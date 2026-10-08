@@ -3061,14 +3061,18 @@ def scan_pr_surface(
 
     ⛔ ORDER IS LOAD-BEARING, but the number==issue case is NO LONGER a
     first-decided *weak hit*: an OPEN PR whose number is the issue RAISES
-    `NotAWorkItem` (#7009). That check runs at block 0, BEFORE the ownership
+    `NotAWorkItem` (#7009) — ON A NON-ADVISORY SURFACE. The refusal is scoped by
+    `surface.authority`, so an ADVISORY entry whose `state` is non-terminal is
+    REPORTED weak and never refused: an advisory surface cannot force an exit.
+    That check runs at block 0, BEFORE the ownership
     check — it is an INPUT-VALIDITY test, not a match test, so `main()`
     auto-declaring the caller's own branch (the documented `--repo .` form)
     cannot suppress it. The caller's OWN PR is still decided before any match
     test; a TERMINAL PR whose number is the issue still takes the weak arm and
     leaves the verdict CLEAN.
 
-    RAISES `NotAWorkItem` for an open PR number, in ADDITION to `SurfaceError`.
+    RAISES `NotAWorkItem` for an open PR number on a non-advisory surface, in
+    ADDITION to `SurfaceError`.
     On the CLI path ONLY `NotAWorkItem` reaches `main()`; a `SurfaceError` is
     absorbed by the per-surface handler and never becomes this refusal. A
     PROGRAMMATIC caller of this function or of `run_preflight` must therefore
@@ -3140,7 +3144,33 @@ def scan_pr_surface(
         #    Measured both ways: `--self-branch <PR head>` and auto-detect each
         #    gave RC=0 / CLEAN / refusal absent. A refusal the caller's own
         #    branch can suppress is not a refusal.
-        if terminal is None and str(pr.get("number")) == str(issue):
+        #    The guard is scoped to the BLOCKING surface through `surface.authority`,
+        #    which IS the invariant rather than a proxy for it. Without that scope the
+        #    refusal also fires from the ADVISORY closed-PR sample — whose elements can
+        #    carry a non-terminal `state` — and an advisory surface could then force
+        #    exit 2, the one thing such a surface must never do (the authority split
+        #    `test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported` pins).
+        #    It would also print "is an OPEN PULL REQUEST" about a PR drawn from the
+        #    CLOSED sample.
+        #
+        #    `use_closing_field` (True only on the blocking CALL SITE) correlates with
+        #    the authority today, but it is a CALLER-REQUEST flag: were the blocking
+        #    path ever to stop asking gh for `closingIssuesReferences`, keying on it
+        #    would silently DELETE this fail-closed refusal. `surface.authority` cannot
+        #    drift that way — it is assigned per surface at construction from
+        #    ADVISORY_SURFACES.
+        #
+        #    Coverage note, stated accurately: an advisory number==issue test already
+        #    existed (`test_closed_pr_own_number_is_weak_not_blocking`), but its fixture
+        #    omits `state`, which `gh_fixtures` normalizes to "closed" — TERMINAL — so
+        #    the `terminal is None` clause was never exercised for the number==issue arm
+        #    on that surface. The uncovered shape is a NON-TERMINAL state, which
+        #    `test_advisory_surface_cannot_refuse_a_number_that_is_the_issue` pins.
+        if (
+            surface.authority != AUTHORITY_ADVISORY
+            and terminal is None
+            and str(pr.get("number")) == str(issue)
+        ):
             linked = []
             unreadable = False
             # The message decoration must NOT be able to pre-empt the refusal.
@@ -3151,7 +3181,23 @@ def scan_pr_surface(
             # … fix gh auth/network") instead of the refusal. Degrade to an empty
             # list: the refusal carries on and merely says less.
             try:
-                linked = sorted(_closing_ref_numbers(pr)) if use_closing_field else []
+                if use_closing_field:
+                    linked = sorted(_closing_ref_numbers(pr))
+                else:
+                    # A BLOCKING surface whose caller did not request the field:
+                    # its CONTENTS are unknown, not empty, so the message below
+                    # must not answer "it names no closing issue". The guard keys
+                    # on `surface.authority` (may this surface refuse?) while this
+                    # read keys on `use_closing_field` (did the CALLER request the
+                    # field? — it is a request flag, not a property of the
+                    # payload, which may still lack it: that is the SurfaceError
+                    # arm below) — different questions, so they may legitimately
+                    # diverge. `unreadable` is what keeps the divergence from
+                    # becoming a false claim; the two agree at both call sites
+                    # today, so this is the drift arm, not the live one, and
+                    # `test_blocking_surface_without_the_closing_field_reports_it_unread`
+                    # is what keeps it from being silently deletable.
+                    unreadable = True
             except SurfaceError:
                 # `unreadable` is carried so the message below does NOT assert a
                 # fact the tool cannot know. THIS branch is reached when the field
@@ -3200,7 +3246,10 @@ def scan_pr_surface(
         #    whose object is a CLOSED/MERGED PR is immutable history, not
         #    in-flight work, so CLEAN is the CORRECT answer for it. Refusing
         #    there would turn a right answer into a refusal. The hazard is
-        #    entirely the NON-TERMINAL case, which block 0 has already refused.
+        #    entirely the NON-TERMINAL case, which block 0 refuses on a
+        #    NON-ADVISORY surface; on the ADVISORY one block 0 cannot fire, so
+        #    that same entry reaches here and is reported weak — which is the
+        #    behaviour this block exists to preserve.
         if str(pr.get("number")) == str(issue):
             surface.add(_pr_ref(pr),
                         f"PR number == issue ({issue}): this PR *is* the issue, "

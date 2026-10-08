@@ -240,6 +240,19 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
+    # #7405 (review P2-2): the replaced-graph / write-lock aborts are NOT in
+    # this transport predicate (the eval harness re-exports the SAME product
+    # object, so this holds here too). They are retryable only on the SDK write
+    # path (`retryable_aborted_write`), which is what keeps the eval's outer
+    # phase loop from multiplying the SDK's inner write retry 3x4.
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
     for code in (401, 429, 500):
