@@ -35,7 +35,6 @@
 | **CRAFT Toolkit** | Verification certificates and auto-formalization tools | **Planned** |
 
 **3-layer architecture** ([docs architecture](https://docs.emergence.ai/getting-started/architecture)):
-
 1. **Solutions** — domain apps: Data Insights, Data Governance, Semiconductor Analytics
 2. **Platform** — identity (Keycloak), authorization (OpenFGA ReBAC), secrets (Infisical / ESO), agent registry, schedules, LLM gateway (LiteLLM), **Memory Service** (inside `em-runtime-utils`)
 3. **Infrastructure** — Kubernetes + Helm + ArgoCD GitOps, four environments (dev, staging, demo, prod)
@@ -295,14 +294,12 @@
 **Sources checked:** their own blog/benchmark disclosures, an independent code-audit write-up, press coverage (TechCrunch, VentureBeat, Gulf News, EE Times), GitHub repos, Discord metadata, LinkedIn/X follower counts. ⚠️ **No G2, Capterra, TrustRadius, or ProductHunt reviews found** — no enterprise-customer sentiment dataset exists publicly. **No customer case studies, logos, or quotes are published on their own site.**
 
 **What is praised:**
-
 - Research credibility: LongMemEval SOTA at time of publication (86%), plus Agent-E's reported 61.1% independently-evaluated H Company task completion and 73.2% on WebVoyager ([their Orchestrator post](https://www.emergence.ai/blog/q7yz1gypvzqcdalwwh2mxocdai8eth))
 - Technical documentation quality — deep, structured, machine-readable
 - Enterprise deployment posture: on-prem/air-gapped, SOC 2/HIPAA/GDPR mappings, OpenFGA ReBAC, audit logs
 - Open-source releases with real utility (Agent-E, MIT)
 
 **What is criticized / where it is weak:**
-
 - **Headline memory number is superseded and stale.** Their homepage as of 2026-09-11 still says they "just set the state-of-the-art standard … (86% accuracy)". Zep's current published figure is **90.2%** ([getzep.com/research](https://www.getzep.com/research/)), and Zep's 71.2% comparison point that Emergence used was already outdated when they published. Multiple benchmark listings still show the older 71.2% figure, i.e. the benchmark is contested on version/methodology.
 - **The 86% is not reproducible: the model that achieved it is not published.** Only `EmergenceMem Simple Fast` (79%) was open-sourced — and that repo has 13 stars and no license.
 - **Independent code audit found crude retrieval defaults.** ⚠️ *single-source — page is Cloudflare-blocked (403 via both `web_fetch` and `curl`); content available only via search snippet.* "[The] open-source code uses simple retrieval choices, including **no explicit chunking** and a **hardcoded k=42** retrieval limit, which the author argues may explain weaker performance on LoCoMo." ([Medium — "Emergence AI Broke the Agent Memory Benchmark. I Tried to Break Their Code"](https://medium.com/asymptotic-spaghetti-integration/emergence-ai-broke-the-agent-memory-benchmark-i-tried-to-break-their-code-23b9751ded97))
@@ -322,7 +319,6 @@
 ## Notes & Sources
 
 **Primary pages fetched (2026-09-11):**
-
 - [emergence.ai](https://www.emergence.ai/) — homepage; tagline "Neuroformal AI for Mission-Critical Environments"; the verbatim 86%/LongMemEval claim
 - [emergence.ai/about-us](https://www.emergence.ai/about-us) — leadership, mission, 2023–2025 product timeline
 - [emergence.ai/latest-news](https://www.emergence.ai/latest-news) — 17 press items
@@ -331,7 +327,6 @@
 - [emergence.ai/blog](https://www.emergence.ai/blog) — ~40 posts
 
 **Documentation (CRAFT / Memory Service):**
-
 - [docs.emergence.ai/llms.txt](https://docs.emergence.ai/llms.txt) — full doc index (~80+ pages), each also available as `.md`
 - [platform/memory-context-packs](https://docs.emergence.ai/platform/memory-context-packs) — Context Pack three-layer architecture, memory record schema, degradation tiers
 - [platform/memory-service](https://docs.emergence.ai/platform/memory-service) — lifecycle, memory types, supersede/pin/archive endpoints
@@ -341,14 +336,12 @@
 - [guides/marketplace/gcp](https://docs.emergence.ai/guides/marketplace/gcp) — "No public storefront is required", committed-spend drawdown
 
 **Benchmark posts:**
-
 - [SOTA on LongMemEval with RAG](https://www.emergence.ai/blog/sota-on-longmemeval-with-rag) — Jun 18 2025; 86% / 82.4% / 79%; turn-match → session-retrieve → NDCG → gpt-4o-2024-08-06; Zep 71.2%; Oracle GPT-4o 82.4%
 - [State of the Art Results in Agentic Memory](https://www.emergence.ai/blog/og2q4h3p2zcmkxjdvj099ogqm21a4a) — Jun 19 2025; "we didn't need to go that far"; "advanced memory architecture appears to be overkill for LongMemEval"; 686,404 facts / 65,886 episodes / 19,829 conversations
 - [Closing personalization performance gaps with memory](https://www.emergence.ai/blog/03pzpaqkiv4p8niyisbyyhsxtritfx) — Jul 17 2025; preference questions ~70%; user-profile memory experiment
 - [getzep.com/research](https://www.getzep.com/research/) — Zep's current LongMemEval 90.2% (supersedes Emergence's 86%)
 
 **Company/funding:**
-
 - [SiliconANGLE 2024-06-24](https://siliconangle.com/2024/06/24/ai-startup-emergence-ai-raises-ton-cash-enhance-office-worker-productivity/) — $97.2M led by Learn Capital, >$100M credit lines, Merlyn Mind division, Samsung/Newline partnerships
 - [TechCrunch 2024-06-24](https://techcrunch.com/2024/06/24/emergence-thinks-it-can-crack-the-ai-agent-code/) — stealth exit, $97.2M
 - [Tracxn profile](https://tracxn.com/d/companies/emergence-ai/__kDwW8PRyndeyEU7117oiy1c6iwmi1ECADhDa4m09MWI) — 123 employees (2026-07-31), "founded 2018" ⚠️ conflicts with stealth-exit timeline
@@ -360,7 +353,6 @@
 **GitHub (org: EmergenceAI, checked 2026-09-11):** Agent-E 1,250★/191 forks/MIT; Emergence-World 597★/74 forks; emergence_simple_fast 13★/5 forks/**no license**; MathViz-E 36★; kotlin_speech_features 29★; embodied-drone-agents 26★; emergence-benchmarks 3★/AGPL-3.0. **No CRAFT repository exists.**
 
 **Gaps documented (do not fill by inference):**
-
 1. ⚠️ **No public pricing anywhere** — `/pricing`, `/plans`, `/get-started`, `/signup`, `/trial`, `/contact` all 404 on 2026-09-11. Pricing is private-offer only.
 2. ⚠️ **The independent Medium code-audit is Cloudflare-blocked** (403 to both `web_fetch` and browser-UA `curl`). Its findings are recorded from the search snippet only and flagged single-source; it should be re-verified from a mirror.
 3. ⚠️ **No G2/Capterra/review-site sentiment** exists. No customer logos or case studies on their site.
