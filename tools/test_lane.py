@@ -63,8 +63,11 @@ Also fail-closed by design:
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
 * ````docker ps -a`` is consulted for port collisions, and THAT SCAN is the
-  load-bearing half of the guard: a peer container can publish a port this host
-  will still bind freely (measured), so the host probe alone is not enough.
+  load-bearing half of the guard for a FOREIGN container publishing on a
+  NON-loopback interface: the host probe still binds ``127.0.0.1:<port>`` freely
+  while ``0.0.0.0:<port>`` is taken. A PEER's container publishes on loopback
+  (``-p 127.0.0.1:<port>:6379``), which the host probe refuses on its own
+  (measured, Docker 29.4.0).
   ``-a`` adds nothing measured — neither a stopped nor a created container
   reports or reserves its published port (Docker 29.4.0) — and is kept only as a
   cheap hedge;
@@ -90,7 +93,7 @@ the command looks like it succeeded. Assigning first is what puts the TOOL's exi
 status on the ``||``, which is the only thing that can abort.
 
 ``uri`` prints ``export TORTOISE_DB_URI='...'`` on stdout so it can be
-``eval``-ed; every diagnostic goes to stderr, so ``eval "$(...)"`` stays clean.
+``eval``-ed; every diagnostic goes to stderr, so the captured value stays clean.
 """
 from __future__ import annotations
 
@@ -134,13 +137,14 @@ IMAGE_PULL_TIMEOUT = 600
 READY_TIMEOUT = 60
 #: The shared instances every lane and the orchestration graph depend on, PLUS
 #: the private containers of particular peer lanes that must never be removed.
-#: It is HAND-MAINTAINED. Today none of its entries carries the NAME_PREFIX, so
-#: the prefix rule refuses them too; the list is what refuses a FUTURE shared name
-#: that does carry the prefix (pinned by
+#: particular peer lanes' private containers that must never be removed. It is
+#: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
+#: prefix rule refuses them anyway, and the list is what refuses a FUTURE name
+#: that both carries the prefix and must be protected (pinned by
 #: tests/test_test_lane_tool.py::test_a_protected_name_sharing_the_prefix_is_still_refused).
-#: A PEER's private container does carry the prefix and therefore reads as managed,
-#: so this list does not cover it — its protection is `_remove_and_describe`'s
-#: refusal unless the name equals `lane_name()`.
+#: A container THIS tool creates does carry the prefix and reads as managed; the
+#: list does not cover it, and its protection is `_remove_and_describe`'s refusal
+#: unless the name equals `lane_name()`.
 PROTECTED_NAMES = frozenset({
     "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb",
 })

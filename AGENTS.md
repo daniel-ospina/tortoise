@@ -442,7 +442,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 > remaining work — the tool is the isolation half, not the whole fix.
 >
 > ```bash
-> uri="$(uv run python tools/test_lane.py uri)" || exit 1   # start + export TORTOISE_DB_URI
+> uri="$(uv run python tools/test_lane.py uri)" || exit 1   # start; capture the export line
 > eval "$uri"                                              # two steps on purpose — see USAGE
 > uv run pytest tests/ -q
 > uv run python tools/test_lane.py status          # it prints the URI again

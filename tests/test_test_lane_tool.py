@@ -396,9 +396,9 @@ def test_pick_port_skips_ports_already_taken(monkeypatch):
 
 
 def test_pick_port_skips_ports_published_by_a_container(monkeypatch):
-    """A port can be free on the HOST yet already published by another lane's
-    container, so the host probe alone would hand out a port already in use. What
-    `docker run -p` would then do is not what this pins."""
+    """A port can be free on the HOST yet already taken by a FOREIGN container
+    publishing on a non-loopback interface, so the host probe alone would hand out
+    a port already in use. What `docker run -p` would then do is not what this pins."""
     monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
     monkeypatch.setattr(tl, "_published_scan", lambda: "")
     monkeypatch.setattr(tl, "_container_publishes",
@@ -704,8 +704,8 @@ def test_the_documented_shell_contract_aborts_on_failure():
         "USAGE must document evaluating the captured value as its own step"
     )
     # AGENTS.md carries the SAME documented command and is the copy lanes actually
-    # read, so pinning only the module docstring lets the one-line form return
-    # there with every test green (measured: reverting only AGENTS.md passed).
+    # read, so pinning only the module docstring would leave that copy free to
+    # regress on its own.
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert 'uri="$(uv run python tools/test_lane.py uri)" || exit 1' in agents, (
         "AGENTS.md must carry the two-step form too, not just the module docstring"
