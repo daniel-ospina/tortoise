@@ -214,12 +214,13 @@ def test_detector_temporal_seam_parity_no_silent_drift():
     NOT aggregative; a genuine frequency surface classifies COUNT and STAYS
     aggregative (the seam must not over-exclude)."""
     from tortoise.temporal_aggregation import classify_temporal_aggregate
-    arithmetic = {"interval", "before-offset", "duration", "total"}
     for r in _census_freq_count_rows():
         intent = classify_temporal_aggregate(r["question"])
         assert intent is not None, r["qid"]
         assert intent.kind != "count", r["qid"]
-        assert intent.kind in arithmetic, r["qid"]
+        # The detector's OWN derived set — not a re-declared literal — so this
+        # parity assertion tracks the single source of truth in aggregate.py.
+        assert intent.kind in agg._TEMPORAL_ARITHMETIC_KINDS, r["qid"]
         assert agg.detect_aggregative_intent(r["question"]).is_aggregative \
             is False, r["qid"]
     # the seam's other half: genuine counts are temporal-COUNT AND aggregative
@@ -228,6 +229,60 @@ def test_detector_temporal_seam_parity_no_silent_drift():
         intent = classify_temporal_aggregate(q)
         assert intent is not None and intent.kind == "count", q
         assert agg.detect_aggregative_intent(q).is_aggregative is True, q
+
+
+def test_detector_temporal_arithmetic_kind_partition_is_exhaustive():
+    """#7804 seam pin, part 2: the exclusion set is DERIVED from the #2886
+    enum (``frozenset(TemporalAggregateKind) - _COUNTING_KINDS``), so no kind
+    can drop out of it silently. This pin reds when a kind is ADDED to
+    ``TemporalAggregateKind`` — forcing the counting-vs-date-arithmetic
+    decision to be deliberate instead of an oversight (reviewer C, P2)."""
+    from tortoise.temporal_aggregation import TemporalAggregateKind as K
+    expected = {
+        "count": False,          # the only counting surface — stays aggregative
+        "total": True,
+        "interval": True,
+        "before-offset": True,
+        "duration": True,
+    }
+    assert {k.value for k in K} == set(expected), (
+        "TemporalAggregateKind grew/shrank — classify the new kind here AND "
+        "in tortoise/aggregate.py's exclusion set")
+    for kind in K:
+        assert (kind in agg._TEMPORAL_ARITHMETIC_KINDS) is expected[kind.value], \
+            kind
+
+
+def test_census_wide_only_one_row_stays_aggregative():
+    """The delegation's behavioural surface is wider than the 12
+    ``frequency/count`` rows: at this head 35 of the 133 census rows flip to
+    non-aggregative, leaving exactly one aggregative row (``a3838d2b``, a
+    genuine count of events before an event — no time unit, so no
+    date-arithmetic match). Pin the WHOLE surface, not just the issue's class,
+    so a later narrowing of the delegated classifier cannot silently restore
+    false fires while the class-only pins stay green (reviewer C, P2)."""
+    census = json.loads(_CENSUS_PATH.read_text())
+    rows = census["rows"]
+    assert len(rows) == 133
+    still = {r["qid"] for r in rows
+             if agg.detect_aggregative_intent(r["question"]).is_aggregative}
+    assert still == {"a3838d2b"}, still
+
+
+def test_detector_delegated_exclusion_breadth_is_deliberate():
+    """The delegated #2886 morphology is broader than two dated anchors: the
+    INTERVAL rule's ``<unit> … since|between`` gap also matches a unit that
+    MEASURES an elapsed span. Under the module contract (elapsed-time shapes
+    are TEMPORAL, R5 #1544) these are date arithmetic, not counts of linked
+    facts, so excluding them is intended — pinned here so the boundary is a
+    reviewed decision, not a silently inherited one (reviewer B, P2)."""
+    for q in (
+        "how many days did i work from home since the new policy started",
+        "how many days of vacation have i taken since january",
+        "how many days of pto did i use between january and march",
+        "how many days of sick leave did i take in total",
+    ):
+        assert agg.detect_aggregative_intent(q).is_aggregative is False, q
 
 
 # ── (b) facet enumeration + per-facet coverage check (pure math) ───────────

@@ -167,23 +167,42 @@ _ELAPSED_TIME_RE = re.compile(
 #: or R5/C6's temporal-ordering class), never a sum/count across facets.
 _HOW_LONG_RE = re.compile(r"\bhow\s+long\b")
 
-#: Temporal-arithmetic kinds from the #2886 classifier
-#: (``tortoise.temporal_aggregation``) — INTERVAL, BEFORE_OFFSET,
-#: DURATION, and the summed-span TOTAL. These ask DATE ARITHMETIC over two
-#: dated anchors (R5 #1544), never a k-of-N count over an entity's linked
-#: facts, so they are excluded before the quantifier scan. COUNT is
-#: deliberately NOT here: "how many times" / "how often" is a genuine
-#: counting aggregation and stays on the aggregative path. Delegating the
-#: date-arithmetic vocabulary to ``classify_temporal_aggregate`` keeps
-#: that morphology in one place: any shape it recognizes as interval /
-#: before-offset / duration / summed span is excluded here too, so the two
-#: classifiers cannot drift silently again (#7804, #2886/PR #7806).
-_TEMPORAL_ARITHMETIC_KINDS: frozenset[TemporalAggregateKind] = frozenset({
-    TemporalAggregateKind.INTERVAL,
-    TemporalAggregateKind.BEFORE_OFFSET,
-    TemporalAggregateKind.DURATION,
-    TemporalAggregateKind.TOTAL,
+#: The one #2886 kind that is a genuine counting aggregation: a frequency
+#: surface ("how many times", "how often"). It stays on the aggregative
+#: path; every other kind is date arithmetic.
+_COUNTING_KINDS: frozenset[TemporalAggregateKind] = frozenset({
+    TemporalAggregateKind.COUNT,
 })
+
+#: Temporal-arithmetic kinds from the #2886 classifier
+#: (``tortoise.temporal_aggregation``) — every kind EXCEPT the counting one.
+#: These are excluded before the quantifier scan. The set is DERIVED from the
+#: owner's enum rather than re-listed, so a kind added to
+#: ``TemporalAggregateKind`` is excluded by construction instead of silently
+#: dropping out of the set; the exhaustive partition pin in
+#: ``tests/test_aggregative_intent.py`` reds on enum growth, so the
+#: counting-vs-arithmetic decision stays a deliberate, reviewed diff
+#: (#7804, #2886/PR #7806).
+#:
+#: THREE of the excluded shapes are TWO-ANCHOR arithmetic (R5 #1544):
+#: INTERVAL (elapsed between two dated anchors), BEFORE_OFFSET (how far one
+#: event precedes another), DURATION (the length of one bounded state). TOTAL
+#: is NOT two-anchor — the owner classifies it ``distinct=True`` on the tally
+#: path, a summed span across >1 event. It is excluded for the same reason a
+#: span is: it answers with a temporal quantity, so it is outside the
+#: entity-scoped facet-census class.
+#:
+#: The delegated morphology is deliberately BROADER than the census class
+#: that motivated #7804: the owner's INTERVAL rule matches ``<unit> …
+#: since|between`` with an arbitrary gap, so "how many days did I work from
+#: home since the new policy started" is excluded too. That is intended —
+#: the module contract files elapsed-time shapes as TEMPORAL (R5 #1544)
+#: regardless of whether the unit measures something countable — and it is
+#: pinned by ``test_detector_delegated_exclusion_breadth_is_deliberate``, so
+#: the boundary is a reviewed decision rather than a silently inherited one.
+_TEMPORAL_ARITHMETIC_KINDS: frozenset[TemporalAggregateKind] = (
+    frozenset(TemporalAggregateKind) - _COUNTING_KINDS
+)
 
 #: Self-corpus language — a query whose aggregation subject is the stored
 #: memory corpus itself has NO enumerable index N ("how many memories do I
