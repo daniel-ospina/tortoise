@@ -41,9 +41,7 @@ doc_status: live
 > **three** layers (mechanism + direction / semantics / predicate + tags). The semantics table gains
 > `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `dependsOn`, `transacts` and a
 > *carries confidence?* column. `produces`: the event→artifact shape is the encouraged pattern, not a
-> restriction. §5: EP confidence is stated as running through Events and Points, with Object
-> confidence derived from attached Points and Subject/Object structural edges carrying a confidence
-> attribute rather than EP.
+> restriction.
 >
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
