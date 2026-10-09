@@ -165,14 +165,20 @@ _RE_TOTAL = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\b[^?]*?"
     r"\b(?:in\s+total|in\s+all|altogether|combined|total)\b",
     re.IGNORECASE)
-#: An elapsed-time marker ("since") makes a question INTERVAL, not a summed
-#: span: "how many weeks IN TOTAL have passed SINCE …" would otherwise
-#: classify TOTAL and let the resolver sum event spans while the caller
-#: supplied the true anchors. "between" is deliberately NOT here: it is also
-#: the LIST form ("in total … travelled between New York, Boston and DC"),
-#: which is a genuine sum, and :data:`_RE_INTERVAL` claims the interval
-#: reading on its own.
-_RE_ELAPSED_MARKER = re.compile(r"\bsince\b", re.IGNORECASE)
+#: An elapsed-time marker makes a question INTERVAL, not a summed span: "how
+#: many weeks IN TOTAL have passed SINCE …" would otherwise classify TOTAL
+#: and let the resolver sum event spans while the caller supplied the true
+#: anchors. Two forms qualify:
+#:   * ``since`` anywhere;
+#:   * ``between <X> and <Y>`` — a TWO-ANCHOR interval. A comma-separated LIST
+#:     ("in total … travelled between New York, Boston and DC") is a genuine
+#:     sum and must stay TOTAL, which is why the between branch forbids commas
+#:     in either anchor.
+#: ``_RE_INTERVAL`` matches BOTH the interval and the list form of "between",
+#: so the LIST reading is discriminated HERE (and by ``_RE_TOTAL``'s precedence
+#: over ``_RE_INTERVAL``) — not by ``_RE_INTERVAL`` alone.
+_RE_ELAPSED_MARKER = re.compile(
+    r"\bsince\b|\bbetween\s+[^,?]+\s+and\s+[^,?]+", re.IGNORECASE)
 # before-offset: "how many <unit> before/prior to/earlier than <X> …"
 _RE_BEFORE_OFFSET = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\s+"
@@ -244,6 +250,16 @@ def classify_temporal_aggregate(
     if m and not _RE_ELAPSED_MARKER.search(q):
         return TemporalAggregateIntent(
             TemporalAggregateKind.TOTAL, unit=_unit_of(m), distinct=True)
+    if m:
+        # "in total" carrying an elapsed marker: the caller's anchors are
+        # authoritative, so this is the INTERVAL shape — never a summed span,
+        # and never a fall-through to None (None reads as `not_temporal` and
+        # would file the row unclassified). The "in total" unit is the
+        # fallback when the interval rule cannot place the marker itself.
+        mi = _RE_INTERVAL.search(q)
+        return TemporalAggregateIntent(
+            TemporalAggregateKind.INTERVAL,
+            unit=_unit_of(mi) or _unit_of(m), distinct=None)
     m = _RE_BEFORE_OFFSET.search(q)
     if m:
         return TemporalAggregateIntent(
@@ -335,10 +351,13 @@ def _overlap_ratio(a: str, b: str) -> float:
     — a MAX denominator plus its ``shared >= 2`` token floor — while this
     function uses a MIN denominator with a 1.5 near-symmetric guard, over the
     normalized content key rather than ``_norm_sent`` output. The local
-    statistic is therefore >= the committed one for the same pair, i.e. on the
-    RATIO alone this band is the looser of the two; every fold is still
-    decided by the committed ``fold_allowed`` gate, so the deviation is a
-    precision caveat rather than a silent widening. If the extractor's floor,
+    statistic is >= the committed one whenever the 1.5 guard admits the pair,
+    so inside its guard band this band is the looser of the two; the guard
+    also rejects asymmetric pairs the committed floor would admit, so the
+    deviation runs BOTH ways — looser inside the guard band, STRICTER outside
+    it (a pair that would fold committed may not fold here, which would
+    OVERCOUNT distinct events rather than undercount them). Every fold is still
+    decided by the committed ``fold_allowed`` gate. If the extractor's floor,
     guard, or statistic moves, revisit this comparison with it."""
     ta, tb = set(a.split()), set(b.split())
     if not ta or not tb:

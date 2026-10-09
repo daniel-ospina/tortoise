@@ -478,6 +478,15 @@ def test_elapsed_marker_beats_the_total_marker():
               "Boston and DC?")
     assert (classify_temporal_aggregate(listed).kind
             is TemporalAggregateKind.TOTAL)
+    # ...and the ANCHORED "between" form is an interval, so the caller's
+    # anchors stay authoritative. Dropping "between" from the marker entirely
+    # (instead of excluding only the LIST form) re-broke these.
+    for anchored in ("How many weeks in total did I work between 2020 and "
+                     "2022?",
+                     "How many days in total between the MoMA visit and the "
+                     "exhibit?"):
+        assert (classify_temporal_aggregate(anchored).kind
+                is TemporalAggregateKind.INTERVAL), anchored
     for leading in ("Since I started jogging, how many weeks in total have "
                     "passed?",
                     "Since 2020, how many days in total have I spent on "
