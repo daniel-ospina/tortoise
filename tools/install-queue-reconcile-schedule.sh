@@ -73,9 +73,11 @@
 #                        it directly; cron divides by 60), default 21600 (6h) —
 #                        the same window the fleet's hub-state check uses.
 #   CLAIMS_QUEUE         queue path (default $HOME/.pi/agent/state/queues/CLAIMS.tsv,
-#                        the tool's own default). Must EXIST at install time, or
-#                        the install is refused rather than scheduling a job
-#                        against a path that is not there.
+#                        the tool's own default). It is validated at install time
+#                        and then passed to the job EXPLICITLY (`--queue <path>`):
+#                        the install is refused if it does not exist, and the job
+#                        can never drift onto a different, unchecked queue by
+#                        falling back to an implicit HOME-derived default.
 #   AGENTS_DIR           launchd install dir (default $HOME/Library/LaunchAgents).
 #                        ⛔ A THROWAWAY $HOME/AGENTS_DIR DOES NOT SANDBOX THIS
 #                        SCRIPT. `launchctl` addresses the user domain BY UID
@@ -154,6 +156,45 @@ if [ -z "$GH_BIN" ]; then
     echo "       gh, every number is UNKNOWN and the report carries no information." >&2
     exit 2
 fi
+
+# The job's PATH: the directory holding the resolved gh, AHEAD of the ambient
+# PATH. Carried into BOTH the plist and the cron line, because launchd's PATH is
+# minimal and cron's default is `/usr/bin:/bin` — neither can find a gh installed
+# under ~/.pi/agent/shims, ~/bin or /usr/local/bin. Without it every identifier
+# resolves to UNKNOWN at fire time (the tool swallows the spawn failure into a
+# per-number UNKNOWN), the report carries no information, and the install-time
+# gh guard above would be giving false confidence about a job that can never
+# work.
+JOB_PATH="$(dirname "$GH_BIN")"
+if [ "${PATH#"$JOB_PATH":}" != "$PATH" ]; then
+    JOB_PATH="$PATH"          # gh's directory is already first — do not duplicate it
+else
+    JOB_PATH="$JOB_PATH:$PATH"
+fi
+
+# ── escaping ──────────────────────────────────────────────────────────────
+# XML-escape a value before it is substituted into the plist template. Without
+# this, a repo path containing `&` ("R&D") or `<` renders a plist that is NOT
+# well-formed — yet the install still reports success, so the job is installed
+# from a document launchd cannot parse. `&` MUST be replaced FIRST, or the `&`
+# that the other replacements introduce would itself be escaped again.
+_xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
+
+# crontab treats `%` as a command separator (everything after it becomes the
+# command's stdin) and `\` as its escape, so a literal `%` in a path must be
+# backslash-escaped or the rest of the schedule line is silently dropped.
+_cron_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//%/\\%}"
+    printf '%s' "$s"
+}
 
 # ── knobs (fail-closed numeric parsing) ────────────────────────────────────
 # `[ "$X" -lt 1 ]` ERRORS on a value too large for the shell's integer type
@@ -280,12 +321,17 @@ _plist_template() {
     <string>@@PYTHON_BIN@@</string>
     <string>@@TOOL@@</string>
 @@MODE_ARG@@
+    <!-- The queue is passed EXPLICITLY: the installer validates this exact path
+         at install time, and an implicit HOME-derived default could silently
+         point the job at a different queue than the one that was checked. -->
+    <string>--queue</string>
+    <string>@@QUEUE_PATH@@</string>
   </array>
   <key>WorkingDirectory</key><string>@@REPO@@</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- HOME resolves the tool's default queue path; PATH is how the spawned
-         gh binary is found (launchd's own PATH is minimal). -->
+    <!-- HOME resolves ~ paths; PATH carries the gh directory, because
+         launchd's own PATH is minimal. -->
     <key>HOME</key><string>@@HOME@@</string>
     <key>PATH</key><string>@@JOB_PATH@@</string>
   </dict>
@@ -298,67 +344,46 @@ PLIST
 }
 
 render_plist() {
-    local mode_arg="" out job_path
+    # Every substituted VALUE is XML-escaped; the template's own markup and the
+    # validated integer are not. Hoisted into locals rather than nested inside
+    # the expansions below, so the escaping is visible per value.
+    local mode_arg="" out
+    local e_label e_python e_tool e_repo e_home e_jobpath e_qpath e_log
     [ -n "$MODE_FLAG" ] && mode_arg="    <string>$MODE_FLAG</string>"
-    # Computed OUTSIDE the expansion below: a command substitution nested inside
-    # a `${var//pat/repl}` replacement is legal but subtle, and a reader should
-    # not have to reason about it.
-    job_path="$(dirname "$GH_BIN"):$PATH"
+    e_label="$(_xml_escape "$LABEL")"
+    e_python="$(_xml_escape "$PYTHON_BIN")"
+    e_tool="$(_xml_escape "$TOOL")"
+    e_repo="$(_xml_escape "$REPO")"
+    e_home="$(_xml_escape "$HOME")"
+    e_jobpath="$(_xml_escape "$JOB_PATH")"
+    e_qpath="$(_xml_escape "$QUEUE_PATH")"
+    e_log="$(_xml_escape "$LOG_PATH")"
     out="$(_plist_template)"
-    out="${out//@@LABEL@@/$LABEL}"
-    out="${out//@@PYTHON_BIN@@/$PYTHON_BIN}"
-    out="${out//@@TOOL@@/$TOOL}"
+    out="${out//@@LABEL@@/$e_label}"
+    out="${out//@@PYTHON_BIN@@/$e_python}"
+    out="${out//@@TOOL@@/$e_tool}"
     out="${out//@@MODE_ARG@@/$mode_arg}"
-    out="${out//@@REPO@@/$REPO}"
-    out="${out//@@HOME@@/$HOME}"
-    out="${out//@@JOB_PATH@@/$job_path}"
+    out="${out//@@REPO@@/$e_repo}"
+    out="${out//@@HOME@@/$e_home}"
+    out="${out//@@JOB_PATH@@/$e_jobpath}"
+    out="${out//@@QUEUE_PATH@@/$e_qpath}"
     out="${out//@@INTERVAL@@/$QUEUE_RECONCILE_INTERVAL}"
-    out="${out//@@LOG_PATH@@/$LOG_PATH}"
+    out="${out//@@LOG_PATH@@/$e_log}"
     printf '%s\n' "$out"
 }
 
 cron_line() {
     local mode_arg=""
     [ -n "$MODE_FLAG" ] && mode_arg=" $MODE_FLAG"
+    # `PATH=...` is the cron spelling of the plist's EnvironmentVariables: cron
+    # runs the command through `/bin/sh -c`, so the assignment applies to THIS
+    # command only. Same JOB_PATH as the plist, for the same reason.
     echo "$CRON_MARKER"
-    echo "$CRON_SCHEDULE $PYTHON_BIN $TOOL${mode_arg} >> $LOG_PATH 2>&1"
+    echo "$CRON_SCHEDULE PATH=$(_cron_escape "$JOB_PATH") $(_cron_escape "$PYTHON_BIN") $(_cron_escape "$TOOL")${mode_arg} --queue $(_cron_escape "$QUEUE_PATH") >> $(_cron_escape "$LOG_PATH") 2>&1"
 }
 
-# Print absolute-path ProgramArguments entries, one per line (python3
-# plistlib; PlistBuddy fallback). Used to verify the job's targets resolve.
-plist_program_args() {
-    local plist="$1" out
-    if command -v python3 >/dev/null 2>&1; then
-        out="$(python3 - "$plist" 2>/dev/null <<'PY' || true
-import plistlib, sys
-try:
-    with open(sys.argv[1], "rb") as f:
-        d = plistlib.load(f)
-    for a in d.get("ProgramArguments", []):
-        if isinstance(a, str) and a.startswith("/"):
-            print(a)
-except Exception:
-    pass
-PY
-)"
-        if [ -n "$out" ]; then printf '%s\n' "$out"; return 0; fi
-    fi
-    /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$plist" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*[0-9][0-9]*[[:space:]]*=[[:space:]]*//p' | grep '^/' || true
-}
-
-# A dead job must never be installed: every absolute path in ProgramArguments
-# must resolve (catches a stale venv symlink or a moved tool).
-verify_targets() {
-    local arg bad=0
-    while IFS= read -r arg; do
-        [ -n "$arg" ] || continue
-        if [ ! -e "$arg" ]; then
-            echo "    broken target: $arg" >&2
-            bad=1
-        fi
-    done < <(plist_program_args "$1")
-    return "$bad"
+job_loaded() {
+    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1
 }
 
 install_darwin() {
@@ -367,18 +392,27 @@ install_darwin() {
     local tmp
     tmp="$(mktemp)" || return 1
     render_plist > "$tmp"
-    if ! verify_targets "$tmp"; then
-        rm -f "$tmp"
-        echo "ERROR: refusing to install a job whose targets do not resolve — see above." >&2
-        return 1
-    fi
     local changed=1
     if [ -f "$PLIST_PATH" ] && cmp -s "$PLIST_PATH" "$tmp"; then
         changed=0
     fi
     mv "$tmp" "$PLIST_PATH"
     if [ "$changed" -eq 0 ]; then
-        echo "unchanged: $PLIST_PATH (no reload)"
+        # Byte-identical plist does NOT imply a loaded agent: a manual bootout, a
+        # failed load, or a reboot can leave the file present and the job
+        # unloaded. Reporting "no reload" there would make the `--status`
+        # remedy ("run this script with no arguments to load it") a no-op, so
+        # the load is re-asserted whenever the label is absent.
+        if job_loaded; then
+            echo "unchanged: $PLIST_PATH (loaded; no reload)"
+        else
+            launchctl enable "gui/$(id -u)/$LABEL" 2>/dev/null || true
+            if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"; then
+                echo "ERROR: launchctl bootstrap failed — see 'launchctl print gui/$(id -u)/$LABEL'" >&2
+                return 1
+            fi
+            echo "unchanged: $PLIST_PATH (was NOT loaded — bootstrapped now)"
+        fi
     else
         launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
         launchctl enable "gui/$(id -u)/$LABEL" 2>/dev/null || true
@@ -439,8 +473,13 @@ status() {
                 plutil -lint "$PLIST_PATH" >/dev/null 2>&1 && echo "plist lint : OK"
                 local row
                 row="$(launchctl list 2>/dev/null | grep -F "$LABEL" || true)"
-                if [ -n "$row" ]; then
-                    echo "loaded     : yes — launchctl list: $row"
+                # job_loaded is the SAME predicate install_darwin acts on, so
+                # `--status` and the install path cannot disagree about whether
+                # the job is loaded (launchctl list is a host-domain view and can
+                # miss a GUI-domain agent that `launchctl print` finds).
+                if job_loaded; then
+                    echo "loaded     : yes"
+                    [ -n "$row" ] && echo "             launchctl list: $row"
                     echo "             (the exit code column is the tool's REPORT code: 0 clean,"
                     echo "              1 findings, 2 UNKNOWN present, 3 queue missing. 1/2 are the"
                     echo "              normal steady state while a report-only row stands — read"

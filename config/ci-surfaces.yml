@@ -3726,7 +3726,7 @@ durations:
   test_pytest_attribution.py: 0.3
   test_queue_conflict_census.py: 0.5
   test_queue_reconcile.py: 0.6  # unmeasured
-  test_install_queue_reconcile_schedule.py: 33.4  # unmeasured — 25 subprocess-level installer tests
+  test_install_queue_reconcile_schedule.py: 60.0  # MEASURED 58.8s — 32 subprocess-level installer tests
   test_queue_window_observe.py: 0.6
   test_registry_integrity.py: 0.7
   test_salience_labels_4917.py: 0.1

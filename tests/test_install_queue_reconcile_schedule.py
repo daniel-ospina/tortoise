@@ -170,6 +170,13 @@ def _install(sb: dict, target: Path, *args: str) -> subprocess.CompletedProcess:
     return _run(sb, *args)
 
 
+def _status(sb: dict, target: Path) -> subprocess.CompletedProcess:
+    """``--status`` addresses the same non-standard AGENTS_DIR install."""
+    sb["env"]["AGENTS_DIR"] = str(target)
+    sb["env"]["QUEUE_RECONCILE_ALLOW_NONSTANDARD_AGENTS_DIR"] = "1"
+    return _run(sb, "--status")
+
+
 def _program_args(plist: Path) -> list[str]:
     with open(plist, "rb") as fh:
         return plistlib.load(fh)["ProgramArguments"]
@@ -264,7 +271,44 @@ def test_dry_run_installs_report_only_without_a_bogus_flag(tmp_path):
     args = _program_args(target / PLIST_NAME)
     assert "--apply" not in args, args
     assert "--dry-run" not in args, args
-    assert args[-1].endswith("queue_reconcile.py"), args
+    assert args[1].endswith("queue_reconcile.py"), args
+
+
+def test_the_validated_queue_path_is_passed_to_the_job(tmp_path):
+    """The queue the installer VALIDATES is the queue the job READS.
+
+    The installer refuses when its queue path is missing, so an install that
+    validated `$CLAIMS_QUEUE` but let the job fall back to the tool's
+    HOME-derived default would either fail on every fire (exit 3) or silently
+    reconcile a DIFFERENT queue than the one that was checked — with no signal
+    anywhere, because `--status` reports the validated path.
+
+    Mutation: drop the explicit `--queue` argument -> the rendered job carries
+    no queue and the assertion fails -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    custom = tmp_path / "custom" / "CLAIMS.tsv"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(custom)
+    target = tmp_path / "agents"
+    res = _install(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    args = _program_args(target / PLIST_NAME)
+    assert "--queue" in args, args
+    assert args[args.index("--queue") + 1] == str(custom), args
+
+
+def test_linux_also_passes_the_validated_queue_path(tmp_path):
+    """The cron line carries the same explicit queue, not just the plist."""
+    sb = _sandbox(tmp_path, uname="Linux")
+    custom = tmp_path / "custom" / "CLAIMS.tsv"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(custom)
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert f"--queue {custom}" in _cron_schedule_line(sb), _cron_schedule_line(sb)
 
 
 def test_darwin_rerender_is_idempotent(tmp_path):
@@ -425,23 +469,151 @@ def test_refuses_when_the_tool_is_absent(tmp_path):
     assert "tool not found" in res.stderr, res.stderr
 
 
-def test_broken_program_argument_target_refuses_the_install(tmp_path):
-    """Even when the checks above pass, every absolute path in the rendered
-    ProgramArguments must resolve before the job is installed — a dead job must
-    never be installed.
+def test_unchanged_plist_with_an_unloaded_job_is_bootstrapped(tmp_path):
+    """An identical plist does NOT imply a loaded agent: a manual `bootout`, a
+    failed load, or a reboot leaves the file present and the job absent.
+    Reporting "no reload" there would make the `--status` remedy ("run this
+    script with no arguments to load it") a silent no-op.
 
-    Mutation: drop ``verify_targets`` -> a plist naming an interpreter that
-    does not exist is installed -> RED.
+    Mutation: always take the `unchanged -> no reload` branch without the
+    `job_loaded` check -> the agent is never bootstrapped -> RED.
     """
     sb = _sandbox(tmp_path)
-    sb["env"]["PYTHON_BIN"] = str(tmp_path / "gone" / "python")
+    _write_stub(
+        sb["bindir"], "launchctl",
+        # `print` reports the label only once something has bootstrapped it.
+        '#!/usr/bin/env bash\n'
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        'case "$1" in\n'
+        '  print) [ -f "$STUB_LOG/loaded" ] && exit 0 || exit 1 ;;\n'
+        '  bootstrap) touch "$STUB_LOG/loaded"; exit 0 ;;\n'
+        'esac\n'
+        'exit 0\n',
+    )
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    # Simulate the job having been unloaded while the plist stayed in place.
+    (sb["log"] / "loaded").unlink()
+    res = _install(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "was NOT loaded" in res.stdout, res.stdout
+    assert (sb["log"] / "loaded").exists(), "the unloaded agent was not re-bootstrapped"
+
+
+# ── P3: rendered output must survive special characters in paths ───────────
+
+def test_status_reports_the_queue_the_job_actually_reads(tmp_path):
+    """`--status` must name the SAME queue the job is passed — otherwise a
+    mismatched queue is undetectable from the only surface a human reads.
+
+    Mutation: drop `--queue` from ProgramArguments while `--status` keeps
+    printing `$QUEUE_PATH` -> the operator sees a path the job never reads.
+    """
+    sb = _sandbox(tmp_path)
+    custom = tmp_path / "elsewhere" / "CLAIMS.tsv"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(custom)
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    res = _status(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert f"queue      : {custom}" in res.stdout, res.stdout
+    args = _program_args(target / PLIST_NAME)
+    assert args[args.index("--queue") + 1] == str(custom), args
+
+
+def test_status_says_loaded_no_for_an_unloaded_job_and_states_the_remedy(tmp_path):
+    """An installed-but-unloaded job must NOT read as healthy, and the remedy
+    it prints must actually work — `install_darwin` re-bootstraps an unloaded
+    label, so "run this script with no arguments to load it" is true.
+    """
+    sb = _sandbox(tmp_path)
+    _write_stub(
+        sb["bindir"], "launchctl",
+        '#!/usr/bin/env bash\n'
+        'printf "%s\\n" "launchctl $*" >> "$STUB_LOG/launchctl.log"\n'
+        'case "$1" in\n'
+        '  print) [ -f "$STUB_LOG/loaded" ] && exit 0 || exit 1 ;;\n'
+        '  bootstrap) touch "$STUB_LOG/loaded"; exit 0 ;;\n'
+        'esac\n'
+        'exit 0\n',
+    )
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    (sb["log"] / "loaded").unlink()
+    res = _status(sb, target)
+    assert "loaded     : NO" in res.stdout, res.stdout
+    assert "run this script with no arguments" in res.stdout, res.stdout
+    # …and the printed remedy is not a lie.
+    assert _install(sb, target).returncode == 0
+    assert "loaded     : yes" in _status(sb, target).stdout
+
+
+def test_xml_special_characters_in_paths_are_escaped(tmp_path):
+    """A repo path containing `&` or `<` must still render a WELL-FORMED plist,
+    and launchd must receive the RAW path back after parsing.
+
+    Substitution without XML escaping produces a document a strict parser
+    rejects — while the install still reports success, so the job is installed
+    from a plist launchd cannot read. (An `&` in a checkout path is ordinary:
+    "R&D".)
+
+    Mutation: remove the `_xml_escape` calls from `render_plist` -> the rendered
+    plist fails `plistlib.load` (ExpatError) -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    tricky = tmp_path / "R&D <lab>" / "repo"
+    (tricky / "tools").mkdir(parents=True)
+    (tricky / "tools" / "queue_reconcile.py").write_text("# stub\n", encoding="utf-8")
+    sb["env"]["TORTOISE_REPO"] = str(tricky)
     target = tmp_path / "agents"
     res = _install(sb, target)
-    # The `-x` probe refuses this one first (it is also a nonexistent
-    # interpreter); the invariant is the same either way: no job, no launchctl.
-    assert res.returncode == 2, (res.stdout, res.stderr)
-    assert not sb["launchctl_log"].exists()
-    assert not (target / PLIST_NAME).exists()
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    plist = target / PLIST_NAME
+    with open(plist, "rb") as fh:  # strict parse: raises on malformed XML
+        doc = plistlib.load(fh)
+    # …and the ESCAPING is transparent: the parsed value is the raw path.
+    assert doc["ProgramArguments"][1] == str(tricky / "tools" / "queue_reconcile.py")
+    assert doc["WorkingDirectory"] == str(tricky)
+
+
+def test_cron_special_characters_in_paths_are_escaped(tmp_path):
+    """crontab reads `%` as a command separator and backslash as its escape, so
+    an unescaped `%` in any path silently truncates the schedule line.
+
+    Mutation: remove the `_cron_escape` calls -> the literal `%` survives into
+    the crontab line and the assertion fails -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    custom = tmp_path / "we%ird" / "CLAIMS.tsv"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(custom)
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    line = _cron_schedule_line(sb)
+    # Every `%` in the line must be backslash-escaped — an unescaped one would
+    # truncate the schedule at that point.
+    assert "we\\%ird" in line, line
+    assert "%" not in line.replace("\\%", ""), line
+
+
+def test_linux_cron_line_carries_the_gh_directory_on_PATH(tmp_path):
+    """cron's default PATH is `/usr/bin:/bin`, which does not contain the
+    resolved gh (e.g. ~/.pi/agent/shims, ~/bin, /usr/local/bin). Without an
+    explicit PATH the job finds no gh, every identifier resolves to UNKNOWN at
+    fire time, and the install-time gh guard gives false confidence.
+
+    Mutation: drop the `PATH=...` prefix from the cron line -> the gh directory
+    is absent -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    line = _cron_schedule_line(sb)
+    # JOB_PATH is exactly "<dir holding gh>:<the installer's PATH>".
+    assert f"PATH={sb['bindir']}:/usr/bin:/bin:/usr/sbin:/sbin " in line, line
 
 
 # ── P2: the numeric guard must fail CLOSED ─────────────────────────────────
