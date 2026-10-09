@@ -279,6 +279,25 @@ def test_contracted_negation_is_not_a_restatement(negated, positive):
     assert len(set(tally.keys)) == 2
 
 
+def test_punctuation_collision_is_not_a_restatement():
+    """Regression (P2): the identity key strips every non-alnum char, so two
+    DIFFERENT claims can share a key — "I ran 3.5 hours." and "I ran 3-5
+    hours." both key to "i ran 3 5 hours". The equality branch must still
+    pass the committed fold gate, or the pair folds into one and UNDERCOUNTS
+    distinct events (the failure this core exists to prevent). The gate is
+    reflexive, so genuinely identical text must still fold — asserted here by
+    the repeated row."""
+    events = [
+        _event("I ran 3.5 hours.", "2025-06-01"),
+        _event("I ran 3-5 hours.", "2025-06-12"),
+        _event("I ran 3.5 hours.", "2025-06-20"),
+    ]
+    tally = count_distinct_events(events)
+    assert tally.n_events == 2        # the two 3.5 rows fold; 3-5 stays apart
+    assert tally.collapsed == 1
+    assert len(tally.keys) == 2       # two clusters, equal key strings aside
+
+
 def test_tally_is_input_order_independent():
     events = [
         _event("We decided to go to Tokyo.", "2025-06-01"),
@@ -403,6 +422,23 @@ def test_tally_total_months_abstains_not_raises():
     assert tally.reason == "no_unit"
     assert tally.total is None
     assert tally.n_events == 0
+
+
+def test_tally_total_ignores_a_reversed_span():
+    """Regression (P2): an event whose end precedes its start is a data
+    inconsistency, not a measurement. It must contribute NOTHING (exactly as
+    an unparsable span does) while still counting once — never publish a
+    negative duration as the measured total."""
+    events = [
+        {"id": "ok", "content": "Reading A.",
+         "start_date": "2025-01-01", "end_date": "2025-01-11"},
+        {"id": "rev", "content": "Reading B.",
+         "start_date": "2025-05-01", "end_date": "2025-04-01"},
+    ]
+    tally = count_distinct_events(events, unit="days", total=True)
+    assert tally.n_events == 2
+    assert tally.total == 10          # 10 + 0, not 10 + (-30)
+    assert tally.reason is None
 
 
 # ── (d) calendar difference ───────────────────────────────────────────────

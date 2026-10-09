@@ -330,10 +330,12 @@ def _overlap_ratio(a: str, b: str) -> float:
 
 def _restatement(content: str, prior: str,
                  raw_content: str, raw_prior: str) -> bool:
-    """True when ``content`` is the SAME event as ``prior``: byte-identical
-    after normalization, or a conservative paraphrase — overlap ≥ the
-    committed NOOP band AND ``fold_allowed`` (no negation/condition/subject
-    substitution).
+    """True when ``content`` is the SAME event as ``prior``: an equal key
+    that the committed fold gate also permits, or a conservative paraphrase
+    — overlap ≥ the committed NOOP band AND ``fold_allowed`` (no
+    negation/condition/subject substitution). Normalization erases
+    punctuation and non-ASCII letters, so an equal key is not yet an equal
+    claim; the gate decides, on the RAW texts, in BOTH branches.
 
     ``content``/``prior`` are the NORMALIZED content keys (overlap band);
     ``raw_content``/``raw_prior`` are the raw admitted texts, and the
@@ -346,7 +348,13 @@ def _restatement(content: str, prior: str,
     if not content or not prior:
         return False
     if content == prior:
-        return True
+        # Normalization collapses punctuation and non-ASCII letters, so two
+        # DIFFERENT claims can share a key ("I ran 3.5 hours." and
+        # "I ran 3-5 hours." both key to "i ran 3 5 hours"). The committed
+        # gate still decides, so a meaning-bearing difference stays two
+        # events (the undercount this core must not commit) while genuinely
+        # identical text keeps folding (the gate is reflexive).
+        return fold_allowed(raw_content, raw_prior)
     return (_overlap_ratio(content, prior) >= NOOP_MIN_OVERLAP
             and fold_allowed(raw_content, raw_prior))
 
@@ -428,7 +436,9 @@ def _span_days(event: Mapping[str, Any]) -> int | None:
     """Per-event span in days: ``end - start`` from the event's own dated
     props (end falls back to the question date only when the caller supplied
     it as ``question_date``). Returns None when either bound is
-    missing/unparseable."""
+    missing/unparseable, or when the span is REVERSED (``end < start``) —
+    a data inconsistency, which contributes nothing rather than a negative
+    total."""
     start = None
     for key in ("start_date", "started_at", "session_date", "date",
                 "created_at"):
@@ -441,6 +451,11 @@ def _span_days(event: Mapping[str, Any]) -> int | None:
         if end is not None:
             break
     if start is None or end is None:
+        return None
+    if end < start:
+        # Never publish a negative duration as a measured span: a reversed
+        # span is a data inconsistency, so it contributes nothing (exactly
+        # as an unparsable span does) and the event still counts once.
         return None
     return (end - start).days
 

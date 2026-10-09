@@ -63,11 +63,14 @@ three arms in the committed 8-arm file that carry `gold_admitted` rows
 only on the 55-question subset — which contains **none** of
 the 12. No run exists in which a class member is observed *with gold
 admitted*, so the conversion bucket cannot fire. The
-`conversion_undetermined` flag is derived from a **union scan over the two
+`conversion_undetermined` flag reports whether the rows being summarized
+observed a gold-admitted class member at all — so a `conversion` of 0 in
+those rows is **undetermined, not measured**. The **union scan over the two
 committed outcome files declared as `OUTCOME_SOURCES` (every arm in each)**
 — `2578-measured-outcomes-133.jsonl`
-and `2578-measured-outcomes.jsonl` — so it establishes the claim it reports
-for the committed data, not merely for the one default arm. Resolving it
+and `2578-measured-outcomes.jsonl` — is reported separately, as
+`conversion_reachable_any_arm`, so the union claim is established for the
+committed data without being conflated with the loaded arm. Resolving it
 requires the 12 re-run under `applied-rerank` (the reported remainder,
 below).
 

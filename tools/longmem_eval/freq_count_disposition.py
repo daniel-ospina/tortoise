@@ -32,10 +32,13 @@ Honesty caveat emitted in the summary: for this class NO gold-admitted class
 member was ever observed (the three arms in the 8-arm file that carry
 ``gold_admitted`` rows — ``applied-rerank`` 21, ``cap3-only`` 21,
 ``tr_top_k24`` 1 (qid ``8c18457d``) — run the 55-Q subset, which excludes all
-12). The ``conversion_undetermined`` flag is derived from a UNION scan over
-the two committed outcome files declared in ``OUTCOME_SOURCES`` (every arm in
-each), not just the default arm — so it establishes "no class member ever had
-gold admitted in the committed data", not merely "in the loaded arm".
+12). The ``conversion_undetermined`` flag reports whether the rows being
+summarized observed a gold-admitted class member at all, so a ``conversion``
+of 0 in those rows is undetermined, not measured. The UNION scan over the
+two committed outcome files declared in ``OUTCOME_SOURCES`` (every arm in
+each) is reported separately as ``conversion_reachable_any_arm``, so it
+establishes "no class member ever had gold admitted in the committed data"
+without being conflated with the loaded arm.
 Resolving it needs the 12 re-run under ``applied-rerank``; that is the
 reported remainder (Refs #2886).
 """
@@ -67,13 +70,16 @@ from tortoise.temporal_aggregation import (  # noqa: E402
 CENSUS_DEFAULT = "tests/_assembly_census.json"
 OUTCOMES_DEFAULT = "docs/runbook/2578-measured-outcomes-133.jsonl"
 #: The 8-arm, 55-Q committed run (``A-default`` …, ``applied-rerank``,
-#: ``cap3-only``). Scanned — every arm — for the reachability flag.
+#: ``cap3-only``). Scanned — every arm — for the union reachability fact
+#: (``conversion_reachable_any_arm``).
 OUTCOMES_8ARM = "docs/runbook/2578-measured-outcomes.jsonl"
 OUT_DEFAULT = "docs/runbook/2886-frequency-count-outcomes.jsonl"
 
 #: Every committed per-question outcome file that could carry one of the 12
-#: class members. ``conversion_undetermined`` is derived from the UNION over
-#: these (all arms) — a run present anywhere in the committed data counts.
+#: class members. The UNION over these (all arms) feeds
+#: ``conversion_reachable_any_arm`` — a run present anywhere in the committed
+#: data counts. ``conversion_undetermined`` itself tracks the rows being
+#: summarized, so an admission in another arm never makes that 0 measured.
 OUTCOME_SOURCES: tuple[str, ...] = (OUTCOMES_DEFAULT, OUTCOMES_8ARM)
 
 #: The issue's own class label in the census.
@@ -120,11 +126,13 @@ def gold_admitted_qids(
     """The class qids that had gold admitted under ANY committed run.
 
     Scans every row — every arm — of every committed outcome file in
-    ``sources`` (default: the two files in :data:`OUTCOME_SOURCES`) — so
-    ``conversion_undetermined`` establishes what it claims: no class member
-    was ever observed with gold admitted in the committed data, not merely
-    in the one default arm. Missing source files are skipped (the caller's
-    committed tree may be partial); a present file contributes every arm.
+    ``sources`` (default: the two files in :data:`OUTCOME_SOURCES`), so the
+    union fact it returns (``conversion_reachable_any_arm``) establishes
+    what it claims: whether any class member was ever observed with gold
+    admitted in the committed data, not merely in the one default arm. It
+    does NOT decide ``conversion_undetermined``, which tracks the rows being
+    summarized. Missing source files are skipped (the caller's committed
+    tree may be partial); a present file contributes every arm.
     """
     class_qids = {str(r["qid"]) for r in census.get("rows", [])
                   if r.get("cls") == CLASS}
@@ -152,12 +160,23 @@ def disposition_for(outcome: Mapping) -> str:
       ``abstention-control`` (an abstention-design row whose correct answer
       is the refusal);
     * gold admitted and answered right → ``fixed-by-admission``;
-    * gold admitted and answered wrong → ``conversion``.
+    * gold admitted and answered wrong → ``conversion``;
+    * a row that OMITS ``gold_admitted`` (or an admitted row that omits
+      ``label``) → ``unmeasured`` — an absent field is not a finding, and
+      reading it as one invents the disposition the tool exists to report.
     """
     qid = str(outcome.get("qid"))
-    if not outcome.get("gold_admitted"):
+    admitted = outcome.get("gold_admitted")
+    if admitted is None:
+        return "unmeasured"
+    if not admitted:
         return "structural" if is_answerable(qid) else "abstention-control"
-    return "fixed-by-admission" if outcome.get("label") else "conversion"
+    label = outcome.get("label")
+    if label is None:
+        # Admitted with no recorded answer outcome: this row cannot be
+        # counted as ``conversion`` (the acceptance metric) or as fixed.
+        return "unmeasured"
+    return "fixed-by-admission" if label else "conversion"
 
 
 def build_rows(census: Mapping, outcomes: Mapping[str, dict]) -> list[dict]:
@@ -200,6 +219,11 @@ def summarize(rows: Iterable[Mapping], *,
     under ANY committed run (see :func:`gold_admitted_qids`). When omitted,
     it is derived from ``rows`` (the loaded arm only) — callers that want the
     union-scan claim must pass the union set explicitly.
+
+    ``conversion_undetermined`` is always derived from the rows being
+    summarized (the loaded arm): an admission in some OTHER arm does not
+    test these rows, so it cannot make a ``conversion`` of 0 measured.
+    ``reachable_qids`` feeds only ``conversion_reachable_any_arm``.
     """
     rows = list(rows)
     counts = {"structural": 0, "conversion": 0, "fixed-by-admission": 0,
@@ -207,9 +231,9 @@ def summarize(rows: Iterable[Mapping], *,
     for r in rows:
         counts[r["disposition"]] = counts.get(r["disposition"], 0) + 1
     n_answerable = sum(1 for r in rows if is_answerable(str(r["qid"])))
+    loaded_admitted = {str(r["qid"]) for r in rows if r.get("gold_admitted")}
     if reachable_qids is None:
-        reachable_qids = {str(r["qid"]) for r in rows
-                          if r.get("gold_admitted")}
+        reachable_qids = loaded_admitted
     return {
         "n": len(rows),
         "n_answerable": n_answerable,
@@ -218,10 +242,14 @@ def summarize(rows: Iterable[Mapping], *,
         "fixed_by_admission": counts["fixed-by-admission"],
         "abstention_controls": counts["abstention-control"],
         "unmeasured": counts["unmeasured"],
-        # conversion is UNREACHABLE (not zero) when no class member ever had
-        # gold admitted under ANY run present in the committed data (the
-        # union scan), not merely in the loaded arm.
-        "conversion_undetermined": not reachable_qids,
+        # ``conversion == 0`` is a MEASUREMENT only when the rows being
+        # summed actually observed gold admitted for a class member; an
+        # admission in some OTHER arm (the union scan) never tested these
+        # rows, so it cannot make this zero measured.
+        "conversion_undetermined": not loaded_admitted,
+        # The union fact is kept, separately, so it is neither lost nor
+        # conflated with the loaded-arm measurement above.
+        "conversion_reachable_any_arm": bool(reachable_qids),
     }
 
 

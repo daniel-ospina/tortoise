@@ -39,6 +39,11 @@ def test_disposition_rule_table():
          "label": True}) == "fixed-by-admission"
     assert fcd.disposition_for(
         {"qid": "x", "gold_admitted": True, "label": False}) == "conversion"
+    # An ABSENT field is not evidence of non-admission: it must never be
+    # reported as a disposition the row did not carry.
+    assert fcd.disposition_for({"qid": "x"}) == "unmeasured"
+    assert fcd.disposition_for(
+        {"qid": "x", "gold_admitted": True}) == "unmeasured"
 
 
 def test_is_answerable_excludes_abs_controls():
@@ -115,18 +120,26 @@ def test_reachability_scan_reads_the_8_arm_file():
 
 
 def test_summarize_honours_union_reachable_qids():
-    """The union scan overrides the loaded-arm derivation: a class qid
-    gold-admitted anywhere makes conversion DETERMINATE (flag False), even
-    though the loaded arm shows no admission."""
+    """The union scan is reported SEPARATELY from the loaded-arm flag.
+
+    ``conversion_undetermined`` must track the rows being summarized: a
+    ``conversion`` of 0 is a MEASUREMENT only if THOSE rows observed gold
+    admitted. An admission in another arm (the union scan) never tested
+    them, so it cannot make the zero measured — it is reported on its own as
+    ``conversion_reachable_any_arm``."""
     census = fcd.load_census()
     rows = fcd.build_rows(census, fcd.load_outcomes())
-    assert fcd.summarize(rows)["conversion_undetermined"] is True
+    loaded = fcd.summarize(rows)
+    assert loaded["conversion_undetermined"] is True
+    assert loaded["conversion_reachable_any_arm"] is False
     union = fcd.gold_admitted_qids(census)
     assert fcd.summarize(
-        rows, reachable_qids=union)["conversion_undetermined"] is True
-    # A reachable qid flips the flag — the parameter is wired, not ignored.
-    assert fcd.summarize(
-        rows, reachable_qids={"b46e15ed"})["conversion_undetermined"] is False
+        rows, reachable_qids=union)["conversion_reachable_any_arm"] is False
+    # A qid reachable in ANOTHER arm does not make THIS arm's zero measured;
+    # it surfaces as the separate union fact instead.
+    mixed = fcd.summarize(rows, reachable_qids={"b46e15ed"})
+    assert mixed["conversion_undetermined"] is True
+    assert mixed["conversion_reachable_any_arm"] is True
 
 
 def test_every_row_is_reclassified_to_a_date_shape():
