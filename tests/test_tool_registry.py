@@ -210,11 +210,18 @@ class TestCurationGroups:
 # so the dashboard only PRESENTS what exists and the wiring never grows a
 # bespoke per-integration UI flow.
 #
-# This table IS the registry of existing integrations. It is parametrized, so
-# a NEW integration cannot silently ship UI-only: a row whose tool path is
-# missing fails `test_existing_integrations_agent_settable`, and a row
-# declared `blocked` fails the moment its tool lands — forcing the row to be
-# flipped, never left stale.
+# This table is the HAND-MAINTAINED registry of the integrations this file
+# tracks. It is parametrized, so a row IN it cannot go stale silently: a row
+# whose tool path is missing fails `test_existing_integrations_agent_settable`,
+# and a row declared `blocked` fails the moment its tool lands — forcing the row
+# to be flipped, never left stale.
+#
+# What it does NOT do — stated here because the earlier wording implied
+# otherwise: the table does not ENUMERATE the product's integrations. A new
+# integration added with no row here is not detected by this file, so
+# "a NEW integration cannot silently ship UI-only" holds only for integrations
+# this table already names. Adding the row is a review obligation, and a
+# product-level enumerator is the missing piece (#3540).
 #
 # `github-documents` is the ONE tracked gap: its enable route
 # (`POST /v1/index/docs`) and its job status (`GET /v1/index/docs/{job_id}`)
