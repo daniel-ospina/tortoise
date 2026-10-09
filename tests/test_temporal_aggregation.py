@@ -155,11 +155,13 @@ def _event(content, date_, eid=None):
 
 
 def test_restatement_across_sessions_counts_once():
-    """The multi-session restatement trap: the SAME event restated in a
-    later session is ONE event — byte-identical content collapses."""
+    """The multi-session restatement trap: the SAME identity-less event
+    restated in a later session is ONE event — byte-identical content on
+    rows with NO explicit id collapses. (The true subject is content
+    identity, not explicit ids.)"""
     events = [
-        _event("We decided to go to Tokyo.", "2025-06-01", "a"),
-        _event("We decided to go to Tokyo.", "2025-06-12", "b"),
+        _event("We decided to go to Tokyo.", "2025-06-01"),
+        _event("We decided to go to Tokyo.", "2025-06-12"),
     ]
     tally = count_distinct_events(events)
     assert tally.n_events == 1
@@ -186,12 +188,44 @@ def test_explicit_event_id_collapses_same_id():
     assert tally.keys == ("id:evt-1",)
 
 
+def test_distinct_explicit_ids_identical_content_stay_separate():
+    """Regression (P1): the explicit id is the strongest identity. Distinct
+    ids carrying IDENTICAL content are distinct occurrences — the content
+    fold must NOT override two explicit ids (which silently UNDERCCOUNTED
+    repeated activity). Fails on the pre-fix code, which returned 1."""
+    events = [
+        _event("Went to the gym.", "2025-01-01", "e1"),
+        _event("Went to the gym.", "2025-02-01", "e2"),
+        _event("Went to the gym.", "2025-03-01", "e3"),
+    ]
+    tally = count_distinct_events(events)
+    assert tally.n_events == 3
+    assert tally.n_input == 3
+    assert tally.collapsed == 0
+    assert tally.keys == ("id:e1", "id:e2", "id:e3")
+
+
+def test_distinct_explicit_ids_identical_content_sum_all_spans():
+    """Regression (P1, total path): distinct ids with identical content are
+    distinct occurrences, so TOTAL sums EVERY span (not one). Fails on the
+    pre-fix code, which summed 10 days once."""
+    events = [
+        {"id": "e1", "content": "Run.",
+         "start_date": "2025-01-01", "end_date": "2025-01-11"},
+        {"id": "e2", "content": "Run.",
+         "start_date": "2025-02-01", "end_date": "2025-02-11"},
+    ]
+    tally = count_distinct_events(events, unit="days", total=True)
+    assert tally.n_events == 2
+    assert tally.total == 20
+
+
 def test_conservative_paraphrase_collapses():
     """A conservative paraphrase (same claim, no negation/substitution) of an
     already-kept event collapses to it."""
     events = [
-        _event("I really enjoyed the concert last night.", "2025-06-01", "a"),
-        _event("I enjoyed the concert last night.", "2025-06-12", "b"),
+        _event("I really enjoyed the concert last night.", "2025-06-01"),
+        _event("I enjoyed the concert last night.", "2025-06-12"),
     ]
     tally = count_distinct_events(events)
     assert tally.n_events == 1
@@ -210,8 +244,8 @@ def test_negation_is_not_a_restatement():
 
 def test_tally_is_input_order_independent():
     events = [
-        _event("We decided to go to Tokyo.", "2025-06-01", "a"),
-        _event("We decided to go to Tokyo.", "2025-06-12", "b"),
+        _event("We decided to go to Tokyo.", "2025-06-01"),
+        _event("We decided to go to Tokyo.", "2025-06-12"),
         _event("I bought a road bike.", "2025-06-05", "c"),
     ]
     forward = count_distinct_events(events)
@@ -243,9 +277,9 @@ def test_tally_total_sums_distinct_spans():
     """TOTAL sums each DISTINCT event's span; a restated event's span is
     added once (the trap closed for sums too)."""
     events = [
-        {"id": "r1", "content": "Reading The Nightingale.",
+        {"content": "Reading The Nightingale.",
          "start_date": "2025-01-01", "end_date": "2025-01-15"},
-        {"id": "r2", "content": "Reading The Nightingale.",
+        {"content": "Reading The Nightingale.",
          "start_date": "2025-01-01", "end_date": "2025-01-15"},
         {"id": "r3", "content": "Listening to Sapiens.",
          "start_date": "2025-01-16", "end_date": "2025-01-23"},
@@ -266,6 +300,22 @@ def test_tally_total_undated_event_counts_but_adds_nothing():
     tally = count_distinct_events(events, unit="days", total=True)
     assert tally.n_events == 2
     assert tally.total == 10
+
+
+def test_tally_total_months_abstains_not_raises():
+    """Regression (P2): a ``total=True`` request in a unit that cannot be
+    inverted from a day sum (months) ABSTAINS with the module's no-value
+    result instead of raising. Fails on the pre-fix code, which raised
+    ``ValueError``."""
+    events = [
+        {"id": "r1", "content": "Reading A.",
+         "start_date": "2025-01-01", "end_date": "2025-01-15"},
+    ]
+    tally = count_distinct_events(events, unit="months", total=True)
+    assert isinstance(tally, EventTally)
+    assert tally.reason == "no_unit"
+    assert tally.total is None
+    assert tally.n_events == 0
 
 
 # ── (d) calendar difference ───────────────────────────────────────────────
@@ -313,8 +363,8 @@ def test_as_date_sentinel_and_iso():
 
 def test_resolve_count_distinct():
     events = [
-        _event("We decided to go to Tokyo.", "2025-06-01", "a"),
-        _event("We decided to go to Tokyo.", "2025-06-12", "b"),
+        _event("We decided to go to Tokyo.", "2025-06-01"),
+        _event("We decided to go to Tokyo.", "2025-06-12"),
         _event("We picked November for the trip.", "2025-06-20", "c"),
     ]
     res = resolve_temporal_aggregate(
@@ -323,6 +373,23 @@ def test_resolve_count_distinct():
     assert res.value == 2
     assert res.method == "count_distinct"
     assert res.n_events == 2
+    assert res.reason is None
+
+
+def test_resolve_counts_repeated_occurrences_with_distinct_ids():
+    """Regression (P1 end-to-end): the reviewer's repro. Three explicit-id
+    events with identical content on different dates are three occurrences;
+    the count must be 3, not 1. Fails on the pre-fix code (value == 1)."""
+    events = [
+        _event("Went to the gym.", "2025-01-01", "e1"),
+        _event("Went to the gym.", "2025-02-01", "e2"),
+        _event("Went to the gym.", "2025-03-01", "e3"),
+    ]
+    res = resolve_temporal_aggregate(
+        "How many times did I go to the gym?", events=events)
+    assert res.kind is TemporalAggregateKind.COUNT
+    assert res.n_events == 3
+    assert res.value == 3
     assert res.reason is None
 
 
@@ -427,8 +494,8 @@ def test_resolve_capped_abstains_with_no_value():
 
 def test_resolution_is_deterministic():
     events = [
-        _event("We decided to go to Tokyo.", "2025-06-01", "a"),
-        _event("We decided to go to Tokyo.", "2025-06-12", "b"),
+        _event("We decided to go to Tokyo.", "2025-06-01"),
+        _event("We decided to go to Tokyo.", "2025-06-12"),
     ]
     q = "How many times did we decide on Tokyo?"
     first = resolve_temporal_aggregate(q, events=events)

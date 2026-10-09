@@ -47,10 +47,14 @@ Design invariants (mirroring the assembly lane's R1/R13 discipline):
   the same inputs always produce the same output.
 
 Identity caveat (documented, never silent): content-identical wording on two
-different occasions is treated as ONE event (the restatement rule the issue
-names). A caller that knows the rows are genuinely distinct occurrences
-(e.g. a repeated activity) must pass distinct ``event_id`` values — the
-explicit id is the strongest identity and always wins.
+DIFFERENT occasions is folded to ONE event only for IDENTITY-LESS rows (the
+restatement rule the issue names). The fold is never applied across explicit
+ids: two rows that carry DISTINCT ``event_id`` values are always DISTINCT
+events, even when their content is identical, and their occurrences are
+counted (and their spans summed) separately. A caller that knows the rows
+are genuinely distinct occurrences (e.g. a repeated activity) must pass
+distinct ``event_id`` values — the explicit id is the strongest identity and
+always wins.
 
 Residual (NOT covered here — recorded so it is not mistaken for verified):
 
@@ -388,8 +392,9 @@ def _days_to_unit(days: int, unit: str | None) -> int:
     if unit == "weeks":
         return days // 7
     if unit == "months":
-        # only reachable via an explicit caller unit override; days→months
-        # is not a calendar inversion, so refuse rather than approximate.
+        # Defensive only: count_distinct_events rejects a months total with
+        # an abstention before reaching here. Kept as a programming-error
+        # guard rather than a silent approximation.
         raise ValueError("cannot express a day sum in calendar months")
     if unit == "years":
         return days // 365
@@ -407,23 +412,36 @@ def count_distinct_events(
 
     Deterministic canonicalisation: events are ordered by
     ``(session_date, event_id)`` so the earliest articulation is kept and
-    the count does not depend on input order. Identity: an explicit event id
-    collapses duplicates with the same id; otherwise content-based identity
-    collapses an identical or conservative-paraphrase restatement of an
-    already-kept event (``fold_allowed`` + ``NOOP_MIN_OVERLAP``).
+    the count does not depend on input order. Identity is exclusive: an
+    explicit event id collapses ONLY a repeated occurrence of the same id,
+    and content-based identity (identical wording, or a conservative-
+    paraphrase restatement under ``fold_allowed`` + ``NOOP_MIN_OVERLAP``)
+    folds ONLY identity-less rows. Content never overrides two distinct
+    explicit ids — distinct ids with identical content stay SEPARATE events
+    (a repeated activity is counted once per occurrence).
 
     ``total=True`` additionally sums each distinct event's span in the
     requested ``unit``; an event with no parsable span contributes 0 to the
-    sum but still counts as one distinct event. Input over ``MAX_EVENTS``
-    abstains (``reason="capped"``); an empty input yields ``n_events=0`` (a
-    real zero — not a truncation).
+    sum but still counts as one distinct event. A ``total=True`` request in
+    a unit that cannot be inverted from a day sum (``months``) abstains
+    (``reason="no_unit"``) rather than raising — the never-guess contract.
+    Input over ``MAX_EVENTS`` abstains (``reason="capped"``); an empty
+    input yields ``n_events=0`` (a real zero — not a truncation).
     """
     rows = list(events)
     if len(rows) > MAX_EVENTS:
         return EventTally(0, len(rows), 0, reason="capped", unit=unit)
+    if total and unit not in (None, "days", "weeks", "years"):
+        # A day sum cannot be inverted into calendar months — abstain
+        # (never raise, never approximate); the span is not published.
+        return EventTally(0, len(rows), 0, reason="no_unit", unit=unit)
     ordered = _canonical_order(rows)
     keys: list[str] = []
     seen_ids: set[str] = set()
+    #: Content keys of already-kept IDENTITY-LESS rows only. An event that
+    #: carries an explicit id is anchored by that id and neither folds into
+    #: nor absorbs a content match, so the fold can never override two
+    #: distinct explicit ids (the occurrence-undercount bug).
     kept_content: list[str] = []
     span_days = 0
     for i, event in ordered:
@@ -431,8 +449,9 @@ def count_distinct_events(
         content = _content_key(event)
         duplicate = bool(
             (eid and eid in seen_ids)
-            or (content and any(_restatement(content, prior)
-                                for prior in kept_content)))
+            or (not eid and content
+                and any(_restatement(content, prior)
+                        for prior in kept_content)))
         if duplicate:
             continue
         if eid:
@@ -440,12 +459,11 @@ def count_distinct_events(
             keys.append(f"id:{eid}")
         elif content:
             keys.append(f"content:{content}")
+            kept_content.append(content)
         else:
             # neither id nor content — not identifiable; keep it as its own
             # row (never silently drop admitted evidence)
             keys.append(f"row:{i}")
-        if content:
-            kept_content.append(content)
         if total:
             span_days += _span_days(event) or 0
     n_events = len(keys)
