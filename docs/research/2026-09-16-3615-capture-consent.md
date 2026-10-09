@@ -23,58 +23,58 @@ migrate a silently-enabled data-sharing default without either silence or alert 
 - **canonical** — GDPR Art. 25 "data protection by default" requires the most privacy-protective
   defaults and processing only what is necessary *without the data subject's intervention*;
   pre-ticked boxes / inactivity are not valid consent — EDPB Guidelines 4/2019
-  (https://www.edpb.europa.eu/sites/default/files/files/file1/edpb_guidelines_201904_dataprotection_by_design_and_by_default_v2.0_en.pdf),
-  legislation.gov.uk Art. 25 (https://www.legislation.gov.uk/eur/2016/679/article/25).
+  (<https://www.edpb.europa.eu/sites/default/files/files/file1/edpb_guidelines_201904_dataprotection_by_design_and_by_default_v2.0_en.pdf>),
+  legislation.gov.uk Art. 25 (<https://www.legislation.gov.uk/eur/2016/679/article/25>).
 - **canonical** — the auth/consent boundary is a first-class separation in OAuth: authentication
   yields a token; consent is a *separate, granular* scope approval. Scopes are "the unit of consent
   and policy boundary"; possessing a credential is not consent —
-  https://oauth.net/2/scope/, https://nhimg.org/articles/scopes-and-claims-in-oauth-and-oidc-where-each-belongs/
+  <https://oauth.net/2/scope/>, <https://nhimg.org/articles/scopes-and-claims-in-oauth-and-oidc-where-each-belongs/>
 - **competitor-precedent** — Teleport anonymous telemetry is strictly opt-in
   (`TELEPORT_ANONYMOUS_TELEMETRY=1`; unset ⇒ nothing collected) —
-  https://goteleport.com/docs/ver/17.x/reference/machine-id/telemetry.md ; terraform-ls telemetry is
+  <https://goteleport.com/docs/ver/17.x/reference/machine-id/telemetry.md> ; terraform-ls telemetry is
   off by default, enabled only by an explicit client capability —
-  https://github.com/hashicorp/terraform-ls/blob/main/docs/telemetry.md ; OpenTelemetry classifies
+  <https://github.com/hashicorp/terraform-ls/blob/main/docs/telemetry.md> ; OpenTelemetry classifies
   "opt-in" attributes as not included by default —
-  https://opentelemetry.io/docs/specs/semconv/general/attribute-requirement-level/
+  <https://opentelemetry.io/docs/specs/semconv/general/attribute-requirement-level/>
 - **pitfalls** — bundled consent is invalid: consent must be a clear affirmative act, separate and
   granular, and if refusing it denies the service it is not "freely given". That is exactly this
   defect (refusing capture denies hosted MCP) — EDPB Guidelines 3/2022 on dark patterns
-  (https://www.edpb.europa.eu/system/files/2022-03/edpb_03-2022_guidelines_on_dark_patterns_in_social_media_business_pages_en.pdf)
+  (<https://www.edpb.europa.eu/system/files/2022-03/edpb_03-2022_guidelines_on_dark_patterns_in_social_media_business_pages_en.pdf>)
 
 ## Axis 2 — Opt-in mechanics readable by a session-end hook (rating: medium)
 
 - **canonical** — `DO_NOT_TRACK` is the de-facto cross-tool convention, but it is an *opt-out*
   grammar; opt-in tooling uses product-specific variables (`HOMEBREW_NO_ANALYTICS`,
-  `DOTNET_CLI_TELEMETRY_OPTOUT`) — https://donottrack.sh/ ,
-  https://learn.microsoft.com/en-us/dotnet/core/tools/telemetry
+  `DOTNET_CLI_TELEMETRY_OPTOUT`) — <https://donottrack.sh/> ,
+  <https://learn.microsoft.com/en-us/dotnet/core/tools/telemetry>
 - **competitor-precedent** — Homebrew notifies the user *before* analytics are enabled and exposes
   two surfaces: a durable file/state command (`brew analytics off`) and a per-run env override
   (`HOMEBREW_NO_ANALYTICS=1`) — the file is the persistent source of truth —
-  https://docs.brew.sh/Analytics
+  <https://docs.brew.sh/Analytics>
 - **canonical (precedence)** — recommended precedence is CLI flag > env var > config file > default,
   with the config path documented; env vars are inherited by child processes and can leak into logs
-  and errors — https://deepwiki.com/cli-guidelines/cli-guidelines/11-configuration-and-environment
+  and errors — <https://deepwiki.com/cli-guidelines/cli-guidelines/11-configuration-and-environment>
 - **pitfalls** — an env-only gate is fragile: Homebrew 4.1.0 turned `HOMEBREW_NO_ANALYTICS` into a
-  silent no-op (https://brew.sh/2023/07/20/homebrew-4.1.0/), and env vars leak into subprocesses
-  (https://softwareengineering.stackexchange.com/questions/148042/).
+  silent no-op (<https://brew.sh/2023/07/20/homebrew-4.1.0/>), and env vars leak into subprocesses
+  (<https://softwareengineering.stackexchange.com/questions/148042/>).
 - **pitfalls** — an undocumented / divergent config path produces machine-global vs per-repo scope
-  confusion (https://codyaray.com/2020/07/cli-design-best-practices).
+  confusion (<https://codyaray.com/2020/07/cli-design-best-practices>).
 
 ## Axis 3 — Breaking-change migration for silently-enabled data-sharing (rating: medium)
 
 - **canonical** — a mature policy announces the change in a release and allows a support window
   before removal, with runtime warnings and a migration-guide link —
-  https://docs.dapr.io/operations/support/breaking-changes-and-deprecations/
+  <https://docs.dapr.io/operations/support/breaking-changes-and-deprecations/>
 - **competitor-precedent** — Kubernetes requires deprecated CLI to emit warnings while guaranteeing
-  a minimum support window (https://kubernetes.io/docs/reference/deprecation-policy/);
+  a minimum support window (<https://kubernetes.io/docs/reference/deprecation-policy/>);
   Salesforce CLI shows warnings for ≥4 months and documents the deprecation in `--help`.
 - **pitfalls (silent vanish)** — AMD's quiet removal of transparent memory encryption left users
   unaware a security feature had vanished; UX guidance argues silent removal is itself the defect —
   disable *visibly* rather than let a capability disappear
-  (https://www.tomshardware.com/pc-components/cpus/amd-silently-removes-memory-encryption-from-consumer-ryzen-cpus)
+  (<https://www.tomshardware.com/pc-components/cpus/amd-silently-removes-memory-encryption-from-consumer-ryzen-cpus>)
 - **pitfalls (alert fatigue)** — repeated per-invocation warnings are a documented frustration;
   guidance is a finite, quiet window (Homebrew's always-shown notice was filed as a bug —
-  https://github.com/Homebrew/brew/issues/15678).
+  <https://github.com/Homebrew/brew/issues/15678>).
 
 ## Implication for #3615
 
@@ -101,7 +101,7 @@ the resolved config names.
 
 ### Surface inventory — which in-repo paths the predicate reaches (#3662)
 
-#3615 gated the paths it owned and declared the rest out of scope. #3662 closed
+\#3615 gated the paths it owned and declared the rest out of scope. #3662 closed
 the one remaining CLIENT-side hole it left, and recorded the two surfaces it
 deliberately did **not** gate — otherwise #3615's claim ("no in-repo path
 requires an explicit non-credential opt-in") stays false for them without anyone
