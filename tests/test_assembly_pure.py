@@ -671,39 +671,56 @@ def test_resolver_excluded_probe_failure_abstains_fail_safe():
     assert res.unresolved == ("the couch",)
 
 
-def test_names_lexically_match_gate_contract():
-    """#3223: the name-FTS leg's lexical gate accepts a genuine NAME match
-    (including a stemmed/inflected form) and rejects a semantic-only
-    neighbour — the property that makes the R1 ``unresolved`` signal
-    reachable while the hybrid vector half is live.
+def test_name_index_ids_gate_contract():
+    """#3223: the name-FTS leg's gate is SET MEMBERSHIP in the ids the Object
+    NAME index itself returns for the term — not a re-derived lexical
+    predicate.
+
+    The predicate form was implemented, reviewed and REJECTED: reproducing the
+    index's English stemmer by hand is BOTH incomplete ("happiness"/"happy"
+    share the stem "happi", yet neither token is a prefix of the other) AND
+    unsound (a naive "ing" strip reduces "rating" to "rat", re-admitting a
+    semantic-only neighbour — the exact class this gate rejects). Asking the
+    index cannot disagree with itself, so the gate is membership.
 
     Pure: no graph, no embedder. The docker-lane consequence is pinned by
     ``test_resolver_docker_embedder_on_unresolved_keeps_legacy``.
     """
-    from tortoise.assembly import _names_lexically_match
+    from tortoise.assembly import _name_index_ids
 
-    assert _names_lexically_match("the grey comfy couch from the store",
-                                  "couch")
-    assert _names_lexically_match("the chewing dog bed", "chew")  # stemmed
-    assert _names_lexically_match("couch", "the couch")
-    # #3223 review: the gate must mean what the NAME index means. RediSearch
-    # stems English by default, so a short stem is a genuine match — the >= 4
-    # prefix floor alone would reject it and narrow recall below the hybrid leg.
-    assert _names_lexically_match("dogs", "dog bed")  # 3-char stem
-    # ...and an all-digit term IS searched literally (build_or_query passes a
-    # degenerate numeric query through RAW), so it must match too.
-    assert _names_lexically_match("747", "Boeing 747")
-    # a semantic-only neighbour shares no lexical material with the term
-    assert not _names_lexically_match("the teleporting exercise bike",
-                                      "couch")
-    assert not _names_lexically_match("the ikea purchase", "sofa")
-    # a sub-threshold prefix is not a token match ("cou" is noise)
-    assert not _names_lexically_match("cou", "couch")
-    # a stem is not a licence to match a different word
-    assert not _names_lexically_match("cats", "catalog")
-    # inert / stopword-only terms never match
-    assert not _names_lexically_match("", "couch")
-    assert not _names_lexically_match("the and of", "couch")
+    seen: dict = {}
+
+    class _G:
+        def query(self, cypher, params=None, **k):
+            seen["cypher"] = cypher
+            seen["params"] = params
+
+            class _R:
+                def __init__(self):
+                    self.result_set = [["obj-a"]]
+
+            return _R()
+
+    class _Proj:
+        g = _G()
+
+    got = _name_index_ids(_Proj(), "the grey comfy couch", ["obj-a", "obj-b"])
+    assert got == {"obj-a"}
+    # the OR-union constructor the SDK's FTS leg runs builds the query text,
+    # so the mirrored leg's query cannot drift
+    from tortoise.sparse import build_or_query
+    assert seen["params"]["query"] == build_or_query("the grey comfy couch")
+    # the index filter is scoped to the rows actually under test
+    assert seen["params"]["ids"] == ["obj-a", "obj-b"]
+    assert "queryNodes('Object'" in seen["cypher"]
+    # no rows under test → no query at all (an empty live set costs nothing)
+    class _NoQuery:
+        class g:
+            @staticmethod
+            def query(*a, **k):
+                raise AssertionError("must not query with no ids")
+
+    assert _name_index_ids(_NoQuery(), "couch", []) == set()
 
 
 def test_resolver_fts_window_grows_past_excluded_rows():
@@ -724,7 +741,12 @@ def test_resolver_fts_window_grows_past_excluded_rows():
 
     class _G:
         def query(self, *a, **k):
-            return _EmptyResult()
+            # #3223: the name-index oracle — the live row is what the Object
+            # index itself matches for the term
+            class _R:
+                def __init__(self):
+                    self.result_set = [["obj-live"]]
+            return _R()
 
     class _Proj:
         g = _G()
@@ -860,7 +882,7 @@ def test_resolver_docker_fts_paraphrase(_docker_sdk, force_sparse_tfidf):
     so this stays a SPARSE-leg count contract. The shipped hybrid leg
     (RRF of name-FTS + name-vector) returns the same single candidate now
     that the leg's NAME gate rejects semantic-only neighbours —
-    ``_names_lexically_match`` (#3223) — but pinning keeps THIS test's
+    ``_name_index_ids`` (#3223) — but pinning keeps THIS test's
     assertion independent of whichever decomposition the lane happens to
     run. The shipped-configuration counterpart is
     ``test_resolver_docker_embedder_on_...`` (see the note below
@@ -884,7 +906,8 @@ def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk,
     #3095/#3223: the embedder state is PINNED OFF (``force_sparse_tfidf``) so
     this remains a SPARSE-leg contract pin. #3223 made the fallback reachable
     in the SHIPPED (embedder-live) configuration too, by gating the resolver's
-    name-FTS leg to genuine lexical name matches (``_names_lexically_match``);
+    name-FTS leg to rows the Object NAME index itself matches
+    (``_name_index_ids``);
     the deterministic shipped-configuration counterpart is
     ``test_resolver_docker_embedder_on_unresolved_keeps_legacy``. The pin is
     kept — not because the assertion is now sparse-only, but because it keeps
@@ -909,7 +932,7 @@ def test_resolver_docker_alias_leg(_docker_sdk, force_sparse_tfidf):
     #3095/#3223: embedder state PINNED OFF (``force_sparse_tfidf``) so this
     stays a SPARSE-leg contract pin. Before #3223 an unpinned vector leg
     swallowed the term at the FTS step and the alias contract was never
-    exercised; the leg's NAME gate (``_names_lexically_match``) now rejects
+    exercised; the leg's NAME gate (``_name_index_ids``) now rejects
     those semantic-only hits, so the alias leg is reached in the shipped
     configuration as well — the pin keeps THIS test's leg mix fixed rather
     than ambient."""
@@ -1197,7 +1220,7 @@ def test_resolver_docker_embedder_on_unresolved_keeps_legacy(
     ``xfail(strict=False)`` record this replaces. The no-match term must stay
     in ``unresolved`` even though the hybrid vector half returns the fixture's
     Objects for any term: leg 2 is the Object NAME-FTS leg, so a semantic-only
-    neighbour is not a name match (``_names_lexically_match``).
+    neighbour is not a name match (``_name_index_ids``).
 
     The ask-lane half is asserted too: the term must drive
     ``_assemble_connected`` to ``fired=False`` (the R1 legacy fallback)

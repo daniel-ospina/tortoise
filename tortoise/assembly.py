@@ -402,84 +402,39 @@ _HEAD_CUT = re.compile(
     r"by|with|in)\b", re.IGNORECASE)
 
 
-#: #3223: shortest shared prefix that still counts as the same lexical token
-#: when normalising an inflected form ("chewing" vs the name "chew"). Below
-#: this a prefix is noise ("couch" vs "cou"), so equality is required.
-_NAME_TOKEN_MIN_PREFIX = 4
+def _name_index_ids(proj, term: str, ids: list[str]) -> set[str]:
+    """The subset of ``ids`` the Object NAME-FTS index itself matches for
+    ``term`` (#3223).
 
-#: RediSearch's default fulltext language is English with stemming ON — the
-#: Object name index is created with no ``LANGUAGE``/``NOSTEM`` option (see
-#: ``projection``'s ``_create_fulltext_index``), so the index matches an
-#: inflected query token against its stemmed form. The gate must mean what the
-#: index means, or it narrows recall BELOW the pre-#3223 hybrid leg instead of
-#: merely dropping semantic-only neighbours: a name whose only shared token is
-#: a short stem ("dogs" vs "dog bed") is a genuine match, and the >= 4 prefix
-#: floor above would reject it. This is a deliberately CONSERVATIVE subset of
-#: the English stemmer (plurals + the common verb endings), each rule
-#: length-guarded so it can never reduce a real word to noise ("need" -
-#: "ed" = "ne"). Applied to token EQUALITY only; the prefix compare above is
-#: unchanged, so "cou" vs "couch" is still rejected.
-_ENGLISH_STEM_RULES = (
-    ("sses", "ss"), ("ies", "y"), ("ing", ""), ("ed", ""),
-)
+    This is the faithful oracle for "is this row leg 2's row". The hybrid
+    ``tortoise_fts_query`` fuses the name index with a vector half that
+    returns the semantically nearest Objects for ANY term, and its rows carry
+    no leg provenance (``leg_trace`` records counts, not ids), so leg
+    membership cannot be read off the result. It must not be RE-DERIVED from
+    the name text either: matching the index means applying the index's own
+    English stemmer, and a hand-rolled approximation is BOTH incomplete
+    ("happiness"/"happy" share the stem "happi", yet neither token is a
+    prefix of the other) AND unsound (a naive "ing" strip reduces "rating"
+    to "rat" and re-admits a semantic-only neighbour — the exact #3223
+    failure class this gate exists to reject). Asking the index removes the
+    re-derivation: the gate is SET MEMBERSHIP, so it agrees with the index by
+    construction.
 
-
-def _english_token_stem(token: str) -> str:
-    """Conservative English inflection stem (see ``_ENGLISH_STEM_RULES``)."""
-    for suffix, replacement in _ENGLISH_STEM_RULES:
-        if token.endswith(suffix):
-            stem = token[: len(token) - len(suffix)] + replacement
-            if len(stem) >= 3:
-                return stem
-    if (token.endswith("s") and not token.endswith(("ss", "us", "is"))
-            and len(token) - 1 >= 3):
-        return token[:-1]
-    return token
-
-
-def _names_lexically_match(term: str, name: str) -> bool:
-    """True iff ``name`` shares lexical material with the searched ``term``.
-
-    #3223: the resolver's leg 2 is the Object **NAME**-FTS leg (see
-    ``docker_resolver_port``), but ``tortoise_fts_query`` is documented as a
-    best-match **hybrid RRF fusion of FTS + vector + structural**. With the
-    embedder live its vector half returns the semantically nearest Objects
-    for ANY term — including one that names nothing — and those hits were
-    indistinguishable from a genuine name match (both stamped
-    ``source="fts"``/``confidence="med"``). A no-match term therefore never
-    reached the alias leg or ``unresolved``, so the R1 ``fired=False`` legacy
-    fallback was unreachable in the shipped configuration, and ``ask()``
-    fired an assembly about unrelated Objects instead.
-
-    This gate restores the documented contract: a hit counts as a name match
-    only when the Object's name shares lexical material with the term. It
-    uses the SAME tokenizer the sparse leg builds its OR-union with
-    (``tortoise.sparse.tokenize_sparse_query`` — the ONE tokenizer both FTS
-    stacks import), so "lexical match" means what the NAME index means, and
-    tolerates an inflected/stemmed form via a bounded prefix compare. A hit
-    that fails is a semantic-only neighbour from the hybrid vector half and
-    is not this leg's row.
+    ``build_or_query`` is the same OR-union constructor the SDK's FTS leg
+    runs (``search_engine.run_fts_query``), so the query text cannot drift
+    from the leg being mirrored. The ``WHERE node.id IN $ids`` filter bounds
+    the result to the rows actually under test instead of the term's whole
+    index posting list.
     """
-    from tortoise.sparse import tokenize_sparse_query
-    # ``keep_numeric=True`` on BOTH sides (#3223 review): ``build_or_query``
-    # passes a degenerate all-digit query through RAW, so the index DOES search
-    # a numeric term literally ("747" matches the name "Boeing 747"); dropping
-    # numeric tokens here would reject a genuine name match and narrow recall.
-    # Same polarity as ``coverage_loop._token_overlap`` (numbers kept on the
-    # name side).
-    term_tokens = tokenize_sparse_query(term, keep_numeric=True)
-    if not term_tokens:
-        return False
-    name_tokens = tokenize_sparse_query(name, keep_numeric=True)
-    for t in term_tokens:
-        t_stem = _english_token_stem(t)
-        for n in name_tokens:
-            if t == n or t_stem == _english_token_stem(n):
-                return True
-            if (min(len(t), len(n)) >= _NAME_TOKEN_MIN_PREFIX
-                    and (t.startswith(n) or n.startswith(t))):
-                return True
-    return False
+    if not ids:
+        return set()
+    from tortoise.sparse import build_or_query
+    rows = proj.g.query(
+        "CALL db.idx.fulltext.queryNodes('Object', $query) YIELD node "
+        "WHERE node.id IN $ids RETURN node.id",
+        params={"query": build_or_query(term), "ids": list(ids)},
+    ).result_set
+    return {str(r[0]) for r in rows}
 
 
 def _candidate_names(term: str) -> list[str]:
@@ -793,12 +748,13 @@ def docker_resolver_port(sdk) -> ResolverPort:
         # #3223: this leg is the Object NAME-FTS leg, but the query it makes
         # is the HYBRID one (RRF of name-FTS + name-vector + structural), so
         # with the embedder live its vector half returns the nearest Objects
-        # for ANY term. Each accumulated row is therefore gated to a genuine
-        # lexical name match (``_names_lexically_match``) before the leg
-        # returns: a semantic-only neighbour is NOT this leg's row, so a
-        # no-match term falls through to the alias leg and then to
-        # ``unresolved`` — making the R1 ``fired=False`` fallback reachable in
-        # the shipped configuration again (the divergence #3223 tracks).
+        # for ANY term. Each accumulated row is therefore gated to membership
+        # in the set the NAME index ITSELF returns for the term
+        # (``_name_index_ids``) before the leg returns: a semantic-only
+        # neighbour is NOT this leg's row, so a no-match term falls through to
+        # the alias leg and then to ``unresolved`` — making the R1
+        # ``fired=False`` fallback reachable in the shipped configuration
+        # again (the divergence #3223 tracks).
         #
         # The gate runs on the ACCUMULATED window rather than inside the
         # admission loop on purpose: the window grows to satisfy the
@@ -869,11 +825,14 @@ def docker_resolver_port(sdk) -> ResolverPort:
                 live.append({"id": oid, "name": h.get("content", "")})
             if (len(live) >= limit or exhausted
                     or window >= _FTS_WINDOW_CAP):
-                # #3223: keep only genuine name matches, then bound — see the
-                # leg note above. Post-gate so a real name match behind
-                # semantic-only neighbours in the same window survives.
+                # #3223: keep only rows the NAME index itself matches, then
+                # bound — see the leg note above and ``_name_index_ids``.
+                # Post-gate so a real name match behind semantic-only
+                # neighbours in the same window survives.
+                name_ids = _name_index_ids(
+                    proj, term, [row["id"] for row in live])
                 return [row for row in live
-                        if _names_lexically_match(term, row["name"])][:limit]
+                        if row["id"] in name_ids][:limit]
             window = min(window * 2, _FTS_WINDOW_CAP)
 
     def alias_objects(term: str, limit: int = 8) -> list[dict]:
