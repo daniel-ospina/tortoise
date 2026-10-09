@@ -525,14 +525,16 @@ def test_clean_run_has_no_remediation_markers():
 # A body comfortably over the pipe capacity is used rather than a
 # timing-dependent race, so these are deterministic on a loaded host and under
 # both BSD and GNU coreutils. The `ls | head -n1` site at `:126` is guarded with
-# `|| true` and is deliberately NOT pinned here: it needs thousands of matching
-# files to exceed the buffer, while the test that observed the CI red stages a
-# handful of tiny migrations — orders of magnitude below that, so it cannot
-# reach the site. (The boundary between 2 files and 2600 is measured; the exact
-# listing sizes are not load-bearing and are deliberately not quoted here.) So
-# the specific trigger of that red is UNIDENTIFIED; what these tests establish is
-# the defect CLASS, and that these three paths now fail loudly pre-fix and pass
-# post-fix.
+# `|| true`: it needs a listing larger than the buffer to be reachable, while the
+# test that observed the CI red stages a handful of tiny migrations — orders of
+# magnitude below that, so it cannot reach the site. (The boundary between 2
+# files and 2600 is measured; the exact listing sizes are not load-bearing and
+# are deliberately not quoted here.) So the specific trigger of that red is
+# UNIDENTIFIED; what these tests establish is the defect CLASS, and that these
+# paths now fail loudly pre-fix and pass post-fix. The `:126` site itself is
+# pinned separately by
+# `test_many_matching_migrations_still_report_the_verdict`, which makes its
+# listing exceed the buffer via deeply-nested paths.
 #
 # False-negative floor, stated because it bounds what these can promise: every
 # fixture must EXCEED the pipe capacity, so on a host whose default capacity were
@@ -626,3 +628,48 @@ def test_large_api_error_body_still_reports_exit_2():
 
     assert r.returncode == 2, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
     assert "500" in r.stderr, r.stderr[-2000:]
+
+
+def test_many_matching_migrations_still_report_the_verdict():
+    """A version with more matching files than the pipe buffer must still
+    produce its verdict, not a SIGPIPE abort.
+
+    Pins the `:126` `ls … | head -n1` site, the one #7567 hunk that shipped
+    without a failing-on-revert test. With no guard, a listing larger than the
+    pipe buffer kills the still-writing `ls` with SIGPIPE, `pipefail` makes the
+    pipeline 141, and `set -e` ABORTS the script before it can print a verdict.
+    #7567 added `|| true` to that assignment, binding the pipeline to exit 0
+    before `set -e` can see the 141; against the pre-#7567 script this test
+    fails with exactly `(141, '', '')`.
+
+    It does NOT identify the trigger of the 2026-10-06 main-red (#6136): the
+    fixture that observed that red stages a handful of tiny migrations, far
+    below the buffer (see the block comment above), so this site cannot reach
+    it. What this pins is the site's own behaviour once its listing exceeds the
+    buffer — the defect CLASS, not the reported incident.
+
+    The fixture directory is nested deep so each `ls` line is long and ~150
+    files suffice; the duplicate-repair path resolves `basename` once PER FILE,
+    so file count — not listing size — is what this test costs. Like its
+    siblings this relies on the host's default pipe capacity: a capacity raised
+    above the fixture's ~115 KiB listing would stop it failing pre-fix (it would
+    still pass post-fix).
+    """
+    mig = FIXTURES / "migrations"
+    for _ in range(6):
+        mig = mig / ("nested" * 20)
+    mig.mkdir(parents=True, exist_ok=True)
+    files = {
+        f"20260813000009_{i:03d}.sql":
+            "CREATE TABLE IF NOT EXISTS public.a (id text);\n"
+        for i in range(150)
+    }
+    for name, body in files.items():
+        (mig / name).write_text(body)
+    listing = sum(len(str(mig / n)) + 1 for n in files)
+    assert listing > 65536, f"listing must exceed the pipe buffer, got {listing}"
+
+    r = _run_staged(mig, _stub_curl(["0001"]))
+
+    assert r.returncode == 1, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+    assert "20260813000009" in r.stdout, r.stdout[-2000:]
