@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -642,6 +643,36 @@ _LEAK_SURFACED_JOBS = (
 _ARTIFACT = "tempdir-hygiene-end.json"
 
 
+def _actions_yaml():
+    """A SafeLoader whose bool resolver matches the RUNNER's, not YAML 1.1's.
+
+    GitHub Actions parses ``if: yes`` / ``if: on`` as STRINGS — actionlint
+    rejects them as undefined variables — while PyYAML's YAML 1.1 resolver maps
+    them to the bool ``True``, so a bare ``if: yes`` would read as an always-run
+    gate the runner would never run. This is the same PyYAML-typing-is-not-
+    runner-typing root that made the round-5 guard a no-op (#7735 reviews,
+    rounds 6-7); the resolver is restricted to true/false so the pin's typing
+    matches the workflow engine it is reasoning about.
+    """
+
+    import yaml
+
+    class _ActionsLoader(yaml.SafeLoader):
+        pass
+
+    _ActionsLoader.yaml_implicit_resolvers = {
+        ch: [(tag, rx) for tag, rx in resolvers
+             if tag != "tag:yaml.org,2002:bool"]
+        for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    _ActionsLoader.add_implicit_resolver(
+        "tag:yaml.org,2002:bool",
+        re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+        list("tTfF"),
+    )
+    return _ActionsLoader
+
+
 def _always_runs(raw: object) -> bool:
     """True when a step's ``if`` makes it run even after a failing suite.
 
@@ -660,7 +691,7 @@ def _always_runs(raw: object) -> bool:
     expr = str(raw).strip()
     if expr.startswith("${{") and expr.endswith("}}"):
         expr = expr[3:-2].strip()
-    return expr == "always()"
+    return expr.casefold() == "always()"
 
 
 def _surfaces_artifact(step_run: str) -> bool:
@@ -708,8 +739,9 @@ def test_suite_jobs_surface_the_tolerated_leak():
     missing: list[str] = []
     for entry in _LEAK_SURFACED_JOBS:
         wf_name, job_name = entry.split("::", 1)
-        wf = yaml.safe_load(
-            (root / ".github" / "workflows" / wf_name).read_text())
+        wf = yaml.load(
+            (root / ".github" / "workflows" / wf_name).read_text(),
+            Loader=_actions_yaml())
         job = (wf.get("jobs") or {}).get(job_name)
         if job is None:
             missing.append(f"{entry} (no such job in {wf_name})")
@@ -778,6 +810,11 @@ def test_tolerant_cleanup_install_is_idempotent_and_restorable():
     ("success()", False),
     ("always()", True),
     ("${{ always() }}", True),
+    ("always() ", True),
+    ("ALWAYS()", True),        # GH expression names are case-insensitive
+    ("Always()", True),
+    ("yes", False),            # YAML 1.1 bools GH treats as invalid strings
+    ("on", False),
     (True, True),
 ])
 def test_a_surfacing_step_must_be_allowed_to_run(gate, expected):
@@ -789,3 +826,20 @@ def test_a_surfacing_step_must_be_allowed_to_run(gate, expected):
     string the workflow never produces.
     """
     assert _always_runs(gate) is expected
+
+
+def test_actions_typing_matches_the_runner_not_yaml_1_1():
+    """#7735 review, round 7: `if: yes`/`if: on` are STRINGS to GitHub.
+
+    PyYAML's YAML 1.1 resolver makes them the bool True, which would accept a
+    gate the runner would never run — the same typing mismatch that produced the
+    round-6 P1 (`if: false`). The pin must load workflows with runner typing.
+    """
+    import yaml
+
+    loader = _actions_yaml()
+    assert yaml.load("if: yes", Loader=loader)["if"] == "yes"
+    assert yaml.load("if: on", Loader=loader)["if"] == "on"
+    assert yaml.load("if: true", Loader=loader)["if"] is True
+    assert yaml.load("if: false", Loader=loader)["if"] is False
+    assert yaml.load("if: always()", Loader=loader)["if"] == "always()"
