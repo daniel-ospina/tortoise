@@ -7,6 +7,7 @@ semantics.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile  # noqa: F401
@@ -366,28 +367,156 @@ def test_snapshot_store_isolated_across_embedded_dbs(tmp_path, monkeypatch):
         fs._store.clear()
 
 
-def test_snapshot_key_memory_identity_is_stamped_not_recycled():
-    """#7760 review: ``:memory:`` must not key on ``id()``.
+def test_snapshot_key_memory_shares_the_store_identity(tmp_path, monkeypatch):
+    """#7773 P1: two REAL ``:memory:`` SDKs in one process attach to the SAME
+    embedded store, so a write through one MUST invalidate the other's cached
+    snapshot.
 
-    A ``:memory:`` projection has no file, so it is identified by a token
-    stamped on the projection. ``id()`` would be recycled once the projection
-    is collected, so a later ``:memory:`` store could inherit a snapshot built
-    before the first was closed — the same cross-store disclosure this key
-    exists to stop. The token is stable for one projection and absent from a
-    fresh one.
+    redislite keys its daemon registry by ``<cwd>/:memory:.settings``, so both
+    projections resolve to one store. The old key minted a per-projection
+    ``uuid4`` on the false premise "a fresh server per projection", giving the
+    two projections distinct keys: ``_mark_dirty``'s ``invalidate`` then
+    reached only the writer's key, so the sibling's cached snapshot survived a
+    create/delete on the same store and its degraded search kept serving the
+    pre-write corpus (a just-written point invisible, a just-deleted point
+    still returned) for up to ``SNAPSHOT_TTL_SECONDS``.
+
+    MUTATION PIN: restoring the per-projection ``uuid4`` makes ``ka == kb``
+    false and the invalidation assertion below fail.
     """
-    class _MemoryProj:
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.chdir(tmp_path)  # isolate the shared :memory: store to tmp
+    fs._store.clear()
+    a = TortoiseSDK(":memory:")
+    b = None
+    try:
+        b = TortoiseSDK(":memory:")
+        proj_a, proj_b = a._get_proj(), b._get_proj()
+        assert proj_a._is_embedded and proj_b._is_embedded, (
+            "this test must run against the embedded store, not a redirected "
+            "server — otherwise it passes without the fix")
+        assert proj_a.db.client.socket_file == \
+            proj_b.db.client.socket_file, (
+                "precondition: both projections must attach to one shared "
+                ":memory: store")
+
+        ka = fs.snapshot_key(proj_a, None)
+        kb = fs.snapshot_key(proj_b, None)
+        assert ka == kb, (
+            "two :memory: projections over one shared store must derive ONE "
+            f"snapshot key, got {ka!r} and {kb!r}")
+        assert ka[1] == ("memory", os.path.realpath(
+            proj_a.db.client.socket_file)), (
+                "the :memory: identity must be the live daemon's endpoint "
+                f"(socket), not an instance token: {ka[1]!r}")
+
+        # A builds and caches its corpus snapshot under the shared key.
+        a.create_point("statement", "shared memory store alpha beta")
+        _no_match_query(a)  # FTS-miss → snapshot built
+        assert fs._store.get(ka) is not None, "A must cache its snapshot"
+
+        # A write through the SIBLING SDK dirties the same store → same key.
+        b.create_point("statement", "shared memory store gamma delta")
+        assert fs._store.get(ka) is None, (
+            "a create through the sibling :memory: SDK must invalidate the "
+            "cached snapshot — per-projection keys leave it stale")
+
+        # End-to-end: the new point is visible on the rebuilt degraded read.
+        rebuilt = fs._store.get(ka)
+        if rebuilt is None:
+            _no_match_query(a)
+            rebuilt = fs._store.get(ka)
+        assert any(p["content"] == "shared memory store gamma delta"
+                   for p in rebuilt["points"]), (
+                       "the sibling's write must reach the rebuilt corpus")
+    finally:
+        for s in filter(None, (a, b)):
+            try:  # noqa: SIM105
+                s._get_proj().g.query("MATCH (n) DETACH DELETE n")
+            except Exception:
+                pass
+            try:  # noqa: SIM105
+                s.close()
+            except Exception:
+                pass
+        fs._store.clear()
+
+
+def test_snapshot_key_memory_tracks_the_daemon_not_the_registry_slot(
+        tmp_path, monkeypatch):
+    """#7773 review: the registry path is a SLOT, not a store INSTANCE.
+
+    A daemon that replaces a dead one at the same ``<cwd>/:memory:.settings``
+    slot starts a fresh (empty) graph, so a key on the slot still matches the
+    dead store's cached snapshot — a phantom point served for up to
+    ``SNAPSHOT_TTL_SECONDS``. Keying on the live daemon's socket distinguishes
+    the instance while still unifying siblings over one daemon.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.chdir(tmp_path)  # isolate the shared :memory: store to tmp
+    fs._store.clear()
+    sdk = TortoiseSDK(":memory:")
+    try:
+        proj = sdk._get_proj()
+        client = proj.db.client
+        key = fs.snapshot_key(proj, None)
+        assert key[1] == ("memory", os.path.realpath(client.socket_file)), (
+            f"the identity must be the live daemon endpoint: {key[1]!r}")
+        orig_socket = client.socket_file
+        try:
+            # Simulate a replacement daemon at the SAME registry slot: it gets
+            # a new temp socket, so the dead store's cached snapshot must not
+            # be reachable under the new store's key.
+            client.socket_file = "/tmp/replacement-daemon.socket"
+            assert fs.snapshot_key(proj, None) != key, (
+                "a replacement daemon at the same registry slot must not "
+                "reuse the dead store's snapshot slot")
+        finally:
+            client.socket_file = orig_socket
+    finally:
+        try:  # noqa: SIM105
+            sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        except Exception:
+            pass
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+        fs._store.clear()
+
+
+def test_snapshot_key_memory_fallback_is_stable_not_minted(caplog):
+    """#7773 P2: an unreadable store identity must NOT re-mint a key per call.
+
+    The old code minted a fresh ``uuid4`` and then suppressed the failed
+    assignment, so a client the token could not be stamped on returned a NEW
+    key on every ``snapshot_key`` call: the entry could never be cache-hit and
+    the corpus re-fetch + TF-IDF re-fit ran silently on every degraded search.
+    The key must stay stable, and the shortfall must be reported loudly.
+    """
+    class _NoStoreHandle:
+        """A duck-typed projection that exposes no store handle AND REJECTS
+        the stamp the pre-fix code attempted (``__slots__``).
+
+        Both halves are load-bearing for this test: without ``__slots__`` the
+        per-projection stamp SUCCEEDS, so the old code's key was stable anyway
+        and ``k1 == k2`` passed without the fix. Only a client the token cannot
+        be stamped on reproduces the per-call re-mint.
+        """
+        __slots__ = ()
         _path = ":memory:"
         graph_name = "tortoise"
+        db = object()
 
-    p = _MemoryProj()
-    key = fs.snapshot_key(p, None)
-    assert fs.snapshot_key(p, None) == key, (
-        "the key must be stable for the same projection")
-    assert getattr(p, "_snapshot_store_id", None) == key[1], (
-        "the identity must be the stamped token, not a recyclable id()")
-    assert fs.snapshot_key(_MemoryProj(), None) != key, (
-        "a fresh in-memory store must not inherit the token")
+    proj = _NoStoreHandle()
+    with caplog.at_level(logging.ERROR, logger="tortoise.fallback_snapshot"):
+        k1 = fs.snapshot_key(proj, None)
+        k2 = fs.snapshot_key(proj, None)
+    assert k1 == k2, (
+        "an unreadable :memory: store identity must yield a STABLE key, not a "
+        f"fresh per-call key — got {k1!r} then {k2!r}")
+    assert any(r.levelno >= logging.ERROR for r in caplog.records), (
+        "the fallback must be loud, not a silent fail-open")
 
 
 def _snap():
