@@ -1289,3 +1289,85 @@ def test_cross_surface_harness_vocab_contract():
     frontend = {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
     assert set(_HARNESS_ANALYTICS_VALUES) <= frontend
     assert frontend - set(_HARNESS_ANALYTICS_VALUES) == {"chatgpt"}
+
+
+# #3552: the last two key families the issue names beside the capture EVIDENCE
+# set — the per-repo index cursor and the one-time legacy `-closed` backfill
+# marker. Both have a legitimate SERVER writer, which is the issue's own
+# precondition for making a key server-owned ("otherwise marking it server-owned
+# bricks a client path"): the index walk stores the cursor via
+# ``updates = {"github_index_cursor": cursors}`` and the backfill sets
+# ``github_legacy_backfill_done=True``. Both are ALSO in the live PATCH model, so
+# while they are unowned a normal authenticated client can rewind the cursor
+# (re-walk, or SKIP issues) or resurrect the one-time backfill.
+#
+# Held as a literal set rather than derived from a registration table: unlike
+# ``install_probe_*`` these are not minted per harness, so there is no source
+# that could generate them, and a derived-only guard would iterate an empty set
+# and stay vacuously green (the exact failure mode the sibling test documents).
+_OPERATIONAL_SERVER_OWNED_KEYS: dict[str, str] = {
+    "github_index_cursor": "github_index_cursor",
+    "github_legacy_backfill_done": "github_legacy_backfill_done",
+}
+
+
+def test_operational_keys_not_client_writable(client):
+    """#3552 residual — a client PATCH cannot rewind the index cursor or clear
+    the one-time legacy backfill marker.
+
+    Complements ``test_capture_verification_keys_not_client_writable``: that one
+    covers the capture EVIDENCE family (receipts, per-harness last-errors,
+    install probes); this covers the two OPERATIONAL keys #3552 names in the
+    same breath, which the derivation there does not reach. Every key must be
+    refused with 403 ``server_owned_key`` AND leave its stored value UNCHANGED —
+    the value half is what makes this a real assertion, since a 403 that still
+    mutated the row would satisfy a status-only check.
+    """
+    from tortoise.hosted_api import (
+        _ALLOWED_STATE_KEYS,
+        _PATCH_SERVER_OWNED_KEYS,
+        _make_sdk,
+        _update_onboarding_state,
+    )
+    # Provision the Team node so the assertions below read REAL persisted state
+    # (the state writer is MERGE...SET — a silent no-op without the node).
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    for state_key, patch_field in sorted(_OPERATIONAL_SERVER_OWNED_KEYS.items()):
+        assert state_key in _ALLOWED_STATE_KEYS, (
+            f"{state_key} is not a registered state key — the refusal below "
+            "would be vacuous")
+        # THE HAZARD, asserted first so a regression fails on the cause and not
+        # on a downstream KeyError.
+        assert state_key in _PATCH_SERVER_OWNED_KEYS, (
+            f"{state_key} is client-writable: an authenticated PATCH can set "
+            "it with no server action (rewind the index cursor / re-run the "
+            "one-time backfill) — #3552")
+        # A value DISTINCT from the sample the client sends, so "unchanged" is a
+        # real comparison rather than two identical writes.
+        sentinel: object = (
+            {"repo-a": {"updated_at": "2020-01-01T00:00:00Z", "number": 1}}
+            if state_key == "github_index_cursor" else True)
+        sample: object = (
+            {"repo-b": {"updated_at": "2026-08-25T00:00:00Z", "number": 9}}
+            if state_key == "github_index_cursor" else False)
+        assert sample != sentinel
+        # The TRUSTED path writes it — this is what a client must not reach.
+        _update_onboarding_state(
+            "test-team-1", _echo=False, **{state_key: sentinel})
+        before = client.get("/v1/onboarding/state").json()["onboarding"]
+        assert before.get(state_key) == sentinel, (
+            f"{state_key}: the server-side write did not land "
+            f"({before.get(state_key)!r}) — the refusal below would be vacuous "
+            "against a value that was never there")
+        r = client.patch("/v1/onboarding/state", json={patch_field: sample})
+        assert r.status_code == 403, (
+            f"server-owned key {state_key} was client-writable: {r.text}")
+        assert r.json()["detail"] == {
+            "message": "server_owned_key", "keys": [state_key]}, r.text
+        after = client.get("/v1/onboarding/state").json()["onboarding"]
+        assert after.get(state_key) == before.get(state_key), (
+            f"{state_key} CHANGED despite the 403: "
+            f"{before.get(state_key)!r} -> {after.get(state_key)!r}")

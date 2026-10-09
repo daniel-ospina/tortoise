@@ -215,14 +215,21 @@ def test_state_keys_registered():
 
 
 def test_state_keys_survive_patch_roundtrip(client, provisioned):
-    """A PATCH writing the cursor key round-trips (the allowlist filter must
-    not drop it)."""
+    """The cursor is SERVER-OWNED — #3552 moved it onto the PATCH refusal
+    list, so a client PATCH is refused 403 with a reason rather than being
+    silently dropped by the allowlist filter.
+
+    This test was written to catch a key that the allowlist filter drops in
+    silence; for a SERVER-OWNED key the equivalent failure is a silent drop of
+    the refusal, which the ``detail`` assertion below pins. The client-writable
+    round-trip for REGISTERED keys is
+    ``test_onboarding_endpoints.test_state_keys_registered_parametrized``.
+    """
     r = client.tc.patch("/v1/onboarding/state",
                         json={"github_index_cursor": {"acme/repo1": {"updated_at": "x", "number": 1}}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["onboarding"]["github_index_cursor"] == {
-        "acme/repo1": {"updated_at": "x", "number": 1}}
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == {
+        "message": "server_owned_key", "keys": ["github_index_cursor"]}, r.text
 
 
 # ── Single-flight (T2-P2 + cycle-3 P1-3) ──────────────────────────
@@ -741,12 +748,17 @@ def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
         return self._client
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
-    # seed persisted cursors + indexed state
-    client.tc.patch("/v1/onboarding/state", json={
-        "github_index_cursor": {
+    # seed persisted cursors + indexed state through the SERVER path: since
+    # #3552 `github_index_cursor` is server-owned, so the PATCH this used to
+    # seed with is refused 403 and would leave the test asserting against
+    # nothing (the pre-walk-failure guarantee would go unexercised).
+    import tortoise.hosted_api as ha
+    ha._update_onboarding_state(
+        client.org_id, _echo=False,
+        github_index_cursor={
             "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
                             "number": 7}},
-        "github_indexed": True})
+        github_indexed=True)
     # break the org resolution → the pre-walk resolve_repos fails
     async def _boom(self, org, **kw):
         raise GitHubFetchError("org not found")
