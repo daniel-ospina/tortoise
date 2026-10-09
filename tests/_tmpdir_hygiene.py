@@ -332,6 +332,22 @@ _ORIGINAL_TEMPDIR_CLEANUP = None
 #: the #1103 shape this module's sibling report already uses.
 _TOLERATED_CLEANUP_LEAKS: list[dict[str, object]] = []
 
+#: #7735 — tolerance is a REPORTING mechanism, so it is enabled only where the
+#: run can also surface the report: every job that sets this variable is a job
+#: that dumps ``tempdir-hygiene-end.json``, and
+#: ``tests/test_tmpdir_hygiene.py`` fails if any tolerating job stops dumping.
+#: A runner that does NOT set it keeps the pre-#7735 behaviour — the hard
+#: ENOTEMPTY error — because a swallowed leak with no reachable report is
+#: exactly the silent green this fix must not create.
+TEMPDIR_HYGIENE_ENV = "TORTOISE_TEMPDIR_HYGIENE"
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def tempdir_tolerance_enabled() -> bool:
+    """True when this run also has a channel to report a tolerated leak."""
+    raw = os.environ.get(TEMPDIR_HYGIENE_ENV, "")
+    return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
 # The unpatched primitive, captured at import (before install_scan_guard).
 # Enumerating the shared temp dir is occasionally legitimate — reclaiming a
 # SIGKILLed prior run's root is the one case — and the guard would otherwise
@@ -888,17 +904,19 @@ def install_tolerant_tempdir_cleanup() -> None:
     That is the same failure of the same invariant this module already states
     for its own teardown — "teardown must not convert a green suite red".
 
-    STRUCTURAL, NOT PER-FILE. The suite has 276 ``TemporaryDirectory`` call
-    sites at this head (counted with the paren-bearing grep over ``tests/``
-    quoted in the PR body); patching them one at a time would be a band-aid on a
-    shared lifecycle bug, and the next test written would reintroduce it. So the
-    fix is applied once, here, next to the other tempdir policy.
+    STRUCTURAL, NOT PER-FILE. The suite has several hundred
+    ``TemporaryDirectory`` call sites; patching them one at a time would be a
+    band-aid on a shared lifecycle bug, and the next test written would
+    reintroduce it. So the fix is applied once, here, next to the other tempdir
+    policy.
 
     NARROW AND REPORTED — deliberately NOT ``ignore_cleanup_errors=True``.
     The blanket stdlib lever would swallow EVERY ``rmtree`` failure (``EROFS``,
     ``EACCES``, ``EBUSY``, ``EIO`` …), not only this race. Tolerating only
     ``ENOTEMPTY`` keeps the shard green; the directory is named in a warning and
-    left for the reaper. Everything else still raises.
+    left for the reaper. Everything else still raises. The tolerance is itself
+    conditional on ``TORTOISE_TEMPDIR_HYGIENE`` (see the constant above), so a
+    run with no reachable report fails LOUD rather than going silently green.
 
     WHAT THE TRACKER DOES NOT CATCH — corrected; an earlier clause said the
     tracker "cannot see a context-managed directory", which is BACKWARDS.
@@ -925,6 +943,12 @@ def install_tolerant_tempdir_cleanup() -> None:
             return original_cleanup(self)
         except OSError as exc:
             if exc.errno != errno.ENOTEMPTY:
+                raise
+            if not tempdir_tolerance_enabled():
+                # Tolerance exists ONLY where the run can also REPORT it (the CI
+                # jobs that set TORTOISE_TEMPDIR_HYGIENE are the jobs that dump
+                # the artifact). With no report channel this would be a silent
+                # green on a swallowed leak, so re-raise and fail LOUD.
                 raise
             # #7735: a live server re-created an entry between rmtree's
             # emptying and its final rmdir, so the directory cannot be removed
@@ -1017,6 +1041,10 @@ def write_tolerated_cleanup_report(log_dir: str | None = None) -> str | None:
                 "tolerated_cleanup_leaks": [
                     by_path[path] for path in sorted(by_path)],
             }, fh, indent=2)
-    except OSError:
+    except Exception:
+        # Best-effort BY CONTRACT: the report must never fail the suite, so any
+        # escape here — a garbled prior artifact, an unserializable record, a
+        # permissions error — is swallowed. The session fixture that calls this
+        # must not redden the shard the record exists to keep green.
         return None
     return log_path

@@ -178,6 +178,14 @@ env:
   # full throughput lever — it cannot move the overall gate wall on its own
   # (see the run step's HONEST LIMIT note).
   PYTEST_XDIST_WORKERS: "4"
+  # #7735: enable the ENOTEMPTY teardown tolerance (tests/_tmpdir_hygiene.py).
+  # Tolerance and its report are ONE mechanism: it is enabled here only because
+  # every job that pytest can redden also dumps the tolerated-leak artifact. A
+  # run WITHOUT this variable keeps the pre-#7735 hard error, so a swallowed
+  # leak can never become a silent green. That invariant is enforced by
+  # tests/test_tmpdir_hygiene.py (every tolerating job must dump the report),
+  # not by this comment.
+  TORTOISE_TEMPDIR_HYGIENE: "1"
 
 jobs:
   changes:
@@ -1304,7 +1312,7 @@ jobs:
             echo "no hygiene log at $LOG (end-sweep logger did not write)"
           fi
 
-      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (verified under this job's own flags — 0
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
@@ -1818,6 +1826,24 @@ jobs:
           # team_* stray pass stays live in CI (opt-in only — issue #1884).
           TORTOISE_TEST_SWEEP_TEAM_STRAYS: ${{ env.SWEEP_TEAM_STRAYS }}
 
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
+        # #7735: a PASSING test's `logger.warning` is discarded by pytest
+        # capture, so the ENOTEMPTY teardown leaks tolerated by
+        # `TemporaryDirectory.cleanup` are mirrored to an artifact at session
+        # end. This job ENABLES the tolerance (workflow-level
+        # TORTOISE_TEMPDIR_HYGIENE), so it must also surface it — a tolerated
+        # leak with no reachable report would be a silent green. Informational:
+        # the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Skip-fail guard (slow legs, epic #1647 Task 9)
         # Cycle-6 P2-8: the same junitxml-reconciled coverage manifest as the
         # fast job — gated on rc==0 AND non-empty $FILES (the no-selected-files
@@ -2045,6 +2071,24 @@ jobs:
           name: pytest-log-${{ github.job }}
           path: /tmp/pytest.log
           if-no-files-found: ignore
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
+        # #7735: a PASSING test's `logger.warning` is discarded by pytest
+        # capture, so the ENOTEMPTY teardown leaks tolerated by
+        # `TemporaryDirectory.cleanup` are mirrored to an artifact at session
+        # end. This job ENABLES the tolerance (workflow-level
+        # TORTOISE_TEMPDIR_HYGIENE), so it must also surface it — a tolerated
+        # leak with no reachable report would be a silent green. Informational:
+        # the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Validate docker-compose.yml (ports + header edits)
         # T1 Step 6 ships with zero other verification — no workflow validates
         # compose today. ubuntu-latest has docker + the repo checked out.
@@ -2196,6 +2240,24 @@ jobs:
           bash .github/scripts/pytest-attribution.sh --log /tmp/trackb.log --rc "$rc"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
+        # #7735: a PASSING test's `logger.warning` is discarded by pytest
+        # capture, so the ENOTEMPTY teardown leaks tolerated by
+        # `TemporaryDirectory.cleanup` are mirrored to an artifact at session
+        # end. This job ENABLES the tolerance (workflow-level
+        # TORTOISE_TEMPDIR_HYGIENE), so it must also surface it — a tolerated
+        # leak with no reachable report would be a silent green. Informational:
+        # the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
         # Same junitxml-reconciled manifest as the other docker surfaces — a
         # vanished track_b nodeid or a FalkorDB-reasoned skip reds.
@@ -2487,6 +2549,24 @@ jobs:
         # must not hide whether the guard still holds under the runner condition.
         if: always()
         run: env -u TMPDIR python -m pytest tests/test_tmpdir_hygiene.py tests/test_tmpdir_sweep.py -q -rs -p no:cacheprovider
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
+        # #7735: a PASSING test's `logger.warning` is discarded by pytest
+        # capture, so the ENOTEMPTY teardown leaks tolerated by
+        # `TemporaryDirectory.cleanup` are mirrored to an artifact at session
+        # end. This job ENABLES the tolerance (workflow-level
+        # TORTOISE_TEMPDIR_HYGIENE), so it must also surface it — a tolerated
+        # leak with no reachable report would be a silent green. Informational:
+        # the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Skip-fail guard (carve-out, epic #1647 E2E-4)
         # The carve-out's redislite-availability skips are the exempt reason
         # family (embedded/redislite-unavailable) — never a guard trip; a
@@ -2710,6 +2790,24 @@ jobs:
           python3 tools/skip-guard.py /tmp/pytest-d14.log \
             --junitxml=/tmp/junit-d14.xml \
             --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
+      - name: "Dump tolerated tempdir-cleanup leaks (issue #7735)"
+        # #7735: a PASSING test's `logger.warning` is discarded by pytest
+        # capture, so the ENOTEMPTY teardown leaks tolerated by
+        # `TemporaryDirectory.cleanup` are mirrored to an artifact at session
+        # end. This job ENABLES the tolerance (workflow-level
+        # TORTOISE_TEMPDIR_HYGIENE), so it must also surface it — a tolerated
+        # leak with no reachable report would be a silent green. Informational:
+        # the step never fails the job.
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true

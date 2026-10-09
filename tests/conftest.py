@@ -138,11 +138,13 @@ install_scan_guard()
 # directory a live embedded server still holds raises ENOTEMPTY out of teardown
 # and reddens a shard whose tests all passed. Same invariant as this module's own
 # teardown ("teardown must not convert a green suite red"), so it is fixed once
-# here for all 276 call sites rather than per test file. It tolerates ONLY
-# ENOTEMPTY and records the directory it leaves behind — deliberately not
-# `ignore_cleanup_errors=True`, which would swallow every rmtree failure. The
-# record is flushed to `tempdir-hygiene-end.json` at session end, because a
-# passing test's log record is discarded by capture (#7735 review, F1).
+# here for all call sites rather than per test file. It tolerates ONLY
+# ENOTEMPTY, only when this run can also report it (`TORTOISE_TEMPDIR_HYGIENE`,
+# set by the CI jobs that dump the artifact), and records the directory it
+# leaves behind — deliberately not `ignore_cleanup_errors=True`, which would
+# swallow every rmtree failure. The record is flushed to
+# `tempdir-hygiene-end.json` at session end, because a passing test's log record
+# is discarded by capture (#7735 review, F1).
 install_tolerant_tempdir_cleanup()
 
 # #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.
@@ -1018,6 +1020,8 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     # flags), so the tolerated ENOTEMPTY leaks are mirrored to their own
     # artifact, which the workflow dumps. Best-effort; writes nothing when no
     # leak was tolerated.
+    # Best-effort: the writer swallows its own failures by contract, so this
+    # call cannot redden the shard the record exists to keep green.
     write_tolerated_cleanup_report()
 
 

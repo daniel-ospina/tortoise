@@ -487,8 +487,13 @@ def _boom_with(err: int):
     return _boom
 
 
-def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
+def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog, monkeypatch):
     #7735: a live server re-creates an entry during rmtree's final rmdir.
+    # Tolerance is conditional on a report channel existing
+    # (`tempdir_tolerance_enabled`), so enable it exactly as the CI jobs do.
+    from tests._tmpdir_hygiene import TEMPDIR_HYGIENE_ENV
+
+    monkeypatch.setenv(TEMPDIR_HYGIENE_ENV, "1")
     # `shutil.rmtree` is patched GLOBALLY, so it is restored in a `finally`
     # BEFORE the test returns — otherwise pytest's own `tmp_path` teardown would
     # hit the stub and ERROR the test that just passed.
@@ -523,6 +528,9 @@ def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
             # This test is a deliberate probe; keep it out of the session
             # artifact, or every CI run would report a synthetic leak.
             _discard_tolerated_leaks([victim])
+            assert victim not in [e["path"] for e in tolerated_cleanup_leaks()], (
+                "the probe must be discarded, or every CI run records a "
+                "synthetic leak as permanent noise")
 
 
 def test_write_tolerated_cleanup_report_is_silent_when_nothing_leaked(tmp_path):
@@ -645,3 +653,87 @@ def test_tolerant_cleanup_install_is_idempotent_and_restorable():
         install_tolerant_tempdir_cleanup()
     assert getattr(tempfile.TemporaryDirectory.cleanup,
                    "_tortoise_tolerant_cleanup", False), "reinstall failed"
+
+
+def test_enotempty_still_raises_when_no_report_channel_is_configured(
+        tmp_path, monkeypatch):
+    """#7735: tolerance is a REPORTING mechanism, so it needs a report channel.
+
+    Without the ``TORTOISE_TEMPDIR_HYGIENE`` gate a run could tolerate an
+    ENOTEMPTY it never surfaces, converting a hard red into a silent green —
+    the false-compliance shape this fix must not introduce.
+    """
+    import tempfile
+
+    from tests._tmpdir_hygiene import TEMPDIR_HYGIENE_ENV
+
+    monkeypatch.delenv(TEMPDIR_HYGIENE_ENV, raising=False)
+    real = shutil.rmtree
+    shutil.rmtree = _boom_with(errno.ENOTEMPTY)
+    try:
+        d = tempfile.TemporaryDirectory(dir=str(tmp_path))
+        with pytest.raises(OSError) as excinfo:
+            d.cleanup()
+        assert excinfo.value.errno == errno.ENOTEMPTY, (
+            "with no report channel the ENOTEMPTY must still raise (fail LOUD)")
+    finally:
+        shutil.rmtree = real
+
+
+def test_every_job_that_tolerates_also_dumps_the_report():
+    """#7735: tolerance and its report are ONE mechanism — enforced, not asserted in prose.
+
+    The artifact is the only CI-visible channel (pytest capture discards the
+    warning for a PASSING test), so a job that enables the tolerance without
+    dumping it turns a hard red into a silent green. This scans EVERY workflow
+    file, resolves each job's effective environment (workflow, job and step
+    level), and fails if a job that runs pytest with the tolerance enabled has
+    no step that dumps ``tempdir-hygiene-end.json``.
+    """
+    import re
+
+    import yaml
+
+    from tests._tmpdir_hygiene import TEMPDIR_HYGIENE_ENV
+
+    workflows = sorted(
+        (Path(__file__).resolve().parent.parent
+         / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflows found — the scan would be vacuous"
+    pytest_cmd = re.compile(r"python -m pytest|uv run pytest")
+
+    def _truthy(env: object) -> bool:
+        return isinstance(env, dict) and str(
+            env.get(TEMPDIR_HYGIENE_ENV, "")).strip().lower() in {
+                "1", "true", "yes", "on"}
+
+    tolerating: list[str] = []
+    offenders: list[str] = []
+    for path in workflows:
+        doc = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(doc, dict):
+            continue
+        wf_env = doc.get("env") or {}
+        for job_name, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+            if not any(pytest_cmd.search(str(s.get("run", ""))) for s in steps):
+                continue
+            enabled = (
+                _truthy(wf_env) or _truthy(job.get("env"))
+                or any(_truthy(s.get("env")) for s in steps))
+            if not enabled:
+                continue
+            key = f"{path.name}::{job_name}"
+            tolerating.append(key)
+            if not any("tempdir-hygiene-end.json" in str(s.get("run", ""))
+                       for s in steps):
+                offenders.append(key)
+    assert len(tolerating) >= 6, (
+        "expected the six Python CI pytest jobs to enable the tolerance; saw "
+        f"{tolerating}")
+    assert not offenders, (
+        "these jobs enable the #7735 tolerance but never dump the "
+        f"tolerated-leak artifact, so a swallowed leak would be silent: "
+        f"{offenders}")
