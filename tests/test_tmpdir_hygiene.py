@@ -612,36 +612,53 @@ def test_the_tolerated_leak_artifact_is_wired_into_session_teardown():
         "or the tolerated leak reaches no CI surface (#7735 review, F1/F2)")
 
 
+# The workflows that run the `tests/` suite. Deliberately NOT repo-wide: the
+# e2e-only workflows (ci.yml's playwright jobs, deploy-pages.yml,
+# blog-write-e2e.yml, welcome-e2e-monitor.yml, evals-on-demand.yml) run
+# `tests/e2e/` specs, which are not the fixture-heavy unit suite #7735 was
+# measured on. Extending the dump there is follow-up work, not a silent gap.
+# A new suite-running workflow must be added here deliberately.
+_SUITE_WORKFLOWS = ("python-ci.yml", "post-merge-validation.yml")
+# Every form the suite workflows invoke pytest with. `python -m pytest` alone
+# let an `uv run pytest` job be added blind (#7735 review, F1 round 2).
+_PYTEST_INVOCATIONS = (
+    "python -m pytest", "python3 -m pytest", "uv run pytest", "pytest tests",
+)
+
+
 def test_every_pytest_job_surfaces_the_tolerated_leak():
     """#7735 review F1: the report is visible only where the workflow dumps it.
 
-    A job that runs pytest installs the process-global tolerant cleanup (via
+    A job that runs the suite installs the process-global tolerant cleanup (via
     ``tests/conftest.py``) and can therefore write the artifact — but only a job
     whose workflow surfaces that file can report a tolerated leak. The first
     revision dumped it in the ``test`` job alone, so the ``test-slow`` legs that
     #7735 was actually measured on stayed blind. Derived from the workflow text
-    — every job with a ``python -m pytest`` invocation must also read the
-    artifact — never a frozen list of job names, which would re-stale the moment
-    a pytest job is renamed or added.
+    — every job invoking pytest in a suite workflow must also read the artifact
+    — never a frozen list of job names, which would re-stale the moment a
+    pytest job is renamed or added. Scope is ``_SUITE_WORKFLOWS`` above.
     """
     import yaml
 
-    wf = yaml.safe_load(
-        (Path(__file__).resolve().parent.parent
-         / ".github" / "workflows" / "python-ci.yml").read_text())
+    root = Path(__file__).resolve().parent.parent
     blind: list[str] = []
     covered: list[str] = []
-    for job_name, job in wf["jobs"].items():
-        runs = [step.get("run") or "" for step in (job.get("steps") or [])]
-        if not any("python -m pytest" in run for run in runs):
-            continue
-        if any("tempdir-hygiene-end.json" in run for run in runs):
-            covered.append(job_name)
-        else:
-            blind.append(job_name)
+    for wf_name in _SUITE_WORKFLOWS:
+        wf = yaml.safe_load(
+            (root / ".github" / "workflows" / wf_name).read_text())
+        for job_name, job in wf["jobs"].items():
+            runs = [step.get("run") or "" for step in (job.get("steps") or [])]
+            has_pytest = any(
+                inv in run for run in runs for inv in _PYTEST_INVOCATIONS)
+            if not has_pytest:
+                continue
+            if any("tempdir-hygiene-end.json" in run for run in runs):
+                covered.append(f"{wf_name}::{job_name}")
+            else:
+                blind.append(f"{wf_name}::{job_name}")
     assert covered, (
-        "no job in python-ci.yml runs `python -m pytest` — the scan found "
-        "nothing to certify, so this pin would pass on an empty surface")
+        "no job in the suite workflows runs pytest — the scan found nothing "
+        "to certify, so this pin would pass on an empty surface")
     assert blind == [], (
         "these jobs run pytest but never surface the tolerated-leak artifact "
         f"(#7735 review F1): {blind}")

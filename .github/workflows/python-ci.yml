@@ -1310,8 +1310,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
@@ -1847,8 +1848,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
@@ -2066,8 +2068,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
@@ -2259,8 +2262,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
@@ -2634,8 +2638,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
@@ -2801,8 +2806,9 @@ jobs:
         # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
-        # so a future xdist admission cannot let one worker truncate a peer's
-        # record — INERT today: CI is serial (`XDIST_WORKERS=0`), so a single
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).

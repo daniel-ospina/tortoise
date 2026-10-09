@@ -888,11 +888,13 @@ def install_tolerant_tempdir_cleanup() -> None:
     That is the same failure of the same invariant this module already states
     for its own teardown — "teardown must not convert a green suite red".
 
-    STRUCTURAL, NOT PER-FILE. The suite has 276 ``TemporaryDirectory(`` call
-    sites at this head — the exact reproducible count is
-    ``git grep -o "TemporaryDirectory(" -- tests/ | wc -l`` = 276, which counts
-    OCCURRENCES (one line of ``tests/`` holds two calls, so a line-based
-    ``grep -c`` totals 275); patching them one at a time would be a band-aid on
+    STRUCTURAL, NOT PER-FILE. The suite has several hundred
+    ``TemporaryDirectory(`` call sites — ``git grep -o "TemporaryDirectory("
+    -- tests/ | wc -l`` counts them, and it counts OCCURRENCES, not lines
+    (one line of ``tests/`` can hold two calls). No literal count is quoted
+    here on purpose: that command counts the module comments that quote it
+    too, so any number written into this sentence re-stales on the very edit
+    that adds it (#7735 review, F3a). Patching them one at a time would be a band-aid on
     a shared lifecycle bug, and the next test written would reintroduce it. So
     the fix is applied once, here, next to the other tempdir policy.
 
