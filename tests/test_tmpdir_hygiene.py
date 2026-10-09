@@ -681,8 +681,10 @@ def _always_runs(raw: object) -> bool:
     that bug shipped in round 5 and was caught in round 6, where the mutation it
     exists to catch passed. Absence is NOT accepted: an absent ``if`` is an
     implicit ``success()``, so the step would be skipped on precisely the failing
-    runs it exists to report. Accepted spellings: ``always()``, its
-    ``${{ }}``-wrapped form, and the bare bool ``True``.
+    runs it exists to report. The exact accepted spellings are defined by
+    this predicate's own body and are deliberately NOT enumerated here: a
+    prose list re-stales the moment the comparison changes (#7735 review,
+    round 8 added case-insensitive matching and made the list stale).
     """
     if raw is None:
         return False
