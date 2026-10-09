@@ -1325,10 +1325,12 @@ def test_operational_keys_not_client_writable(client):
     """
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
-        _OPERATIONAL_SERVER_OWNED_KEYS as _HA_OPERATIONAL_SERVER_OWNED_KEYS,
         _PATCH_SERVER_OWNED_KEYS,
         _make_sdk,
         _update_onboarding_state,
+    )
+    from tortoise.hosted_api import (
+        _OPERATIONAL_SERVER_OWNED_KEYS as _HA_OPERATIONAL_SERVER_OWNED_KEYS,
     )
     # Both directions, because the literal above keeps the loop non-vacuous but
     # cannot see the PRODUCTION set: dropping a key from production shrinks this
