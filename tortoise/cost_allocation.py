@@ -459,9 +459,10 @@ def evaluate_allocation(
 
     ``orgs`` is the registered org set. A **falsy** value (``None`` or ``[]``)
     means the enumeration could not be confirmed — ``_iter_registered_orgs``
-    returns ``[]`` on ANY control-plane failure — so the whole snapshot is
-    :data:`STATE_UNAVAILABLE` and no share is emitted. It is NEVER read as
-    "a fleet with no orgs" and NEVER as zero cost.
+    returns ``None`` for a completeness-demanding caller and ``[]`` for a
+    best-effort one, and NEITHER is proof of an empty fleet — so the whole
+    snapshot is :data:`STATE_UNAVAILABLE` and no share is emitted. It is NEVER
+    read as "a fleet with no orgs" and NEVER as zero cost.
 
     ``weights_by_org`` supplies the measured per-org basis for proportional
     lines. ``None`` means the proportional basis could not be read: those lines

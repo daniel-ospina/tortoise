@@ -13,10 +13,8 @@ The fix makes completeness a first-class property read from the SERVER
 """
 from __future__ import annotations
 
+from tortoise.hosted_api import _ORG_ENUMERATION_MAX_ROWS as MAX
 from tortoise.supabase_control import _content_range_total
-
-MAX = 1000
-
 
 # ── the header parser ──────────────────────────────────────────────────────
 
@@ -75,7 +73,12 @@ class FakeControlPlane:
         eff = min(limit or self.page_size, self.page_size)
         page = rows[:eff]
         self.calls.append((last, self.state_total if count_exact else None))
-        return page, self.state_total
+        # PostgREST volunteers a total ONLY when `Prefer: count=exact` was sent
+        # (`Content-Range: .../*` otherwise, which the reader maps to None), so
+        # the double must gate it on `count_exact` too. Returning `state_total`
+        # unconditionally made the fake MORE generous than the server, which hid
+        # a caller regression that adopts a total it never asked for.
+        return page, (self.state_total if count_exact else None)
 
 
 def _run(monkeypatch, cp, *, require_complete: bool):
@@ -505,9 +508,16 @@ class _StubHTTP:
     def __init__(self, headers):
         self._headers = headers
         self.seen: list[dict] = []
+        # Round 6: the keyset contract (`order=id`, `id > cursor`) is rendered
+        # onto the REQUEST, and it was previously asserted only against in-file
+        # fakes — a proxy. If this rendering regressed the server would return
+        # arbitrary order, the strictly-ascending guard would fail closed in
+        # PRODUCTION (freezing the metric) with every unit test green.
+        self.seen_params: list[dict] = []
 
     def get(self, url, params=None, headers=None, **kw):
         self.seen.append(dict(headers or {}))
+        self.seen_params.append(dict(params or {}))
         return _StubResp(self._headers)
 
 
@@ -572,3 +582,183 @@ class TestRealSeamWiring:
         cp._http = _HTTP()
         rows, total = cp.query_with_total("organizations", count_exact=True)
         assert rows == [] and total is None
+
+
+class TestCertificationRequiresAnExhaustedWalk:
+    """Round 6 — ``exhausted`` is a NECESSARY conjunct of ``complete``.
+
+    Written as ``len(seen_ids) >= total if total is not None and total > 0 else
+    exhausted``, the total branch BYPASSED ``exhausted`` ENTIRELY, so every exit
+    that is deliberately NOT an end-of-walk could still certify as soon as the
+    stated total was satisfied. Both shapes below returned rows as COMPLETE with
+    orgs unserved — and ``_refresh_cost_allocation`` PRUNES every org absent
+    from the enumeration, so the guard whose whole purpose is to refuse became
+    the prune. Found by review (two independent reviewers, reproduced), not by
+    the suite, which only ever paired an unsorted page / the page cap with
+    ``total=None``.
+    """
+
+    class _UnsortedSecondPage:
+        """Page 1 is ordered and states the fleet total; page 2 comes back DESC.
+
+        A server that filters by ``id > cursor`` but ignores ``order`` — the
+        exact case the strictly-ascending check exists for.
+        """
+
+        def __init__(self, ids):
+            self.rows = [{"id": i, "name": None} for i in ids]
+            self.calls = 0
+
+        def query_with_total(self, table, **kw):
+            self.calls += 1
+            last = None
+            for col, op, val in (kw.get("filters") or []):
+                if col == "id" and op == "gt":
+                    last = val
+            view = [r for r in self.rows if last is None or r["id"] > last]
+            page = view[: (kw.get("limit") or MAX)]
+            if self.calls > 1:
+                page = list(reversed(page))
+            return page, (len(self.rows) if kw.get("count_exact") else None)
+
+    def test_an_unsorted_page_cannot_certify_a_satisfied_total(
+            self, monkeypatch):
+        n = MAX + 500
+        ids = [f"o{i:06d}" for i in range(n)]
+        # A FRESH fake per call: `_UnsortedSecondPage` counts calls, so reusing
+        # one instance across the two `_run`s makes the second walk start on a
+        # different page — and the first draft of this test passed with the fix
+        # REVERTED for exactly that reason (the falsification caught it).
+        partial = _run(monkeypatch, self._UnsortedSecondPage(ids),
+                       require_complete=False)
+        assert len(partial) == n, (
+            f"the walk must serve every row it can; got {len(partial)} of {n}")
+        assert _run(monkeypatch, self._UnsortedSecondPage(ids),
+                    require_complete=True) is None, (
+            "a break with no empty page must NOT certify, however satisfied "
+            "the stated total is — `exhausted` is a conjunct, not a fallback")
+
+    def test_a_page_cap_exit_cannot_certify_a_satisfied_total(self, monkeypatch):
+        """The page cap is NOT proof of completeness (its own docstring).
+
+        2500 rows at 1000/page with a server that UNDERSTATES its fleet at
+        1000: the total is satisfied after page 1 while 1500 rows are still
+        unserved, and the walk exits on the cap rather than an empty page.
+        """
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_ORG_ENUMERATION_MAX_PAGES", 2)
+        cp = FakeControlPlane(2500, state_total=MAX)
+        partial = _run(monkeypatch, cp, require_complete=False)
+        assert len(partial) == 2 * MAX, (
+            f"the cap bounds the walk at 2 pages; got {len(partial)}")
+        assert _run(monkeypatch, cp, require_complete=True) is None, (
+            "hitting the page cap leaves `exhausted` False, so it cannot "
+            "certify — 1500 orgs were never served")
+
+    class _Page:
+        """Serves one page of the given ids, stating the fleet total."""
+
+        def __init__(self, ids):
+            self.rows = [{"id": i, "name": None} for i in ids]
+
+        def query_with_total(self, table, **kw):
+            last = None
+            for col, op, val in (kw.get("filters") or []):
+                if col == "id" and op == "gt":
+                    last = val
+            view = [r for r in self.rows if last is None or r["id"] > last]
+            page = view[: (kw.get("limit") or MAX)]
+            return page, (len(self.rows) if kw.get("count_exact") else None)
+
+    def test_a_falsy_id_refuses_certification(self, monkeypatch):
+        """The ``not all(page_ids)`` half had NO failing-without-it test.
+
+        Ascending so the SORTED half does not fire and the falsy half must: a
+        falsy id cannot be a cursor (``id > None`` is a restart, not a filter),
+        so the walk refuses rather than advancing a cursor it cannot compare.
+        """
+        cp = self._Page(["", "a", "b"])
+        partial = _run(monkeypatch, cp, require_complete=False)
+        assert partial is not None and len(partial) == 3, (
+            "the rows are still served to a best-effort caller: what the falsy "
+            f"id forbids is CERTIFICATION; got {partial!r}")
+        assert _run(monkeypatch, cp, require_complete=True) is None, (
+            "a page containing a falsy id must not certify the fleet")
+
+    class _CrashesOnSecondPage:
+        """Serves page 1, then blows up — a control-plane failure MID-walk."""
+
+        def __init__(self, ids):
+            self.rows = [{"id": i, "name": None} for i in ids]
+            self.calls = 0
+
+        def query_with_total(self, table, **kw):
+            self.calls += 1
+            if self.calls >= 2:
+                raise RuntimeError("control plane failed mid-walk")
+            return self.rows[:MAX], None
+
+    def test_a_mid_walk_crash_is_unknown_not_a_partial_fleet(self, monkeypatch):
+        """New failure mode: rows already accumulated, then a later page raises.
+
+        ``require_complete=True`` must report UNKNOWN (``None``).
+        """
+        cp = self._CrashesOnSecondPage(
+            [f"o{i:06d}" for i in range(MAX + 10)])
+        assert _run(monkeypatch, cp, require_complete=True) is None
+        # Pinned DELIBERATELY, not left implicit: the best-effort caller gets
+        # ``[]`` rather than the rows collected so far. Discarding is the SAFE
+        # direction (the sweep processes nothing instead of a partial fleet),
+        # but it IS a choice, so it is asserted.
+        assert _run(monkeypatch, cp, require_complete=False) == [], (
+            "the best-effort caller discards partials on a mid-walk failure")
+
+    def test_a_swallowed_crash_is_distinguishable_from_a_refusal(
+            self, monkeypatch):
+        """The signal every ``is None`` assertion in this file needs.
+
+        The walk wraps its whole body in a fail-soft ``except`` that returns
+        ``None`` for ``require_complete=True`` as well, so an ``is None``
+        assertion is ALSO satisfied by a crash anywhere in the walk — the defect
+        class the file's own docstrings describe (a fixture bug raised, the
+        handler swallowed it, and the test passed while never reaching the
+        guard). The discriminating signal: a DELIBERATE refusal still serves the
+        rows to a best-effort caller; a crash does not. Both arms are pinned
+        here so a future fixture regression cannot make the refusals above look
+        green for the wrong reason.
+        """
+        refusing_ids = [f"o{i:06d}" for i in range(MAX + 500)]
+        assert _run(monkeypatch, self._UnsortedSecondPage(refusing_ids),
+                    require_complete=True) is None
+        assert _run(monkeypatch, self._UnsortedSecondPage(refusing_ids),
+                    require_complete=False), (
+            "a refusal is not a crash: it still serves what it walked")
+        crashing_ids = [f"o{i:06d}" for i in range(MAX + 10)]
+        assert _run(monkeypatch, self._CrashesOnSecondPage(crashing_ids),
+                    require_complete=True) is None
+        assert _run(monkeypatch, self._CrashesOnSecondPage(crashing_ids),
+                    require_complete=False) == [], (
+            "a crash serves nothing — which is how it is told apart from a "
+            "deliberate refusal")
+
+    def test_the_wire_carries_the_keyset_contract_the_walk_rests_on(self):
+        """``order=id`` and ``id > cursor`` are RENDERED here, not assumed.
+
+        The walk's soundness rests on the server honouring the requested order
+        and the cursor filter. That contract was previously asserted only
+        against in-file fakes — a proxy. If this rendering regressed, a real
+        server could return arbitrary order, the strictly-ascending guard would
+        fail CLOSED in production (freezing the cost metric) with every unit
+        test green.
+        """
+        cp = _real_cp("0-0/1")
+        cp.query_with_total(
+            "organizations", select=["id"],
+            filters=[("id", "gt", "o000042")],
+            order="id", limit=MAX, count_exact=False)
+        sent = cp._http.seen_params[0]
+        assert sent.get("order") == "id", (
+            "keyset paging is only sound if the cursor column is the sort key")
+        assert sent.get("id") == "gt.o000042", (
+            f"the cursor must reach the wire as a gt filter; got {sent!r}")
+        assert sent.get("limit") == str(MAX), sent

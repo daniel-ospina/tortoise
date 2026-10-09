@@ -424,6 +424,28 @@ class SupabaseControlPlane:
         should ask for it. A ``None`` total means "the fleet could not be
         confirmed", NEVER "complete" — callers must fail closed on it.
 
+        ⚠️ **The DELTA-PAGING CONTRACT is the caller's, and this method does not
+        enforce it (round-6 review).** ``order`` and ``filters`` are opaque
+        pass-throughs: a keyset caller (see ``hosted_api._iter_registered_orgs``)
+        needs the server to apply a STABLE TOTAL ORDER on the cursor column and
+        to apply the ``col gt value`` filter server-side, exactly and
+        inclusively of neither boundary. This method asserts none of that, and
+        it cannot — the guarantee lives in the RPC the request reaches. So a
+        walk that certifies completeness rests on an assumption it can only
+        PARTIALLY verify:
+
+        * it checks each page is strictly ascending (`order` honoured per page);
+        * it requires the walk to end on an EMPTY page, so a truncated page
+          can never be the end signal;
+        * it does NOT check that the order is monotonic ACROSS pages, because
+          re-deriving the server's ordering in Python is not authoritative —
+          the column's collation is the database's, not Python's.
+
+        Cross-page monotonicity is therefore ASSUMED. A server that returns
+        each page ordered yet skips or repeats a range between pages is not
+        detectable here; the completeness guarantee for the destructive caller
+        is only as strong as the server honouring ``ORDER BY``.
+
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
         (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
         Raises RuntimeError on any failure.

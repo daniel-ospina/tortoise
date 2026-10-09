@@ -991,10 +991,14 @@ mcp_http_app = create_http_app(
 _ORG_ENUMERATION_MAX_ROWS = 1000
 
 #: Page-walk bound for the enumeration (#5388). Guards against an endless walk
-#: when a server neither states a total nor returns short pages — a page cap is
-#: NOT proof of completeness, so hitting it leaves ``complete`` False and the
-#: fail-closed caller still refuses. 100 pages = 100k orgs, ~100x the fleet
-#: size the 1000-row cap was sized for.
+#: when a server never returns an EMPTY page — the ONLY end-of-walk signal this
+#: walk has. (An earlier wording said "nor returns short pages"; a short page is
+#: NOT a signal here and has not been since round 3 — believing it is would
+#: reintroduce the round-1 fail-open, and round 4 removed the same wording from
+#: two other comments.) A page cap is NOT proof of completeness, so the page-cap
+#: exit leaves ``exhausted`` False; ``exhausted`` is a NECESSARY conjunct of
+#: ``complete`` below, so the fail-closed caller still refuses.
+#: 100 pages = 100k orgs, ~100x the fleet size the 1000-row cap was sized for.
 _ORG_ENUMERATION_MAX_PAGES = 100
 
 
@@ -1007,14 +1011,18 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
     production caller on the same hourly interval. The two share the one
     offload pool below.
 
-    ⚠️ ``[]`` is returned on ANY failure, so it is NOT proof of an empty
-    fleet; the allocation caller treats a falsy result as "enumeration
-    unavailable" and fails closed rather than reading it as "no orgs, no cost".
+    ⚠️ The failure shape DEPENDS on the caller, so neither result may be read
+    as "no orgs": ``require_complete=True`` returns ``None`` (UNKNOWN) on ANY
+    failure and whenever the walk cannot confirm the fleet, and the default
+    returns ``[]`` — which is likewise NOT proof of an empty fleet. The
+    allocation caller treats either as "enumeration unavailable" and fails
+    closed rather than reading it as "no orgs, no cost".
     Supabase mode (post-#669 flip): enumerates from Supabase orgs via the
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph. Registry mode: the Org nodes from the
     registry_control_plane graph via _make_sdk(namespace="registry").
-    Returns [] on any failure — the sweep is best-effort.
+    Returns ``None`` (``require_complete``) or ``[]`` on failure — neither is
+    proof of an empty fleet; the sweep is best-effort.
 
     #4493/#5388: completeness is a FIRST-CLASS property read from the SERVER,
     not inferred from a page boundary. The Supabase branch walks pages ordered
@@ -1104,10 +1112,19 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     # to certify is the correct response — `order` is part of
                     # the contract and this is the one place that can check it.
                     unsorted = any(a >= b for a, b in itertools.pairwise(page_ids))
-                    # A falsy id cannot be a cursor (``id > None`` is not a
-                    # filter, it is a restart) and cannot be counted as served.
+                    # A falsy id cannot be a CURSOR: ``id > None`` is not a
+                    # filter, it is a restart, so the walk cannot continue past
+                    # it. The row is already counted in ``seen_ids`` and is
+                    # still returned to a best-effort caller — what the falsy id
+                    # forbids is CERTIFICATION, which the break below enforces.
                     if unsorted or not all(page_ids):
-                        break  # `exhausted` stays False -> fail closed
+                        # No empty page was reached, so ``exhausted`` stays
+                        # False — and ``exhausted`` is a NECESSARY conjunct of
+                        # ``complete`` below, so this break cannot certify
+                        # however large ``seen_ids`` has grown against the
+                        # stated total. (Before round 6 the total branch
+                        # bypassed ``exhausted``, and this break DID certify.)
+                        break
                     last_id = page_ids[-1]
                 if not page:
                     # THE sound end-of-walk signal: the server returned no more
@@ -1137,10 +1154,19 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # issue names, and a fail-OPEN that pruned real orgs), and a
             # satisfied total as a STOP condition (wrong because the total is a
             # page-1 snapshot while ``seen_ids`` grows with concurrent inserts).
-            complete = (
-                len(seen_ids) >= total
-                if total is not None and total > 0
-                else exhausted
+            # ``exhausted`` is a NECESSARY conjunct, not the fallback arm of an
+            # either/or. Written as `len(seen_ids) >= total if total > 0 else
+            # exhausted` the total branch BYPASSED ``exhausted`` completely, so
+            # every exit that is deliberately NOT an end-of-walk could still
+            # certify: the `unsorted`/falsy `break` above and the page-cap exit
+            # both leave ``exhausted`` False, yet returned rows as COMPLETE as
+            # soon as the stated total was satisfied. A server that mis-orders
+            # one page and states a total therefore turned this file's own
+            # refuse-to-certify guard into a PRUNE (round 6). The total may only
+            # ever DOWNGRADE a walk that already reached an empty page; it can
+            # never promote one that did not.
+            complete = exhausted and (
+                total is None or total <= 0 or len(seen_ids) >= total
             )
             if not complete:
                 _logger.warning(
@@ -1387,7 +1413,13 @@ def _sweep_events() -> None:
                 _logger.warning("event retention sweep skipped: registry graph probe failed")
                 return
         # Sweep every registered org's graph (registry Org nodes).
-        for org in _iter_registered_orgs():
+        # ``_iter_registered_orgs`` is typed ``list[dict] | None``: the
+        # ``require_complete`` path can return ``None``. This default path does
+        # not, today — but the sweep must not depend on that accident, because a
+        # ``None`` here raises ``TypeError`` inside the surrounding handler and
+        # is swallowed into "event retention sweep skipped": a SILENT fleet-wide
+        # retention stop (reviewer C, round 6).
+        for org in (_iter_registered_orgs() or []):
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue
             try:
