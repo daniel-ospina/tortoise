@@ -166,7 +166,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 1. **There is no cheap-idle lever on our current stack.** Our ~140 MB user costs ~**$10/month active or idle**, and that memory is not reclaimable without deleting the graph.
 2. **The only levers are density and size** — pack many graphs onto one instance (≤75% of RAM) and write less noise. **Both are ours to pull without changing engines.**
 
-**⚠️ Also measured: `GRAPH.MEMORY USAGE` is a sampling-based ESTIMATE**, not an exact allocation — it takes `SAMPLES` (default 100, up to 10,000) and *"averages them to estimate"*. It does report a real breakdown (`indices_sz_mb`, `amortized_node_attributes_by_label_sz_mb`, `label_matrices_sz_mb`, …), and it does **not** include per-graph/Redis-key overhead. **So 140 MB is a good number, not an exact one — quote it as an estimate.**
+**⚠️ Also measured: `GRAPH.MEMORY USAGE` is a sampling-based ESTIMATE**, not an exact allocation — it takes `SAMPLES` (default 100, up to 10,000) and *"averages them to estimate"*. It does report a real breakdown (`indices_sz_mb`, `amortized_node_attributes_by_label_sz_mb`, `label_matrices_sz_mb`, …), and it does **not** include per-graph/Redis-key overhead. **⚠️ It is also BLIND to the HNSW vector index** (`#5331`, measured 2026-10-08 on a 20,000-node × 384-dim graph): the index lives in the separately-loaded `vectorset` module and appears in **neither** the total nor `indices_sz_mb` — measured **8.5x–21.7x** under-report on the index share and **~2x** on the total. **So 140 MB is a good number, not an exact one — quote it as an estimate, and do not wire it to a cap for a vector-bearing tenant.**
 
 ### 2.2 Why this is still the right call to defer
 

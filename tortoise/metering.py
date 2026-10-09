@@ -1834,9 +1834,14 @@ def measure_write_ops(org_id: str) -> int:
 # WHY. The owner ruling (2026-09-26) is that storage is counted in MB/GB, not
 # nodes. The graph MB figure comes from ``GRAPH.MEMORY USAGE``
 # (``tortoise/graph_storage.py``), which is a SAMPLING ESTIMATE that excludes
-# per-graph/Redis-key overhead. This lane puts the reading on the SAME durable
-# per-(org, period) ledger the ask/capture lanes use, so the figure needs no
-# new store and no new read path.
+# per-graph/Redis-key overhead AND the HNSW vector index (measured #5331: the
+# index is the largest resident component of a vector-bearing graph, and it is
+# in neither the total nor the index share). This lane puts the reading on the
+# SAME durable per-(org, period) ledger the ask/capture lanes use, so the
+# figure needs no new store and no new read path — but the CAVEAT does NOT
+# travel with it: only the numeric columns are persisted, so a ledger reader
+# must read the caveats in ``tortoise/graph_storage.py`` before treating this
+# figure as a cap.
 #
 # A GAUGE, NOT AN INCREMENT. The other lanes are cumulative workload; graph
 # storage is a current-state measurement. This lane OVERWRITES its columns (the

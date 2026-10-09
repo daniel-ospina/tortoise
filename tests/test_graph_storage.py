@@ -6,8 +6,9 @@ lane (``metering.record_graph_storage_reading`` / ``get_graph_storage_reading``)
 The load-bearing properties, each pinned so it can fail:
 
 * the reading reports a RANGE and its SAMPLES/repeats — never a bare point;
-* the two caveats (sampling estimate; excludes per-graph/Redis-key overhead)
-  TRAVEL with the reading, including through ``as_dict()``;
+* the three caveats (sampling estimate; excludes per-graph/Redis-key overhead;
+  blind to the HNSW vector index) TRAVEL with the reading, including through
+  ``as_dict()``;
 * the meter is FAIL-SOFT — a bad handle, a malformed reply or a dead engine
   returns ``ok=False`` and never raises;
 * the ledger write is a GAUGE (overwrite), not an increment — adding two
@@ -421,13 +422,13 @@ def test_reading_carries_the_two_caveats():
 
 
 def test_reading_declares_the_vector_index_blind_spot():
-    """⛔ #5331: the meter cannot see the HNSW vector index (#5331-review).
+    """⛔ #5331: the meter cannot see the HNSW vector index.
 
-    Measured on a dedicated engine: ``indices_sz_mb`` reported 2.00 MB
-    IDENTICALLY across six configs whose true index cost 33.92-43.41 MiB — a
-    17.9-21.7x under-report that does not move with ``M`` or ``efConstruction``.
-    The index lives in the separately-loaded ``vectorset`` module, so it is in
-    NEITHER the total NOR the index share.
+    Measured on a dedicated engine across six configs whose true index cost
+    33.92-43.41 MiB: ``indices_sz_mb`` reported 2.00 MB in five of them and
+    4.00 MB in the M=32 run — an 8.5x-21.7x under-report that tracks neither the
+    index nor ``efConstruction``. The index lives in the separately-loaded
+    ``vectorset`` module, so it is in NEITHER the total NOR the index share.
 
     This is the load-bearing pin: the reading previously said "Acceptable as a
     CAP INPUT", and a cap wired to it would charge for the cheap part of a
@@ -440,17 +441,18 @@ def test_reading_declares_the_vector_index_blind_spot():
     # and the false all-clear is GONE — a cap designer must not read it
     assert "Acceptable as a CAP INPUT" not in r.precision_note
     assert "DO NOT use this" in r.precision_note
-    # the measured magnitude travels and is discoverable as a constant
-    assert "17.9-21.7x" in PRECISION_NOTE
-    assert "17.9-21.7x" in VECTOR_INDEX_EXCLUDED
+    # WIRING, not a change-detector: the constant is the thing the reading
+    # publishes, so removing it from EXCLUDED_OVERHEAD fails HERE.
+    assert VECTOR_INDEX_EXCLUDED in EXCLUDED_OVERHEAD
+    assert VECTOR_INDEX_EXCLUDED in tuple(r.excludes)
 
 
 def test_as_dict_carries_the_vector_blind_spot():
     """GUARD: a consumer reading only the dict still learns what is missing."""
     d = measure_graph_storage(_FakeClient([_reply(9)]), "org_x").as_dict()
-    excludes = " | ".join(d["graph_storage_excludes"])
-    assert "VECTOR INDEX" in excludes
-    assert "17.9-21.7x" in excludes
+    excludes = tuple(d["graph_storage_excludes"])
+    assert VECTOR_INDEX_EXCLUDED in excludes
+    assert any("VECTOR INDEX" in e for e in excludes)
     assert "vector index" in d["graph_storage_precision_note"]
 
 
