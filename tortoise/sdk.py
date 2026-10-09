@@ -5904,9 +5904,13 @@ class TortoiseSDK:
         declined = capture_declined_reason()
         if declined is not None:
             # A structured `ok=False` — the method's own contract is "errors are
-            # surfaced", never a raise out of a public entry point.
+            # surfaced", never a raise out of a public entry point. The shape
+            # carries `payload: None` like every other non-ok return of this
+            # method, so a caller that uniformly reads result["payload"] on
+            # `not ok` does not KeyError on the decline branch alone.
             return {"session_id": session_id, "ok": False,
-                    "errors": [declined], "error": declined}
+                    "errors": [declined], "error": declined,
+                    "payload": None}
         extractor = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
         if extractor == "v1" or summary is not None:
             return self._commit_session_v1(

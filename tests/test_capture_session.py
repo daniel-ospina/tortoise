@@ -92,6 +92,10 @@ def test_commit_session_refuses_without_consent_before_extraction(
     assert any("explicit consent" in e for e in out["errors"]), out["errors"]
     assert extracted == [], "the refusal must precede extraction"
     assert posted == [], "an unconsented commit must not POST"
+    # The decline carries the same result shape as every other non-ok return
+    # of this method (e.g. the v1 gate-failure path), so a caller that
+    # uniformly reads `payload` on `not ok` does not KeyError on this branch.
+    assert "payload" in out and out["payload"] is None, out
 
 
 def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):

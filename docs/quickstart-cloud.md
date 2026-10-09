@@ -136,16 +136,20 @@ is **per-surface**, not uniform (#3615):
   (`tortoise/capture_consent.py`), which is credential-independent — exporting
   `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
   enable capture there; it only authenticates the connection. The gated paths
-  are the Claude Code `session-end.sh` hook, `tortoise session capture` /
-  `tortoise sessions import`, and the SDK's client transmission
-  (`TortoiseSDK.commit_session` → `POST /v1/sessions/commit`).
+  are the Claude Code `session-end.sh` hook (plus `tortoise session drain`,
+  which its `SessionStart` counterpart runs in the background), `tortoise
+  session capture` / `tortoise sessions import`, and the SDK's client
+  transmission (`TortoiseSDK.commit_session` → `POST /v1/sessions/commit`).
 - **The hosted MCP tool `tortoise_session_capture` is not gated by this
   variable** — it executes on the server, which cannot read the client host's
   `TORTOISE_CAPTURE`. It carries the server-side recording policy
   (`session_recording`, default-ON) instead. Whether an explicit, agent-invoked
   capture should also require a *client-carried* consent assertion is an open
   product question (#3662). `TortoiseSDK.capture_session` is likewise ungated —
-  it writes the local graph, it does not transmit to the vendor.
+  it writes the graph backend named by `TORTOISE_DB_URI`, not the vendor's API,
+  so an embedded local backend keeps nothing off the machine while a
+  remote/managed `redis://`·`rediss://` backend is itself a data-egress choice
+  outside this gate.
 - **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
   `agent-infra` and starts hosted capture on **credential presence**, never
   reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
