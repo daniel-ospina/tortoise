@@ -1322,8 +1322,18 @@ jobs:
     # agent-infra at a semver pin rather than at whatever `main` happens to be.
     #
     # `--dirs` names THIS repo's layout — the guard's default set is agent-infra's and
-    # `scripts/` here points back at it. Shell embedded in workflow YAML is NOT scannable
-    # by a file-based guard and is fixed by hand (see ai-review-gate.yml's marker_channel).
+    # `scripts/` here points back at it. The list lives in ONE place, `.sigpipe-grep-dirs`,
+    # shared with .husky/pre-commit, so the two invocation sites cannot diverge.
+    #
+    # ⚠️ THIS JOB IS NOT A REQUIRED CONTEXT YET (tortoise#7778), so a red here does not
+    # block a merge: it is visible but unenforced. The sites it covers are already fixed,
+    # so the exposure is a FUTURE reintroduction of the idiom, not the current tree.
+    # Making it required is a branch-protection change — the declaration home, the
+    # required-context record, and the required-set enumeration must move together, and it
+    # must land in the SAME change as the wiring: requiring it earlier would block every
+    # merge while the resolving guard still rejects `--dirs`. Measured repro on #7778.
+    # (The declaration home is deliberately not named here: the recut guard reads any
+    # workflow naming it as a workflow reading it as an authoritative source, and reds.)
     # `website/` is excluded: it carries a node_modules tree. Its shell files are NOT
     # covered anywhere else, so this exclusion is a known gap, not a claim of coverage.
     runs-on: ubuntu-latest
@@ -1336,7 +1346,7 @@ jobs:
       - name: SIGPIPE false-negative guard (#841)
         run: |
           bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
-            --dirs '.github/scripts .github/actions .husky tools .ci-checks client integrations tortoise supabase docs entrypoint.sh'
+            --dirs "$(cat .sigpipe-grep-dirs)"
 
   license-surface:
     runs-on: ubuntu-latest

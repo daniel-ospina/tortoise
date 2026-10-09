@@ -56,9 +56,20 @@ check_version
 #   · a missing guard WARNS instead of skipping silently. A silent skip is the very
 #     failure this guard exists to catch (#6937 P2-3), and `scripts/` is a machine-local
 #     symlink that can dangle; the `sigpipe-guard` CI job runs it unconditionally.
-if [ -f scripts/check-no-sigpipe-grep.sh ]; then
-  bash scripts/check-no-sigpipe-grep.sh \
-    --dirs '.github/scripts .github/actions .husky tools .ci-checks client integrations tortoise supabase docs entrypoint.sh' || exit 1
+#   · a guard that is PRESENT BUT TOO OLD is named as such. `--dirs` is new (agent-infra#1643);
+#     without this probe an older guard exits 2 with `unknown argument: --dirs`, which reaches
+#     the developer as a hard commit block whose message names no idiom — indistinguishable
+#     from a real finding. A `case` match is used rather than `grep -q` in a pipeline, because
+#     THIS FILE IS ITSELF IN THE SCAN SET and that pipeline is the defect being guarded against.
+SIGPIPE_GUARD=scripts/check-no-sigpipe-grep.sh
+if [ -f "$SIGPIPE_GUARD" ]; then
+  if case "$(bash "$SIGPIPE_GUARD" --help 2>&1)" in *--dirs*) true ;; *) false ;; esac; then
+    bash "$SIGPIPE_GUARD" --dirs "$(cat .sigpipe-grep-dirs)" || exit 1
+  else
+    echo "⚠️  $SIGPIPE_GUARD is too old to take --dirs (needs agent-infra#1643)." >&2
+    echo "    Your local agent-infra checkout is behind. Update it and re-link scripts/." >&2
+    echo "    Commit NOT blocked -- the guard's CI job still runs." >&2
+  fi
 else
   echo "[sigpipe-guard] scripts/check-no-sigpipe-grep.sh not found — NOT checked locally." >&2
   echo "   Fix: set AGENT_INFRA_PATH and re-link scripts/. CI runs this guard regardless" >&2
