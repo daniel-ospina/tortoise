@@ -52,8 +52,11 @@ overwrite each other silently, #3662):
   * the ambient INDEXER sweep (``tortoise index directory <corpus> --metadata``,
     which the Claude Code ``session-end.sh`` hook runs unconditionally, outside
     its ``TORTOISE_CAPTURE`` branch) sends conversation-derived text to the
-    configured LLM provider whenever ``OPENAI_API_KEY`` is present
-    (``tortoise/session_indexer.py``). Unlike the two seams above, this one
+    configured LLM provider whenever ``OPENAI_API_KEY`` is present — the one
+    other suppression is the test-only ``TORTOISE_INDEX_NO_NETWORK``, which
+    forces metadata extraction off at the SDK boundary (``sdk.py`` honors it at
+    both ``index_file`` and ``index_directory``; ``tortoise/session_indexer.py``).
+    Unlike the two seams above, this one
     EGRESSES rather than merely skipping a gate, and it is the one path on which
     "no transcript leaves the machine" is false — so an absolute promise is
     wrong and only "on the consent-gated paths" is true.

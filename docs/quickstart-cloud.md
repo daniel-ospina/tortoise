@@ -155,7 +155,8 @@ is **per-surface**, not uniform (#3615):
   Code `session-end.sh` hook runs `tortoise index directory <corpus> --metadata`
   **unconditionally** — outside its `TORTOISE_CAPTURE` branch — and
   `tortoise/session_indexer.py` posts conversation-derived text to an
-  OpenAI-compatible endpoint whenever `OPENAI_API_KEY` is set. So everything
+  OpenAI-compatible endpoint whenever `OPENAI_API_KEY` is set (the one other
+  suppression is the test-only `TORTOISE_INDEX_NO_NETWORK=1`). So everything
   above is a statement about the **consent-gated paths**; on this one an
   absolute "no transcript leaves the machine" claim is false (tracked with the
   other ungated seams, #3662).
