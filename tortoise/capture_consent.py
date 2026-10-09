@@ -35,8 +35,8 @@ Consumers:
     directly. Two ENFORCEMENT points, one predicate — the verdict string comes
     from ``capture_declined_reason`` below.
 
-NOT gated here — recorded, not settled (so the two consent contracts cannot
-overwrite each other silently, #3662):
+NOT gated here — recorded, not settled, and NOT the complete list (the two Pi
+surfaces are ungated too; every enumeration lives in the docs' seam lists, #3662):
   * ``tortoise/mcp_server.py::tortoise_session_capture`` executes SERVER-side
     (it answers "session capture requires hosted mode" for stdio/self-host),
     so the client host's ``TORTOISE_CAPTURE`` is unreadable there. Its gate is
@@ -52,10 +52,11 @@ overwrite each other silently, #3662):
   * the ambient INDEXER sweep (``tortoise index directory <corpus> --metadata``,
     which the Claude Code ``session-end.sh`` hook runs unconditionally, outside
     its ``TORTOISE_CAPTURE`` branch) sends conversation-derived text to the
-    configured LLM provider whenever ``OPENAI_API_KEY`` is present — the one
-    other suppression is the test-only ``TORTOISE_INDEX_NO_NETWORK``, which
-    forces metadata extraction off at the SDK boundary (``sdk.py`` honors it at
-    both ``index_file`` and ``index_directory`` in ``tortoise/session_indexer.py``).
+    configured LLM provider whenever ``OPENAI_API_KEY`` is present
+    (``tortoise/session_indexer.py``) — the one other suppression is the
+    test-only ``TORTOISE_INDEX_NO_NETWORK``, which forces metadata extraction off
+    at the SDK boundary (``sdk.py`` honors it at both ``index_file`` and
+    ``index_directory``).
     All three seams can transmit, and this one egresses AMBIENTLY — with no user
     action at all — so an absolute "no transcript leaves the machine" promise is
     wrong for more than one surface, and only "on the consent-gated paths" is
