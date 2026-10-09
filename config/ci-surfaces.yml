@@ -2371,7 +2371,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
-- test_rebuild_parity_fail_loud_3585.py  # #3585: 75 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED WHEN THE FILE COLLECTED 47; #7719 added 9 and updated the count to 75, so ~36s is a LOWER bound and the committed 45.0 weight predates those 9 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
+- test_rebuild_parity_fail_loud_3585.py  # #3585: 75 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED 2026-10-08 WHEN THE FILE COLLECTED 47; it now collects 75, of which #7719 contributed 9 (66 -> 75), so ~36s is a LOWER bound and the committed 45.0 weight predates those 9 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
