@@ -1391,7 +1391,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 | hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
 | addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
 | supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Bidirectional by default, optional unidirectional (directed attack) | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
+| opposes | NAND | Both ways for a mutual restatement; one way for a directed attack | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
 
 > **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
 
