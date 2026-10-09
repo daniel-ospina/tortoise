@@ -256,10 +256,23 @@ def _sanitize_for_log(value: str) -> str:
 # across 126 routes / ~80 tools and load a model on shards that never embed.
 # This reads the embedder's own one-time-load state (``embeddings.EmbeddingModel``)
 # only when a deadline has ALREADY fired, so the ordinary path pays nothing.
-# ``TORTOISE_EMBEDDER_WARMUP=0`` is honoured: the load happens only because a
-# request demanded it — the change is WHEN it is charged, not WHETHER it runs.
-# Background pre-warms are excluded at the source (``background_load``), so this
-# exemption fires for the REQUEST that triggered the load and nothing else.
+# ``TORTOISE_EMBEDDER_WARMUP`` does NOT gate this path, and that is the point:
+# the hosted lifespan pre-warm (``hosted_api._prewarm_embeddings``) never
+# consults the flag — only ``EmbeddingModel.warm_up`` does — so a process that
+# runs the hosted lifespan can hold a load no request asked for. Background
+# pre-warms are excluded at the source (``background_load``), so this exemption
+# fires for the REQUEST that triggered a load and nothing else.
+#
+# ⚠️ OPEN (measured, #4055) — this exemption does NOT close that issue:
+#   1. The load that blocks the issue's own reproduction is the LIFESPAN
+#      PRE-WARM. It is ownerless by design, so it never stamps the clock this
+#      reads and the request is still refused 504. #4055 records the
+#      reproduction failing at head b38fc2219 for exactly this reason.
+#   2. A SECOND concurrent request that blocks on the same in-flight
+#      REQUEST-owned load is refused as well: admission is by owner IDENTITY,
+#      so it does not inherit the triggering request's exemption.
+# Both belong to #4055, not to this change — which is why the PR references the
+# issue rather than closing it.
 _COLD_SETUP_POLL_S = 0.05
 
 
@@ -338,9 +351,13 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
       ``asyncio.wait_for(asyncio.shield(task), timeout=…)`` did;
     * when the deadline fires while the process's ONE-TIME embedder load, OWNED
       BY THIS REQUEST AND STILL IN FLIGHT, ran during this wait, the load is
-      drained OUTSIDE the budget and the full bound is re-armed for the
-      request's own work — **at most once**, so a genuinely slow request still
-      breaches;
+      drained OUTSIDE the budget and the bound THIS SEAM WAS GIVEN is re-armed
+      for the request's own work — **at most once**, so a genuinely slow
+      request still breaches. It is the RESIDUAL on the MCP seam, which passes
+      ``_TRANSPORT_WAIT_BOUND_S - elapsed``; it is the transport constant on
+      REST, which passes that constant. This helper re-arms its argument and
+      cannot know which it was given, so a seam that wants a full re-arm must
+      pass a full bound;
     * ``timeout <= 0`` never exempts: a deadline that was already spent before
       this seam (the pre-SSE-stall path, where ``remaining`` collapsed to 0)
       is not a cold-start case, and the exactly-once refusal contract on that

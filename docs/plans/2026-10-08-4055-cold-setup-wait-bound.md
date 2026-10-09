@@ -86,9 +86,11 @@ on shards that never embed).
 - No startup change (honours the owner's rejection of Option 1).
 - No load for requests that never embed — the reverse of a route allowlist, which would have to
   be kept in sync with 126 routes / ~80 tools and would load a model on shards that never embed.
-- `TORTOISE_EMBEDDER_WARMUP=0` (the test-lane opt-out, #7015) is honoured: the load happens only
-  because a request demanded it, exactly as it does today. The change is *when* it is charged,
-  not *whether* it runs.
+- `TORTOISE_EMBEDDER_WARMUP=0` (the test-lane opt-out, #7015) does **not** gate this path, and no
+  claim here rests on it: the hosted lifespan pre-warm (`hosted_api._prewarm_embeddings`) never
+  consults the flag — only `EmbeddingModel.warm_up` does — so a hosted process can hold a
+  background load that no request asked for. The change is *when* a request-triggered load is
+  charged, not *whether* it runs.
 
 ## Acceptance criteria
 
@@ -109,9 +111,26 @@ on shards that never embed).
 - The exemption is granted **at most once** per request.
 - No MCP tool or `TortoiseSDK` public method added/removed/renamed.
 
+## Scope — what this does NOT fix (measured, #4055)
+
+This change closes the **request-triggered** cold-load case. Two measured cases belonging to the
+issue (see #4055) stay open, and by the acceptance criteria above they are deliberate rather than
+oversights:
+
+1. **The lifespan pre-warm.** `hosted_api._prewarm_embeddings` starts its load inside
+   `EmbeddingModel.background_load()`, which stamps nothing, so a request that merely waits on it
+   is still refused at the bound. #4055 records the reproduction failing at head `b38fc2219` for
+   exactly this reason.
+2. **A second concurrent request.** A request that blocks on ANOTHER request's in-flight load
+   never becomes the owner, so it does not inherit the exemption (acceptance criterion:
+   attribution is the owner's identity, not the time window).
+
+⇒ The PR **references** #4055 and does not close it.
+
 ## Tests
 
-- `tests/test_transport_wait_bound.py` (new):
+- `tests/test_transport_wait_bound.py` (extended — the file already exists on `main`; this change
+  appends cases to it):
   - helper unit: extension granted once when a request-owned one-time setup is still in flight
     and started during the wait; the total wait is setup + a full bound; a task outliving setup +
     bound still breaches.
