@@ -264,24 +264,31 @@ export function isUserTokenRejection(status: number, errorBody: string): boolean
   // recognised here is NOT a credential verdict and stays a fault (503).
   const code = typeof parsed.code === "string" ? parsed.code : "";
   if (/^(?:pgrst30[123]|invalid_jwt|bad_jwt|unusable_credential)$/i.test(code)) return true;
-  const text = [parsed.error, parsed.msg, parsed.message, parsed.error_description]
-    .filter((v): v is string => typeof v === "string")
-    .join(" ");
-  // The MESSAGE fallback is deliberately NARROW (#3559 review round 3). A bare
-  // `jwt` is NOT a verdict: PostgREST answers a request-level parse error with
-  // `PGRST100`, and an envelope such as
-  // `{"code":"PGRST100","message":"Your jwt configuration was rotated by an
-  // administrator"}` names the term while saying nothing about a rejected
-  // credential. Reading those as a sign-out is the #3485 direction — it clears
-  // a live session over a benign envelope. The JWT term must CO-OCCUR with a
-  // rejection/expiry verb; `pgrst30[123]`, `invalid token`/`invalid claim` and
-  // `token expired` still stand alone, and anything unrecognised stays a fault.
-  const jwtTerm = /\bjwt\b|json\s*web\s*token/i.test(text);
-  const rejectionVerb = /\b(?:expired|invalid|missing|revoked|malformed|rejected)\b/i.test(text);
-  return (
-    /pgrst30[123]|invalid (?:token|claim)|token (?:has )?expired/i.test(text) ||
-    (jwtTerm && rejectionVerb)
-  );
+  // The MESSAGE fallback. The envelope fields are INDEPENDENT statements, so a
+  // JWT term and its rejection must appear in the SAME field: a term in one
+  // field and a verb in another attests to nothing about the caller's bearer —
+  // `{"message":"query selector jwt","error_description":"the request expired
+  // while parsing"}` is a request-level parse fault (PGRST100), not a session
+  // verdict. Likewise a `jwt` mention is not a verdict when it names SERVER
+  // configuration: `jwt configuration`, `JWT secret` and `jwt settings`
+  // describe our infrastructure, never the caller's token, so the term carries
+  // a config exclusion. The rejection family covers the whole family gateways
+  // actually emit — `failed`, `verif…`, `decod…`, `pars…`, `signature`,
+  // `mismatch`, `unverifiab…`, `absent`, `not valid`, `not provided` and the
+  // expiry/validity words. `pgrst30[123]`, `invalid token`, `invalid claim` and
+  // `token expired` still stand alone, and anything unrecognised stays a fault
+  // (503).
+  const jwtTerm =
+    /\bjson web tokens?\b|\bjwt\b(?!\s+(?:configuration|config|settings?|secret)\b)/i;
+  const rejection =
+    /\b(?:expired|invalid|missing|revoked|malformed|rejected|unverifiab\w*|verif\w*|decod\w*|pars\w*|signature|mismatch|fail\w*|absent)\b|\bnot\s+(?:valid|provided)\b/i;
+  const bareCredentialVerdict = /pgrst30[123]|invalid (?:token|claim)|token (?:has )?expired/i;
+  for (const field of [parsed.error, parsed.msg, parsed.message, parsed.error_description]) {
+    if (typeof field !== "string") continue;
+    if (bareCredentialVerdict.test(field)) return true;
+    if (jwtTerm.test(field) && rejection.test(field)) return true;
+  }
+  return false;
 }
 
 export async function refreshSession(

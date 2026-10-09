@@ -162,3 +162,75 @@ test('round 3: a `jwt` term WITH a rejection/expiry verb is still a sign-out', (
     )
   }
 })
+
+// ── Round 4 (#7749): right in BOTH directions ───────────────────────────────
+//
+// Round 3 narrowed the message fallback to `jwt` plus one of six words, which
+// dropped real rejection phrasings the PRE-FIX classifier caught (a false
+// negative → 503 with re-auth never owed), while the conjunction ran over the
+// fields JOINED together, so a `jwt` in one field and a verb in another still
+// read as a verdict. Round 4 requires BOTH signals in ONE field and widens the
+// rejection family. These cases pin every direction.
+test('round 4: real rejection phrasings the round-3 six-word set dropped are sign-outs', () => {
+  const rejections = [
+    'JWT verification failed',
+    'failed to parse JWT',
+    'JWT is not valid',
+    'error decoding JWT',
+    'JWT signature mismatch',
+    'could not verify JWT',
+    'JWT not provided',
+  ]
+  for (const message of rejections) {
+    assert.equal(
+      classifier.isUserTokenRejection(401, JSON.stringify({ message })),
+      true,
+      `message=${JSON.stringify(message)} names a rejected credential — must be a sign-out`,
+    )
+  }
+})
+
+test('round 4: a benign `jwt` mention in a PGRST100 envelope stays a fault (503)', () => {
+  const benign = [
+    '{"code":"PGRST100","message":"The project jwt configuration is invalid; contact the administrator"}',
+    '{"code":"PGRST100","message":"JWT secret missing from the server environment"}',
+    '{"code":"PGRST100","message":"query selector jwt","error_description":"the request expired while parsing"}',
+  ]
+  for (const body of benign) {
+    assert.equal(
+      classifier.isUserTokenRejection(401, body),
+      false,
+      `body=${body} names \`jwt\` but reports no rejected credential — must be a FAULT (503)`,
+    )
+  }
+})
+
+test('round 4: genuine rejections and unreadable bodies keep their verdicts', () => {
+  const verdicts = [
+    [401, JSON.stringify({ code: 'PGRST301' }), true],
+    [403, JSON.stringify({ code: 'PGRST303' }), true],
+    [401, JSON.stringify({ code: 'invalid_jwt' }), true],
+    [401, JSON.stringify({ error: 'invalid token' }), true],
+    [401, JSON.stringify({ message: 'JWT expired' }), true],
+    [403, JSON.stringify({ error_description: 'invalid claim' }), true],
+    // Every one of these is a FAULT: no credential verdict is present.
+    [401, '', false],
+    [401, 'null', false],
+    [401, '[]', false],
+    [401, '"string"', false],
+    [401, '42', false],
+    [401, '{}', false],
+    [401, '{"foo":"bar"}', false],
+    [401, '{"code":"PGRST30', false],
+    [401, '<html><body>502 Bad Gateway</body></html>', false],
+    [401, '<html><body>Your jwt was rejected</body></html>', false],
+    [401, '\uFEFF{"code":"PGRST301","message":"JWT expired"}', false],
+  ]
+  for (const [status, body, expected] of verdicts) {
+    assert.equal(
+      classifier.isUserTokenRejection(status, body),
+      expected,
+      `status=${status} body=${JSON.stringify(body)} must be ${expected ? 'a sign-out' : 'a FAULT (503)'}`,
+    )
+  }
+})
