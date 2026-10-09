@@ -299,14 +299,17 @@ SOURCE_PATTERNS = {
                    # and the guard never runs on the PR that owns it — the same
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
-                   "website/apps/blog-admin/dist/index.html",
-                   # The bundle's ACTUAL content lives in dist/assets/ — that is the
-                   # rglob target of the migration guard. Without this entry, a
-                   # change that edits the asset WITHOUT touching index.html (a
-                   # hand-edit, or a partial merge resolution) selects NO surface
-                   # and the artifact's only guard does not run on the PR that owns
-                   # it — the same silent-drop class as the entries above.
-                   "website/apps/blog-admin/dist/assets/",
+                   # The DIRECTORY is the correct granularity — not the files that
+                   # happened to break (the same rule the dashboard/functions/
+                   # entry below already states). The guard rglob-scans the whole
+                   # dist tree, so registering only dist/index.html let a change
+                   # to the asset itself select NO surface and skip the guard
+                   # entirely — the silent-drop class these entries exist to close.
+                   "website/apps/blog-admin/dist/",
+                   # The env pin's own fixture: _expected_supabase_origin() reads
+                   # this file to derive the origin the bundle must carry, so a
+                   # change to it must run the guard that compares against it.
+                   "website/apps/blog-admin/.env.example",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,
