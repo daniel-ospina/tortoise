@@ -108,7 +108,7 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("blog_posts", "published_at"),
     ("blog_posts", "reviewed_at"),
     ("blog_posts", "updated_at"),
-    # #2636 connectors (migration 20260922000001): the three timestamptz
+    # #2636 connectors (migration 20261001000003): the three timestamptz
     # columns the fake must type-check like the real seam.
     ("connectors", "created_at"),
     ("connectors", "last_sync_at"),
@@ -578,7 +578,7 @@ class FakeControlPlane:
             return None
         if fn == "metering_increment_embedding":
             # #4488: the embed lane's additive upsert on the SAME
-            # ``(org_id, period_start)`` row (migration 20260925000003). The
+            # ``(org_id, period_start)`` row (migration 20261001000004). The
             # fake models the sticky/paired/skip-safe mixed rule EXACTLY as the
             # SQL does, so a test can tell "the window used two encoders" from
             # "the window used one" and from "a skip-only flush erased it".
@@ -639,7 +639,7 @@ class FakeControlPlane:
                                  p.get("p_identity_mixed"))})
             return None
         if fn == "metering_set_graph_storage":
-            # #5331: migration 20260926000002 — a GAUGE SETTER mirroring the SQL
+            # #5331: migration 20261001000005_metering_graph_storage.sql — a GAUGE SETTER mirroring the SQL
             # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
             # a test that cannot tell a gauge from an increment cannot catch the
             # double-count defect the gauge design exists to avoid.
@@ -1516,7 +1516,7 @@ class FakeControlPlane:
                 numeric = [r.get("id") for r in self.tables.get(table, [])
                            if isinstance(r.get("id"), int)]
                 row["id"] = (max(numeric) + 1) if numeric else 1
-            # #2636 unique parity (migration 20260922000001,
+            # #2636 unique parity (migration 20261001000003,
             # `idx_connectors_org_source`): ONE connector per (org_id,
             # source_type). Without this the fake silently ACCEPTS a duplicate
             # the real table rejects with 23505, so the handler's 409 mapping

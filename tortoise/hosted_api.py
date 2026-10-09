@@ -28670,7 +28670,7 @@ def _clear_github_credentials(org_id: str) -> None:
 
 
 # The allowed value sets mirror the CHECK constraints in the migration that
-# owns them (supabase/migrations/20260922000001_connectors.sql). Without a
+# owns them (supabase/migrations/20261001000003_connectors.sql). Without a
 # boundary check a bad value reaches PostgREST, whose 4xx raises out of the seam
 # (`SupabaseControlPlane.query` raises on status >= 300, it does not return
 # None) and surfaces as the generic 500 {"detail": "Internal server error"} —

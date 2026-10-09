@@ -1,6 +1,16 @@
 -- ============================================================================
--- Migration 20260922000001: connectors table (#2636, epic #2632)
+-- Migration 20261001000003: connectors table (#2636, epic #2632)
 -- ----------------------------------------------------------------------------
+-- RENUMBERED FORWARD from 20260922000001 (#7634). It was authored with a
+-- prefix OLDER than the newest version prod had already applied
+-- (20261001000001), so it sorted before prod's tip and `supabase db push
+-- --include-all` would have landed it ON TOP of its own successor — the state
+-- the drift gate refuses, which was blocking every deploy-api run. It carries
+-- no supabase_migrations.schema_migrations row (the gate listed it repo-ahead).
+-- The DDL below is idempotent — the four RLS policies are dropped-if-exists
+-- before creation, as the trigger already was — so the forward re-land
+-- converges whether or not prod already has the objects.
+--
 -- Timestamp note: this file targets the POST-rename tenancy schema
 -- (teams→organizations, team_memberships→org_memberships, team_id→org_id,
 -- 20260915000001) and must therefore sort AFTER that rename. There is no
@@ -82,6 +92,15 @@ CREATE INDEX IF NOT EXISTS idx_connectors_sync_eligible
 
 -- Enable RLS
 ALTER TABLE public.connectors ENABLE ROW LEVEL SECURITY;
+
+-- Policies are DROPPED before they are created — the same idiom the trigger
+-- below already uses. Without this, a re-land of this DDL onto a database that
+-- already carries the policies aborts on "policy already exists", so the
+-- re-land would be safe only against a prod state we cannot read from here.
+DROP POLICY IF EXISTS connectors_read_org ON public.connectors;
+DROP POLICY IF EXISTS connectors_write_org ON public.connectors;
+DROP POLICY IF EXISTS connectors_update_org ON public.connectors;
+DROP POLICY IF EXISTS connectors_delete_org ON public.connectors;
 
 -- Org members can read connectors for their org (but NOT credential_enc)
 CREATE POLICY connectors_read_org ON public.connectors

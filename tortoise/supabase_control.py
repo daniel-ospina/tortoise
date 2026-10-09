@@ -2134,7 +2134,8 @@ def clear_github_credentials(cp, org_id: str) -> None:
 # ``_CONNECTOR_PUBLIC_SELECT`` is the column allow-list returned to API clients
 # — everything EXCEPT ``credential_enc``. A ``select``-less PostgREST read
 # returns ``*``, i.e. hands the encrypted credential back and defeats the
-# column-level grants in migration 20260922000001.
+# column-level grants in migration 20261001000003_connectors.sql
+# (renumbered forward from 20260922000001, #7634).
 _CONNECTOR_PUBLIC_SELECT = [
     "id", "org_id", "source_type", "config", "sync_status",
     "sync_cursor", "last_sync_at", "last_error",
