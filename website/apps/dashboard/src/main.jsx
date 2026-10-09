@@ -941,9 +941,18 @@ async function copyInline(e, text, label) {
   setTimeout(() => { btn.textContent = label }, ok ? 1600 : 4000)
 }
 
+// #2935 (review P2): the sentinel a copy control renders as a failure. Shared
+// so the setter and the label render cannot drift apart.
+const COPY_FAILED = '__copy_failed__'
+
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
   const [copyFailed, setCopyFailed] = React.useState(false)
+  // #2935 (review P2): the card is reconciled IN PLACE across harness switches
+  // (it renders inside a stable WizardBlock with no `key`), so a refusal on one
+  // prompt left 'Copy failed' on the NEXT one — a payload never attempted, the
+  // mirror of the defect this PR fixes. `copied` had the same latent staleness.
+  React.useEffect(() => { setCopied(false); setCopyFailed(false) }, [text])
   // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
   // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
   // landmarks, and a shared "Setup prompt" name made them
@@ -1861,7 +1870,14 @@ function claimIntentInFlight() {
     // #2935: the `try` here used to be decorative — the rejection is async, so
     // 'Copied ✓' showed over an unchanged clipboard. Only a resolved write is a
     // copy; a refused one claims nothing.
-    if (!(await copyText(text))) { setCopiedStep(''); return }
+    if (!(await copyText(text))) {
+      // #2935 (review P2): a refusal must not be SILENT either — returning
+      // early left the button unchanged and nothing to see. It says what
+      // happened, and clears on its own.
+      setCopiedStep(COPY_FAILED)
+      setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 4000)
+      return
+    }
     setCopiedStep(text)
     setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 1600)  // review: mounted-guard the flash timer (setState after unmount)
   }
@@ -3311,7 +3327,13 @@ function claimIntentInFlight() {
 
   async function wizardCopy(text, label) {
     // #2935: see wizardCopyStep — same decorative try, same false 'Copied ✓'.
-    if (!(await copyText(text))) { setWizardCopied(''); return }
+    if (!(await copyText(text))) {
+      // #2935 (review P2): see wizardCopyStep — the connect step's primary
+      // control must not refuse in silence.
+      setWizardCopied(COPY_FAILED)
+      setTimeout(() => { if (mountedRef.current) setWizardCopied('') }, 4000)
+      return
+    }
     setWizardCopied(label)
     if (label !== 'harness') {
       // #1691: the harness label is STICKY on purpose — the positive
@@ -8450,7 +8472,7 @@ function claimIntentInFlight() {
                                   <code style={{ padding: '2px 6px', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 5, fontSize: 13 }}>{s.code}</code>{' '}
                                   {s.copy && (
                                     <button type="button" className="ghost small" onClick={() => wizardCopyStep(s.copy)}>
-                                      {copiedStep === s.copy ? 'Copied ✓' : 'Copy'}
+                                      {copiedStep === s.copy ? 'Copied ✓' : (copiedStep === COPY_FAILED ? 'Copy failed' : 'Copy')}
                                     </button>
                                   )}
                                 </>
@@ -8474,7 +8496,7 @@ function claimIntentInFlight() {
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
                             onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](harnessKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''), 'harness')}>
-                            {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
+                            {wizardCopied === 'harness' ? 'Copied ✓' : (wizardCopied === COPY_FAILED ? 'Copy failed' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup'))}
                           </button>
                           {wizardCopied === 'harness' && (
                             <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>{HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →"}</button>

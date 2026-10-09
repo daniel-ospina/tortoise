@@ -122,7 +122,7 @@ test('#2935: the inline buttons still say "Copied" when the write really lands',
   assert.deepEqual(wrote, ['secret'])
 })
 
-test('#2935: wizardCopyStep claims NOTHING when the clipboard refuses', async () => {
+test('#2935: wizardCopyStep says "Copy failed" when the clipboard refuses', async () => {
   const copied = []
   const { wizardCopyStep } = build(
     {
@@ -130,11 +130,12 @@ test('#2935: wizardCopyStep claims NOTHING when the clipboard refuses', async ()
       setCopiedStep: (v) => copied.push(v),
       mountedRef: { current: true },
       setTimeout: () => 0,
+      COPY_FAILED: '__copy_failed__',
     },
     ['async function copyText', 'async function wizardCopyStep'],
   )
   await wizardCopyStep('step payload')
-  assert.deepEqual(copied, [''], 'the false-success defect was setCopiedStep(text) here — it must not be set')
+  assert.deepEqual(copied, ['__copy_failed__'], 'the false-success defect was setCopiedStep(text) here — it must not be set')
   assert.ok(!copied.includes('step payload'), 'a refused write must never mark that step as copied')
 })
 
@@ -149,28 +150,68 @@ test('#2935: wizardCopy claims NOTHING when the clipboard refuses', async () => 
       wizardHarness: 'pi',
       onboardingTeamQ: () => '',
       api: () => ({ catch: () => {} }),
+      COPY_FAILED: '__copy_failed__',
     },
     ['async function copyText', 'async function wizardCopy'],
   )
   await wizardCopy('payload', 'harness')
-  assert.deepEqual(marked, [''], 'the button must not flip to Copied ✓ over an unchanged clipboard')
+  assert.deepEqual(marked, ['__copy_failed__'], 'the button must not flip to Copied ✓ over an unchanged clipboard')
   assert.ok(!marked.includes('harness'), 'a refused write must never set the copied label')
 })
 
-test('#2935 TRIPWIRE: no clipboard site is left un-awaited (the defect cannot come back)', () => {
-  // Every `navigator.clipboard` write must be awaited, so its rejection is
-  // observable. A bare `writeText(...)` — with or without a synchronous
-  // try/catch — silently reproduces #2935. This is the ratchet: it fails on a
-  // NEW site, not just on the ones fixed here.
-  const lines = mainJsx.split('\n')
+// #2935 (review P2-1): the ratchet is a FUNCTION so it can be tested against
+// sources that are not main.jsx. The first version keyed on the qualified
+// literal `navigator.clipboard?.writeText(` on one line, which a destructured
+// alias, a bracket access, or a multi-line call all evaded — a guard that only
+// catches the shape it was written against is theatre. Flag the `writeText`
+// IDENTIFIER (plus the other copy primitives), unless the write is awaited or
+// its rejection is handled.
+export function clipboardWriteOffences(src) {
   const offences = []
-  lines.forEach((line, i) => {
+  src.split('\n').forEach((line, i) => {
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return
     const code = line.replace(/\/\/.*$/, '')
-    if (!/navigator\.clipboard\??\.writeText\s*\(/.test(code)) return
-    if (/await\s+navigator\.clipboard/.test(code)) return
-    // Comments describing the pattern are not code.
-    if (/^\s*\*/.test(line)) return
+    const isCopy = /\bwriteText\s*\(/.test(code)
+      || /\bexecCommand\s*\(\s*['"]copy['"]/.test(code)
+      || /\bClipboardItem\b/.test(code)
+    if (!isCopy) return
+    // `await` must be on the same line; `.then(`/`.catch(` observe the promise.
+    if (/await\s+\.?\s*[A-Za-z_$]/.test(code)) return
+    if (/\.then\s*\(|\.catch\s*\(/.test(code)) return
     offences.push(`main.jsx:${i + 1}: ${line.trim()}`)
   })
+  return offences
+}
+
+test('#2935 TRIPWIRE: no clipboard site is left un-awaited (the defect cannot come back)', () => {
+  const offences = clipboardWriteOffences(mainJsx)
   assert.deepEqual(offences, [], `un-awaited clipboard writes reintroduce #2935:\n${offences.join('\n')}`)
+})
+
+test('#2935 TRIPWIRE is real: it catches the shapes that evaded the first version', () => {
+  // Mutation-tested against the forms a reviewer used to defeat the literal
+  // matcher. Each of these reproduces the defect and MUST be flagged.
+  const evading = [
+    'navigator.clipboard.writeText(x)',
+    'const { writeText } = navigator.clipboard; writeText(x)',
+    'navigator["clipboard"].writeText(x)',
+    'const cb = navigator.clipboard; cb.writeText(x)',
+    'document.execCommand("copy")',
+    'navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })])',
+  ]
+  evading.forEach((line) => {
+    assert.equal(clipboardWriteOffences(line).length, 1, `the ratchet must flag: ${line}`)
+  })
+})
+
+test('#2935 TRIPWIRE does not cry wolf on an observed rejection', () => {
+  const handled = [
+    'await navigator.clipboard.writeText(x)',
+    'await copyText(x)',
+    'navigator.clipboard.writeText(x).catch(() => {})',
+    '// navigator.clipboard.writeText(x) -- not code',
+  ]
+  handled.forEach((line) => {
+    assert.deepEqual(clipboardWriteOffences(line), [], `must NOT flag: ${line}`)
+  })
 })
