@@ -10,8 +10,8 @@ tool's CONTRACT, not Docker's behaviour:
     another lane's private test DB, and the shared dev/test instances must not
     be removable by it either), and
   * ``uri`` prints an ``eval``-able export line on stdout, with diagnostics on
-    stderr only — the documented ``eval "$(uv run python tools/test_lane.py
-    uri)"`` usage silently breaks if a diagnostic lands on stdout.
+    stderr only — anything that leaked onto stdout would corrupt the ``eval``-ed
+    value, which silently breaks the lane's target rather than aborting it.
 
 Where a function's real body is the safety property (``container_state``,
 ``_graph_count``, ``_container_publishes``, ``repo_root``), it is tested
@@ -696,9 +696,12 @@ def test_the_documented_shell_contract_aborts_on_failure():
     assert r.stdout.strip() == "", f"nothing reaches stdout on failure: {r.stdout!r}"
     assert "REACHED" not in r.stdout + r.stderr, "the shell ran on with a stale URI"
     doc = tl.__doc__ or ""
-    assert 'eval "$(uv run python tools/test_lane.py uri)"' not in doc, (
-        "the one-line form cannot abort (the tool prints nothing on stdout and "
-        'eval "" returns 0) — keep the two-step USAGE'
+    assert 'uri="$(uv run python tools/test_lane.py uri)" || exit 1' in doc, (
+        "USAGE must document the two-step form: assigning first is what puts the "
+        "tool's exit status on the `||`"
+    )
+    assert 'eval "$uri"' in doc, (
+        "USAGE must document evaluating the captured value as its own step"
     )
 
 

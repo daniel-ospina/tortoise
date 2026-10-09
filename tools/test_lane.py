@@ -138,7 +138,7 @@ READY_TIMEOUT = 60
 #: only by the NAME_PREFIX rule, which the truly shared names do not carry.
 #: `is_managed` consults it, so a listed name is refused even if it did share the
 #: prefix (pinned by
-#: tests/test_test_lane_tool.py::test_is_managed_refuses_a_protected_name_that_shares_the_prefix).
+#: tests/test_test_lane_tool.py::test_a_protected_name_sharing_the_prefix_is_still_refused).
 PROTECTED_NAMES = frozenset({
     "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb",
 })

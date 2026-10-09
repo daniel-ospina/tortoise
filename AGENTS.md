@@ -433,7 +433,8 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 > when #5084 was filed on 2026-09-24), and a single-file run showed graphs appearing from
 > *other* lanes' sessions. `tools/test_lane.py` gives the lane its own throwaway container
 > — for every test that takes its target from `TORTOISE_DB_URI`, the graphs land in a
-> container no other lane can name, so no lane can leave residue on another's target.
+> container this tool refuses to address from any other lane, so no lane's run leaves
+> residue on another's target.
 > The container is not self-cleaning: it lives until an explicit `down`. **Not yet the whole suite**:
 > tests that build their URI through `tests/_live_utils.py` key on
 > `TORTOISE_TEST_DOCKER_PORT` (default 6379) and a `falkordb` password, so they still address
