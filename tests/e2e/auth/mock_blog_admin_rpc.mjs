@@ -16,16 +16,45 @@
  *                                  + body, so the test can prove the proxy
  *                                  forwarded them rather than the browser.
  *
- * Control endpoints (`/__mock/*`) let the test flip the admin verdict and read
- * what was seen. No route is stubbed in a way that would hide the property:
- * the credential really is attached server-side (the test asserts it), and the
- * upstream really does refuse the empty body.
+ *   GET/POST /rest/v1/blog_posts — the /api/sb/* Token Handler's PostgREST
+ *   GET/POST /storage/v1/object/blog-images/*
+ *                                — upstream (#4178). Records the method, path,
+ *                                  search and the FULL credential headers the
+ *                                  upstream actually saw, so the suite can prove
+ *                                  the credential is server-minted and the
+ *                                  CLIENT's cookie/authorization/apikey never
+ *                                  arrived. Answers a benign 200.
+ *
+ * Control endpoints (`/__mock/*`) let the test flip the admin verdict, inject an
+ * upstream fault on a chosen surface (`data` or `admin`, so the Token Handler's
+ * two independent fault branches stay independently provable) at a chosen STATUS
+ * (so the 5xx and the non-5xx classification branches are each provable), and
+ * read what was seen. No route is stubbed in a way that would
+ * hide the property: the credential really is attached server-side (the test
+ * asserts it), and the upstream really does refuse the empty body.
  */
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT || 9011);
 
 let admin = true;
+// #4178/#3559: a 5xx, injectable per upstream SURFACE. The Token Handler
+// answers a fault with 503 (never a sign-out) at TWO independent places — the
+// `is_admin` membership check (`checkAdmin`) and the proxied DATA call — and a
+// single whole-mock flag would let one test reach the fault through the other's
+// branch, so neither branch would have an independent guard (#3559 review).
+// ONE mechanism (`upstreamFault`), ONE control endpoint, with a target so each
+// branch is provable on its own AND a status so the two status classes the
+// handler classifies differently stay provable. `value: true` with no target
+// keeps #4178's meaning (DATA); no status keeps the 500 default.
+let upstreamFault = null; // null | { surface: "data" | "admin" | "all", status: number, body?: object }
+const faulted = (surface) =>
+  upstreamFault !== null && (upstreamFault.surface === surface || upstreamFault.surface === "all");
+const faultStatus = () => upstreamFault?.status ?? 500;
+// #3559 P2-1: the classification of an `is_admin` rejection depends on the
+// BODY (a JWT error is the USER's token; `Invalid API key` is the SERVICE's),
+// so the fault's body must be selectable too — status alone cannot express it.
+const faultBody = () => upstreamFault?.body ?? { error: "upstream_fault" };
 const seen = [];
 
 function json(res, status, body) {
@@ -43,6 +72,12 @@ const server = http.createServer((req, res) => {
 
     if (req.method === "POST" && url.pathname === "/rest/v1/rpc/is_admin") {
       seen.push({ kind: "is_admin", auth });
+      // #3559: the gate's OWN upstream is faultable too, and at any status.
+      // `checkAdmin` must turn EITHER status class into 503 (unavailable), never
+      // 403 (not_admin) — conflating a store fault with a signed-in non-admin is
+      // the #3485 class. The 500 case is guarded by the pre-fix handler; the
+      // non-5xx case is what #3559's broadened classification actually changed.
+      if (faulted("admin")) return json(res, faultStatus(), faultBody());
       return json(res, 200, admin);
     }
 
@@ -53,16 +88,70 @@ const server = http.createServer((req, res) => {
       return json(res, 400, { error: "invalid_slug" });
     }
 
+    // #4178: the /api/sb/* Token Handler's upstream — the console's PostgREST
+    // reads/writes on `blog_posts` and its Storage uploads. Every header the
+    // upstream actually received is recorded, so the suite can assert the
+    // credential is the SERVER's and the client's never arrived.
+    if (
+      (req.method === "GET" || req.method === "POST" || req.method === "PATCH" || req.method === "DELETE") &&
+      (url.pathname === "/rest/v1/blog_posts" || url.pathname.startsWith("/rest/v1/blog_posts/"))
+    ) {
+      seen.push({
+        kind: "blog_posts",
+        method: req.method,
+        path: url.pathname,
+        search: url.search,
+        auth,
+        apikey: req.headers["apikey"] || "",
+        cookie: req.headers["cookie"] || "",
+        contentType: req.headers["content-type"] || "",
+        body,
+      });
+      if (faulted("data")) return json(res, faultStatus(), faultBody());
+      return json(res, 200, []);
+    }
+
+    if (
+      (req.method === "GET" || req.method === "POST" || req.method === "PUT") &&
+      (url.pathname === "/storage/v1/object/blog-images" ||
+        url.pathname.startsWith("/storage/v1/object/blog-images/"))
+    ) {
+      seen.push({
+        kind: "storage",
+        method: req.method,
+        path: url.pathname,
+        search: url.search,
+        auth,
+        apikey: req.headers["apikey"] || "",
+        cookie: req.headers["cookie"] || "",
+        contentType: req.headers["content-type"] || "",
+        body,
+      });
+      if (faulted("data")) return json(res, faultStatus(), faultBody());
+      return json(res, 200, { Key: url.pathname.slice(1) });
+    }
+
     if (url.pathname === "/__mock/state") {
-      return json(res, 200, { admin, seen });
+      return json(res, 200, { admin, upstreamFault, seen });
     }
     if (url.pathname === "/__mock/admin") {
       admin = JSON.parse(body || "{}").value === true;
       return json(res, 200, { admin });
     }
+    if (url.pathname === "/__mock/upstream-fault") {
+      const p = JSON.parse(body || "{}");
+      // No target on an ON call preserves #4178's data-only fault; no status
+      // preserves its 500; no body preserves its `{error:"upstream_fault"}`.
+      upstreamFault =
+        p.value === true
+          ? { surface: p.target || "data", status: p.status || 500, body: p.body }
+          : null;
+      return json(res, 200, { upstreamFault });
+    }
     if (url.pathname === "/__mock/reset") {
       seen.length = 0;
       admin = true;
+      upstreamFault = null;
       return json(res, 200, { ok: true });
     }
 

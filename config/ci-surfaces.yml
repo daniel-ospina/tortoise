@@ -2062,9 +2062,12 @@ surfaces:
   - test_pi_capture_hooks.py
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
-  # #3485: dual-registered with `api` (cross-surface registration is deliberate,
-  # #2913). This is the website-guard home for the shared session-bridge asset:
-  # a `website/assets/supabase-session.js` change selects this surface via
+  # #3485/#3559: dual-registered with `api` (cross-surface registration is
+  # deliberate, #2913). This was the website-guard home for the shared
+  # session-bridge asset; the bridge (`website/assets/supabase-session.js`) was
+  # DELETED in #3559, so this guard now proves its ABSENCE and covers the
+  # surviving subjects it still reads (`main.jsx`, `signup.html`, `backend.ts`).
+  # A `website/apps/blog-admin/src/lib/backend.ts` change selects this surface via
   # SOURCE_PATTERNS, so the guard runs on the PR that edits the file it guards.
   - test_cross_subdomain_cookie_sync.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
@@ -2100,10 +2103,12 @@ surfaces:
   # through the same-origin BFF. It lives at the tests/ root because it scans all
   # of website/, not just the onboarding pages.
   - test_no_legacy_token_path.py
-  # #3503: the fragment-retention regression gate for the legacy cross-subdomain
-  # bridge (a failed session-cookie write must not destroy the only copy of the
-  # credential). Pure Node-harness + cookie-jar shim, no browser/network, so it
-  # runs in the python-ci matrix. Moves to the deletion test when #3559 lands.
+  # #3503/#3559: the fragment-retention regression gate for the legacy
+  # cross-subdomain bridge. The bridge is DELETED (#3559), so the gate is now its
+  # absence proof — the failed-write/destroyed-fragment class is unreachable
+  # because no browser surface writes a session at all. Pure static, no
+  # browser/network, so it runs in the python-ci matrix. It still exports
+  # `_require_node`, which `test_oauth_consent_pkce.py` imports.
   - test_session_bridge_fragment_retention.py
   - test_waitlist_form.py
   - test_w7_publish.py

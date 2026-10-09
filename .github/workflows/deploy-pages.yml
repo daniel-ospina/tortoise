@@ -725,27 +725,29 @@ jobs:
         # and assets must land at `dist/admin/` so the gate Function
         # (functions/admin/[[path]].ts) can serve them from ASSETS — and so the
         # whole console ships with THIS project, same-origin with the
-        # `__Host-session` cookie. VITE_* are public-safe (anon key). The app's
-        # env guard throws at RUNTIME (browser), so missing secrets would
-        # silently ship a white-screen SPA — fail fast instead.
-        # #4361: both secrets are bound in `env:` and read as QUOTED shell
-        # variables. `${{ secrets.X }}` must never appear in a `run:` body —
+        # `__Host-session` cookie. VITE_SUPABASE_URL is public-safe (the project
+        # origin). The app's env guard throws at RUNTIME (browser), so a missing
+        # secret would silently ship a white-screen SPA — fail fast instead.
+        # #4178: the console's data layer rides the same-origin `/api/sb/*` Token
+        # Handler, which attaches the Supabase credential server-side, so the
+        # anon key is NO LONGER a build input (`backend.ts` passes a placeholder
+        # and requires only VITE_SUPABASE_URL).
+        # #4361: the secret is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
         # GitHub substitutes it into the shell SOURCE before bash parses it, so
         # a value containing `"` loses its quotes (the #4334 outage) and one
         # containing `$(…)`/backticks would EXECUTE. An expanded variable's
         # contents are data, never re-parsed.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::error::SUPABASE_URL repo secret required for the blog-admin build"
             exit 1
           fi
           cd website/apps/blog-admin
           npm ci
           VITE_SUPABASE_URL="$SUPABASE_URL" \
-          VITE_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
             npm run build
           mkdir -p ../dashboard/dist/admin
           cp -r dist/* ../dashboard/dist/admin/

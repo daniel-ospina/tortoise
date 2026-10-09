@@ -1,9 +1,12 @@
 /**
  * blog-api — typed functions over supabase-js for the Tortoise blog CMS.
  *
- * The `supabase`-backed blog_posts reads/writes ride the legacy `sb-tortoise-auth-token`
- * session cookie via `src/lib/supabase.ts` — a RETAINED legacy surface (#4178), not the BFF
- * session; the `/blog/api/*` calls below ride the BFF session instead
+ * The `blog_posts` reads/writes and the `blog-images` uploads ride the BFF-backed
+ * Supabase client (`src/lib/backend.ts`): each `rest/v1`/`storage/v1` request is
+ * rewritten to the same-origin `/api/sb/*` Token Handler, which attaches the
+ * server-minted credential. The browser holds only the HttpOnly `__Host-session`
+ * — the JS-readable `sb-tortoise-auth-token` cookie is gone (#4178, parent #3501).
+ * The `/blog/api/*` calls below ride the BFF session the same way.
  * (RLS: blog_posts admin_all policy gates on is_admin() membership — migration 20260827000001).
  * No service-role keys client-side.
  *
@@ -13,7 +16,7 @@
  * (status='published' AND reviewed_at IS NULL) + held (hold_for_review=true).
  */
 
-import { supabase, SUPABASE_URL } from '@/lib/supabase';
+import { bff, SUPABASE_URL } from '@/lib/backend';
 import type { BlogPostRow, BlogPostInsert, BlogPostUpdate } from '@/lib/types';
 
 export type { BlogPostRow };
@@ -39,7 +42,7 @@ export const POST_SELECT = `
 
 /** All posts for the admin surface (admin RLS allows SELECT ALL). */
 export async function listPosts(): Promise<BlogPostRow[]> {
-  const { data, error } = await supabase
+  const { data, error } = await bff
     .from('blog_posts')
     .select(POST_SELECT)
     .order('updated_at', { ascending: false });
@@ -49,7 +52,7 @@ export async function listPosts(): Promise<BlogPostRow[]> {
 
 /** Review queue — the three item kinds from plan W2 (archived rows excluded — archive is terminal). */
 export async function listQueue(): Promise<BlogPostRow[]> {
-  const { data, error } = await supabase
+  const { data, error } = await bff
     .from('blog_posts')
     .select(POST_SELECT)
     .or(`status.eq.draft,and(status.eq.published,reviewed_at.is.null),hold_for_review.eq.true`)
@@ -60,7 +63,7 @@ export async function listQueue(): Promise<BlogPostRow[]> {
 }
 
 export async function getPost(id: string): Promise<BlogPostRow | null> {
-  const { data, error } = await supabase
+  const { data, error } = await bff
     .from('blog_posts')
     .select(POST_SELECT)
     .eq('id', id)
@@ -71,7 +74,7 @@ export async function getPost(id: string): Promise<BlogPostRow | null> {
 
 export async function createPost(input: Partial<BlogPostRow>): Promise<BlogPostRow> {
   const record = sanitizeInsert(input);
-  const { data, error } = await supabase
+  const { data, error } = await bff
     .from('blog_posts')
     .insert(record)
     .select(POST_SELECT)
@@ -82,7 +85,7 @@ export async function createPost(input: Partial<BlogPostRow>): Promise<BlogPostR
 
 export async function updatePost(id: string, patch: Partial<BlogPostRow>): Promise<BlogPostRow> {
   const record = sanitizeUpdate(patch);
-  const { data, error } = await supabase
+  const { data, error } = await bff
     .from('blog_posts')
     .update(record)
     .eq('id', id)
@@ -441,13 +444,13 @@ export async function uploadBlogImage(file: File, slug: string): Promise<string>
   const filename = `${Date.now()}-${safe || 'image'}`;
   const path = `${folder}/${filename}`;
 
-  const { error } = await supabase.storage.from(IMAGE_BUCKET).upload(path, file, {
+  const { error } = await bff.storage.from(IMAGE_BUCKET).upload(path, file, {
     contentType: file.type,
     cacheControl: '31536000',
   });
   if (error) throw error;
 
-  const { data } = supabase.storage.from(IMAGE_BUCKET).getPublicUrl(path);
+  const { data } = bff.storage.from(IMAGE_BUCKET).getPublicUrl(path);
   return data.publicUrl;
 }
 
@@ -474,6 +477,6 @@ export async function deleteBlogImage(publicUrl: string): Promise<void> {
 
   const path = url.pathname.slice(STORAGE_OBJECT_PREFIX.length);
   if (!path) return;
-  const { error } = await supabase.storage.from(IMAGE_BUCKET).remove([path]);
+  const { error } = await bff.storage.from(IMAGE_BUCKET).remove([path]);
   if (error) throw error;
 }

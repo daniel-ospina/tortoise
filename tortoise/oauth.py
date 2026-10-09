@@ -1982,7 +1982,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const SUPABASE_ANON_KEY = __SUPABASE_ANON_KEY__;
   const AUTHORIZE_PATH = "/oauth/authorize";
   // #1704: reuse the dashboard's parent-domain session cookie
-  // (sb-tortoise-auth-token on .premiselabs.co — main.jsx supabaseStorage).
+  // (sb-tortoise-auth-token on .premiselabs.co — the dashboard's supabaseStorage
+  // adapter, DELETED in #4054).
   // The user is already signed in on app.premiselabs.co; this page must not
   // ask for a SECOND login. persistSession stays TRUE (gotrue DISCARDS a
   // custom storage when persistSession is false, review P0) and
@@ -1992,21 +1993,23 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // ingest a token fragment: #3496 moved this flow to PKCE, so the provider
   // returns `?code=` in the QUERY, and the library gates the code exchange on
   // this flag (an implicit-style fragment return is refused by the bundle).
-  // #3503: this page is the ONE place it stays true — it does NOT load
-  // website/assets/supabase-session.js (that file's factory sets it false,
-  // because its load-time IIFE is the fragment consumer there). loadParams()
+  // #3503: this page is the ONE place it stays true — it does NOT load the
+  // shared bridge (website/assets/supabase-session.js, DELETED in #3559, whose
+  // factory set it false because its load-time IIFE was the fragment consumer
+  // there). loadParams()
   // below still merges the hash, because a provider REFUSAL arrives there.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — the COOKIE mechanics (name, domain
   // and secure attributes, size guard; getItem reads an existing dashboard
   // session so there is no second login; setItem/removeItem are REAL writes,
-  // because getSession() always re-reads storage) are ported from the
+  // because getSession() always re-reads storage) were ported from the
   // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
-  // SPLITS the provenance: the KEY-IDENTITY ROUTING below is ported from the
+  // SPLITS the provenance: the KEY-IDENTITY ROUTING below was ported from the
   // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
-  // supabase.ts) — the DASHBOARD bridge (website/assets/supabase-session.js)
-  // has no key routing at all: it writes whatever key it is handed to the
-  // cookie, which is the hole this adapter now closes.
+  // supabase.ts) — the DASHBOARD bridge had no key routing at all: it wrote
+  // whatever key it was handed to the cookie, which is the hole this adapter
+  // now closes. Both source files were DELETED (#3559; the console adapter in
+  // #4178), so oauth.py is now the LAST copy of this contract.
   // Method shorthand so `this` binds to the object (arrow functions
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
@@ -2015,8 +2018,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const SIZE_GUARD = 3800;
   // #3496 item 6: the write-path cap, DERIVED from the rule (never hardcoded —
   // a literal previously disagreed with the rule by 4 bytes, leaving an untested
-  // band where the code wrote and the browser dropped). Mirrors
-  // website/assets/supabase-session.js:46-47.
+  // band where the code wrote and the browser dropped). Mirrored
+  // website/assets/supabase-session.js:46-47 (DELETED in #3559).
   const COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
   const SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
   const isLocal = () => {
@@ -2033,7 +2036,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const secureAttr = () => (isLocal() ? "" : "; Secure");
   // #3496: the PKCE code_verifier must NEVER reach the JS-readable
   // parent-domain jar. Key-identity routing, ported from the blog-admin
-  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts):
+  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts,
+  // DELETED in #4178 — oauth.py is the last copy):
   // ONLY the session key may reach document.cookie; every other key is an
   // origin-scoped aux credential. The aux chain has NO cookie leg, so the
   // allowlist is fail-closed by construction.
@@ -2134,7 +2138,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           delete obj.provider_token;
           delete obj.provider_refresh_token;
           // #3496 item 6: port the shared bridge's non-essential-claim
-          // narrowing (website/assets/supabase-session.js:111-135).
+          // narrowing (website/assets/supabase-session.js:111-135, DELETED in #3559).
           if (obj.user) {
             delete obj.user.identities;
             if (obj.user.user_metadata) {
