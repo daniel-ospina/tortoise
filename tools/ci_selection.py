@@ -299,17 +299,26 @@ SOURCE_PATTERNS = {
                    # and the guard never runs on the PR that owns it — the same
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
-                   # The DIRECTORY is the correct granularity — not the files that
-                   # happened to break (the same rule the dashboard/functions/
-                   # entry below already states). The guard rglob-scans the whole
-                   # dist tree, so registering only dist/index.html let a change
-                   # to the asset itself select NO surface and skip the guard
-                   # entirely — the silent-drop class these entries exist to close.
-                   "website/apps/blog-admin/dist/",
-                   # The env pin's own fixture: _expected_supabase_origin() reads
-                   # this file to derive the origin the bundle must carry, so a
-                   # change to it must run the guard that compares against it.
-                   "website/apps/blog-admin/.env.example",
+                   # The guard reads the WHOLE website tree (`WEBSITE.rglob("*")`)
+                   # and the committed blog-admin artifact. Registering only
+                   # dist/index.html (and then dist/assets/) left the guard unrun
+                   # for a change to any OTHER file it reads — three review rounds
+                   # each found another instance of that same silent drop.
+                   #
+                   # NOT a wholesale `website/`: `test_unrelated_website_change_
+                   # stays_tier1` pins that a website path owning no guard test
+                   # keeps tier-1 behavior. So each path this guard actually reads
+                   # is named — the granularity the carve-out design requires.
+                   "website/apps/blog-admin/",
+                   "website/apps/dashboard/index.html",
+                   "website/apps/dashboard/vite.config.js",
+                   "website/apps/dashboard/eslint.config.js",
+                   "website/apps/dashboard/scripts/",
+                   "website/blog/",
+                   "website/functions/",
+                   "website/consent.js",
+                   "website/website_architecture.md",
+                   "docs/auth-architecture.md",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,
