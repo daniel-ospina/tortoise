@@ -1387,6 +1387,94 @@ def test_architecture_docs_do_not_restate_the_rejected_parent_domain_session():
             "and the next reader re-derives the parent-domain cookie."
         )
 
+        # …and the CONSENT PAGE's live acceptance of the legacy cookie must stay stated
+        # (#3559 P1-1). The assertions above forbid the cookie as the SESSION; they are
+        # silent on WHO still accepts it, and they passed against the old, false "no longer
+        # accepted" wording. Pin the corrected claim here.
+        acceptance_violations = _consent_page_acceptance_violations(rel, text)
+        assert not acceptance_violations, "\n\n".join(acceptance_violations)
+
+
+# ── The docs must keep the consent page as the legacy cookie's ONLY acceptor ────────
+#
+# #3559 narrowed the docs to "no surface OTHER than the consent page that issues it
+# accepts" the legacy `sb-tortoise-auth-token` cookie, because that page re-reads the
+# cookie it issues as its own session (`tortoise/oauth.py::cookieStorage`). The docs
+# gate above is silent on this: it forbids the parent-domain cookie as the SESSION, and
+# it passed unchanged against the OLD "no longer accepted" wording. A restore of that
+# wording would therefore ship a false claim with the gate green (proved by running the
+# docs gate against the pre-fix docs at `245f42128^`).
+#
+# A POSITIVE + NEGATIVE pair, because either alone is gameable:
+#   - NEGATIVE: the current region must not carry the OLD global denial;
+#   - POSITIVE: it must AFFIRM that the consent page accepts the cookie — the sentence
+#     that disappears when the denial is restored.
+# The NEGATIVE set is deliberately the UNAMBIGUOUS global claims, and a denial is
+# excused by an "other"/"except" qualifier. A bare `no longer accepted` is NOT a
+# trigger on its own: website_architecture.md's host table correctly says the cookie is
+# "no longer accepted BY THEM" (scoped to that host), and matching it would redden a
+# correct doc.
+_NO_SURFACE_ACCEPTS = re.compile(
+    r"no longer accepted\s*[:(]"
+    r"|\bno longer accepted by any surface\b"
+    r"|\bno\s+(?:[\w-]+\s+){0,2}(?:surface|consumer)s?\s+(?:accepts?|reads?|authenticat\w*)\s+it\b"
+    r"|\bauthenticat\w*\s+nothing\b"
+    r"|\bNO\s+surface\b"
+    r"|\bnot accepted\b(?!\s+by\b)",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_EXCEPTION = re.compile(r"\bother\b|\bexcept\b", re.IGNORECASE)
+# The corrected affirmation: the consent page is (still) an accepting surface, and it
+# is the ONLY one. Matched on the corrected phrasings, so restoring the old wording
+# removes it.
+_CONSENT_PAGE_ACCEPTS = re.compile(
+    r"accepted\s+by\s+the\s+(?:one\s+)?page\s+that\s+issues\s+it"
+    r"|consent[- ]page\b[^.\n]{0,80}\b(?:re-?reads?|accepts?|authenticat(?:es|e|ing))\b"
+    r"|no\s+surface\s+other\s+than[^.\n]{0,80}accepts?\b"
+    r"|no\s+other\b[^.\n]{0,80}\baccepts?\b"
+    r"|by\s+no\s+other\s+surface\b",
+    re.IGNORECASE,
+)
+
+
+def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
+    """Violations of #3559's corrected acceptance claim in one doc's CURRENT region.
+
+    Empty means: the region carries neither the OLD global denial ("no longer accepted" /
+    "no Tortoise surface accepts it any more") nor a missing affirmation that the
+    consent page which issues the cookie accepts it. Called from the docs gate above.
+    """
+    pairs = _current_lines(rel, text)
+    scanned = "\n".join(ln for _, ln in pairs)
+
+    violations: list[str] = []
+    denials: list[tuple[int, str]] = []
+    for item in _items(pairs):
+        joined = " ".join(ln for _, ln in item)
+        for m in _NO_SURFACE_ACCEPTS.finditer(joined):
+            if _ACCEPTANCE_EXCEPTION.search(_sentence_around(joined, m.start())):
+                continue
+            denials.append((item[0][0], item[0][1].strip()))
+            break
+    if denials:
+        violations.append(
+            f"{rel} asserts, in its CURRENT-architecture region, that NO surface accepts "
+            "the legacy `sb-tortoise-auth-token` cookie:\n"
+            + "\n".join(f"  line {n}: {ln}" for n, ln in denials)
+            + "\n\nThat is false: the MCP consent page re-reads the cookie it issues as its "
+            "own session and uses its access token as a bearer for `/oauth/consent` and "
+            "`/oauth/consent/preview` (`tortoise/oauth.py`; see §2.1 'Legacy cohort'). The "
+            "claim is 'no surface OTHER than the consent page that issues it accepts it'."
+        )
+    if not _CONSENT_PAGE_ACCEPTS.search(scanned):
+        violations.append(
+            f"{rel} does not AFFIRM, in its CURRENT-architecture region, that the consent "
+            "page which issues the legacy cookie accepts it. The corrected claim names "
+            "that page as the live (and only) acceptor; restoring the old 'no longer "
+            "accepted' wording removes this affirmation."
+        )
+    return violations
+
 
 def test_auth_architecture_doc_keeps_the_rendered_welcome_case():
     """

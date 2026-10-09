@@ -216,8 +216,10 @@ export function isRefreshTokenDead(status: number, errorBody: string): boolean {
  *     configured key at all — a rotated/wrong `SUPABASE_ANON_KEY`, i.e. an
  *     infrastructure/configuration fault; and
  *   - PostgREST answers **401/403** with a JWT error (`PGRST301` for an
- *     undecodable JWT, `PGRST303` for a claims failure, or a message like
- *     `JWT expired`) when it is the USER's bearer that was rejected.
+ *     undecodable JWT, `PGRST302` for a rejected/absent bearer, `PGRST303` for
+ *     a claims failure, a message like `JWT expired`, or a GoTrue code such as
+ *     `invalid_jwt` / `unusable_credential`) when it is the USER's bearer that
+ *     was rejected.
  *
  * Treating the first as "you are not an admin" (or as a re-auth bounce) is the
  * #3485 class: a deployment fault read as a session verdict. Status cannot tell
@@ -234,22 +236,37 @@ export function isUserTokenRejection(status: number, errorBody: string): boolean
   // CONFIGURATION fault, not a credential verdict — so it only counts when the
   // body names a JWT failure, never by status alone.
   if (status !== 401 && status !== 403) return false;
-  let text = errorBody;
+  // ONLY a JSON error envelope can name a credential failure. A NON-JSON body is
+  // — by construction — not a Supabase/PostgREST error, so it can never be
+  // EVIDENCE that the USER's bearer was rejected: an HTML config or WAF error
+  // page that happens to contain `jwt` / `invalid token`, a truncated response,
+  // or an empty body is a deployment fault, not a session verdict. Testing the
+  // RAW text made a WAF page a sign-out (#3485). Unparseable → fault (503).
+  let parsed: {
+    code?: string;
+    error?: string;
+    msg?: string;
+    message?: string;
+    error_description?: string;
+  };
   try {
-    const parsed = JSON.parse(errorBody) as {
-      code?: string;
-      error?: string;
-      msg?: string;
-      message?: string;
-      error_description?: string;
-    };
-    text = [parsed.code, parsed.error, parsed.msg, parsed.message, parsed.error_description]
-      .filter(Boolean)
-      .join(" ");
+    parsed = JSON.parse(errorBody) as typeof parsed;
   } catch {
-    /* not JSON — fall back to the raw body */
+    return false;
   }
-  return /pgrst30[13]|\bjwt\b|invalid (?:token|claim)|token (?:has )?expired/i.test(text);
+  if (parsed === null || typeof parsed !== "object") return false;
+  // The CODE field FIRST: it is the provider's own identifier, and the message
+  // wording is theirs to change. `\bjwt\b` could never match GoTrue's
+  // `INVALID_JWT` — `_` is a word character, so there is no boundary before
+  // `jwt` — and `PGRST302` / `UNUSABLE_CREDENTIAL` were missed entirely, so a
+  // user whose bearer the gateway rejected was never signed out. Anything not
+  // recognised here is NOT a credential verdict and stays a fault (503).
+  const code = typeof parsed.code === "string" ? parsed.code : "";
+  if (/^(?:pgrst30[123]|invalid_jwt|bad_jwt|unusable_credential)$/i.test(code)) return true;
+  const text = [parsed.error, parsed.msg, parsed.message, parsed.error_description]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ");
+  return /pgrst30[123]|\bjwt\b|invalid (?:token|claim)|token (?:has )?expired/i.test(text);
 }
 
 export async function refreshSession(

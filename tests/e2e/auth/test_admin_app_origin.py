@@ -188,7 +188,13 @@ def stack(_dashboard_dist_built, tmp_path_factory):
             "--compatibility-date=2026-08-26",
             "--d1", "SESSIONS",
             "--persist-to", str(PERSIST),
-            "-b", f"SUPABASE_URL={MOCK_URL}",
+            # DELIBERATELY a trailing slash (#3559 P2-2): it is a legal spelling of
+            # SUPABASE_URL and used to break the gate's `is_admin()` URL (the base
+            # became `//`, so the RPC path was `//rest/v1/rpc/is_admin`). The
+            # sibling /api/sb suite does the same on purpose; keeping it here makes
+            # this whole suite a permanent guard on the admin normalisation rather
+            # than a one-off case.
+            "-b", f"SUPABASE_URL={MOCK_URL}/",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             # Both the gate's RPC and the proxy's upstream live on the mock.
             "-b", f"BLOG_ORIGIN={MOCK_URL}",

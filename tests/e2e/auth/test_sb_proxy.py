@@ -557,6 +557,45 @@ def test_admin_check_rejection_is_classified_by_body(
     )
 
 
+def test_rejected_user_token_401_clears_the_session_cookie(stack):
+    """A dead USER credential must also CLEAR the browser's session handle.
+
+    The route answers `not_signed_in` (401) for a rejected minted token. Without
+    the `Set-Cookie` clear the browser keeps the dead `__Host-session` handle and
+    every subsequent call re-401s against the same unusable session — a sign-out
+    the user can never act on. The clear must keep the `__Host-` prefix valid: no
+    `Domain` attribute, and `Max-Age=0`.
+
+    No test in this suite asserted `Set-Cookie` at all before this one (#3559
+    P2-3), so the clear could be dropped with the suite still green.
+    """
+    _reset()
+    _set_upstream_fault(
+        True, target="admin", status=401, body={"code": "PGRST301", "message": "JWT expired"}
+    )
+    try:
+        status, body, headers = _req(
+            "/api/sb/rest/v1/blog_posts?select=*", cookie=f"__Host-session={HANDLE}"
+        )
+    finally:
+        _set_upstream_fault(False)
+
+    assert status == 401, f"a rejected user token must be OUR 401, got {status} {body}"
+    assert json.loads(body)["error"] == "not_signed_in", body
+
+    cookie = headers.get("Set-Cookie", "")
+    assert cookie, (
+        "the 401 did not clear the session cookie — the dead handle persists and "
+        "every call keeps 401ing against it"
+    )
+    assert cookie.startswith("__Host-session="), cookie
+    assert "Max-Age=0" in cookie, f"the clear must expire the cookie: {cookie!r}"
+    assert "Domain" not in cookie, (
+        "a `__Host-` cookie may carry NO Domain attribute (the browser rejects the "
+        f"whole cookie otherwise, so the clear would be silently ignored): {cookie!r}"
+    )
+
+
 def test_unknown_handle_is_401(stack):
     """A dead handle IS a sign-out — the other side of the same distinction."""
     _reset()
