@@ -1009,7 +1009,7 @@ class _FakeControlPlane:
         constructed with: ``None`` (the default) models a server that does not
         answer ``count=exact``, and completeness then rests on the walk reaching
         an EMPTY page — the production fallback. A short page is NOT that
-        signal; it is a per-request cap (round 1's fail-open).
+        signal; it is a per-request cap (a fail-OPEN).
         """
         rows = self._rows
         last = None
@@ -1021,7 +1021,12 @@ class _FakeControlPlane:
         lim = kw.get("limit")
         page = rows[:lim] if lim is not None else rows
         self.limit_seen = kw.get("limit")
-        return page, self._state_total
+        # PostgREST volunteers a total ONLY when `Prefer: count=exact` was sent
+        # (`Content-Range: .../*` otherwise, which the reader maps to None), so
+        # the double must gate on it too: returning `_state_total`
+        # unconditionally makes this fake MORE generous than the server and
+        # hides a caller that adopts a total it never asked for.
+        return page, (self._state_total if kw.get("count_exact") else None)
 
 
 def _cap_rows():

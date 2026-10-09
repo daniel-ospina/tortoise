@@ -1052,6 +1052,21 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # complete 1000-org fleet, and it silently stopped working on a
             # deployment whose ``max_rows`` was lower than the requested bound
             # (a short page, no signal).
+            # A seam object that predates the total-aware read still enumerates
+            # correctly — it simply cannot state a total, which is the
+            # documented no-total case (completeness then rests on reaching an
+            # EMPTY page). Without this branch the call raises ``AttributeError``,
+            # and the handler below turns an interface mismatch into an EMPTY
+            # fleet for the best-effort caller — a silent under-enumeration on
+            # the very path #5388 is about.
+            _total_aware = getattr(cp, "query_with_total", None)
+            if _total_aware is None:
+                def _read_page(table, **kw):
+                    kw.pop("count_exact", None)
+                    return cp.query(table, **kw), None
+            else:
+                _read_page = _total_aware
+
             rows: list[dict] = []
             seen_ids: set[str] = set()
             total: int | None = None
@@ -1073,10 +1088,9 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     page_filters.append(("id", "gt", last_id))
                 # Capture BEFORE the call, from the PRE-call cursor. Computed
                 # afterwards it is always False, because the page we just read
-                # advanced `last_id` (round 4's own first attempt had it there,
-                # and the baseline promptly went red).
+                # advanced `last_id`.
                 asked_for_count = last_id is None
-                page, page_total = cp.query_with_total(
+                page, page_total = _read_page(
                     "organizations", select=["id", "name"],
                     filters=page_filters,
                     # A stable `order` is REQUIRED: keyset paging is only sound
@@ -1134,8 +1148,26 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     exhausted = True
                     break
 
+            # Dedupe by id, FIRST occurrence winning. The certificate below
+            # counts DISTINCT ids, so the rows returned must be the same set it
+            # counted: a server whose cursor is INCLUSIVE (or that otherwise
+            # serves an overlapping page) would still report the walk COMPLETE
+            # on the distinct count while publishing one org twice, and the cost
+            # refresh would carry that duplicate into the metric's label set.
+            # A FALSY id cannot key a dedupe any more than it can be a cursor,
+            # so such a row passes through unchanged: it is still returned to a
+            # best-effort caller — what it forbids is CERTIFICATION, decided
+            # above.
+            by_id: dict[str, dict] = {}
+            unkeyed: list[dict] = []
+            for r in rows:
+                rid = r["id"]
+                if rid:
+                    by_id.setdefault(rid, r)
+                else:
+                    unkeyed.append(r)
             parsed = [{"org_id": r["id"], "name": r.get("name")}
-                      for r in rows]
+                      for r in [*by_id.values(), *unkeyed]]
             # Completeness. The walk above stops only on an EMPTY page (or the
             # page cap, which leaves ``exhausted`` False); only THEN is it asked
             # whether the fleet is complete:
@@ -1144,15 +1176,16 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             #     total is how a shifted window certifies an incomplete fleet);
             #   * with NO total -> the empty page IS the signal.
             # A total of 0 is NOT evidence of an empty fleet — it is the absence
-            # of a usable count — so it takes the `exhausted` branch too. Left
-            # as `len(seen) >= 0` it would be vacuously satisfied and certify a
-            # page-cap exit (round 5).
-            # Two shapes were REMOVED here and must not come back (#5388 rounds
-            # 1 and 3): a short page as end-of-data (wrong whenever a server's
-            # per-request cap is below our ``limit`` — the exact deployment this
-            # issue names, and a fail-OPEN that pruned real orgs), and a
-            # satisfied total as a STOP condition (wrong because the total is a
-            # page-1 snapshot while ``seen_ids`` grows with concurrent inserts).
+            # of a usable count — so it takes the `exhausted` branch too. As
+            # `len(seen) >= 0` it would be vacuously satisfied and certify a
+            # page-cap exit, which is exactly what the `exhausted` conjunct is
+            # there to refuse.
+            # Two shapes were REMOVED here and must not come back (#5388): a
+            # short page as end-of-data (wrong whenever a server's per-request
+            # cap is below our ``limit`` — the exact deployment this issue names,
+            # and a fail-OPEN that pruned real orgs), and a satisfied total as a
+            # STOP condition (wrong because the total is a page-1 snapshot while
+            # ``seen_ids`` grows with concurrent inserts).
             # ``exhausted`` is a NECESSARY conjunct, not the fallback arm of an
             # either/or. Written as `len(seen_ids) >= total if total > 0 else
             # exhausted` the total branch BYPASSED ``exhausted`` completely, so
@@ -1161,15 +1194,9 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # both leave ``exhausted`` False, yet returned rows as COMPLETE as
             # soon as the stated total was satisfied. A server that mis-orders
             # one page and states a total therefore turned this file's own
-            # refuse-to-certify guard into a PRUNE (round 6). The total may only
-            # ever DOWNGRADE a walk that already reached an empty page; it can
-            # never promote one that did not.
-            # A total of 0 needs no disjunct of its own: `len(seen_ids) >= 0`
-            # is already true, so `total <= 0` was DEAD here (reviewer T round 7
-            # — removing it left the suite green). What refuses a page-cap exit
-            # with `total=0` is the `exhausted` conjunct, not a test on the
-            # total. (Round 5 concluded the opposite from the pre-round-6
-            # expression, where `len(seen) >= 0` really was vacuous on its own.)
+            # refuse-to-certify guard into a PRUNE. The total may only ever
+            # DOWNGRADE a walk that already reached an empty page; it can never
+            # promote one that did not.
             complete = exhausted and (total is None or len(seen_ids) >= total)
             if not complete:
                 _logger.warning(
@@ -1205,7 +1232,7 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
         return [{"org_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
     except Exception:
-        # #5388 (round 5): the exception means the fleet is UNKNOWN, and
+        # #5388: the exception means the fleet is UNKNOWN, and
         # `require_complete` already defines UNKNOWN as None. Returning ``[]``
         # here is a FAIL-OPEN: an empty list is indistinguishable from a
         # genuinely empty fleet, and the destructive caller
@@ -1425,9 +1452,7 @@ def _sweep_events() -> None:
         # failed" before returning — stopping the WHOLE fleet's retention for
         # that pass. WITH it, a ``None`` becomes a SILENT zero-org sweep: the
         # loop body never runs and NOTHING is logged. So the guard prevents the
-        # crash; it does NOT make the stop visible. (Reviewer C round 6;
-        # corrected round 7 — the first rewrite described the UNGUARDED
-        # behaviour as if it were what this line does.)
+        # crash; it does NOT make the stop visible.
         for org in (_iter_registered_orgs() or []):
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue

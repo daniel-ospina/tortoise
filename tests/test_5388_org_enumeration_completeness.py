@@ -13,6 +13,7 @@ The fix makes completeness a first-class property read from the SERVER
 """
 from __future__ import annotations
 
+from tortoise.hosted_api import _ORG_ENUMERATION_MAX_PAGES as MAX_PAGES
 from tortoise.hosted_api import _ORG_ENUMERATION_MAX_ROWS as MAX
 from tortoise.supabase_control import _content_range_total
 
@@ -147,7 +148,7 @@ class TestEnumerationCompleteness:
     def test_no_total_with_a_short_page_is_complete(self, monkeypatch):
         """A server that states no total is complete once the walk hits an EMPTY
         page — NOT when it hits a short one. A short page is a per-request cap;
-        treating it as the end is round 1's fail-open. This fixture's 37 rows
+        treating it as the end is a fail-OPEN. This fixture's 37 rows
         end at the EMPTY second page, not at the short first one."""
         cp = FakeControlPlane(37, state_total=None)
         got = _run(monkeypatch, cp, require_complete=True)
@@ -245,12 +246,11 @@ class TestWindowShiftRace:
                                                         caplog):
         """Completeness counts DISTINCT ids — pinned at an EXHAUSTED exit.
 
-        ROUND 7 (reviewer T): the previous fixture re-served one page forever,
-        so the walk ALWAYS exited on the page cap with ``exhausted=False``, and
-        the round-6 conjunct refused regardless of which count was used —
-        mutating ``len(seen_ids)`` to ``len(rows)`` left the whole suite green.
-        A guard needs a fixture that REACHES the branch it guards, so this one
-        serves page 1 (MAX distinct ids), then 200 rows that DUPLICATE ids
+        The fixture must actually REACH the branch it guards: one that re-serves
+        a page forever exits on the page cap with ``exhausted=False``, so the
+        ``exhausted`` conjunct refuses regardless of which count was used and
+        mutating ``len(seen_ids)`` to ``len(rows)`` would leave the suite green.
+        This one serves page 1 (MAX distinct ids), then 200 rows that DUPLICATE ids
         already sent (ascending, so the cursor guard does not fire), then an
         EMPTY page. That is a genuine exhausted exit where ``len(rows)=1200``
         satisfies ``total=1200`` while the DISTINCT count is only MAX.
@@ -283,7 +283,7 @@ class TestWindowShiftRace:
 
 
 class TestEndOfWalkSignals:
-    """Round 3: the walk must stop only on an EMPTY page.
+    """The walk must stop only on an EMPTY page.
 
     Two weaker signals were each a fail-OPEN in the destructive caller
     (`_refresh_cost_allocation` prunes every org absent from the enumeration),
@@ -301,8 +301,8 @@ class TestEndOfWalkSignals:
         ``order`` IS honoured: the client asks for ``order="id"`` and a fake
         that returns insertion order instead is not a faithful double — keyset
         paging's whole soundness rests on the cursor being the SORT key, and an
-        unsorted double silently hid a real break (round 3: page 2 came back
-        with the un-served originals first, so an early break looked harmless).
+        unsorted double silently hid a real break — page 2 came back with the
+        un-served originals first, so an early break looked harmless.
         """
 
         def __init__(self, ids, *, cap=None, stated="fleet",
@@ -644,7 +644,7 @@ class _StubHTTP:
     def __init__(self, headers):
         self._headers = headers
         self.seen: list[dict] = []
-        # Round 6: the keyset contract (`order=id`, `id > cursor`) is rendered
+        # The keyset contract (`order=id`, `id > cursor`) is rendered
         # onto the REQUEST, and it was previously asserted only against in-file
         # fakes — a proxy. If this rendering regressed the server would return
         # arbitrary order, the strictly-ascending guard would fail closed in
@@ -721,7 +721,7 @@ class TestRealSeamWiring:
 
 
 class TestCertificationRequiresAnExhaustedWalk:
-    """Round 6 — ``exhausted`` is a NECESSARY conjunct of ``complete``.
+    """``exhausted`` is a NECESSARY conjunct of ``complete``.
 
     Written as ``len(seen_ids) >= total if total is not None and total > 0 else
     exhausted``, the total branch BYPASSED ``exhausted`` ENTIRELY, so every exit
@@ -729,9 +729,8 @@ class TestCertificationRequiresAnExhaustedWalk:
     stated total was satisfied. Both shapes below returned rows as COMPLETE with
     orgs unserved — and ``_refresh_cost_allocation`` PRUNES every org absent
     from the enumeration, so the guard whose whole purpose is to refuse became
-    the prune. Found by review (two independent reviewers, reproduced), not by
-    the suite, which never paired a non-end exit (an unsorted page, or the page
-    cap) with a SATISFIED total.
+    the prune. The suite never paired a non-end exit (an unsorted page, or the
+    page cap) with a SATISFIED total, so nothing pinned it.
     """
 
     class _UnsortedSecondPage:
@@ -898,3 +897,99 @@ class TestCertificationRequiresAnExhaustedWalk:
         assert sent.get("id") == "gt.o000042", (
             f"the cursor must reach the wire as a gt filter; got {sent!r}")
         assert sent.get("limit") == str(MAX), sent
+
+
+class TestASeamObjectWithoutTheTotalAwareRead:
+    """A control-plane object predating ``query_with_total`` must still work.
+
+    It cannot STATE a total, which is the documented no-total case —
+    completeness then rests on reaching an EMPTY page. Raising
+    ``AttributeError`` instead would be swallowed by the walk's handler and
+    returned as an EMPTY fleet for a best-effort caller: a silent
+    under-enumeration on the path this issue is about.
+    """
+
+    class QueryOnly:
+        """Only the pre-#5388 read shape; no ``query_with_total``."""
+
+        def __init__(self, *, endless: bool = False):
+            self.rows = [{"id": "org-1", "name": "A"},
+                         {"id": "org-2", "name": "B"}]
+            self.calls: list[tuple[str, dict]] = []
+            self.endless = endless
+
+        def query(self, table, **kw):
+            self.calls.append((table, kw))
+            last = None
+            for col, op, val in (kw.get("filters") or []):
+                if col == "id" and op == "gt":
+                    last = val
+            if not self.endless:
+                return [r for r in self.rows
+                        if last is None or r["id"] > last]
+            start = 0 if last is None else int(last.split("-")[1]) + 1
+            return [{"id": f"org-{i:05d}", "name": "x"}
+                    for i in range(start, start + MAX)]
+
+    def test_a_query_only_seam_enumerates_via_the_fallback(self, monkeypatch):
+        cp = self.QueryOnly()
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None, "an interface mismatch must not read as UNKNOWN"
+        assert [o["org_id"] for o in got] == ["org-1", "org-2"], got
+        # `count_exact` must not reach a seam that has no such parameter: a
+        # TypeError from it would be swallowed into that same empty fleet.
+        assert cp.calls, "the fallback must still read through `query`"
+        assert all("count_exact" not in kw for _t, kw in cp.calls), cp.calls
+
+    def test_a_query_only_seam_still_fails_closed_when_cut_short(
+            self, monkeypatch):
+        """No total AND never reaching an empty page is UNKNOWN, not empty.
+
+        The call COUNT is asserted too: an ``AttributeError`` from the missing
+        total-aware read would also return ``None``, so the verdict alone cannot
+        tell the walk apart from the interface mismatch it is meant to survive.
+        """
+        cp = self.QueryOnly(endless=True)
+        assert _run(monkeypatch, cp, require_complete=True) is None
+        assert len(cp.calls) == MAX_PAGES, (
+            f"the walk must run to its page cap; it made {len(cp.calls)} call(s)")
+
+
+class TestADuplicateRowIsNotPublishedTwice:
+    """The certificate counts DISTINCT ids, so the rows returned must be the
+    same set it counted.
+
+    A store whose cursor is INCLUSIVE re-serves a page boundary once. The walk
+    can still legitimately reach an EMPTY page afterwards and certify on the
+    distinct count, so without deduping the caller receives one org twice and
+    the cost refresh carries that duplicate into the metric's label set.
+    """
+
+    class OverlapOnceCP:
+        """Serves the boundary row twice, once, then behaves."""
+
+        def __init__(self, n: int = 5):
+            self.rows = [{"id": f"org-{i:03d}", "name": f"O{i}"}
+                         for i in range(n)]
+            self.overlapped = False
+
+        def query_with_total(self, table, *, select=None, filters=None,
+                             order=None, limit=None, count_exact=False, **kw):
+            last = None
+            for col, op, val in (filters or []):
+                if col == "id" and op == "gt":
+                    last = val
+            total = len(self.rows) if count_exact else None
+            if last is not None and not self.overlapped:
+                self.overlapped = True
+                return [r for r in self.rows if r["id"] >= last], total
+            return [r for r in self.rows
+                    if last is None or r["id"] > last], total
+
+    def test_an_overlapping_page_publishes_each_org_once(self, monkeypatch):
+        cp = self.OverlapOnceCP()
+        got = _run(monkeypatch, cp, require_complete=True)
+        assert got is not None, "this walk DOES certify; the fixture must too"
+        ids = [o["org_id"] for o in got]
+        assert len(ids) == 5, f"the boundary row was published twice: {ids}"
+        assert ids == sorted(set(ids)), ids
