@@ -25508,9 +25508,13 @@ class OnboardingStatePatchRequest(BaseModel):
     org_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
-    # #1725 (Slice 0): registered state keys (see the registration table) —
-    # the cursor is server-written; the fields exist so the keys round-trip
-    # through the PATCH surface like every other registered key.
+    # #1725 (Slice 0): registered state keys (see the registration table).
+    # #3552: BOTH are SERVER-OWNED — the index walk writes the cursor and the
+    # one-time backfill writes the marker, and an authenticated client PATCH is
+    # refused 403 `server_owned_key` (_OPERATIONAL_SERVER_OWNED_KEYS). The
+    # fields remain on the model so the keys stay REGISTERED (the allowlist
+    # filter would otherwise drop them in silence) and the dashboard can read
+    # them back — not so a client can write them.
     github_index_cursor: dict | None = None
     github_legacy_backfill_done: bool | None = None
     # #1727 (Slice 2, Task 11): capture-surface registration-table members —
@@ -25641,11 +25645,29 @@ def _capture_server_owned_keys() -> set[str]:
 
 
 _CAPTURE_SERVER_OWNED_KEYS = _capture_server_owned_keys()
+# #3552: the two OPERATIONAL keys the issue names beside the capture EVIDENCE
+# family above. Each has a legitimate SERVER writer, which is the precondition
+# for ownership (the issue's own caveat: marking a key server-owned WITHOUT a
+# server-side writer bricks a client path that still needs it):
+#   * ``github_index_cursor`` is stored by the index walk —
+#     ``updates = {"github_index_cursor": cursors}``;
+#   * ``github_legacy_backfill_done`` is set by the one-time legacy backfill —
+#     ``github_legacy_backfill_done=True``.
+# Both are still in the live PATCH model, so while unowned a normal
+# authenticated client could rewind the cursor (re-walking, or SKIPPING, issues)
+# or resurrect the one-time backfill. Listed literally rather than derived:
+# unlike ``install_probe_*`` these are not minted per harness, so there is no
+# registration table that could generate them (pinned by
+# ``test_operational_keys_not_client_writable``).
+_OPERATIONAL_SERVER_OWNED_KEYS = {
+    "github_index_cursor",
+    "github_legacy_backfill_done",
+}
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
     "fork_unsure_at",
-} | _CAPTURE_SERVER_OWNED_KEYS
+} | _CAPTURE_SERVER_OWNED_KEYS | _OPERATIONAL_SERVER_OWNED_KEYS
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
     "capture_disclosed", "org_named", "connection_written",
