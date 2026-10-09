@@ -121,7 +121,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._tmpdir_hygiene import (  # noqa: E402
     install_scan_guard,
     install_session_tmpdir,
+    install_tolerant_tempdir_cleanup,
     sweep_stale_session_roots,
+    write_tolerated_cleanup_report,
 )
 
 install_session_tmpdir()
@@ -132,6 +134,20 @@ install_session_tmpdir()
 # session.
 sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_scan_guard()
+# #7735: `TemporaryDirectory.__exit__` cleans up with `ignore_errors=False`, so a
+# directory a live embedded server still holds raises ENOTEMPTY out of teardown
+# and reddens a shard whose tests all passed. Same invariant as this module's own
+# teardown ("teardown must not convert a green suite red"), so it is fixed once
+# here for every ``TemporaryDirectory(`` call site — counted by
+# `git grep -o "TemporaryDirectory(" -- tests/ | wc -l` (OCCURRENCES, not
+# lines: one line can hold two calls). No literal count is quoted on purpose:
+# that command counts this comment too, so a number here re-stales on the very
+# edit that adds it (#7735 review, F3a) — rather than per test file. It tolerates ONLY
+# ENOTEMPTY and records the directory it leaves behind — deliberately not
+# `ignore_cleanup_errors=True`, which would swallow every rmtree failure. The
+# record is flushed to `tempdir-hygiene-end.json` at session end, because a
+# passing test's log record is discarded by capture (#7735 review, F1).
+install_tolerant_tempdir_cleanup()
 
 # #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.
 #
@@ -1001,6 +1017,12 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
             }, fh, indent=2)
     except Exception:
         pass
+    # #7735: same capture trap as #1103 above — a PASSING test's
+    # `logger.warning` is discarded (verified: 0 occurrences under the CI
+    # flags), so the tolerated ENOTEMPTY leaks are mirrored to their own
+    # artifact, which the workflow dumps. Best-effort; writes nothing when no
+    # leak was tolerated.
+    write_tolerated_cleanup_report()
 
 
 # ── Epic #1647 Task 2 Step 7 (P2-14/P0-3/P1-8/P1-9/P2-3/P2-4) ─────────────

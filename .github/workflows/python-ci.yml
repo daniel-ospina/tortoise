@@ -1304,6 +1304,28 @@ jobs:
             echo "no hygiene log at $LOG (end-sweep logger did not write)"
           fi
 
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest
@@ -1820,6 +1842,28 @@ jobs:
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
 
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Same gate contract as the fast job's assert (#4740): the bound is read
         # from the conftest session-end sweep's own report
@@ -2018,6 +2062,27 @@ jobs:
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
         if: always()
@@ -2190,6 +2255,27 @@ jobs:
             python3 tools/skip-guard.py /tmp/trackb.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
           fi
       - name: Upload track-b log (measurement artifact, #1477)
         # #1477: non-gating upload — track-b writes /tmp/trackb.log (no
@@ -2546,6 +2632,28 @@ jobs:
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
+
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Same gate contract as the fast/slow asserts (#4740): the bound is read
         # from the conftest session-end sweep's own report
@@ -2692,6 +2800,27 @@ jobs:
           python3 tools/skip-guard.py /tmp/pytest-d14.log \
             --junitxml=/tmp/junit-d14.xml \
             --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
+      - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
+        # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
+        # discarded by pytest capture (measured on the fast job's flags — 0
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: CI is
+        # serial (`XDIST_WORKERS=0`), so a single
+        # session owns the path. Informational: the step never fails the job.
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true

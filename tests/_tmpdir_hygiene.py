@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import errno
+import functools
 import json
 import logging
 import os
@@ -316,6 +318,19 @@ _PREV_HOST_TMPDIR_ENV: str | None = None
 _PREV_TMPDIR_ENV: str | None = None
 _GUARD_INSTALLED = False
 _ORIGINALS: dict[str, object] = {}
+#: #7735 — the pre-install ``TemporaryDirectory.cleanup``, kept so the tolerant
+#: wrapper can be uninstalled by its own test (the other installs here have the
+#: same escape hatch).
+_ORIGINAL_TEMPDIR_CLEANUP = None
+#: #7735 — the ENOTEMPTY teardown leaks tolerated this session, as
+#: ``{"path", "errno", "reason"}`` dicts (the artifact adds the writing
+#: process's ``pid``). A per-leak ``logger.warning`` is
+#: DISCARDED by pytest capture for a PASSING test (measured under the CI flags
+#: this PR was reviewed with: 0 occurrences in ``/tmp/pytest.log`` and 0 in the
+#: junit XML), so the record is accumulated here and flushed at session end by
+#: ``write_tolerated_cleanup_report`` — the file the CI workflow dumps, exactly
+#: the #1103 shape this module's sibling report already uses.
+_TOLERATED_CLEANUP_LEAKS: list[dict[str, object]] = []
 
 # The unpatched primitive, captured at import (before install_scan_guard).
 # Enumerating the shared temp dir is occasionally legitimate — reclaiming a
@@ -850,3 +865,165 @@ def uninstall_scan_guard() -> None:
     os.listdir = _ORIGINALS["listdir"]  # type: ignore[assignment]
     os.walk = _ORIGINALS["walk"]  # type: ignore[assignment]
     _GUARD_INSTALLED = False
+
+
+def install_tolerant_tempdir_cleanup() -> None:
+    """Keep a live server's temp dir from reddening a green shard (#7735).
+
+    WHY (measured, #7735). ``TemporaryDirectory.__exit__`` calls ``cleanup()``,
+    which calls ``shutil.rmtree(..., ignore_errors=False)``. A directory that is
+    still held by an embedded server which deliberately OUTLIVES the suite — the
+    live-redis case this module already handles for the private session root
+    (#3752) — cannot be removed atomically: ``rmtree`` empties it and the server
+    re-creates an entry before ``os.rmdir``, which then raises
+
+        OSError: [Errno 39] Directory not empty
+
+    That exception escapes ``__exit__``, so pytest reports it as a test ERROR
+    and the shard goes red even though every test in it PASSED — observed as
+    ``2054 passed, 15 skipped, 1 error``, on three consecutive runs of the same
+    commit with a different nodeid each time (the error follows whichever test
+    is tearing down, not the test's subject).
+
+    That is the same failure of the same invariant this module already states
+    for its own teardown — "teardown must not convert a green suite red".
+
+    STRUCTURAL, NOT PER-FILE. The suite has several hundred
+    ``TemporaryDirectory(`` call sites — ``git grep -o "TemporaryDirectory("
+    -- tests/ | wc -l`` counts them, and it counts OCCURRENCES, not lines
+    (one line of ``tests/`` can hold two calls). No literal count is quoted
+    here on purpose: that command counts the module comments that quote it
+    too, so any number written into this sentence re-stales on the very edit
+    that adds it (#7735 review, F3a). Patching them one at a time would be a band-aid on
+    a shared lifecycle bug, and the next test written would reintroduce it. So
+    the fix is applied once, here, next to the other tempdir policy.
+
+    NARROW AND REPORTED — deliberately NOT ``ignore_cleanup_errors=True``.
+    The blanket stdlib lever would swallow EVERY ``rmtree`` failure (``EROFS``,
+    ``EACCES``, ``EBUSY``, ``EIO`` …), not only this race. Tolerating only
+    ``ENOTEMPTY`` keeps the shard green; the directory is named in a warning and
+    left for the reaper. Everything else still raises.
+
+    WHAT THE TRACKER DOES NOT CATCH — corrected; an earlier clause said the
+    tracker "cannot see a context-managed directory", which is BACKWARDS.
+    ``TemporaryDirectory`` resolves the module-global ``tempfile.mkdtemp``, which
+    the autouse ``TrackedTempfileArtifacts`` patches, so a directory it creates
+    in a test body IS recorded in ``tracker.created`` (verified). What the
+    tracker does NOT do is ASSERT on it: its teardown rmtrees with
+    ``ignore_errors=True`` and only LOGS the live-server paths it leaves for the
+    reaper, so a leftover directory never reddens the run. The ``ENOTEMPTY``
+    ``ERROR`` was therefore the only HARD signal this case produced — which is
+    why tolerating it must be paired with an explicit report
+    (``write_tolerated_cleanup_report``), not only a log record.
+    """
+    global _ORIGINAL_TEMPDIR_CLEANUP
+    original_cleanup = tempfile.TemporaryDirectory.cleanup
+    if getattr(original_cleanup, "_tortoise_tolerant_cleanup", False):
+        return  # idempotent: a second pytest.main() must not double-wrap
+    if _ORIGINAL_TEMPDIR_CLEANUP is None:
+        _ORIGINAL_TEMPDIR_CLEANUP = original_cleanup
+
+    @functools.wraps(original_cleanup)
+    def _cleanup(self):
+        try:
+            return original_cleanup(self)
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+            # #7735: a live server re-created an entry between rmtree's
+            # emptying and its final rmdir, so the directory cannot be removed
+            # atomically. Stay green — but NOT silent. The log record alone is
+            # invisible in CI (capture discards a passing test's records), so
+            # the path is ALSO accumulated for the session-end artifact.
+            _TOLERATED_CLEANUP_LEAKS.append({
+                "path": self.name,
+                "errno": errno.ENOTEMPTY,
+                "reason": exc.strerror or str(exc),
+            })
+            logger.warning(
+                "#7735: leaving %s in place — a live server still holds it "
+                "(%s); the reaper owns it. Recorded in "
+                "tempdir-hygiene-end.json, not swallowed.",
+                self.name, exc.strerror or exc)
+            return None
+
+    _cleanup._tortoise_tolerant_cleanup = True  # type: ignore[attr-defined]
+    tempfile.TemporaryDirectory.cleanup = _cleanup  # type: ignore[method-assign]
+
+
+def uninstall_tolerant_tempdir_cleanup() -> None:
+    """Restore the original ``cleanup`` (used by the fix's own test)."""
+    if _ORIGINAL_TEMPDIR_CLEANUP is None:
+        return
+    tempfile.TemporaryDirectory.cleanup = _ORIGINAL_TEMPDIR_CLEANUP  # type: ignore[method-assign]
+
+
+def tolerated_cleanup_leaks() -> list[dict[str, object]]:
+    """The #7735 ENOTEMPTY teardown leaks tolerated so far this session."""
+    return [dict(entry) for entry in _TOLERATED_CLEANUP_LEAKS]
+
+
+def _discard_tolerated_leaks(paths: list[str]) -> None:
+    """Drop probe entries a test added, so the session artifact stays real.
+
+    This module's own test deliberately drives the ENOTEMPTY path; without
+    this, ``tests/test_tmpdir_hygiene.py`` would put a synthetic path in every
+    CI run's artifact and the channel would read as permanent noise.
+    """
+    drop = set(paths)
+    _TOLERATED_CLEANUP_LEAKS[:] = [
+        e for e in _TOLERATED_CLEANUP_LEAKS if e["path"] not in drop]
+
+
+def write_tolerated_cleanup_report(log_dir: str | None = None) -> str | None:
+    """Mirror the #7735 tolerated-leak record to a JSON artifact (#1103 shape).
+
+    WHY A FILE, NOT JUST THE LOG RECORD (measured). A ``logger.warning`` from a
+    PASSING test is discarded by pytest capture: under this CI's own flags
+    (``-v --timeout=300 -r fEs --junitxml=… -o junit_family=xunit1``, and with
+    xdist) the #7735 warning appears 0 times in ``/tmp/pytest.log`` and 0 times
+    in the junit XML. ``warnings.warn`` would be visible, but pytest dedupes it
+    per code location (so only the FIRST of N leaks is shown) and any future
+    ``filterwarnings = error`` would turn the report into a RED. So — exactly
+    like the #1103 redislite end-sweep decision — the record is accumulated and
+    written to a file the workflow dumps.
+
+    Best-effort: writing the report never fails the suite. Written ONLY when at
+    least one leak was tolerated, so a clean xdist worker never overwrites a
+    peer worker's record with an empty one. The write MERGES with whatever is
+    already there keyed by path instead of truncating, so IF xdist is
+    re-admitted, every worker's OWN session teardown against this one artifact
+    path cannot let the last worker to finish discard a peer's leak — the
+    invisibility this report exists to remove. That branch is INERT at this
+    head: CI runs SERIAL (``XDIST_WORKERS=0`` in ``python-ci.yml``, with the
+    only non-zero admission behind an inert ``if false``), so a single session
+    owns the path today. (A merge can still lose one record if two workers
+    write in the same instant; the artifact then still names the defect, so the
+    leak stays observable.)
+    """
+    if not _TOLERATED_CLEANUP_LEAKS:
+        return None
+    try:
+        if log_dir is None:
+            log_dir = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+        log_path = os.path.join(log_dir, "tempdir-hygiene-end.json")
+        by_path: dict[str, dict[str, object]] = {}
+        try:
+            with open(log_path) as fh:
+                prior = json.load(fh)
+            for entry in prior.get("tolerated_cleanup_leaks", []):
+                if isinstance(entry, dict) and "path" in entry:
+                    by_path[str(entry["path"])] = entry
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass  # no prior artifact, or an unreadable/garbled one — start fresh
+        for entry in tolerated_cleanup_leaks():
+            entry.setdefault("pid", os.getpid())
+            by_path[str(entry["path"])] = entry
+        with open(log_path, "w") as fh:
+            json.dump({
+                "tolerated_cleanup_leaks": [
+                    by_path[path] for path in sorted(by_path)],
+            }, fh, indent=2)
+    except OSError:
+        return None
+    return log_path
