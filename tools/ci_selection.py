@@ -763,6 +763,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_docs_lint_baseline_tool_change_selects_core_not_tier1.
              "tools/docs_lint_baseline.py",
+             # #7814 review P2: the queue-reconcile schedule installer owns
+             # tests/test_install_queue_reconcile_schedule.py, registered
+             # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches an installer path — so an
+             # INSTALLER-ONLY change selected NO surface and took the docs-only
+             # early return: the hermetic cases pinning that the scheduled run
+             # is the SAFE run (armed with `--apply`, the validated queue passed
+             # EXPLICITLY, gh's directory on the job's PATH, XML/cron escaping,
+             # and the install-only preflight) would not have run on the PR
+             # editing the installer. Same #1349/#3332/#3616 silent-drop class
+             # as tools/queue_resweep.py above. Pinned by
+             # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
+             "tools/install-queue-reconcile-schedule.sh",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS

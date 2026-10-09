@@ -1095,6 +1095,31 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
+    # tools/install-queue-reconcile-schedule.sh owns
+    # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning
+    # that the scheduled run is the SAFE run: armed with --apply, the validated
+    # queue passed EXPLICITLY, gh's directory on the job's PATH, XML/cron
+    # escaping, and the install-only preflight).
+    #
+    # Before its CORE_ALSO entry this was the #3261 silent-drop class: `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry, so an installer-only change came back
+    # with `changed == []` and took the docs-only early return — `select()`
+    # returned NO surface, and the guard never ran on the file it guards.
+    #
+    # Measured before the fix: `_sel(["tools/install-queue-reconcile-schedule.sh"])`
+    # -> surfaces=[], full=False, test_install_queue_reconcile_schedule.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic and subprocess-only, so selecting `core` runs it at the lowest CI
+    # cost. Mutation check: removing the CORE_ALSO entry selects no surface, so
+    # assert 1 below fails.
+    r = _sel(["tools/install-queue-reconcile-schedule.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_test_lane_tool_change_selects_core_not_tier1():
     # #5084 review P1: tools/test_lane.py owns tests/test_test_lane_tool.py
     # (`core`). Without the CORE_ALSO entry the flat "tools/"

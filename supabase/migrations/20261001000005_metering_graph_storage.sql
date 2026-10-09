@@ -1,17 +1,18 @@
--- Migration 20260926000002: the GRAPH STORAGE gauge on the metering ledger
+-- Migration 20261001000005: the GRAPH STORAGE gauge on the metering ledger
 -- (#5331, lane c7-instrumentation).
 --
--- ⚠️ WHY 000002 AND NOT 000001. The sibling #5045 branch adds
--- ``20260926000001_metering_capture_tokens.sql``, and the two files touch
--- DISJOINT objects, so nothing about the SQL collides — but the VERSION
--- PREFIX is the key of ``supabase_migrations.schema_migrations``, and this
--- repo guards that key twice: ``tests/test_migration_append_only.py::
--- test_prefix_duplicates_rejected`` and ``tests/test_migration_drift_gate.py::
--- test_duplicate_prefix_blocks`` (#1235 — *"duplicate still blocks"*,
--- *"db push would abort"*). Two files sharing a prefix therefore turn main RED
--- as soon as both land, regardless of merge order. ``000002`` follows the
--- same-day convention already in this directory (20260925000001/00002). Do not
--- "tidy" this back to 000001.
+-- RENUMBERED FORWARD from 20260926000002 (#7634). It was authored with a
+-- prefix OLDER than the newest version prod had already applied
+-- (20261001000001), so it sorted before prod's tip and `supabase db push
+-- --include-all` would have landed it ON TOP of its own successor — the state
+-- the drift gate refuses, which was blocking every deploy-api run. It carries
+-- no supabase_migrations.schema_migrations row (the gate listed it repo-ahead).
+-- The DDL below is idempotent (ADD COLUMN IF NOT EXISTS, DROP FUNCTION IF
+-- EXISTS then CREATE), so the forward re-land converges whether or not prod
+-- already has the columns and the RPC. The ``000002`` suffix this file carried
+-- was collision-avoidance against the sibling #5045 capture-tokens migration at
+-- 20260926000001, which has since been renumbered to 20261001000001 — the
+-- suffix's reason is spent with it.
 --
 -- WHY THIS EXISTS. The owner ruling (2026-09-26) is that storage is counted in
 -- MB/GB, not nodes. ``GRAPH.MEMORY USAGE`` returns MB directly and is already
@@ -37,9 +38,8 @@
 -- write is dropped, while the READER degrades to a zero view. Deploying the code
 -- first therefore yields a SILENT ZERO (not an error), which is precisely the
 -- fail-open this ledger exists to avoid. (20260918000001, which IS on main,
--- carries the same operational note; a second copy lives on the unmerged sibling
--- branch ``fix/4488-embedding-encode-cost`` as 20260925000003, so it is not
--- deployable history yet and must not be cited as if it were.)
+-- carries the same operational note; the sibling embed lane's copy is
+-- 20261001000004_metering_embedding_columns.sql in this directory.)
 
 ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS graph_storage_mb double precision NOT NULL DEFAULT 0,
