@@ -3091,6 +3091,9 @@ def _install_read_hook_impl(args) -> int:
               "or remove here.", file=_sys.stderr)
         return 1
 
+    dry = getattr(args, "dry_run", False)
+    uninstall = getattr(args, "uninstall", False)
+
     # ── Root-shape guard (#7807): a ``--dir`` ROOT that is not a real
     #    directory — a regular FILE, a symlink to a file, or a DANGLING
     #    symlink — cannot host the registration
@@ -3104,16 +3107,20 @@ def _install_read_hook_impl(args) -> int:
     #    run share, closes the gap: a bad root fails with NOTHING written.
     #    A root that simply does NOT exist is not refused — it is the normal
     #    fresh-install case (``mkdir(parents=True)`` creates it).
-    if (root.exists() or root.is_symlink()) and not root.is_dir():
+    #
+    #    Skipped under ``--uninstall`` (#2383): an uninstall writes nothing,
+    #    and a root that cannot host a registration is by definition one with
+    #    no registration to remove, so it must stay the CLEAN NO-OP that
+    #    0-exit contract promises rather than becoming a new refusal.  This
+    #    guard exists to protect a WRITE, so it applies only where one happens.
+    if (not uninstall and (root.exists() or root.is_symlink())
+            and not root.is_dir()):
         print(f"Refusing: --dir root {root} is not a directory (a file, or "
               "a symlink that does not resolve to one) — a harness "
               "registration file cannot live beneath it. Pass --dir a "
               "directory, or remove the file/symlink first.",
               file=_sys.stderr)
         return 1
-
-    dry = getattr(args, "dry_run", False)
-    uninstall = getattr(args, "uninstall", False)
 
     # ── Symlink-escape guard: refuse when ANY existing component between the
     #    install root and the target (including the leaf AND intermediate

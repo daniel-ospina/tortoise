@@ -2551,6 +2551,30 @@ def test_cli_install_codex_non_directory_root_writes_nothing(cli, tmp_path):
         assert "not a directory" in r.stderr, (name, r.stderr)
 
 
+def test_cli_install_codex_non_directory_root_uninstall_is_a_clean_noop(cli, tmp_path):
+    """``--uninstall`` against a non-directory root stays the clean no-op that
+    #2383 promises, even though the SAME root shape is refused on the write
+    path.
+
+    A root that cannot host a registration is by definition one with no
+    registration to remove, and an uninstall writes nothing — so the
+    root-shape guard (#7807) protects a WRITE and therefore applies only where
+    one happens. Without the ``not uninstall`` condition the guard turns a
+    nothing-to-do uninstall into a new refusal, which is a behaviour change
+    against #2383 (mutation: drop that condition — this test REDs at
+    ``returncode == 1``).
+    """
+    run, _root, _home = cli
+    root = tmp_path / "badroot-uninstall"
+    root.write_text("not a directory")
+
+    r = run("install", "codex", "--dir", str(root), "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Refusing" not in r.stderr, r.stderr
+
+
 def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
     """A ``.codex`` symlink loop must be a populated error, never an uncaught
     ``RuntimeError`` traceback (``Path.resolve()`` raises on a cycle).
