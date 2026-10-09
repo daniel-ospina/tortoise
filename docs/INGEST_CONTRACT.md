@@ -81,11 +81,14 @@ with identical contracts.
   ],
   "connections": [
     {"from": "pA", "to": "pB", "operator": "IMPL", "label": "supports",
-     "confidence": 0.9, "direction": "unidirectional"},   // accepted names today: bidirectional | unidirectional
+     "confidence": 0.9, "direction": "unidirectional"},
     {"from": "pA", "to": "src1", "relation": "extractedFrom"}
   ]
 }
 ```
+
+The `direction` values accepted today are `bidirectional` and `unidirectional` — see the direction
+model and its *Transition state* note in `docs/ONTOLOGY.md` (§8).
 
 Rules that hold regardless of granularity or policy:
 

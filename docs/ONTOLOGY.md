@@ -41,7 +41,9 @@ doc_status: live
 > **three** layers (mechanism + direction / semantics / predicate + tags). The semantics table gains
 > `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `dependsOn`, `transacts` and a
 > *carries confidence?* column. `produces`: the event→artifact shape is the encouraged pattern, not a
-> restriction. §5: confidence propagates across Subject, Object, Event and Point.
+> restriction. §5: EP confidence is stated as running through Events and Points, with Object
+> confidence derived from attached Points and Subject/Object structural edges carrying a confidence
+> attribute rather than EP.
 >
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
@@ -610,7 +612,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code keys off `op_type` instead** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code does not read the semantics — `create_direct_edge` and the ingest path key off `op_type`, while `create_operator` still takes its `bidirectional` default (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -1134,7 +1136,7 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 >
 > Confidence propagates across Events and Points. Object-level confidence is **derived** from the
 > Points attached to the Object — structural edges to Subjects and Objects carry a confidence
-> *attribute*, not EP (see §3.1 and §6).
+> *attribute*, not EP (see §3.1 and §8).
 >
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
@@ -1362,8 +1364,9 @@ edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code resolves by `op_type` — see the
-  *Transition state* note.)*
+  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
+  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
+  default (#7813). See the *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1535,7 +1538,8 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
-code resolves by `op_type` — see the *Transition state* note in the changelog).*
+code does not read the semantics — it resolves by `op_type`, or takes `create_operator`'s default
+(#7813). See the *Transition state* note.)*
 
 ---
 
