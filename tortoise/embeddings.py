@@ -14,6 +14,7 @@ Thresholds are model-specific — recalibrate when swapping the embedder.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -255,6 +256,12 @@ DEFAULT_THRESHOLD = 0.72
 # above).
 VECTOR_RELEVANCE_FLOOR = 0.60
 
+# #4055: marks the thread running a BACKGROUND (pre-warm) one-time load, so
+# ``EmbeddingModel.__init__`` can tell it apart from a request-triggered load
+# and keep it off the wait-bound seams' setup clock. Set by
+# ``EmbeddingModel.background_load()``.
+_background_load_tls = threading.local()
+
 
 class EmbeddingModel:
     """Lazy-loaded embedding model singleton.
@@ -286,6 +293,18 @@ class EmbeddingModel:
     #: Why the last load attempt failed: "not_installed" (designed absence —
     #: INFO) vs "load_failed"/"load_timeout" (real degrade — WARNING).
     _last_failure_kind: str | None = None
+    # #4055: the one-time load's wall clock. The transport wait-bound seams
+    # (``mcp_auth.await_under_wait_bound``) read these to keep process
+    # INITIALIZATION out of a caller's wait budget — the bound measures the
+    # request's own wait, not the one-time setup that happens to sit inside it.
+    # ``_one_time_setup_started_at`` is ``time.monotonic()`` at the load's
+    # start; the Event is set for the load's duration and cleared when the load
+    # returns or its join timeout expires. (The daemon load THREAD can outlive
+    # that clear — ``t.join(timeout=…)`` abandons it — so the Event tracks the
+    # ATTEMPT, which is the thing charged to a request.) Both are advisory
+    # reads: a stale value can only mis-time one exemption poll.
+    _one_time_setup_started_at: float | None = None
+    _one_time_setup_in_progress = threading.Event()
 
     @classmethod
     def _embedder_required(cls) -> bool:
@@ -406,7 +425,10 @@ class EmbeddingModel:
         the resulting single-leg reads.
         """
         try:
-            model = cls.get(load_timeout=load_timeout)
+            # #4055: a warm-up is BACKGROUND process setup, not a request's
+            # work — it must never stamp the wait-bound cold-setup clock.
+            with cls.background_load():
+                model = cls.get(load_timeout=load_timeout)
         except Exception as exc:  # noqa: BLE001, RUF100 — warm-up is non-fatal
             cls._last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
@@ -476,6 +498,60 @@ class EmbeddingModel:
         except Exception:  # noqa: BLE001, RUF100 — a daemon thread must not raise
             logger.debug("embedder warm-up worker failed", exc_info=True)
 
+    # ── #4055: the one-time setup's clock, read by the wait-bound seams ────
+
+    @classmethod
+    @contextlib.contextmanager
+    def background_load(cls):
+        """Mark the one-time embedder load on this thread as BACKGROUND setup.
+
+        A pre-warm (``warm_up`` / the hosted ``_prewarm_embeddings`` thread) is
+        process initialization that NO request owns. A load started inside this
+        context therefore does NOT stamp the one-time-setup clock the wait-bound
+        seams read (#4055): a request that merely overlaps a pre-warm is waiting
+        on init it did not trigger, so it must not be granted the cold-setup
+        exemption. Without this, the hosted lifespan pre-warm leaks into the
+        next request and turns a genuine breach into a false success.
+        """
+        previous = getattr(_background_load_tls, "active", False)
+        _background_load_tls.active = True
+        try:
+            yield
+        finally:
+            _background_load_tls.active = previous
+
+    @classmethod
+    def one_time_setup_in_progress(cls) -> bool:
+        """True while a one-time embedder load attempt is running."""
+        return cls._one_time_setup_in_progress.is_set()
+
+    @classmethod
+    def one_time_setup_started_at(cls) -> float | None:
+        """``time.monotonic()`` when the last load attempt began, or ``None``."""
+        return cls._one_time_setup_started_at
+
+    @classmethod
+    def one_time_setup_started_since(cls, reference: float) -> bool:
+        """True when the last load attempt began at/after ``reference``.
+
+        Lets a wait-bound seam attribute a load to the request that triggered
+        it (``reference`` = the request's transport arrival on the mono clock)
+        instead of exempting an unrelated, older load.
+        """
+        started = cls._one_time_setup_started_at
+        return started is not None and started >= reference
+
+    @classmethod
+    def one_time_setup_deadline(cls) -> float | None:
+        """When the in-flight load attempt must stop, on the mono clock.
+
+        ``_one_time_setup_started_at`` + the ACTIVE ``_LOAD_TIMEOUT_S`` — read
+        per call, not frozen, so the test lane's raised budget (#6960, 270.0)
+        bounds the drain the same way it bounds the load.
+        """
+        started = cls._one_time_setup_started_at
+        return None if started is None else started + cls._LOAD_TIMEOUT_S
+
     @classmethod
     def status(cls) -> dict:
         """(C) #2952 — the DECLARED embedder availability state.
@@ -518,9 +594,18 @@ class EmbeddingModel:
             cls._warm_up_started = False
             cls._last_error = None
             cls._last_failure_kind = None
+        # #4055: drop the one-time-setup clock too — a test that resets the
+        # embedder must not leave a stale "load in progress" that exempts the
+        # NEXT test's wait bound.
+        cls._one_time_setup_started_at = None
+        cls._one_time_setup_in_progress.clear()
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
+        # #4055: a BACKGROUND pre-warm must not stamp the setup clock a
+        # wait-bound seam reads (``background_load``), or an unrelated request
+        # that merely overlaps the pre-warm would be exempted.
+        background = bool(getattr(_background_load_tls, "active", False))
         result: dict = {"model": None}
 
         def _load():
@@ -560,23 +645,33 @@ class EmbeddingModel:
                 result["model"] = None
 
         t = threading.Thread(target=_load, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            # Model load timed out — log and return None. Do NOT permanently
-            # self-disable: in the hosted container the model is pre-downloaded
-            # and pre-warmed at startup (entrypoint.sh), so this path means
-            # transient resource starvation (OOM, competing process). Next call
-            # will create a fresh instance and retry.
-            logger.warning(
-                "Embedding model load exceeded %ss — returning None "
-                "(retries on next get() call).",
-                self._LOAD_TIMEOUT_S,
-            )
-            type(self)._last_failure_kind = "load_timeout"
-            self._model = None
-            return
-        self._model = result["model"]
+        # #4055: stamp the attempt BEFORE the join so a wait-bound seam on the
+        # event loop can see it while this thread blocks here, and clear it in
+        # a ``finally`` so the stamp cannot outlive the join timeout. A
+        # background pre-warm stamps nothing (it is not any request's setup).
+        if not background:
+            type(self)._one_time_setup_started_at = time.monotonic()
+            type(self)._one_time_setup_in_progress.set()
+        try:
+            t.start()
+            t.join(timeout=timeout)
+            if t.is_alive():
+                # Model load timed out — log and return None. Do NOT permanently
+                # self-disable: in the hosted container the model is pre-downloaded
+                # and pre-warmed at startup (entrypoint.sh), so this path means
+                # transient resource starvation (OOM, competing process). Next call
+                # will create a fresh instance and retry.
+                logger.warning(
+                    "Embedding model load exceeded %ss — returning None "
+                    "(retries on next get() call).",
+                    self._LOAD_TIMEOUT_S,
+                )
+                type(self)._last_failure_kind = "load_timeout"
+                self._model = None
+                return
+            self._model = result["model"]
+        finally:
+            type(self)._one_time_setup_in_progress.clear()
 
     def encode(self, texts: list[str], batch_size: int = 32):
         """Encode texts to embeddings. Returns numpy array or None."""

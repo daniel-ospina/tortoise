@@ -240,6 +240,128 @@ def _sanitize_for_log(value: str) -> str:
     return "".join(out)
 
 
+# ── #4055: keep one-time PROCESS SETUP out of the wait budget ──────────────
+# The bound times the WAITING, not the SETTING UP (owner ruling on #4055,
+# comment 5845912938: "Option 2 — lift the one-time load out of the bounded
+# section"). The collision it fixes: the first embedding request after a
+# process start runs ``EmbeddingModel.get()``, whose one-time load is sized
+# above this bound by the codebase's own constant (``_LOAD_TIMEOUT_S``, 90.0;
+# 270.0 in the test lane, #6960) and measured ~27s cold — so the request was
+# refused 504 while the load still ran, order- and env-dependently (the
+# rotating `python-ci` red on `main`).
+#
+# Why a clock exemption and not a startup pre-warm: the owner rejected the
+# startup pre-warm (it changes the selfhost startup contract and needs no
+# change here), and a route/tool allowlist for eager warming would drift
+# across 126 routes / ~80 tools and load a model on shards that never embed.
+# This reads the embedder's own one-time-load state (``embeddings.EmbeddingModel``)
+# only when a deadline has ALREADY fired, so the ordinary path pays nothing.
+# ``TORTOISE_EMBEDDER_WARMUP=0`` is honoured: the load happens only because a
+# request demanded it — the change is WHEN it is charged, not WHETHER it runs.
+# Background pre-warms are excluded at the source (``background_load``), so this
+# exemption fires for the REQUEST that triggered the load and nothing else.
+_COLD_SETUP_POLL_S = 0.05
+
+
+def _cold_setup_ran_during(reference: float) -> bool:
+    """True when a REQUEST-owned one-time embedder load sits in this wait.
+
+    The single admission is a load STARTED at/after ``reference`` — the request
+    whose wait began at ``reference`` triggered it, the case #4055 names.
+
+    A BACKGROUND pre-warm (#2952, the hosted ``_prewarm_embeddings`` thread) is
+    deliberately NOT admitted: it is process setup no request owns, so it never
+    stamps the clock this reads (``EmbeddingModel.background_load``). A request
+    that merely overlaps a pre-warm is waiting on init it did not trigger, and
+    exempting it turned a genuine breach into a false success (a sibling test's
+    app lifespan pre-warm leaked its load into the next request's wait).
+
+    Never raises: the embedder is optional (the ``embeddings`` extra may be
+    absent), and a wait-bound seam must not fail because a probe did.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # noqa: BLE001, RUF100 — the embedder is optional; no bound may depend on it
+        return False
+    return EmbeddingModel.one_time_setup_started_since(reference)
+
+
+async def _drain_cold_setup() -> None:
+    """Wait out an in-flight one-time embedder load, OFF the request budget.
+
+    Bounded by the embedder's OWN ``_LOAD_TIMEOUT_S`` (the load attempt cannot
+    outlive its join timeout), so this cannot hang a request on a wedged model.
+    Polling, not an event await: the check is a lock-free bool read, this fires
+    at most once per process, and a poll keeps the ordinary path free of any
+    thread hand-off.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # noqa: BLE001, RUF100 — the embedder is optional
+        return
+    while EmbeddingModel.one_time_setup_in_progress():
+        deadline = EmbeddingModel.one_time_setup_deadline()
+        if deadline is None:
+            # No recorded start to bound against (the two are set together in
+            # ``__init__``, so this is defensive): stop rather than spin, and
+            # let the caller's re-armed bound decide.
+            return
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(_COLD_SETUP_POLL_S)
+
+
+async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
+                                 reference: float):
+    """Await ``task`` under ``timeout``, exempting one-time PROCESS SETUP (#4055).
+
+    Both bound seams (REST ``hosted_api.WaitBoundMiddleware`` and MCP
+    ``mcp_server._await_under_mcp_wait_bound``) delegate here, for the same
+    reason the number itself lives in this module: one implementation, no
+    drift between the surfaces.
+
+    Semantics, stated precisely because a bound is a promise:
+
+    * the ORDINARY request is unchanged — the task gets ``timeout`` and a
+      breach raises ``TimeoutError`` exactly as the bare
+      ``asyncio.wait_for(asyncio.shield(task), timeout=…)`` did;
+    * when the deadline fires while the process's ONE-TIME embedder load ran
+      during this wait, the load is drained OUTSIDE the budget and the full
+      bound is re-armed for the request's own work — **at most once**, so a
+      genuinely slow request still breaches;
+    * ``timeout <= 0`` never exempts: a deadline that was already spent before
+      this seam (the pre-SSE-stall path, where ``remaining`` collapsed to 0)
+      is not a cold-start case, and the exactly-once refusal contract on that
+      path must not be reopened;
+    * ``task`` MUST already be owned by the caller — this helper only SHIELDS
+      it, never cancels it, so a breach still leaves it to the caller's
+      ABANDON-never-cancel path.
+
+    ``reference`` is the mono-clock instant the caller's wait began (the
+    transport arrival on the REST middleware, the same on the MCP arm; the
+    seam's own entry off-HTTP). It is what attributes a load to THIS request.
+    """
+    remaining = max(0.0, float(timeout))
+    exempted = False
+    while True:
+        try:
+            # ``wait_for`` + ``shield``: the primitive both seams already used.
+            # ``shield`` is REQUIRED — ``wait_for`` alone CANCELS the awaited
+            # future on timeout, and these bounds ABANDON, never cancel.
+            return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except TimeoutError:
+            if task.done():
+                # The dispatch finished as the deadline expired: surface its own
+                # result/exception. A handler's ``TimeoutError`` is NOT a breach.
+                return task.result()
+            if (exempted or float(timeout) <= 0.0
+                    or not _cold_setup_ran_during(reference)):
+                raise
+            exempted = True
+            await _drain_cold_setup()
+            remaining = max(0.0, float(timeout))
+
+
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
 # An org-resolution outage (control plane or registry unreachable) is a
 # RETRYABLE dependency condition, not a hard outage. Before this the 503

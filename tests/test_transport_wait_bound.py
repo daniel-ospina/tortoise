@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import json
 import re
+import threading
 import time
 
 import pytest
@@ -1471,6 +1472,233 @@ async def test_mcp_cancellation_cleanup_error_propagates(monkeypatch):
             ms.mcp.local_provider.remove_tool("_bound_cleanup_boom")
         except Exception:
             pass
+
+
+# ── #4055: one-time process SETUP is not charged to the bound ─────────────
+#
+# Owner ruling on #4055 (comment 5845912938): Option 2 — lift the one-time
+# embedder load out of the bounded section. The bound times the WAITING, not
+# the SETTING UP. The collision: the first embedding request after a process
+# start runs ``EmbeddingModel.get()``, whose load is sized above this bound
+# (``_LOAD_TIMEOUT_S``, 90.0 on the device / 270.0 in the test lane, #6960) and
+# measured ~27s cold — so the request was refused 504 while the load still ran,
+# order/env dependent (the rotating ``python-ci`` red on ``main``).
+
+def test_cold_setup_probe_reads_the_embedder_clock(monkeypatch):
+    """``_cold_setup_ran_during`` = a REQUEST-owned load started at/after ref."""
+    from tortoise.embeddings import EmbeddingModel
+
+    ref = time.monotonic()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", ref + 1.0)
+    assert ma._cold_setup_ran_during(ref) is True, (
+        "a load started after the reference belongs to this request's wait")
+
+    # Started BEFORE the reference: NOT this request's setup — even while still
+    # in progress. That is the background pre-warm a request merely overlaps,
+    # which must not earn the exemption (#4055).
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", ref - 1.0)
+    event = threading.Event()
+    event.set()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", event)
+    assert ma._cold_setup_ran_during(ref) is False
+
+    # No load on record: never exempt.
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", None)
+    assert ma._cold_setup_ran_during(ref) is False
+
+
+def test_background_prewarm_load_does_not_stamp_the_setup_clock(monkeypatch):
+    """A background pre-warm must not stamp the REQUEST-owned setup clock.
+
+    Pinned at the embedder, where the marking actually happens: without this,
+    the hosted lifespan pre-warm leaks its one-time load into the next
+    request's wait and the seam exempts a genuine breach.
+    """
+    from tortoise import embeddings as em
+
+    class _DummyST:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(em, "import_sentence_transformer", lambda: _DummyST)
+    em.EmbeddingModel._reset()
+    try:
+        with em.EmbeddingModel.background_load():
+            em.EmbeddingModel(load_timeout=5.0)
+        assert em.EmbeddingModel.one_time_setup_started_at() is None, (
+            "a background pre-warm stamped the request-owned setup clock")
+        assert em.EmbeddingModel.one_time_setup_in_progress() is False
+
+        # A request-triggered load (no marker) DOES stamp.
+        em.EmbeddingModel(load_timeout=5.0)
+        assert em.EmbeddingModel.one_time_setup_started_at() is not None, (
+            "a request-triggered load did not stamp the setup clock")
+    finally:
+        em.EmbeddingModel._reset()
+
+
+@pytest.mark.asyncio
+async def test_wait_bound_breaches_without_a_cold_setup(monkeypatch):
+    """Regression pin for every existing case: no setup → the bound is the bound."""
+
+    async def _never():
+        await asyncio.sleep(30)
+
+    task = asyncio.ensure_future(_never())
+    try:
+        with pytest.raises(TimeoutError):
+            await ma.await_under_wait_bound(task, 0.05, reference=time.monotonic())
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_one_time_setup_is_drained_outside_the_wait_budget(monkeypatch):
+    """A request that outlives the bound only because it runs the one-time load
+    completes: the load is drained OUTSIDE the budget, then the full bound is
+    re-armed for the request's own work."""
+    drained = []
+
+    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref: True)
+
+    async def _drain():
+        drained.append(True)
+        await asyncio.sleep(0.15)
+
+    monkeypatch.setattr(ma, "_drain_cold_setup", _drain)
+
+    async def _work():
+        await asyncio.sleep(0.25)  # outlives the 0.05 bound, within drain+bound
+        return "done"
+
+    task = asyncio.ensure_future(_work())
+    started = time.monotonic()
+    result = await ma.await_under_wait_bound(task, 0.05, reference=started)
+    assert result == "done"
+    assert drained == [True]
+    assert time.monotonic() - started >= 0.25, "the work was cut short"
+
+
+@pytest.mark.asyncio
+async def test_cold_setup_exemption_is_granted_at_most_once(monkeypatch):
+    """One extension, never a loop: a request with genuinely slow work still
+    breaches after the setup has been drained."""
+    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref: True)
+
+    async def _drain():
+        return None
+
+    monkeypatch.setattr(ma, "_drain_cold_setup", _drain)
+
+    async def _never():
+        await asyncio.sleep(30)
+
+    task = asyncio.ensure_future(_never())
+    try:
+        with pytest.raises(TimeoutError):
+            await ma.await_under_wait_bound(task, 0.05, reference=time.monotonic())
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_zero_deadline_never_exempts(monkeypatch):
+    """A deadline already spent before this seam (the pre-SSE-stall path, where
+    ``remaining`` collapsed to 0) is not a cold-start case — the exactly-once
+    refusal contract there must not be reopened."""
+    probes = []
+
+    def _probe(ref):
+        probes.append(ref)
+        return True
+
+    monkeypatch.setattr(ma, "_cold_setup_ran_during", _probe)
+
+    async def _never():
+        await asyncio.sleep(30)
+
+    task = asyncio.ensure_future(_never())
+    try:
+        with pytest.raises(TimeoutError):
+            await ma.await_under_wait_bound(task, 0.0, reference=time.monotonic())
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert probes == [], "a zero deadline consulted the cold-setup exemption"
+
+
+@pytest.mark.asyncio
+async def test_rest_request_running_a_cold_setup_is_not_refused(fast_bound, monkeypatch):
+    """END-TO-END middleware: a handler that starts the one-time embedder load
+    and outlives the bound gets 200, not the 504 refusal."""
+    from tortoise.embeddings import EmbeddingModel
+
+    event = threading.Event()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", event)
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at",
+                        time.monotonic() + 1.0)
+
+    async def app(scope, receive, send):
+        event.set()                 # enter the one-time load
+        await asyncio.sleep(0.15)   # ...which outlives the 0.05 bound...
+        event.clear()               # ...and completes
+        await asyncio.sleep(0.02)
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+    mw = ha.WaitBoundMiddleware(app)
+    rec = await _drive(mw, _scope())
+    assert rec.status == 200, "the one-time load was charged to the wait budget"
+    assert rec.json == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_rest_request_without_a_cold_setup_still_refuses(fast_bound, monkeypatch):
+    """The paired negative: the SAME slow shape with no one-time setup in flight
+    is refused at the bound — the exemption is for setup, not for slowness."""
+    from tortoise.embeddings import EmbeddingModel
+
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress",
+                        threading.Event())
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", None)
+
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+    rec = await _drive(mw, _scope())
+    assert rec.status == 504
+
+
+@pytest.mark.asyncio
+async def test_mcp_seam_drains_a_one_time_setup(fast_bound, monkeypatch):
+    """The MCP arm shares the same wait: a dispatch that runs the one-time load
+    past the bound is not refused."""
+    from tortoise import mcp_server as ms
+    from tortoise.embeddings import EmbeddingModel
+
+    event = threading.Event()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", event)
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at",
+                        time.monotonic() + 1.0)
+
+    sentinel = object()
+
+    async def _dispatch(name, arguments, *, version, run_middleware, task_meta):
+        event.set()
+        await asyncio.sleep(0.15)
+        event.clear()
+        await asyncio.sleep(0.02)
+        return sentinel
+
+    monkeypatch.setattr(ms, "_original_call_tool", _dispatch)
+
+    result = await ms._await_under_mcp_wait_bound(
+        "_bound_cold", {}, version=None, task_meta=None)
+    assert result is sentinel, "the MCP seam refused a one-time setup as a breach"
 
 
 # ── the cold half: a VERIFICATION, not a build ────────────────────────────
