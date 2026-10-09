@@ -68,6 +68,82 @@ def test_commit_session_threads_session_date(sdk, monkeypatch):
 # (before any extraction is spent), then at `_post_commit` itself (the
 # bypass-proof chokepoint, pinned in tests/test_capture_consent.py).
 
+def _valid_v2_payload() -> dict:
+    """A Layer-1 payload the gate ACCEPTS.
+
+    Both tests below need a mocked extraction that would genuinely reach
+    `_post_commit`. With an empty ``{}`` (or a payload the Layer-1 gate
+    rejects) the SDK appends an error, returns ``ok=False`` BEFORE the POST, and
+    the refusal test's ``posted == []`` would hold whether or not the consent
+    gate existed — the gate would then be pinned only by ``extracted == []``.
+
+    The shape mirrors ``tests/test_commit_schema.py``'s proven fixture: an
+    EMPTY ``client_commit_id`` finalized with the schema's own
+    ``compute_client_commit_id``, and a ``provenance_refs`` entry — the gate
+    resolves ``source_ref`` against the emitted sources / provenance refs.
+    """
+    from tortoise.commit_schema import compute_client_commit_id
+
+    raw = {
+        "schema_version": "1",
+        "session_id": "sess_3662_consent",
+        "client_commit_id": "",
+        "captured_at": "2026-08-11T10:00:00Z",
+        "extractor": {"version": "value@1.0.0", "mode": "byok",
+                      "calibration_version": "v3"},
+        "summary": "consent-gate fixture",
+        "story_arc": "",
+        "provenance_refs": [{"path": "session.md", "spans": ["0-10"]}],
+        "sources": [],
+        "entities": [],
+        "points": [{
+            "id": "pt_" + "3662" * 16,
+            "content": "an unconsented transmission must not leave the machine",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "",
+            "status": "live",
+        }],
+        "operators": [],
+        "telemetry": {
+            "extractor": {"version": "value@1.0.0", "mode": "byok",
+                          "calibration_version": "v3"},
+            "model": {"provider": "anthropic", "id": "claude-3-7",
+                      "cfg_hash": "h1"},
+            "counts": {"kept": 1, "candidate": 1, "segment": 1, "window": 1,
+                       "empty_windows": 0},
+            "keep_ratio": 1.0,
+            "dedup_hits": 0,
+            "frontier_calls": 0,
+            "llm_cost_usd": 0.0,
+            "extraction_ms": 1,
+            "retry_count": 0,
+            "last_error_code": None,
+            "confidence_histogram": [0] * 10,
+        },
+    }
+    raw["client_commit_id"] = compute_client_commit_id(
+        raw["session_id"], raw["points"], raw["entities"], raw["operators"],
+        raw["summary"], raw["story_arc"], raw.get("events", []),
+        raw.get("supersessions", []))
+    return raw
+
+
+def _extract_with_payload(payload: dict, extracted: list):
+    """A stand-in for ``extract_session_v2`` that records the call."""
+    def _fake(model, conversation, **kw):
+        extracted.append(conversation)
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+    return _fake
+
+
 def test_commit_session_refuses_without_consent_before_extraction(
         sdk, monkeypatch):
     """FAIL-ON (before the fix): extraction runs and `_post_commit` is reached,
@@ -86,7 +162,7 @@ def test_commit_session_refuses_without_consent_before_extraction(
                         lambda *a, **k: posted.append(a) or {"ok": True})
     extracted: list = []
     monkeypatch.setattr(ev2, "extract_session_v2",
-                        lambda *a, **k: extracted.append(a) or {})
+                        _extract_with_payload(_valid_v2_payload(), extracted))
     out = sdk.commit_session(CONV)
     assert out["ok"] is False, out
     assert any("explicit consent" in e for e in out["errors"]), out["errors"]
@@ -106,13 +182,19 @@ def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):
     import tortoise.extractor_v2 as ev2
 
     monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    posted: list = []
+    monkeypatch.setattr("tortoise.sdk._post_commit",
+                        lambda *a, **k: posted.append(a) or {"ok": True})
     extracted: list = []
-    monkeypatch.setattr(
-        ev2, "extract_session_v2",
-        lambda *a, **k: (extracted.append(a) or
-                         {"payload": None, "errors": ["no payload produced"]}))
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_with_payload(_valid_v2_payload(), extracted))
     out = sdk.commit_session(CONV)
     assert extracted, "the consented path must not be refused before extraction"
+    # The fail-on companion to the refusal test: this SAME mocked extraction is
+    # one that genuinely reaches the transmitting primitive, so `posted == []`
+    # there is the gate's doing and not an early return for another reason.
+    assert posted, "the consented path must reach the transmitting primitive"
+    assert out["ok"] is True, out
     assert not any("explicit consent" in str(e)
                    for e in out.get("errors", [])), out
 
