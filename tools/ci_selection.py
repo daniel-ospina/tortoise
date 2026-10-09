@@ -299,7 +299,42 @@ SOURCE_PATTERNS = {
                    # and the guard never runs on the PR that owns it — the same
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
-                   "website/apps/blog-admin/dist/index.html",
+                   # The guard reads the WHOLE website tree (`WEBSITE.rglob("*")`)
+                   # and the committed blog-admin artifact. Registering only
+                   # dist/index.html (and then dist/assets/) left the guard unrun
+                   # for a change to any OTHER file it reads — three review rounds
+                   # each found another instance of that same silent drop.
+                   #
+                   # NOT a wholesale `website/`: `test_unrelated_website_change_
+                   # stays_tier1` pins that a website path owning no guard test
+                   # keeps tier-1 behavior. So each path this guard actually reads
+                   # is named — the granularity the carve-out design requires.
+                   "website/apps/blog-admin/",
+                   "website/apps/dashboard/index.html",
+                   "website/apps/dashboard/vite.config.js",
+                   "website/apps/dashboard/eslint.config.js",
+                   "website/apps/dashboard/scripts/copy-shared-assets.mjs",
+                   "website/apps/dashboard/scripts/gen-wizard-prompts-snapshot.mjs",
+                   "website/apps/dashboard/scripts/gen-wizard-rendered-copy-snapshot.mjs",
+                   # File granularity, NOT `website/blog/` or `website/functions/`:
+                   # test_website_docs_consistency pins that `website/blog/index.html`
+                   # is NOT guard-reachable, so the directory would over-select.
+                   "website/blog/blog.js",
+                   "website/consent.js",
+                   "website/functions/_middleware.ts",
+                   "website/functions/_shared/contact-transport.ts",
+                   "website/functions/_shared/security-headers.ts",
+                   "website/functions/blog/_lib.ts",
+                   "website/functions/blog/feed.xml.ts",
+                   "website/functions/blog/sitemap.xml.ts",
+                   "website/functions/blog/_shared/cloudflare-purge.ts",
+                   "website/functions/blog/_shared/meta-contract.ts",
+                   "website/functions/blog/_shared/seo-constraints.ts",
+                   "website/functions/blog/_shared/seo-keywords.ts",
+                   "website/functions/blog/_shared/slug.ts",
+                   "website/functions/contact/submit.ts",
+                   "website/website_architecture.md",
+                   "docs/auth-architecture.md",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,
