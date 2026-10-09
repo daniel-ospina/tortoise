@@ -225,7 +225,7 @@ MCP tool `tortoise_session_capture` (and a hosted-backend `TortoiseSDK.capture_s
 through that same server primitive and is likewise declared out of the client gate with its
 rationale recorded in the table above (companion issue #3662). The SDK's sibling
 `commit_session` → `POST /v1/sessions/commit` path (`tortoise/sdk.py::_post_commit`) WAS named
-here as a carve-out; **#3662 closed it** — `_post_commit` now refuses when consent is declined,
+here as a carve-out; **#3662 closed that carve-out** — `_post_commit` now refuses when consent is declined,
 so it is gated like the other in-repo client paths. #3615 therefore fixes the in-repo
 **automatic client paths** and declares every cross-layer dependency rather than claiming
 end-to-end closure.

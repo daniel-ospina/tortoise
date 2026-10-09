@@ -151,6 +151,14 @@ is **per-surface**, not uniform (#3615):
   extractor provider (BYOK is the documented default), so a remote
   `redis://`·`rediss://` backend is itself a data-egress choice and the
   provider leg transmits regardless of which backend is named.
+- **The ambient indexer sweep is not gated, and it does egress.** The Claude
+  Code `session-end.sh` hook runs `tortoise index directory <corpus> --metadata`
+  **unconditionally** — outside its `TORTOISE_CAPTURE` branch — and
+  `tortoise/session_indexer.py` posts conversation-derived text to an
+  OpenAI-compatible endpoint whenever `OPENAI_API_KEY` is set. So everything
+  above is a statement about the **consent-gated paths**; on this one an
+  absolute "no transcript leaves the machine" claim is false (tracked with the
+  other ungated seams, #3662).
 - **The in-repo Pi capture extension is not gated either.**
   `tortoise/pi-hooks/tortoise-capture.ts` (installed by `tortoise capture
   install`, `harness: "pi"`) POSTs the conversation on `session_shutdown` and

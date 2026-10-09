@@ -35,8 +35,8 @@ Consumers:
     directly. Two ENFORCEMENT points, one predicate — the verdict string comes
     from ``capture_declined_reason`` below.
 
-NOT gated here, by design (recorded so the two consent contracts cannot drift,
-#3662):
+NOT gated here — recorded, not settled (so the two consent contracts cannot
+overwrite each other silently, #3662):
   * ``tortoise/mcp_server.py::tortoise_session_capture`` executes SERVER-side
     (it answers "session capture requires hosted mode" for stdio/self-host),
     so the client host's ``TORTOISE_CAPTURE`` is unreadable there. Its gate is
@@ -49,6 +49,14 @@ NOT gated here, by design (recorded so the two consent contracts cannot drift,
     provider. It is out of scope here because gating it would also refuse pure
     local writes — but it is NOT egress-free: the provider leg transmits
     regardless of which backend ``TORTOISE_DB_URI`` names.
+  * the ambient INDEXER sweep (``tortoise index directory <corpus> --metadata``,
+    which the Claude Code ``session-end.sh`` hook runs unconditionally, outside
+    its ``TORTOISE_CAPTURE`` branch) sends conversation-derived text to the
+    configured LLM provider whenever ``OPENAI_API_KEY`` is present
+    (``tortoise/session_indexer.py``). Unlike the two seams above, this one
+    EGRESSES rather than merely skipping a gate, and it is the one path on which
+    "no transcript leaves the machine" is false — so an absolute promise is
+    wrong and only "on the consent-gated paths" is true.
 
 The truthy vocabulary is NOT declared here: it delegates to the tree's single
 declared contract, `tortoise/env_truthy.py` (#4097), so this module cannot drift
