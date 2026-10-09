@@ -214,7 +214,7 @@ def test_state_keys_registered():
     assert "github_docs_indexed_at" in ha.OnboardingStatePatchRequest.model_fields
 
 
-def test_state_keys_survive_patch_roundtrip(client, provisioned):
+def test_server_owned_state_keys_patch_refused_with_reason(client, provisioned):
     """The cursor is SERVER-OWNED — #3552 moved it onto the PATCH refusal
     list, so a client PATCH is refused 403 with a reason rather than being
     silently dropped by the allowlist filter.
@@ -223,7 +223,9 @@ def test_state_keys_survive_patch_roundtrip(client, provisioned):
     silence; for a SERVER-OWNED key the equivalent failure is a silent drop of
     the refusal, which the ``detail`` assertion below pins. The client-writable
     round-trip for REGISTERED keys is
-    ``test_onboarding_endpoints.test_state_keys_registered_parametrized``.
+    ``test_onboarding_endpoints.test_state_keys_registered_parametrized``, and
+    the persisted-value half (the refusal must not mutate the row) is
+    ``test_onboarding_endpoints.test_operational_keys_not_client_writable``.
     """
     r = client.tc.patch("/v1/onboarding/state",
                         json={"github_index_cursor": {"acme/repo1": {"updated_at": "x", "number": 1}}})

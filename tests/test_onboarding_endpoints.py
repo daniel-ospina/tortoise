@@ -1325,10 +1325,21 @@ def test_operational_keys_not_client_writable(client):
     """
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
+        _OPERATIONAL_SERVER_OWNED_KEYS as _HA_OPERATIONAL_SERVER_OWNED_KEYS,
         _PATCH_SERVER_OWNED_KEYS,
         _make_sdk,
         _update_onboarding_state,
     )
+    # Both directions, because the literal above keeps the loop non-vacuous but
+    # cannot see the PRODUCTION set: dropping a key from production shrinks this
+    # literal along with it, and adding one to production leaves this literal
+    # untouched — either way the new key would get no refusal/value coverage.
+    # The equality is what closes the drift in both directions.
+    assert set(_OPERATIONAL_SERVER_OWNED_KEYS) == set(
+        _HA_OPERATIONAL_SERVER_OWNED_KEYS), (
+        "the test literal and hosted_api._OPERATIONAL_SERVER_OWNED_KEYS have "
+        "drifted — an operational key on one side only is untested: "
+        f"{sorted(set(_OPERATIONAL_SERVER_OWNED_KEYS) ^ set(_HA_OPERATIONAL_SERVER_OWNED_KEYS))}")
     # Provision the Team node so the assertions below read REAL persisted state
     # (the state writer is MERGE...SET — a silent no-op without the node).
     _make_sdk(namespace="registry")._get_registry().query(
