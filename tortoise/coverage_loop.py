@@ -343,8 +343,15 @@ def coverage_gap(facets: list[LoopFacet], pool: list[dict], *,
         return []
     window = max(1, min(window, len(pool)))
     win_sessions = {_session_of(h, session_key) for h in pool[:window]}
-    win_sessions.discard("")
-    win_sessions.discard("idx:-1")
+    # A synthetic ``idx:*`` key names no graph session — the ``lme_session_
+    # index`` bucket, and since #3591 the per-hit ``idx:point:{id}`` bucket
+    # of a hit with no session identity — so it can never be a session a
+    # census ``span`` names. Drop the whole namespace rather than the one
+    # literal ``idx:-1``: after #3591 the per-hit bucket would otherwise
+    # read as a session PRESENT in the window, which is the opposite of
+    # what it means.
+    win_sessions = {k for k in win_sessions
+                    if k and not k.startswith("idx:")}
     missing: list[LoopFacet] = []
     for facet in facets:
         span = set(facet.span)

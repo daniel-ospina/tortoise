@@ -679,6 +679,36 @@ def test_session_key_matches_the_historical_bucket_key():
     assert not is_raw_chunk(_point("a1", "s1"))
 
 
+def test_identity_less_hits_get_a_per_hit_bucket_3591():
+    """#3591: an identity-less hit is keyed by its OWN id, so two unrelated
+    identity-less chunks no longer share the C5 allowance and are not
+    dropped collectively. The PHANTOM property is unchanged — an ``idx:``
+    key still names no graph session, so it can never seed a fetch."""
+    alpha, beta = _chunk("alpha", ""), _chunk("beta", "")
+    assert session_key_of(alpha) == "idx:point:alpha"
+    assert session_key_of(beta) == "idx:point:beta"
+    # The shipped defect (measured before the fix): both read ``idx:-1``, so
+    # cap=1 dropped ``beta`` and cap=3 kept only 3 of 5.
+    assert [h["id"] for h in dedup_pool([alpha, beta],
+                                        max_chunks_per_session=1)] == [
+        "alpha", "beta"]
+    five = [_chunk(f"c{i}", "") for i in range(5)]
+    assert [h["id"] for h in dedup_pool(five,
+                                        max_chunks_per_session=3)] == [
+        f"c{i}" for i in range(5)]
+    # The historical key is UNCHANGED where an index exists — including the
+    # explicit ``-1`` sentinel, which is not the same shape as absent.
+    assert session_key_of({"lme_session_index": 7}) == "idx:7"
+    assert session_key_of({"lme_session_index": -1}) == "idx:-1"
+    # ... and a hit with nothing at all to key on keeps the one bucket.
+    assert session_key_of({}) == "idx:-1"
+    # PHANTOM, not session: a per-hit bucket is still refused as a seed, so
+    # the fix cannot cause a fetch against a session id that does not exist.
+    assert seeded_sessions([alpha, beta], window=5, limit=5) == []
+    assert seeded_sessions([_chunk("a1", "s1")], window=5, limit=5) == [
+        SeededSession(session_id="s1", rank=0, point_id="a1")]
+
+
 def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):
     # sentinel: coverage_loop must DELEGATE, not re-implement — reverting it
     # to the historical inline copy must fail this test
