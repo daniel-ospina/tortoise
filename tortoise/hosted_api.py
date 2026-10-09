@@ -1060,7 +1060,10 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # fleet for the best-effort caller — a silent under-enumeration on
             # the very path #5388 is about. Presence alone is not enough: a
             # truthy but NON-CALLABLE attribute would raise ``TypeError``, which
-            # that same handler swallows into that same empty fleet.
+            # that same handler swallows into that same empty fleet. This
+            # NARROWS the hole rather than closing it: a CALLABLE whose signature
+            # rejects ``count_exact`` still raises, and is still swallowed, so a
+            # seam object must accept that parameter to keep its total.
             _total_aware = getattr(cp, "query_with_total", None)
             if not callable(_total_aware):
                 def _read_page(table, **kw):

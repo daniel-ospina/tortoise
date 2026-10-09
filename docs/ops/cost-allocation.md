@@ -196,13 +196,15 @@ declared total is 0 (unconfigured) or no org carries weight.
 * The writer runs on the existing hourly maintenance loop
   (`hosted_api._event_retention_loop`), so the metric is first populated within
   one interval after boot **provided the enumeration is confirmable**. A fleet
-  larger than the 1000-row page size is fine — the walk pages past it — but when
-  the walk cannot CONFIRM the whole fleet (it hit its page cap, or the server
-  never stated a total and the walk never reached an empty page, or it reached
-  one but the distinct ids it saw fell short of the stated total, or the
-  enumeration raised), the cost caller fails closed on every cycle and the metric
-  stays last-known-good (or empty if it was never populated), with no on-metric
-  evidence that it is not live. It is best-effort: a refresh failure can never
+  larger than the 1000-row page size is fine — the walk pages past it — but the
+  cost caller fails closed on every cycle (and the metric stays last-known-good,
+  or empty if it was never populated) whenever the walk cannot CONFIRM the whole
+  fleet. That is any of: it never reached an empty page (it hit its page cap, or
+  it refused to advance a cursor it could not trust on an out-of-order or
+  falsy-id page, or no total was stated and an empty page was the only available
+  signal); or it did reach one but the distinct ids it saw fell short of the
+  stated total; or the enumeration raised. There is no on-metric evidence that
+  the metric is not live. It is best-effort: a refresh failure can never
   terminate event retention.
 * The org label is bounded (`MAX_ORG_LABELS`, default 512, with a fixed
   `__other__` overflow child), so org growth cannot blow up the metric's
