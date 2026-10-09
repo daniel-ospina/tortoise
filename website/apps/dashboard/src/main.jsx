@@ -937,8 +937,12 @@ async function copyText(text) {
 async function copyInline(e, text, label) {
   const btn = e.currentTarget
   const ok = await copyText(text)
-  btn.textContent = ok ? 'Copied' : 'Copy failed'
-  setTimeout(() => { btn.textContent = label }, ok ? 1600 : 4000)
+  const shown = ok ? 'Copied' : 'Copy failed'
+  btn.textContent = shown
+  // #2935 (review 3): conditional, so a stale timer cannot erase a LATER state
+  // on the same button. (Round 2 fixed this direction only for the failure
+  // timer; the success timer had the identical shape.)
+  setTimeout(() => { if (btn.textContent === shown) btn.textContent = label }, ok ? 1600 : 4000)
 }
 
 // #2935 (review P2): the sentinel a copy control renders as a failure. Shared
@@ -1885,7 +1889,10 @@ function claimIntentInFlight() {
       return
     }
     setCopiedStep(text)
-    setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 1600)  // review: mounted-guard the flash timer (setState after unmount)
+    // #2935 (review 3): conditional — an unconditional '' here let a success on
+    // one row erase a FAILURE that arrived on another row inside the 1.6s, which
+    // re-silences exactly the refusal this PR made visible.
+    setTimeout(() => { if (mountedRef.current) setCopiedStep((c) => (c === text ? '' : c)) }, 1600)  // review: mounted-guard the flash timer (setState after unmount)
   }
   const [wizardProject, setWizardProject] = React.useState('')
   const mountedRef = React.useRef(true)  // review: flash-timer guard — flipped false on unmount so late setState is skipped
@@ -3350,7 +3357,7 @@ function claimIntentInFlight() {
       // 'I've set it up — Continue' affordance must persist after the user
       // copies and goes to paste/run it (the 1.6s flash timer would eat
       // it). It resets on harness-tab switch and on step change instead.
-      setTimeout(() => { if (mountedRef.current) setWizardCopied('') }, 1600)  // review: mounted-guard the flash timer
+      setTimeout(() => { if (mountedRef.current) setWizardCopied((c) => (c === label ? '' : c)) }, 1600)  // review: mounted-guard the flash timer
     }
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})

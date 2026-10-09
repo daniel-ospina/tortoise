@@ -233,14 +233,23 @@ export function clipboardWriteOffences(src) {
   const raw = src.split('\n')
   const offences = []
   lines.forEach((line, i) => {
-    // `writeText` as an IDENTIFIER (catches destructured aliases and bracket
-    // access), plus the other copy primitives. String contents are already
-    // blanked, so `execCommand` is matched by call shape alone.
-    const isCopy = /\bwriteText\s*\(/.test(line)
+    // `writeText` as an IDENTIFIER — not the qualified call shape. Round 2
+    // matched `writeText(`, which `writeText?.(x)` and the value-alias form
+    // evaded. Bracket access on the METHOD (`["writeText"]`) cannot be seen in
+    // the stripped projection, because its key IS a string body, so it is
+    // matched on the raw line — narrowly, so a string that merely MENTIONS the
+    // call is still not flagged. Pure comment lines are skipped.
+    const rawLine = raw[i] || ''
+    // A line that was ENTIRELY comment/string blanks to nothing in the stripped
+    // projection. (A leading-comment regex was wrong: a block comment followed
+    // by real code on the same line is not a comment line.)
+    if (line.trim() === '') return
+    const isCopy = /\bwriteText\b/.test(line)
+      || /\[\s*['"]writeText['"]\s*\]/.test(rawLine)
       || /\bexecCommand\s*\(/.test(line)
       || /\bClipboardItem\b/.test(line)
     if (!isCopy) return
-    const at = line.search(/\bwriteText\s*\(|\bexecCommand\s*\(|\bClipboardItem\b/)
+    const at = line.search(/\bwriteText\b|\bexecCommand\s*\(|\bClipboardItem\b/)
     const before = line.slice(0, at < 0 ? 0 : at)
     // `await` must govern THIS call: since the last statement boundary, or as
     // the trailing token of the previous line. An unrelated earlier
@@ -249,7 +258,10 @@ export function clipboardWriteOffences(src) {
     const prevLine = i > 0 ? lines[i - 1] : ''
     const awaitedPrev = /\bawait\b\s*\(?\s*$/.test(prevLine)
     if (awaitedHere || awaitedPrev) return
-    if (/\.then\s*\(|\.catch\s*\(/.test(line)) return
+    // `.then`/`.catch` must be attached to THIS write's own call — `[^;]*?`
+    // cannot cross a statement boundary, so a `.catch` belonging to an unrelated
+    // call later on the line no longer makes the write look observed.
+    if (/\bwriteText\b[^;]*?\)\s*\.(then|catch)\s*\(/.test(line)) return
     offences.push(`main.jsx:${i + 1}: ${(raw[i] || '').trim()}`)
   })
   return offences
@@ -272,6 +284,11 @@ test('#2935 TRIPWIRE is real: it catches the shapes that evaded the first versio
     'await foo(); navigator.clipboard.writeText(x)',
     '/* not a comment anymore */ navigator.clipboard.writeText(x)',
     'await copyText("https://a"); navigator.clipboard.writeText(x)',
+    // The four round 3 named:
+    'navigator.clipboard?.writeText?.(x)',
+    'navigator.clipboard["writeText"](x)',
+    'const w = navigator.clipboard.writeText; w(x)',
+    'navigator.clipboard.writeText(x); foo().catch(console.error)',
   ]
   evading.forEach((line) => {
     assert.equal(clipboardWriteOffences(line).length, 1, `the ratchet must flag: ${line}`)
