@@ -87,6 +87,17 @@ reason``); nothing about the columns is assumed beyond that.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first with an UNATTRIBUTED error.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/queue_reconcile.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/queue_reconcile.py`"
+    )
+
 import argparse
 import concurrent.futures
 import fcntl
@@ -95,7 +106,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
