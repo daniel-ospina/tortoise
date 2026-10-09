@@ -2167,6 +2167,55 @@ def force_sparse_tfidf(monkeypatch):
     return None
 
 
+@pytest.fixture
+def force_embedder_on(monkeypatch):
+    """#3223: pin a DETERMINISTIC embedder-ON state for the test.
+
+    ``force_sparse_tfidf`` (above) pins the embedder OFF. The SHIPPED
+    configuration is the opposite one, and before #3223 there was no way to
+    pin it on without depending on the ambient HF cache — which python-ci.yml
+    treats as present-or-absent (a failed download is a WARN), the very
+    non-determinism ``force_sparse_tfidf``'s note records. This is the
+    counterpart: a deterministic stand-in embedder, monkeypatched at the SAME
+    seam, so a test can exercise the hybrid (RRF FTS + vector) retrieval leg
+    in EVERY lane — including a lane with no model cache, where it would
+    otherwise block on a cold load and then degrade to sparse.
+
+    The stand-in embeds by a stable per-text hash (not ``hash()``, which is
+    salted per process), so a text's vector is reproducible across runs and
+    unrelated texts land at comparable distance from a query — i.e. the vector
+    half returns its nearest Objects for ANY term, exactly the shipped
+    behaviour #3223 records. It returns the store's own width
+    (``EMBEDDING_DIM``) so a docker ``vecf32``/HNSW write path accepts it.
+
+    Assertions must never depend on the vectors' VALUES, only on the leg
+    being live; a test that needs a specific semantic ranking must build its
+    own embedder.
+    """
+    import hashlib
+
+    import numpy as np
+
+    from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel
+
+    class _DeterministicEmbedder:
+        """Stable 384-dim embedder — no model, no network, no cache."""
+
+        def encode(self, texts, batch_size=32, show_progress_bar=False):
+            rows = []
+            for text in texts:
+                seed = int.from_bytes(hashlib.sha256(
+                    str(text).encode("utf-8")).digest()[:8], "big")
+                vec = np.random.default_rng(seed).standard_normal(EMBEDDING_DIM)
+                norm = float(np.linalg.norm(vec))
+                rows.append(vec / norm if norm else vec)
+            return np.stack(rows).astype(np.float32)
+
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: _DeterministicEmbedder()))
+    return None
+
+
 # ── #7655: keep pytest-timeout's per-test guard from being disarmed ────────
 # pytest-timeout's default `signal` method shares `ITIMER_REAL` with the code
 # under test, so an in-process `signal.alarm()` silently replaces the per-test
