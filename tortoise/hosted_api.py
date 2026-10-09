@@ -1165,9 +1165,13 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # refuse-to-certify guard into a PRUNE (round 6). The total may only
             # ever DOWNGRADE a walk that already reached an empty page; it can
             # never promote one that did not.
-            complete = exhausted and (
-                total is None or total <= 0 or len(seen_ids) >= total
-            )
+            # A total of 0 needs no disjunct of its own: `len(seen_ids) >= 0`
+            # is already true, so `total <= 0` was DEAD here (reviewer T round 7
+            # — removing it left the suite green). What refuses a page-cap exit
+            # with `total=0` is the `exhausted` conjunct, not a test on the
+            # total. (Round 5 concluded the opposite from the pre-round-6
+            # expression, where `len(seen) >= 0` really was vacuous on its own.)
+            complete = exhausted and (total is None or len(seen_ids) >= total)
             if not complete:
                 _logger.warning(
                     "org enumeration is INCOMPLETE: %d row(s) walked, server "
@@ -1415,11 +1419,16 @@ def _sweep_events() -> None:
         # Sweep every registered org's graph (registry Org nodes).
         # ``_iter_registered_orgs`` is typed ``list[dict] | None``: the
         # ``require_complete`` path can return ``None``. This default path does
-        # not, today — but the sweep must not depend on that accident: a
-        # ``None`` here would raise ``TypeError``, which the outer handler below
-        # catches and logs as "event retention sweep failed" before returning —
-        # so the WHOLE fleet's retention would stop for that pass, reported only
-        # as that one warning (reviewer C, round 6).
+        # not, today — but the sweep must not depend on that accident.
+        #
+        # WITHOUT this guard a ``None`` would raise ``TypeError``, which the
+        # outer handler below catches and logs as "event retention sweep
+        # failed" before returning — stopping the WHOLE fleet's retention for
+        # that pass. WITH it, a ``None`` becomes a SILENT zero-org sweep: the
+        # loop body never runs and NOTHING is logged. So the guard prevents the
+        # crash; it does NOT make the stop visible. (Reviewer C round 6;
+        # corrected round 7 — the first rewrite described the UNGUARDED
+        # behaviour as if it were what this line does.)
         for org in (_iter_registered_orgs() or []):
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue

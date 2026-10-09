@@ -241,30 +241,41 @@ class TestWindowShiftRace:
 
     def test_a_duplicate_cannot_satisfy_the_stated_total(self, monkeypatch,
                                                         caplog):
-        """Completeness counts DISTINCT ids: if the server repeats a row, the
-        count must not be reachable by duplication."""
-        class RepeatingCP:
-            """Always serves the same full page, and claims a LARGER total."""
+        """Completeness counts DISTINCT ids — pinned at an EXHAUSTED exit.
 
-            def __init__(self, total):
-                self.page = [{"id": f"o{i:06d}", "name": None}
-                             for i in range(MAX)]
-                self.total = total
+        ROUND 7 (reviewer T): the previous fixture re-served one page forever,
+        so the walk ALWAYS exited on the page cap with ``exhausted=False``, and
+        the round-6 conjunct refused regardless of which count was used —
+        mutating ``len(seen_ids)`` to ``len(rows)`` left the whole suite green.
+        A guard needs a fixture that REACHES the branch it guards, so this one
+        serves page 1 (MAX distinct ids), then 200 rows that DUPLICATE ids
+        already sent (ascending, so the cursor guard does not fire), then an
+        EMPTY page. That is a genuine exhausted exit where ``len(rows)=1200``
+        satisfies ``total=1200`` while the DISTINCT count is only MAX.
+        """
+
+        class RepeatingCP:
+            def __init__(self):
+                self.distinct = [{"id": f"o{i:06d}", "name": None}
+                                 for i in range(MAX)]
+                # Re-serves ids ALREADY SENT: only the raw row count grows.
+                self.dupes = [{"id": f"o{i:06d}", "name": None}
+                              for i in range(200)]
+                self.calls = 0
 
             def query_with_total(self, table, **kw):
-                # Deliberately IGNORES the cursor: re-serves the same full page
-                # on every call. Round 3 found that honouring the cursor made
-                # this test VACUOUS — page 2 came back empty, so the
-                # distinct-id count was never exercised and swapping it for a
-                # raw row count left every test green. A server that re-serves
-                # rows it already sent is exactly the case the distinct count
-                # exists for.
-                return self.page, self.total
+                self.calls += 1
+                if self.calls == 1:
+                    return self.distinct, MAX + 200  # the stated fleet total
+                if self.calls == 2:
+                    return self.dupes, None
+                return [], None                      # THE end-of-walk signal
 
-        # 2*MAX claimed, but only MAX distinct rows will ever be served.
-        cp = RepeatingCP(MAX * 2)
+        cp = RepeatingCP()
         assert _run(monkeypatch, cp, require_complete=True) is None, (
-            "a total that no amount of walking satisfies must fail closed"
+            "a total reachable only by counting DUPLICATE rows must fail "
+            "closed — otherwise the fleet is certified while originals are "
+            "still unserved"
         )
         _assert_refused_not_crashed(caplog)
 
@@ -383,6 +394,15 @@ class TestEndOfWalkSignals:
 
         Without this test the guard could be `total is None` ("first non-None
         total") and the suite would still pass — a mutation found exactly that.
+
+        ROUND 7 CORRECTION (reviewer T): that is no longer true. Once round 6
+        added the `exhausted` conjunct, THIS fixture never reaches an empty page
+        — it exits on the page CAP — so it refuses regardless of which total was
+        adopted, and the "first non-None total" mutation now leaves it GREEN.
+        The sticky-first-total guard is pinned by
+        ``test_a_later_page_total_cannot_mask_a_shortfall``, whose fixture DOES
+        reach an exhausted exit. What this test still pins is the page-cap
+        refusal under a volunteered remainder.
 
         The discriminating shape is a server that NEVER returns an empty page,
         so the exit is the local page cap and `exhausted` is False. Only then
