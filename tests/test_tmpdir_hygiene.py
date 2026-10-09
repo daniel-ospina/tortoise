@@ -642,6 +642,27 @@ _LEAK_SURFACED_JOBS = (
 _ARTIFACT = "tempdir-hygiene-end.json"
 
 
+def _always_runs(raw: object) -> bool:
+    """True when a step's ``if`` makes it run even after a failing suite.
+
+    PyYAML types a bare ``if: false`` as the BOOL ``False``, so a truthiness
+    check (``raw or "always()"``) silently treats a DISABLED step as allowed —
+    that bug shipped in round 5 and was caught in round 6, where the mutation it
+    exists to catch passed. Absence is NOT accepted: an absent ``if`` is an
+    implicit ``success()``, so the step would be skipped on precisely the failing
+    runs it exists to report. Accepted spellings: ``always()``, its
+    ``${{ }}``-wrapped form, and the bare bool ``True``.
+    """
+    if raw is None:
+        return False
+    if raw is True:
+        return True
+    expr = str(raw).strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    return expr == "always()"
+
+
 def _surfaces_artifact(step_run: str) -> bool:
     """True when this ONE step names the artifact and contains a `cat`.
 
@@ -677,7 +698,9 @@ def test_suite_jobs_surface_the_tolerated_leak():
     the ``test`` job alone, so the ``test-slow`` legs #7735 was actually
     measured on stayed blind; a job that only NAMES the path still reports
     nothing, so this asserts the two together — in a step that is also allowed
-    to run (``if: always()``). It does not evaluate the job's OWN ``if``.
+    to run after a failing suite (see ``_always_runs``); an absent ``if`` is NOT
+    enough, because it is an implicit ``success()``. It does not evaluate the
+    job's OWN ``if``.
     """
     import yaml
 
@@ -691,15 +714,16 @@ def test_suite_jobs_surface_the_tolerated_leak():
         if job is None:
             missing.append(f"{entry} (no such job in {wf_name})")
             continue
-        # The step must both surface the artifact and be allowed to RUN: a
-        # step gated `if: false` would never print it (#7735 review, round 5).
+        # The step must both surface the artifact and be ALLOWED TO RUN. The
+        # gate is checked by `_always_runs`, not by truthiness: `if: false`
+        # parses as the bool False, and `False or "always()"` is truthy, which
+        # made an earlier version of this guard a no-op (#7735 review, round 6).
         steps = job.get("steps") or []
-        if not any(
-            _surfaces_artifact(step.get("run") or "")
-            and str(step.get("if") or "always()").strip() == "always()"
-            for step in steps
-        ):
-            missing.append(entry)
+        present = [s for s in steps if _surfaces_artifact(s.get("run") or "")]
+        if not any(_always_runs(s.get("if")) for s in present):
+            missing.append(
+                f"{entry} (surfacing step is not allowed to run)"
+                if present else entry)
     assert missing == [], (
         "these jobs do not surface the tolerated-leak artifact "
         f"(#7735 review F1): {missing}")
@@ -745,3 +769,23 @@ def test_tolerant_cleanup_install_is_idempotent_and_restorable():
         install_tolerant_tempdir_cleanup()
     assert getattr(tempfile.TemporaryDirectory.cleanup,
                    "_tortoise_tolerant_cleanup", False), "reinstall failed"
+
+
+@pytest.mark.parametrize("gate,expected", [
+    (None, False),            # implicit success(): skipped on a failing run
+    (False, False),           # YAML bool — the round-6 regression
+    ("false", False),
+    ("success()", False),
+    ("always()", True),
+    ("${{ always() }}", True),
+    (True, True),
+])
+def test_a_surfacing_step_must_be_allowed_to_run(gate, expected):
+    """#7735 review, round 6: `if: false` parses as the BOOL False.
+
+    A truthiness fallback (`raw or "always()"`) silently treated a disabled step
+    as allowed, so the guard added in round 5 was a no-op for the one mutation it
+    exists to catch. This pins the predicate against the YAML-typed value, not a
+    string the workflow never produces.
+    """
+    assert _always_runs(gate) is expected
