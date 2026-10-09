@@ -637,6 +637,33 @@ skill teaches the same flow at `tortoise/onboarding/SKILL.md` (the
 AGENT_ONBOARDING.md prompt it replaced is archived under
 `tortoise/onboarding/archive/`, M8).
 
+### Automatic capture (optional Minutes integration)
+
+The flow above is manual by design. A separate, operator-installed integration
+(`integrations/meetings/minutes/`) can capture meetings **automatically**, and is
+worth reading about before you enable it:
+
+- **Capture is automatic.** When its LaunchAgent is installed, `cal-trigger.py`
+polls the calendar every 60 s and starts recording when an upcoming event begins.
+There is no per-meeting confirmation; the only notice is a notification that
+fires automatically as recording starts (it is not a prompt), and the trigger
+does not require the event to have guests.
+- **Transcript text is copied into a CRM.** A watcher runs `bridge.py`, which posts
+the first 50 lines of the transcript plus decisions and commitments as a note in
+a **self-hosted Twenty** instance, and the attendees' names and emails as contact
+records. Meeting title, decisions, and commitments (no transcript excerpt) also go
+to the local Tortoise graph. Both destinations are local by default (Twenty on
+`localhost:3001`, the Tortoise daemon on `localhost:8000`) and no hosted Premise
+Labs server is contacted — but if you point `TWENTY_BASE_URL` at a remote host,
+the transcript excerpt is sent there.
+- **Meeting counterparties are not notified.** The people on the call are not
+asked to consent and are not told they are being recorded, by this software or by
+anything downstream of it. Enabling the integration is the operator's act of
+consent.
+
+Full data flow, and the two LaunchAgents that switch it on:
+`integrations/meetings/minutes/README.md` and `integrations/crm/twenty/README.md`.
+
 ## Troubleshooting
 
 - **`pip` refuses to install ("externally-managed-environment")** — you're on Homebrew/Ubuntu system Python. Create and activate a venv first (step 1).
