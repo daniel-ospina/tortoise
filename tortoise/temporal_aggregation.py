@@ -165,6 +165,11 @@ _RE_TOTAL = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\b[^?]*?"
     r"\b(?:in\s+total|in\s+all|altogether|combined|total)\b",
     re.IGNORECASE)
+#: An elapsed-time marker ("since"/"between") makes a question INTERVAL,
+#: not a summed span: "how many weeks IN TOTAL have passed SINCE …" would
+#: otherwise classify TOTAL and let the resolver sum event spans while the
+#: caller supplied the true anchors.
+_RE_ELAPSED_MARKER = re.compile(r"\b(?:since|between)\b", re.IGNORECASE)
 # before-offset: "how many <unit> before/prior to/earlier than <X> …"
 _RE_BEFORE_OFFSET = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\s+"
@@ -213,7 +218,8 @@ def classify_temporal_aggregate(
 
     1. empty → None.
     2. explicit frequency/count surface → COUNT.
-    3. summed-span surface ("in total" + a time unit) → TOTAL.
+    3. summed-span surface ("in total" + a time unit, and NO elapsed-time
+       marker) → TOTAL.
     4. ``how many <unit> before/prior to/earlier than …`` → BEFORE_OFFSET.
     5. ``how many <unit> … between|since`` (incl. ``between A and B, how
        many …``) → INTERVAL.
@@ -232,7 +238,7 @@ def classify_temporal_aggregate(
         return TemporalAggregateIntent(
             TemporalAggregateKind.COUNT, unit=None, distinct=True)
     m = _RE_TOTAL.search(q)
-    if m:
+    if m and not _RE_ELAPSED_MARKER.search(q):
         return TemporalAggregateIntent(
             TemporalAggregateKind.TOTAL, unit=_unit_of(m), distinct=True)
     m = _RE_BEFORE_OFFSET.search(q)
@@ -318,7 +324,15 @@ def _event_date(event: Mapping[str, Any]) -> date | None:
 def _overlap_ratio(a: str, b: str) -> float:
     """Token-overlap ratio mirroring ``extractor_v2._overlap_ratio``'s
     near-symmetric guard (max/min < 1.5) so an asymmetric token-subset is
-    never folded. Kept local to avoid importing a private symbol."""
+    never folded. Kept local to avoid importing a private symbol.
+
+    DELIBERATE DEVIATION: the borrowed band floor (:data:`NOOP_MIN_OVERLAP`
+    from ``extractor_v2``) is applied here to a ratio computed over the
+    NORMALIZED content key, whereas the extractor computes its ratio over
+    ``_norm_sent`` output. The statistic therefore differs from the one the
+    floor was calibrated against — documented rather than silently forked;
+    if the extractor's guard or floor moves, this comparison and
+    :data:`NOOP_MIN_OVERLAP` must be revisited together."""
     ta, tb = set(a.split()), set(b.split())
     if not ta or not tb:
         return 0.0
@@ -365,6 +379,11 @@ class EventTally:
 
     ``n_events`` — distinct events counted once. ``n_input`` — raw input
     rows. ``collapsed`` — ``n_input - n_events`` (restatements folded).
+    On ABSTENTION (``reason`` is not None) the counters are UNSET and carry
+    no measurement: ``n_events``/``collapsed`` are 0 because no tally was
+    published, NOT because the input was empty. A caller must read
+    ``reason`` before either number — only an empty input yields
+    ``n_events=0`` with ``reason=None`` (the real-zero case).
     ``keys`` — the canonical event keys in tally order. ``unit`` — the
     reported unit for a TOTAL span (None for a bare count). ``total`` — the
     summed span for TOTAL (None for a bare count). ``reason`` — set when
@@ -384,18 +403,26 @@ def _canonical_order(
     events: Sequence[Mapping[str, Any]],
 ) -> list[tuple[int, Mapping[str, Any]]]:
     """Stable ``(index, event)`` order keyed by ``(session_date, event_id,
-    normalized content)`` — a TOTAL key, so two identity-less events sharing
-    a date are separated by their content and NEVER by the caller's input
-    index. Undated events sort last. Rows still tied after the content key
-    are structurally identical (same date, same id, same content) and so
-    belong to the same identity cluster; their relative order is immaterial
-    to the tally."""
+    normalized content, span bounds)`` — a TOTAL key, so two identity-less
+    events sharing a date are separated by their content and NEVER by the
+    caller's input index. Undated events sort last. The SPAN bounds are part
+    of the key because the TOTAL path reads a cluster's span off its earliest
+    member: rows tying on (date, id, content) but differing in span would
+    otherwise let the caller's input order choose the published total. A row
+    carrying a parsable span orders before a twin that carries none, so the
+    cluster's span is read from a row that actually has one."""
     def key(item: tuple[int, Mapping[str, Any]]):
         _i, e = item
         content = _content_key(e)
         d = _event_date(e)
-        return (0, d.isoformat(), _event_id(e), content) if d is not None \
-            else (1, "", _event_id(e), content)
+        s, en = _span_bounds(e)
+        if s is not None and en is not None and en >= s:
+            span: tuple[int, str, str] = (0, s.isoformat(), en.isoformat())
+        else:
+            span = (1, "", "")
+        return (0 if d is not None else 1,
+                d.isoformat() if d is not None else "",
+                _event_id(e), content, *span)
 
     return sorted(enumerate(events), key=key)
 
@@ -432,13 +459,12 @@ class _DisjointSet:
             self._parent[rb] = ra
 
 
-def _span_days(event: Mapping[str, Any]) -> int | None:
-    """Per-event span in days: ``end - start`` from the event's own dated
-    props (end falls back to the question date only when the caller supplied
-    it as ``question_date``). Returns None when either bound is
-    missing/unparseable, or when the span is REVERSED (``end < start``) —
-    a data inconsistency, which contributes nothing rather than a negative
-    total."""
+def _span_bounds(event: Mapping[str, Any]) -> tuple[date | None, date | None]:
+    """The event's own span bounds ``(start, end)`` from its dated props
+    (end falls back to the question date only when the caller supplied it as
+    ``question_date``). Either is None when missing/unparseable. Shared with
+    the canonical order key so the TOTAL path's representative span cannot
+    depend on the caller's input order."""
     start = None
     for key in ("start_date", "started_at", "session_date", "date",
                 "created_at"):
@@ -450,6 +476,15 @@ def _span_days(event: Mapping[str, Any]) -> int | None:
         end = as_date(event.get(key))
         if end is not None:
             break
+    return start, end
+
+
+def _span_days(event: Mapping[str, Any]) -> int | None:
+    """Per-event span in days: ``end - start`` from the event's own dated
+    props. Returns None when either bound is missing/unparseable, or when
+    the span is REVERSED (``end < start``) — a data inconsistency, which
+    contributes nothing rather than a negative total."""
+    start, end = _span_bounds(event)
     if start is None or end is None:
         return None
     if end < start:
@@ -678,8 +713,10 @@ def resolve_temporal_aggregate(
       the caller-supplied anchors (``start``/``end``); missing anchors
       abstain (``reason="no_anchors"``) so the reader lane keeps the case.
 
-    ``unit`` overrides the classified unit (a caller with an explicit unit —
-    e.g. the eval's per-question answer unit — is authoritative).
+    ``unit`` overrides the classified unit for the shapes that report one
+    (a caller with an explicit unit — e.g. the eval's per-question answer
+    unit — is authoritative). A COUNT has no unit by construction, so the
+    override does not apply there.
 
     Empty event input abstains (``reason="no_events"``) for COUNT/TOTAL —
     an empty admitted set is not a measured zero, and the never-guess

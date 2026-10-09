@@ -119,11 +119,11 @@ def is_answerable(qid: str) -> bool:
     return not str(qid or "").endswith("_abs")
 
 
-def gold_admitted_qids(
+def gold_admitted_scan(
     census: Mapping,
     sources: Iterable[str | Path] = OUTCOME_SOURCES,
-) -> set[str]:
-    """The class qids that had gold admitted under ANY committed run.
+) -> tuple[set[str], list[str], list[str]]:
+    """``(admitted_qids, scanned, missing)`` over the declared sources.
 
     Scans every row — every arm — of every committed outcome file in
     ``sources`` (default: the two files in :data:`OUTCOME_SOURCES`), so the
@@ -131,16 +131,24 @@ def gold_admitted_qids(
     what it claims: whether any class member was ever observed with gold
     admitted in the committed data, not merely in the one default arm. It
     does NOT decide ``conversion_undetermined``, which tracks the rows being
-    summarized. Missing source files are skipped (the caller's committed
-    tree may be partial); a present file contributes every arm.
+    summarized.
+
+    ``missing`` names every declared source that was NOT read. Absence is
+    not evidence: an empty ``admitted`` must not be read as "no class member
+    was ever admitted" without knowing which files were actually scanned,
+    so the summary carries this list beside the flag.
     """
     class_qids = {str(r["qid"]) for r in census.get("rows", [])
                   if r.get("cls") == CLASS}
     admitted: set[str] = set()
+    scanned: list[str] = []
+    missing: list[str] = []
     for path in sources:
         p = _resolve(path)
         if not p.exists():
+            missing.append(str(path))
             continue
+        scanned.append(str(path))
         with open(p, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -150,15 +158,28 @@ def gold_admitted_qids(
                 qid = str(row.get("qid"))
                 if qid in class_qids and row.get("gold_admitted"):
                     admitted.add(qid)
-    return admitted
+    return admitted, scanned, missing
+
+
+def gold_admitted_qids(
+    census: Mapping,
+    sources: Iterable[str | Path] = OUTCOME_SOURCES,
+) -> set[str]:
+    """The class qids that had gold admitted under ANY committed run.
+
+    Thin wrapper over :func:`gold_admitted_scan` for callers that want only
+    the qid set; see it for the missing-source reporting.
+    """
+    return gold_admitted_scan(census, sources)[0]
 
 
 def disposition_for(outcome: Mapping) -> str:
     """The structural-vs-conversion disposition of one committed outcome.
 
     * gold never admitted → ``structural`` (answerable) or
-      ``abstention-control`` (an abstention-design row whose correct answer
-      is the refusal);
+      ``abstention-control`` (an abstention-design row that RECORDS the
+      reader refusing — the row's ``reader_refusal`` must be True; without
+      that evidence the disposition is ``unmeasured``);
     * gold admitted and answered right → ``fixed-by-admission``;
     * gold admitted and answered wrong → ``conversion``;
     * a row that OMITS ``gold_admitted`` (or an admitted row that omits
@@ -170,7 +191,13 @@ def disposition_for(outcome: Mapping) -> str:
     if admitted is None:
         return "unmeasured"
     if not admitted:
-        return "structural" if is_answerable(qid) else "abstention-control"
+        if is_answerable(qid):
+            return "structural"
+        # An abstention-DESIGN row is a correct refusal only when the row
+        # itself records the refusal: without that evidence, claiming
+        # "abstention-control" would credit a reader that answered instead.
+        return ("abstention-control"
+                if outcome.get("reader_refusal") is True else "unmeasured")
     label = outcome.get("label")
     if label is None:
         # Admitted with no recorded answer outcome: this row cannot be
@@ -198,6 +225,11 @@ def build_rows(census: Mapping, outcomes: Mapping[str, dict]) -> list[dict]:
             "aggregate_unit": intent.unit if intent is not None else None,
             "label": outcome.get("label") if outcome else None,
             "context_tokens": outcome.get("context_tokens") if outcome else None,
+            # Carried through unchanged so an emitted row is a strict
+            # superset of the 2578 row shape: a joiner reading the pool
+            # geometry (which every 2578 row carries) must not KeyError.
+            "pool_limit": outcome.get("pool_limit") if outcome else None,
+            "pool_depth": outcome.get("pool_depth") if outcome else None,
             "gold_admitted": (
                 outcome.get("gold_admitted") if outcome else None),
             "reader_refusal": (
@@ -211,7 +243,8 @@ def build_rows(census: Mapping, outcomes: Mapping[str, dict]) -> list[dict]:
 
 
 def summarize(rows: Iterable[Mapping], *,
-              reachable_qids: set[str] | None = None) -> dict:
+              reachable_qids: set[str] | None = None,
+              union_sources_missing: list[str] | None = None) -> dict:
     """The acceptance summary: counts per disposition + the conversion
     reachability caveat.
 
@@ -224,6 +257,9 @@ def summarize(rows: Iterable[Mapping], *,
     summarized (the loaded arm): an admission in some OTHER arm does not
     test these rows, so it cannot make a ``conversion`` of 0 measured.
     ``reachable_qids`` feeds only ``conversion_reachable_any_arm``.
+    ``union_sources_missing`` names the declared sources the union scan did
+    NOT read (None = no scan was performed by this caller), so the flag can
+    never be read as a finding about files that were never opened.
     """
     rows = list(rows)
     counts = {"structural": 0, "conversion": 0, "fixed-by-admission": 0,
@@ -250,6 +286,11 @@ def summarize(rows: Iterable[Mapping], *,
         # The union fact is kept, separately, so it is neither lost nor
         # conflated with the loaded-arm measurement above.
         "conversion_reachable_any_arm": bool(reachable_qids),
+        # Which declared sources the union scan actually READ: None means this
+        # caller performed no scan, [] means all were present. A missing
+        # source makes `false` unreadable as "nothing was ever admitted".
+        "union_sources_missing": (None if union_sources_missing is None
+                                  else sorted(union_sources_missing)),
     }
 
 
@@ -276,8 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         for r in rows:
             print(f"{r['qid']:18s} {r['aggregate_kind']!s:14s} "
                   f"{r['disposition']}")
+    admitted, _scanned, missing = gold_admitted_scan(census)
     print(json.dumps(
-        summarize(rows, reachable_qids=gold_admitted_qids(census)),
+        summarize(rows, reachable_qids=admitted,
+                  union_sources_missing=missing),
         indent=2))
     p = write_rows(rows, args.out)
     print(f"wrote {len(rows)} rows → {p}")

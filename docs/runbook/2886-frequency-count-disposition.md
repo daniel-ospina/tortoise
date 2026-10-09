@@ -53,7 +53,7 @@ contains these 12 qids):
 | disposition | n | note |
 | --- | --- | --- |
 | **structural** (gold never admitted) | **11** | every answerable class member |
-| **abstention-control** (correct refusal) | 1 | `c8090214_abs` — refusing is correct, not a capability fix |
+| **abstention-control** (correct refusal) | 1 | `c8090214_abs` — the row records `reader_refusal`, so refusing is correct, not a capability fix |
 | **conversion** (gold admitted, reader wrong) | 0 | — |
 | **fixed-by-admission** (gold admitted, reader right) | 0 | — |
 
@@ -74,8 +74,9 @@ committed data without being conflated with the loaded arm. Resolving it
 requires the 12 re-run under `applied-rerank` (the reported remainder,
 below).
 
-Per-question rows are committed in the same shape as
-`2578-measured-outcomes.jsonl` (arm / qid / cls / label / context_tokens /
+Per-question rows are a strict superset of the
+`2578-measured-outcomes.jsonl` row shape: all ten source fields (arm / qid /
+cls / label / context_tokens / **pool_limit** / **pool_depth** /
 gold_admitted / reader_refusal / answer) plus the reclassification
 (`reclassified_cls`, `aggregate_kind`, `aggregate_unit`) and `disposition`.
 Regenerate:
@@ -122,10 +123,28 @@ events the reader already admitted.
 
 | acceptance criterion | status |
 | --- | --- |
-| named aggregation path exercised against the 12 census qids | ✅ `tests/test_temporal_aggregation.py::test_census_frequency_count_class_classified` classifies all 12; the resolved intent is pinned per qid |
+| named aggregation path exercised against the 12 census qids | ✅ `tests/test_temporal_aggregation.py::test_census_frequency_count_class_classified` classifies all 12, and `test_resolve_path_runs_over_all_12_census_qids` drives the RESOLUTION path over all 12 (each abstains — no admitted anchors — never guessing); the resolved intent is pinned per qid |
 | per-question outcomes committed, 2578 shape | ✅ `docs/runbook/2886-frequency-count-outcomes.jsonl` |
 | structural vs conversion split stated | ✅ this doc; 11 structural / 0 conversion (unreachable) / 1 abstention-control |
 | reader-model change stays #2013-gated | ✅ no reader/prompt/production path changed |
+
+## Scope decision — the count/total path is built deliberately
+
+The issue's **Scope** asks for the literal count/frequency surface. A comment
+in this issue's own thread measured the class and recommended *against*
+building a count aggregator ("it would add a capability no census question
+requires"), re-scoping to date-difference resolution. This change does the
+re-scope **and** lands the count/total tally, because a measured negative is
+only checkable if the capability it denies exists: `test_census_class_has_no_
+frequency_surface` states that no census member needs the tally, and the tally
+is what makes that statement falsifiable rather than asserted.
+
+The tally path has **no production caller today** — it is exercised by tests
+and by the resolution seam. Its first real consumer is remainder item 2
+(wiring the eval reader lane behind an OFF-by-default flag). If that wiring
+does not happen, the count/total machinery (`_DisjointSet`,
+`_canonical_order`, the paraphrase band, `MAX_EVENTS`) is the part to delete,
+not the date-arithmetic half.
 
 ## Remainder disposition
 

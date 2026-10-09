@@ -441,6 +441,71 @@ def test_tally_total_ignores_a_reversed_span():
     assert tally.reason is None
 
 
+def test_tied_key_total_is_input_order_independent():
+    """Regression (P1): the canonical order key must be TOTAL for the TOTAL
+    path. Two rows tying on (session_date, id, content) but differing in span
+    are ONE cluster and its span is read off the cluster's earliest member —
+    so if the span bounds were absent from the key, the published total would
+    flip with the caller's input order (14 forward, 0 reversed pre-fix). The
+    twin carrying no dates must never win the cluster."""
+    dated = {"content": "Jogging.", "session_date": "2025-06-01",
+             "start_date": "2025-05-25", "end_date": "2025-06-08"}
+    undated = {"content": "Jogging.", "session_date": "2025-06-01"}
+    forward = count_distinct_events([dated, undated], unit="days", total=True)
+    backward = count_distinct_events([undated, dated], unit="days", total=True)
+    assert forward == backward
+    assert forward.n_events == 1
+    assert forward.total == 14
+
+
+def test_elapsed_marker_beats_the_total_marker():
+    """Regression (P2): a question carrying BOTH a summed-span marker and an
+    elapsed-time marker is the elapsed INTERVAL — the caller's anchors are
+    authoritative, not the sum of event spans. Fails on the pre-fix code,
+    which classified this TOTAL and ignored start/end."""
+    q = "How many weeks in total have passed since I started jogging?"
+    intent = classify_temporal_aggregate(q)
+    assert intent.kind is TemporalAggregateKind.INTERVAL
+    res = resolve_temporal_aggregate(
+        q, start="2025-01-01", end="2025-06-01")
+    assert res.value == difference_in_unit("2025-01-01", "2025-06-01", "weeks")
+    assert res.reason is None
+
+
+def test_abstained_tally_counters_are_unset(monkeypatch):
+    """The EventTally contract: ``collapsed == n_input - n_events`` holds for
+    a real tally, while on ABSTENTION the counters are UNSET (0) and only
+    ``reason`` is meaningful — an abstained tally is never a real zero."""
+    import tortoise.temporal_aggregation as ta
+    monkeypatch.setattr(ta, "MAX_EVENTS", 2)
+    capped = count_distinct_events([_event("a", "2025-01-01", "1"),
+                                    _event("b", "2025-01-02", "2"),
+                                    _event("c", "2025-01-03", "3")])
+    assert capped.reason == "capped"
+    assert (capped.n_events, capped.collapsed) == (0, 0)
+    real = count_distinct_events([_event("a", "2025-01-01"),
+                                 _event("a", "2025-01-02")])
+    assert real.reason is None
+    assert real.n_events == 1
+    assert real.collapsed == real.n_input - real.n_events
+
+
+def test_resolve_path_runs_over_all_12_census_qids():
+    """The acceptance's "named aggregation path exercised against the 12
+    census qids": every class member classifies to a date-arithmetic shape
+    AND the RESOLUTION path abstains with no admitted anchors/events — it
+    never guesses a number. (Exercising the classifier alone would not
+    exercise the named path.)"""
+    rows = [r for r in _CENSUS["rows"] if r.get("cls") == "frequency/count"]
+    assert len(rows) == 12
+    for row in rows:
+        res = resolve_temporal_aggregate(row["question"])
+        assert res.kind is not None, row["qid"]
+        assert res.value is None, (row["qid"], res.value)
+        assert res.reason in ("no_anchors", "no_events"), (row["qid"],
+                                                           res.reason)
+
+
 # ── (d) calendar difference ───────────────────────────────────────────────
 
 def test_difference_days_weeks():

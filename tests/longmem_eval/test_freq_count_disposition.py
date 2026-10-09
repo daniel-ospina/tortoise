@@ -31,9 +31,14 @@ def test_load_outcomes_has_all_12_class_members():
 def test_disposition_rule_table():
     assert fcd.disposition_for(
         {"qid": "x", "gold_admitted": False, "label": False}) == "structural"
+    # An abstention-DESIGN row is a correct refusal only when the row RECORDS
+    # the refusal — answering an abstention row must not read as a pass.
     assert fcd.disposition_for(
-        {"qid": "x_abs", "gold_admitted": False,
+        {"qid": "x_abs", "gold_admitted": False, "reader_refusal": True,
          "label": True}) == "abstention-control"
+    assert fcd.disposition_for(
+        {"qid": "x_abs", "gold_admitted": False, "reader_refusal": False,
+         "label": True}) == "unmeasured"
     assert fcd.disposition_for(
         {"qid": "x", "gold_admitted": True,
          "label": True}) == "fixed-by-admission"
@@ -140,6 +145,33 @@ def test_summarize_honours_union_reachable_qids():
     mixed = fcd.summarize(rows, reachable_qids={"b46e15ed"})
     assert mixed["conversion_undetermined"] is True
     assert mixed["conversion_reachable_any_arm"] is True
+
+
+def test_rows_carry_the_2578_pool_fields():
+    """The acceptance asks for the 2578 row shape: every source row carries
+    ``pool_limit``/``pool_depth``, so the emitted rows must too — a joiner
+    reading the pool geometry must not KeyError on this file."""
+    rows = fcd.build_rows(fcd.load_census(), fcd.load_outcomes())
+    assert rows
+    for row in rows:
+        assert "pool_limit" in row and "pool_depth" in row
+
+
+def test_union_scan_reports_missing_sources():
+    """A declared source that was NOT read must be visible: an empty union must
+    never be read as "no class member was ever admitted" when a file its claim
+    depends on was simply absent (absence is not evidence)."""
+    missing_path = "docs/runbook/does-not-exist.jsonl"
+    admitted, scanned, missing = fcd.gold_admitted_scan(
+        fcd.load_census(), sources=[missing_path, fcd.OUTCOMES_DEFAULT])
+    assert admitted == set()
+    assert missing == [missing_path]
+    assert scanned == [fcd.OUTCOMES_DEFAULT]
+    summary = fcd.summarize(
+        fcd.build_rows(fcd.load_census(), fcd.load_outcomes()),
+        reachable_qids=admitted, union_sources_missing=missing)
+    assert summary["union_sources_missing"] == [missing_path]
+    assert summary["conversion_reachable_any_arm"] is False
 
 
 def test_every_row_is_reclassified_to_a_date_shape():
