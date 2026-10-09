@@ -558,6 +558,31 @@ the self-hosted node).
 - **Capture disclosure** — see the copy contract in section 6 (fired at the
   user's first capture, not during install).
 
+### Enabling a data source (thin UI, capable backend, agent-addressable — #3540)
+
+The dashboard's job is to **show** what exists and its state; the **wiring**
+(connect, enable, scope, start an index) lives in the backend and is reachable
+from the **tool surface**, so an agent can do it without any per-integration UI
+flow. Each integration this document covers is enable/connectable **and**
+state-readable from that surface:
+
+- **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
+  `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
+  (or `tortoise_onboarding_state`).
+- **Agent-session recording** — `tortoise_onboarding_session_recording`
+  (`enabled`); read it back from `tortoise_onboarding_state`.
+- **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
+  status have **no MCP tool yet**; adding one expands the agent-facing surface
+  and needs owner approval plus a `config/surface-manifest.yml` re-cut
+  (#4282). Until then this source is dashboard-only — do **not** invent a tool
+  name for it. Pinned by `tests/test_tool_registry.py`
+  (`TestAgentAddressableIntegrations`).
+
+Design rule for the NEXT integration: ship the tool-surface enable + state
+read **first**, and let the grid render what the backend already exposes. An
+integration whose only enable path is a bespoke UI flow is a design bug, not a
+feature.
+
 ### The generic MCP-tool decide protocol (options → criteria → findings → EP ranking)
 
 Use ONLY the standard Tortoise MCP tools (all always-listable during

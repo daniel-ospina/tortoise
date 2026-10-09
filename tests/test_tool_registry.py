@@ -204,6 +204,131 @@ class TestCurationGroups:
         assert "tortoise_events_poll" in groups["sessions"]
 
 
+# ── #3540 — agent-addressable integrations (epic #1714 R6) ────────────────
+# "Thin UI, capable backend, agent-addressable": every integration the epic
+# ships must be enable/connectable AND state-readable FROM THE TOOL SURFACE,
+# so the dashboard only PRESENTS what exists and the wiring never grows a
+# bespoke per-integration UI flow.
+#
+# This table IS the registry of existing integrations. It is parametrized, so
+# a NEW integration cannot silently ship UI-only: a row whose tool path is
+# missing fails `test_existing_integrations_agent_settable`, and a row
+# declared `blocked` fails the moment its tool lands — forcing the row to be
+# flipped, never left stale.
+#
+# `github-documents` is the ONE tracked gap: its enable route
+# (`POST /v1/index/docs`) and its job status (`GET /v1/index/docs/{job_id}`)
+# have NO MCP tool. Adding them EXPANDS the agent-facing surface, which needs
+# owner approval plus a `config/surface-manifest.yml` re-cut (#4282 —
+# `tools/surface-guard.py` reds an unrecorded addition). The verification +
+# state-key parity half is owned here; the surface addition is REPORTED, not
+# added silently.
+_INTEGRATIONS: dict[str, dict] = {
+    "github-issues": {
+        "enable": ("tortoise_onboarding_github_connect",
+                   "tortoise_onboarding_github_index"),
+        "state_read": ("tortoise_onboarding_github_status",
+                       "tortoise_onboarding_state"),
+        "blocked": None,
+    },
+    "agent-session-recording": {
+        "enable": ("tortoise_onboarding_session_recording",),
+        "state_read": ("tortoise_onboarding_state",),
+        "blocked": None,
+    },
+    "github-documents": {
+        "enable": (),
+        "state_read": (),
+        "blocked": (
+            "POST /v1/index/docs + GET /v1/index/docs/{job_id} have no MCP "
+            "tool (#3540). Adding one is an agent-facing SURFACE change: it "
+            "needs owner approval and a config/surface-manifest.yml re-cut "
+            "(#4282)."
+        ),
+    },
+}
+
+
+class TestAgentAddressableIntegrations:
+    """#3540 (epic #1714 R6): each existing integration is enable/connectable
+    AND state-readable from the tool surface, asserted by a named test.
+
+    Parametrized over the three integrations the epic ships. A live row
+    asserts registry presence, onboarding-group membership (an ungrouped tool
+    falls to the 'memory' default and is filtered off group-scoped surfaces)
+    and HTTP exposure."""
+
+    @staticmethod
+    def _registry():
+        from tortoise.tool_registry import TOOL_REGISTRY, tools_by_group
+        by_name = {t.name: t for t in TOOL_REGISTRY}
+        return by_name, {t.name for t in tools_by_group("onboarding")}
+
+    @staticmethod
+    def _docs_index_routes(by_name):
+        return {
+            (t.rest_spec.method, t.rest_spec.path)
+            for t in by_name.values() if t.rest_spec is not None
+        }
+
+    @pytest.mark.parametrize("integration", sorted(_INTEGRATIONS))
+    def test_existing_integrations_agent_settable(self, integration):
+        spec = _INTEGRATIONS[integration]
+        by_name, grouped = self._registry()
+        if spec["blocked"]:
+            # The gap is OPEN. Assert it from the REGISTRY, never from the
+            # table, so the row cannot stay stale: when the enable tool
+            # lands, this fails and forces the row to be flipped.
+            assert ("POST", "/v1/index/docs") not in self._docs_index_routes(by_name), (
+                "the github-documents enable tool landed — flip the "
+                f"'github-documents' row and drop the xfail docs test. {spec['blocked']}"
+            )
+            assert not {n for n in by_name if "docs" in n}, (
+                "a docs-named tool appeared — confirm it is the github-documents "
+                f"enable/state path and flip the row. {spec['blocked']}"
+            )
+            return
+        assert spec["enable"], f"{integration}: no enable path declared"
+        assert spec["state_read"], f"{integration}: no state read declared"
+        for name in (*spec["enable"], *spec["state_read"]):
+            entry = by_name.get(name)
+            assert entry is not None, (
+                f"{integration}: {name} is not in TOOL_REGISTRY — the "
+                "integration is not agent-settable")
+            assert entry.group == "onboarding", (
+                f"{integration}: {name} groups under {entry.group!r}; an "
+                "ungrouped tool falls to the 'memory' default and is filtered "
+                "off group-scoped surfaces")
+            assert name in grouped, (
+                f"{integration}: {name} is not reachable via "
+                "tools_by_group('onboarding')")
+            assert entry.http_policy is True, (
+                f"{integration}: {name} is not exposed on HTTP surfaces")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#3540: the github-documents enable tool is NOT added — it "
+               "expands the agent-facing surface and needs owner approval plus "
+               "a surface-manifest re-cut (#4282). strict=True makes this test "
+               "XPASS (red) the moment the tool lands, forcing the xfail and "
+               "the `blocked` row to be removed together.",
+    )
+    def test_docs_index_tool_registered(self):
+        """#3540 named test: the github-documents enable tool exists, is
+        grouped, and is not filtered out of group-scoped surfaces."""
+        by_name, grouped = self._registry()
+        assert ("POST", "/v1/index/docs") in self._docs_index_routes(by_name), (
+            "no registered tool wraps POST /v1/index/docs")
+        entry = next(
+            t for t in by_name.values()
+            if t.rest_spec is not None
+            and (t.rest_spec.method, t.rest_spec.path) == ("POST", "/v1/index/docs")
+        )
+        assert entry.group == "onboarding", f"got {entry.group!r}"
+        assert entry.name in grouped
+        assert entry.http_policy is True
+
+
 class TestDescriptionImprovements:
     """Epic #888 no-regret item 4: sharpened descriptions for the top-confused
     tools (query family, search, entity_profile vs list_topics) so agents can

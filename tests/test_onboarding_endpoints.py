@@ -334,6 +334,113 @@ def test_q3_decline_then_reenable_consents(tmp_path):
     assert state2["capture_revised"] is True
 
 
+# ── #3540 — tool-surface enable parity + the tool-path partition ─────────
+# Epic #1714 R6: the tool surface and the dashboard must write IDENTICAL
+# state keys for the same enable intent (one state path), and NO tool
+# enable/connect path may write a SERVER-OWNED key — #3552's partition is the
+# contract, and a tool that could set a receipt/probe/cursor is the same
+# forgery R11 forbids. #3552 owns the PATCH partition; these assert the TOOL
+# half of it.
+
+
+def _spy_state_router(monkeypatch) -> dict[str, set[str]]:
+    """Capture the state keys each surface hands to the ONE router.
+
+    Both the MCP tool and the PATCH route import/look up
+    ``_update_onboarding_state`` at call time, so patching the module
+    attribute intercepts BOTH while recording the exact key set each wrote.
+    """
+    import tortoise.hosted_api as ha
+
+    captured: dict[str, set[str]] = {}
+
+    def _spy(org_id, *a, **fields):
+        captured.setdefault(org_id, set()).update(fields)
+        return {}
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _spy, raising=True)
+    return captured
+
+
+def test_tool_and_dashboard_enable_write_same_keys(client, monkeypatch):
+    """#3540: enabling the session-recording integration from the MCP tool
+    (``tortoise_onboarding_session_recording``) and from the dashboard PATCH
+    write IDENTICAL state keys for the same intent — one state path, no
+    cross-surface divergence (mirrors #3517's prompt/dashboard parity)."""
+    from tortoise import mcp_server
+    from tortoise.mcp_auth import _current_org_id
+
+    captured = _spy_state_router(monkeypatch)
+
+    tok = _current_org_id.set("team-3540-tool")
+    try:
+        result = mcp_server.tortoise_onboarding_session_recording(enabled=True)
+    finally:
+        _current_org_id.reset(tok)
+    assert "error" not in result, result
+
+    r = client.patch("/v1/onboarding/state",
+                     json={"session_recording": True, "capture_revised": True})
+    assert r.status_code == 200, r.text
+
+    tool_keys = captured.get("team-3540-tool")
+    dashboard_keys = captured.get("test-team-1")
+    assert tool_keys, "the tool path never reached the state router"
+    assert dashboard_keys, "the dashboard path never reached the state router"
+    assert tool_keys == dashboard_keys, (
+        f"tool wrote {sorted(tool_keys)} but dashboard wrote "
+        f"{sorted(dashboard_keys)}")
+
+
+def test_tool_enable_paths_never_write_server_owned_keys(monkeypatch):
+    """#3540 (epic cycle-6 mandate 1 / R11): the tool enable/connect paths
+    carry the SAME three-class partition as PATCH — no key a tool hands to the
+    onboarding-state router may be SERVER-OWNED (a receipt, a probe, an index
+    cursor, the CAS token), so a tool path cannot forge a capture status.
+    Also asserts no enable tool admits ``**kwargs``, so an arbitrary state key
+    cannot be smuggled through the tool surface."""
+    import inspect
+
+    from tortoise import mcp_server
+    from tortoise.hosted_api import (
+        _ALLOWED_STATE_KEYS,
+        _PATCH_SERVER_OWNED_KEYS,
+    )
+    from tortoise.mcp_auth import _current_org_id
+
+    captured = _spy_state_router(monkeypatch)
+    tok = _current_org_id.set("team-3540-partition")
+    try:
+        result = mcp_server.tortoise_onboarding_session_recording(enabled=True)
+    finally:
+        _current_org_id.reset(tok)
+    assert "error" not in result, result
+
+    written = captured.get("team-3540-partition") or set()
+    assert written, "the tool path never reached the state router"
+    # The tool's own write surface is EXACTLY its two documented keys —
+    # non-vacuous, and disjoint from the server-owned set.
+    assert written == {"session_recording", "capture_revised"}, sorted(written)
+    assert written <= _ALLOWED_STATE_KEYS
+    assert written.isdisjoint(_PATCH_SERVER_OWNED_KEYS), sorted(
+        written & _PATCH_SERVER_OWNED_KEYS)
+
+    # Non-vacuity of the server-owned set: the capture-evidence family is in
+    # it, and the CAS token is deliberately NOT a state key at all — so the
+    # partition above is a real filter, not an empty set.
+    assert "session_capture_receipt" in _PATCH_SERVER_OWNED_KEYS
+    assert "state_version" not in _ALLOWED_STATE_KEYS
+
+    for tool in (mcp_server.tortoise_onboarding_session_recording,
+                 mcp_server.tortoise_onboarding_github_connect,
+                 mcp_server.tortoise_onboarding_github_index):
+        params = inspect.signature(tool).parameters.values()
+        assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params), (
+            f"{tool.__name__} accepts **kwargs — an arbitrary state key could "
+            "be smuggled through the tool surface")
+
+
 def test_fresh_team_defaults_to_recording_on(client):
     """#1927: a FRESH team (no stored flag) reads session_recording=True
     from the default merge — capture works out of the box, no consent gate.

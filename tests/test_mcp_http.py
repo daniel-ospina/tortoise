@@ -2981,3 +2981,94 @@ class TestToolCallAdmissionBoundary:
             for t in threads:
                 t.join()
         assert not failures, f"concurrent traffic produced errors: {failures}"
+
+
+# ── #3540 — the tool HOLDER's refusals (epic #1714 cycle-6 mandate 2) ─────
+# The tool enable/connect path must refuse an INVALID credential with NO state
+# write (and no spool/turn side effect). This proves the credential-validity
+# rows (revoked key, expired key) against the SAME tool the dashboard's
+# recording toggle drives (tortoise_onboarding_session_recording). The
+# non-owner-member row is #3552's contract (the dashboard route's owner/admin
+# role matrix) and is asserted there, not duplicated here.
+
+class TestAgentEnableToolHolderRefusals:
+    """#3540: a revoked or expired holder is refused before the tool runs, so
+    no onboarding state is written. The positive control on the SAME fixture
+    (a valid key writes the key) keeps the "no write" assertion non-vacuous."""
+
+    @pytest.fixture
+    def holder(self, tmp_path, monkeypatch):
+        """Seeded registry + one valid / one revoked / one expired key, plus a
+        factory that mounts a FRESH MCP app per key (empty auth cache — so a
+        revoked/expired key is re-resolved, never served from the 60s TTL)."""
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "holder.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.org_create("holder-team")
+        good = reg.apikey_create(team["id"], "holder")
+        revoked = reg.apikey_create(team["id"], "holder")
+        expired = reg.apikey_create(team["id"], "holder",
+                                    expires_at="2020-01-01T00:00:00+00:00")
+        reg.apikey_revoke(revoked["id"])
+
+        def _client(key):
+            app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+            tc = _mounted_test_client(app)
+            tc.headers.update({
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            })
+            return tc
+
+        return reg, team["id"], {
+            "good": good["api_key"],
+            "revoked": revoked["api_key"],
+            "expired": expired["api_key"],
+        }, _client
+
+    @staticmethod
+    def _team_state(reg, org_id):
+        """The raw onboarding_state jsonb on the org's Team node."""
+        import json
+        rows = reg._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.onboarding_state",
+            params={"id": org_id},
+        ).result_set
+        raw = rows[0][0] if rows else "{}"
+        return json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+    @staticmethod
+    def _call(tc, enabled):
+        return _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_onboarding_session_recording",
+                       "arguments": {"enabled": enabled}},
+        })
+
+    @pytest.mark.parametrize("holder_kind", ["revoked", "expired"])
+    def test_invalid_holder_refuses_with_no_state_write(self, holder, holder_kind):
+        reg, org_id, keys, client_for = holder
+        # Positive control: the SAME call with a valid key reaches the tool
+        # and writes the state key — so "no write" below is not vacuous.
+        with client_for(keys["good"]) as tc:
+            r, body = self._call(tc, enabled=False)
+            assert r.status_code == 200, r.text
+            assert "error" not in (body or {}), body
+            assert body["result"]["isError"] is False, body
+        before = dict(self._team_state(reg, org_id))
+        assert before.get("session_recording") is False, before
+
+        # The invalid holder is refused BEFORE the tool runs.
+        with client_for(keys[holder_kind]) as tc:
+            r, body = self._call(tc, enabled=True)
+            assert r.status_code == 401, (holder_kind, r.status_code, r.text)
+            assert "error" in (body or {}), body
+
+        after = dict(self._team_state(reg, org_id))
+        changed = {k for k in after if before.get(k) != after.get(k)}
+        assert not changed, (
+            f"a {holder_kind} key still wrote onboarding state: {sorted(changed)}")
