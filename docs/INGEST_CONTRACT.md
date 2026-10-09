@@ -81,7 +81,7 @@ with identical contracts.
   ],
   "connections": [
     {"from": "pA", "to": "pB", "operator": "IMPL", "label": "supports",
-     "confidence": 0.9, "direction": "unidirectional"},
+     "confidence": 0.9, "direction": "unidirectional"},   // accepted names today: bidirectional | unidirectional
     {"from": "pA", "to": "src1", "relation": "extractedFrom"}
   ]
 }

@@ -33,6 +33,21 @@ doc_status: live
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
 >
+> **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
+> §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
+> policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
+> direction is **recorded on the write** — `->`, `<-`, `<->`, `-` — and **comes from the connection's
+> semantics**. `-` means the connection exists and no confidence transfers along it. §8 now states
+> **three** layers (mechanism + direction / semantics / predicate + tags). The semantics table gains
+> `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `dependsOn`, `transacts` and a
+> *carries confidence?* column. `produces`: the event→artifact shape is the encouraged pattern, not a
+> restriction. §5: confidence propagates across Subject, Object, Event and Point.
+>
+> ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
+> `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
+> EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
+> accepted names** — the model tables state the target.
+>
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
 > - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
@@ -446,7 +461,7 @@ doc_status: live
 > 2. §4.5: `capturedAt` field (transaction time — bi-temporal capture).
 > 3. §4.5: content-addressed Event ID (deterministic MERGE anchor for the agentSession Event).
 > 4. §4.4: `story_arc` field registered (summary = short, story_arc = arc continuation).
-> 5. §3.1: direction is **recorded** per write — four values (`->` `<-` `<->` `-`) — and **comes from the connection's semantics**. `NAND` under `refutes` is one-way; under `mutuallyExclusive` it is both ways.
+> 5. §3.1: NAND direction policy — extraction-emitted NANDs default `unidirectional`; `bidirectional` only for explicit mutual restatement (SDK creation default stays bidirectional, #807).
 > 6. §4.6/§5: `provenance_spans` Source property + `sourceKind: agentSession` value (credibility-tier inheritance keyed on sourceKind, #398).
 > 7. §3.9: `mitigated_by` predicate registered (existing `mitigate_operator` edge — currently unregistered).
 > 8. §3.4: `references` target extended — Source allowed (producer extension `link_source_to_entity`).
@@ -606,7 +621,7 @@ Each layer answers a different question. All four are live mechanisms.
 >
 > **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
 >
-> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; an authoring path that omits it takes the direction from the connection's semantics:
+> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; a caller that omits it takes the operator's canonicalized direction (see the *Transition state* note in the changelog above):
 >
 > - **New-claim-attacks-existing-claim → `->`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
 > - **Mutual restatement → `<->`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
@@ -654,7 +669,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` | Subject → Event | unidirectional | N-ary | **`schema:agent` inverse** — schema.org's "direct performer or driver of the action", reversed (we go Agent→Activity) | X **did** this. The doing relation: subject executes the event. PROV has no Agent→Activity predicate (its `wasAssociatedWith` is Activity→Agent accountability); we name the performer-side verb ourselves, aligned to schema.org's performer concept. |
-| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created — an **Object** (a report, a PR, a build) or a **decision Point** (the #531 `humanApproval` pattern: an approval Event produces the decision Point that seeds its grounding). The event→artifact shape is the **encouraged pattern, not a restriction** |
+| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the source created — an **Object** (a report, a PR, a build) or a **decision Point** (the #531 `humanApproval` pattern: an approval Event produces the decision Point that seeds its grounding). The event→artifact shape is the **encouraged pattern, not a restriction** |
 | `uses` | Event → Object | unidirectional | N-ary | **`prov:used`** (W3C: Activity→Entity, direction-identical — canonical) / `schema:instrument` for mechanisms | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
 | `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
 
@@ -685,7 +700,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` (in) | Subject → Event | unidirectional | N-ary | `schema:agent` inverse | Actor — who did it |
-| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531) |
+| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531). Event→artifact is the encouraged pattern |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
 | `op: IMPL/NAND` | Event → Point, Point → Event | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
@@ -1344,8 +1359,8 @@ edge attribute.
   source), `<->` (both ways), `-` (none). Lives on the operator node when present, else on the
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
-  path applies it — **a caller supplies the meaning and does not state a direction.** The recorded
-  direction is authoritative.
+  path resolves and records it — a caller supplies the meaning and need not state a direction. The
+  recorded direction is authoritative.
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
