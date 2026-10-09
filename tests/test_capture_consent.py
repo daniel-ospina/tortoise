@@ -16,6 +16,7 @@ import os
 import stat
 import sys
 import threading
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,12 +26,16 @@ import pytest
 from tests._signal_hygiene import harness_safe_sigalrm
 from tortoise.__main__ import main
 from tortoise.capture_consent import (
+    CAPTURE_DECLINED_HINT,
     CAPTURE_OPT_IN_ENV,
     capture_consent_enabled,
+    capture_declined_reason,
     capture_notice_path,
     capture_notice_shown_path,
     pending_capture_notice,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 GLOBAL_CFG = {
     "api_key": "tt_global", "api_url": "https://api.premiselabs.co",
@@ -476,3 +481,98 @@ def test_install_probe_is_not_capture_gated(tmp_path):
         rc = main(["session", "probe", "--harness", "claude"])
     assert rc == 0
     assert urlopen.called
+
+
+# ── #3662: the SDK client TRANSMISSION path is consent-gated ──────────────
+# The defect this pins: #3615's confirmed problem statement said "no in-repo
+# path requires an explicit non-credential opt-in", but `TortoiseSDK`'s
+# `_post_commit` (POST `/v1/sessions/commit`) shipped session-derived content
+# with no consent check — the one in-repo, CLIENT-side transmission primitive
+# the predicate did not reach. The hosted MCP tool
+# (`mcp_server.tortoise_session_capture`) is deliberately NOT gated here: it
+# executes server-side, so the client host's `TORTOISE_CAPTURE` is unreadable
+# there (its gate is the server policy `session_recording`, #1927). See the
+# consumer inventory in `tortoise/capture_consent.py`.
+
+
+def test_capture_declined_reason_is_none_when_opted_in(monkeypatch):
+    """The decline side of the predicate is inert once the host opts in."""
+    monkeypatch.setenv(CAPTURE_OPT_IN_ENV, "1")
+    assert capture_declined_reason() is None
+
+
+def test_capture_declined_reason_records_the_durable_notice(tmp_path):
+    """One call decides the refusal AND records the migration notice.
+
+    Single-sourcing the decline is what stops a new transmitting surface from
+    refusing without writing the `~/.tortoise/capture-consent-notice` channel
+    the migration depends on (`_isolated` pins HOME to `tmp_path`)."""
+    reason = capture_declined_reason()
+    assert reason == CAPTURE_DECLINED_HINT
+    assert capture_notice_path(tmp_path).exists(), (
+        "the refusal must record the durable migration notice")
+
+
+def test_sdk_post_commit_refuses_without_consent_and_never_posts(monkeypatch):
+    """#3662: the client transmission primitive fails closed.
+
+    FAIL-ON (before the fix): `_post_commit` POSTs the derived payload with no
+    consent consulted — the test's `requests.post` recorder is hit.
+    REACHABLE: the consent variable is genuinely UNSET (`_isolated` deletes it,
+    ordered after the suite-wide grant in tests/conftest.py)."""
+    import requests
+
+    from tortoise.sdk import _post_commit
+
+    posted: list = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: posted.append(a))
+    payload = {"session_id": "s1", "points": [], "entities": [],
+               "operators": [], "summary": "", "story_arc": ""}
+    with pytest.raises(PermissionError) as excinfo:
+        _post_commit(payload, base_url="http://unused", api_key="tt_k")
+    assert CAPTURE_OPT_IN_ENV in str(excinfo.value), excinfo.value
+    assert posted == [], "an unconsented capture must not POST"
+
+
+def test_sdk_post_commit_transmits_when_consented(monkeypatch):
+    """Control for the gate: the opt-in takes the authorised branch.
+
+    Without this, a gate that always refuses would pass the test above."""
+    import requests
+
+    from tortoise.sdk import _post_commit
+
+    calls: list = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"duplicate": False}
+
+    monkeypatch.setenv(CAPTURE_OPT_IN_ENV, "1")
+    monkeypatch.setattr(requests, "post",
+                        lambda url, **k: calls.append(url) or _Resp())
+    payload = {"session_id": "s1", "points": [], "entities": [],
+               "operators": [], "summary": "", "story_arc": ""}
+    out = _post_commit(payload, base_url="http://unused.example", api_key="tt_k")
+    assert out == {"duplicate": False}
+    assert calls == ["http://unused.example/v1/sessions/commit"], calls
+
+
+def test_quickstart_documents_both_consent_contracts():
+    """#3662's minimum requirement: document the SDK gate next to #3615's
+    opt-in AND name the surface that is deliberately NOT client-gated, so the
+    two contracts cannot drift apart in the doc a user actually reads.
+
+    The refusal hint points readers at this file by name
+    (`CAPTURE_DECLINED_HINT`), so it is the surface the two claims must agree
+    on."""
+    doc = (REPO_ROOT / "docs" / "quickstart-cloud.md").read_text(encoding="utf-8")
+    assert "TortoiseSDK.commit_session" in doc, (
+        "the quickstart must name the SDK's consent-gated transmission path")
+    assert "tortoise_session_capture" in doc, (
+        "the quickstart must name the server-side MCP tool whose gate is the "
+        "server policy, not the client opt-in")
+    assert "#3662" in doc, "the deferred hosted-side decision must be traceable"

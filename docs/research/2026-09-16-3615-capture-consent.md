@@ -99,6 +99,28 @@ The predicate is deliberately **host-agnostic**: a self-hosted daemon is still
 data leaving the machine, so the requirement does not depend on the endpoint
 the resolved config names.
 
+### Surface inventory — which in-repo paths the predicate reaches (#3662)
+
+#3615 gated the paths it owned and declared the rest out of scope. #3662 closed
+the one remaining CLIENT-side hole it left, and recorded the two surfaces it
+deliberately did **not** gate — otherwise #3615's claim ("no in-repo path
+requires an explicit non-credential opt-in") stays false for them without anyone
+noticing:
+
+| In-repo surface | Executes | `TORTOISE_CAPTURE` gate | Why |
+|---|---|---|---|
+| `tortoise/__main__.py` — `session capture`, `sessions import`, `session drain` | client | **YES** | transcript upload to `{TORTOISE_API_URL}` |
+| `tortoise/claude-hooks/session-end.sh` | client (bash twin) | **YES** | same upload, ambient path |
+| `TortoiseSDK.commit_session` → `_post_commit` | client | **YES** (#3662) | POSTs the derived payload to `/v1/sessions/commit` |
+| `tortoise/mcp_server.py::tortoise_session_capture` | **server** | **NO** (deferred) | the client host's env is unreadable server-side; gate is the server policy `session_recording` (default-ON, #1927). The real fix is a *client-carried* signal (an MCP request header) — an open product decision, #3662 |
+| `TortoiseSDK.capture_session` | client | **NO** (by design) | a graph write (embedded / `TORTOISE_DB_URI`), not a vendor transmission; gating it would also refuse pure local writes |
+| Pi `reflect-hook` (agent-infra) | client | **NO** (open) | keys capture on credential presence; agent-infra#1117 |
+
+The enforcement shape for the #3662 row follows the layer model above: the
+predicate lives once in `tortoise/capture_consent.py`, and the gate sits on the
+primitive that TRANSMITS (`_post_commit`), with `commit_session` refusing first
+so no extraction is spent on an unauthorised upload.
+
 ## Rejected alternatives (#3615 solution-diverge) and why
 
 - **B1 — a `capture` key in the existing credential file** (`./.tortoise` /

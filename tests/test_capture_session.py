@@ -61,6 +61,58 @@ def test_commit_session_threads_session_date(sdk, monkeypatch):
     assert received[1] == "2026-08-01"
 
 
+# ── #3662: the SDK transmission path requires explicit consent ────────────
+# `_post_commit` is the in-repo CLIENT-side transmission primitive for
+# session-derived content; #3615's predicate did not reach it, so
+# `commit_session` uploaded with no opt-in. The gate now runs twice: first here
+# (before any extraction is spent), then at `_post_commit` itself (the
+# bypass-proof chokepoint, pinned in tests/test_capture_consent.py).
+
+def test_commit_session_refuses_without_consent_before_extraction(
+        sdk, monkeypatch):
+    """FAIL-ON (before the fix): extraction runs and `_post_commit` is reached,
+    so the recorder is hit and the result is `ok=True`.
+
+    The refusal must land BEFORE extraction: an unconsented transmission must
+    not spend a BYOK provider call over the raw conversation, and the CLI's
+    gated twins (`session capture` / `sessions import`) also refuse before any
+    work. `monkeypatch.delenv` is the explicit negative the suite-wide
+    `_capture_consent_default_on` grant (tests/conftest.py) requires."""
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    posted: list = []
+    monkeypatch.setattr("tortoise.sdk._post_commit",
+                        lambda *a, **k: posted.append(a) or {"ok": True})
+    extracted: list = []
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **k: extracted.append(a) or {})
+    out = sdk.commit_session(CONV)
+    assert out["ok"] is False, out
+    assert any("explicit consent" in e for e in out["errors"]), out["errors"]
+    assert extracted == [], "the refusal must precede extraction"
+    assert posted == [], "an unconsented commit must not POST"
+
+
+def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):
+    """Control: the refusal is consent-dependent, not always-on.
+
+    Without this, a gate that refused unconditionally would pass the negative
+    test above."""
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    extracted: list = []
+    monkeypatch.setattr(
+        ev2, "extract_session_v2",
+        lambda *a, **k: (extracted.append(a) or
+                         {"payload": None, "errors": ["no payload produced"]}))
+    out = sdk.commit_session(CONV)
+    assert extracted, "the consented path must not be refused before extraction"
+    assert not any("explicit consent" in str(e)
+                   for e in out.get("errors", [])), out
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.

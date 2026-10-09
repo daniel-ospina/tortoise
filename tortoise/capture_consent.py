@@ -25,6 +25,27 @@ Consumers:
     that never updates itself). The bash↔Python **parity is pinned by
     tests/test_session_capture_e2e.py** (the truthy/falsy matrix); the CLI-side
     gate is covered by tests/test_capture_consent.py.
+  * `tortoise/sdk.py` — the SDK's client TRANSMISSION primitive
+    (``_post_commit`` → ``POST {TORTOISE_API_URL}/v1/sessions/commit``) is the
+    third client-side upload path (#3662), and it refuses here too. Its public
+    caller ``TortoiseSDK.commit_session`` refuses FIRST, before any extraction
+    runs, so no provider call is spent on an unauthorised transmission; the
+    primitive re-checks so a future caller cannot bypass consent by calling it
+    directly. Two ENFORCEMENT points, one predicate — the verdict string comes
+    from ``capture_declined_reason`` below.
+
+NOT gated here, by design (recorded so the two consent contracts cannot drift,
+#3662):
+  * ``tortoise/mcp_server.py::tortoise_session_capture`` executes SERVER-side
+    (it answers "session capture requires hosted mode" for stdio/self-host),
+    so the client host's ``TORTOISE_CAPTURE`` is unreadable there. Its gate is
+    the server policy ``session_recording`` — default-ON, ToS-covered, an
+    off-switch and explicitly NOT a consent gate (#1927). Gating this surface
+    needs a CLIENT-CARRIED signal (an MCP request header) and is an open
+    product question, not a client-side predicate (see #3662).
+  * ``TortoiseSDK.capture_session`` writes to the GRAPH (embedded, or
+    ``TORTOISE_DB_URI``) — a local write, not a vendor transmission. It is out
+    of scope here because gating it would also refuse pure local writes.
 
 The truthy vocabulary is NOT declared here: it delegates to the tree's single
 declared contract, `tortoise/env_truthy.py` (#4097), so this module cannot drift
@@ -79,6 +100,27 @@ def capture_consent_enabled(env: Mapping[str, str] | None = None) -> bool:
     """
     source = os.environ if env is None else env
     return str(source.get(CAPTURE_OPT_IN_ENV, "")).strip(_ASCII_WS).lower() in TRUTHY
+
+
+def capture_declined_reason() -> str | None:
+    """The refusal message when the host has NOT opted in, else ``None`` (#3662).
+
+    The single *decline* side of the predicate. A transmitting surface refuses
+    on a non-``None`` answer, so:
+
+    * the durable migration notice is recorded on the SAME call that decides the
+      refusal (a surface cannot refuse and forget the notice), and
+    * a new surface cannot re-implement the refusal text — the returned string
+      IS ``CAPTURE_DECLINED_HINT``, so returning it to a caller and printing it
+      to stderr cannot diverge.
+
+    Deliberately NOT a boolean: ``capture_consent_enabled()`` is the predicate,
+    this is the refusal. Callers that only need the predicate keep calling it.
+    """
+    if capture_consent_enabled():
+        return None
+    record_capture_declined()
+    return CAPTURE_DECLINED_HINT
 
 
 def capture_notice_path(home: Path | str | None = None) -> Path:
