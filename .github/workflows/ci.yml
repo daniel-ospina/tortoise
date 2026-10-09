@@ -1347,6 +1347,13 @@ jobs:
         run: |
           bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
             --dirs "$(cat .sigpipe-grep-dirs)"
+      # The hook's own block is tested HERE, not left as a file nobody runs. This test
+      # stubs the guard, so it needs no agent-infra and no network — it runs even while
+      # the step above is red for the ordering reason. It exists because the hook's block
+      # once discarded the guard's verdict (a glued `else` made `exit` take two arguments
+      # and fail) while `sh -n` stayed green; only an executed assertion catches that.
+      - name: SIGPIPE hook block self-test
+        run: sh .github/scripts/sigpipe-hook.test.sh
 
   license-surface:
     runs-on: ubuntu-latest
