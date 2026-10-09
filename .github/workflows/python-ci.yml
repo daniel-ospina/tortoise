@@ -1314,7 +1314,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
@@ -1852,7 +1852,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
@@ -2072,7 +2072,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
@@ -2266,7 +2266,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
@@ -2642,7 +2642,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
@@ -2810,7 +2810,7 @@ jobs:
         # (a same-instant write can still drop one entry) — INERT today: CI is
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
-        # Every job that runs pytest carries this step (pinned by
+        # Every job listed in _LEAK_SURFACED_JOBS carries this step (pinned by
         # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |

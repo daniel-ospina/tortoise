@@ -643,18 +643,20 @@ _ARTIFACT = "tempdir-hygiene-end.json"
 
 
 def _surfaces_artifact(step_run: str) -> bool:
-    """True when this ONE step both names the artifact and reads it out.
+    """True when this ONE step names the artifact and contains a `cat`.
 
     Comment lines and trailing `#` comments are stripped first, because a bare
     substring check was satisfied by a comment that merely mentioned the path —
     certifying "the string occurs" rather than "the artifact is surfaced"
-    (#7735 review, round 3). The two halves are required within the same step,
-    so an unrelated `cat` elsewhere in the job cannot stand in.
+    (#7735 review, round 3). Both halves are required within the SAME step, so
+    an unrelated `cat` in another step cannot stand in.
 
-    Boundary: this is a TEXT-level check. It requires the `cat` this repo's
-    seven delivered steps all use; a future rewrite to `jq`/`head` must update
-    this pin. It cannot prove the shell executed — only that the step would
-    print the file.
+    Boundary — what this does NOT prove (#7735 review, round 5): the `cat` need
+    not read the artifact. The delivered shape declares `LOG=…tempdir-hygiene-end.json`
+    on one line and `cat "$LOG"` on the next, so "same line" would false-reject
+    it; the pin therefore checks co-occurrence inside the step. It also cannot
+    prove the shell executed. It requires the `cat` all seven delivered steps
+    use — a future rewrite to `jq`/`head` must update this pin.
     """
     lines = [
         ln.split("#", 1)[0]
@@ -674,7 +676,8 @@ def test_suite_jobs_surface_the_tolerated_leak():
     surfaces deliberately outside it. The first revision dumped the artifact in
     the ``test`` job alone, so the ``test-slow`` legs #7735 was actually
     measured on stayed blind; a job that only NAMES the path still reports
-    nothing, so this asserts the two together.
+    nothing, so this asserts the two together — in a step that is also allowed
+    to run (``if: always()``). It does not evaluate the job's OWN ``if``.
     """
     import yaml
 
@@ -688,8 +691,14 @@ def test_suite_jobs_surface_the_tolerated_leak():
         if job is None:
             missing.append(f"{entry} (no such job in {wf_name})")
             continue
-        runs = [step.get("run") or "" for step in (job.get("steps") or [])]
-        if not any(_surfaces_artifact(run) for run in runs):
+        # The step must both surface the artifact and be allowed to RUN: a
+        # step gated `if: false` would never print it (#7735 review, round 5).
+        steps = job.get("steps") or []
+        if not any(
+            _surfaces_artifact(step.get("run") or "")
+            and str(step.get("if") or "always()").strip() == "always()"
+            for step in steps
+        ):
             missing.append(entry)
     assert missing == [], (
         "these jobs do not surface the tolerated-leak artifact "
