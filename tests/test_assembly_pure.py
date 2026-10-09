@@ -686,12 +686,21 @@ def test_names_lexically_match_gate_contract():
                                   "couch")
     assert _names_lexically_match("the chewing dog bed", "chew")  # stemmed
     assert _names_lexically_match("couch", "the couch")
+    # #3223 review: the gate must mean what the NAME index means. RediSearch
+    # stems English by default, so a short stem is a genuine match — the >= 4
+    # prefix floor alone would reject it and narrow recall below the hybrid leg.
+    assert _names_lexically_match("dogs", "dog bed")  # 3-char stem
+    # ...and an all-digit term IS searched literally (build_or_query passes a
+    # degenerate numeric query through RAW), so it must match too.
+    assert _names_lexically_match("747", "Boeing 747")
     # a semantic-only neighbour shares no lexical material with the term
     assert not _names_lexically_match("the teleporting exercise bike",
                                       "couch")
     assert not _names_lexically_match("the ikea purchase", "sofa")
     # a sub-threshold prefix is not a token match ("cou" is noise)
     assert not _names_lexically_match("cou", "couch")
+    # a stem is not a licence to match a different word
+    assert not _names_lexically_match("cats", "catalog")
     # inert / stopword-only terms never match
     assert not _names_lexically_match("", "couch")
     assert not _names_lexically_match("the and of", "couch")
