@@ -102,7 +102,7 @@ the resolved config names.
 ### Surface inventory — which in-repo paths the predicate reaches (#3662)
 
 \#3615 gated the paths it owned and declared the rest out of scope. #3662 closed
-the one remaining CLIENT-side hole it left, and recorded the two surfaces it
+the one remaining CLIENT-side hole it left, and recorded the surfaces it
 deliberately did **not** gate — otherwise #3615's claim ("no in-repo path
 requires an explicit non-credential opt-in") stays false for them without anyone
 noticing:
@@ -113,7 +113,7 @@ noticing:
 | `tortoise/claude-hooks/session-end.sh` | client (bash twin) | **YES** | same upload, ambient path |
 | `TortoiseSDK.commit_session` → `_post_commit` | client | **YES** (#3662) | POSTs the derived payload to `/v1/sessions/commit` |
 | `tortoise/mcp_server.py::tortoise_session_capture` | **server** | **NO** (deferred) | the client host's env is unreadable server-side; gate is the server policy `session_recording` (default-ON, #1927). The real fix is a *client-carried* signal (an MCP request header) — an open product decision, #3662 |
-| `TortoiseSDK.capture_session` | client | **NO** (by design) | a graph write (embedded / `TORTOISE_DB_URI`), not a vendor transmission; gating it would also refuse pure local writes |
+| `TortoiseSDK.capture_session` | client | **NO** (by design) | writes the graph backend named by `TORTOISE_DB_URI` **and** sends each turn to the configured BYOK extractor provider, so it is not egress-free; gating it would also refuse pure local writes |
 | Pi `reflect-hook` (agent-infra) | client | **NO** (open) | keys capture on credential presence; agent-infra#1117 |
 
 The enforcement shape for the #3662 row follows the layer model above: the

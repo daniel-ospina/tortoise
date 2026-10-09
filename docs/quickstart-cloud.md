@@ -132,7 +132,7 @@ tortoise context                                    # memory digest for session-
 Filing a transcript to Tortoise Cloud is **off by default**, and what gates it
 is **per-surface**, not uniform (#3615):
 
-- **The in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
+- **The consent-gated in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
   (`tortoise/capture_consent.py`), which is credential-independent — exporting
   `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
   enable capture there; it only authenticates the connection. The gated paths
