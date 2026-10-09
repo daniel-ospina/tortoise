@@ -17,10 +17,16 @@ Run under pytest:  python3 -m pytest tests/test_cmux_dispatch.py -q
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +36,39 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import cmux_dispatch as cd  # noqa: E402
 
+# #4842: the durable fallback appends to the ORCHESTRATOR inbox
+# (~/.pi/agent/state/orchestrator-inbox.log). Tests must never write the live one,
+# so every test in this module — including the pre-existing transport-error ones —
+# points the tool at a throwaway file. The tool reads the override at CALL time.
+#
+# The throwaway is created lazily in `setUpModule`, NOT at import: an
+# all-deselected run (`-k` matching nothing) never calls `setUpModule`, so it must
+# leave no temp dir behind (the old import-time `mkdtemp` + `tearDownModule`-only
+# teardown leaked exactly one). The env override is saved and restored, never
+# leaked into later modules (the #4883 env-isolation class).
+INBOX_PATH: Path | None = None
+_INBOX_DIR: Path | None = None
+_INBOX_ENV_SAVED: str | None = None
+
+
+def setUpModule() -> None:
+    global INBOX_PATH, _INBOX_DIR, _INBOX_ENV_SAVED
+    _INBOX_ENV_SAVED = os.environ.get(cd.INBOX_ENV)
+    _INBOX_DIR = Path(tempfile.mkdtemp(prefix="cmux-dispatch-inbox-"))
+    INBOX_PATH = _INBOX_DIR / "orchestrator-inbox.log"
+    os.environ[cd.INBOX_ENV] = str(INBOX_PATH)
+
+
+def tearDownModule() -> None:
+    global INBOX_PATH, _INBOX_DIR
+    if _INBOX_ENV_SAVED is None:
+        os.environ.pop(cd.INBOX_ENV, None)
+    else:
+        os.environ[cd.INBOX_ENV] = _INBOX_ENV_SAVED
+    if _INBOX_DIR is not None:
+        shutil.rmtree(_INBOX_DIR, ignore_errors=True)
+    INBOX_PATH = None
+    _INBOX_DIR = None
 #: The dispatch probe used throughout. Defined before the fixtures because the
 #: derived queued-turn fixture substitutes it.
 PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
@@ -2189,6 +2228,500 @@ class TestCliExitCodes(unittest.TestCase):
             "--timeout", "0",
         )
         self.assertEqual(rc, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Durable fallback — a transport failure must never silently drop the notice
+# --------------------------------------------------------------------------- #
+
+
+class _TransportDiesAfterFirstRead(cd.Cmux):
+    """`list-workspaces` succeeds once, then the transport dies.
+
+    Models the issue's own evidence: the appearance/readiness reads land, the
+    bytes go out, and cmux goes unreachable mid-confirmation (load 95-113) — the
+    point at which the old code returned exit 3 and dropped the notice.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("cmux")
+        self.reads = 0
+
+    def run(self, argv: list[str], timeout: float | None = None) -> cd.CmuxResult:
+        if argv and argv[0] == "list-workspaces":
+            self.reads += 1
+            if self.reads > 1:
+                return cd.CmuxResult(124, "", "cmux timed out: list-workspaces")
+            return cd.CmuxResult(0, REAL_PAYLOAD, "")
+        if argv and argv[0] == "read-screen":
+            return cd.CmuxResult(0, SCREEN_IDLE_READY, "")
+        return cd.CmuxResult(0, "OK", "")
+
+
+class _TransportDiesAtReadinessGate(cd.Dispatcher):
+    """The readiness gate itself raises a transport error (site 2).
+
+    `wait_until_safe_to_send` swallows `read-screen` rc failures into `None`
+    rather than raising, so the except that guards it is only reachable from a
+    transport that raises. This pins that guard: a real `CmuxTransportError`
+    there must take the durable fallback, never the old drop-the-notice return.
+    """
+
+    def wait_until_safe_to_send(self, *args, **kwargs):
+        raise cd.CmuxTransportError("cmux timed out: read-screen")
+
+
+class _SendTextFails(cd.Cmux):
+    """Reads succeed; the text `send` is refused (site 3)."""
+
+    def __init__(self, workspace: str = "cmux") -> None:
+        super().__init__(workspace)
+
+    def run(self, argv: list[str], timeout: float | None = None) -> cd.CmuxResult:
+        if argv and argv[0] == "send" and "--" in argv and argv[-1] != "\\n":
+            return cd.CmuxResult(1, "", "cmux send: connection refused")
+        if argv and argv[0] == "list-workspaces":
+            return cd.CmuxResult(0, REAL_PAYLOAD, "")
+        if argv and argv[0] == "read-screen":
+            return cd.CmuxResult(0, SCREEN_IDLE_READY, "")
+        return cd.CmuxResult(0, "OK", "")
+
+
+class _TransportDiesOnNthListRead(FakeCmux):
+    """`list-workspaces` succeeds until its Nth call, then the transport dies.
+
+    Used to reach the PRE-RECOVERY GRACE `wait_consumed` specifically: reads #1
+    (appearance) and #2 (confirmation) must land, and read #3 (the grace window)
+    is the one that raises.
+    """
+
+    def __init__(self, *, fail_on: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.fail_on = fail_on
+        self.state_reads = 0
+
+    def list_workspaces_json(self) -> cd.CmuxResult:
+        self.state_reads += 1
+        if self.state_reads == self.fail_on:
+            return cd.CmuxResult(124, "", "cmux timed out: list-workspaces")
+        return super().list_workspaces_json()
+
+
+class _PromptForever(FakeCmux):
+    """Ready until the first send, then the live boot-block prompt for ever.
+
+    Reaches the RECOVERY `never-became-ready` branch, where the written text was
+    eaten and the re-send refused — the branch deliberately NOT wired to the
+    durable fallback in this change (tracked as a scoped follow-up).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stuck = False
+
+    def read_screen(self, workspace, lines=80, surface=None):
+        if self.stuck:
+            return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
+        return super().read_screen(workspace, lines, surface)
+
+    def send_text(self, workspace, text, surface=None):
+        if text != "\\n":
+            self.stuck = True
+        return super().send_text(workspace, text, surface)
+
+    def send_enter(self, workspace, surface=None):
+        self.sent_log.append("\\n")
+        return cd.CmuxResult(0, "OK")
+
+
+class _TransportDiesAtTheRecoveryGate(cd.Dispatcher):
+    """The RECOVERY-site readiness gate raises a transport error.
+
+    The FIRST `wait_until_safe_to_send` (the pre-send gate) succeeds; the SECOND
+    is reached only after the boot-block prompt ate the text and recovery chose
+    `dismiss-and-resend`. Un-wrapped, that raise propagates out of `send_message`
+    and the notice is recorded nowhere — this pins the wrap at that second site.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.gate_calls = 0
+
+    def wait_until_safe_to_send(self, *args, **kwargs):
+        self.gate_calls += 1
+        if self.gate_calls >= 2:
+            raise cd.CmuxTransportError("cmux timed out: read-screen")
+        return super().wait_until_safe_to_send(*args, **kwargs)
+
+
+class TestDurableInboxFallback(unittest.TestCase):
+    """#4842: when cmux is unreachable the notice lands in the orchestrator inbox.
+
+    Measured 2026-09-23: `cmux unreachable: cmux timed out` at load 95-113, and
+    the lane-completion notice was lost — exactly under the congestion when
+    "which lane finished" matters most. The inbox
+    (`~/.pi/agent/state/orchestrator-inbox.log`) is the surface the orchestrator
+    already treats as intake truth (`notify-orchestrator.sh` writes it FIRST,
+    before it ever touches cmux); this class pins that it is now a real fallback
+    of the dispatch path and not an agent's manual improvisation.
+    """
+
+    def setUp(self) -> None:
+        INBOX_PATH.unlink(missing_ok=True)
+
+    def _timeout_send(self, text: str = PROBE, label: str = "B7") -> cd.DispatchResult:
+        """Drive the REAL transport into its timeout branch (`subprocess.run`)."""
+        with mock.patch.object(
+            subprocess, "run", side_effect=subprocess.TimeoutExpired("cmux", 30)
+        ):
+            # A no-op log, exactly as the module's other helper does: the real
+            # logger spams stderr with every poll.
+            return cd.Dispatcher(cd.Cmux("cmux"), log=lambda _m: None).send_message(
+                "workspace:79", text, label=label, appear_timeout=0.0
+            )
+
+    # -- the wired sites: each is a separate place the notice could be dropped -- #
+
+    def test_a_spawn_oserror_is_a_transport_failure_not_an_escape(self):
+        # #4842 re-review: `Cmux.run` converted only FileNotFoundError and
+        # TimeoutExpired. A PermissionError (a non-executable `--cmux`) escaped
+        # PAST every `except CmuxTransportError` and every fallback, so the notice
+        # was recorded nowhere. It must be a transport failure like the rest.
+        with mock.patch.object(
+            subprocess,
+            "run",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            result = cd.Dispatcher(cd.Cmux("cmux"), log=lambda _m: None).send_message(
+                "workspace:79", PROBE, label="B7", appear_timeout=0.0
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "a spawn OSError dropped the notice")
+        self.assertIn("could not be spawned", result.detail)
+        self.assertIn("[B7]", INBOX_PATH.read_text(encoding="utf-8"))
+
+    def test_a_timed_out_cmux_still_reaches_the_inbox_and_names_the_channel(self):
+        result = self._timeout_send()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "transport-error")
+        self.assertTrue(
+            INBOX_PATH.exists(),
+            "the notice was DROPPED: a transport failure recorded nothing in the inbox",
+        )
+        line = INBOX_PATH.read_text(encoding="utf-8").strip()
+        self.assertIn("[B7]", line)
+        self.assertTrue(line.endswith(PROBE), line)
+        self.assertEqual(result.channel, "inbox")
+        self.assertIn("channel: inbox", result.detail)
+        self.assertIn("timed out", result.detail)
+
+    def test_a_transport_death_at_the_readiness_gate_still_reaches_the_inbox(self):
+        clock = FakeClock()
+        dispatcher = _TransportDiesAtReadinessGate(
+            FakeCmux(), sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B7", appear_timeout=0.0
+        )
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("channel: inbox", result.detail)
+
+    def test_a_transport_death_at_the_recovery_gate_still_reaches_the_inbox(self):
+        # #4842 re-review: the RECOVERY-site `wait_until_safe_to_send` was
+        # un-wrapped, so a raise there escaped with no inbox record. Drive the
+        # real recovery branch (boot-block prompt eats the text, recovery chooses
+        # dismiss-and-resend) and make only the SECOND gate raise.
+        clock = FakeClock()
+        dispatcher = _TransportDiesAtTheRecoveryGate(
+            _PromptForever(), sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B7", consume_timeout=0.0, retries=2
+        )
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("recovery gate", result.detail)
+        self.assertEqual(result.attempts, 1, "the attempt count is evidence")
+        self.assertEqual(result.recoveries, [cd.R_DISMISS_RESEND])
+
+    def test_a_refused_text_send_still_reaches_the_inbox(self):
+        result = cd.Dispatcher(_SendTextFails(), log=lambda _m: None).send_message(
+            "workspace:79", PROBE, label="B7", appear_timeout=0.0, ready_timeout=0.0
+        )
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("rc=1", result.detail)
+
+    def test_a_transport_death_mid_confirmation_keeps_the_attempt_evidence(self):
+        result = cd.Dispatcher(
+            _TransportDiesAfterFirstRead(), log=lambda _m: None
+        ).send_message(
+            "workspace:79", PROBE, label="B7", appear_timeout=0.0, consume_timeout=0.0
+        )
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertEqual(result.attempts, 1, "the send's attempt count is evidence")
+
+    def test_a_transport_death_in_the_pre_recovery_grace_window_reaches_the_inbox(self):
+        fake = _TransportDiesOnNthListRead(fail_on=3, drops_message=True)
+        result = _dispatcher(fake).send_message(
+            "workspace:99", PROBE, label="B7",
+            appear_timeout=0.0, ready_timeout=0.0, consume_timeout=0.0, retries=1,
+        )
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("grace window", result.detail)
+        self.assertEqual(result.attempts, 1, "the attempt count is evidence")
+        self.assertEqual(result.recoveries, [cd.R_RESEND])
+
+    def test_an_unknown_workspace_still_reaches_the_inbox_and_keeps_exit_two(self):
+        result = _dispatcher(FakeCmux()).send_message(
+            "workspace:nope", PROBE, label="B7", appear_timeout=0.0
+        )
+        self.assertEqual(result.status, "unknown-workspace")
+        self.assertEqual(result.channel, "inbox")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("not found", result.detail)
+        self.assertIn("channel: inbox", result.detail)
+        self.assertEqual(cd._EXIT_FOR_STATUS[result.status], 2)
+
+    def test_cli_unknown_workspace_exits_two_and_still_records_the_notice(self):
+        fake = FakeCmux()
+        out = io.StringIO()
+        with mock.patch.object(cd, "Cmux", lambda *a, **k: fake), redirect_stdout(out):
+            rc = cd.main(
+                [
+                    "send", "--workspace", "workspace:nope", "--text", PROBE,
+                    "--label", "B7", "--appear-timeout", "0",
+                ]
+            )
+        self.assertEqual(rc, 2)
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("channel: inbox", out.getvalue())
+
+    # -- the channel is a real, pinned field (not the inbox PATH, not a rename) -- #
+
+    def test_the_json_surface_carries_the_channel(self):
+        result = self._timeout_send()
+        self.assertEqual(result.as_json()["channel"], "inbox")
+
+    def test_the_channel_is_named_consistently_in_detail_and_cli(self):
+        result = self._timeout_send()
+        self.assertIn("channel: inbox", result.detail)
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                subprocess, "run", side_effect=subprocess.TimeoutExpired("cmux", 30)
+            ),
+            redirect_stdout(out),
+        ):
+            cd.main(
+                [
+                    "send", "--workspace", "workspace:79", "--text", PROBE,
+                    "--label", "B7", "--appear-timeout", "0", "--ready-timeout", "0",
+                ]
+            )
+        self.assertIn("channel: inbox", out.getvalue())
+
+    # -- negative: the fallback fires ONLY where the notice would vanish --------- #
+
+    def test_sent_but_not_consumed_never_touches_the_inbox(self):
+        result = _dispatcher(FakeCmux(never_consumes=True)).send_message(
+            "workspace:99", PROBE, label="B7",
+            ready_timeout=0.0, consume_timeout=0.0, retries=0,
+        )
+        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(result.channel, "transport")
+        self.assertFalse(
+            INBOX_PATH.exists(),
+            "the bytes reached the transport; an inbox entry would be a duplicate",
+        )
+
+    def test_a_refused_submit_enter_is_not_routed_to_the_inbox(self):
+        # #4842 re-review: the `send_enter rc != 0` branch is deliberately NOT
+        # wired to the durable fallback (the text reached cmux; a recovery entry
+        # would be a duplicate). `FakeCmux.send_enter` always returns 0, so the
+        # branch was never exercised and could silently be re-routed.
+        fake = FakeCmux()
+        fake.send_enter = lambda *a, **k: cd.CmuxResult(
+            1, "", "cmux send: connection refused"
+        )
+        result = _dispatcher(fake).send_message(
+            "workspace:99", PROBE, label="B7", ready_timeout=0.0
+        )
+        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(result.channel, "transport")
+        self.assertIn("rc=1", result.detail)
+        self.assertFalse(
+            INBOX_PATH.exists(),
+            "the bytes reached the transport; an inbox entry would be a duplicate",
+        )
+
+    def test_a_refusal_to_send_never_touches_the_inbox(self):
+        fake = FakeCmux(boot_block=True)
+        fake.send_enter = lambda *a, **k: cd.CmuxResult(0, "OK")
+        result = _dispatcher(fake).send_message(
+            "workspace:99", PROBE, label="B7", ready_timeout=0.0
+        )
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.channel, "")
+        self.assertFalse(INBOX_PATH.exists())
+
+    def test_a_refused_recovery_never_touches_the_inbox(self):
+        result = _dispatcher(_PromptForever()).send_message(
+            "workspace:99", PROBE, label="B7", consume_timeout=0.0, retries=2
+        )
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertFalse(INBOX_PATH.exists())
+
+    # -- the shape: append-only, one line, flattened, honest about failure -------- #
+
+    def test_the_record_matches_the_established_inbox_shape(self):
+        # `[YYYY-MM-DD HH:MM:SS TZ] [LABEL] <one line>` — what
+        # notify-orchestrator.sh writes on its FIRST line since 2026-09-16.
+        self._timeout_send()
+        line = INBOX_PATH.read_text(encoding="utf-8").rstrip("\n")
+        self.assertRegex(
+            line,
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+\] \[B7\] "
+            + re.escape(PROBE)
+            + r"$",
+        )
+
+    def test_a_multi_line_notice_stays_one_line_in_the_inbox(self):
+        # The watcher's header documents the one-line invariant: embedded newlines
+        # become Enters. The fallback payload must flatten them too.
+        result = self._timeout_send(text="first line\n\nsecond   line\nthird")
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        lines = INBOX_PATH.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("first line second line third", lines[0])
+        self.assertEqual(result.channel, "inbox")
+
+    def test_the_fallback_appends_and_never_truncates_the_inbox(self):
+        INBOX_PATH.write_text(
+            "[2026-01-01 00:00:00 UTC] [PRIOR] keep me\n", encoding="utf-8"
+        )
+        self._timeout_send()
+        data = INBOX_PATH.read_text(encoding="utf-8")
+        self.assertIn("keep me", data, "open('w') would have truncated the inbox")
+        self.assertEqual(len(data.splitlines()), 2, data)
+
+    def test_inbox_record_uses_the_fallback_label_when_the_label_is_empty(self):
+        # #4842 re-review: the previous form compared the record against the
+        # constant itself, so renaming `INBOX_FALLBACK_LABEL` stayed green. Pin
+        # the LITERAL value in the produced record, not the symbol.
+        self.assertEqual(cd.INBOX_FALLBACK_LABEL, "cmux-dispatch")
+        line = cd.inbox_record("", PROBE)
+        self.assertIn("[cmux-dispatch]", line)
+        self.assertTrue(line.endswith(PROBE))
+
+    def test_inbox_record_flattens_label_and_text_into_one_line(self):
+        line = cd.inbox_record("B7]\n[1999-01-01 00:00:00 XX] [INJECTED", "a\nb   c")
+        self.assertNotIn("\n", line)
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn("[B7] [1999-01-01 00:00:00 XX] [INJECTED]", line)
+        self.assertTrue(line.endswith("a b c"), line)
+
+    def test_a_newline_in_the_label_cannot_forge_a_second_record(self):
+        cd.append_to_inbox("B7]\n[1999-01-01 00:00:00 XX] [INJECTED", PROBE)
+        lines = INBOX_PATH.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], r"^\[\d{4}-\d{2}-\d{2} .+\] \[B7\] ")
+
+    def test_default_inbox_is_the_orchestrator_inbox(self):
+        self.assertEqual(cd.DEFAULT_INBOX, "~/.pi/agent/state/orchestrator-inbox.log")
+        with mock.patch.dict(os.environ, {cd.INBOX_ENV: ""}):
+            self.assertEqual(
+                cd.orchestrator_inbox_path(),
+                Path("~/.pi/agent/state/orchestrator-inbox.log").expanduser(),
+            )
+
+    # -- fallback failure is a diagnostic, never a crash ------------------------- #
+
+    def test_both_channels_failing_names_no_channel_and_carries_both_diagnostics(self):
+        with mock.patch.object(
+            cd, "append_to_inbox", side_effect=OSError("permission denied")
+        ):
+            result = self._timeout_send()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "none")
+        self.assertIn("timed out", result.detail)
+        self.assertIn("permission denied", result.detail)
+        self.assertIn("not recorded anywhere", result.detail)
+        self.assertFalse(INBOX_PATH.exists())
+        self.assertEqual(cd._EXIT_FOR_STATUS[result.status], 3)
+
+    def test_a_real_write_failure_is_reported_not_raised(self):
+        # Hermetic, mock-free: point the inbox UNDER A FILE. `mkdir` there raises
+        # an OSError, so the REAL `append_to_inbox` failure path is exercised.
+        blocker = _INBOX_DIR / "afile"
+        blocker.write_text("not a directory", encoding="utf-8")
+        with mock.patch.dict(os.environ, {cd.INBOX_ENV: str(blocker / "x.log")}):
+            with self.assertRaises(OSError):
+                cd.append_to_inbox("B7", PROBE)
+            result = self._timeout_send()
+        self.assertEqual(result.status, "transport-error")
+        self.assertEqual(result.channel, "none")
+        self.assertIn("not recorded anywhere", result.detail)
+
+    def test_a_broad_non_oserror_failure_is_reported_not_raised(self):
+        # `Path.expanduser()` raises RuntimeError (an unexpandable home), which a
+        # narrow `except OSError` would let escape as a traceback with no result.
+        with mock.patch.object(
+            cd, "orchestrator_inbox_path", side_effect=RuntimeError("no home")
+        ):
+            result = self._timeout_send()
+        self.assertEqual(result.channel, "none")
+        self.assertIn("no home", result.detail)
+        self.assertIn("not recorded anywhere", result.detail)
+
+    def test_a_lone_surrogate_is_reported_not_raised(self):
+        # `handle.write` raises UnicodeEncodeError for a lone surrogate (an
+        # `OSError` it is NOT). The result must still report both diagnostics.
+        result = self._timeout_send(label="B7\ud800")
+        self.assertEqual(result.channel, "none")
+        self.assertIn("not recorded anywhere", result.detail)
+
+    def test_transport_and_consumption_failures_are_distinct_outcomes(self):
+        transport = self._timeout_send()
+        unconsumed = _dispatcher(FakeCmux(never_consumes=True)).send_message(
+            "workspace:99", PROBE, ready_timeout=0.0, consume_timeout=0.0, retries=0
+        )
+        self.assertEqual(transport.status, "transport-error")
+        self.assertEqual(unconsumed.status, "sent-but-not-consumed")
+        self.assertNotEqual(transport.status, unconsumed.status)
+        self.assertEqual(cd._EXIT_FOR_STATUS["transport-error"], 3)
+        self.assertEqual(cd._EXIT_FOR_STATUS.get("sent-but-not-consumed", 1), 1)
+        self.assertNotEqual(cd._EXIT_FOR_STATUS.get(unconsumed.status, 1), 3)
+
+    def test_cli_reports_the_inbox_channel_and_still_exits_three(self):
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                subprocess, "run", side_effect=subprocess.TimeoutExpired("cmux", 30)
+            ),
+            redirect_stdout(out),
+        ):
+            rc = cd.main(
+                [
+                    "send", "--workspace", "workspace:79", "--text", PROBE,
+                    "--label", "B7", "--appear-timeout", "0", "--ready-timeout", "0",
+                ]
+            )
+        self.assertEqual(rc, 3)
+        self.assertTrue(INBOX_PATH.exists(), "the notice was dropped")
+        self.assertIn("FAIL", out.getvalue())
+        self.assertIn("channel: inbox", out.getvalue())
 
 
 if __name__ == "__main__":

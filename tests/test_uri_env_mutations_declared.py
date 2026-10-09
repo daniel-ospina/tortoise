@@ -156,6 +156,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_selfhost_volunteer_context.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2103 (W4C) — selfhost volunteer forces the embedded lane (the selfhost_rest pattern)
     "test_turnstile_signup.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_value_extractor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #7760: the cross-embedded-DB isolation test forces the EMBEDDED lane (the
+    # delenv IS the point — both ``TortoiseSDK(<path>)`` constructions must be
+    # genuinely embedded, because on a URI-bearing session the path is redirected
+    # to a server and derives a per-path graph name, so the ``(graph_name,
+    # namespace)`` collision the test guards would not be exercised at all and it
+    # would pass without the fix). The fixture-param monkeypatch auto-restores at
+    # teardown, so no lane leaks into a later docker-lane test.
+    "test_fallback_snapshot.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ── DELIBERATE_URI: module-level live-FalkorDB probes (set + restore at
     #    import; the probe asserts the docker lane) ──────────────────────────
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',

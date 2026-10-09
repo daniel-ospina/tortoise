@@ -1384,3 +1384,142 @@ def test_every_website_page_is_selectable_by_ci() -> None:
         f"guard ever executing. Add them to SOURCE_PATTERNS['onboarding'] in "
         f"tools/ci_selection.py."
     )
+
+
+# ---------------------------------------------------------------------------
+# #2535 — session-recording retention in the Privacy Policy
+# ---------------------------------------------------------------------------
+# The Terms of Service (§4.3) promise that previously captured sessions "remain
+# subject to this Agreement and the Privacy Policy", so the Privacy Policy must
+# actually state how long they are kept. Before #2535 it did not state it at all,
+# and the Terms pointed a reader — or a customer's security reviewer, or a
+# regulator — at a document that did not answer the question.
+#
+# These pins exist because the #2535 change was originally covered by NOBODY:
+# `test_retention_promise.py` asserts only the backup horizon, and nothing here
+# inspected the session-recording text. Deleting the entire new §6 entry and
+# reverting the version still produced a green run.
+
+PRIVACY = WEBSITE / "privacy.html"
+
+
+def test_privacy_states_session_recording_retention() -> None:
+    """#2535: the retention statement must exist, and must not claim an expiry."""
+    text = _read(PRIVACY)
+    assert "<strong>Session recordings.</strong>" in text, (
+        "privacy.html must disclose session recordings as a processed category; "
+        "a retention carve-out for an undisclosed category is not a disclosure"
+    )
+    assert "retained <strong>until they are deleted</strong>" in text
+    assert "no retention window and no automatic expiry" in text
+
+
+def test_privacy_does_not_promise_a_deletion_control_that_does_not_exist() -> None:
+    """#2535 review finding: state the SHIPPED authorization model, not a planned one.
+
+    Session list/detail/delete are organisation-member authorised with no owner
+    check and no role gate: ``delete_session`` depends on
+    ``get_current_org_session_ungated`` and ``_require_scope``, which returns
+    early for session auth (``org.get("key_id") is None``). Any active member can
+    therefore delete ANY session in the organisation, not only their own.
+
+    Wording that describes a member-scoped / admin-scoped split would describe an
+    access-control boundary a security reviewer reads as a control — and it would
+    be false. The planned refinement may be described as planned, and this pin
+    holds the page to the shipped behaviour.
+    """
+    text = _read(PRIVACY)
+    assert (
+        "any member of the organization can view the organization's recorded "
+        "sessions and delete them"
+    ) in text
+    assert "an organization administrator can delete across the organization" not in text, (
+        "that split is NOT shipped: there is no role gate on session deletion"
+    )
+
+
+def test_privacy_header_version_matches_the_version_section() -> None:
+    """#2535 review finding: the header badge contradicted §15 on the same page.
+
+    The policy's own rule ("when this policy changes, the version number and
+    effective date are updated") is only honoured if every place the version
+    appears is updated. The 1.2 change updated §15 and left the header at 1.1,
+    so the first thing a reader saw contradicted the section body.
+    """
+    text = _read(PRIVACY)
+    header = re.search(
+        r'<span class="label">Version</span>\s*<span class="value">([0-9.]+)</span>',
+        text,
+    )
+    assert header is not None, "privacy.html must carry a header version badge"
+    section = re.search(r"<strong>Current version:</strong>\s*([0-9.]+)", text)
+    assert section is not None, "privacy.html must carry a §15 current version"
+    assert header.group(1) == section.group(1), (
+        f"header version {header.group(1)!r} contradicts §15's {section.group(1)!r}"
+    )
+
+
+def test_privacy_does_not_leave_session_deletion_backups_undisclosed() -> None:
+    """#2535 review finding: deletion is not complete at the moment it is requested.
+
+    A snapshot taken before a session is deleted still contains it and ages out on
+    the four-week cycle. Stating an absolute "retained until deleted" while naming
+    the backup residual for only the graph and account paths would over-promise.
+    """
+    text = _read(PRIVACY)
+    assert "A deleted session recording is likewise not actively purged" in text
+    assert "not governed by the 7-day restore window" in text, (
+        "§16 must scope the carve-out to the 7-day restore window, not to all windows"
+    )
+
+
+def test_privacy_draft_mirrors_the_session_recording_retention() -> None:
+    """The canonical doc requires the draft and the published page to move together.
+
+    `docs/retention-and-deletion.md` states the draft's policy body is coupled to
+    the published page and must be edited in BOTH files together. The e2e fidelity
+    gate only checks draft ⊆ render, so a render-only ADDITION passes it silently —
+    which is how the mirror would have gone stale here.
+    """
+    draft = _read(REPO_ROOT / "docs" / "drafts" / "2026-08-08-657-privacy-draft.md")
+    assert "**Session recordings.**" in draft
+    assert "**Current version:** 1.2" in draft
+
+
+def _privacy_section(heading: str) -> str:
+    """Return the body of the privacy.html <h2> section starting at ``heading``.
+
+    Scoping matters: an unscoped `in text` assertion is satisfied by whichever
+    section happens to carry the phrase, so a mutation to a DIFFERENT section
+    passes. Cycle 2 proved exactly that — deleting only the §2 bullet, or only
+    the §4 bullet, left every pin green.
+    """
+    html = _read(PRIVACY)
+    start = html.find(heading)
+    assert start != -1, f"privacy.html must carry the heading {heading!r}"
+    nxt = html.find("<h2>", start + len(heading))
+    return html[start : nxt if nxt != -1 else len(html)]
+
+
+def test_privacy_lists_session_recordings_in_the_data_category_section() -> None:
+    """#2535 review cycle 2: §2 must disclose the category, not just §6 carve it out.
+
+    A retention carve-out for a category the policy never discloses is not a
+    disclosure. Scoped to §2 so that deleting the §2 bullet alone goes red.
+    """
+    section = _privacy_section("<h2>2. Data processed by the service</h2>")
+    assert "<strong>Session recordings.</strong>" in section, (
+        "§2 must list session recordings as a processed category"
+    )
+
+
+def test_privacy_establishes_the_basis_that_6_cites() -> None:
+    """#2535 review cycle 2: §6 cites §4 for justification, so §4 must establish it.
+
+    Scoped to §4 so that deleting the §4 legal-basis bullet alone goes red.
+    """
+    section = _privacy_section("<h2>4. Purposes of processing and legal bases</h2>")
+    assert "session content its members contribute is processed" in section, (
+        "§4 must state the purpose for session recordings, which §6 cites"
+    )
+    assert "legitimate interests (Art. 6(1)(f)):" in section

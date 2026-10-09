@@ -21,6 +21,13 @@ from datetime import datetime, timezone
 # importable here.
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+
+# #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
+# ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
+from tortoise.projection.nonfolded import (
+    classify_terminalizer_miss,
+    record_non_folded,
+)
 from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
@@ -1899,7 +1906,8 @@ class _EntityHandlers:
 
     def apply_journal_point_restamp(
             self, ev: dict, seq: int,
-            plan: dict[int, tuple[bool, bool]]) -> tuple[int, str, str] | None:
+            plan: dict[int, tuple[bool, bool]], *,
+            hard_deleted: dict) -> tuple[int, str, str] | None:
         """#3305: apply the shared whole-journal plan to ONE terminalizer.
 
         The apply()-based whole-journal engines (``rebuild(EventLog)``,
@@ -1919,11 +1927,19 @@ class _EntityHandlers:
         The belief half folds here, at the record's own
         position — chronological, so it cannot clobber a later writer.
 
-        A fold that matches NO Point warns (#3299): the apply() one-record
-        branch and ``rebuild_all``'s sweep both emit a fold-miss line, and
-        before this one the whole-journal apply() arm was quieter than both —
-        a ``rebuild(EventLog)`` replay of a terminalizer whose target was never
-        created said nothing, while ``rebuild_all`` warned.
+        A fold that matches NO Point is now RECORDED as a ``NonFoldedEvent``
+        carrying the SHARED classifier's shape (``classify_terminalizer_miss``),
+        so a WHOLE-JOURNAL caller running inside a ``collect_non_folded()``
+        boundary (``rebuild``, ``recover_from_log``, ``backup.restore``) fails
+        closed — ``NonFoldedEventsError`` — on exactly the journal
+        ``rebuild_all`` refuses. R8 makes the fail-closed set ONE set, and #7719
+        closed the gap where this arm was merely loud (#3299). The
+        ``logger.warning`` is KEPT: a caller reached OUTSIDE that boundary —
+        ``apply()``'s one-record live path, or a bare/test call — has no run to
+        fail and still needs the audible line. Before #7719 the whole-journal
+        apply() arm was quieter than both, so a ``rebuild(EventLog)`` replay of
+        a terminalizer whose target was never created said nothing while
+        ``rebuild_all`` refused.
 
         The record is NORMALIZED here (``self._norm``) because the fold body
         reads the flat ``id``/``new_id``, and ``_norm`` tolerates a nested
@@ -1947,7 +1963,16 @@ class _EntityHandlers:
         sweep already runs after its pass-1a hoist, which is why the two
         engines disagreed). The ``seq`` rides along because the sweep needs it
         for the hard-delete staleness rule.
+
+        ``hard_deleted`` is the anchor-gated ``hard_deleted_pairs`` map, and it
+        is keyword-only and REQUIRED: it is the only way this consumer can tell
+        a genuine terminalizer miss from the named
+        ``supersede-target-deleted`` exemption, and a defaulted value would
+        re-open the fail-OPEN it closes.
         """
+        if hard_deleted is None:
+            raise TypeError(
+                "apply_journal_point_restamp requires hard_deleted=...")
         ev = self._norm(ev)
         apply_decay, apply_stamp = plan.get(seq, (False, False))
         if not apply_decay and not apply_stamp:
@@ -1955,7 +1980,36 @@ class _EntityHandlers:
             return None
         matched = self._fold_point_restamp(
             ev, decay=apply_decay, stamp=apply_stamp)
+        rid = ev.get("id")
         if apply_stamp and matched == 0:
+            # #7719: the fold could not resolve the target. The SHAPE is the
+            # SHARED classifier's — the same value `rebuild_all`'s deferred
+            # sweep and `check_consistency`'s reference fold record for this
+            # journal — and it is now RECORDED, so a whole-journal run through
+            # this consumer fails closed (R8) instead of passing on a merely
+            # loud warning. KEEP the warning: the #3299 contract is that a
+            # dropped fold must be AUDIBLE, and a caller reached outside a
+            # `collect_non_folded` boundary (a bare or test call) still needs
+            # the log line — the record fails the RUN, the warning names it.
+            # `target_deleted` reads the anchor-gated map; `has_successor`
+            # (`new_id`, NEVER `corrected_by`) is REQUIRED at this
+            # PointSuperseded site — the classifier's False default would
+            # mislabel a target-miss as the EXEMPT
+            # `point-superseded-no-new-id`.
+            # Function-local on purpose: `projection/__init__` imports this
+            # module, so a module-top import of `_hard_deleted_any` would cycle.
+            from tortoise.projection import _hard_deleted_any
+            record_non_folded(
+                classify_terminalizer_miss(
+                    ev.get("type"),
+                    has_successor=bool(ev.get("new_id")),
+                    target_deleted=_hard_deleted_any(
+                        hard_deleted, "Point", rid)),
+                event_id=ev.get("event_id"), event_type=ev.get("type"),
+                seq=seq, id=rid if isinstance(rid, str) else None,
+                candidates=(ev.get("new_id"), ev.get("corrected_by")),
+                detail="terminalizer fold matched no Point",
+            )
             logger.warning(
                 "apply_journal_point_restamp: %s fold matched no Point "
                 "(event_id=%s id=%r new_id=%r) — the target was never "
@@ -1965,7 +2019,6 @@ class _EntityHandlers:
         if not apply_stamp:
             return None
         from tortoise.projection import _writable_id
-        rid = ev.get("id")
         # Scope the successor field to the NORMALIZED type, exactly as the fold
         # dispatch and ``rebuild_all``'s sweep do: ``_fold_point_superseded``
         # reads ``new_id`` ONLY and ``_fold_point_invalidated`` reads
