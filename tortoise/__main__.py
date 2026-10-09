@@ -3018,6 +3018,10 @@ def _install_read_hook_impl(args) -> int:
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
+    - A ``--dir`` root that is not a real directory (a regular file, a
+      symlink to a file, or a dangling symlink) is REFUSED before either
+      half writes, so a bad root fails the whole install with NOTHING on
+      disk — never a capture seam left behind an exit 1 (#7807).
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
@@ -3089,6 +3093,34 @@ def _install_read_hook_impl(args) -> int:
 
     dry = getattr(args, "dry_run", False)
     uninstall = getattr(args, "uninstall", False)
+
+    # ── Root-shape guard (#7807): a ``--dir`` ROOT that is not a real
+    #    directory — a regular FILE, a symlink to a file, or a DANGLING
+    #    symlink — cannot host the registration
+    #    (``<root>/.codex/hooks.json`` is unrepresentable beneath a non-dir),
+    #    so every real write beneath it raises (NotADirectoryError /
+    #    FileExistsError).  The write-free pre-flight dry run
+    #    (``_read_hook_refusal``) performs no ``mkdir``, so it never met that
+    #    error, passed, and let the HOME-scoped capture half write BEFORE the
+    #    real read half failed — a half-install behind an exit 1.  Refusing
+    #    the root SHAPE here, in the code path BOTH the dry run and the real
+    #    run share, closes the gap: a bad root fails with NOTHING written.
+    #    A root that simply does NOT exist is not refused — it is the normal
+    #    fresh-install case (``mkdir(parents=True)`` creates it).
+    #
+    #    Skipped under ``--uninstall`` (#2383): an uninstall writes nothing,
+    #    and a root that cannot host a registration is by definition one with
+    #    no registration to remove, so it must stay the CLEAN NO-OP that
+    #    0-exit contract promises rather than becoming a new refusal.  This
+    #    guard exists to protect a WRITE, so it applies only where one happens.
+    if (not uninstall and (root.exists() or root.is_symlink())
+            and not root.is_dir()):
+        print(f"Refusing: --dir root {root} is not a directory (a file, or "
+              "a symlink that does not resolve to one) — a harness "
+              "registration file cannot live beneath it. Pass --dir a "
+              "directory, or remove the file/symlink first.",
+              file=_sys.stderr)
+        return 1
 
     # ── Symlink-escape guard: refuse when ANY existing component between the
     #    install root and the target (including the leaf AND intermediate

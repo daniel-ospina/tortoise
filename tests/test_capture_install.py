@@ -2500,6 +2500,81 @@ def test_cli_install_codex_directory_hooks_json_is_a_populated_error(cli):
         "a read-half refusal must not leave the capture seam behind")
 
 
+def test_cli_install_codex_non_directory_root_writes_nothing(cli, tmp_path):
+    """A ``--dir`` root that is not a real directory (a regular file, a
+    symlink to a file, or a dangling symlink) must fail the read half and
+    leave NOTHING on disk — never install the HOME-scoped codex capture seam
+    and then exit 1 (#7807).
+
+    The write-free pre-flight (``_read_hook_refusal``) deliberately performs
+    no ``mkdir``, so a root SHAPE it never exercised slipped past it; the real
+    read half then raised at ``<root>/.codex`` (``NotADirectoryError`` /
+    ``FileExistsError``) — AFTER the capture half had already written
+    ``$CODEX_HOME/hooks.json`` and ``tortoise-session-end.sh``.
+
+    Mutation: drop the root-shape refusal in ``_install_read_hook_impl`` —
+    the dry run passes, the capture seam lands, and the ``not exists``
+    assertions RED."""
+    run, _root, home = cli
+
+    def _as_file(root):
+        root.write_text("not a directory")
+
+    def _as_symlink_to_file(root):
+        (root.parent / "target-file").write_text("not a directory")
+        root.symlink_to(root.parent / "target-file")
+
+    def _as_dangling_symlink(root):
+        root.symlink_to(root.parent / "does-not-exist")
+
+    for name, shape in (("file", _as_file),
+                        ("symlink-to-file", _as_symlink_to_file),
+                        ("dangling-symlink", _as_dangling_symlink)):
+        root = tmp_path / f"badroot-{name}"
+        shape(root)
+
+        r = run("install", "codex", "--dir", str(root))
+
+        assert r.returncode == 1, (name, r.returncode, r.stdout, r.stderr)
+        assert "Traceback" not in r.stderr, (name, r.stderr)
+        # The refusal is read-only: nothing landed beneath the bad root...
+        assert not (root / ".codex").exists(), name
+        # ...and the HOME-scoped capture half never wrote a byte — this is the
+        # atomicity property (#7807), so it is asserted before the message.
+        assert not (home / ".codex" / "hooks.json").exists(), (
+            f"{name}: the capture registration was written before the read "
+            "half refused")
+        assert not (home / ".codex" / "hooks"
+                    / "tortoise-session-end.sh").exists(), (
+            f"{name}: the capture script was written before the read half "
+            "refused")
+        assert "not a directory" in r.stderr, (name, r.stderr)
+
+
+def test_cli_install_codex_non_directory_root_uninstall_is_a_clean_noop(cli, tmp_path):
+    """``--uninstall`` against a non-directory root stays the clean no-op that
+    #2383 promises, even though the SAME root shape is refused on the write
+    path.
+
+    A root that cannot host a registration is by definition one with no
+    registration to remove, and an uninstall writes nothing — so the
+    root-shape guard (#7807) protects a WRITE and therefore applies only where
+    one happens. Without the ``not uninstall`` condition the guard turns a
+    nothing-to-do uninstall into a new refusal, which is a behaviour change
+    against #2383 (mutation: drop that condition — this test REDs at
+    ``returncode == 1``).
+    """
+    run, _root, _home = cli
+    root = tmp_path / "badroot-uninstall"
+    root.write_text("not a directory")
+
+    r = run("install", "codex", "--dir", str(root), "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Refusing" not in r.stderr, r.stderr
+
+
 def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
     """A ``.codex`` symlink loop must be a populated error, never an uncaught
     ``RuntimeError`` traceback (``Path.resolve()`` raises on a cycle).
