@@ -1738,7 +1738,11 @@ async def _lifespan(app):
                     # Longer window than request paths (30s): cold-start torch
                     # import on a 2-core/2GB VM can exceed 30s (#545). The
                     # thread is daemon + background, so it never blocks bind.
-                    model = EmbeddingModel.get(load_timeout=300.0)
+                    # #4055: mark it as BACKGROUND setup so the one-time load
+                    # it starts is not attributed to (and cannot exempt) a
+                    # request that merely overlaps this pre-warm.
+                    with EmbeddingModel.background_load():
+                        model = EmbeddingModel.get(load_timeout=300.0)
                     loaded_id = _probe_loaded_model_id(model)
                     if model is not None:
                         if loaded_id and loaded_id != EMBEDDING_MODEL:
@@ -3717,7 +3721,16 @@ class WaitBoundMiddleware:
             scope["state"] = state
         state["_wait_bound_t0"] = t0
 
-        task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        # #4055 (P2): bind an opaque owner token for THIS request, then create
+        # the handler task INSIDE the binding so the task copies it. Any
+        # one-time embedder load the handler triggers (possibly through a
+        # context-copying thread hand-off, the repo rule) stamps this token as
+        # the load's owner; the wait-bound seam admits the cold-setup exemption
+        # only for a load THIS request owns — never a concurrent request's.
+        from tortoise.embeddings import request_load_owner
+        owner = object()
+        with request_load_owner(owner):
+            task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
             # ``wait_for`` is a single deadline around ``await fut``, and the two
@@ -3728,9 +3741,13 @@ class WaitBoundMiddleware:
             # the unwrapped call. The ``shield`` is REQUIRED: ``wait_for`` alone
             # CANCELS the awaited future on timeout, and this bound must
             # ABANDON, never cancel (the SDK-closing ``finally`` doctrine below).
-            return await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=_mcp_auth._TRANSPORT_WAIT_BOUND_S)
+            # #4055: the wait itself is delegated to ``mcp_auth`` so this arm and
+            # the MCP seam share ONE implementation — including the one-time
+            # embedder-setup exemption (the bound times the WAITING, not the
+            # SETTING UP).
+            return await _mcp_auth.await_under_wait_bound(
+                task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0,
+                owner=owner)
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the

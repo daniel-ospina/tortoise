@@ -501,9 +501,22 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     else:
         remaining = max(
             0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival))
-    task = asyncio.ensure_future(
-        _original_call_tool(name, arguments, version=version,
-                            run_middleware=True, task_meta=task_meta))
+    # #4055: the mono-clock reference the cold-setup exemption attributes a
+    # one-time embedder load to — the transport arrival when there is one, else
+    # this seam's entry. Same clock as ``_wait_bound_arrival`` and
+    # ``EmbeddingModel``'s own stamp.
+    setup_ref = arrival if arrival is not None else _time.monotonic()
+    # #4055 (P2): bind an opaque owner token for this dispatch, then create the
+    # dispatch task INSIDE the binding so it copies the token. A one-time
+    # embedder load this dispatch triggers stamps that token as the load's
+    # owner; the shared wait admits the cold-setup exemption only for a load
+    # THIS dispatch owns, never a concurrent request's.
+    from tortoise.embeddings import request_load_owner
+    owner = object()
+    with request_load_owner(owner):
+        task = asyncio.ensure_future(
+            _original_call_tool(name, arguments, version=version,
+                                run_middleware=True, task_meta=task_meta))
     try:
         # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
         # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
@@ -516,8 +529,11 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # ``_original_call_tool``. The ``shield`` is what preserves
         # ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited future on
         # timeout, and cancelling here would run the SDK-closing ``finally``
-        # under work still using it (#2988 / #3718).
-        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        # under work still using it (#2988 / #3718). #4055: delegated to
+        # ``mcp_auth`` so this seam and the REST middleware share ONE wait —
+        # including the one-time embedder-setup exemption.
+        return await _mcp_auth.await_under_wait_bound(
+            task, remaining, reference=setup_ref, owner=owner)
     except asyncio.CancelledError:
         # Outer cancellation (client disconnect, server shutdown, transport
         # teardown). Propagate it INTO the dispatch and await it, so the tool's
