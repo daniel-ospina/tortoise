@@ -120,7 +120,7 @@ def _embedded_store_identity(proj) -> str:
     """Identity of the embedded store a ``:memory:`` projection uses.
 
     redislite keys its running-daemon registry by ``<cwd>/:memory:.settings``,
-    so every ``FalkorProjection(":memory:")`` in one CWD attaches to the SAME
+    so every ``FalkorProjection`` over ``":memory:"`` in one CWD attaches to the SAME
     daemon and the SAME graph — the second sees the first's writes. The corpus
     identity must therefore be the STORE INSTANCE, not the projection: a
     per-projection token gives two projections over one store two keys, so
