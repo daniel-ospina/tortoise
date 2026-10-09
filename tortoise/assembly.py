@@ -322,8 +322,8 @@ from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES  # noqa: E402
 # ``commit_ops.OBJECT_TERMINAL_STATUSES`` (#3301), and the search lane now
 # applies it; THIS port resolves the wider set on purpose (superseded /
 # deprecated / archived Objects must resolve to render their own state), so
-# its FTS leg reads the terminal-INCLUSIVE view from the SDK and filters
-# here. Re-point this constant at the canonical set and the current-state
+# its FTS leg passes THIS set into the FTS index query and never the read
+# lane's wider vocabulary. Re-point this constant at the canonical set and the current-state
 # question stops firing.
 _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES = frozenset({"retracted"})
 
@@ -558,24 +558,23 @@ def docker_resolver_port(sdk) -> ResolverPort:
     the sibling Object-anchor resolvers — ``aggregate.py``,
     ``coverage_loop.py`` — are status-BLIND: #3301 widened the shared search
     lane's Object exclusion, and those resolution-only legs opt back out of
-    it via ``excluded_statuses=()``, so they still resolve terminal Objects.) The exact + alias legs carry it as a
-    Cypher conjunct (the graph filters; the batched exact probe stays one
-    query). The FTS leg applies it in Python instead, through the SAME
-    constant so the two can never drift — and, since #3301 widened the
-    shared lane's Object exclusion, it asks the SDK for the
-    terminal-INCLUSIVE view (``include_terminal=True``) so the narrower set
-    here stays the only filter on this leg and a SUPERSEDED Object still
-    resolves.
+    it via ``excluded_statuses=()``, so they still resolve terminal Objects.)
+    The exact + alias legs carry it as a Cypher conjunct (the graph filters;
+    the batched exact probe stays one query). The FTS leg passes it straight
+    into the index query (``search_engine.run_fts_query``'s
+    ``excluded_statuses``), from the SAME constant, so the narrow set here
+    stays the only filter on that leg and a SUPERSEDED Object still resolves
+    (#3301) — the query's own WHERE applies it, before its LIMIT.
 
     #4061 (R1/R2/R3) closes the three residuals #3317 left in THIS port:
     ``excluded_exact_objects`` makes the exact leg's exclusion DISTINGUISHABLE
     from an absent match (so the resolver can abstain instead of substituting
-    a weaker leg's live Object); ``fts_objects`` grows its window until the
-    exclusion has been applied before the leg's bound (a post-truncation
-    Python filter let >=limit excluded Objects starve a live candidate); and
-    an FTS hit whose payload carried no ``status`` (batch content-fetch
-    degradation) has its status re-read from the graph instead of defaulting
-    to live.
+    a weaker leg's live Object); the FTS leg's exclusion is applied BY the
+    index query before its LIMIT, so an excluded Object cannot consume the
+    leg's bound (the pre-#4061 post-truncation Python filter let >=limit
+    excluded Objects starve a live candidate); and ``status`` is read by that
+    same query, so the SDK's batch content-fetch degradation cannot drop it
+    and let a retracted Object read as live.
     """
     proj = sdk._get_proj()
     # Object-scoped predicate, stated inline rather than routed through
@@ -583,8 +582,8 @@ def docker_resolver_port(sdk) -> ResolverPort:
     # and WHERE-fragment shape differ from this port's plain conjunct, and the
     # resolver's set is a deliberate NARROWING (see
     # ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``), not the read surface's
-    # vocabulary. Derived from the constant so the Cypher and the Python (FTS)
-    # check share one vocabulary; #3301's Object lanes in ``live``
+    # vocabulary. Derived from the constant so the Cypher legs and the FTS
+    # leg share one vocabulary; #3301's Object lanes in ``live``
     # (``excluded`` + ``include_outdated_flag``) compose the WIDER read-surface
     # predicate, which this port deliberately does not apply.
     #
