@@ -52,6 +52,7 @@ import {
   getAccessTokenForSession,
   invalidateCachedToken,
 } from "../../_shared/auth/token";
+import { isUserTokenRejection } from "../../_shared/auth/supabase";
 
 interface SupabaseProxyEnv extends Env {
   SUPABASE_URL?: string;
@@ -105,23 +106,45 @@ function isAllowed(path: string): boolean {
 }
 
 /**
+ * The Supabase project origin with any trailing slash removed.
+ *
+ * `SUPABASE_URL=https://x.supabase.co/` is a legal way to write it, but it made
+ * the resolution base `//`, so every forwarded path normalised to
+ * `//rest/v1/...`, `isAllowed` refused it, and EVERY request 403'd. The sibling
+ * handlers tolerate this (`/blog/api` strips the slash, `/api/v1` compares by
+ * prefix); this route's allowlist is exact, so it must strip it here.
+ */
+function supabaseBase(env: SupabaseProxyEnv): string {
+  return (env.SUPABASE_URL ?? "").replace(/\/+$/, "");
+}
+
+/**
  * `blog_admins` membership via the `is_admin()` RPC, as the USER.
  *
- * Mirrors `admin/[[path]].ts::isAdmin`: the dashboard project carries no
- * service-role key, so the SECURITY DEFINER `public.is_admin()` resolves
- * `auth.uid()` from the bearer token we minted. `unavailable` and `not_admin`
- * stay distinct so a fault is a 503, never a 403 that reads as an access
- * decision. Only a 401/403 (the presented USER token was rejected) is the
- * access-decision branch; every other non-ok status — a missing/renamed RPC, a
- * misconfigured URL, a PostgREST fault, a 5xx/429 — is OUR problem and is
- * `unavailable`, exactly as the sibling classifies it.
+ * The dashboard project carries no service-role key, so the SECURITY DEFINER
+ * `public.is_admin()` resolves `auth.uid()` from the bearer token we minted.
+ *
+ * A 401/403 is NOT a verdict on its own: the call carries BOTH credentials (the
+ * user's minted bearer in `Authorization`, the project anon key in `apikey`), so
+ * the same status is produced by a rejected USER token (PostgREST `PGRST301` /
+ * `JWT expired`) and by a rotated/wrong `SUPABASE_ANON_KEY` (the gateway
+ * rejecting the SERVICE credential). `isUserTokenRejection` reads the BODY, so
+ * the two resolve differently:
+ *   - USER token rejected → `unauthenticated` (re-authenticate);
+ *   - anything else — a gateway/service-key fault, a missing/renamed RPC, a
+ *     misconfigured URL, a PostgREST fault, a 5xx/429 → `unavailable` (503).
+ * `not_admin` (403) means ONLY a resolved `false` from a 200 admin check.
+ *
+ * The sibling `admin/[[path]].ts::isAdmin` classifies the same response with the
+ * same helper, so the two surfaces agree: a store/configuration fault is a 503
+ * in both and never reads as an access decision or a sign-out (#3485).
  */
 async function checkAdmin(
   env: SupabaseProxyEnv,
   accessToken: string,
-): Promise<"admin" | "not_admin" | "unavailable"> {
+): Promise<"admin" | "not_admin" | "unauthenticated" | "unavailable"> {
   try {
-    const res = await fetch(`${env.SUPABASE_URL ?? ""}/rest/v1/rpc/is_admin`, {
+    const res = await fetch(`${supabaseBase(env)}/rest/v1/rpc/is_admin`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -133,11 +156,15 @@ async function checkAdmin(
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
-      // A rejected USER token IS an access decision. Anything else (a missing
-      // RPC, a rotated key, a PostgREST fault, a 5xx/429) is OUR problem and
-      // must be 503 — showing "not an admin" would be a lie that costs an hour
-      // to debug. Mirrors `admin/[[path]].ts::isAdmin`.
-      if (res.status === 401 || res.status === 403) return "not_admin";
+      // Status alone cannot separate a rejected USER token from a rotated/wrong
+      // SERVICE key (see the doc comment above), so the BODY decides. A rejected
+      // user token means re-authenticate; every other non-ok class is OUR
+      // problem and must be 503 — showing "not an admin" for a store fault
+      // would be a lie that costs an hour to debug (#3485). Same classifier as
+      // `admin/[[path]].ts::isAdmin`, so the two surfaces agree.
+      if (isUserTokenRejection(res.status, await res.text().catch(() => ""))) {
+        return "unauthenticated";
+      }
       return "unavailable";
     }
     return (await res.json()) === true ? "admin" : "not_admin";
@@ -202,7 +229,7 @@ export const onRequest: PagesFunction<SupabaseProxyEnv> = async ({ request, env,
     return json({ error: "invalid_path" }, { status: 400 });
   }
 
-  const upstreamBase = new URL(`${env.SUPABASE_URL}/`);
+  const upstreamBase = new URL(`${supabaseBase(env)}/`);
   const upstream = new URL(rest, upstreamBase);
 
   // The wildcard must not escape the project origin. WHATWG URL normalisation
@@ -226,7 +253,15 @@ export const onRequest: PagesFunction<SupabaseProxyEnv> = async ({ request, env,
   if (admin === "unavailable") {
     return json({ error: "upstream_unavailable", detail: "admin check could not be resolved" }, { status: 503 });
   }
-  if (admin !== "admin") {
+  // A rejected USER credential is a sign-out for this route, matching the
+  // sibling gate's re-auth bounce. It is NOT the 503 the DATA path uses: that
+  // path refreshes a transient mid-session rejection and retries, while a
+  // freshly-minted token rejected HERE is unusable, so the session must be
+  // re-established. Same 401 shape as `no_session` above.
+  if (admin === "unauthenticated") {
+    return json({ error: "not_signed_in" }, { status: 401, cookies: [clearCookie(SESSION_COOKIE)] });
+  }
+  if (admin === "not_admin") {
     return json({ error: "not_admin" }, { status: 403 });
   }
 

@@ -47,10 +47,14 @@ let admin = true;
 // branch is provable on its own AND a status so the two status classes the
 // handler classifies differently stay provable. `value: true` with no target
 // keeps #4178's meaning (DATA); no status keeps the 500 default.
-let upstreamFault = null; // null | { surface: "data" | "admin" | "all", status: number }
+let upstreamFault = null; // null | { surface: "data" | "admin" | "all", status: number, body?: object }
 const faulted = (surface) =>
   upstreamFault !== null && (upstreamFault.surface === surface || upstreamFault.surface === "all");
 const faultStatus = () => upstreamFault?.status ?? 500;
+// #3559 P2-1: the classification of an `is_admin` rejection depends on the
+// BODY (a JWT error is the USER's token; `Invalid API key` is the SERVICE's),
+// so the fault's body must be selectable too — status alone cannot express it.
+const faultBody = () => upstreamFault?.body ?? { error: "upstream_fault" };
 const seen = [];
 
 function json(res, status, body) {
@@ -73,7 +77,7 @@ const server = http.createServer((req, res) => {
       // 403 (not_admin) — conflating a store fault with a signed-in non-admin is
       // the #3485 class. The 500 case is guarded by the pre-fix handler; the
       // non-5xx case is what #3559's broadened classification actually changed.
-      if (faulted("admin")) return json(res, faultStatus(), { error: "upstream_fault" });
+      if (faulted("admin")) return json(res, faultStatus(), faultBody());
       return json(res, 200, admin);
     }
 
@@ -103,7 +107,7 @@ const server = http.createServer((req, res) => {
         contentType: req.headers["content-type"] || "",
         body,
       });
-      if (faulted("data")) return json(res, faultStatus(), { error: "upstream_fault" });
+      if (faulted("data")) return json(res, faultStatus(), faultBody());
       return json(res, 200, []);
     }
 
@@ -123,7 +127,7 @@ const server = http.createServer((req, res) => {
         contentType: req.headers["content-type"] || "",
         body,
       });
-      if (faulted("data")) return json(res, faultStatus(), { error: "upstream_fault" });
+      if (faulted("data")) return json(res, faultStatus(), faultBody());
       return json(res, 200, { Key: url.pathname.slice(1) });
     }
 
@@ -137,9 +141,11 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/__mock/upstream-fault") {
       const p = JSON.parse(body || "{}");
       // No target on an ON call preserves #4178's data-only fault; no status
-      // preserves its 500.
+      // preserves its 500; no body preserves its `{error:"upstream_fault"}`.
       upstreamFault =
-        p.value === true ? { surface: p.target || "data", status: p.status || 500 } : null;
+        p.value === true
+          ? { surface: p.target || "data", status: p.status || 500, body: p.body }
+          : null;
       return json(res, 200, { upstreamFault });
     }
     if (url.pathname === "/__mock/reset") {

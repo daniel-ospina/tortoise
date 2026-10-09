@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session is minted here**; the admin-gated blog Functions (`/blog/api/purge`, `generate-seo`, `generate-cover`) authenticate via `Authorization: Bearer` (reached through the app-origin `/blog/api/*` Token Handler); the legacy parent-domain `sb-tortoise-auth-token` cookie is no longer accepted (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session is minted here**; the admin-gated blog Functions (`/blog/api/purge`, `generate-seo`, `generate-cover`) authenticate via `Authorization: Bearer` (reached through the app-origin `/blog/api/*` Token Handler); the legacy parent-domain `sb-tortoise-auth-token` cookie is no longer accepted by them (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | **The one session-bearing origin (#4054):** the BFF, the dashboard SPA, `/auth*`, `/welcome`, `/invite-accept`, `/admin`, `/api/v1`, `/blog/api` | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -61,7 +61,8 @@ Host routing lives in `website/functions/_middleware.ts`:
   `SESSIONS` binding) and never reach the browser; revoking a session marks its row revoked
   (`revoked = 1`) — the row is retained, not deleted. Issued by
   `website/apps/dashboard/functions/_shared/auth/session.ts`. A **separate legacy** JS-readable
-  parent-domain cookie is still issued but no longer accepted — see the ruling bullet below.
+  parent-domain cookie is still issued — and is still accepted by the one page that issues it
+  (the MCP consent page) — see the ruling bullet below.
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain — is **rejected**. It is JS-reachable from any subdomain and forfeits the `__Host-`
   prefix; one session-bearing origin is worth the extra 301. The recorded ruling is the auth-topology
@@ -71,16 +72,19 @@ Host routing lives in `website/functions/_middleware.ts`:
   (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) was
   **DELETED** (#3559); it was already loaded by no page
   (`tests/test_cross_subdomain_cookie_sync.py` pinned `PAGES = []`, and now proves its absence).
-  The cookie is still **issued** by the MCP consent page in
-  `tortoise/oauth.py` (`/oauth/authorize` on `api.premiselabs.co`,
-  `Domain=.premiselabs.co`, JS-readable), but **no Tortoise surface accepts it any more**: the
-  blog-admin console's supabase-js data layer now rides the same-origin `/api/sb/*` Token Handler
-  (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy
+  The cookie is still **issued** — and still **read back as its own session**, so it still
+  authenticates — by the MCP consent page in `tortoise/oauth.py` (`/oauth/authorize` on
+  `api.premiselabs.co`, `Domain=.premiselabs.co`, JS-readable): the page's inline supabase client
+  (`storage: cookieStorage, storageKey: COOKIE_NAME`) reads the cookie and uses the session's
+  access token as the bearer for `/oauth/consent/preview` and `/oauth/consent`. No OTHER surface
+  accepts it: the blog-admin console's supabase-js data layer now rides the same-origin
+  `/api/sb/*` Token Handler (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy
   `src/lib/supabase.ts` adapter is DELETED), and
   `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is REMOVED (Bearer
-  only). So a JS-readable parent-domain session is still issued to a consent-page visitor —
-  exactly what this `OVERRIDES` ruling exists to prevent — but it authenticates nothing on our
-  side. Stop issuing: **#3524**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
+  only). So a JS-readable parent-domain session is still issued to — and still authenticates —
+  the consent page that writes it: exactly what this `OVERRIDES` ruling exists to prevent,
+  surviving on the one surface not yet migrated. Migrate that page off it: **#3524**. See
+  `docs/auth-architecture.md` §2.1 “Legacy cohort” and
   §4 item 1 (now RESIDUAL, not closed).
 - The raw API key (`tt_…`) **never** leaves app-origin (sessionStorage on `app.premiselabs.co` only)
 

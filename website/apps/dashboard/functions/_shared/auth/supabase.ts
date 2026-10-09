@@ -204,6 +204,54 @@ export function isRefreshTokenDead(status: number, errorBody: string): boolean {
   );
 }
 
+/**
+ * Did an `is_admin()` rejection name a DEAD USER CREDENTIAL, or is it OUR fault?
+ *
+ * `is_admin()` is called with BOTH credentials at once: the project anon key as
+ * `apikey` (the SERVICE's credential) and the user's minted access token as
+ * `Authorization` (the USER's). A 401/403 from that call is therefore AMBIGUOUS
+ * BY STATUS ALONE:
+ *
+ *   - the Supabase gateway answers **401** when `apikey` does not match a
+ *     configured key at all — a rotated/wrong `SUPABASE_ANON_KEY`, i.e. an
+ *     infrastructure/configuration fault; and
+ *   - PostgREST answers **401/403** with a JWT error (`PGRST301` for an
+ *     undecodable JWT, `PGRST303` for a claims failure, or a message like
+ *     `JWT expired`) when it is the USER's bearer that was rejected.
+ *
+ * Treating the first as "you are not an admin" (or as a re-auth bounce) is the
+ * #3485 class: a deployment fault read as a session verdict. Status cannot tell
+ * them apart, so the BODY decides — exactly the mechanism `isRefreshTokenDead`
+ * (refresh grant) and `/auth/password`'s `isCredentialRejection` (password
+ * grant) already use: only a POSITIVE credential signal is a rejection, and
+ * everything else — including an unreadable or unexpected body — is a fault
+ * (503, retryable). Failing toward "try again" is the safe direction; failing
+ * toward "you are signed out" is the bug.
+ */
+export function isUserTokenRejection(status: number, errorBody: string): boolean {
+  if (status >= 500 || status === 429) return false;
+  // 403 from PostgREST is also `42501 insufficient privileges` — a permission
+  // CONFIGURATION fault, not a credential verdict — so it only counts when the
+  // body names a JWT failure, never by status alone.
+  if (status !== 401 && status !== 403) return false;
+  let text = errorBody;
+  try {
+    const parsed = JSON.parse(errorBody) as {
+      code?: string;
+      error?: string;
+      msg?: string;
+      message?: string;
+      error_description?: string;
+    };
+    text = [parsed.code, parsed.error, parsed.msg, parsed.message, parsed.error_description]
+      .filter(Boolean)
+      .join(" ");
+  } catch {
+    /* not JSON — fall back to the raw body */
+  }
+  return /pgrst30[13]|\bjwt\b|invalid (?:token|claim)|token (?:has )?expired/i.test(text);
+}
+
 export async function refreshSession(
   env: SupabaseEnv,
   refreshToken: string,

@@ -178,7 +178,12 @@ def stack(_dashboard_dist_built, tmp_path_factory):
             "--compatibility-date=2026-08-26",
             "--d1", "SESSIONS",
             "--persist-to", str(PERSIST),
-            "-b", f"SUPABASE_URL={MOCK_URL}",
+            # DELIBERATELY a trailing slash (#3559 P3): it is a legal spelling of
+            # SUPABASE_URL and used to break EVERY request (the base became `//`,
+            # so `isAllowed` refused the `//rest/v1/...` that URL normalisation
+            # produced). Keeping it here makes the whole suite a permanent guard
+            # on the normalisation rather than a one-off case.
+            "-b", f"SUPABASE_URL={MOCK_URL}/",
             "-b", f"SUPABASE_ANON_KEY={ANON}",
         ],
         cwd=str(DASHBOARD_DIR),
@@ -241,7 +246,12 @@ def _set_admin(value: bool) -> None:
     _control("/__mock/admin", {"value": value})
 
 
-def _set_upstream_fault(value: bool, target: str = "data", status: int = 500) -> None:
+def _set_upstream_fault(
+    value: bool,
+    target: str = "data",
+    status: int = 500,
+    body: dict | None = None,
+) -> None:
     """Inject (or clear) an upstream fault.
 
     `target` selects the surface: `"data"` (the proxied call, #4178's default),
@@ -249,9 +259,14 @@ def _set_upstream_fault(value: bool, target: str = "data", status: int = 500) ->
     independently faultable so each of the Token Handler's 503 branches can be
     proven on its own rather than through the other's (#3559 review). `status`
     selects the injected status (default 500) so the 5xx and the non-5xx
-    classification branches can each be exercised.
+    classification branches can each be exercised. `body` selects the upstream
+    error BODY (default `{"error":"upstream_fault"}`) because the `is_admin`
+    401/403 classification is BODY-dependent (#3559 P2-1).
     """
-    _control("/__mock/upstream-fault", {"value": value, "target": target, "status": status})
+    payload = {"value": value, "target": target, "status": status}
+    if body is not None:
+        payload["body"] = body
+    _control("/__mock/upstream-fault", payload)
 
 
 def _seen(*kinds: str) -> list[dict]:
@@ -476,6 +491,66 @@ def test_admin_check_fault_is_503_not_403(stack, fault_status):
     # The DATA branch's marker: its presence would mean this response came from
     # the proxied call rather than from the gate under test.
     assert "upstream_status" not in payload, body
+    assert _seen("is_admin"), "the fault was injected on a route the gate never reached"
+    assert not _seen("blog_posts", "storage"), (
+        "the request was proxied despite the admin check failing to resolve"
+    )
+
+
+@pytest.mark.parametrize(
+    "status,body,expect_status,expect_error",
+    [
+        # The USER's bearer was rejected by PostgREST (the JWT family) → sign out.
+        (401, {"code": "PGRST301", "message": "JWT expired"}, 401, "not_signed_in"),
+        (403, {"code": "PGRST303", "message": "JWT claim validation failed"}, 401, "not_signed_in"),
+        # The SERVICE's anon key was rejected by the gateway, or a permission
+        # configuration fault → OUR problem, a 503. NONE of these may be read as
+        # "you are not an admin" (403) or as a sign-out (401).
+        (401, {"error": "Invalid API key"}, 503, "upstream_unavailable"),
+        (401, {"message": "Missing or invalid credentials"}, 503, "upstream_unavailable"),
+        (403, {"code": "42501", "message": "insufficient privileges"}, 503, "upstream_unavailable"),
+    ],
+    ids=["user-401", "user-403", "service-key-401", "gateway-plaintext", "config-403"],
+)
+def test_admin_check_rejection_is_classified_by_body(
+    stack, status, body, expect_status, expect_error
+):
+    """A 401/403 from `is_admin` is AMBIGUOUS by STATUS — the BODY decides.
+
+    The call carries the user's minted bearer AND the project anon key, so the
+    SAME 401/403 comes from a rejected USER token (PostgREST `PGRST301`/`303`)
+    or from a rotated/wrong `SUPABASE_ANON_KEY` (the gateway rejecting the
+    SERVICE credential).
+
+    Why this must not be status-only. Aligning this branch to the sibling
+    gate's `unauthenticated` by STATUS ALONE turns a rotated anon key — a
+    configuration fault — into a re-auth bounce, and mapping it to `not_admin`
+    (the pre-fix behaviour) reads it as an access decision; the first breaks the
+    #3485 property this PR established, the second is the lie #3559 fixed. So
+    only a POSITIVE user-token signal is a sign-out; everything else stays 503.
+    Same classifier as `admin/[[path]].ts::isAdmin`, so the two surfaces agree.
+
+    The pre-fix handler mapped EVERY 401/403 to `not_admin` (403), and the new
+    case `test_admin_check_fault_is_503_not_403` only parametrizes 5xx/non-5xx —
+    this branch had NO coverage at all (#3559 review P2-1).
+    """
+    _reset()
+    _set_upstream_fault(True, target="admin", status=status, body=body)
+    try:
+        got_status, got_body, _ = _req(
+            "/api/sb/rest/v1/blog_posts?select=*", cookie=f"__Host-session={HANDLE}"
+        )
+    finally:
+        _set_upstream_fault(False)
+
+    assert got_status == expect_status, (
+        f"is_admin {status} {body!r} must be {expect_status}, got {got_status} {got_body}"
+    )
+    assert json.loads(got_body)["error"] == expect_error, got_body
+    assert got_status != 403, (
+        "a 401/403 from the admin check must never read as `not_admin` — that is "
+        f"the #3485 lie: got {got_status} {got_body}"
+    )
     assert _seen("is_admin"), "the fault was injected on a route the gate never reached"
     assert not _seen("blog_posts", "storage"), (
         "the request was proxied despite the admin check failing to resolve"
