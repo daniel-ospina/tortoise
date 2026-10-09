@@ -446,7 +446,7 @@ doc_status: live
 > 2. §4.5: `capturedAt` field (transaction time — bi-temporal capture).
 > 3. §4.5: content-addressed Event ID (deterministic MERGE anchor for the agentSession Event).
 > 4. §4.4: `story_arc` field registered (summary = short, story_arc = arc continuation).
-> 5. §3.1: NAND direction policy — extraction-emitted NANDs default `unidirectional`; `bidirectional` only for explicit mutual restatement (SDK creation default stays bidirectional, #807).
+> 5. §3.1: direction is **recorded** per write — four values (`->` `<-` `<->` `-`) — and **comes from the connection's semantics**. `NAND` under `refutes` is one-way; under `mutuallyExclusive` it is both ways.
 > 6. §4.6/§5: `provenance_spans` Source property + `sourceKind: agentSession` value (credibility-tier inheritance keyed on sourceKind, #398).
 > 7. §3.9: `mitigated_by` predicate registered (existing `mitigate_operator` edge — currently unregistered).
 > 8. §3.4: `references` target extended — Source allowed (producer extension `link_source_to_entity`).
@@ -580,9 +580,9 @@ Each layer answers a different question. All four are live mechanisms.
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
-| `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). **Extraction-emitted NANDs default `unidirectional`** — see extraction policy in the direction-flag note below (#909 §4.3 #5). |
-| `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
+| `IMPL` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction comes from the connection's semantics and is recorded on the write. |
+| `NAND` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction comes from the semantics and is recorded on the write. |
+| `hasPart` | Point → Point | `<->` (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4765) / `invalidate_point` (sdk.py:4654). |
 
 > **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
@@ -595,7 +595,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative. Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -606,11 +606,11 @@ Each layer answers a different question. All four are live mechanisms.
 >
 > **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
 >
-> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; the SDK creation default stays `bidirectional` (#807 — API-user path):
+> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; an authoring path that omits it takes the direction from the connection's semantics:
 >
-> - **New-claim-attacks-existing-claim → `unidirectional`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
-> - **Mutual restatement → `bidirectional`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
-> - **Default for extraction-emitted NANDs: `unidirectional`** — extraction is always asserting something NEW against something EXISTING; mutual is the rare explicit case.
+> - **New-claim-attacks-existing-claim → `->`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
+> - **Mutual restatement → `<->`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
+> - **Extraction-emitted NANDs record `->`** — extraction asserts something NEW against something EXISTING; `<->` is the rare explicit mutual case.
 
 ### §3.2 Point ↔ Entity (Cross — Semantic ↔ Epistemic)
 
@@ -654,7 +654,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` | Subject → Event | unidirectional | N-ary | **`schema:agent` inverse** — schema.org's "direct performer or driver of the action", reversed (we go Agent→Activity) | X **did** this. The doing relation: subject executes the event. PROV has no Agent→Activity predicate (its `wasAssociatedWith` is Activity→Agent accountability); we name the performer-side verb ourselves, aligned to schema.org's performer concept. |
-| `produces` | Event → **Object or Point** | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created — an **Object** (a report, a PR, a build) or a **decision Point** (the #531 `humanApproval` pattern: an approval Event produces the decision Point that seeds its grounding) |
+| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created — an **Object** (a report, a PR, a build) or a **decision Point** (the #531 `humanApproval` pattern: an approval Event produces the decision Point that seeds its grounding). The event→artifact shape is the **encouraged pattern, not a restriction** |
 | `uses` | Event → Object | unidirectional | N-ary | **`prov:used`** (W3C: Activity→Entity, direction-identical — canonical) / `schema:instrument` for mechanisms | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
 | `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
 
@@ -678,17 +678,17 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Derivation |
-| `hasPart` | Object → Object | bidirectional | N-ary | `dcterms:hasPart` | Composition. Inverse traversal (`<-[:hasPart]-`) covers "part of" — no separate `partOf` edge. |
+| `hasPart` | Object → Object | `<->` | N-ary | `dcterms:hasPart` | Composition. Inverse traversal (`<-[:hasPart]-`) covers "part of" — no separate `partOf` edge. |
 
 ### §3.8 Event Edges
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` (in) | Subject → Event | unidirectional | N-ary | `schema:agent` inverse | Actor — who did it |
-| `produces` | Event → **Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531) |
+| `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531) |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point, Point → Event | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
+| `op: IMPL/NAND` | Event → Point, Point → Event | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -1117,6 +1117,8 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
 >
+> Confidence propagates across Subject, Object, Event and Point.
+>
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
 > `pointKind: statement`; the legacy write kinds remain valid Point kinds for write-compat,
@@ -1307,8 +1309,9 @@ Bidirectional: querying `dev:issue` also returns `pm:task`, and vice versa.
 
 ## §8. Semantic-Epistemic Edge Model
 
-A relationship operates on two layers — **semantic** (relation type) and **epistemic**
-(confidence / contradiction). It carries an operator **only when it needs one**.
+A relationship operates on **three layers** — **mechanism + direction** (how it acts, and which way
+it runs), **semantics** (the meaning vocabulary), and **predicate + tags** (the specific verb, plus
+optional free data). It carries an operator **only when it needs one**.
 
 ### Reification rule — when an edge gets an operator
 
@@ -1337,9 +1340,13 @@ edge attribute.
 
 - **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
   (no operator); EP propagates over it the same way.
-- **Direction:** `bidirectional` (default) / `unidirectional`. Lives on the
-  operator node when present, else on the edge. EP reads the operator node
-  first, falls back to the edge.
+- **Direction:** four values, **recorded on the write**: `->` (source → target), `<-` (target →
+  source), `<->` (both ways), `-` (none). Lives on the operator node when present, else on the
+  edge. EP reads the operator node first, falls back to the edge.
+- **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
+  path applies it — **a caller supplies the meaning and does not state a direction.** The recorded
+  direction is authoritative.
+- `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
 - **EP:** for operator-less edges, EP reads direction from the edge and
@@ -1356,20 +1363,32 @@ Operator:      (op-123)                                   ← mitigation anchor
 
 | Layer | Where | What |
 |-------|-------|------|
-| Semantic | operator.label | Domain verb: addresses, hasPart, opposes |
+| **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related` |
+| **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
+Same semantics with different predicates is correct: `fixes`, `implements` and `deploysTo` all carry
+semantics `addresses`; the predicate distinguishes them.
+
 ### Semantic Types
 
-| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
-|------|-----------|------------|-------------------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | bidirectional | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | unidirectional | Feature addresses Need |
-| supports | IMPL | Unidirectional (A supports B) | unidirectional | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Bidirectional by default, optional unidirectional (directed attack) | declared by pack | Feature competesWith Competitor |
+| Semantics | Mechanism | Direction | Carries confidence? | Example |
+|-----------|-----------|-----------|---------------------|---------|
+| `hasPart` | IMPL | `<->` | yes — aggregation, parts ↔ whole | Epic hasPart Issue |
+| `addresses` | IMPL | `->` | weakly — relevance, not evidence | Feature addresses Need |
+| `supports` | IMPL | `->` | yes — positive evidence, one way | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
+| `mutuallySupportive` | IMPL | `<->` | yes — each reinforces the other | — |
+| `mutuallyExclusive` | NAND | `<->` | yes — each rules the other out | Feature competesWith Competitor |
+| `refutes` | NAND | `->` | yes — negative evidence, one way | Claim refutes Claim |
+| `causes` | IMPL | `->` | yes — A brought B about | Bug causes Incident |
+| `dependsOn` | IMPL | `->` | yes — a precondition | Tranche gatedBy Condition |
+| `transacts` | IMPL | `-` | no — a trade; association only | Buyer transacts Seller |
+| `related` | — | `-` | no — evidence-free by construction (§3.9) | neutral association |
 
-> **Direction is an explicit operator flag, default bidirectional.** The table above shows typical pack declarations; a pack (or agent) may declare `direction: unidirectional` for a directed attack.
+**The both-ways semantics name their mutuality** (`mutuallySupportive`, `mutuallyExclusive`); the
+one-way ones do not (`supports`, `refutes`).
 
 ### Pack Relation Declarations
 
@@ -1493,10 +1512,8 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 | Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
-traversal well-defined: IMPL is unidirectional (source→target), NAND
-symmetric by default (directed `unidirectional` NANDs traverse one-way
-per §3.1 — extraction-emitted NANDs default directed, #909), hasPart
-bidirectional — `_affected_claims` follows these directions.
+traversal well-defined: `_affected_claims` follows the recorded direction
+(`->`, `<-`, `<->` or `-`), which the connection's semantics supplies.
 
 ---
 
