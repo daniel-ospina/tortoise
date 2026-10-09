@@ -380,6 +380,37 @@ class TestEndOfWalkSignals:
             f"got {len(got)} of {n} in {cp.calls} page(s)"
         )
 
+    def test_an_adjacent_equal_id_is_unsorted_and_cannot_advance_the_cursor(
+            self, monkeypatch, caplog):
+        """The guard is STRICTLY ascending: a repeated id is NOT an advance.
+
+        ROUND 8 (reviewer T): weakening ``any(a >= b for a, b in
+        itertools.pairwise(page_ids))`` to ``any(a > b ...)`` left ALL 32 tests
+        green — the two tests that name the unsorted guard feed only a
+        DESCENDING page, so the "strictly" half was pinned by NOTHING. An
+        adjacent EQUAL id means the keyset cursor cannot advance past it, so the
+        walk would loop and still certify COMPLETE. Falsified by that
+        one-character mutation.
+        """
+
+        class _EqualCP:
+            def __init__(self):
+                self.calls = 0
+
+            def query_with_total(self, table, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    ids = [f"o{i:06d}" for i in range(MAX - 1)]
+                    ids.append(ids[-1])  # EQUAL-adjacent: NOT strictly ascending
+                    return [{"id": i, "name": None} for i in ids], None
+                return [], None
+
+        assert _run(monkeypatch, _EqualCP(), require_complete=True) is None, (
+            "a page whose last two ids are EQUAL is not strictly ascending, so "
+            "it must not advance the cursor or certify completeness"
+        )
+        _assert_refused_not_crashed(caplog)
+
     def test_a_later_page_remainder_is_never_adopted_as_the_fleet_total(
             self, monkeypatch, caplog):
         """A remainder reported on page 2+ must not become the fleet count.
@@ -395,18 +426,20 @@ class TestEndOfWalkSignals:
         Without this test the guard could be `total is None` ("first non-None
         total") and the suite would still pass — a mutation found exactly that.
 
-        ROUND 7 CORRECTION (reviewer T): that is no longer true. Once round 6
-        added the `exhausted` conjunct, THIS fixture never reaches an empty page
-        — it exits on the page CAP — so it refuses regardless of which total was
-        adopted, and the "first non-None total" mutation now leaves it GREEN.
-        The sticky-first-total guard is pinned by
-        ``test_a_later_page_total_cannot_mask_a_shortfall``, whose fixture DOES
-        reach an exhausted exit. What this test still pins is the page-cap
-        refusal under a volunteered remainder.
-
-        The discriminating shape is a server that NEVER returns an empty page,
-        so the exit is the local page cap and `exhausted` is False. Only then
-        can an adopted remainder turn an unconfirmable walk into COMPLETE.
+        ROUND 7-8 CORRECTION (reviewer T): neither claim survives the round-6
+        `exhausted` conjunct, and no fixture in this file can pin this guard.
+        THIS fixture exits on the page CAP, so it refuses regardless of which
+        total was adopted; and the shortfall test does NOT pick up the other
+        shape, because ``LyingCP`` states its 1500 on page 1, so
+        `asked_for_count` and `total is None` adopt it identically — mutating one
+        into the other leaves ALL 32 tests GREEN. Under `exhausted` the two
+        discriminants are behaviourally equivalent at every reachable exit, so
+        `asked_for_count` is UNFALSIFIABLE by any fixture here. What the
+        shortfall test pins is the unconditional-OVERWRITE shape (a later page
+        clobbering a total already adopted). What THIS test pins is the page-cap
+        refusal when page 1 stated no total and a later page volunteers a
+        remainder — the discriminating shape, a server that never returns an
+        empty page, so the exit is the local page cap and `exhausted` is False.
         """
         # More rows than the page cap can walk (100 pages x 1000 rows).
         from tortoise import hosted_api as _ha
@@ -463,8 +496,15 @@ class TestEndOfWalkSignals:
                                                         caplog):
         """A stated total of 0 is the ABSENCE of a count, not an empty fleet.
 
-        Left as `len(seen) >= 0` it is vacuously true, so a page-cap exit is
-        reported COMPLETE with rows unserved.
+        ROUND 8 CORRECTION (reviewer T): the refusal comes from the `exhausted`
+        conjunct, NOT from any rule about the total — the round-7 claim that this
+        docstring had been re-attributed was WRONG (that edit went to the
+        expression's comment, not here). `total <= 0` was a DEAD disjunct: for
+        `total=0` the expression already evaluates the very `len(seen) >= 0` the
+        round-5 note called vacuous, and the page-cap exit refuses anyway. This
+        test pins the `exhausted` conjunct — dropping it, or forcing the cap exit
+        to look exhausted, both kill this test; re-adding `total <= 0` leaves it
+        green.
         """
         from tortoise import hosted_api as _ha
         n = (_ha._ORG_ENUMERATION_MAX_PAGES
