@@ -1353,6 +1353,15 @@ jobs:
       # once discarded the guard's verdict (a glued `else` made `exit` take two arguments
       # and fail) while `sh -n` stayed green; only an executed assertion catches that.
       - name: SIGPIPE hook block self-test
+        # `if: always()` is REQUIRED here, not defensive. Without it a failing
+        # step above (the NORMAL state while `--dirs` is unlanded — see the
+        # ordering note) SKIPS this step, so the test written to catch a
+        # discarded guard verdict would itself never run in the one case it
+        # exists for. Measured on this PR's own CI run: the guard step exited 2
+        # on `unknown argument: --dirs` and the job log contains no record of
+        # this step at all. The comment above claims it "runs even while the
+        # step above is red"; only this line makes that true.
+        if: always()
         run: sh .github/scripts/sigpipe-hook.test.sh
 
   license-surface:
