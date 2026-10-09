@@ -993,9 +993,8 @@ _ORG_ENUMERATION_MAX_ROWS = 1000
 #: Page-walk bound for the enumeration (#5388). Guards against an endless walk
 #: when a server never returns an EMPTY page — the ONLY end-of-walk signal this
 #: walk has. (An earlier wording said "nor returns short pages"; a short page is
-#: NOT a signal here and has not been since round 3 — believing it is would
-#: reintroduce the round-1 fail-open, and round 4 removed the same wording from
-#: two other comments.) A page cap is NOT proof of completeness, so the page-cap
+#: NOT a signal here — believing it is would reintroduce the round-1 fail-open.)
+#: A page cap is NOT proof of completeness, so the page-cap
 #: exit leaves ``exhausted`` False; ``exhausted`` is a NECESSARY conjunct of
 #: ``complete`` below, so the fail-closed caller still refuses.
 #: 100 pages = 100k orgs, ~100x the fleet size the 1000-row cap was sized for.

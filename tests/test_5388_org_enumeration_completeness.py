@@ -145,8 +145,10 @@ class TestEnumerationCompleteness:
         assert got is not None and len(got) == MAX
 
     def test_no_total_with_a_short_page_is_complete(self, monkeypatch):
-        """Server states no total (no count=exact support): a SHORT page is the
-        only remaining signal for 'that was everything'."""
+        """A server that states no total is complete once the walk hits an EMPTY
+        page — NOT when it hits a short one. A short page is a per-request cap;
+        treating it as the end is round 1's fail-open. This fixture's 37 rows
+        end at the EMPTY second page, not at the short first one."""
         cp = FakeControlPlane(37, state_total=None)
         got = _run(monkeypatch, cp, require_complete=True)
         assert got is not None and len(got) == 37
@@ -382,15 +384,12 @@ class TestEndOfWalkSignals:
 
     def test_an_adjacent_equal_id_is_unsorted_and_cannot_advance_the_cursor(
             self, monkeypatch, caplog):
-        """The guard is STRICTLY ascending: a repeated id is NOT an advance.
+        """The ordering guard is STRICTLY ascending: a repeated id is not one.
 
-        ROUND 8 (reviewer T): weakening ``any(a >= b for a, b in
-        itertools.pairwise(page_ids))`` to ``any(a > b ...)`` left ALL 32 tests
-        green — the two tests that name the unsorted guard feed only a
-        DESCENDING page, so the "strictly" half was pinned by NOTHING. An
-        adjacent EQUAL id means the keyset cursor cannot advance past it, so the
-        walk would loop and still certify COMPLETE. Falsified by that
-        one-character mutation.
+        ``any(a >= b for a, b in itertools.pairwise(page_ids))`` marks a page
+        whose last two ids are EQUAL as unsorted. Without that arm the walk
+        accepts the page and certifies the fleet from it (falsified by
+        ``>=`` -> ``>``).
         """
 
         class _EqualCP:
@@ -411,35 +410,82 @@ class TestEndOfWalkSignals:
         )
         _assert_refused_not_crashed(caplog)
 
+    def test_a_later_page_total_never_overrides_the_page_that_asked(
+            self, monkeypatch):
+        """The fleet count is ONLY the asking page's business.
+
+        Page 1 is asked for ``count=exact`` and states nothing. A LATER,
+        cursor-filtered page then volunteers an overstated count — a remainder,
+        not a fleet total. Adopting it refuses a walk that did in fact exhaust,
+        so this guard protects the ACCEPT direction too. Pinned by mutating
+        ``asked_for_count`` into "the first non-None total".
+        """
+
+        class _LateTotal:
+            def __init__(self):
+                self.calls = 0
+
+            def query_with_total(self, table, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    ids = [f"o{i:06d}" for i in range(30)]
+                    return [{"id": i, "name": None} for i in ids], None
+                return [], 99999
+
+        got = _run(monkeypatch, _LateTotal(), require_complete=True)
+        assert got is not None and len(got) == 30, (
+            "a total volunteered on a LATER page must not make an exhausted "
+            "walk refuse"
+        )
+
+    def test_the_walk_filters_soft_deleted_orgs_and_cursors_only_from_page_two(
+            self, monkeypatch):
+        """Two wire contracts, asserted from the CALLS the walk makes.
+
+        (1) EVERY page must exclude soft-deleted orgs — without that filter the
+        destructive cost refresh would enumerate orgs the tenant deleted.
+        (2) Page 1 must carry NO ``id`` cursor; a keyset filter on the first
+        page would skip every id at or below it. Both were unpinned: removing
+        either left the suite green.
+        """
+
+        class _RecordingCP:
+            def __init__(self):
+                self.calls = 0
+                self.filters: list[list[tuple[str, str, object]]] = []
+
+            def query_with_total(self, table, *, filters=None, **kw):
+                self.calls += 1
+                self.filters.append(list(filters or []))
+                if self.calls == 1:
+                    ids = [f"o{i:06d}" for i in range(MAX)]
+                    return [{"id": i, "name": None} for i in ids], None
+                return [], None
+
+        cp = _RecordingCP()
+        _run(monkeypatch, cp, require_complete=True)
+
+        assert cp.calls >= 2, "the walk must reach the empty second page"
+        for i, flt in enumerate(cp.filters, start=1):
+            assert ("deleted_at", "is", None) in flt, (
+                f"page {i} must exclude soft-deleted orgs, got {flt}"
+            )
+        assert not any(col == "id" for col, _, _ in cp.filters[0]), (
+            f"page 1 must carry NO id cursor, got {cp.filters[0]}"
+        )
+        assert ("id", "gt", f"o{MAX - 1:06d}") in cp.filters[1], (
+            f"page 2 must cursor from page 1's max id, got {cp.filters[1]}"
+        )
+
     def test_a_later_page_remainder_is_never_adopted_as_the_fleet_total(
             self, monkeypatch, caplog):
         """A remainder reported on page 2+ must not become the fleet count.
 
         The fleet count is only meaningful from the page that ASKED for it
-        (page 1, the ``count_exact`` page). This is the residual case the sticky
-        guard has to cover beyond the shortfall test: page 1 states NOTHING (a
-        server that refuses ``count=exact``), and a later page volunteers the
-        cursor-filtered REMAINING count. Adopting it makes `seen >= total`
-        satisfiable while rows are still unserved — and on the page-cap exit
-        that means COMPLETE=True with orgs missing, which prunes them.
-
-        Without this test the guard could be `total is None` ("first non-None
-        total") and the suite would still pass — a mutation found exactly that.
-
-        ROUND 7-8 CORRECTION (reviewer T): neither claim survives the round-6
-        `exhausted` conjunct, and no fixture in this file can pin this guard.
-        THIS fixture exits on the page CAP, so it refuses regardless of which
-        total was adopted; and the shortfall test does NOT pick up the other
-        shape, because ``LyingCP`` states its 1500 on page 1, so
-        `asked_for_count` and `total is None` adopt it identically — mutating one
-        into the other leaves ALL 32 tests GREEN. Under `exhausted` the two
-        discriminants are behaviourally equivalent at every reachable exit, so
-        `asked_for_count` is UNFALSIFIABLE by any fixture here. What the
-        shortfall test pins is the unconditional-OVERWRITE shape (a later page
-        clobbering a total already adopted). What THIS test pins is the page-cap
-        refusal when page 1 stated no total and a later page volunteers a
-        remainder — the discriminating shape, a server that never returns an
-        empty page, so the exit is the local page cap and `exhausted` is False.
+        (page 1, the ``count_exact`` page). Here page 1 states NOTHING and a
+        later page volunteers the cursor-filtered REMAINING count. This fixture
+        never reaches an empty page — it exits on the page CAP — so it pins the
+        page-cap refusal when a later page volunteers a remainder.
         """
         # More rows than the page cap can walk (100 pages x 1000 rows).
         from tortoise import hosted_api as _ha
@@ -496,15 +542,11 @@ class TestEndOfWalkSignals:
                                                         caplog):
         """A stated total of 0 is the ABSENCE of a count, not an empty fleet.
 
-        ROUND 8 CORRECTION (reviewer T): the refusal comes from the `exhausted`
-        conjunct, NOT from any rule about the total — the round-7 claim that this
-        docstring had been re-attributed was WRONG (that edit went to the
-        expression's comment, not here). `total <= 0` was a DEAD disjunct: for
-        `total=0` the expression already evaluates the very `len(seen) >= 0` the
-        round-5 note called vacuous, and the page-cap exit refuses anyway. This
-        test pins the `exhausted` conjunct — dropping it, or forcing the cap exit
-        to look exhausted, both kill this test; re-adding `total <= 0` leaves it
-        green.
+        The refusal comes from the ``exhausted`` conjunct, NOT from any rule
+        about the total: for ``total=0`` the completeness expression already
+        evaluates the ``len(seen) >= 0`` that reads as vacuously true, and the
+        page-cap exit refuses anyway. ``total <= 0`` was a DEAD disjunct and was
+        removed; re-adding it leaves this test green.
         """
         from tortoise import hosted_api as _ha
         n = (_ha._ORG_ENUMERATION_MAX_PAGES
@@ -688,8 +730,8 @@ class TestCertificationRequiresAnExhaustedWalk:
     orgs unserved — and ``_refresh_cost_allocation`` PRUNES every org absent
     from the enumeration, so the guard whose whole purpose is to refuse became
     the prune. Found by review (two independent reviewers, reproduced), not by
-    the suite, which only ever paired an unsorted page / the page cap with
-    ``total=None``.
+    the suite, which never paired a non-end exit (an unsorted page, or the page
+    cap) with a SATISFIED total.
     """
 
     class _UnsortedSecondPage:

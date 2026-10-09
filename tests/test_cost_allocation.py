@@ -1005,11 +1005,11 @@ class _FakeControlPlane:
 
         The cursor is the `id > last` filter, not an offset — offset paging on a
         moving window can serve a row twice and SKIP an original, yet still
-        satisfy a stated total. It deliberately states no total, because the
-        fake has no ``Content-Range``: completeness then rests on the walk
-        reaching an EMPTY page, which is the production fallback when a server
-        does not answer ``count=exact``. A short page is NOT that signal — it is
-        a per-request cap (round 1's fail-open).
+        satisfy a stated total. It states whatever ``_state_total`` it was
+        constructed with: ``None`` (the default) models a server that does not
+        answer ``count=exact``, and completeness then rests on the walk reaching
+        an EMPTY page — the production fallback. A short page is NOT that
+        signal; it is a per-request cap (round 1's fail-open).
         """
         rows = self._rows
         last = None
