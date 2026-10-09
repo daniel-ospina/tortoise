@@ -279,12 +279,22 @@ _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^a-z0-9 ]")
 
 
+def _raw_content(event: Mapping[str, Any]) -> str:
+    """The event's raw content text, exactly as admitted (may be empty)."""
+    return str(event.get("content") or event.get("text")
+               or event.get("statement") or "")
+
+
 def _content_key(event: Mapping[str, Any]) -> str:
     """Normalized content of an admitted event (lowercase alnum tokens,
-    whitespace-collapsed). Empty when the event carries no content text."""
-    raw = (event.get("content") or event.get("text")
-           or event.get("statement") or "")
-    text = _PUNCT_RE.sub(" ", str(raw).lower())
+    whitespace-collapsed). Empty when the event carries no content text.
+
+    This key is for ORDERING, the overlap band and the reported cluster key
+    — NEVER for the negation gate: :data:`_PUNCT_RE` strips the apostrophe
+    of a clitic, so a negated contraction normalizes away from "n't"
+    ("can't" → "can t") and would fold into its positive counterpart. The
+    fold gate is applied to the RAW text (see :func:`_restatement`)."""
+    text = _PUNCT_RE.sub(" ", _raw_content(event).lower())
     return _WS_RE.sub(" ", text).strip()
 
 
@@ -318,17 +328,27 @@ def _overlap_ratio(a: str, b: str) -> float:
     return len(ta & tb) / lo
 
 
-def _restatement(content: str, prior: str) -> bool:
+def _restatement(content: str, prior: str,
+                 raw_content: str, raw_prior: str) -> bool:
     """True when ``content`` is the SAME event as ``prior``: byte-identical
     after normalization, or a conservative paraphrase — overlap ≥ the
     committed NOOP band AND ``fold_allowed`` (no negation/condition/subject
-    substitution)."""
+    substitution).
+
+    ``content``/``prior`` are the NORMALIZED content keys (overlap band);
+    ``raw_content``/``raw_prior`` are the raw admitted texts, and the
+    negation gate (``fold_allowed``) is applied to THOSE. ``fold_allowed``
+    detects a contracted negator through the clitic SHAPE ``n[^\\w\\s]{1,2}t``
+    (the apostrophe), so a pre-normalized key would erase the "n't" and fold
+    a negated claim into its positive form (the undercount this core must
+    not commit). The committed extractor/dedup lanes all gate on raw text
+    too."""
     if not content or not prior:
         return False
     if content == prior:
         return True
     return (_overlap_ratio(content, prior) >= NOOP_MIN_OVERLAP
-            and fold_allowed(content, prior))
+            and fold_allowed(raw_content, raw_prior))
 
 
 @dataclass(frozen=True)
@@ -490,10 +510,11 @@ def count_distinct_events(
     # on which prior a later row happens to be compared against.
     dsu = _DisjointSet(len(rows))
     first_id: dict[str, int] = {}
-    #: ``(index, content, token-set)`` for IDENTITY-LESS content rows; the
-    #: token set is precomputed once so the O(n²) fold scan does not re-split
-    #: every string on every comparison.
-    content_rows: list[tuple[int, str, frozenset[str]]] = []
+    #: ``(index, content, raw content, token-set)`` for IDENTITY-LESS content
+    #: rows; the token set is precomputed once so the O(n²) fold scan does not
+    #: re-split every string on every comparison, and the RAW text is kept so
+    #: the negation gate sees clitic apostrophes the normalized key strips.
+    content_rows: list[tuple[int, str, str, frozenset[str]]] = []
     for i, event in ordered:
         eid = _event_id(event)
         if eid:
@@ -504,11 +525,12 @@ def count_distinct_events(
             continue
         content = _content_key(event)
         if content:
-            content_rows.append((i, content, frozenset(content.split())))
+            content_rows.append(
+                (i, content, _raw_content(event), frozenset(content.split())))
     for a in range(len(content_rows)):
-        ia, ca, ta = content_rows[a]
+        ia, ca, ra, ta = content_rows[a]
         for b in range(a + 1, len(content_rows)):
-            ib, cb, tb = content_rows[b]
+            ib, cb, rb, tb = content_rows[b]
             la, lb = len(ta), len(tb)
             lo, hi = (la, lb) if la < lb else (lb, la)
             if not lo or hi / lo >= 1.5:
@@ -519,7 +541,7 @@ def count_distinct_events(
             # applies the conservative fold gate (byte-identical or
             # ``fold_allowed``). The prefilter above just avoids the gate's
             # cost on pairs that cannot possibly clear the band.
-            if _restatement(cb, ca):
+            if _restatement(cb, ca, rb, ra):
                 dsu.union(ia, ib)
 
     # One key per cluster, taken from its earliest canonical member (so the

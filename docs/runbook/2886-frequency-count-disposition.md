@@ -57,13 +57,15 @@ contains these 12 qids):
 | **conversion** (gold admitted, reader wrong) | 0 | — |
 | **fixed-by-admission** (gold admitted, reader right) | 0 | — |
 
-**`conversion` is UNREACHABLE by construction, not measured as zero.** Both
-gold-admitting arms in the committed 8-arm file (`applied-rerank`,
-`cap3-only`) ran only on the 55-question subset — which contains **none** of
+**`conversion` is UNREACHABLE by construction, not measured as zero.** All
+three arms in the committed 8-arm file that carry `gold_admitted` rows
+(`applied-rerank` 21, `cap3-only` 21, `tr_top_k24` 1 — qid `8c18457d`) ran
+only on the 55-question subset — which contains **none** of
 the 12. No run exists in which a class member is observed *with gold
 admitted*, so the conversion bucket cannot fire. The
-`conversion_undetermined` flag is derived from a **union scan over every
-committed outcomes file (all arms)** — `2578-measured-outcomes-133.jsonl`
+`conversion_undetermined` flag is derived from a **union scan over the two
+committed outcome files declared as `OUTCOME_SOURCES` (every arm in each)**
+— `2578-measured-outcomes-133.jsonl`
 and `2578-measured-outcomes.jsonl` — so it establishes the claim it reports
 for the committed data, not merely for the one default arm. Resolving it
 requires the 12 re-run under `applied-rerank` (the reported remainder,

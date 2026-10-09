@@ -233,13 +233,50 @@ def test_conservative_paraphrase_collapses():
 
 def test_negation_is_not_a_restatement():
     """D12/O4: a restatement that NEGATES the claim stays its own event —
-    the fold band is conservative."""
+    the fold band is conservative.
+
+    IDENTITY-LESS rows on purpose: with explicit ids the content gate is
+    never consulted, so the assertion would hold even with ``fold_allowed``
+    forced True (the round-2 test was vacuous for exactly this reason). With
+    no ids the content gate is the ONLY identity, so a broken fold gate
+    collapses the pair and drops this to 1."""
     events = [
-        _event("I bought a new bike.", "2025-06-01", "a"),
-        _event("I did not buy a new bike.", "2025-06-12", "b"),
+        _event("I bought a new bike.", "2025-06-01"),
+        _event("I did not buy a new bike.", "2025-06-12"),
     ]
     tally = count_distinct_events(events)
     assert tally.n_events == 2
+    assert tally.collapsed == 0
+
+
+#: (negated, positive) contraction pairs — the reviewer's P1 repro. Each is
+#: identity-less so the content-fold gate is actually exercised.
+_NEGATION_PAIRS = [
+    ("I can't attend the meeting.", "I can attend the meeting."),
+    ("I isn't happy.", "I is happy."),
+    ("It wasn't there.", "It was there."),
+    ("She doesn't like it.", "She does like it."),
+]
+
+
+@pytest.mark.parametrize(("negated", "positive"), _NEGATION_PAIRS)
+def test_contracted_negation_is_not_a_restatement(negated, positive):
+    """Regression (P1): the negation gate must read the RAW content. The
+    event-identity key strips every non-alnum char, so it normalizes "can't"
+    to "can t"; ``fold_allowed`` finds the negator through the clitic SHAPE
+    ``n[^\\w\\s]{1,2}t$`` (which needs the apostrophe), so gating on the
+    normalized key makes the n't invisible and folds the negated claim into
+    its positive form — an UNDERCOUNT. Fails on the pre-fix code for all four
+    contractions (n_events == 1, reviewer repro)."""
+    events = [
+        _event(negated, "2025-06-01"),
+        _event(positive, "2025-06-12"),
+    ]
+    tally = count_distinct_events(events)
+    assert tally.n_events == 2
+    assert tally.collapsed == 0
+    # The two keys are genuinely distinct — not a single folded cluster.
+    assert len(set(tally.keys)) == 2
 
 
 def test_tally_is_input_order_independent():

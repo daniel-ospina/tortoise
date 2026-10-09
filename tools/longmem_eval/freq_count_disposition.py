@@ -28,14 +28,16 @@ shape as ``2578-measured-outcomes.jsonl`` (the 133 arm), plus the
 ``aggregate_kind``/``aggregate_unit`` classification and the ``disposition``
 fields. Deterministic: same committed inputs → byte-identical output.
 
-Honesty caveat emitted in the summary: for this class NO gold-admitting arm
-was ever run (both gold-admitting arms in the 8-arm file cover the 55-Q
-subset, which excludes all 12). The ``conversion_undetermined`` flag is
-derived from a UNION scan over EVERY committed outcomes file (all arms),
-not just the default arm — so it establishes "no class member ever had gold
-admitted in the committed data", not merely "in the loaded arm". Resolving
-it needs the 12 re-run under ``applied-rerank``; that is the reported
-remainder (Refs #2886).
+Honesty caveat emitted in the summary: for this class NO gold-admitted class
+member was ever observed (the three arms in the 8-arm file that carry
+``gold_admitted`` rows — ``applied-rerank`` 21, ``cap3-only`` 21,
+``tr_top_k24`` 1 (qid ``8c18457d``) — run the 55-Q subset, which excludes all
+12). The ``conversion_undetermined`` flag is derived from a UNION scan over
+the two committed outcome files declared in ``OUTCOME_SOURCES`` (every arm in
+each), not just the default arm — so it establishes "no class member ever had
+gold admitted in the committed data", not merely "in the loaded arm".
+Resolving it needs the 12 re-run under ``applied-rerank``; that is the
+reported remainder (Refs #2886).
 """
 from __future__ import annotations
 
@@ -107,7 +109,8 @@ def gold_admitted_qids(
 ) -> set[str]:
     """The class qids that had gold admitted under ANY committed run.
 
-    Scans EVERY row of EVERY committed outcomes file (all arms) — so
+    Scans every row — every arm — of every committed outcome file in
+    ``sources`` (default: the two files in :data:`OUTCOME_SOURCES`) — so
     ``conversion_undetermined`` establishes what it claims: no class member
     was ever observed with gold admitted in the committed data, not merely
     in the one default arm. Missing source files are skipped (the caller's

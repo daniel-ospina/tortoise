@@ -5,6 +5,7 @@ network). Locks the disposition rule table and the acceptance summary.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -67,10 +68,36 @@ def test_build_rows_and_summary_are_the_measured_split():
 def test_reachability_union_scan_covers_every_committed_source():
     """Regression (P3): the reachability flag must be derived from the union
     over the committed outcomes files (all arms), not only the default
-    133-Q arm. Asserts the 8-arm file is among the declared sources."""
+    133-Q arm. Asserts the 8-arm file is among the declared sources and that
+    the scan is exactly those two files (the honesty caveat enumerates
+    them)."""
     names = [Path(s).name for s in fcd.OUTCOME_SOURCES]
     assert "2578-measured-outcomes-133.jsonl" in names
     assert "2578-measured-outcomes.jsonl" in names
+    assert len(fcd.OUTCOME_SOURCES) == 2
+
+
+def test_gold_admitting_arms_are_exactly_three_and_named():
+    """Regression (P2): the honesty caveat names EVERY arm carrying
+    gold-admitted rows, not two. The committed 8-arm file has three:
+    ``applied-rerank`` 21, ``cap3-only`` 21, ``tr_top_k24`` 1 (qid
+    ``8c18457d``). None covers a class member, so conversion stays
+    undetermined. Fails if the wording drops ``tr_top_k24`` or a new
+    gold-admitting arm appears without the caveat being updated."""
+    counts: dict[str, int] = {}
+    qids: dict[str, list[str]] = {}
+    with open(fcd._resolve(fcd.OUTCOMES_8ARM), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("gold_admitted"):
+                arm = row["arm"]
+                counts[arm] = counts.get(arm, 0) + 1
+                qids.setdefault(arm, []).append(str(row["qid"]))
+    assert counts == {"applied-rerank": 21, "cap3-only": 21, "tr_top_k24": 1}
+    assert qids["tr_top_k24"] == ["8c18457d"]
 
 
 def test_reachability_scan_reads_the_8_arm_file():
