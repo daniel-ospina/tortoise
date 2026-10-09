@@ -45,3 +45,12 @@ The bridge script (`bridge.py`) connects Minutes meeting markdown → Twenty CRM
 ```
 
 See `bridge.py` for the full integration pipeline.
+
+### What lands in Twenty, and who is told
+
+Running the bridge (via `watchdog.sh` / `com.minutes.bridge.plist`) copies data out of the local meeting file into this CRM:
+
+- a **note** on the first matched contact containing the **first 50 lines of the transcript**, plus the meeting's decisions and commitments (`bridge.py:431-449`);
+- one **person/opportunity** record per calendar attendee, using their name and email (`bridge.py:106-112`).
+
+The **meeting counterparties are not notified** that this copy happens. Twenty is self-hosted by default (`TWENTY_BASE_URL`, default `http://localhost:3001`) and is not a subprocessor of the hosted Tortoise service — the controller of a self-hosted deployment is its operator.
