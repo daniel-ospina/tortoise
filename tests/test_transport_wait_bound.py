@@ -1485,26 +1485,79 @@ async def test_mcp_cancellation_cleanup_error_propagates(monkeypatch):
 # order/env dependent (the rotating ``python-ci`` red on ``main``).
 
 def test_cold_setup_probe_reads_the_embedder_clock(monkeypatch):
-    """``_cold_setup_ran_during`` = a REQUEST-owned load started at/after ref."""
+    """``_cold_setup_ran_during`` = a REQUEST-OWNED load, IN FLIGHT, started at/after ref."""
     from tortoise.embeddings import EmbeddingModel
 
     ref = time.monotonic()
+    owner = object()
+    in_progress = threading.Event()
+    in_progress.set()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", in_progress)
     monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", ref + 1.0)
-    assert ma._cold_setup_ran_during(ref) is True, (
-        "a load started after the reference belongs to this request's wait")
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_owner", owner)
+
+    assert ma._cold_setup_ran_during(ref, owner) is True, (
+        "a load this request owns, started after the reference and still "
+        "running, belongs to this request's wait")
+
+    # P1: started during the wait but COMPLETED before the deadline. The
+    # request is no longer waiting on setup — exempting it would re-arm the
+    # full bound for overrun that is entirely the request's own work.
+    in_progress.clear()
+    assert ma._cold_setup_ran_during(ref, owner) is False, (
+        "a load that already finished must not earn the exemption")
+    in_progress.set()
+
+    # P2: IN FLIGHT and started since the reference, but OWNED BY ANOTHER
+    # request. In a multi-request process a concurrent load is not this
+    # request's setup, however recent.
+    assert ma._cold_setup_ran_during(ref, object()) is False, (
+        "a concurrent request's load must not exempt this request")
 
     # Started BEFORE the reference: NOT this request's setup — even while still
     # in progress. That is the background pre-warm a request merely overlaps,
     # which must not earn the exemption (#4055).
     monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", ref - 1.0)
-    event = threading.Event()
-    event.set()
-    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", event)
-    assert ma._cold_setup_ran_during(ref) is False
+    assert ma._cold_setup_ran_during(ref, owner) is False
+
+    # No owner bound (this wait owns no request): never exempt.
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", ref + 1.0)
+    assert ma._cold_setup_ran_during(ref, None) is False
 
     # No load on record: never exempt.
     monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", None)
-    assert ma._cold_setup_ran_during(ref) is False
+    assert ma._cold_setup_ran_during(ref, owner) is False
+
+
+def test_embedder_stamps_the_request_owner_from_the_contextvar(monkeypatch):
+    """``EmbeddingModel.__init__`` stamps the contextvar-bound owner on the load.
+
+    This is the P2 plumbing: the seam binds ``request_load_owner`` before the
+    handler task exists, the task copies it, and the (possibly worker-thread)
+    context that runs ``get()`` stamps the SAME token. Without the stamp the
+    probe can only compare times, which is the bug.
+    """
+    from tortoise import embeddings as em
+
+    class _DummyST:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(em, "import_sentence_transformer", lambda: _DummyST)
+    em.EmbeddingModel._reset()
+    try:
+        owner = object()
+        with em.request_load_owner(owner):
+            em.EmbeddingModel(load_timeout=5.0)
+        assert em.EmbeddingModel._one_time_setup_owner is owner, (
+            "the request-triggered load did not stamp its owner")
+
+        # Outside any binding the load is ownerless — never exempted.
+        em.EmbeddingModel._reset()
+        em.EmbeddingModel(load_timeout=5.0)
+        assert em.EmbeddingModel._one_time_setup_owner is None
+    finally:
+        em.EmbeddingModel._reset()
 
 
 def test_background_prewarm_load_does_not_stamp_the_setup_clock(monkeypatch):
@@ -1527,6 +1580,8 @@ def test_background_prewarm_load_does_not_stamp_the_setup_clock(monkeypatch):
             em.EmbeddingModel(load_timeout=5.0)
         assert em.EmbeddingModel.one_time_setup_started_at() is None, (
             "a background pre-warm stamped the request-owned setup clock")
+        assert em.EmbeddingModel._one_time_setup_owner is None, (
+            "a background pre-warm stamped a request owner")
         assert em.EmbeddingModel.one_time_setup_in_progress() is False
 
         # A request-triggered load (no marker) DOES stamp.
@@ -1561,7 +1616,7 @@ async def test_one_time_setup_is_drained_outside_the_wait_budget(monkeypatch):
     re-armed for the request's own work."""
     drained = []
 
-    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref: True)
+    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref, owner=None: True)
 
     async def _drain():
         drained.append(True)
@@ -1585,7 +1640,7 @@ async def test_one_time_setup_is_drained_outside_the_wait_budget(monkeypatch):
 async def test_cold_setup_exemption_is_granted_at_most_once(monkeypatch):
     """One extension, never a loop: a request with genuinely slow work still
     breaches after the setup has been drained."""
-    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref: True)
+    monkeypatch.setattr(ma, "_cold_setup_ran_during", lambda ref, owner=None: True)
 
     async def _drain():
         return None
@@ -1612,7 +1667,7 @@ async def test_zero_deadline_never_exempts(monkeypatch):
     refusal contract there must not be reopened."""
     probes = []
 
-    def _probe(ref):
+    def _probe(ref, owner=None):
         probes.append(ref)
         return True
 
@@ -1634,28 +1689,111 @@ async def test_zero_deadline_never_exempts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rest_request_running_a_cold_setup_is_not_refused(fast_bound, monkeypatch):
-    """END-TO-END middleware: a handler that starts the one-time embedder load
-    and outlives the bound gets 200, not the 504 refusal."""
+    """END-TO-END middleware: a handler that itself runs the REAL one-time
+    embedder load past the bound gets 200, not the 504 refusal.
+
+    The load is real (a dummy sentence-transformers whose construction sleeps
+    past the bound), so this pins the WHOLE P2 chain: the middleware binds the
+    request owner before the task exists, ``asyncio.to_thread`` carries the
+    token into the worker, ``EmbeddingModel.__init__`` stamps it, and the probe
+    matches it. Without the ownership stamp this case regresses to 504.
+    """
+    from tortoise import embeddings as em
+
+    class _SlowST:
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.15)  # the one-time load outlives the 0.05 bound
+
+    monkeypatch.setattr(em, "import_sentence_transformer", lambda: _SlowST)
+    em.EmbeddingModel._reset()
+    try:
+        async def app(scope, receive, send):
+            # The real blocking load, off-loop — exactly the shape a sync
+            # handler (or ``list_packs``-style ``to_thread``) produces.
+            await asyncio.to_thread(em.EmbeddingModel.get, 5.0)
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+        mw = ha.WaitBoundMiddleware(app)
+        rec = await _drive(mw, _scope())
+        assert rec.status == 200, "the one-time load was charged to the wait budget"
+        assert rec.json == {"ok": True}
+    finally:
+        em.EmbeddingModel._reset()
+
+
+@pytest.mark.asyncio
+async def test_rest_request_with_a_completed_cold_setup_still_refuses(
+        fast_bound, monkeypatch):
+    """P1: a load that STARTED during the wait but COMPLETED before the deadline
+    is not setup this request is still waiting on. Its overrun is the request's
+    own work, so the bound must refuse at 0.05 — re-arming the full bound would
+    grant 200 to a request that only overlaps a finished load.
+
+    The load's OWNER is stamped to THIS request (from the handler's bound
+    context), so only the in-progress conjunct can decide the case."""
+    from tortoise import embeddings as em
     from tortoise.embeddings import EmbeddingModel
 
-    event = threading.Event()
-    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress", event)
-    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at",
-                        time.monotonic() + 1.0)
+    async def _drain():
+        return None
+
+    monkeypatch.setattr(ma, "_drain_cold_setup", _drain)
+    started = time.monotonic()
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", started + 1.0)
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress",
+                        threading.Event())  # cleared → the load already finished
 
     async def app(scope, receive, send):
-        event.set()                 # enter the one-time load
-        await asyncio.sleep(0.15)   # ...which outlives the 0.05 bound...
-        event.clear()               # ...and completes
-        await asyncio.sleep(0.02)
+        # The request's OWN load, already complete: stamp its owner from the
+        # context the seam bound, then do the request's own (slow) work.
+        EmbeddingModel._one_time_setup_owner = em.current_load_owner()
+        await asyncio.sleep(0.08)
         await send({"type": "http.response.start", "status": 200,
                     "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": b'{"ok": true}'})
 
     mw = ha.WaitBoundMiddleware(app)
     rec = await _drive(mw, _scope())
-    assert rec.status == 200, "the one-time load was charged to the wait budget"
-    assert rec.json == {"ok": True}
+    assert rec.status == 504, (
+        "a load that finished before the deadline exempted the request's own overrun")
+
+
+@pytest.mark.asyncio
+async def test_rest_request_does_not_borrow_a_concurrent_requests_load(
+        fast_bound, monkeypatch):
+    """P2 end-to-end: request A never calls the embedder, but a concurrent
+    request B starts the one-time load inside A's wait. The load is genuinely
+    IN FLIGHT at A's breach and started after A arrived — the old time-window
+    probe would exempt A. Identity must refuse it."""
+    from tortoise import embeddings as em
+
+    class _SlowST:
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.15)
+
+    monkeypatch.setattr(em, "import_sentence_transformer", lambda: _SlowST)
+    em.EmbeddingModel._reset()
+
+    async def _foreign_load():
+        # Request B: started from a context with NO owner token bound (B is not
+        # the request A's middleware is bounding).
+        await asyncio.sleep(0.02)
+        await asyncio.to_thread(em.EmbeddingModel.get, 5.0)
+
+    foreign = asyncio.ensure_future(_foreign_load())
+    try:
+        mw = ha.WaitBoundMiddleware(_slow_app(0.08))
+        rec = await _drive(mw, _scope())
+        assert rec.status == 504, (
+            "A borrowed a concurrent request's one-time load")
+    finally:
+        # Let B's real load finish before resetting, so the worker thread does
+        # not write into a later test's embedder state.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(foreign, timeout=5.0)
+        em.EmbeddingModel._reset()
 
 
 @pytest.mark.asyncio
@@ -1667,6 +1805,7 @@ async def test_rest_request_without_a_cold_setup_still_refuses(fast_bound, monke
     monkeypatch.setattr(EmbeddingModel, "_one_time_setup_in_progress",
                         threading.Event())
     monkeypatch.setattr(EmbeddingModel, "_one_time_setup_started_at", None)
+    monkeypatch.setattr(EmbeddingModel, "_one_time_setup_owner", None)
 
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
     rec = await _drive(mw, _scope())
@@ -1676,7 +1815,10 @@ async def test_rest_request_without_a_cold_setup_still_refuses(fast_bound, monke
 @pytest.mark.asyncio
 async def test_mcp_seam_drains_a_one_time_setup(fast_bound, monkeypatch):
     """The MCP arm shares the same wait: a dispatch that runs the one-time load
-    past the bound is not refused."""
+    past the bound is not refused. The dispatch stamps the seam-bound owner
+    into the faked load, pinning that the MCP seam binds ``request_load_owner``
+    the same way the REST middleware does."""
+    from tortoise import embeddings as em
     from tortoise import mcp_server as ms
     from tortoise.embeddings import EmbeddingModel
 
@@ -1689,6 +1831,9 @@ async def test_mcp_seam_drains_a_one_time_setup(fast_bound, monkeypatch):
 
     async def _dispatch(name, arguments, *, version, run_middleware, task_meta):
         event.set()
+        # The seam bound the owner before creating THIS task; a real load would
+        # read it in ``EmbeddingModel.__init__``.
+        EmbeddingModel._one_time_setup_owner = em.current_load_owner()
         await asyncio.sleep(0.15)
         event.clear()
         await asyncio.sleep(0.02)

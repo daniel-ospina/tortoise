@@ -263,11 +263,22 @@ def _sanitize_for_log(value: str) -> str:
 _COLD_SETUP_POLL_S = 0.05
 
 
-def _cold_setup_ran_during(reference: float) -> bool:
-    """True when a REQUEST-owned one-time embedder load sits in this wait.
+def _cold_setup_ran_during(reference: float, owner: object | None = None) -> bool:
+    """True when a REQUEST-OWNED one-time embedder load sits in this wait.
 
-    The single admission is a load STARTED at/after ``reference`` — the request
-    whose wait began at ``reference`` triggered it, the case #4055 names.
+    A load is admitted only when ALL of the following hold (see
+    ``EmbeddingModel.one_time_setup_owned_and_started_since``):
+
+    * it is currently IN FLIGHT — a load that started during the wait but
+      COMPLETED before the deadline is not setup this request is still waiting
+      on, so exempting it would re-arm the full bound for work that is entirely
+      the request's own (P1);
+    * it STARTED at/after ``reference`` — the request whose wait began at
+      ``reference`` did not merely overlap an older load;
+    * ``owner`` IDENTIFIES this request — a concurrent request that started the
+      one-time load inside this request's wait is not this request's setup
+      (P2). ``owner`` is the token the caller bound with
+      ``embeddings.request_load_owner``; ``None`` never admits.
 
     A BACKGROUND pre-warm (#2952, the hosted ``_prewarm_embeddings`` thread) is
     deliberately NOT admitted: it is process setup no request owns, so it never
@@ -283,7 +294,7 @@ def _cold_setup_ran_during(reference: float) -> bool:
         from tortoise.embeddings import EmbeddingModel
     except Exception:  # noqa: BLE001, RUF100 — the embedder is optional; no bound may depend on it
         return False
-    return EmbeddingModel.one_time_setup_started_since(reference)
+    return EmbeddingModel.one_time_setup_owned_and_started_since(reference, owner)
 
 
 async def _drain_cold_setup() -> None:
@@ -312,7 +323,7 @@ async def _drain_cold_setup() -> None:
 
 
 async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
-                                 reference: float):
+                                 reference: float, owner: object | None = None):
     """Await ``task`` under ``timeout``, exempting one-time PROCESS SETUP (#4055).
 
     Both bound seams (REST ``hosted_api.WaitBoundMiddleware`` and MCP
@@ -325,10 +336,11 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
     * the ORDINARY request is unchanged — the task gets ``timeout`` and a
       breach raises ``TimeoutError`` exactly as the bare
       ``asyncio.wait_for(asyncio.shield(task), timeout=…)`` did;
-    * when the deadline fires while the process's ONE-TIME embedder load ran
-      during this wait, the load is drained OUTSIDE the budget and the full
-      bound is re-armed for the request's own work — **at most once**, so a
-      genuinely slow request still breaches;
+    * when the deadline fires while the process's ONE-TIME embedder load, OWNED
+      BY THIS REQUEST AND STILL IN FLIGHT, ran during this wait, the load is
+      drained OUTSIDE the budget and the full bound is re-armed for the
+      request's own work — **at most once**, so a genuinely slow request still
+      breaches;
     * ``timeout <= 0`` never exempts: a deadline that was already spent before
       this seam (the pre-SSE-stall path, where ``remaining`` collapsed to 0)
       is not a cold-start case, and the exactly-once refusal contract on that
@@ -339,7 +351,10 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
 
     ``reference`` is the mono-clock instant the caller's wait began (the
     transport arrival on the REST middleware, the same on the MCP arm; the
-    seam's own entry off-HTTP). It is what attributes a load to THIS request.
+    seam's own entry off-HTTP). ``owner`` is the identity token the caller
+    bound with ``embeddings.request_load_owner`` BEFORE spawning ``task``; it
+    is what attributes a load to THIS request (identity, not merely a time
+    window — see ``_cold_setup_ran_during``). ``owner=None`` never exempts.
     """
     remaining = max(0.0, float(timeout))
     exempted = False
@@ -355,7 +370,7 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
                 # result/exception. A handler's ``TimeoutError`` is NOT a breach.
                 return task.result()
             if (exempted or float(timeout) <= 0.0
-                    or not _cold_setup_ran_during(reference)):
+                    or not _cold_setup_ran_during(reference, owner)):
                 raise
             exempted = True
             await _drain_cold_setup()

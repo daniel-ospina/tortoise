@@ -55,21 +55,31 @@ no change here) and **not** a route/tool allowlist (which would drift and would 
 on shards that never embed).
 
 1. `tortoise/embeddings.py` — `EmbeddingModel` records the one-time load's wall clock
-   (`_one_time_setup_started_at`) and whether it is running (`threading.Event`), and exposes
-   read-only helpers. Both are stamped around the load in `__init__`; cleared in `_reset()`.
-   A `background_load()` context marks a load as a pre-warm (invoked by `warm_up()` and the
+   (`_one_time_setup_started_at`), whether it is running (`threading.Event`), and the
+   **owner** request's identity token (`_one_time_setup_owner`), and exposes read-only helpers.
+   All three are stamped around the load in `__init__`; cleared in `_reset()`. A
+   `background_load()` context marks a load as a pre-warm (invoked by `warm_up()` and the
    hosted `_prewarm_embeddings` thread), so a load started for process setup is NOT stamped:
-   it belongs to no request, and a request that merely overlaps it must not be exempted.
+   it belongs to no request, and a request that merely overlaps it must not be exempted. The
+   owner token comes from a `request_load_owner()` ContextVar binding the transport seam makes
+   *before* it spawns the handler task, so the context-copying hand-off (`asyncio.to_thread` /
+   `_submit_off_loop`) carries it into the worker that runs `get()`.
 2. `tortoise/mcp_auth.py` — one shared async helper `await_under_wait_bound(task, timeout,
-   *, reference)` (the bound's constants already live here because both surfaces import this
-   module). It awaits the shielded task; on a would-be breach it grants **one** extension when a
-   **request-owned** one-time embedder load started during this request (`reference` = the
-   request's arrival), drains the load (bounded by the embedder's own `_LOAD_TIMEOUT_S`), then
-   re-arms the full bound for the request's own work. A genuine breach (no request-owned setup)
-   raises `TimeoutError` exactly as before. A background pre-warm never qualifies.
-3. `tortoise/hosted_api.py` — `WaitBoundMiddleware` uses the helper with `reference=t0`.
-4. `tortoise/mcp_server.py` — `_await_under_mcp_wait_bound` uses the helper with the transport
-   arrival (or seam entry off-HTTP) as `reference`.
+   *, reference, owner)` (the bound's constants already live here because both surfaces import
+   this module). It awaits the shielded task; on a would-be breach it grants **one** extension
+   when a **request-owned** one-time embedder load is **still in flight** and started during
+   this request (`reference` = the request's arrival, `owner` = the identity token the seam
+   bound). The probe requires all three: in-progress, started-since, and owner-identity — a
+   load that already finished, or that a concurrent request started, does NOT qualify. It then
+   drains the load (bounded by the embedder's own `_LOAD_TIMEOUT_S`) and re-arms the full bound
+   for the request's own work. A genuine breach (no request-owned setup) raises `TimeoutError`
+   exactly as before. A background pre-warm never qualifies.
+3. `tortoise/hosted_api.py` — `WaitBoundMiddleware` binds an owner token with
+   `request_load_owner` *around* the `ensure_future` that creates the handler task, then uses
+   the helper with `reference=t0, owner=token`.
+4. `tortoise/mcp_server.py` — `_await_under_mcp_wait_bound` binds its own owner token around
+   the dispatch-task creation and passes the transport arrival (or seam entry off-HTTP) as
+   `reference`, plus the token as `owner`.
 
 ### Why clock-exempt rather than pre-warm
 
@@ -84,6 +94,12 @@ on shards that never embed).
 
 - A bounded request whose handler starts a one-time embedder load outlasting the bound is **not**
   refused: it completes (load drained outside the bound), then the bound applies to its own work.
+- A bounded request with no one-time setup **in flight** is refused at the bound — including a
+  load that started during the wait but **completed before the deadline**: its overrun is the
+  request's own work, so re-arming the bound would be a false success.
+- A **concurrent request's** one-time load does NOT exempt this request: attribution is the
+  owner's IDENTITY, not the time window. Request A (which never calls the embedder) is refused
+  at the bound even while request B's load runs inside A's wait.
 - A bounded request with no one-time setup in flight is refused at the bound, unchanged
   (`test_transport_wait_bound.py` suite stays green).
 - A **background pre-warm** does not stamp the setup clock, so an unrelated slow request that
@@ -96,13 +112,17 @@ on shards that never embed).
 ## Tests
 
 - `tests/test_transport_wait_bound.py` (new):
-  - helper unit: extension granted once when a request-owned one-time setup started during the
-    wait; the total wait is setup + a full bound; a task outliving setup + bound still breaches.
+  - helper unit: extension granted once when a request-owned one-time setup is still in flight
+    and started during the wait; the total wait is setup + a full bound; a task outliving setup +
+    bound still breaches.
   - helper unit: no request-owned setup → breach at the bound (regression pin for every existing
-    case). A load started BEFORE the request, even while in progress, is not exempted.
-  - embedder unit: a `background_load()` load stamps nothing; a request load stamps.
-  - REST: middleware over a fake app that starts the one-time embedder load mid-flight and
-    outlives a fast bound → 200, not 504; and the same app without the load → 504.
+    case). A load started BEFORE the request, even while in progress, is not exempted; a load
+    that already COMPLETED is not exempted; a concurrent request's in-flight load is not exempted.
+  - embedder unit: a `background_load()` load stamps nothing; a request load stamps its owner
+    from the contextvar (and an unbound load is ownerless).
+  - REST: middleware over an app that runs the REAL one-time embedder load mid-flight and
+    outlives a fast bound → 200, not 504; an app whose load completed before the deadline → 504;
+    an app that never loads while a concurrent request's load is in flight → 504.
   - MCP: the seam over a tool whose dispatch starts/outlives the load → no refusal.
 - `tests/test_graph_write_loop_responsiveness.py` — the existing `[points]` case is the
   end-to-end acceptance check (run manually; it is slow by construction because it pays the real

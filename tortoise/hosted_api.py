@@ -3721,7 +3721,16 @@ class WaitBoundMiddleware:
             scope["state"] = state
         state["_wait_bound_t0"] = t0
 
-        task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        # #4055 (P2): bind an opaque owner token for THIS request, then create
+        # the handler task INSIDE the binding so the task copies it. Any
+        # one-time embedder load the handler triggers (possibly through a
+        # context-copying thread hand-off, the repo rule) stamps this token as
+        # the load's owner; the wait-bound seam admits the cold-setup exemption
+        # only for a load THIS request owns — never a concurrent request's.
+        from tortoise.embeddings import request_load_owner
+        owner = object()
+        with request_load_owner(owner):
+            task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
             # ``wait_for`` is a single deadline around ``await fut``, and the two
@@ -3737,7 +3746,8 @@ class WaitBoundMiddleware:
             # embedder-setup exemption (the bound times the WAITING, not the
             # SETTING UP).
             return await _mcp_auth.await_under_wait_bound(
-                task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0)
+                task, _mcp_auth._TRANSPORT_WAIT_BOUND_S, reference=t0,
+                owner=owner)
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the
