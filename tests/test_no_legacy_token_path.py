@@ -340,6 +340,55 @@ BLOG_ADMIN_DIST = WEBSITE / "apps" / "blog-admin" / "dist"
 # `/api/sb` is the Supabase credential seam the console's data layer was rewritten onto.
 SB_PROXY_PREFIX = "/api/sb"
 
+# The console's build REQUIRES `VITE_SUPABASE_URL` (`.env.example`). Vite INLINES the value,
+# so the env and the artifact are inseparable and BOTH are pinned here:
+#
+#   - `backend.ts` throws `Missing VITE_SUPABASE_URL …` at module load when the env is absent.
+#     With the env set the guard is `if (! "https://…")` — always false — so the minifier
+#     DEAD-CODE-ELIMINATES the throw. Its PRESENCE means the bundle was built without the env
+#     (the SPA throws at load = white screen); its ABSENCE proves the env was present.
+#   - the inlined PROJECT ORIGIN must therefore appear in the union.
+#
+# This is the reviewer's finding: the legacy-token absence and the `/api/sb` presence are BOTH
+# satisfied by a no-env bundle, which white-screens. origin/main's committed `index-D_YQJEok.js`
+# was exactly that build (#7757).
+MISSING_ENV_THROW = "Missing VITE_SUPABASE_URL"
+BLOG_ADMIN_ENV_EXAMPLE = BLOG_ADMIN_DIST.parent / ".env.example"
+
+
+def _expected_supabase_origin() -> str:
+    """`VITE_SUPABASE_URL` from `.env.example` — the origin the committed bundle inked in."""
+    m = re.search(r"^VITE_SUPABASE_URL=(\S+)\s*$", _read(BLOG_ADMIN_ENV_EXAMPLE), re.MULTILINE)
+    assert m, f"{BLOG_ADMIN_ENV_EXAMPLE} no longer declares VITE_SUPABASE_URL"
+    return m.group(1)
+
+
+def _bundle_union_offenders(union: str) -> list[str]:
+    """The migration + env pins, checked over the UNION of committed bundles.
+
+    Aggregate, not per-chunk: a code-split chunk need not carry the entry's seam, so only the
+    union must prove the data layer was migrated onto `/api/sb` AND built with the env set.
+    """
+    offenders: list[str] = []
+    if SB_PROXY_PREFIX not in union:
+        offenders.append(
+            f"  no committed bundle carries {SB_PROXY_PREFIX!r} — the console data layer "
+            "predates the BFF proxy path"
+        )
+    if MISSING_ENV_THROW in union:
+        offenders.append(
+            f"  a committed bundle carries {MISSING_ENV_THROW!r} — it was built without "
+            "VITE_SUPABASE_URL, so the console throws at load (white screen) even though the "
+            "legacy token is gone and the /api/sb seam is present"
+        )
+    origin = _expected_supabase_origin()
+    if origin not in union:
+        offenders.append(
+            f"  no committed bundle carries the inlined project origin {origin!r} — "
+            "VITE_SUPABASE_URL was not set at build (the load-time throw is the usual companion)"
+        )
+    return offenders
+
 
 def test_the_committed_blog_admin_bundle_is_migrated():
     """F3 (#7757): the tracked blog-admin `dist/` must not ship the legacy token.
@@ -348,7 +397,8 @@ def test_the_committed_blog_admin_bundle_is_migrated():
     bundle still carried the deleted adapter's `sb-tortoise-auth-token` cookie path and
     none of the `/api/sb` seam. `test_admin_app_origin.py` serves that exact bundle, so
     the console under test was the un-migrated one. Pin the artifact: no legacy marker in
-    any committed bundle, and the migrated proxy seam present.
+    any committed bundle, the migrated proxy seam present, AND the build env inlined — so
+    a no-env bundle (which white-screens at load) cannot pass on the first two alone.
     """
     bundles = sorted(p for p in BLOG_ADMIN_DIST.rglob("*.js") if p.is_file())
     # NON-VACUITY: a missing or renamed bundle must fail loudly rather than scan zero
@@ -366,17 +416,44 @@ def test_the_committed_blog_admin_bundle_is_migrated():
     # Aggregate, not per-chunk: a code-split chunk need not carry the entry's seam, so only
     # the union of committed bundles must prove the migration reached the data layer.
     union = "\n".join(_read(p) for p in bundles)
-    if SB_PROXY_PREFIX not in union:
-        offenders.append(
-            f"  no committed bundle carries {SB_PROXY_PREFIX!r} — the console data layer "
-            "predates the BFF proxy path"
-        )
+    offenders += _bundle_union_offenders(union)
     assert not offenders, (
         "the committed blog-admin bundle is not migrated:\n"
         + "\n".join(offenders)
         + "\n\nThis artifact is COMMITTED and staged by "
         "tests/e2e/auth/test_admin_app_origin.py; rebuild it with "
         "`cd website/apps/blog-admin && npm run build` (#7757)."
+    )
+
+
+def test_the_blog_admin_bundle_env_pin_is_not_vacuous():
+    """Falsifiability for the env pin: a no-env bundle must FAIL the guard.
+
+    The reviewer proved the first cut was vacuous for the load-time white screen: replacing
+    the inlined project origin with the literal `undefined` still PASSED, because that copy
+    kept the legacy-token absence and the `/api/sb` presence. Simulate that mutation — and
+    the throw that accompanies a REAL no-env build — and assert the guard reddens; without
+    this, the assertion cannot fail and is not a guard.
+    """
+    bundles = sorted(p for p in BLOG_ADMIN_DIST.rglob("*.js") if p.is_file())
+    assert bundles, f"no committed JS bundle under {BLOG_ADMIN_DIST}"
+    union = "\n".join(_read(p) for p in bundles)
+    # The shipped artifact passes …
+    assert not _bundle_union_offenders(union), "the committed bundle failed the env pin"
+    # … and the reviewer's mutation (origin -> `undefined`) fails it.
+    no_env = union.replace(_expected_supabase_origin(), "undefined")
+    assert no_env != union, "the fixture origin is not in the bundle — the mutation is a no-op"
+    assert _bundle_union_offenders(no_env), (
+        "the env pin PASSED a bundle whose inlined origin is `undefined` — a no-env build "
+        "white-screens at load and must fail the guard"
+    )
+    # … as does the real companion: a no-env build KEEPS the load-time throw.
+    assert _bundle_union_offenders(union + "\n" + MISSING_ENV_THROW), (
+        "the env pin PASSED a bundle carrying the load-time throw string"
+    )
+    # … and a union that lost the BFF seam still fails, so that pin is not vacuous either.
+    assert _bundle_union_offenders(union.replace(SB_PROXY_PREFIX, "REMOVED-SEAM")), (
+        "the seam pin PASSED a bundle with no /api/sb"
     )
 
 
