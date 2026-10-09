@@ -703,6 +703,16 @@ def test_the_documented_shell_contract_aborts_on_failure():
     assert 'eval "$uri"' in doc, (
         "USAGE must document evaluating the captured value as its own step"
     )
+    # AGENTS.md carries the SAME documented command and is the copy lanes actually
+    # read, so pinning only the module docstring lets the one-line form return
+    # there with every test green (measured: reverting only AGENTS.md passed).
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert 'uri="$(uv run python tools/test_lane.py uri)" || exit 1' in agents, (
+        "AGENTS.md must carry the two-step form too, not just the module docstring"
+    )
+    assert 'eval "$uri"' in agents, (
+        "AGENTS.md must show evaluating the captured value as its own step"
+    )
 
 
 def test_docker_forwards_its_timeout_to_subprocess(monkeypatch):

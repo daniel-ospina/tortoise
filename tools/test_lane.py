@@ -18,9 +18,9 @@ instance accumulates per-run graphs:
     THEIR sessions (each journaled under its own session nonce).
 
 A private instance removes the class for every test that resolves its target
-from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container no OTHER
-lane can name, so nothing it does can contaminate another lane and no peer's
-leftovers can contaminate it. The container is NOT self-cleaning — it is a
+from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container this tool
+refuses to address from any other lane, so nothing it does can contaminate
+another lane and no peer's leftovers can contaminate it. The container is NOT self-cleaning — it is a
 ``docker run -d`` with no ``--rm`` and nothing binds it to this session — so it
 lives until an explicit ``down`` (or a reap), and a forgotten lane leaves one
 container and its graphs behind.
@@ -134,11 +134,13 @@ IMAGE_PULL_TIMEOUT = 600
 READY_TIMEOUT = 60
 #: The shared instances every lane and the orchestration graph depend on, PLUS
 #: the private containers of particular peer lanes that must never be removed.
-#: It is HAND-MAINTAINED: a shared or peer container not listed here is protected
-#: only by the NAME_PREFIX rule, which the truly shared names do not carry.
-#: `is_managed` consults it, so a listed name is refused even if it did share the
-#: prefix (pinned by
+#: It is HAND-MAINTAINED. Today none of its entries carries the NAME_PREFIX, so
+#: the prefix rule refuses them too; the list is what refuses a FUTURE shared name
+#: that does carry the prefix (pinned by
 #: tests/test_test_lane_tool.py::test_a_protected_name_sharing_the_prefix_is_still_refused).
+#: A PEER's private container does carry the prefix and therefore reads as managed,
+#: so this list does not cover it — its protection is `_remove_and_describe`'s
+#: refusal unless the name equals `lane_name()`.
 PROTECTED_NAMES = frozenset({
     "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb",
 })
@@ -308,10 +310,14 @@ def _published_scan() -> str | None:
     timed-out call is not evidence for it. This tool exists for an overloaded
     host, so a failed scan is an expected case, not an exotic one.
     """
-    # The SCAN is the load-bearing guard: a peer container can publish a port this
-    # host still binds freely. `-a` adds nothing measured — a stopped or created
-    # container reports no `Ports` (Docker 29.4.0) — so this covers RUNNING
-    # containers, and `-a` is kept only as a cheap hedge.
+    # The SCAN is the load-bearing guard, but for FOREIGN containers: one that
+    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`)
+    # leaves the host probe free to bind 127.0.0.1:16478, so only this table shows
+    # it. A PEER's container publishes on loopback (`-p 127.0.0.1:<port>:6379`,
+    # what `start()` asks for), which the host probe DOES refuse — measured,
+    # Docker 29.4.0. `-a` adds nothing measured — a stopped or created container
+    # reports no `Ports` — so this covers RUNNING containers, and `-a` is kept only
+    # as a cheap hedge.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return None if r.returncode != 0 else (r.stdout or "")
 
