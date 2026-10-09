@@ -1131,9 +1131,18 @@ EMBEDDER_UNAVAILABLE_REASONS = [
     ("tests/test_extractor.py::test_multi_source_embedding",
      "sentence-transformers / bge-small cache not available — multi-source "
      "embedding test skipped (embedder-less CI)"),  # :417
-    ("tests/test_assembly_pure.py::test_shipped_config",
-     "embedder unavailable — the shipped hybrid leg cannot be exercised in "
-     "this lane (see #3223)"),  # :694
+    # #3223: no entry here, deliberately. The record this entry anchored
+    # (``test_resolver_docker_shipped_hybrid_leg_leaves_nothing_unresolved``, a
+    # ``strict=False`` skip whose docstring said to delete it when #3223 landed)
+    # was replaced by ``test_resolver_docker_embedder_on_unresolved_keeps_legacy``,
+    # which pins the embedder ON via ``force_embedder_on`` and so no longer skips
+    # for embedder UNAVAILABILITY in any lane (it is still ``@_docker_only``, so
+    # it skips with the unrelated docker reason where no docker lane exists — an
+    # embedder skip is the ANOMALY #2573 cares about, and that one is gone).
+    # With no verbatim reason left to point at, the entry goes too; keeping it
+    # fails this test's own invariant. The guard's classifier is unaffected: it
+    # matches by PATTERN, not by this list, and the phrasing stays pinned by
+    # test_generic_embedder_phrasing_stays_in_the_class below.
     ("tests/test_hosted_api.py::test_thread_safety",
      "bge-small-en-v1.5 not cached — skipping thread-safety test"),  # :5721
 ]
@@ -1231,6 +1240,18 @@ class TestGuardFailsOnEmbedderUnavailableSkip:
         rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), manifest,
                                      junit=junit)
         assert rc == 1
+
+    def test_generic_embedder_phrasing_stays_in_the_class(self):
+        # #3223 removed the tree's only skip carrying this phrasing, so it is no
+        # longer a tree anchor. The classifier must still catch it — the class
+        # matches by PATTERN, not by EMBEDDER_UNAVAILABLE_REASONS — or a future
+        # re-introduction of an `embedder`-context skip is silently unmatchable.
+        assert _skip_guard.is_embedder_reason_violation(
+            "embedder unavailable — the shipped hybrid leg cannot be exercised "
+            "in this lane"), (
+            "the classifier stopped matching the bare `embedder` context "
+            "alternative — a re-introduced skip of this shape would be "
+            "silently unmatchable")
 
     def test_both_classes_are_independent(self):
         # Regression guard for the two families: each predicate is blind to the
