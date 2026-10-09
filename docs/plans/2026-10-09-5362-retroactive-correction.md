@@ -145,7 +145,7 @@ This definition is wrong if any of these holds:
 
 ## 2. Scope
 
-**In scope**
+### In scope
 
 - The **semantics** of the retroactive correction: precondition, the window it collapses, the
   terminal stamps, and how the chain reads before/after (§3.1–§3.3).
@@ -159,7 +159,7 @@ This definition is wrong if any of these holds:
   mirror `hosted_api.py:13880`).
 - Tests and acceptance criteria (§6).
 
-**Out of scope — different roots, filed or already filed (§9)**
+### Out of scope — different roots, filed or already filed (§9)
 
 - The **closed-interval / half-open representation rewrite** and the shared-boundary ambiguity
   (`t == validTo == successor.validFrom` → `ambiguous`). A different root; it flips the meaning of
@@ -350,7 +350,7 @@ This is the repo's own "one home, two callers / parity by construction" idiom (`
 
 **Journal event — reuse `PointSuperseded`; do not mint a type.** Emit
 
-```
+```python
 PointSuperseded(id=old_id, new_id=new_id,
                 valid_from=vC,           # the corrector's own start — for the FIRST time ≠ valid_to
                 valid_to=vP,             # the collapsed predecessor end
@@ -430,7 +430,7 @@ Add to ONTOLOGY §4.7 (`docs/ONTOLOGY.md:1001`), under the `validTo` row / the s
 > closed intervals admit no well-formed empty window, so the displaced predecessor is collapsed to the
 > zero-length `[validFrom, validFrom]` (already legal and already produced by `supersede_point` on the
 > equality boundary) and one instant at that boundary is deliberately ambiguous.
-
+>
 > **OVERRIDES (intra-file polarity):** `_supersede_window_end`'s comment (`sdk.py:4276-4277`) says "two
 > guards in one file must not return opposite verdicts for one input" — the new verb **refuses** an
 > unorderable predecessor start where #4021's path **skips** it. The verdicts are deliberately
@@ -454,7 +454,7 @@ Add to ONTOLOGY §4.7 (`docs/ONTOLOGY.md:1001`), under the `validTo` row / the s
   rewritten to `to ***` and reds the existing
   `tests/test_validity_windows.py:1381 test_supersede_refusal_message_survives_scrub`, which asserts
   `_scrub_error(msg) == msg` for the forward refusal. Use a scrub-safe construction (e.g. "…or
-  `supersede_retroactively()` for a correction whose start precedes the predecessor" — no `at `/`to `
+  `supersede_retroactively()` for a correction whose start precedes the predecessor” — no `at`/`to`
   followed by a word). This is a message-only change, error-class unchanged, so the hosted 422 mapping
   (#5363) is unaffected. The scrub-stability test is extended to the **modified forward refusal**, not
   only the new verb's message.
@@ -874,7 +874,7 @@ must be stated); `audit.py` check 8 (should a zero-length window carry a signal?
 Filed with the plan: **#7818** (closed-interval shared-boundary ambiguity), **#7819** (`update_point`
 missing lifecycle guard), **#7821** (hosted/ingest reachability) and **#7822** (lifecycle-guard
 row-order) — each checked for duplicates first, and none's root matched an existing issue.
-#7818 additionally received the `found`-omission evidence (§3.3) as a comment, since it is the same
+Issue #7818 additionally received the `found`-omission evidence (§3.3) as a comment, since it is the same
 read-path root.
 
 **Recorded but deliberately NOT filed** (inside another issue's existing root, per the "symptom of an
