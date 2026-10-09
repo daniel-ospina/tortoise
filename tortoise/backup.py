@@ -209,9 +209,10 @@ def restore(backup_dir: str, db_path: str,
     if into_falkor:
         from tortoise.projection import (  # noqa: I001
             FalkorProjection,
+            _object_hard_deleted_ids,
+            hard_deleted_pairs,
             journal_first_materialization,
             journal_hard_delete_seqs,
-            journal_object_hard_deleted_ids,
             journal_object_surviving_keys,
             plan_point_restamp_folds,
         )
@@ -254,6 +255,9 @@ def restore(backup_dir: str, db_path: str,
             records = (_source_records if _source_records is not None
                        else log.read_all())
             hard_delete_seqs = journal_hard_delete_seqs(records)
+            # #7719: the anchor-gated hard-delete MEMBERSHIP map, hoisted ONCE
+            # over the SAME ``records`` iterable the replay loop walks.
+            hard_deleted = hard_deleted_pairs(records)
             deferred_links: list[tuple[int, dict]] = []
             # #3305: the Point lifecycle terminalizers fold through the SHARED
             # whole-journal plan (the same selection ``rebuild_all`` uses),
@@ -276,7 +280,9 @@ def restore(backup_dir: str, db_path: str,
             # feature-detect the kwargs (an `apply(ev)`-only injected backend
             # must not be handed a kwarg it does not accept).
             journal_object_surviving = journal_object_surviving_keys(records)
-            journal_object_deleted = journal_object_hard_deleted_ids(records)
+            # #7719: derived from the GATED map via `_hard_deleted_any`, so an
+            # anchor-suppressed delete no longer exempts the supersede.
+            journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
             # #3585 (P1-1): the whole-journal EXISTENCE map, so a
             # retract/state-op that precedes its own creation (folded by
             # `rebuild_all`'s hoist) is not refused on this chronological path.
@@ -310,7 +316,7 @@ def restore(backup_dir: str, db_path: str,
                     # its unshared selection (#325/#3722's raw-vs-normalized class).
                     if seq in restamp_plan:
                         edge = proj.apply_journal_point_restamp(
-                            ev, seq, restamp_plan)
+                            ev, seq, restamp_plan, hard_deleted=hard_deleted)
                         if edge is not None:
                             deferred_corrects.append(edge)
                         continue

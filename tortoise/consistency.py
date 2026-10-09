@@ -62,14 +62,16 @@ from .projection import (
     _annotator_value_ok,
     _apply_one,
     _creation_entity_id_from_record,
+    _hard_deleted_any,
     _journal_forward_reference,
     _load_prewipe_snapshot,
     _norm,
+    _object_hard_deleted_ids,
     _promotion_point_with_operator,
     _writable_id,
+    hard_deleted_pairs,
     journal_first_materialization,
     journal_hard_delete_seqs,
-    journal_object_hard_deleted_ids,
     journal_object_surviving_keys,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
@@ -81,11 +83,9 @@ from .projection.entities import (
     _writable_journalled_vector,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
-    SHAPE_OBJECT_SUPERSEDED_MISS,
-    SHAPE_POINT_INVALIDATED_MISS,
-    SHAPE_POINT_RETRACTED_MISS,
-    SHAPE_POINT_SUPERSEDED_MISS,
+    SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
     SHAPE_STATE_OP_MISS,
+    classify_terminalizer_miss,
     collect_non_folded,
     record_non_folded,
     refused_events,
@@ -809,6 +809,16 @@ def record_projection_state(log_path, *, last_applied_seq: int,
 _DECAY = {"confidence": 0.5, "posterior_alpha": 1.0, "posterior_beta": 1.0}
 
 
+class _RestampSignatureError(TypeError):
+    """#7719: the terminalizer consumer was called with a bad signature.
+
+    Distinct from a bare ``TypeError`` so ``recover_from_log``'s per-record
+    ``except Exception`` cannot degrade a programming error into a ``torn``
+    skip — which would leave ``recovered=True`` standing over a journal whose
+    terminalizers were never folded (the exact false PASS #7719 closes).
+    """
+
+
 def _fold_journal(events: list[dict]) -> dict:
     """The journal side of the comparison: the writer's own fold, PLUS the
     lifecycle arms `fold` does not have.
@@ -884,6 +894,11 @@ def _fold_journal(events: list[dict]) -> dict:
     # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
     # list (the anchor boundary is an envelope property).
     anchors = journal_hard_delete_seqs(events)
+    # #7719: the anchor-gated MEMBERSHIP map, hoisted ONCE beside ``anchors`` —
+    # never rebuilt inside the per-event loop (that is the O(N²) class this
+    # file already fixed). ``anchors`` remains the ORDERED-boundary reader; the
+    # gated map is the exemption predicate shared with the graph engines.
+    hard_deleted = hard_deleted_pairs(events)
     # #3585 re-review: the same journal-wide existence map `fold` passes — an
     # order-dependent refusal (a belief/annotator write, a terminalizer) is
     # mirrored only when the target is NOT a forward reference. The ORDERED map
@@ -946,7 +961,8 @@ def _fold_journal(events: list[dict]) -> dict:
                 # new_id-less supersede as a documented no-op, so the
                 # reference fold mirrors it. Recorded, not fatal.
                 record_non_folded(
-                    "point-superseded-no-new-id", event_id=ev.get("event_id"),
+                    SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
+                    event_id=ev.get("event_id"),
                     event_type=t, seq=seq,
                     detail="reference fold: supersede with no new_id is a no-op",
                 )
@@ -965,10 +981,21 @@ def _fold_journal(events: list[dict]) -> dict:
                 # exactly the journal `rebuild_all` accepts — the two classifiers
                 # must agree, or the fail-closed set is not one set.
                 _del_seq = anchors.get(pid, {}).get("Point")
-                if (t in ("PointSuperseded", "PointInvalidated")
-                        and isinstance(_del_seq, int) and _del_seq < seq):
+                # #7719: the exemption predicate is the SHARED anchor-gated map,
+                # with the EXISTING ordered boundary retained as an ADDITIONAL
+                # exemption — the journal [PointAdded X(0), delete X(1),
+                # PointSuperseded X→Y(2), PointAdded X(3)] is GREEN on both
+                # engines today, and dropping the ordered test would refuse a
+                # record the shared plan DROPS.
+                _target_deleted = (
+                    _hard_deleted_any(hard_deleted, "Point", pid)
+                    or (isinstance(_del_seq, int) and _del_seq < seq))
+                if (_target_deleted
+                        and t in ("PointSuperseded", "PointInvalidated")):
                     record_non_folded(
-                        "supersede-target-deleted",
+                        classify_terminalizer_miss(
+                            t, has_successor=bool(ev.get("new_id")),
+                            target_deleted=True),
                         event_id=ev.get("event_id"), event_type=t, seq=seq,
                         id=pid,
                         candidates=(ev.get("new_id"), ev.get("corrected_by")),
@@ -987,9 +1014,9 @@ def _fold_journal(events: list[dict]) -> dict:
                         _first_materialized, seq, "Point", pid):
                     continue
                 record_non_folded(
-                    SHAPE_POINT_INVALIDATED_MISS if t == "PointInvalidated"
-                    else SHAPE_POINT_RETRACTED_MISS if t == "PointRetracted"
-                    else SHAPE_POINT_SUPERSEDED_MISS,
+                    classify_terminalizer_miss(
+                        t, has_successor=bool(ev.get("new_id")),
+                        target_deleted=_target_deleted),
                     event_id=ev.get("event_id"), event_type=t, seq=seq, id=pid,
                     candidates=(ev.get("new_id"), ev.get("corrected_by")),
                     detail="reference fold: terminalizer matched no point",
@@ -1200,9 +1227,12 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # divergence on a correct journal). Deferring EVERY supersede subsumes the
     # forward-reference case and removes the second path that kept drifting.
     surviving_ids, _surviving_names = journal_object_surviving_keys(events)
-    # Ids the journal HARD-DELETES anywhere — the named
-    # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries.
-    hard_deleted_objects = journal_object_hard_deleted_ids(events)
+    # #7719: the anchor-gated MEMBERSHIP map — the named
+    # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries. The
+    # ungated `journal_object_hard_deleted_ids` used here before exempted an
+    # anchor-suppressed delete too (a reachable divergence from the graph
+    # fold); the gated map is the shared predicate.
+    hard_deleted = hard_deleted_pairs(events)
     # EVERY `ObjectSuperseded`, in journal order, resolved by the ONE trailing
     # sweep below — never applied inline.
     supersede_events: list[tuple[int, dict]] = []
@@ -1308,13 +1338,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         return None, False
 
     def _object_hard_deleted(oid) -> bool:
-        return isinstance(oid, str) and oid in hard_deleted_objects
+        # #7719: the SHARED gated predicate, so this Object leg and
+        # `rebuild_all`'s Object arm reach one verdict.
+        return _hard_deleted_any(hard_deleted, "Object", oid)
 
     def _record_supersede_miss(seq: int, ev: dict) -> None:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
         record_non_folded(
-            SHAPE_OBJECT_SUPERSEDED_MISS,
+            classify_terminalizer_miss("ObjectSuperseded",
+                                       target_deleted=False),
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
@@ -1995,7 +2028,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
         removal/terminal one, dropping it would RESURRECT the state it
         removed, so the replay is refused before any event is applied
         (#3316). Mid-file corruption is refused for the same reason
-        (``EventLog.read_all`` raises there).
+        (``EventLog.read_all`` raises there). The ONE deliberate exception is
+        a PROGRAMMING error in this engine's own wiring: if the projection's
+        ``apply_journal_point_restamp`` cannot accept the required
+        ``hard_deleted=`` context, this raises ``_RestampSignatureError``
+        (a ``TypeError``) instead of reporting a ``torn`` skip — the
+        per-record tolerance would otherwise turn a bad call signature into
+        `recovered=True` over a journal whose terminalizers were never folded
+        (#7719).
 
     Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`,
     the trigger flag set whenever a completed replay left the graph's onboarding
@@ -2230,6 +2270,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
     refused = 0
     first_refusal = ""
     hard_delete_seqs = journal_hard_delete_seqs(events)
+    # #7719: the anchor-gated hard-delete MEMBERSHIP map, hoisted ONCE for the
+    # whole journal (never per record).
+    hard_deleted = hard_deleted_pairs(events)
     entity_link_events: list[tuple[int, dict]] = []
     # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
     # keys (`apply()` refuses an ObjectSuperseded whose target the journal
@@ -2240,7 +2283,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # injected backends used in tests take ``apply(ev)`` alone, and a kwarg
     # they do not accept would be miscounted as a TORN record.
     journal_object_surviving = journal_object_surviving_keys(events)
-    journal_object_deleted = journal_object_hard_deleted_ids(events)
+    # #7719: derived from the GATED map via `_hard_deleted_any`, so an
+    # anchor-suppressed delete no longer exempts the supersede.
+    journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
     # #3585 (P1-1): the whole-journal EXISTENCE map — a retract/state-op that
     # PRECEDES its own creation is folded by `rebuild_all`'s hoist and no-op'd
     # live, so this chronological engine must not refuse it. `journal_seq` is
@@ -2274,6 +2319,35 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # in the journal cannot be merged chronologically (see
         # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
         # sweep resolves it, so the engines would disagree.
+        # #7719 (E7): validate the consumer's contract ONCE, before the loop.
+        # A missing/renamed kwarg must fail LOUD — the per-record
+        # `except Exception` below would otherwise count it as crash damage
+        # (`torn`) and the function would return `recovered=True` over a journal
+        # whose terminalizers were never folded (the exact false PASS this
+        # change closes). Probing the signature is the same idiom `apply`'s
+        # kwargs use above, and it keeps the per-record handler free to count
+        # REAL fold failures.
+        #
+        # Guarded on a NON-EMPTY plan: a journal with no terminalizer folds
+        # calls the consumer zero times, so an injected projection that does not
+        # implement it is not violating the contract (#7174's fake projection).
+        # Only a journal that WILL call it is refused a missing kwarg.
+        if restamp_plan:
+            try:
+                _restamp_params = inspect.signature(
+                    projection.apply_journal_point_restamp).parameters
+            except (AttributeError, TypeError, ValueError):
+                # AttributeError: no such method at all; TypeError: not
+                # callable. Both mean the required kwarg cannot be supplied.
+                _restamp_params = {}
+            if "hard_deleted" not in _restamp_params and not any(
+                    _p.kind is inspect.Parameter.VAR_KEYWORD
+                    for _p in _restamp_params.values()):
+                raise _RestampSignatureError(
+                    "recover_from_log: the projection's "
+                    "apply_journal_point_restamp does not accept "
+                    "hard_deleted=...; refusing rather than reporting a false "
+                    "recovery (#7719)")
         deferred_corrects: list[tuple[int, str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
@@ -2286,8 +2360,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 # through to ``apply()``'s inline branch and its unshared selection
                 # (#325/#3722's raw-vs-normalized class).
                 if seq in restamp_plan:
+                    # #7719 (E7): the consumer's contract was validated ONCE
+                    # before this loop, so a genuine fold failure inside this
+                    # call is NOT reclassified as a signature error — it stays a
+                    # per-record failure the `except Exception` below counts as
+                    # `torn`, exactly as before this change.
                     edge = projection.apply_journal_point_restamp(
-                        ev, seq, restamp_plan)
+                        ev, seq, restamp_plan, hard_deleted=hard_deleted)
                     if edge is not None:
                         deferred_corrects.append(edge)
                 else:
@@ -2300,6 +2379,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 refused += 1
                 if not first_refusal:
                     first_refusal = str(exc)
+            except _RestampSignatureError:
+                # #7719 (E7): a bad call signature is a programming error, not
+                # crash damage (``torn``). Fail LOUD rather than letting the
+                # generic handler below turn it into a skip that leaves
+                # ``recovered=True`` standing.
+                raise
             except Exception:
                 torn += 1
         if deferred_corrects:
