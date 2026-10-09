@@ -1415,10 +1415,11 @@ def _sweep_events() -> None:
         # Sweep every registered org's graph (registry Org nodes).
         # ``_iter_registered_orgs`` is typed ``list[dict] | None``: the
         # ``require_complete`` path can return ``None``. This default path does
-        # not, today — but the sweep must not depend on that accident, because a
-        # ``None`` here raises ``TypeError`` inside the surrounding handler and
-        # is swallowed into "event retention sweep skipped": a SILENT fleet-wide
-        # retention stop (reviewer C, round 6).
+        # not, today — but the sweep must not depend on that accident: a
+        # ``None`` here would raise ``TypeError``, which the outer handler below
+        # catches and logs as "event retention sweep failed" before returning —
+        # so the WHOLE fleet's retention would stop for that pass, reported only
+        # as that one warning (reviewer C, round 6).
         for org in (_iter_registered_orgs() or []):
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue

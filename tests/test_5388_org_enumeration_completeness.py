@@ -90,6 +90,28 @@ def _run(monkeypatch, cp, *, require_complete: bool):
     return ha_mod._iter_registered_orgs(require_complete=require_complete)
 
 
+def _assert_refused_not_crashed(caplog) -> None:
+    """POSITIVE ARM for every ``is None`` assertion in this file.
+
+    ``_iter_registered_orgs`` wraps its whole body in a fail-soft ``except``
+    that returns ``None`` for a completeness-demanding caller, so ``is None`` is
+    ALSO satisfied by a crash ANYWHERE in the walk — the test then passes while
+    never reaching the guard it names. That is the defect class this file's own
+    docstrings describe (a fixture bug raised, the handler swallowed it, and the
+    test stayed green).
+
+    The two paths ARE distinguishable without a second walk (which a stateful
+    fixture cannot survive): a REFUSAL logs the reason
+    (``org enumeration is INCOMPLETE: ...``, naming rows walked / total /
+    exhausted), while the exception path logs NOTHING at all. Asserting the
+    reason is what turns "returned None" into "the guard refused".
+    """
+    assert "org enumeration is INCOMPLETE" in caplog.text, (
+        "the None above was NOT a guard refusal: no INCOMPLETE reason was "
+        "logged, so the walk very likely raised and the fail-soft handler "
+        "swallowed it into the same value")
+
+
 class TestEnumerationCompleteness:
 
     def test_exactly_the_page_size_is_complete_not_truncated(self, monkeypatch):
@@ -108,11 +130,12 @@ class TestEnumerationCompleteness:
         assert got is not None and len(got) == 1500
         assert [c[0] for c in cp.calls][:2] == [None, "org-00999"], cp.calls
 
-    def test_truncated_server_count_fails_closed(self, monkeypatch):
+    def test_truncated_server_count_fails_closed(self, monkeypatch, caplog):
         """The server says 1500 but only serves 1000: the fleet could NOT be
         confirmed, so a completeness-critical caller must get None."""
         cp = FakeControlPlane(MAX, state_total=1500)
         assert _run(monkeypatch, cp, require_complete=True) is None
+        _assert_refused_not_crashed(caplog)
 
     def test_truncated_is_still_returned_for_a_best_effort_caller(self, monkeypatch):
         """The retention sweep must process what it got rather than purge
@@ -128,11 +151,13 @@ class TestEnumerationCompleteness:
         got = _run(monkeypatch, cp, require_complete=True)
         assert got is not None and len(got) == 37
 
-    def test_no_total_with_full_pages_to_the_cap_fails_closed(self, monkeypatch):
+    def test_no_total_with_full_pages_to_the_cap_fails_closed(self, monkeypatch,
+                                                             caplog):
         """Server states no total AND every page is full: the page cap is NOT
         proof of completeness, so refuse rather than prune on a guess."""
         cp = FakeControlPlane(MAX * 500, state_total=None)
         assert _run(monkeypatch, cp, require_complete=True) is None
+        _assert_refused_not_crashed(caplog)
         assert len(cp.calls) == ha_pages(), (
             f"should stop at the page cap, not walk 500 pages: {len(cp.calls)}"
         )
@@ -214,7 +239,8 @@ class TestWindowShiftRace:
         # The cursor must be the last SAW id, never a count.
         assert cp.seen_cursors[0] is None and cp.seen_cursors[1] is not None
 
-    def test_a_duplicate_cannot_satisfy_the_stated_total(self, monkeypatch):
+    def test_a_duplicate_cannot_satisfy_the_stated_total(self, monkeypatch,
+                                                        caplog):
         """Completeness counts DISTINCT ids: if the server repeats a row, the
         count must not be reachable by duplication."""
         class RepeatingCP:
@@ -240,6 +266,7 @@ class TestWindowShiftRace:
         assert _run(monkeypatch, cp, require_complete=True) is None, (
             "a total that no amount of walking satisfies must fail closed"
         )
+        _assert_refused_not_crashed(caplog)
 
 
 class TestEndOfWalkSignals:
@@ -343,7 +370,7 @@ class TestEndOfWalkSignals:
         )
 
     def test_a_later_page_remainder_is_never_adopted_as_the_fleet_total(
-            self, monkeypatch):
+            self, monkeypatch, caplog):
         """A remainder reported on page 2+ must not become the fleet count.
 
         The fleet count is only meaningful from the page that ASKED for it
@@ -379,8 +406,10 @@ class TestEndOfWalkSignals:
             "a walk that hit its page cap cannot be reported COMPLETE just "
             "because a later page volunteered the remaining count"
         )
+        _assert_refused_not_crashed(caplog)
 
-    def test_an_unsorted_server_cannot_advance_the_cursor(self, monkeypatch):
+    def test_an_unsorted_server_cannot_advance_the_cursor(self, monkeypatch,
+                                                        caplog):
         """The cursor must be the page MAXIMUM, so `order` is enforced not assumed.
 
         A server that filters by ``id > cursor`` but returns rows in another
@@ -408,8 +437,10 @@ class TestEndOfWalkSignals:
         assert _run(monkeypatch, UnsortedCP(), require_complete=True) is None, (
             "an out-of-order page must fail closed, not certify a short fleet"
         )
+        _assert_refused_not_crashed(caplog)
 
-    def test_a_zero_total_cannot_certify_a_page_cap_exit(self, monkeypatch):
+    def test_a_zero_total_cannot_certify_a_page_cap_exit(self, monkeypatch,
+                                                        caplog):
         """A stated total of 0 is the ABSENCE of a count, not an empty fleet.
 
         Left as `len(seen) >= 0` it is vacuously true, so a page-cap exit is
@@ -428,6 +459,7 @@ class TestEndOfWalkSignals:
         assert _run(monkeypatch, ZeroCP(ids), require_complete=True) is None, (
             "total=0 must not satisfy the completeness check"
         )
+        _assert_refused_not_crashed(caplog)
 
     def test_a_walk_exception_is_unknown_not_an_empty_fleet(self, monkeypatch):
         """An exception must NOT become ``[]`` for a completeness-demanding
@@ -455,7 +487,8 @@ class TestEndOfWalkSignals:
         # A best-effort caller must still never be failed by a sweep.
         assert _run(monkeypatch, ExplodingCP(), require_complete=False) == []
 
-    def test_a_later_page_total_cannot_mask_a_shortfall(self, monkeypatch):
+    def test_a_later_page_total_cannot_mask_a_shortfall(self, monkeypatch,
+                                                       caplog):
         """The fleet count is a CONSISTENCY CHECK, not just a label.
 
         When the server states a fleet total larger than it will ever serve,
@@ -482,6 +515,7 @@ class TestEndOfWalkSignals:
             "a fleet total the walk can never satisfy must fail closed, not be "
             "overwritten by a later page's smaller remainder"
         )
+        _assert_refused_not_crashed(caplog)
 
 
 def ha_pages() -> int:
