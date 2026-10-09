@@ -64,6 +64,44 @@ def test_build_rows_and_summary_are_the_measured_split():
     assert summary["conversion_undetermined"] is True
 
 
+def test_reachability_union_scan_covers_every_committed_source():
+    """Regression (P3): the reachability flag must be derived from the union
+    over the committed outcomes files (all arms), not only the default
+    133-Q arm. Asserts the 8-arm file is among the declared sources."""
+    names = [Path(s).name for s in fcd.OUTCOME_SOURCES]
+    assert "2578-measured-outcomes-133.jsonl" in names
+    assert "2578-measured-outcomes.jsonl" in names
+
+
+def test_reachability_scan_reads_the_8_arm_file():
+    """Regression (P3): prove the union scan actually reads the 8-arm file.
+    A synthetic census that claims an 8-arm gold-admitted qid as a class
+    member must have it surfaced — a qid the default 133-Q arm never loads.
+    Fails on the pre-fix code, which only loaded ``A-default-133q`` from the
+    133-Q file and knew nothing of the 8-arm file."""
+    # gpt4_213fd887 is gold_admitted=False in the 133-Q arm but
+    # gold_admitted=True in the 8-arm file.
+    assert not fcd.load_outcomes()["gpt4_213fd887"].get("gold_admitted")
+    census = {"rows": [{"qid": "gpt4_213fd887", "cls": fcd.CLASS,
+                        "question": "How many weeks in total ..."}]}
+    assert "gpt4_213fd887" in fcd.gold_admitted_qids(census)
+
+
+def test_summarize_honours_union_reachable_qids():
+    """The union scan overrides the loaded-arm derivation: a class qid
+    gold-admitted anywhere makes conversion DETERMINATE (flag False), even
+    though the loaded arm shows no admission."""
+    census = fcd.load_census()
+    rows = fcd.build_rows(census, fcd.load_outcomes())
+    assert fcd.summarize(rows)["conversion_undetermined"] is True
+    union = fcd.gold_admitted_qids(census)
+    assert fcd.summarize(
+        rows, reachable_qids=union)["conversion_undetermined"] is True
+    # A reachable qid flips the flag — the parameter is wired, not ignored.
+    assert fcd.summarize(
+        rows, reachable_qids={"b46e15ed"})["conversion_undetermined"] is False
+
+
 def test_every_row_is_reclassified_to_a_date_shape():
     """No class member is a count/frequency surface — all reclassify to a
     date-arithmetic shape (the measured mislabelling finding)."""

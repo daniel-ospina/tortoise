@@ -254,7 +254,57 @@ def test_tally_is_input_order_independent():
     assert set(forward.keys) == set(backward.keys)
 
 
+def test_same_date_paraphrases_are_input_order_independent():
+    """Regression (P1): same-date identity-less rows must not tie-break on
+    input index, and restatements must cluster by the transitive closure of
+    the fold relation (union-find), not a greedy sequential scan. The
+    reviewer's repro gave 2 forward vs 3 reversed. Fails on the pre-fix
+    code, whose canonical key fell back to the input index and whose greedy
+    fold compared each row only against already-kept priors."""
+    texts = [
+        "mu eta beta kappa iota delta",
+        "beta theta lambda mu iota delta epsilon zeta",
+        "delta lambda iota beta mu epsilon",
+        "beta lambda delta iota epsilon theta",
+    ]
+    dated = [{"content": t, "session_date": "2025-06-01"} for t in texts]
+    undated = [{"content": t} for t in texts]
+    for label, events in (("dated", dated), ("undated", undated)):
+        forward = count_distinct_events(events)
+        backward = count_distinct_events(list(reversed(events)))
+        assert (forward.n_events, forward.keys, forward.total) == \
+            (backward.n_events, backward.keys, backward.total), label
+        # Pin the cluster too, not merely the equality: deterministic and
+        # equals the reviewer-confirmed converged value (2, not 3).
+        assert forward.n_events == 2, label
+        assert backward.n_events == 2, label
+
+
+def test_same_date_total_is_input_order_independent():
+    """Regression (P1, TOTAL path): two same-date paraphrase rows with
+    different spans must sum the SAME representative span regardless of
+    input order. Fails on the pre-fix code, which kept whichever row arrived
+    first (total 2 forward vs 7 reversed here)."""
+    events = [
+        {"content": "alpha beta gamma delta",
+         "session_date": "2025-06-01",
+         "start_date": "2025-01-01", "end_date": "2025-01-03"},
+        {"content": "alpha beta gamma",
+         "session_date": "2025-06-01",
+         "start_date": "2025-01-01", "end_date": "2025-01-08"},
+    ]
+    forward = count_distinct_events(events, unit="days", total=True)
+    backward = count_distinct_events(
+        list(reversed(events)), unit="days", total=True)
+    assert forward == backward
+    assert forward.n_events == 1
+    assert forward.total == 7
+
+
 def test_tally_empty_input_is_a_real_zero():
+    """The TALLY layer reports a real zero for empty input; the RESOLVER
+    abstains instead (``no_events``) — see
+    ``test_resolve_count_empty_events_abstains``."""
     tally = count_distinct_events([])
     assert isinstance(tally, EventTally)
     assert tally.n_events == 0
@@ -391,6 +441,49 @@ def test_resolve_counts_repeated_occurrences_with_distinct_ids():
     assert res.n_events == 3
     assert res.value == 3
     assert res.reason is None
+
+
+def test_resolve_count_same_date_paraphrases_is_input_order_independent():
+    """Regression (P1 end-to-end): the resolver's COUNT value over a
+    same-date paraphrase set is identical forward vs reversed. Fails on the
+    pre-fix code (value 2 forward vs 3 reversed)."""
+    texts = [
+        "mu eta beta kappa iota delta",
+        "beta theta lambda mu iota delta epsilon zeta",
+        "delta lambda iota beta mu epsilon",
+        "beta lambda delta iota epsilon theta",
+    ]
+    events = [{"content": t, "session_date": "2025-06-01"} for t in texts]
+    question = "How many times did I do the thing?"
+    forward = resolve_temporal_aggregate(question, events=events)
+    backward = resolve_temporal_aggregate(
+        question, events=list(reversed(events)))
+    assert forward.value == backward.value == 2
+    assert forward.n_events == backward.n_events == 2
+
+
+def test_resolve_count_empty_events_abstains():
+    """Regression (P2): an EMPTY admitted-event set is not a measured zero.
+    COUNT must abstain (never guess 0). Fails on the pre-fix code, which
+    returned value=0, reason=None, method='count_distinct'."""
+    res = resolve_temporal_aggregate(
+        "How many times did I go to the gym?", events=[])
+    assert res.kind is TemporalAggregateKind.COUNT
+    assert res.value is None
+    assert res.n_events is None
+    assert res.method is None
+    assert res.reason == "no_events"
+
+
+def test_resolve_total_empty_events_abstains():
+    """Regression (P2, TOTAL path): an empty set abstains rather than
+    publishing a 0 span. Fails on the pre-fix code (value=0)."""
+    res = resolve_temporal_aggregate(
+        "How many weeks in total did I spend reading?", events=[])
+    assert res.kind is TemporalAggregateKind.TOTAL
+    assert res.value is None
+    assert res.n_events is None
+    assert res.reason == "no_events"
 
 
 def test_resolve_interval_difference():

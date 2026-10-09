@@ -28,9 +28,12 @@ model, no IO, no clock:
   by a deterministic event-identity key: an explicit event id, else the
   normalized content, else the repo's committed conservative paraphrase
   band (``extractor_v2.fold_allowed`` + ``NOOP_MIN_OVERLAP``). Events are
-  canonicalised in ``(session_date, id)`` order so the earliest articulation
-  wins and the result is independent of input order. TOTAL additionally
-  sums each distinct event's span (``gpt4_a1b77f9c`` — weeks across three
+  canonicalised in ``(session_date, id, normalized content)`` order — a
+  TOTAL key, never an input-index tie-break — and restatements are resolved
+  as an order-independent clustering (union-find over the pairwise fold
+  relation, i.e. its transitive closure), so the earliest articulation wins
+  and the result does not depend on input order. TOTAL additionally sums
+  each distinct event's span (``gpt4_a1b77f9c`` — weeks across three
   books).
 * DIFFERENCE — calendar arithmetic over two admitted dated anchors:
   interval ("how many days between A and B"), before-offset ("how many days
@@ -352,17 +355,53 @@ class EventTally:
 def _canonical_order(
     events: Sequence[Mapping[str, Any]],
 ) -> list[tuple[int, Mapping[str, Any]]]:
-    """Stable ``(index, event)`` order keyed by ``(session_date, event_id)``
-    so the earliest articulation wins and the tally is input-order
-    independent. Undated events sort last, preserving input order among
-    themselves."""
+    """Stable ``(index, event)`` order keyed by ``(session_date, event_id,
+    normalized content)`` — a TOTAL key, so two identity-less events sharing
+    a date are separated by their content and NEVER by the caller's input
+    index. Undated events sort last. Rows still tied after the content key
+    are structurally identical (same date, same id, same content) and so
+    belong to the same identity cluster; their relative order is immaterial
+    to the tally."""
     def key(item: tuple[int, Mapping[str, Any]]):
-        i, e = item
+        _i, e = item
+        content = _content_key(e)
         d = _event_date(e)
-        return (0, d.isoformat(), _event_id(e), i) if d is not None \
-            else (1, "", _event_id(e), i)
+        return (0, d.isoformat(), _event_id(e), content) if d is not None \
+            else (1, "", _event_id(e), content)
 
     return sorted(enumerate(events), key=key)
+
+
+class _DisjointSet:
+    """Minimal union-find for order-independent restatement clustering.
+
+    The cluster a row lands in must not depend on which prior row it happened
+    to be compared against, so the fold relation is resolved as its
+    transitive closure (union every pair that folds) rather than a greedy
+    scan over already-kept rows. ``union`` roots at the smaller index so the
+    internal structure is deterministic, though callers derive the cluster's
+    reported key from canonical order, not from the root.
+    """
+    __slots__ = ("_parent",)
+
+    def __init__(self, n: int) -> None:
+        self._parent = list(range(n))
+
+    def find(self, x: int) -> int:
+        parent = self._parent
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            if rb < ra:
+                ra, rb = rb, ra
+            self._parent[rb] = ra
 
 
 def _span_days(event: Mapping[str, Any]) -> int | None:
@@ -411,9 +450,12 @@ def count_distinct_events(
     restatement trap closed).
 
     Deterministic canonicalisation: events are ordered by
-    ``(session_date, event_id)`` so the earliest articulation is kept and
-    the count does not depend on input order. Identity is exclusive: an
-    explicit event id collapses ONLY a repeated occurrence of the same id,
+    ``(session_date, event_id, normalized content)`` — a total key, so
+    same-date / undated identity-less rows never tie-break on input index —
+    and identity clusters are resolved order-independently (union-find over
+    the pairwise fold relation), so the count does not depend on input
+    order. Identity is exclusive: an explicit event id collapses ONLY a
+    repeated occurrence of the same id,
     and content-based identity (identical wording, or a conservative-
     paraphrase restatement under ``fold_allowed`` + ``NOOP_MIN_OVERLAP``)
     folds ONLY identity-less rows. Content never overrides two distinct
@@ -436,34 +478,73 @@ def count_distinct_events(
         # (never raise, never approximate); the span is not published.
         return EventTally(0, len(rows), 0, reason="no_unit", unit=unit)
     ordered = _canonical_order(rows)
-    keys: list[str] = []
-    seen_ids: set[str] = set()
-    #: Content keys of already-kept IDENTITY-LESS rows only. An event that
-    #: carries an explicit id is anchored by that id and neither folds into
-    #: nor absorbs a content match, so the fold can never override two
-    #: distinct explicit ids (the occurrence-undercount bug).
-    kept_content: list[str] = []
-    span_days = 0
+
+    # ── cluster identity, order-independently ─────────────────────────────
+    # Union-find over the two identity relations: same explicit id, and the
+    # symmetric restatement relation among IDENTITY-LESS content rows. An
+    # event that carries an explicit id is anchored by that id and neither
+    # folds into nor absorbs a content match, so the fold can never override
+    # two distinct explicit ids (the occurrence-undercount bug). Every fold
+    # pair is precomputed and unioned (transitive closure), so the cluster —
+    # and therefore the tally — does not depend on the order rows arrive or
+    # on which prior a later row happens to be compared against.
+    dsu = _DisjointSet(len(rows))
+    first_id: dict[str, int] = {}
+    #: ``(index, content, token-set)`` for IDENTITY-LESS content rows; the
+    #: token set is precomputed once so the O(n²) fold scan does not re-split
+    #: every string on every comparison.
+    content_rows: list[tuple[int, str, frozenset[str]]] = []
     for i, event in ordered:
         eid = _event_id(event)
-        content = _content_key(event)
-        duplicate = bool(
-            (eid and eid in seen_ids)
-            or (not eid and content
-                and any(_restatement(content, prior)
-                        for prior in kept_content)))
-        if duplicate:
-            continue
         if eid:
-            seen_ids.add(eid)
-            keys.append(f"id:{eid}")
+            if eid in first_id:
+                dsu.union(first_id[eid], i)
+            else:
+                first_id[eid] = i
+            continue
+        content = _content_key(event)
+        if content:
+            content_rows.append((i, content, frozenset(content.split())))
+    for a in range(len(content_rows)):
+        ia, ca, ta = content_rows[a]
+        for b in range(a + 1, len(content_rows)):
+            ib, cb, tb = content_rows[b]
+            la, lb = len(ta), len(tb)
+            lo, hi = (la, lb) if la < lb else (lb, la)
+            if not lo or hi / lo >= 1.5:
+                continue
+            if len(ta & tb) / lo < NOOP_MIN_OVERLAP:
+                continue
+            # Overlap band already cleared; ``_restatement`` re-checks it and
+            # applies the conservative fold gate (byte-identical or
+            # ``fold_allowed``). The prefilter above just avoids the gate's
+            # cost on pairs that cannot possibly clear the band.
+            if _restatement(cb, ca):
+                dsu.union(ia, ib)
+
+    # One key per cluster, taken from its earliest canonical member (so the
+    # earliest articulation still wins) — deterministic and input-order
+    # independent.
+    keys: list[str] = []
+    cluster_seen: dict[int, str] = {}
+    span_days = 0
+    for i, event in ordered:
+        root = dsu.find(i)
+        if root in cluster_seen:
+            continue
+        eid = _event_id(event)
+        content = _content_key(event)
+        if eid:
+            key = f"id:{eid}"
         elif content:
-            keys.append(f"content:{content}")
-            kept_content.append(content)
+            key = f"content:{content}"
         else:
             # neither id nor content — not identifiable; keep it as its own
-            # row (never silently drop admitted evidence)
-            keys.append(f"row:{i}")
+            # cluster (never silently drop admitted evidence). The rank is a
+            # function of canonical position, so it is input-order stable.
+            key = f"row:{len(keys)}"
+        cluster_seen[root] = key
+        keys.append(key)
         if total:
             span_days += _span_days(event) or 0
     n_events = len(keys)
@@ -562,6 +643,12 @@ def resolve_temporal_aggregate(
 
     ``unit`` overrides the classified unit (a caller with an explicit unit —
     e.g. the eval's per-question answer unit — is authoritative).
+
+    Empty event input abstains (``reason="no_events"``) for COUNT/TOTAL —
+    an empty admitted set is not a measured zero, and the never-guess
+    contract forbids reporting one. The tally layer
+    (:func:`count_distinct_events`) still returns ``n_events=0`` for empty
+    input; only the resolver refuses to treat it as an answer.
     """
     intent = classify_temporal_aggregate(question)
     if intent is None:
@@ -574,6 +661,16 @@ def resolve_temporal_aggregate(
             return TemporalResolution(
                 intent.kind, None, None, None, n_events=None,
                 reason=tally.reason, intent=intent)
+        if tally.n_input == 0:
+            # An EMPTY admitted-event set is not a measured zero: with no
+            # events there is nothing to tally, so abstain and let the
+            # reader lane keep the case (never guess zero). A real zero —
+            # e.g. "how many times did I skydive?" in a session that was
+            # scanned and contained no skydive — is a caller-side judgement
+            # (pass evidence), not something this pure core can infer.
+            return TemporalResolution(
+                intent.kind, None, None, None, n_events=None,
+                reason="no_events", intent=intent)
         return TemporalResolution(
             intent.kind, tally.n_events, None, "count_distinct",
             n_events=tally.n_events, intent=intent)
@@ -589,6 +686,12 @@ def resolve_temporal_aggregate(
             return TemporalResolution(
                 intent.kind, None, tally.unit, None, n_events=None,
                 reason=tally.reason, intent=intent)
+        if tally.n_input == 0:
+            # Same never-guess rule as COUNT: no admitted events → abstain,
+            # never publish a 0 span.
+            return TemporalResolution(
+                intent.kind, None, tally.unit, None, n_events=None,
+                reason="no_events", intent=intent)
         return TemporalResolution(
             intent.kind, tally.total, tally.unit, "sum_distinct",
             n_events=tally.n_events, intent=intent)

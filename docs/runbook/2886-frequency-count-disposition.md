@@ -61,8 +61,13 @@ contains these 12 qids):
 gold-admitting arms in the committed 8-arm file (`applied-rerank`,
 `cap3-only`) ran only on the 55-question subset — which contains **none** of
 the 12. No run exists in which a class member is observed *with gold
-admitted*, so the conversion bucket cannot fire. Resolving it requires the
-12 re-run under `applied-rerank` (the reported remainder, below).
+admitted*, so the conversion bucket cannot fire. The
+`conversion_undetermined` flag is derived from a **union scan over every
+committed outcomes file (all arms)** — `2578-measured-outcomes-133.jsonl`
+and `2578-measured-outcomes.jsonl` — so it establishes the claim it reports
+for the committed data, not merely for the one default arm. Resolving it
+requires the 12 re-run under `applied-rerank` (the reported remainder,
+below).
 
 Per-question rows are committed in the same shape as
 `2578-measured-outcomes.jsonl` (arm / qid / cls / label / context_tokens /
@@ -96,9 +101,13 @@ bypassed (a reader-model swap stays #2013-gated).
 **Restatement trap.** Distinct-event identity is: explicit `event_id` → else
 normalized content → else the repo's committed conservative paraphrase band
 (`extractor_v2.fold_allowed` + `NOOP_MIN_OVERLAP`). Events are canonicalised
-in `(session_date, event_id)` order, so the earliest articulation wins and
-the tally is input-order independent. A negated / re-conditioned /
-subject-substituted restatement stays its own event (D12/O4).
+in `(session_date, event_id, normalized content)` order — a **total** key, so
+same-date / undated identity-less rows never tie-break on input index — and
+restatements are clustered order-independently (union-find over the pairwise
+fold relation, i.e. its transitive closure, not a greedy sequential scan),
+so the earliest articulation wins and the tally is input-order independent. A
+negated / re-conditioned / subject-substituted restatement stays its own
+event (D12/O4).
 
 **Not folded into the assembler (#2165).** The assembler locates subjects
 through the graph; this core is a downstream arithmetic/tally step over the
