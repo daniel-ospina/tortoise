@@ -327,13 +327,6 @@ from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES  # noqa: E402
 # question stops firing.
 _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES = frozenset({"retracted"})
 
-# #4061 R2: the ceiling of the FTS leg's adaptive window. The window doubles
-# while excluded Objects crowd it, so it only ever grows on a graph where
-# retracted rows genuinely out-rank live ones; the cap bounds the
-# pathological case and equals ``tortoise_fts_query``'s own ``limit`` ceiling
-# (a larger window would raise there and degrade the leg to []).
-_FTS_WINDOW_CAP = 10000
-
 
 @dataclass(frozen=True)
 class SubjectCandidate:
@@ -400,41 +393,6 @@ _HEAD_CUT = re.compile(
     r"sold|delivered|received|ordered|moved|chewed|repaired|painted|fixed|"
     r"replaced|started|finished|installed|came|went|that|which|who|from|"
     r"by|with|in)\b", re.IGNORECASE)
-
-
-def _name_index_ids(proj, term: str, ids: list[str]) -> set[str]:
-    """The subset of ``ids`` the Object NAME-FTS index itself matches for
-    ``term`` (#3223).
-
-    This is the faithful oracle for "is this row leg 2's row". The hybrid
-    ``tortoise_fts_query`` fuses the name index with a vector half that
-    returns the semantically nearest Objects for ANY term, and its rows carry
-    no leg provenance (``leg_trace`` records counts, not ids), so leg
-    membership cannot be read off the result. It must not be RE-DERIVED from
-    the name text either: matching the index means applying the index's own
-    English stemmer, and a hand-rolled approximation is BOTH incomplete
-    ("happiness"/"happy" share the stem "happi", yet neither token is a
-    prefix of the other) AND unsound (a naive "ing" strip reduces "rating"
-    to "rat" and re-admits a semantic-only neighbour — the exact #3223
-    failure class this gate exists to reject). Asking the index removes the
-    re-derivation: the gate is SET MEMBERSHIP, so it agrees with the index by
-    construction.
-
-    ``build_or_query`` is the same OR-union constructor the SDK's FTS leg
-    runs (``search_engine.run_fts_query``), so the query text cannot drift
-    from the leg being mirrored. The ``WHERE node.id IN $ids`` filter bounds
-    the result to the rows actually under test instead of the term's whole
-    index posting list.
-    """
-    if not ids:
-        return set()
-    from tortoise.sparse import build_or_query
-    rows = proj.g.query(
-        "CALL db.idx.fulltext.queryNodes('Object', $query) YIELD node "
-        "WHERE node.id IN $ids RETURN node.id",
-        params={"query": build_or_query(term), "ids": list(ids)},
-    ).result_set
-    return {str(r[0]) for r in rows}
 
 
 def _candidate_names(term: str) -> list[str]:
@@ -586,36 +544,11 @@ def resolve_subjects(port: ResolverPort, terms: list[str], *,
                          unresolved=tuple(unresolved))
 
 
-def _excluded_object_ids(proj, ids: list[str], excluded) -> set[str]:
-    """Authoritative exclusion membership for Object ids whose search payload
-    carried NO ``status`` (#4061 R3).
-
-    ``SearchResult.to_dict`` emits ``status`` only when truthy, so a hit
-    loses the key both when its Object genuinely has no stored status AND
-    when the SDK's batch content fetch degraded (``sdk.py``'s ``except``
-    writes ``{"content": "", "kind": ""}``). The two are indistinguishable
-    from the hit, so the stored status is re-read here for exactly the
-    status-less ids. Returns the subset whose stored status IS in
-    ``excluded``; a genuinely status-less Object is NOT in that subset
-    (live, matching the Cypher legs' ``o.status IS NULL OR …`` admission).
-
-    A read failure PROPAGATES — the caller's leg then degrades to ``[]``
-    under its R10 contract, never to a live-by-default admission.
-    """
-    if not ids or not excluded:
-        return set()
-    rows = proj.g.query(
-        "MATCH (o:Object) WHERE o.id IN $ids AND o.status IN $statuses "
-        "RETURN o.id",
-        params={"ids": ids,
-                "statuses": sorted(excluded)}).result_set
-    return {str(r[0]) for r in rows}
-
-
 def docker_resolver_port(sdk) -> ResolverPort:
     """Adapter over a live TortoiseSDK: exact probe via the projection's
-    Object id/name index (one batched query), FTS via
-    ``tortoise_fts_query(entity_type='object')``, alias via one anchored
+    Object id/name index (one batched query), FTS via the shared FTS leg
+    (``search_engine.run_fts_query``, ``entity_type='object'`` — #3223: the
+    NAME index itself, not the hybrid read surface), alias via one anchored
     search_keys query. Function-level imports keep the module import-safe
     (no sdk import at module scope).
 
@@ -743,97 +676,64 @@ def docker_resolver_port(sdk) -> ResolverPort:
         return [{"id": r[0], "name": r[1]} for r in rows]
 
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
-        # raises on embedded (no fulltext index) — the resolver degrades
+        # returns [] when the index is absent/unreachable — ``run_fts_query``
+        # degrades rather than raising, and ``resolve_subjects`` handles an
+        # empty leg and a raising one identically (no FTS candidates).
         #
-        # #3223: this leg is the Object NAME-FTS leg, but the query it makes
-        # is the HYBRID one (RRF of name-FTS + name-vector + structural), so
-        # with the embedder live its vector half returns the nearest Objects
-        # for ANY term. Each accumulated row is therefore gated to membership
-        # in the set the NAME index ITSELF returns for the term
-        # (``_name_index_ids``) before the leg returns: a semantic-only
-        # neighbour is NOT this leg's row, so a no-match term falls through to
-        # the alias leg and then to ``unresolved`` — making the R1
-        # ``fired=False`` fallback reachable in the shipped configuration
-        # again (the divergence #3223 tracks).
+        # #3223: this leg IS the Object NAME-FTS index, so it runs THE FTS
+        # leg (``search_engine.run_fts_query`` — the same function the SDK's
+        # sparse leg uses) rather than the HYBRID ``tortoise_fts_query`` (RRF
+        # of name-FTS + name-vector + structural). With the embedder live the
+        # hybrid's vector half matches ANY term, so a term that names nothing
+        # resolved to unrelated Objects and the R1 ``fired=False`` fallback
+        # was unreachable in the shipped configuration.
         #
-        # The gate runs on the ACCUMULATED window rather than inside the
-        # admission loop on purpose: the window grows to satisfy the
-        # PRE-EXISTING exclusion bound (#4061 R2), and a semantic-only hit must
-        # not drive that growth (a no-match term would otherwise scan the whole
-        # Object index up to the cap). Slicing to ``limit`` happens after the
-        # gate so a name match ranked behind semantic-only neighbours inside
-        # the same window is still recovered.
+        # Recovering "just the name leg" from the hybrid does NOT work; three
+        # shapes were measured and rejected:
+        #   * returning the hybrid rows UNFILTERED — the #3223 divergence;
+        #   * filtering them with a re-derived LEXICAL predicate — a predicate
+        #     cannot reproduce the index's English stemmer, so it both DROPPED
+        #     genuine matches ("happiness"/"happy" share the stem "happi",
+        #     yet neither token prefixes the other) and ADMITTED non-matches
+        #     (a naive "ing" strip reduces "rating" to "rat", re-admitting a
+        #     semantic-only neighbour);
+        #   * intersecting them with an id-filtered INDEX query — the hybrid's
+        #     top-``limit`` is vector-weighted, so a genuine name match ranked
+        #     outside the returned window was never in it to survive, and the
+        #     leg returned [] for a term the index DOES match (measured).
+        # Asking the index directly removes all three: the leg's candidates
+        # ARE the index's rows.
         #
-        # #4061 R2: the exclusion cannot be pushed into the SDK query — the
-        # SDK exposes only the all-or-nothing ``include_terminal`` opt-in for
-        # the canonical OBJECT set, so this port's deliberately NARROWER
-        # ``{retracted}`` exclusion has no query-level predicate — and the
-        # rows therefore arrive ALREADY truncated by the SDK's own LIMIT. Filtering
-        # only those rows let >=limit excluded Objects consume the window and
-        # starve a live candidate out of the leg. The window therefore GROWS
-        # until ``limit`` LIVE rows are found or the index is exhausted, so
-        # the exclusion is applied before THIS leg's bound — the same
-        # pre-bound polarity as the exact (no LIMIT) and alias (WHERE before
-        # LIMIT) legs. The ordinary case still costs exactly one call; the
-        # results of successive windows are UNIONED so a non-monotone tie
-        # order cannot drop a candidate seen in a smaller window.
+        # #4061 R2/R3: the port's deliberately NARROW ``{retracted}``
+        # exclusion is pushed INTO that FTS query, before its LIMIT, so an
+        # excluded Object cannot consume the leg's bound (the SDK's
+        # all-or-nothing ``include_terminal`` opt-in could not express the
+        # narrower set — which is what forced the old window-growth dance) —
+        # and ``status`` is read by that same query, so the SDK's batch-content
+        # degradation (which could drop ``status`` and let a retracted Object
+        # read as live) cannot apply here at all.
         #
-        # #4061 R3: ``status`` is ABSENT on a hit whenever the SDK's batch
-        # content fetch degraded (``sdk.py``'s ``except`` writes
-        # ``{"content": "", "kind": ""}``) — and an Object with no stored
-        # status produces the SAME absent key, because SearchResult.to_dict
-        # emits ``status`` only when truthy. An absent status must never read
-        # as live, so it is re-read from the graph before the decision.
-        window = max(1, limit)
-        live: list[dict] = []
-        seen: set[str] = set()
-        # #3301: the search lane's Object legs now exclude the canonical
-        # OBJECT vocabulary (superseded/deprecated/archived/retracted) at the
-        # QUERY level, so the shared FTS leg no longer returns a SUPERSEDED
-        # Object — which THIS port must still resolve (its state render IS the
-        # answer to the current-state question; see
-        # ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``). The leg therefore asks
-        # the SDK for the terminal-INCLUSIVE view and applies its own,
-        # deliberately NARROWER set below — net resolver behaviour is
-        # byte-identical to before #3301, and the exclusion stays in ONE place
-        # (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``) instead of being split
-        # between the shared lane's wider set and this leg's filter.
-        while True:
-            hits = sdk.tortoise_fts_query(term, entity_type="object",
-                                          limit=window,
-                                          include_terminal=True) or []
-            exhausted = len(hits) < window
-            # R3: authoritative status for hits the search read did not carry
-            # one for. Let a failure PROPAGATE: this leg's R10 contract is
-            # degrade-to-[] on raise, never a live-by-default admission.
-            retracted = _excluded_object_ids(
-                proj,
-                [str(h.get("id")) for h in hits
-                 if h.get("id") and not h.get("status")],
-                _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)
-            for h in hits:
-                oid = str(h.get("id") or "")
-                if not oid or oid in seen:
-                    continue
-                seen.add(oid)
-                status = h.get("status")
-                if status:
-                    if status in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES:
-                        continue
-                elif oid in retracted:
-                    continue
-                live.append({"id": oid, "name": h.get("content", "")})
-            if (len(live) >= limit or exhausted
-                    or window >= _FTS_WINDOW_CAP):
-                # #3223: keep only rows the NAME index itself matches, then
-                # bound — see the leg note above and ``_name_index_ids``.
-                # Post-gate so a real name match behind semantic-only
-                # neighbours in the same window survives.
-                name_ids = _name_index_ids(
-                    proj, term, [row["id"] for row in live])
-                return [row for row in live
-                        if row["id"] in name_ids][:limit]
-            window = min(window * 2, _FTS_WINDOW_CAP)
+        # #3301: passing THIS port's own set rather than the read surface's
+        # wider OBJECT vocabulary also preserves the decision it encodes — a
+        # SUPERSEDED Object is still resolvable here (its state render IS the
+        # answer to a current-state question); only ``retracted`` is excluded.
+        from tortoise.search_engine import run_fts_query
+        hits = run_fts_query(
+            proj.g, term, entity_type="object", limit=limit,
+            excluded_statuses=tuple(sorted(
+                _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)))
+        # ``run_fts_query`` already returns index order (score DESC, id ASC)
+        # and omits nothing this port must re-admit; an id-less Object (the
+        # #3019 MERGE-by-name shape) can never be a candidate, so it is
+        # dropped rather than returned as the string "None".
+        ids = [str(oid) for oid, _score in hits if oid]
+        if not ids:
+            return []
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id IN $ids RETURN o.id, o.name",
+            params={"ids": ids}).result_set
+        names = {str(r[0]): (r[1] or "") for r in rows}
+        return [{"id": oid, "name": names.get(oid, "")} for oid in ids]
 
     def alias_objects(term: str, limit: int = 8) -> list[dict]:
         tokens = [t for t in re.split(r"[^a-z0-9]+", term.lower())
