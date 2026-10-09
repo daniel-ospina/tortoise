@@ -612,11 +612,15 @@ def test_status_reports_entity_bearing_paths_unescaped(tmp_path):
     The plist stores `&`/`<` escaped (that is what makes rendering
     well-formed); a reader that forgot to unescape would report the operator a
     path that does not exist on disk — the same lie, in the other direction.
-    BOTH the tool and the queue are entity-bearing here, because unescaping is
-    done per value and dropping it from one call site is otherwise invisible.
+    BOTH the tool, the queue AND THE INTERPRETER are entity-bearing here —
+    unescaping is done per value, and a value that carries no `&`/`<` cannot
+    tell its call site apart from a deleted one. (A real install from
+    `tmp_path/"R&D <lab>"/repo` resolves the interpreter to
+    `<repo>/.venv/bin/python`, so the interpreter line is entity-bearing in
+    exactly the case this test builds.)
 
-    Mutation: drop the `_plist_unescape` call on either the tool or the queue ->
-    the block shows `R&amp;D` / `&lt;lab&gt;` -> RED.
+    Mutation: drop the `_plist_unescape` call on ANY of the three (tool, queue,
+    interpreter) -> the block shows `R&amp;D` / `&lt;lab&gt;` -> RED.
     """
     sb = _sandbox(tmp_path)
     tricky = tmp_path / "R&D <lab>" / "repo"
@@ -627,12 +631,18 @@ def test_status_reports_entity_bearing_paths_unescaped(tmp_path):
     qfile.parent.mkdir(parents=True)
     qfile.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
     sb["env"]["CLAIMS_QUEUE"] = str(qfile)
+    # Satisfies BOTH install_preflight probes (`-x` and the >= 3.12 `-c` call).
+    stub = tricky / "venv" / "bin" / "python"
+    stub.parent.mkdir(parents=True)
+    _write_stub(stub.parent, "python", "#!/usr/bin/env bash\nexit 0\n")
+    sb["env"]["PYTHON_BIN"] = str(stub)
     target = tmp_path / "agents"
     assert _install(sb, target).returncode == 0
     res = _status(sb, target)
     installed = res.stdout.split("installed job (read FROM the plist")[1]
     assert f"  tool       : {tricky / 'tools' / 'queue_reconcile.py'}" in installed, res.stdout
     assert f"  queue      : {qfile}" in installed, res.stdout
+    assert f"  interpreter: {stub}" in installed, res.stdout
     assert "&amp;" not in installed, res.stdout
     assert "&lt;" not in installed, res.stdout
     assert "&gt;" not in installed, res.stdout
