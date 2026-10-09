@@ -862,8 +862,8 @@ def test_resolver_docker_fts_paraphrase(_docker_sdk, force_sparse_tfidf):
     index (``search_engine.run_fts_query``), so the vector half never enters
     it — but pinning keeps THIS test's assertion independent of whichever
     decomposition the lane happens to run. The shipped-configuration
-    counterpart is ``test_resolver_docker_embedder_on_...`` (see the note
-    below ``resolve_subjects``' leg 2 in ``tortoise/assembly.py``)."""
+    counterpart is ``test_resolver_docker_embedder_on_...`` (see the #3223
+    note in ``docker_resolver_port.fts_objects``)."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
