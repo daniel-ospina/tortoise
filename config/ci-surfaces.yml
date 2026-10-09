@@ -885,6 +885,12 @@ surfaces:
   # hand count. Same surface as its siblings test_merge_throughput.py /
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
+  # #7800: the queue reconciliation tool. Hermetic (no DB, no network — every
+  # live read is injected through a FakeResolver), so `core` can run it; it pins
+  # tools/queue_reconcile.py, the instrument that re-checks CLAIMS.tsv against
+  # measured GitHub state after a merge (row 7678 read BLOCKED while PR #7686
+  # had merged). Same surface as its queue siblings above.
+  - test_queue_reconcile.py
   - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
@@ -3710,6 +3716,7 @@ durations:
   test_pr_lead_time.py: 0.2
   test_pytest_attribution.py: 0.3
   test_queue_conflict_census.py: 0.5
+  test_queue_reconcile.py: 0.6  # unmeasured
   test_queue_window_observe.py: 0.6
   test_registry_integrity.py: 0.7
   test_salience_labels_4917.py: 0.1
