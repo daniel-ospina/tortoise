@@ -915,8 +915,35 @@ const SKEL_LABEL = { width: '45%', height: '1.2em' }
 // button convention used by the build fork and the key rows). The three-way
 // intent is deliberately NOT preserved: keeping "click anywhere copies" would
 // require the container to stay a control, which is the violation itself.
+// #2935: a copy control must not claim a success it did not have. `writeText`
+// returns a promise that REJECTS asynchronously on a refused write (clipboard
+// permission denied, non-secure context, no user activation). A synchronous
+// `try { writeText() } catch {}` never sees that rejection — it catches only a
+// *missing* clipboard — so every such site flipped its label to 'Copied ✓'
+// (and announced it through the live region) while the clipboard still held the
+// previous contents. Resolve the write, then decide.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// #2935: the inline copy buttons carry their outcome in their own label, so a
+// refused write must not read as a success. `label` is the button's resting
+// text, restored after the flash.
+async function copyInline(e, text, label) {
+  const btn = e.currentTarget
+  const ok = await copyText(text)
+  btn.textContent = ok ? 'Copied' : 'Copy failed'
+  setTimeout(() => { btn.textContent = label }, ok ? 1600 : 4000)
+}
+
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
+  const [copyFailed, setCopyFailed] = React.useState(false)
   // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
   // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
   // landmarks, and a shared "Setup prompt" name made them
@@ -927,8 +954,16 @@ function WizardPromptCard({ text, label }) {
   // circles above them own the order, so the button/region names describe the
   // PROMPT instead ("Copy the connect prompt" → "the connect prompt").
   const regionLabel = label ? label.replace(/^Copy\s+/i, '') : 'Setup prompt'
-  const doCopy = React.useCallback(() => {
-    navigator.clipboard.writeText(text)
+  const doCopy = React.useCallback(async () => {
+    // #2935: `copied` drives both the 'Copied ✓' label and the live region, so
+    // it is set only from a resolved write. On a refused write the prompt stays
+    // on screen and the alert below names the real fallback.
+    if (!(await copyText(text))) {
+      setCopied(false)
+      setCopyFailed(true)
+      return
+    }
+    setCopyFailed(false)
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
   }, [text])
@@ -946,9 +981,14 @@ function WizardPromptCard({ text, label }) {
       <div className="wizard-prompt-actions">
         <button type="button" className={copied ? 'ghost small' : 'btn-primary small'}
           onClick={doCopy}>
-          {copied ? 'Copied ✓' : (label || 'Copy')}
+          {copied ? 'Copied ✓' : (copyFailed ? 'Copy failed' : (label || 'Copy'))}
         </button>
       </div>
+      {copyFailed && (
+        <p className="error small" role="alert" style={{ marginTop: 8 }}>
+          Your browser blocked the clipboard — select the text above and press ⌘/Ctrl-C.
+        </p>
+      )}
     </div>
   )
 }
@@ -1817,8 +1857,11 @@ function claimIntentInFlight() {
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
   const [copiedStep, setCopiedStep] = React.useState('')
-  function wizardCopyStep(text) {
-    try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
+  async function wizardCopyStep(text) {
+    // #2935: the `try` here used to be decorative — the rejection is async, so
+    // 'Copied ✓' showed over an unchanged clipboard. Only a resolved write is a
+    // copy; a refused one claims nothing.
+    if (!(await copyText(text))) { setCopiedStep(''); return }
     setCopiedStep(text)
     setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 1600)  // review: mounted-guard the flash timer (setState after unmount)
   }
@@ -3266,8 +3309,9 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
-  function wizardCopy(text, label) {
-    try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
+  async function wizardCopy(text, label) {
+    // #2935: see wizardCopyStep — same decorative try, same false 'Copied ✓'.
+    if (!(await copyText(text))) { setWizardCopied(''); return }
     setWizardCopied(label)
     if (label !== 'harness') {
       // #1691: the harness label is STICKY on purpose — the positive
@@ -7775,7 +7819,7 @@ function claimIntentInFlight() {
                               <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
                                 {harnessKey}
                               </code>
-                              <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
+                              <button type="button" className="btn-primary" onClick={(e) => copyInline(e, harnessKey, 'Copy')}>
                                 Copy
                               </button>
                             </div>
@@ -7863,7 +7907,7 @@ function claimIntentInFlight() {
                         <div className="key-row">
                           <p className="dim small">Your API key:</p>
                           <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                          <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
+                          <button type="button" className="btn-primary small" onClick={(e) => copyInline(e, harnessKey, 'Copy')}>Copy</button>
                         </div>
                       ) : null
 
@@ -7932,7 +7976,7 @@ function claimIntentInFlight() {
                               <li>Name: <strong>Tortoise</strong></li>
                               <li>Server URL: <code>{CANONICAL_MCP_URL}</code>
                                 <button type="button" className="ghost small" style={{ marginLeft: '0.5rem' }}
-                                  onClick={() => navigator.clipboard?.writeText(CANONICAL_MCP_URL)}>Copy URL</button>
+                                  onClick={(e) => copyInline(e, CANONICAL_MCP_URL, 'Copy URL')}>Copy URL</button>
                               </li>
                             </ul>
                             <p className="wizard-caption">
@@ -9253,11 +9297,7 @@ function claimIntentInFlight() {
                   <button
                     type="button"
                     className="snippet-copy"
-                    onClick={(e) => {
-                      try { navigator.clipboard.writeText(firstDataSnippet) } catch { /* clipboard blocked */ }
-                      e.currentTarget.textContent = 'Copied'
-                      setTimeout(() => { e.currentTarget.textContent = 'Copy' }, 1600)
-                    }}
+                    onClick={(e) => copyInline(e, firstDataSnippet, 'Copy')}
                   >
                     Copy
                   </button>
