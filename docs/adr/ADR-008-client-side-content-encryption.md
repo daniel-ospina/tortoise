@@ -116,6 +116,7 @@ the 7714 data-model plan reserving `encryptionVersion` + `_searchText` so
 
 **Phase 2 — post-GA (trigger: first privacy-sensitive prospect or security
 questionnaire):**
+
 1. `tortoise/crypto.py` — AES-256-GCM envelope (~250 lines) + HKDF key
    derivation from team secret.
 2. Write-path: SDK `create_point`/`ingest` encrypt content, derive

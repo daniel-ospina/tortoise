@@ -9,6 +9,7 @@
 **Team:** unknown | **Role:** product-implementer
 
 **Architecture (v4 decision — controller, 2026-08-08):**
+
 - **#596 backs up per-team knowledge graphs** (team namespaces in FalkorDB) — NOT the registry. The registry/control-plane metadata migrates to Supabase under **#669** (managed backups + PITR); any registry backup/restore/restore-and-rotate machinery is explicitly NOT built here (no build-then-delete). Registry sections of the scoping plan (§3.3/§3.5/§3.1-registry-rows) are **superseded by #669**.
 - External GH Actions cron driver calls internal-key endpoints on the Fly app (independent failure domain — the app OOM-crash-loops per #545). A read-only in-process staleness daemon (driver-disabled leg) files alerts directly; the driver's own direct R2 freshness check covers the app-down leg.
 - Alerts = GitHub issue (agent) + Telegram push (human) — **#673's Telegram leg is ABSORBED into Task 5** (issue #673 closed-as-absorbed). **Telegram creds exist in BOTH Fly (daemon-side pushes) and GH secrets (driver-side pushes for the app-down/daemon-dead legs — send-only token, acceptable exposure, same trust class as the R2 creds already in GH)**; both sinks share the R2 dedup authority (v2.1 P2-1 resolution: driver-filed incidents — APP_DOWN/WATCHER_DOWN/direct-STALE/R2_DOWN/ALERTER_DOWN — also push Telegram).
@@ -58,6 +59,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** Config parses/validates all vars (sweep thresholds, retention, size guard, Telegram, GitHub, watcher cadence); defaults unit-tested; missing syncable secret when enabled → clear boot error; `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` required-when-enabled (missing → boot error when alerting on); `GH_REPO` defaulted with explicit-empty → boot error when enabled.
 
 **Files:**
+
 - Create: `tortoise/backup_config.py`, `tests/test_backup_config.py`
 
 ### Task 2: `keep_hourly` retention extension
@@ -67,6 +69,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** `prune_backups(..., keep_hourly=24, keep_daily=7, keep_weekly=4)` per-team; **semantics (v2.2 P2-1 — the interplay that pins retention): when `keep_hourly > 0`, the hourly window (keep ALL backups younger than `keep_hourly` hours) PLUS hour-bucket anchors (one per hour-bucket, bounded by the `keep_daily` horizon as anchor count) REPLACE the daily keep-all rule** — the existing "keep all < keep_daily days" branch is skipped in keep_hourly mode (otherwise anchors never bind and each team retains ~168 objects/week at hourly cadence); `keep_hourly=0` restores existing behavior byte-for-byte; newest-never-deleted; idempotent; **discriminating boundary test (v2.2): backups at hours {1, 23, 25, 49, 167, 169} with keep_hourly=24/keep_daily=7/keep_weekly=4 → assert the EXACT survivor set (~35 objects — the three keep-all/anchors variants must fail it)**; boundary cases (23:59/00:01, ISO week) tested; all 67 existing hosted_backup tests green; team key-shape round-trip test passes.
 
 **Files:**
+
 - Modify: `tortoise/hosted_backup.py`, `tests/test_hosted_backup.py`
 
 ### Task 3: Conditional-create storage primitive
@@ -76,6 +79,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** `R2Storage.create_if_not_exists(key, body)` → True on create / False on 412 (monkeypatched boto3); **HEAD-check + list-based adoption fallback implemented** (scoping §10 fallback — the dedup authority must not silently degrade); `MemoryStorage` identical.
 
 **Files:**
+
 - Modify: `tortoise/hosted_backup.py`, `tests/test_hosted_backup.py`
 
 ### Task 4: Backup sweep routine (`run_backup_sweep`)
@@ -85,6 +89,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** Enumerates teams from the seam (registry now → Supabase post-#669); **0 teams → `{"status":"no_teams"}` only on a CONFIRMED-EMPTY enumeration — an enum-source failure (registry down at first sweep) is NOT classified as chronic NO_TEAMS (mirrors `list_backups` fail-closed; v2.2 P4-2)** — never fake success, never an incident; per-team dump with size-guard abort (>100k → event + alert, no dump); DATA_LOSS_CANDIDATE per team fires only on transition (>0→0 or >50% drop vs that team's prior counts persisted in `ops/teams/{team}/state.json`), steady-0 team = signal not incident; **repeated-empty alert identity (v2.2 P3): the P0-guard's empty-dump alert ADOPTS/REUSES the open DATA_LOSS_CANDIDATE incident (stable key kind+team while active, delete-to-resolve on recovery) — a wiped team must produce ONE issue + ONE Telegram per incident, not per hour; two-cycle test asserts one issue**; **enumeration-delta guard (v2.1 P2-2): prior team count persisted in `ops/state.json`; an N>0→0 team-universe transition files an incident (a wiped enumeration source must not degrade silently to the chronic NO_TEAMS state); chronic-0 stays non-incident; a partial wipe (N→N-1) of a never-backed-up team is an accepted residual (no R2 prefix → no STALE leg; v2.2 P4-2)**; **P0-guard per team: `manifest.graph_name` == `f'org_{org_id}'` derived from the SEAM enumeration (independent of the dump projection — not tautological) AND `node_count >= 1`; wrong-name or empty ⇒ delete the just-uploaded objects + alert**; serialized per-team lock; prune per team.
 
 **Files:**
+
 - Create: `tortoise/backup_sweep.py`, `tests/test_backup_sweep.py`
 
 ### Task 5: Alert store — GitHub issue + Telegram push (absorbs #673)
@@ -94,6 +99,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** Create-once-first/file-second with adoption branch (placeholder without issue_number → adopter becomes filer — the create-then-die window never leaves an incident silent); per-incident dedup (redeploy mid-incident → 1 issue + 1 Telegram message); recovery → close + delete + "resolved" Telegram; Telegram API down → issue still files, push retried **from the R2 pending-push state by the DAEMON on its next poll (owner pinned, v2.1)**; filing-failure never deletes dedup objects; `dr:backup` label idempotent; issues created with `BACKUP_ALERT_ASSIGNEE`; **#673 closed-as-absorbed after this task lands. Per-team R2 object map (v2.1 P3-1): `backups/{org_id}/{ts}_{rnd}/dump.enc`+manifest, `ops/teams/{team}/state.json` (source, latest_backup_at, latest_object_key, node_count, counts), `ops/state.json` (team count for the delta guard, watcher/driver heartbeats), `ops/alerts/{KIND}-{ts}.json`, `ops/pending-push/`, `ops/simulate/`, `ops/suppression.json`.**
 
 **Files:**
+
 - Create: `tortoise/github_issue.py`, `tortoise/alert_store.py`, `tests/test_github_issue.py`, `tests/test_alert_store.py`
 - Modify: `tortoise/backup_config.py` (Telegram vars)
 
@@ -104,6 +110,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** `compute_status` table-tested (per-team never/stamp-missing/stale, **NO_TEAMS steady-state → signal not incident**, **per-team universe = SEAM ENUMERATION ∪ R2 team prefixes under `backups/` (v2.2 P3-1): `never` computed over seam-enumerated teams lacking any R2 archive; R2-prefix set governs STALE/BACKUP_SET_MISSING — a team whose archives age without a live enum entry still STALEs; NEVER-detection when the app is down = accepted residual, runbook-documented**, post-restore grace, thresholds, DRIVER_DOWN, boot grace, R2-down UNKNOWN on fresh boot, BACKUP_SET_MISSING per team on confirmed-empty); daemon files once, adopts on restart, closes+deletes on recovery; **process `ops/pending-push/` retries each poll (v2.2 P4 — the Task 5 retry owner bound into the loop)**; no graph writes (asserted); simulate-stale → issue ≤2 polls; **watchdog restarts an exited daemon thread (unit test stops the poll loop); explicit socket timeouts; RSS trend memory guard; expired simulate objects ignored**; spawn gated on config + test-env signal.
 
 **Files:**
+
 - Create: `tortoise/backup_watcher.py`, `tests/test_backup_watcher.py`
 - Modify: `tortoise/hosted_api.py` (`_lifespan` spawn), `tortoise/backup_config.py`
 
@@ -114,6 +121,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** `POST /v1/internal/backups/sweep` (202/skip/lock semantics, per-team results), `GET /v1/internal/backups/status` (per-team tri-state, NO_TEAMS, counts, daemon-not-running, r2_ok, gh_ok, watcher heartbeat age), `POST /v1/internal/driver/heartbeat`, simulate-stale|recover (403 when disabled), re-baseline (operator-gated, per team), **drill endpoint (`drill:true` only; internal-key auth; `target_graph` = `^_drill_` scratch only (v2.2 P4 — `registry_drill_` vestige trimmed); reuse the SHIPPED `restore_backup` verification stack; ISOLATION-CHECK DECOUPLING (v2.1 P2-2): manifest/payload graph-isolation checks bind to the CANONICAL `graph_name` (`restore_backup(org_id, graph_name=canonical, target_graph=scratch)`), ALL live-phase ops (empty-guard read, pre-restore copy, delete, swap) bind to `target_graph`; exact-name spy asserts no destructive call references any live team graph; `restore_backup`'s end-stamp (`Team.backup_restored_at`) SKIPPED when `drill:true` — **a `drill:true` flag param on `restore_backup` in addition to `target_graph` (v2.2 P4 — listed in Files)** — integration test asserts registry write-count == 0 across a drill; ≥1h cooldown, in-memory, resets on restart — stated)**; **boot GC sweeps `_drill_*`/`registry_drill_*` + `*_restore_*`/`*_pre_restore_*` (suffix forms matching shipped staging names) older than N hours**; integration tests via `internal_client`. **`drill:false` production restore: NOT in scope (returns 501) — restore-and-rotate retires with the registry (#669).**
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py`, `tortoise/hosted_backup.py` (`target_graph` + `drill:true` end-stamp-skip flags), `tests/test_hosted_api.py`, `tests/test_backup_sweep.py`
 
 ### Task 8: Driver workflow + script
@@ -123,6 +131,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** `registry-backup-cron.yml` (hourly cron + dispatch inputs, permissions issues:write, concurrency group; **"registry" naming retained from the registry-era design — content is per-team (v2.2 P4)**); script shellcheck-clean; APP_DOWN classification (connect-failure vs app-503/429); kill-switch skip; direct R2 STALE independent of /status (**team list from R2 top-level prefixes under `backups/` — app-down-independent; per-team thresholds from workflow env `BACKUP_STALE_*` PINNED IDENTICAL to the daemon's config thresholds in the runbook + Task 11 E2E (v2.2 P4-1 — divergence would flap STALE/recovery between the two watchers); a never-backed-up team while app is down = accepted residual, runbook-documented**); listing-failure never confirmed-empty; R2_DOWN + ALERTER_DOWN legs; **files WATCHER_DOWN when `/status` reports stale watcher heartbeat + `r2_ok: true`**; **self-heal closes APP_DOWN/WATCHER_DOWN/STALE EXCLUDING simulate-triggered STALE**; **driver-side filings participate in the same create-once dedup (aws CLI conditional put) with GH-search fallback AND push Telegram (TELEGRAM_BOT_TOKEN/CHAT_ID as GH secrets — v2.1 P2-1: the app-down/daemon-dead legs are exactly when the human channel matters)**; reconcile skipped when run returns 202; staging dispatch produces objects + heartbeat; recovery closes issues.
 
 **Files:**
+
 - Create: `.github/workflows/registry-backup-cron.yml`, `.github/scripts/registry-cron.sh`
 
 ### Task 9: Drill workflow + rollout execution
@@ -132,6 +141,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** Rollout drill executed within 2 weeks of completion (operator-invoked, documented commands; **requires ≥1 team archive — in the chronic 0-teams state, run against a seeded scratch graph or defer with a recorded reason (v2.1 P3)**; operator supplies `org_id`+`backup_key`, default = newest non-empty archive across teams): counts match, content spot-check 0 mismatches, swap rehearsal passes, indexes present, **no production safety export created (asserted — the pre-restore copy is of the scratch target; the meaningful check is graph-level count before == after)** , production graph provably untouched (graph-level count before == after), scratch cleaned, no tenant 503s, endpoint-side RTO < 15 min; metrics posted as an issue comment.
 
 **Files:**
+
 - Create: `.github/workflows/registry-restore-drill.yml`, `.github/scripts/registry-drill.sh`
 
 ### Task 10: Wiring + secrets + docs
@@ -141,6 +151,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** deploy-hosted.yml updated (sync Telegram + new secrets; `enabled=true` only when ALL syncable secrets present — **the gate condition names `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` explicitly**; **create GH secrets `INTERNAL_API_URL`, `GITHUB_ISSUES_PAT`, `BACKUP_ALERT_ASSIGNEE`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` BEFORE the deploy change that can set `enabled=true`; post-deploy verify `/status` reports `enabled: true`**); `.env.example` covers all vars; `docs/ops/registry-backup-dr.md` (architecture, R2 layout per-team, alert taxonomy incl. Telegram triage + assignee + the app-down/NEVER-detection blind spots, drill execution, suppression, simulations, secret rotation incl. Telegram, GH single-provider axis, re-drill mandate); **`docs/00_index.md` CREATED (routing index entry — verified it does not exist)**; `docs/registry-graph-schema.md` updated. **Execution note (v2.1 P4): Tasks 1-10 land as a SINGLE PR; the agent runs the `gh secret set` commands at Task 10 before merging; the deploy change references only secrets that exist.**
 
 **Files:**
+
 - Modify: `.github/workflows/deploy-hosted.yml`, `.env.example`, `docs/registry-graph-schema.md`
 - Create: `docs/ops/registry-backup-dr.md`, `docs/00_index.md`
 
@@ -151,6 +162,7 @@ Skipped — no user-facing journeys (backend/infra). Operator journeys covered b
 **Acceptance:** E2E checklist executed against staging: dispatch → per-team objects in R2; simulate-stale → STALE issue + Telegram ≤20 min with label + assignee; redeploy mid-incident → no duplicate; **driver-disabled leg: disable workflow → daemon files STALE itself + DRIVER_DOWN**; app-down leg (simulate_app_down) → APP_DOWN, exit 0, self-heal; **crash-loop leg: restart app repeatedly → driver's direct R2 check files STALE**; watcher-down → WATCHER_DOWN; retention backdated simulation; re-baseline E2E; restore-key absence N/A (drill internal-key only); OOM sanity across cycles.
 
 **Files:**
+
 - Test: staging environment (checklist in `docs/ops/registry-backup-dr.md`)
 
 ---

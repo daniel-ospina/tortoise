@@ -122,6 +122,7 @@ lanes: embedded (carve-out) + docker (`TORTOISE_DB_URI` set, immunity check).
 The cycle-1 design ("kill the anchor between seed and request") was wrong: the
 seed is already collected by then (harmlessly), so it cannot discriminate the
 GC-NOSAVE trigger. Deterministic construction instead:
+
 1. Anchor held (lifespan pin) → seed dropped → drift-evict → `gc.collect()`
    between evict-close and new-anchor connect — **construction only; outcome
    feeds the step-3 discriminator (do NOT assert a kill here: under
@@ -223,6 +224,7 @@ batch), not a quota/health signal.
 ## External Research (Phase 1.5)
 
 ### Axis Research
+>
 > **Trigger assessment:** axes low (UX=low, Ontology=low, Architecture=medium).
 > Architecture fires on the `_anchor_usable`/keepalive change surface, but the
 > fix pattern is **in-repo precedent** (f69c775d, #1497, #1502, #1607, #1556,
@@ -246,6 +248,7 @@ batch), not a quota/health signal.
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1
+
 - Verifier A: P0=0, P1=2, P2=3, P3=1, P4=1 — P1-1: "observed set = exposed set"
   overclaim (3 no-SDK-hold tests + TestPurge; requires_owner is masked);
   P1-2: trigger disagreement merged, not reconciled (need hybrid synthesis).
@@ -257,7 +260,9 @@ batch), not a quota/health signal.
   synthesis, corrected blast radius, added fix family (b), widened symptoms,
   qualified fixture mode, added prior art. Incorporated P2s (exposed-set
   classification, TestPurge, repro-protocol note, `_anchor_usable` line refs).
+
 ### problem-verify — Cycle 2
+
 - Verifier A: P0=0, P1=0, P2=3, P3=2 — APPROVED. P2-1: trigger-timing
   sub-claim "cyclic GC inside an eviction window" contradicted by probes
   (refcount-at-scope-exit vs cycle-pinned — recorded as open sub-question;
@@ -276,7 +281,9 @@ batch), not a quota/health signal.
   trigger discriminator + instrumentation); P3s (line refs export_team:7840 /
   delete_team:8909; family (a) widened to ALL dropped seeds incl. TestPurge +
   _registry_count; falkordblite `CLIENT LIST` source cited).
+
 ### problem-verify — Cycle 3 (FINAL)
+
 - Verifier A: P0=0, P1=0, P2=2, P3=3, P4=1 — APPROVED, ready for solution
   diamond. P2s: missing #1950 precedent (now added — proves fix (b1) in-repo);
   0/1/2-client parenthetical contradicted verified `_gc_close` count>1
@@ -306,6 +313,7 @@ batch), not a quota/health signal.
 Files touched: `tests/test_export_delete.py` + `tests/test_free_team_entitlement.py`
 (client :59-80, reg_client :244-270). **No production code, no CI config changes.**
 (Framing label corrected: NOT "test_export_delete only" — it is "test_export_delete
+
 + one cross-file churn representative", the gate-mandated second symptom class.)
 
 Rationale (quality-over-convenience): (b1) kills the deterministic churn enabler;
@@ -378,6 +386,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 (CARVE_OUT=1, URI unset) + `uv sync`.
 
 **Step 1 — RED (instrumentation + masked pin, no fix yet).**
+
 - Eviction counter in `reg_client`: install AFTER `_patch_tortoise_sdk_init`
   (which clears). **⚠️ P1 fix (cycle 2) — counter mechanics (FINAL):**
   - Use a `dict`-subclass replacement of `ha_mod._FALLBACK_KEEPALIVE`
@@ -437,6 +446,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 - Gate G1 (RED): counter ≥1 deterministically on the embedded carve-out lane.
 
 **Step 2 — GREEN (b1 pin + restore-close).**
+
 - `sb_client` + `reg_client`: `os.environ["TORTOISE_DB_PATH"] = db_path` right
   after `_patch_tortoise_sdk_init(db_path)` — verbatim #1950 pin
   (tests/test_hosted_api.py:174-202 rationale) + #1950's companion close-at-
@@ -461,6 +471,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 - Gate G2: fresh-context verifier on the fixture change (#1502/#1950 invariants).
 
 **Step 3 — seed-hold (family a).**
+
 - Module `_SEED_SDKS: list[TortoiseSDK] = []` (test_suspension_parity:156
   precedent, typed); `_seed_registry` (:195-214) and `_registry_count` (:219-230)
   append their SDKs (append BEFORE the writes/return — precedent
@@ -493,6 +504,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 - Gate G3: full gate green ×10 embedded (stability evidence).
 
 **Step 4 — cross-file churn representative (`tests/test_free_team_entitlement.py`).**
+
 - `client` (:59-80, supabase) + `reg_client` (:244-270, registry): same b1 pin +
   close-at-restore migration (they currently clear-without-close — the leak
   pattern).
@@ -503,6 +515,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 - Gate G4: verifier on the representative migration; gate set green both lanes.
 
 **Step 5 — full regression gate, both lanes.**
+
 - Embedded (carve-out): `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_export_delete.py tests/test_free_team_entitlement.py`
 - Docker (immunity): `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest ...`
   — ⚠️ annotation (CORRECTED per review gates — P2): docker-lane runs of these
@@ -524,6 +537,7 @@ sub-question resolution in §Fix-phase experiment. Prereqs: carve-out shape
 - Gate G5: all green, ×10 embedded, both lanes; zero churn-class flakes.
 
 **Step 6 — CI streak + follow-ups.**
+
 - **⚠️ P1 fix — acceptance re-scope:** the fix PR (test files + docs) selects
   tier-2 `full=false` (tools/ci_selection.py; tests/test_export_delete.py is
   api-surface, config/ci-surfaces.yml:58) → the PR gets ONLY tier-2 embedded
@@ -587,6 +601,7 @@ cancel-in-progress, python-ci.yml:104-110).
 scoping (#2090)` → file).
 **Enter-pin-failure rationale (CORRECTED, P3 devil's advocate):** the fix
 works for the enter-pin-`_get_proj()`-failure variant via **path-aligned reads
+
 + seed-hold**, NOT anchor reuse — under that variant the enter anchor has
 `_proj=None` → `_anchor_usable` False → evict+recreate every call (the pin
 cannot fix a `proj is None` failure); seed-hold keeps the data alive and the
@@ -643,6 +658,7 @@ landed 2026-08-19 10:53 (5e0c7d30). Failing PRs' CI runs all postdate it:
    guard); documented in this scoping doc; no design cycle.
 
 ## solution-verify — Cycle 1 log
+
 - Verifier A: P0=0, P1=0, P2=4, P3=5 — VERIFIED. P2s: escalation trigger for
   B-pull-forward; _close_keepalive_anchors source; masked-pin/seed-hold
   ordering; follow-up wave boundaries.
@@ -659,6 +675,7 @@ landed 2026-08-19 10:53 (5e0c7d30). Failing PRs' CI runs all postdate it:
 - Re-dispatching both verifiers (cycle 2)…
 
 ### solution-verify — Cycle 2
+
 - Verifier A: P0=0, P1=1, P3=2 — NOT APPROVED as written. P1 (converge-quality):
   the path-drift discriminator is mechanically broken — both eviction sites
   close() BEFORE pop (hosted_api.py:160-162/:203-205) and close() nulls `_proj`
@@ -688,6 +705,7 @@ landed 2026-08-19 10:53 (5e0c7d30). Failing PRs' CI runs all postdate it:
 - Re-dispatching both verifiers (cycle 3 — final)…
 
 ### solution-verify — Cycle 3 (FINAL)
+
 - Verifier A: P0=0, P1=0, P2=0, P3=1, P4=2 — APPROVED, execution-ready.
   `_db_path` discriminator verified end-to-end (init precedence sdk.py:1108-1131,
   close-survival, both eviction sites, env-path replication exact incl. OSError
@@ -707,6 +725,7 @@ landed 2026-08-19 10:53 (5e0c7d30). Failing PRs' CI runs all postdate it:
   Plan execution-ready (executing-plans → commit-workflow).
 
 ## Phase 5.6 — Second-Model Coherence Check (DONE — deepseek-v4-pro)
+
 No P0/P1 — cross-diamond coherence strong. P2: counter assert operator
 (`>=` for RED, `== 0` for GREEN — fixed in Step 1). P3s: a-only tradeoff
 sentence (added); docker acceptance unmeasurable on PR (accepted — docker
@@ -716,6 +735,7 @@ framing softened; experiment coupling wording; import coupling (resolved by
 local-copy decision).
 
 ## Phase 7 — Parallel Review Gates (DONE — 3 agents + second-model; epic
+
 alignment skipped — standalone)
 All agents: **no P0/P1**. Codebase & Docs: P2-1 docker-gate annotation
 corrected (projection redirect → real URI data-plane coverage; keepalive
@@ -736,6 +756,7 @@ exposed set widened.
 ## Phase 8 — Finalize (re-review cycle + plan comment pending)
 
 ### Phase 7 — Re-review cycle (2 agents)
+
 - Agent 1 (mechanism/codebase): conditional PASS — 1 new P1 (lint tripwire scope:
   blanket tripwire reds ~25 pre-existing unpinned files), 2 P2s (wave
   decomposition leaves ~15-17 named-helper files unwaved; #1502 pair claimed in
@@ -761,6 +782,7 @@ exposed set widened.
 ## Phase 8 — Finalize
 
 ### Confirmed Problem
+
 Within-test embedded-lane data loss → intermittent 403s in tests/test_export_delete.py
 registry tests on the CI tier-2 URI-less lane. Mechanism: fixture patch + no
 TORTOISE_DB_PATH pin → keepalive anchor evicted per call (0-other-client
@@ -771,6 +793,7 @@ per-test tempdirs). Family confidence 90; trigger timing (refcount-vs-cyclic-GC)
 open at 70 — resolved by the Step-0 experiment.
 
 ### Verification Gates
+
 - problem-verify: 3 cycles, clean (P1s fixed in cycle 1; P2s incorporated).
 - solution-verify: 3 cycles, clean (P1s fixed in cycles 1-2; final cycle
   approved).
@@ -779,15 +802,19 @@ open at 70 — resolved by the Step-0 experiment.
   P0/P1.
 
 ### Plan
+
 See Implementation plan (Steps 0-6, gates G1-G6) above. Files: 2 test files +
 docs. No production/CI changes.
 
 ### Clarifications
+
 None — no questions qualified (problem well-specified by issue + verified root
 cause).
 
 ### External Research (Phase 1.5 artifact)
+
 ### Axis Research
+>
 > **Trigger assessment:** axes low (UX=low, Ontology=low, Architecture=medium).
 > Architecture fires on the _anchor_usable/keepalive change surface, but the fix
 > pattern is in-repo precedent (f69c775d, #1497, #1502, #1607, #1556,
@@ -797,10 +824,12 @@ cause).
 > scan found 3+ examples).
 
 ### Integration Docs
+
 No new deps (falkordblite 0.10.0 vendored; redislite client semantics per
 `.venv/lib/python3.12/site-packages/redislite/client.py:183-200` CLIENT LIST).
 
 ### Rejected Alternatives
+
 - Runner DB pollution / quota (original issue) — refuted (no quota code;
   fresh VM + fresh container per job; per-test tempdirs). Pollution intuition
   survives only as within-run path-drift (the confirmed mechanism).
@@ -816,6 +845,7 @@ No new deps (falkordblite 0.10.0 vendored; redislite client semantics per
   as optional follow-up.
 
 ### Wiring Check
+
 | Touch Point | Type | Covered By | Status |
 |---|---|---|---|
 | test_export_delete fixtures (sb/reg_client) | test infra | b1 pin + restore-close (Step 2) | ✅ planned |
@@ -829,10 +859,12 @@ No new deps (falkordblite 0.10.0 vendored; redislite client semantics per
 | embedded keepalive durability | production | follow-up 2 (C2, optional) | ✅ filed as follow-up |
 
 ### Review Cycle Log
+
 See problem-verify cycles 1-3, solution-verify cycles 1-3, Phase 5.6, Phase 7
 (+ re-review) above.
 
 ### Complexity
+
 | Domain | Rating |
 |---|---|
 | Config (CI/infra) | standard |

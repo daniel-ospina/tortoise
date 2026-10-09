@@ -237,6 +237,7 @@ tolerance — see E2E-2).
 > without UI detail. The detailed E2E tests in `epic-plan` flesh these out.
 
 ### E2E-1: Why-layer conflict-surfacing (the headline)
+
 **Given:** a state (Point) in the graph with active NANDs and a contested
 claim (P9) against it; a user/agent recalls it through an EXISTING recall
 surface (ask lane (eval-only) / analyze / search / MCP).
@@ -256,6 +257,7 @@ full A/B vs confidence-only validation is an eval-phase artifact of the
 W3 why-layer suite / W7, not an E2E gate here).
 
 ### E2E-2: Write-path planted-gold survival (the W2 benchmark)
+
 **Given:** a planted-gold corpus (fictional sessions, salient units with
 verbatim anchors, true-but-routine distractors, attribution hazards) and a
 frozen, sealed answer key.
@@ -273,6 +275,7 @@ the benchmark + competitor data, not before it.
 the benchmark can fail, and the failure is publishable.
 
 ### E2E-3: Reflex know-to-ask / false-fire (the W3 harness)
+
 **Given:** a scripted-conversation fixture with sealed gold (per-turn
 should_retrieve labels), replayed through Tortoise's real seams (MCP
 tools / claude-hooks / session_import).
@@ -287,6 +290,7 @@ decision); write-back fidelity + provenance and continuity pairs pass.
 superseded facts don't surface as current.
 
 ### E2E-4: Source-isolation gates at zero (the W3 guard)
+
 **Given:** the W3 harness running all suites (know-to-ask, push, write-back,
 continuity, why-layer) across a multi-source / multi-team graph fixture.
 **When:** any suite's replay writes or injects memory.
@@ -297,6 +301,7 @@ pairs.
 reranker during hermetic runs).
 
 ### E2E-5: Ingestion toggle — engine contract, aligned with #1976 (W5 QUALITY work; UI deferred)
+
 **Given:** the W5 write-path QUALITY work ships with the toggle contract
 surfaced (feature flag + disclosure semantics); #1976 owns the onboarding
 and Settings → Memory sources UI surfaces (out of scope here).
@@ -315,6 +320,7 @@ onboarding and Settings" transfers to **#1976's** E2E surface verification
 (UI reachability is not testable in this epic).
 
 ### E2E-6: Supersession-aware recall (bi-temporal why-context)
+
 **Given:** a Point that was superseded by a newer one (CORRECTS edge +
 edge transfer) and an outdated predecessor still in the graph.
 **When:** the superseded predecessor is recalled through an existing surface.
@@ -325,6 +331,7 @@ it never surfaces as the current belief.
 (no stale-belief-as-current).
 
 ### E2E-7: Dig-deeper navigation accuracy (the why-layer suite)
+
 **Given:** a state with planted conflicts (NANDs, superseded predecessors,
 contested alternatives) and ONLY the surfaced context available.
 **When:** an agent is asked "what contradicts this?", "why is this
@@ -337,6 +344,7 @@ to the correct points — ≥ 0.95).
 (validates A11; if it fails, W4's context assembly changes first).
 
 ### E2E-8: Published LongMemEval 500-Q sealed run (W7)
+
 **Given:** the official LongMemEval 500-question set, sealed answer keys,
 pinned judge versions, and the Tortoise runner with its documented
 semantics divergences.

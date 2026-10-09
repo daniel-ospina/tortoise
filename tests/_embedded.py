@@ -393,6 +393,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
     # homes; tests/test_ci_selection.py pins the equality).
     "test_write_path_unreachable_seam_5148",
+    # #4521: the `_revise_point` guard asserts the EMBEDDED engine's stored type
+    # for a revised Point (the server lane lands the same write), so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the ``carve_out``
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_4521_revise_point_embedding",
 )
 
 _HAS_FALKOR: bool | None = None

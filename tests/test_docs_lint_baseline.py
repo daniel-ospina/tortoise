@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -845,6 +845,47 @@ def _by_name(name: str) -> dict:
     raise AssertionError(f"no docs-job step named {name!r} (#7435)")
 
 
+def test_vendored_markdown_is_excluded_from_the_population_everywhere():
+    """Vendored markdown is not ours, and cannot be fixed by hand (#7534).
+
+    A vendored re-install REWRITES `website/apps/dashboard/node_modules/**`, so a
+    finding there is unreproducible the moment the dependency is bumped — the
+    baseline's own `end_state` note records this. It is removed from the lint
+    POPULATION (not suppressed finding-by-finding), and the SAME glob must be
+    applied in all THREE places the population is defined: the baseline generator
+    (`_population`), the cli2 config, and the `docs` job's changed-set diffs. A
+    mismatch is fail-CLOSED at runtime (the differ requires `Linting: N` == the
+    changed-set count), so this pins the agreement instead of letting it decay
+    into a red required check.
+    """
+    assert dlb.VENDORED_MARKDOWN == ("node_modules",)
+    population = dlb._population(ROOT, None)
+    assert population, "the population must not be empty"
+    leaked = [p for p in population if "node_modules" in PurePosixPath(p).parts]
+    assert leaked == [], f"vendored markdown leaked into the population: {leaked[:3]}"
+    config_text = (ROOT / ".markdownlint-cli2.jsonc").read_text(encoding="utf-8")
+    assert '"**/node_modules/**"' in config_text, (
+        "the cli2 config must ignore the same vendored glob the population filter drops"
+    )
+    for name in (
+        "Get changed markdown files",
+        "Get changed markdown files (main health)",
+    ):
+        run = _by_name(name)["run"]
+        # `glob` magic is required on the pathspec: without it git's `**/` does not
+        # match zero directories and a root-level `node_modules/` survives while
+        # `_population` (a path-component match) and cli2's micromatch glob both
+        # drop it. BOTH `'*.md'` diffs in the step carry it: the population diff
+        # that decides what is linted AND the suppression-directive guard. A
+        # vendored-only change must not red the check for files excluded from
+        # linting — a suppression there hides nothing.
+        assert ":(exclude,glob)**/node_modules/**" in run, name
+        assert run.count(":(exclude,glob)**/node_modules/**") >= 2, (
+            f"{name}: the suppression-directive diff must use the same "
+            "vendored-excluded population as the lint diff"
+        )
+
+
 @pytest.mark.parametrize(
     ("name", "gate"),
     [
@@ -1598,14 +1639,24 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     counts = baseline["snapshot"]["counts"]
     # markdownlint is DETERMINISTIC, so its ceiling is EXACT: any growth is a
-    # deliberate append, never noise. The lychee half also checks REMOTE links,
-    # whose occurrence count drifts between RUNS for reasons no author controls,
-    # so it is a SET (deduplicated) and its ceiling is the MAXIMUM OBSERVED set
-    # size across generations (151-160, measured three times) — not a round
-    # number: slack above the observed range is an amnesty window, so it is
-    # bounded at 160 and any re-baseline above it must raise this row out loud.
+    # deliberate append, never noise. It is 3300 after the #7534 autofix: the
+    # whitespace findings went away, and the 7 files the autofix deferred keep
+    # their pre-existing findings RECORDED here (#7534 — the deferral restores
+    # them to the tree, so the snapshot must still cover them or a later PR that
+    # touches one is charged for debt the base snapshot already knew).
+    # The lychee half also checks REMOTE links, whose occurrence count drifts
+    # between RUNS for reasons no author controls, so it is a SET (deduplicated)
+    # and its ceiling is the MAXIMUM OBSERVED set size — 52 after the vendored
+    # population fix (#7534; it was 151-160 across the pre-fix generations). The
+    # 2 keys above the 50 a single host's egress observed are the `dl.acm.org`
+    # links main's canonical snapshot holds for `prior-art-scan.md`: they were
+    # dropped when the snapshot was regenerated from a host that could not reach
+    # them, and restored here so the half equals `main` minus the vendored
+    # entries (a host-dependent loss, filed as #7697 — never a hand-added key).
+    # It is not a round number: slack above the observed range is an amnesty
+    # window, so any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 11238, "lychee": 160}
+    ceilings = {"markdownlint": 3300, "lychee": 52}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1624,7 +1675,7 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
 
     A PR can delete a legitimate baseline entry and append the finding it
     introduced while keeping `snapshot.counts` constant: the count ceiling
-    (11238 <= 11238) and the counts/lists consistency test both pass, and the
+    (3300 <= 3300) and the counts/lists consistency test both pass, and the
     differ classifies the new finding as KNOWN — it only inspects findings the
     run produces, so a removed entry is never re-checked. Measured end-to-end on
     the previous revision: the differ returned 0 new on a swapped baseline. These
@@ -1643,14 +1694,14 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "ba58e90af5357ad7f83eb6c4004b84b0860ce4408dbbb1b7977c704c766d5469"
+        "9236d7c46202671a9162f48dc7599c7ccf01bbf019a4ebc13b918c79620ca8fa"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
-        "568e42acb1a73bc4ff3b68a1cecf58b4233d9f8f3ebd68279f7c3e59cece8493"
+        "f605204128fee73d5d5ad97552a5f0047f4485b0822c0dec8e0462d5385e0ed7"
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
     assert hashlib.sha256(
         json.dumps(baseline["linter_config"], sort_keys=True).encode("utf-8")
-    ).hexdigest() == "6f63d7c4437ca88c69184fcde2d53d38beb649c64eadd21edad0b02887cce658", (
+    ).hexdigest() == "bf9d46866af0dff458c4e13cfddefe1e031d1a9389650e9feeae2f722f4922e2", (
         "the pinned linter-policy map changed — turning a rule off in any "
         ".markdownlint* config (or adding one, or adding a [tool.lychee] section) "
         "suppresses the very findings the required `docs` check exists to catch, so "

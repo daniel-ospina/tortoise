@@ -83,6 +83,7 @@ The cut principle: **smallest system that satisfies agent-write → human-review
 > **Findings date:** 2026-08-27
 
 Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary questions are covered at sufficient granularity in the epic brief:
+
 - **UX (editor depth):** research §3.4 (TipTap vs markdown trade-offs, ElDato precedent, markdown-import pattern) + §4.4 (admin UI options, review-queue throughput anti-patterns). Locked decision: TipTap with markdown import/export.
 - **Architecture (render + API + repo):** research §3.2 (SSR required; Pages Functions fit), §3.3 (Supabase-as-CMS), §4.2 (public render), §4.3 (agent API + safety rails), §4.6 (repo placement). Locked decision: repo A, Pages Functions SSR, service-role Function for agent writes.
 - No external queries fired — the brief already resolves every boundary question this scope needed.
@@ -94,6 +95,7 @@ Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary 
 > Written BEFORE user journeys — behavioral, not presentational. These anchor detailed E2E in plan + capstone verification.
 
 ### E2E-1: Agent publishes a post (two modes)
+
 **Given:** a valid per-agent credential and a markdown post with meta (title, slug, excerpt, meta_title, meta_description, cover image uploaded)
 **When (default/queue mode):** the agent calls the publish API without `status` (defaults to draft)
 **Then:** the post is NOT public (`/blog/<slug>` → 404) and appears in the admin review queue
@@ -106,12 +108,14 @@ Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary 
 **And:** `blog_posts` row has `published_by=<agent>`, `published_at` set
 
 ### E2E-2: Hold-for-review keeps a post private
+
 **Given:** an agent publishes with `hold_for_review=true`
 **When:** a public visitor requests `/blog/<slug>`
 **Then:** the post returns 404 (not public)
 **And:** after the owner clears the flag in the admin, the post becomes public (E2E-1 outcomes apply)
 
 ### E2E-3: Review queue + audit
+
 **Given:** 4 posts exist — 1 agent-draft (default queue), 1 unreviewed direct-published, 1 held, 1 reviewed
 **When:** the owner opens the admin review queue
 **Then:** the queue shows the agent-draft, the unreviewed-published post, and the held post; the reviewed post does not appear
@@ -119,38 +123,45 @@ Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary 
 **And:** the audit view lists each post with `published_by` agent identity and timestamp
 
 ### E2E-4: Unpublish takes a post down
+
 **Given:** a published post exists and is indexed
 **When:** the owner unpublishes it in the admin
 **Then:** `/blog/<slug>` returns 404 for public visitors
 **And:** the post disappears from `/blog` index and the sitemap
 
 ### E2E-5: Owner edits a post (TipTap) → change goes live
+
 **Given:** a published post
 **When:** the owner edits body/images in the editor and saves
 **Then:** the public page reflects the edited content after save
 
 ### E2E-6: Image upload (cover + inline)
+
 **Given:** an authenticated admin session
 **When:** the owner uploads a cover image and an inline image in the editor
 **Then:** both images upload to `blog-images` Storage, return CDN URLs, render in the post (cover at top, inline in body), and serve publicly
 
 ### E2E-7: SSR + host isolation
+
 **Given:** a published post
 **When:** an unauthenticated crawler (curl, no JS) requests `/blog` and `/blog/<slug>` on tortoise.premiselabs.co
 **Then:** both return complete server-rendered HTML with content and meta in the raw response
 **And:** on premiselabs.co (company host), `/blog` **and `/blog/<slug>` (prefix rule, not just exact match)** are 301'd to the tortoise host (per the middleware contract change in scope item 5)
 
 ### E2E-8: Agent API rejects bad actors
+
 **Given:** the publish API endpoint
 **When:** (a) an unauthenticated write, (b) a write with an invalid/unknown agent credential, (c) a write with invalid schema (bad slug, missing body), (d) a PATCH by agent B on agent A's post is attempted
 **Then:** (a)-(c) rejected (401/401/400), no row created; (d) rejected 403; no anonymous write path exists
 
 ### E2E-8b: Agent rewrite loop
+
 **Given:** agent A created a post (default draft); the owner requested changes with a note
 **When:** agent A PATCHes content and republishes (explicit status=published); agent B attempts a PATCH on the same post
 **Then:** the revised content is public (no 409 on update); the review_note survived the draft transition; agent B's PATCH → 403
 
 ### E2E-9: Social share buttons work + attribute + track
+
 **Given:** a published post
 **When:** a visitor clicks each share action (X, LinkedIn, Facebook, WhatsApp, copy-link)
 **Then:** each opens the correct share target with the post URL carrying `utm_source=<network>&utm_medium=share`
@@ -158,6 +169,7 @@ Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary 
 **And:** each click emits a `share_click` event to PostHog (when consent granted)
 
 ### E2E-10: PostHog captures blog traffic (consent-gated)
+
 **Given:** consent granted (existing flow)
 **When:** a visitor loads `/blog` and `/blog/<slug>` and reads past a scroll-depth/read-time threshold
 **Then:** PostHog records pageviews for both pages
@@ -166,18 +178,21 @@ Both `medium+` axes (UX, Architecture) are **justified skips** — the boundary 
 **And:** consent.js is present on blog pages (same as funnel pages)
 
 ### E2E-11: RSS feed lists published posts
+
 **Given:** published + draft + archived posts exist
 **When:** a client requests `/blog/feed.xml`
 **Then:** the feed returns valid XML containing only published posts (newest first, full URL + title + date + excerpt)
 **And:** drafts/archived posts never appear in the feed
 
 ### E2E-12: Admin auth gate blocks non-owners
+
 **Given:** an unauthenticated visitor and an authenticated non-owner user
 **When:** either requests the admin route
 **Then:** each is blocked (401/redirect to `/auth`), no post content, review queue, or audit data is returned
 **And:** the owner session sees the full admin surface
 
 ### E2E-13: Archive retires a post everywhere
+
 **Given:** a published post (public, indexed, in feed)
 **When:** the owner archives it in the admin
 **Then:** `/blog/<slug>` returns 404 publicly; the post leaves `/blog` index, sitemap, and RSS feed

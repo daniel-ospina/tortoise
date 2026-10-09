@@ -63,6 +63,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 3. **The routing fix breaks the deepseek lane.** A capability filter mis-parses (`deepseek/deepseek-v4-flash` misclassified, or `TORTOISE_EXTRACTOR_PROVIDER` inheritance change) → the (b) known-answer smoke (`provider: deepseek-direct`) regresses, or the extraction lane is touched. Mitigation: `build_extractor_model` stays byte-identical (param default None); regression pins: `test_build_reader_model_resolves_env_and_reports_spec` + the runbook (b) smoke must stay green with the default config.
 
 **Boundary check (OUTSIDE scope):**
+
 - ❌ #2009 detector parity (separate failure class, separate issue, owner-assigned).
 - ❌ Retrieval top-k / hybrid / reranking (runbook follow-up (2)).
 - ❌ Containment-judge bar / SSP long-gold composition (runbook follow-up (3)).
@@ -80,6 +81,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 **Why this framing:** (1) it names the actual defect (provider-blind pool construction in `build_extractor_model`'s reuse) and preserves the CORRECT 400 taxonomy — the fix is architectural (route by capability), not a classification weakening; (2) it explains both symptoms (deepseek lane fine, qwen lane 502) with one mechanism; (3) it generalizes to every non-deepseek family (solar-pro4, claude-opus-5), so it closes the whole class, not just qwen; (4) it reuses the repo's OWN proven convention — the eval lane already routes `openrouter:qwen/qwen3.8-max` via spec-prefix parsing (`_parse_model_spec`/`_resolve_provider`, tools/longmem_eval/reader.py) — the product lane just never adopted it.
 
 **Rejected alternatives with rationale:**
+
 - (a) "failover policy is the problem" → rejected as the primary fix: contradicts DeepSeek's documented 400 semantics + the repo's #1530 no-flip-flop discipline; would retry guaranteed-fatal requests and mask config bugs. Only defensible as a NARROW defense-in-depth layer (mismatch-400 → cooldown + failover) with a recorded body fixture.
 - (b) "weak default model is the problem" → rejected: the default deepseek lane works and is deliberately cheap; flipping the default before routing exists ships a 502-by-default.
 - (d) "single-provider architecture" as a rewrite → rejected as too broad: deepseek-direct's cheap lane is a deliberate production decision; the fix must KEEP it for deepseek specs, not flatten the architecture.
@@ -95,12 +97,14 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 #### Architecture axis
 
 **Codebase-first precedent scan (grep of tortoise/):**
+
 - `RoutingModel` (primary+fallback, transient-only failover, sticky-forward, cooldown) + `RotatingModel` (weighted round-robin, per-provider cooldown, 402-only rotation) — model_adapters.py:493-754.
 - `FATAL_CONFIG_STATUS_CODES = {400, 404}` + `is_fatal` — the M2/M3 taxonomy export contract (model_adapters.py:286-389).
 - **The eval lane's spec-prefix routing IS the repo precedent:** `_parse_model_spec("openrouter:qwen/qwen3.8-max")` → provider "openrouter" → `_PROVIDERS["openrouter"] = (base_url, key_env)` → `OpenAICompatModel` (tools/longmem_eval/reader.py:107-204, tortoise/ingest.py:33-38). The product lane never adopted this.
 - `_REGISTRY_KEY_TO_ID` (model_adapters.py:631-673): `qwen3.8-max`/`solar-pro4`/`claude-opus-5` "intentionally pass through — judge/reader-only" — so a MODELS-key spec currently reaches `build_extractor_model` as a raw spec (correct: qwen must NOT be registry-mapped to a deepseek id).
 
 **External (canonical + competitor-precedent + pitfalls):**
+
 - **LiteLLM** (docs.litellm.ai/docs/routing, /docs/router_architecture, /docs/proxy/reliability): retries within a model group first, then cross-group fallbacks **in order**; 404 treated non-retryable; per-deployment cooldown. Precedent: routing tables + ordered fallback; "non-retryable ≠ never-route-elsewhere" (a 404 on ONE deployment escalates to another model group).
 - **OpenRouter** (openrouter.ai/docs/guides/routing/model-fallbacks; OpenRouterTeam/schemas; /docs/guides/routing/provider-selection): client-side `models` fallback list (up to 3, priority order), `route:"fallback"`, provider selection with `order`/`allow_fallbacks`/`require_parameters` — provider-level failover INSIDE the gateway request; single model served by multiple providers auto-fails-over on 5xx/rate-limit.
 - **Vercel AI Gateway** (vercel.com/docs/ai-gateway/models-and-providers/model-fallbacks): `models` array fallback in `providerOptions.gateway`, tried in order; provider order via `order`/`only`/`sort`; billing follows the successful model.
@@ -114,6 +118,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 **Codebase-first:** runbook's (d) class table (7 reader-MODEL content errors vs 4 retrieval-gap vs 2 judge-bar); qwen3.8-max probe results on 3 evidence shapes; `MODELS['qwen3.8-max']` = OpenRouterModel('qwen/qwen3.8-max', max_tokens=8000, temperature=0.0, thinking_budget=2000) — gate-judge tuning, NOT a reader spec; eval `READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"` (M5 pin).
 
 **External (competitor research — how RAG/memory products pick answer models):**
+
 - **Mem0** (docs.mem0.ai/core-concepts/memory-operations/search; prior repo research docs/research/2026-08-29-reader-answer-surface-competitors.md): retrieval-only read path (vector+BM25+entity, LLM-free search); LLM used at WRITE time (extraction) with a single provider config; no hosted QA answer surface.
 - **Zep/Graphiti** (github.com/getzep/graphiti; help.getzep.com/retrieving-context): 0-credit LLM-free retrieval + Context Block for the caller's LLM; `mode="summary"` is write-side pre-computed context summarization.
 - **Cognee** (docs.cognee.ai, cognee.ai): recall-only; "build structured context BEFORE generating an answer" — the answer is the downstream app's LLM.
@@ -128,6 +133,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 **Codebase-first:** `TORTOISE_ASK_MODEL` (product; family-prefixed spec; provider-agnostic routing); `TORTOISE_LME_READER_MODEL` (eval; `provider:model` spec; provider-aware routing); `TORTOISE_EXTRACTOR_PROVIDER` (extractor lane primary/fallback); `TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN` (flap guard); `.env.example:392-404` ask-surface block.
 
 **External:**
+
 - **LiteLLM**: config-driven (models.yaml deployment lists + model-group routing) — a declarative provider map.
 - **OpenRouter**: per-request `models`/provider options — no config file, routing declared in the call.
 - **Vercel AI Gateway**: per-request `providerOptions.gateway`.
@@ -143,10 +149,12 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 **Codebase-first:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m": 0.42}` (deepseek-direct $0.14/$0.28 × 1.5 documented over-cover; metering.py:246-247); `estimate_ask_cost_usd` (249-260); `MAX_ASK_LLM_PER_MIN = 60` (quota.py); worst case ~9.2k in + 500 out ≈ $0.0014-0.0023/query vs the $0.01/query structural target (epic plan Cost Metering Design; research doc's verified math).
 
 **External (verified pricing):**
+
 - **deepseek-v4-flash direct:** $0.14/M in, $0.28/M out, $0.0028/M cached (api-docs.deepseek.com/quick_start/pricing; repo prior research).
 - **qwen3.8-max via OpenRouter:** **$2.00/M in, $6.00/M out**; cache read $0.25/M, cache write $2.50/M (openrouter.ai model page + 3 independent sources, 2026-08-31).
 
 **Re-measure math (to be recorded in the runbook):**
+
 | Lane | Worst-case (9.2k in + 500 out) | Typical (~3.5k in, 150 out) |
 |---|---|---|
 | deepseek-direct (current envelope ×1.5) | ≈ $0.0021 | ≈ $0.0009 |
@@ -175,6 +183,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 ### Codebase Explorer Findings
 
 **AFFECTED_FILES (paths + lines):**
+
 - `tortoise/model_adapters.py` — `build_reader_model` (845-862), `build_extractor_model` (797-841), `_build_single` (573-588), `resolve_extractor_provider` (397-455), `RoutingModel.complete` (527-546), `RotatingModel.complete` (≈668-707), `classify_llm_error`/`is_fatal` (312-389), `FATAL_CONFIG_STATUS_CODES` (289), `_direct_wire_id` (585), `_REGISTRY_KEY_TO_ID` (631-673), `MODELS['qwen3.8-max']` (214).
 - `tortoise/metering.py` — `ASK_METER_RATES` (246-247), `estimate_ask_cost_usd` (249-260), `record_ask_usage` (≈278-330).
 - `tortoise/sdk.py` — `_ask_reader_cache`/`_default_ask_reader_factory` (43-96), `_LockedReader` (98-140), `ask()` (10505+; rate selection ~10560-10600 region where cost_estimate_usd is computed).
@@ -184,6 +193,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 - Tests: `tests/test_model_adapters_routing.py` (880-1100: json_mode pin, `test_build_reader_model_resolves_env_and_reports_spec` 922, `test_wrapper_forwards_usage_and_model` 964, `test_failover_policy_pin` 1002, concurrent rotation 1040); `tests/test_ask_sdk.py`, `tests/test_ask_api.py`, `tests/test_ask_regression_llm.py`, `tests/test_reader_abstention_calibration.py`.
 
 **PATTERNS_OBSERVED (existing failover/routing patterns anywhere in tortoise/):**
+
 1. **Eval lane spec-prefix routing** (tools/longmem_eval/reader.py `_parse_model_spec`/`_resolve_provider` + `_PROVIDERS` registry at tortoise/ingest.py:33-38) — `provider:model` → base_url/key_env. **The exact pattern the product lane lacks.**
 2. RoutingModel/RotatingModel failover with per-provider cooldown + sticky-forward (model_adapters.py:493-754).
 3. `_FAILOVER_COOLDOWN` process-local flap guard keyed by provider name (model_adapters.py:457-484).
@@ -192,12 +202,14 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 6. Fail-closed philosophy on explicit provider envs (`resolve_extractor_provider` raises ValueError on explicit-provider-without-key).
 
 **PARTIAL_IMPLEMENTATIONS:**
+
 - `build_reader_model` exists with `json_mode=False` pin + `TORTOISE_ASK_MODEL` resolution — but provider-blind.
 - `MODELS['qwen3.8-max']` OpenRouter entry exists — but tuned for gate judges (8000 tok / thinking_budget 2000), not the reader call shape.
 - The runbook's 500-Q strong-reader config (PR #2067) is documented but unexecuted (eval lane; "verified up to spec parse + mock-run only").
 - 429 is already a failover trigger (`TRANSIENT_STATUS_CODES` incl. 429, model_adapters.py:288) — the ask lane's transient failover story is complete; only the FATAL_CONFIG-on-wrong-provider class is mis-routed.
 
 **RECOMMENDED_TESTS (see Plan Draft → Testing for full detail):**
+
 - Provider-capability pool per spec family; registry-key normalization before family parse; bare-id back-compat.
 - `TORTOISE_ASK_PROVIDER` explicit-without-key fail-closed; `openrouter` forced override for deepseek specs.
 - FATAL-400 preservation on correctly-routed primaries (taxonomy contract); optional mismatch-400 failover with a RECORDED DeepSeek body fixture.
@@ -213,6 +225,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 ### Solution Approaches (diverge — 2-3 distinct)
 
 **Approach (a) — Narrow provider-mismatch failover in the adapters.**
+
 - *Name:* "mismatch-400 fails over" (error-body-classified).
 - *Description:* add `_is_provider_mismatch(exc)` (400/404 + body markers like "model" + not-found/invalid); in `RoutingModel.complete` and `RotatingModel.complete`, treat THAT subclass as failover-eligible (+ cooldown the primary, latch like a normal failover); all other 400/404 stay fatal.
 - *Files:* tortoise/model_adapters.py (routing path only), tests.
@@ -222,6 +235,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 - *Best-fit-if:* we want a safety net WITHOUT any config/convention change and accept heuristics + the dead-call cost.
 
 **Approach (b) — Provider-capability-aware pool construction (spec-declares-provider).** ✅ recommended
+
 - *Name:* "route by capability, ask-scoped."
 - *Description:* in `build_reader_model` (ask lane only), derive the servable provider set from the spec's family prefix (`qwen/` → openrouter-only; `deepseek/`/bare → deepseek-direct + openrouter + venice as today); build the pool only from servable providers; add `TORTOISE_ASK_PROVIDER` (`auto` default) for explicit overrides; `build_extractor_model` unchanged (private shared pool-builder or a `provider_scope=None` param). Optional defense-in-depth: (a)'s mismatch-400 failover gated on a recorded-body fixture.
 - *Files:* tortoise/model_adapters.py, tortoise/metering.py (rates — Step 3), tortoise/sdk.py (rate selection), .env.example, tools/longmem_eval/reader.py (gated M5 flip), docs, tests.
@@ -231,6 +245,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 - *Best-fit-if:* the spec prefix is a reliable provider declaration (it is — the eval already relies on it), and we want correctness + zero dead calls + preserved cheap lane.
 
 **Approach (c) — Gateway routing: the reader lane always serves via OpenRouter (spec-agnostic), with gateway-level model/provider fallbacks.**
+
 - *Name:* "OpenRouter-primary reader."
 - *Description:* `build_reader_model` returns an OpenRouterModel (or OpenRouter-primary RoutingModel) regardless of spec; redundancy via OpenRouter's `models` fallback list + `route:"fallback"`/`allow_fallbacks` in the request body (deepseek spec fallback to qwen or vice versa); `provider`/`route` report `openrouter` (or the gateway's chosen lane).
 - *Files:* tortoise/model_adapters.py (build_reader_model simplified), .env.example, tests.
@@ -249,6 +264,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 **Best approach: (b) provider-capability-aware pool construction + ask-scoped provider knob + meter-rate re-baseline + gated M5 flip** — with (a)'s mismatch-failover as an OPTIONAL defense-in-depth layer, gated on a deterministic recorded-body fixture.
 
 **Rationale (QUALITY-OVER-CONVENIENCE):**
+
 1. **Outcome quality:** (b) is correct by construction — the deepseek-primary-400s-qwen state becomes structurally unreachable (the deepseek adapter is not in qwen pools). (a) only recovers AFTER the failure, per-request, with heuristic classification. (c) removes the failure but destroys the cheap lane.
 2. **Edge cases:** (b) handles registry keys (**normalize via `_ASK_MODELS_KEY_SPECS` before family parse; unknown bare non-deepseek → ValueError**), bare ids (deepseek back-compat), venice catalog (deepseek-only), missing keys (**empty-intersection guard → build-time ValueError naming the key**), and generalizes to every non-deepseek family. (a) has no answer for body-parsing ambiguity (A12). (c) has no answer for the cost edge case.
 3. **Failure modes:** (b) preserves the documented fatal-400 semantics for genuine config bugs (a malformed request on a correctly-routed primary still 502s loudly). (a) risks masking config bugs behind failover. (c) moves failure modes into a gateway with coarser observability.
@@ -256,6 +272,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 5. **Cost honesty:** only (b) preserves the deepseek lane AND enables a spec-aware meter re-baseline (Step 3) so `cost_estimate_usd` never under-counts on the strong lane.
 
 **Rejected alternatives + when each WOULD have been better:**
+
 - **(a) narrow mismatch-failover as the PRIMARY fix:** rejected — heuristic (DeepSeek documents no discriminator), pays a dead call per foreign spec, risks masking config bugs, and the taxonomy contract's "no flip-flop on 4xx" discipline is a deliberate production decision. **Better when:** DeepSeek ships a machine-readable model-mismatch error code, or as defense-in-depth alongside (b) once a recorded 400-body fixture proves the discriminator — adopt ONLY then.
 - **(c) OpenRouter-gateway reader:** rejected — cost (deepseek markup on every deepseek ask; the (b) smoke's $0.000129/query on the direct lane is the documented baseline), contradicts #1350/#1790 (deepseek-direct primary was chosen for cost AND because OpenRouter hit connection errors under load — the #1350 collapse class), and route transparency degrades. **Better when:** deepseek-direct's cost advantage is immaterial for the ask surface, OR provider instability returns and gateway-managed `allow_fallbacks` becomes the resilience requirement — then the client shrinks to a single adapter.
 - **(d) explicit config-driven provider map:** folded into (b)'s `TORTOISE_ASK_PROVIDER` override; standalone it duplicates what the prefix convention already encodes. **Better when:** arbitrary family→provider overrides beyond the prefix (e.g., routing deepseek via OpenRouter for cache economics) or a non-prefixed spec format is required.
@@ -286,6 +303,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 5. **Step 5 — Docs + env.** `.env.example`: `TORTOISE_ASK_PROVIDER` + updated `TORTOISE_ASK_MODEL` comment (family-prefixed spec ONLY — `qwen/qwen3.8-max`, not `openrouter:qwen/qwen3.8-max` (eval format, rejected on the ask lane), not bare `qwen3.8-max` (resolved via `_ASK_MODELS_KEY_SPECS` or fail-loud); provider auto-derived; OpenRouter-only families require `OPENROUTER_API_KEY`). **Epic acceptance annotation:** `docs/plans/2026-08-29-1987-ask-reader.md:379` pins `cost_estimate_usd ≤ $0.01 (structural caps)` on `/v1/ask` — the strong lane makes that hosted acceptance permanently unsatisfiable at real qwen rates (metered worst ~$0.032 at STRONG {3.00, 9.00}, ~$0.021 at real $2/$6); Step 3's docs deliverable must explicitly amend/annotate that epic row (not just the runbook + answer-surface.md), so the epic's own merge gate doesn't break. Runbook: record the routing fix, the 500-Q result, the cost re-measure, the pin decision. `docs/00_index.md` if a new research artifact is created.
 
 **Testing strategy:**
+
 - **Unit (offline, fake transport):** pool construction per family (deepseek → deepseek-primary with both keys; qwen → openrouter-only, no deepseek adapter in the pool); registry-key normalization precedes family parse (**NEW: bare `qwen3.8-max` MODELS key → `qwen/qwen3.8-max` via `_ASK_MODELS_KEY_SPECS` → openrouter-only, NEVER deepseek-direct; unknown non-deepseek bare key → ValueError; `deepseek-flash-direct` maps to the deepseek family**); colon-form `openrouter:qwen/qwen3.8-max` → ValueError on the ask lane (eval lane untouched); bare `deepseek-v4-flash` → deepseek family; `TORTOISE_ASK_PROVIDER=openrouter` forces openrouter for deepseek specs too; explicit-without-key → ValueError; **auto-mode empty intersection (qwen spec, no OPENROUTER_API_KEY) → build-time ValueError naming the key**; `build_extractor_model` unchanged (default path).
 - **Failover-policy preservation:** a genuine request-shape 400 (malformed-body stub) on a correctly-routed primary still re-raises (taxonomy contract pinned); if Step 2 lands: a recorded DeepSeek model-not-found 400 body → failover + cooldown + recovery (next ask hits primary again for the transient class — for mismatch the latch is correct since the primary can never serve the spec).
 - **Integration (docker lane):** `sdk.ask` with `TORTOISE_ASK_MODEL=qwen/qwen3.8-max` through the real factory + fake transport → request hits the OpenRouter base_url with `model: qwen/qwen3.8-max`; exactly ONE `complete()`; response `model/provider/route` = qwen/qwen3.8-max/openrouter/openrouter; 502 `reader_unavailable` only when the openrouter lane also fails; `cost_estimate_usd` uses the STRONG rates; per-namespace cache + `_LockedReader` unchanged.
@@ -294,6 +312,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 - **Live smoke (A9):** qwen3.8-max at the reader call shape (temp 0, max 500, no response_format) commits on gpt4_8279ba02's evidence without reasoning-budget collapse.
 
 **Acceptance criteria (mapped to O/I/T):**
+
 - **O1/I1:** `TORTOISE_ASK_MODEL=qwen/qwen3.8-max` + production keys → `sdk.ask` serves via OpenRouter with zero manual intervention (`model: qwen/qwen3.8-max`, `provider: openrouter`, `route: openrouter`); the deepseek-direct primary structurally cannot hard-fail non-deepseek specs (excluded from non-deepseek pools / fails over via Step 2 if landed). Automated: real-factory fake-transport test + docker-lane integration test.
 - **O2/I2:** 500-Q / spot-check with the strong reader: **0 of the 7 recorded content-error failures** (gpt4_8279ba02, gpt4_7a0daae1, gpt4_6ed717ea, 830ce83f, 0100672e, e831120c, b0479f84) recur on the same evidence (target). Recorded in the runbook with per-class counts.
 - **T3:** per-query cost re-measured and RECORDED (qwen envelope vs the $0.21/$0.42 deepseek ×1.5) BEFORE the M5 pin flips; `ASK_METER_RATES_STRONG` ships so `cost_estimate_usd` never under-counts on the strong lane; the $0.01-target impact documented with an owner decision. The M5 `READER_MODEL` flip lands only after (i)-(iii) of Step 4.
@@ -320,6 +339,7 @@ Verified end-to-end in code (see Codebase Explorer Findings):
 | `$0.01/query` structural target vs qwen worst case (~$0.021) | Step 3 re-measure + three documented owner options (tighten context cap / OpenRouter cache-read / re-baseline) — **BLOCKS the M5 pin flip until decided** | ⛔ resolve before Step 4 |
 
 **Unresolved gaps (block on owner):**
+
 1. **The $0.01/query target break** (qwen worst case ≈ $0.021 at the current 8k/500 caps) — owner must pick: tighten the strong lane's context cap, exploit OpenRouter $0.25/M cache-read, or re-baseline the target. The CODE (routing + rates) is not blocked; the M5 flip IS.
 2. **A9 live-smoke sign-off** — qwen3.8-max at the reader call shape (no reasoning-budget collapse at max_tokens 500) must pass before the flip; without keys at scoping time this is a runtime prerequisite, not a design decision.
 3. **Step 2 inclusion decision** — include the mismatch-400 defense-in-depth only if a recorded DeepSeek 400-body fixture proves the discriminator deterministic; otherwise ship Step 1 alone (capability filter already makes the mismatch unreachable for declared families).

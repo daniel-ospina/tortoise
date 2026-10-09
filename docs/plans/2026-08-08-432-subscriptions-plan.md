@@ -72,16 +72,19 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 **Library docs (preflight)** — FalkorDB (in-repo via `redislite.falkordb_client` / FalkorDB Cloud; no pinned version in requirements.txt — connect via `TORTOISE_DB_URI`). context7 unavailable in this session → used Perplexity `web_search` (3 framings, distinct invocations) + fetch of the official `GRAPH.CONSTRAINT CREATE` doc page.
 
 **Library version & API surface** — 3+ calls (official docs + FalkorDB blog)
+
 - **Canonical:** Unique-constraint syntax is `GRAPH.CONSTRAINT CREATE <key> UNIQUE NODE <label> PROPERTIES <propCount> <prop...>` (e.g. `GRAPH.CONSTRAINT CREATE g UNIQUE NODE Person PROPERTIES 1 email`); `db.constraints` procedure lists created constraints. **A unique constraint REQUIRES an exact-match index to exist prior to its creation**; deleting the supporting index fails while the constraint exists. Source: docs.falkordb.com/commands/graph.constraint-create.html (fetched in full).
 - **Competitor variance:** Composite indexes are supported: `CREATE INDEX FOR (n:User) ON (n.lastName, n.firstName)` (FalkorDB blog Cypher cheatsheet). The repo already creates indexes this way (sdk.py:336, wrapped in try/except).
 - **Known pitfall:** A unique constraint is enforced **only when all constrained properties are non-null** — a node missing a constrained property does not violate uniqueness; array-valued properties are not covered (official docs). FalkorDB issue #664 reports crash/undefined behavior around unique constraints on string properties in some versions → create constraints defensively (try/except + `db.constraints` verification) and never rely on the constraint alone for dedup on read (keep `recovery.dedup_events`).
 
 **Idiomatic usage patterns** — 3+ calls (FalkorDB docs + Neo4j/Cypher community)
+
 - **Canonical:** Pagination = `ORDER BY` + `SKIP`/`LIMIT`; without `ORDER BY` result order is non-deterministic (docs.falkordb.com/cypher/skip.html). For change-feed reads, cursor-based range scans (`WHERE n.seq > $after ORDER BY n.seq LIMIT $limit`) are the recommended pattern for large offsets — deep `SKIP` is not optimized (Neo4j issue #12695, StackOverflow).
 - **Competitor variance:** Cursor-based pagination with a unique sort key + filtering on already-retrieved values is the consensus best practice for large result sets (microservices/GraphQL cursor conventions).
 - **Known pitfall:** `SKIP` is not efficient for large offsets — the engine still scans past skipped rows. Hence the plan's cursor = range scan on the plain `seq` index (per-graph = per-team), never offset pagination.
 
 **Library/framework pitfalls** — 2 calls (FalkorDB known-limitations + issue #664)
+
 - **Canonical:** FalkorDB `NULL` = missing/undefined value; constraints skip missing properties. Label-scoped `MATCH` scans only that label; isolated (zero-relationship) nodes do not affect pattern queries that require relationships, counts, or traversal — confirming the `:GraphEvent` graph-island guard.
 - **Competitor variance:** N/A (graph-island behavior is inherent to Cypher pattern matching; corroborated by FalkorDB GraphRAG storage docs re: label hints).
 - **Known pitfall:** unique-constraint crashes on string props reported (FalkorDB #664) — constraint creation must be non-fatal to boot, verified post-creation, and the read path must not assume storage-level dedup alone. `FalkorDBLite` (embedded) lacks `dropIndex` (projection/__init__.py:763 comment) — schema creation must be idempotent try/except (mirror sdk.py:336).
@@ -102,12 +105,14 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 | 10 | EventAPI parity (`_point` default live→draft, api.py:67) | State | Internal | Unit + regression | parity with SDK default; CLI/ingest blast radius checked | existing EventAPI tests/consumers break |
 
 **Bug Pattern Flags**
+
 - **Race conditions** (seq counter + append + concurrent polls): verify per-team `seq` monotonicity under concurrent SDK writes (atomic in-graph counter; test with concurrent appends).
 - **Silent function skips** (emit hook): every mutation must produce a `:GraphEvent` node — test asserts graph contains the event after each mutation type; a skipped emission must fail the test.
 - **Conditional guards** (transition guards): boundary tests on both sides of every guard branch.
 - **DB business logic in Cypher** (constraint/index/retention/seq): graph-level integration tests against a REAL FalkorDBLite graph (the repo's pgTAP analog) — mock-free for the DB surfaces above.
 
 **Checklist Notes**
+
 - Empty vs null: `after=None` (tail) vs expired cursor vs empty graph must behave distinctly (410 vs empty batch).
 - Atomicity: append-before-mutation + idempotent schema creation; document at-least-once (clients idempotent on replay) as the contract.
 - Ordering: `seq` is the sole ordering key; `ts` is informational.
@@ -115,6 +120,7 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 ### Journey Test Map
 
 **Journey 1: Tenant observes claim lifecycle changes**
+
 1. SDK creates a point → **Acceptance:** `:GraphEvent` node exists with type `PointAdded`, zero relationships → **Test:** `tests/test_event_store.py::test_emit_on_create_point`
 2. Tenant polls `GET /v1/events?after=<cursor>` → **Acceptance:** receives exactly the events appended after cursor, ordered by seq, dedup'd → **Test:** `tests/test_subscriptions.py::test_poll_after_cursor`
 3. Point retracted → **Acceptance:** `PointRetracted` event emitted AND `get_point` returns `status:'retracted'` (not 404) → **Test:** `tests/test_claim_lifecycle.py::test_retract_tombstone`
@@ -122,9 +128,11 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 5. Cursor expires (retention purge) → **Acceptance:** poll returns 410 with "replay from tail" hint; `after=None` resumes from tail → **Test:** `tests/test_subscriptions.py::test_expired_cursor_410`
 
 **Journey 2: Cross-tenant isolation**
+
 1. Team A and team B both mutate graphs → **Acceptance:** A's poll cursor never returns B's events → **Test:** `tests/test_subscriptions.py::test_tenant_isolation`
 
 **Failure Modes**
+
 - Duplicate event append (client retry) → **Expected:** unique constraint on `event_id` rejects; append catches + skips (no-op); read path dedups → **Test:** `tests/test_event_store.py::test_append_duplicate_event_id_rejected` + `test_read_dedups_duplicate_event_ids`
 - Illegal status transition `live→draft` → **Expected:** `ValueError` → **Test:** `tests/test_claim_lifecycle.py::test_transition_guards`
 - Mutated graph with no event (emit skipped) → **Expected:** test fails (silent-skip flag) → **Test:** per-mutation event-presence assertions
@@ -155,6 +163,7 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 **Intent:** Make the claim lifecycle a real, enforced state machine. State vocabulary is `draft → live → retracted → superseded` (plus existing `outdated`, `archived`); **`challenged` is NOT a state** — it is a derived condition (NAND-operator edge present on a live point), documented in ontology §5. This is the substrate indicator 1 of #432.
 
 **Acceptance:**
+
 - `POINT_STATUS_VALUES` (sdk.py:27) = `frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})`; no `challenged` in the set.
 - `sdk.retract_point(id)` exists; sets `status='retracted'` via a **single atomic guarded query** (plan-review P2); returns the updated point; raises `ValueError` if the point is missing, is an operator node, or is already terminal. **Terminal set = `retracted`/`superseded`/`archived`** — `deleted` is dropped (hard delete is `delete_point`, not a status); `archived` joins the set, aligned with the retract guard's `NOT IN` clause.
 - `update_point` accepts **NO status changes except the draft→live promote (plan-review P1)**: `status='live'` is allowed only when the current status is `draft`/absent (matches the create_operator promote); any other `status` value → `ValueError` ("update_point only promotes draft→live — use retract_point()/supersede_point() for lifecycle transitions"). Non-status property/content edits remain unrestricted and emit nothing. `outdated` stays a settable boolean *flag* (not a status transition); `archived` remains in the vocabulary as a **reserved terminal state** (no v1 SDK write path — only direct graph writes), kept in the terminal set so retraction refuses it defensively.
@@ -164,6 +173,7 @@ UX gate **SKIPPED** (workflow/01.5): `UX_RATING = low` — no user-visible UI; t
 - `docs/ONTOLOGY.md` §4.1 status row updated to the new vocabulary; §5 documents `challenged` as NAND-edge-derived.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (POINT_STATUS_VALUES :27, update_point :557-600, supersede_point :695, new retract_point near :646)
 - Modify: `tortoise/api.py` (:_point default :67)
 - Modify: `docs/ONTOLOGY.md` (§4.1 status row :201, §5 vocabulary)
@@ -294,6 +304,7 @@ if not res.result_set:
 ```
 
 The same WHERE guard applies to the :Object-labeled branch (:575-596) alongside its version bump. Non-status props bypass the guard entirely (plain SET, unchanged).
+
 - New `retract_point` — **single atomic conditional query** (plan-review P2: one round trip on the happy path; trailing `get_point` dropped — the query RETURNs the updated node):
 
 ```python
@@ -336,6 +347,7 @@ def retract_point(self, id: str) -> dict:
 **Intent:** Make retraction observable instead of a deletion — the fold/projection keeps the point with `status:'retracted'` (user decision #2). Partially fixes #689 (future retractions no longer destroy data). Consumers that relied on retraction-as-absence must be audited and, where the default-visible surface changes, excluded-by-default with an opt-in filter.
 
 **Acceptance:**
+
 - `_apply_one` (projection/__init__.py:125-126): `PointRetracted` sets `points[id]["status"] = "retracted"` instead of `points.pop(id)`; **no-op when the id is absent** (e.g., merged-away points — a retract-after-merge must neither KeyError nor resurrect a phantom). **Re-fold behavior change is INTENDED and TESTED (plan-review P2):** re-folding a pre-change log under the new code yields TOMBSTONES (`status:'retracted'` kept) instead of deletion — a deliberate change that recovers retracted points from retained logs. Existing materialized projections are NOT re-folded by this plan; NO migration reconstructs already-deleted historical retractions (#689 full remediation out of scope). **Not version-gated** (decision: tombstone-by-default for every `PointRetracted` event, regardless of `projection_version` — the alternative, gating on `projection_version >= 2`, was considered and rejected: it adds per-event age semantics with no consumer benefit).
 - `split()` (projection/__init__.py:140) excludes `status=='retracted'` points from the statements list (default behavior preserved: retracted ≠ active statement).
 - `sdk.query()` / `paginated_query()` / hosted `GET /v1/points` exclude `status='retracted'` by default (additive filter: `AND (n.status IS NULL OR n.status <> 'retracted')`), with an `include_retracted: bool = False` param on `query`/`paginated_query` for opt-in visibility.
@@ -344,6 +356,7 @@ def retract_point(self, id: str) -> dict:
 - `check_structure` orphaned_draft (sdk.py:1135) unaffected (already `status:'draft'`-scoped).
 
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` (:_apply_one :125, :split :140)
 - Modify: `tortoise/sdk.py` (query :933, paginated_query — add retracted filter + include_retracted)
 - Modify: `tortoise/hosted_api.py` (list_points :829 — same filter; no include param on REST v1, keep surface minimal)
@@ -419,6 +432,7 @@ def test_query_excludes_retracted_by_default(sdk_factory, tmp_path):
 **Intent:** THE root-cause fix (scoping confirmed problem): every SDK claim/graph mutation emits a durable, team-scoped event. All three surfaces route through `TortoiseSDK` (mcp_server.py:14, hosted_api.py:45) — one hook covers MCP, REST, and local. Replaces the GAP-07 TODO (sdk.py:2168). EventAPI/EventLog JSONL path stays as-is.
 
 **Acceptance:**
+
 - New `tortoise/event_store.py`: `ensure_event_schema(proj)`, `next_seq(proj)`, `append_event(proj, seq, type, payload, event_id, ts=None)`, `read_after(proj, after_seq, types=None, limit=100)` — **no `org_id` parameter anywhere (plan-review P2)**; the SDK writes into its own graph namespace and the namespace IS the partition. `ts` is optional (defaults to now; tests backdate it for retention).
 - **Duplicate `event_id` append (plan-review P1):** `append_event` catches the unique-constraint violation, logs a warning, and **skips** (no-op / returns the existing event) — `event_id` is a server-side ULID, so a collision is a client-retry artifact, never legitimate. The read path additionally dedups (defense in depth; see the direct-Cypher dedup test).
 - Schema (idempotent, try/except — mirror sdk.py:336): exact-match index on `event_id` FIRST, then `GRAPH.CONSTRAINT CREATE <key> UNIQUE NODE GraphEvent PROPERTIES 1 event_id` (constraint requires the index first — Pattern Research); **plain** index `CREATE INDEX FOR (n:GraphEvent) ON (n.seq)` (per-graph = per-team; no `org_id` property to index — plan-review P2).
@@ -431,6 +445,7 @@ def test_query_excludes_retracted_by_default(sdk_factory, tmp_path):
 - `read_after` returns events ordered by `seq ASC`, filtered by `types` if provided, honoring `limit` (default 100, max 1000), and **dedups duplicate `event_id`s** (defense in depth — see the direct-Cypher dedup test).
 
 **Files:**
+
 - Create: `tortoise/event_store.py`
 - Modify: `tortoise/sdk.py` (emit hook + calls in create_point :382, create_operator :794, retract_point (Task 1), supersede_point :695, annotate_operator :857; GAP-07 TODO :2168)
 - Test: `tests/test_event_store.py`
@@ -582,6 +597,7 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
 **Step 2: Run — expect FAIL** (`GraphEvent` label never created).
 
 **Step 3: Implement** — `event_store.py` (schema, seq, append, read_after) + `_emit_event` on TortoiseSDK + hook calls. Emit placement:
+
 - `create_point`: compute `pid`/dedup decision first; if new point → `_emit_event("PointAdded", {"id": pid, "kind": kind, ...})` before the CREATE query.
 - `create_operator`: after pid computed, before edge creation → `_emit_event("OperatorAdded", {"id": pid, "op_type": op_type, "source_id": ..., "target_ids": ...})`.
 - `retract_point`/`supersede_point`/`annotate_operator`: emit `PointRetracted`/`PointSuperseded`/`OperatorAnnotated` with the point/operator id + payload before the mutation query.
@@ -599,12 +615,14 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
 **Intent:** Satisfy #432 indicator 3 — claim events integrate with the shared_state EventCodec (versioned, registered types, upcasters) instead of a parallel mechanism. **Scope is REGISTRATION ONLY in this task (plan-review P2):** the claim types become the catalog of record in `shared_state/events.py` with round-trip tests; encode/decode wiring into the emit hook / read path is DEFERRED to the task that ships the first real upcaster (the codec adds no value until events carry versions that need migration; node-level `type`/`event_id`/`ts` are canonical for v1). `ClaimStateChanged` is DROPPED (plan-review P1) — no code path emits it.
 
 **Acceptance:**
+
 - `tortoise/shared_state/events.py` registers exactly: `PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated` — each with an (initially empty) upcaster chain via `register_event_type(name, upcasters=[])`. `ClaimStateChanged` is NOT registered.
 - `EventCodec.encode(type_name, payload)` round-trips through `EventCodec.decode` for each of the five types (version 1) — codec-level unit tests only.
 - **No emission/read wiring in this task:** `:GraphEvent` stores the bare domain payload (Task 3); `_emit_event`/`read_after` do NOT call the codec. A follow-up task ("ship the first real upcaster") wires `EventCodec.encode`/`decode` into the emit hook + read path, with a `try/except KeyError → raw fallback` for unregistered legacy types at that point.
 - New test file `tortoise/shared_state/tests/test_events_claim.py` (or extend existing) with round-trip + upcaster-chain tests for the five types.
 
 **Files:**
+
 - Modify: `tortoise/shared_state/events.py` (register the five types — no `ClaimStateChanged`)
 - Test: `tortoise/shared_state/tests/test_events_claim.py` (Create)
 - (Deferred, NOT in this task: codec wiring in `tortoise/event_store.py` + `tortoise/sdk.py` `_emit_event` — lands with the first real upcaster)
@@ -626,6 +644,7 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
 **Intent:** Indicator 2 — a tenant polls graph/claim changes without full-graph polling. Built on the Task 3 stream, not the CLI EventLog (related: #488 tracks the EventLog primitive separately). Team scoping comes from auth (`get_current_org`) + SDK namespace — never client input.
 
 **Acceptance:**
+
 - `TortoiseSDK.events_poll(after: str | None = None, types: list[str] | None = None, limit: int = 100) -> dict` returns `{"events": [...], "next_cursor": str}` where events are **payload dicts (JSON-parsed bare domain payloads; codec decode deferred to the first-upcaster task — Task 4)** ordered by seq, dedup'd via `recovery.dedup_events`, and `next_cursor` is an **opaque** token encoding `{v:1, seq:last_seq}` (base64url JSON). `after=None` → tail (oldest retained). **The empty-graph cursor uses the SAME format** — `b64url({"v":1,"seq":0})` (plan-review P2; the plan's earlier `"v1:0"` string is unparseable by `_decode_cursor` and is removed).
 - `GET /v1/events?after=<cursor>&types=a,b&limit=100` (hosted_api) — auth `Depends(get_current_org)`; team SDK `_make_sdk(namespace=team["org_id"])`; responds `{"events": [...], "next_cursor": "..."}`.
 - **Expired cursor → HTTP 410** with body `{"detail": "cursor expired — replay from tail (after= omitted)"}`. **SDK-level (plan-review P2):** `events_poll` raises `ValueError("cursor expired — replay from tail")` when `after_seq < min(seq)` (query `MATCH (n:GraphEvent) RETURN min(n.seq)` — per-graph = per-team, no `org_id` filter); `_safe` (MCP) converts that to a structured error, and the REST route maps it to 410. **Empty graph:** `after` never expires; poll returns an empty batch with the same opaque cursor format encoding `{v:1, seq:0}`.
@@ -636,6 +655,7 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
 - At-least-once contract documented in the endpoint docstring: clients must be idempotent on replay.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`events_poll`, `_encode_cursor`/`_decode_cursor` helpers, `events_since` internal)
 - Modify: `tortoise/event_store.py` (`read_after` already; add min-seq + cursor helpers if SDK-side keeps them)
 - Modify: `tortoise/hosted_api.py` (new `@app.get("/v1/events")` near :829)
@@ -788,6 +808,7 @@ class TestEventsPoll:
 **Intent:** Expose the subscription surface to MCP/pi agents (stdio + Streamable HTTP) and make tombstone retraction tenant-reachable (the SDK method from Task 1 has no tenant surface otherwise — EventAPI retract is CLI-only). Tool registry is the single source of truth — `http_policy=True` auto-includes tools in `HTTP_ALLOWED` (mcp_auth.py:70 ← tool_registry).
 
 **Acceptance:**
+
 - `tortoise_events_poll(after: str | None = None, types: list[str] | None = None, limit: int = 100) -> dict` wraps `_safe(_get_org_sdk().events_poll, ...)`; registered in `tool_registry.py` with `annotations=_ro()` (readOnlyHint), `http_policy=True`, `sdk_method="events_poll"`. **readOnlyHint vs lazy-purge DELETE (plan-review P2):** the Task 7 lazy purge inside `events_poll` is **gated by `TORTOISE_EVENT_RETENTION_INTERVAL`** (purge at most once per interval per process), so polls are read-only in steady state; the rare maintenance DELETE is documented in the tool docstring (readOnlyHint covers user-visible state — the poll never mutates user content). The introspective quota test scans for CREATE/MERGE patterns only, so the DELETE does not trip `_QUOTA_GATED` enforcement.
 - `tortoise_retract_point(id: str) -> dict` wraps `_safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)`; registered with `annotations=_rw()` (destructiveHint), `http_policy=True`, `sdk_method="retract_point"`, and added to `_QUOTA_GATED` (mcp_server.py:145 set) — it is a status-mutating write like `tortoise_update_point`. **Add `.retract_point` to the `scan_patterns` tuple** in `TestIntrospectiveQuotaCompleteness.test_every_node_creating_tool_is_quota_gated` (tests/test_mcp_http.py:614) — it currently omits `retract_point`, so the test cannot enforce its gating (plan-review P2).
 - HTTP-mode team scoping: `_get_org_sdk()` (mcp_auth.py:58) already returns `TortoiseSDK(namespace=org_id)` from the request-scoped ContextVar — poll/retract inherit isolation; stdio mode uses namespace `None` → `"default"` team.
@@ -796,6 +817,7 @@ class TestEventsPoll:
 - **Hosted tombstone contract (plan-review P2):** hosted-client test — create + retract a point via the team SDK, then assert `GET /v1/points` excludes it while `GET /v1/points/{point_id}` still returns it with `status:'retracted'` (tombstone contract — not a 404).
 
 **Files:**
+
 - Modify: `tortoise/mcp_server.py` (two tools near :552 update_point / :676 supersede)
 - Modify: `tortoise/tool_registry.py` (two ToolDefinition entries; `_QUOTA_GATED` is in mcp_server.py)
 - Test: `tests/test_mcp_server.py`, `tests/test_mcp_http.py` (HTTP_ALLOWED membership + quota-gate introspection — **add `.retract_point` to `scan_patterns`**), `tests/test_subscriptions.py` (stdio parity), `tests/test_hosted_api.py` (tombstone contract: `/v1/points` excludes, `/v1/points/{id}` returns retracted)
@@ -817,6 +839,7 @@ class TestEventsPoll:
 **Intent:** Bound `:GraphEvent` growth in the in-memory graph (FalkorDB Cloud bills by memory). Cursor expiry semantics already handle purged history (Task 5 410). Config-driven so ops can tune without code change.
 
 **Acceptance:**
+
 - `event_store.purge_expired(proj, retention_days)` deletes `MATCH (n:GraphEvent) WHERE n.ts < $cutoff DELETE n` (cutoff = ISO8601 UTC now − retention; per-graph = per-team — no `org_id` filter, plan-review P2).
 - `event_store.purge_overflow(proj, max_events)` — if `count(n:GraphEvent) > max_events`, delete oldest by `ORDER BY n.seq ASC LIMIT <overflow>` (size cap; default from config).
 - Config: `TORTOISE_EVENT_RETENTION_DAYS` (default `30`), `TORTOISE_EVENT_MAX_PER_TEAM` (default `500_000`), `TORTOISE_EVENT_RETENTION_INTERVAL` (default `3600`s) — read via `os.environ` with defaults (no config-file change; Verification Plan Config=skip).
@@ -825,6 +848,7 @@ class TestEventsPoll:
 - Tests: events older than cutoff purged; `max_events` cap enforced (oldest dropped); purge + cursor expiry interaction (purged seq → 410).
 
 **Files:**
+
 - Modify: `tortoise/event_store.py` (purge helpers)
 - Modify: `tortoise/hosted_api.py` (boot + interval task in lifespan)
 - Modify: `tortoise/sdk.py` (lazy purge hook in `events_poll`)
@@ -847,12 +871,14 @@ class TestEventsPoll:
 **Intent:** Close the ontology loop: the state vocabulary + derived-`challenged` semantics + the `:GraphEvent` event catalog must be documented where consumers look (`docs/ONTOLOGY.md`, the engineering wiki index). AGENTS.md references `docs/00_index.md`, which does **not exist in this repo** — the wiki index `docs/04_platform/wiki/index.md` is the nearest index (verify at execution; if a `docs/00_index.md` appears on main by then, register there instead).
 
 **Acceptance:**
+
 - `docs/ONTOLOGY.md` §4.1 Point `status` row + §5 reflect: `{draft, live, retracted, superseded, outdated, archived}`; `challenged` derived from NAND-operator-edge presence on a live point; retraction = tombstone (status change, not deletion).
 - New `docs/event-catalog.md`: event types table (name, version, emitted-by, payload fields, producer surface) for `PointAdded`, `OperatorAdded`, `PointRetracted`, `PointSuperseded`, `OperatorAnnotated` (**no `ClaimStateChanged` — dropped, plan-review P1**); delivery contract (at-least-once, event_id dedup, 30-day retention, opaque cursor, 410 expiry); `:GraphEvent` node schema `{seq, ts, type, payload, event_id}` (**no `org_id` — the graph namespace is the partition, plan-review P2**) + zero-relationship guard.
 - Register `docs/event-catalog.md` in `docs/04_platform/wiki/index.md` (or `docs/00_index.md` if present).
 - `docs/plans/` gets nothing else; scoping + research docs already filed.
 
 **Files:**
+
 - Modify: `docs/ONTOLOGY.md`
 - Create: `docs/event-catalog.md`
 - Modify: `docs/04_platform/wiki/index.md`
@@ -873,6 +899,7 @@ class TestEventsPoll:
 ## 4. Notes / Open Items
 
 **Research Intake Summary (FalkorDB — cited)**
+
 - Unique constraint: `GRAPH.CONSTRAINT CREATE <key> UNIQUE NODE <label> PROPERTIES <count> <props...>`; **requires a pre-existing exact-match index**; enforced only when constrained properties are non-null; array props excluded. Source: docs.falkordb.com/commands/graph.constraint-create.html (fetched 2026-08-08).
 - Composite index: `CREATE INDEX FOR (n:Label) ON (n.p1, n.p2)` — FalkorDB blog Cypher cheatsheet; in-repo precedent sdk.py:336.
 - Pagination: `ORDER BY` + `SKIP`/`LIMIT` is the documented pattern; cursor range-scans preferred over deep SKIP (Neo4j issue #12695). Plan uses `WHERE seq > $after ORDER BY seq LIMIT` on the plain `seq` index (per-graph = per-team).
@@ -880,6 +907,7 @@ class TestEventsPoll:
 - Zero-relationship nodes are graph islands — invisible to label-scoped queries, traversals, EP (corroborated by FalkorDB MATCH/label-scan docs). Guard enforced by test.
 
 **Open Items (verify/decide at execution; none block task sequencing)**
+
 1. **`seq` atomicity:** confirm the `MERGE (m:GraphEventMeta ...) SET m.last_seq = m.last_seq + 1 RETURN m.last_seq` pattern is atomic per graph on the deployed FalkorDB version (Cloud). Fallback if not: ts-millis seq with +1 bump on collision (dupes tolerable — event_id remains unique; ordering ties only at same-ms). Test `test_seq_is_monotonic_under_concurrency` gates this.
 2. **Append-before vs after mutation:** plan follows scoping (append-before-mutation, EventAPI parity). Consequence: failed mutations leave phantom events; poll consumers tolerate via `get_point` miss. Boot-reconcile (event watermark vs graph `updatedAt`) is documented as a follow-up, NOT in v1.
 3. **Unique-constraint behavior on missing property:** constraint skips nodes missing `event_id` — the emit hook always sets `event_id` (ULID), so this is safe; do NOT rely on the constraint to reject null-event_id nodes (an Open-Item note for anyone touching the write path). Consider a MANDATORY constraint on `event_id`/`seq` as a hardening follow-up (safe on a fresh label).

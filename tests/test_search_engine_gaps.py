@@ -32,6 +32,8 @@ from tortoise.search_engine import (
     reset_circuit_breakers,
     _breaker,
     _breaker_allow,
+    MECHANISM_INDEX,
+    VECTOR_MECHANISM_KEY,
 )
 
 
@@ -668,7 +670,7 @@ class TestRunVectorQuery:
         assert "vec.euclideanDistance" not in sig_b
 
     def test_docker_mode_signature_b_scores_clamped_to_non_negative(self):
-        """#1359 / #5583: sig B's engine value is a DISTANCE, and the
+        """#1359 / #5583 / #6214: sig B's engine value is a DISTANCE, and the
         similarity derived from it is clamped to [0, 1] so RRF and
         single-strategy ordering stay sane.
 
@@ -678,15 +680,22 @@ class TestRunVectorQuery:
         pre-#5583 fixture used ``-0.2``, which is not a distance at all — it
         was written against the (unmeasured) belief that the engine returns a
         similarity.
+
+        #6214: THE ORDER IS PART OF THE CONTRACT AND THE ENGINE'S IS NOT.
+        Both rows tie on distance (2.4), and the engine mock hands them back
+        with ``zulu`` first. The leg must return ``alpha`` first because the
+        secondary key is the id — not because of the order the engine
+        produced. Dropping the id key makes this assertion fail
+        (``zulu`` would stay first).
         """
         graph = MultiCallGraph([
             (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 2.4), ("b", 0.0)], None),
+            ([("zulu", 2.4), ("alpha", 2.4)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("a", 0.0), ("b", 1.0)]
+        assert result == [("alpha", 0.0), ("zulu", 0.0)]
 
     def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
         """#1359: sig A 'not registered' AND sig B fails → brute-force is
@@ -757,7 +766,10 @@ class TestRunVectorQuery:
         assert len(result) == 2
         assert len(graph.query_calls) == 2
         assert "vecf32($query_vec)" in graph.query_calls[0][0]  # sig B first
-        assert "vecf32($query_vec)" not in graph.query_calls[1][0]  # sig A retry
+        # #6214: sig A now also contains vecf32($query_vec) — for the
+        # vec.cosineDistance() it RETURNs, not for the query vector argument.
+        # The A/B distinction is the CALL's argument ORDER, so assert that.
+        assert "'embedding', $query_vec, $limit)" in graph.query_calls[1][0]
 
     def test_procedure_api_queries_signature_a_first(self):
         """vector_index_api='procedure' → sig A attempted first (unchanged)."""
@@ -778,19 +790,51 @@ class TestRunVectorQuery:
         failure (historical probe behavior).
 
         Sig B's rows are DISTANCES and come back as similarities (#5583).
+
+        #6214: the returned ORDER is now contractual. The two rows tie on
+        distance (0.0 — perfect matches), so the id is the only thing that
+        can order them; the engine mock hands them back ``zulu`` first, and
+        the leg must return ``alpha`` first. Removing the id key leaves the
+        mock's order and fails this assertion.
         """
         graph = MultiCallGraph([
             (None, Exception(
                 "Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 2.4), ("b", 0.0)], None),
+            ([("zulu", 0.0), ("alpha", 0.0)], None),
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api=None)
 
-        assert result == [("a", 0.0), ("b", 1.0)]
+        assert result == [("alpha", 1.0), ("zulu", 1.0)]
         assert len(graph.query_calls) == 2
+
+    def test_docker_mode_signature_a_carries_a_distance_and_ties_by_id(self):
+        """#6214: signature A yields NO score column, so its query must
+        COMPUTE a cosine distance from the yielded node (``vec.cosineDistance``).
+        Without it the shared ``(distance, id)`` ordering pass has no
+        comparable value and could only order by the row POSITION — which is
+        not a ranking and reverses under a re-sort (the reason the pre-#6214
+        code could not be fixed by sorting alone).
+
+        Two rows tie on distance (0.0), and the engine mock hands them back
+        ``zulu`` first, so ``alpha`` first is reachable only via the id key.
+        """
+        graph = MultiCallGraph([
+            ([("zulu", 0.0), ("alpha", 0.0)], None),   # sig A succeeds
+        ])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="procedure")
+
+        assert result == [("alpha", 1.0), ("zulu", 1.0)]
+        assert len(graph.query_calls) == 1
+        sig_a = graph.query_calls[0][0]
+        assert "'embedding', $query_vec, $limit)" in sig_a   # A's argument order
+        assert "vec.cosineDistance" in sig_a                 # distance obtained
+        assert "YIELD node, score" not in sig_a              # A yields no score
 
     def test_docker_mode_generic_error_falls_back_to_brute_force(self):
         """HNSW fails with generic error → brute-force fallback."""
@@ -888,26 +932,39 @@ class TestRunVectorQuery:
         assert result == [("a", 0.9)]
 
     def test_hnsw_timeout_logs_but_returns_results(self):
-        """#561: HNSW query exceeding timeout_ms returns its results."""
-        graph = SimpleMockGraph(result_set=[("a",)])
+        """#561: HNSW query exceeding timeout_ms returns its results.
+
+        #6214: signature A now RETURN a distance (sig B always did), so the
+        fixture carries one; a 1-tuple would report ``None`` — an unreadable
+        distance — rather than a score.
+        """
+        graph = SimpleMockGraph(result_set=[("a", 0.1)])
 
         with mock.patch("time.monotonic", side_effect=[0.0, 2.0, 3.0]):
             result = run_vector_query(graph, self.QUERY_VEC, timeout_ms=500, is_embedded=False)
 
-        assert result == [("a", 1.0)]
+        assert result == [("a", pytest.approx(0.9))]
 
     # ── Scoring ──────────────────────────────────────────────────────
 
-    def test_vector_scores_are_monotonically_decreasing(self):
-        """Docker-mode scores: 1.0 - i/N (monotonically decreasing)."""
-        graph = SimpleMockGraph(result_set=[("a",), ("b",), ("c",)])
+    def test_vector_scores_follow_the_engine_distance_not_row_position(self):
+        """Docker-mode scores come from the DISTANCE, not the row position.
+
+        #6214: the pre-#6214 signature-A branch fabricated `1.0 - i/N` from
+        the row's POSITION. That is exactly why re-sorting A by id would have
+        reversed its ranking, and why the shared ordering pass needed A to
+        carry a real distance first. Scores are now `1 - distance` clamped
+        (the same conversion signature B uses), and the returned sequence is
+        still monotonically decreasing — now because distance orders it.
+        """
+        graph = SimpleMockGraph(result_set=[("a", 0.0), ("b", 0.25), ("c", 0.5)])
 
         result = run_vector_query(graph, self.QUERY_VEC, is_embedded=False, limit=10)
 
         assert len(result) == 3
-        assert result[0][1] == 1.0
-        assert result[1][1] == pytest.approx(2.0 / 3.0)
-        assert result[2][1] == pytest.approx(1.0 / 3.0)
+        assert result[0] == ("a", 1.0)
+        assert result[1] == ("b", pytest.approx(0.75))
+        assert result[2] == ("c", pytest.approx(0.5))
 
     def test_entity_type_operator_uses_point_label(self):
         """#193: entity_type='operator' → label='Point' in vector (brute-force) path."""
@@ -939,6 +996,70 @@ class TestRunVectorQuery:
         assert "queryNodes('Event'," in cypher
         assert "node.eventId" in cypher
         assert "vec.euclideanDistance" not in cypher
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
+    """#6214 acceptance 3: the INDEX-accelerated vector leg returns
+    equal-distance rows in a stable, id-determined order — NON-VACUOUSLY.
+
+    Three Points are created in DESCENDING id order with IDENTICAL embeddings,
+    so every distance ties and the engine's own order is
+    ``[tie6214_zulu, tie6214_mike, tie6214_alpha]`` (measured on
+    falkordb-server:v4.16.7 and falkordb:latest). ``[alpha, mike, zulu]`` is
+    unreachable unless the ``(distance, id)`` secondary key is applied:
+    removing that key leaves the engine order and FAILS this test.
+
+    WHY THIS IS THE INDEX PATH AND NOT A SUBSTITUTED SCAN: the leg trace's
+    ``mechanism`` is asserted to be ``index``, so a silent fall-through to the
+    brute-force scan fails the test rather than passing it vacuously. (The
+    scan's own ordering was already pinned by #3019.)
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_vec6214_{os.urandom(4).hex()}")
+    g = proj.g
+    prefix = "tie6214_"
+    try:
+        proj._ensure_indexes()
+        assert proj._vector_index_api is not None, (
+            "FIXTURE NOT REACHED: no vector index was created, so there is no "
+            "index path to test")
+        g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
+        vec = [0.0] * EMBEDDING_DIM
+        vec[0] = 1.0
+        vec[1] = 1.0
+        for pid in (f"{prefix}zulu", f"{prefix}mike", f"{prefix}alpha"):
+            g.query(
+                "CREATE (n:Point {id:$id, text:$id, status:'active', "
+                "embedding: vecf32($vec)})",
+                params={"id": pid, "vec": vec})
+
+        trace: list[dict] = []
+        out = run_vector_query(
+            g, vec, limit=10, is_embedded=False,
+            vector_index_api=proj._vector_index_api,
+            excluded_statuses=(), leg_trace=trace)
+        got = [pid for pid, _ in out]
+
+        assert got, "FIXTURE NOT REACHED: the index leg returned no rows"
+        assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
+        mechanism = next(
+            (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+            None)
+        assert mechanism == MECHANISM_INDEX, (
+            "the vector leg did not answer from the index, so the tie-order "
+            f"assertion below would not be about the index path: {trace}")
+        assert got == [f"{prefix}alpha", f"{prefix}mike", f"{prefix}zulu"], (
+            "equal-distance rows are not id-ordered on the index path: "
+            f"{got}")
+    finally:
+        try:
+            g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
+        finally:
+            proj.close()
 
 
 # ── run_fts_query ───────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ Implementation shape: the private `_graph_name_for_namespace()` derivation (sdk.
 ### D-C5-2 — One data-SDK resolver: `_data_sdk(team_dict)` (+ MCP twin)
 
 `hosted_api` gains `_data_sdk(team: dict) -> TortoiseSDK`:
+
 1. `gid = team["graph_id"]`; `ns = team["graph_namespace"]` (the C1-resolved FULL name; None only pre-C1 nodes → fall back `org_{org_id}`).
 2. **Ownership pre-check (the spine):** if `gid` is set, verify the key's graph actually belongs to the team before opening (registry: Graph node `{id:$gid, org_id:$tid}`; supabase: graphs row org_id) — 403 `"graph not found for key"` on mismatch/vanished graph (fail-closed — never widen onto the default). This is the "ownership check BEFORE select_graph" from the issue.
 3. Open via `TortoiseSDK.from_graph_name(…, ns)`.
@@ -39,6 +40,7 @@ Replacement discipline: every data-plane endpoint that opens the team graph (`na
 ### D-C5-3 — Scope enforcement: `_require_scope(team, op)` — write implies read; legacy full-access class exempt
 
 Enforcement model (epic §5.4): GET/HEAD→read; POST/PUT/PATCH/DELETE→write + operation-level classification (query-language bodies). One matrix:
+
 - `legacy_full_access` (deleg NULL, `scopes==[]` — the tt_/tkm_ class + session auth): **all data-plane ops allowed** on the resolved graph — existing flows unchanged.
 - Scoped key (deleg NULL or 0 with `scopes` non-empty): data reads need `graphs:read`; data writes need `graphs:write` (which implies read). `graphs:read`-only key → write endpoint 403.
 - deleg=0 keys: the DI dormancy gate (`get_current_org_gated`, `_reject_minted_delegated_key`) already 403s them off team data until now — C5's `_data_sdk` + `_require_scope` REPLACE that blanket dormancy for deleg=0 keys that carry data scopes (minted child keys minted with `graphs:read`/`graphs:write` become functional on their bound graph); deleg=0 keys WITHOUT data scopes stay 403. `get_current_org_gated` semantics narrow from "no deleg=0 keys at all" to "deleg=0 keys operate only via `_data_sdk` + scope gate".
@@ -67,6 +69,7 @@ metering.py per-team `write_ops` pool: ops from ANY of the team's graphs count o
 ### D-C5-8 — Cross-graph suite runs BOTH planes in one file pair
 
 `tests/test_tenancy_spine.py` (docker lane, api surface): per-surface matrix with ACL layer OFF (monkeypatch the module's `_admin_client` to None → layer no-ops → app layer alone enforces) AND ON (the docker matrix server has the module; C4's fixtures seed ACL users). Cross-graph probes:
+
 1. key(graph A, read) → GET on A's data OK, on B's data 404/403, team-wide surface 403.
 2. key(graph A, read) → write op on A → 403 (read-only).
 3. key(graph A, read+write) → write on A OK; read B 403.
@@ -85,6 +88,7 @@ metering.py per-team `write_ops` pool: ops from ANY of the team's graphs count o
 6. **Docs:** plan review log + C6 handoff (delivery-shape + session_recording override owned by #2115).
 
 ## Review log
+
 - **Task 2 (data-plane conversion) done**: graph-data + sessions/context/insight/backups route via _data_sdk + _require_scope; team-level surfaces (overview/packs/onboarding/restore) reject graph-bound keys; deleg=0 data-scoped children activate (dormancy pins updated to the C5 contract).
 - **Task 3 (MCP) done**: graph-scope ContextVars + _get_org_sdk custom-graph routing + _enforce_mcp_tool_scope at the call-tool dispatch; C2 MCP pins green under the narrowed gate.
 - **Task 4 (sweeps) PARTIAL**: the dream drain is now per-graph (a custom-graph write's dirty roots drain THAT graph — the old team-keyed drain would dream the DEFAULT graph). **Deferred (documented residual):** backup_sweep + event-retention sweep custom-graph passes need per-graph STATE keying (read_org_state/manifest/drift alarms are team-scoped — a naive per-graph loop would false-drift) + incident semantics review; pinned as a follow-up (C6 handoff / ops) — the default-graph sweep is unchanged and safe.

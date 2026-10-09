@@ -6,6 +6,7 @@
 ## Boundaries
 
 ### In Scope
+
 - Beta prior mapping validation (T0-T4)
 - Log-scale aggregation formula correctness
 - EP propagation across 3 graph topologies (chain, loopy single, loopy multi)
@@ -17,6 +18,7 @@
 - 40 automated tests in `tests/test_ep_sources.py`
 
 ### Out of Scope
+
 - Edge annotation dimensions (archived)
 - Production FalkorDB testing (uses FalkorDBLite)
 - Performance benchmarking
@@ -32,6 +34,7 @@
 3. **Documentation:** Experiment design doc at `docs/ep-source-credibility-experiment.md`
 
 ## Complexity
+
 | Domain | Rating |
 |--------|--------|
 | Architecture | low — single test file, no new systems |

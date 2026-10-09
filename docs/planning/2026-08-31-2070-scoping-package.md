@@ -70,6 +70,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 3. **Answer-correctness failure (false success on recall@k).** Recall@k passes (gold in context) but the reader still answers wrong/abstains — the reader-MODEL content-error class from the runbook (deepseek-v4-flash arithmetic/ordering/recency), or the rerank surfaced related-but-wrong turns that flooded the 40-slot. **Mitigation: acceptance is gold-IN-CONTEXT (indicator 1) not answer-correctness (that's #2069); keep the two classes separable in the benchmark, and add a control asserting the assembled context's top-40 recall, not just membership.**
 
 **Boundary check — OUTSIDE scope (explicitly excluded):**
+
 - Reader-model upgrade / provider routing for the ask lane (**#2069** — separate failure class; the model is the constraint on the content-error class, not retrieval).
 - Detector parity (**#2009** — separate issue, owned).
 - Containment-judge word-overlap bar for long synthesis golds (#1987 follow-up 3 — composition, not retrieval).
@@ -86,6 +87,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 **Why this framing (vs the single framings):** each single framing fails falsification on at least one recorded failure: (a) lexical-mismatch does not explain ceb54acb (which HAS lexical overlap and ranks 70 — a scoring/cap problem); (b) cap-raising does not explain the lexical trio (raising caps cannot add "Veja"); (c) naive-scoring alone does not explain why the vector leg never runs; (d) capability-transfer alone does not explain the degraded-env reality. The combined framing is the only one whose mechanism covers all four recorded failures and whose fix order is falsifiable.
 
 **Rejected alternatives with rationale:**
+
 - *Pure cap-raising (framing b):* rejected as the fix — fails the lexical trio by construction; risks re-introducing the R1 #1540 whole-session token flood (35k measured) and TR flood-control regression. **Better when** measurement shows all failures are ceb54acb-shaped (in-pool + lexical overlap) and context-token headroom exists.
 - *Rerank-only (framing c's strongest variant):* rejected as the fix — the #317 diagnostic ("missing from top-50 → fix retrieval first") and arXiv 2411.11767 (rerankers frequently underperform strong retrievers; 53.3% of datasets hurt by scaling candidate K) directly disconfirm a rerank-first posture for the lexical trio; also CPU latency (~410 ms/20 docs) vs the 500 ms product cap. **Better when** the vector leg is guaranteed and pool recall@50 is already high (the genuine two-stage sweet spot).
 - *Embedder-swap-first:* rejected for this issue — dimension change is a coordinated re-embed/reindex (#265), and the MemDelta +6.2pp claim is single-source; the same-384-dim question (arctic-xs/s vs bge-small) is a re-embed but not reindex and can be part of the measurement, not the fix.
@@ -102,6 +104,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 **Codebase-first precedent scan** (grep across tortoise/ + tools/longmem_eval/): `rrf_fusion` with per-strategy `weights` + `strategy_names` (search_engine.py:871-930; wired with `{"vector": 1.5}` at sdk.py:10127-10138 + `TORTOISE_FUSION_WEIGHTS`); `apply_evidence_boost` product function (retrieval.py:471-590, OFF, mark_for injectable); eval R6 rerank (tools/longmem_eval/rerank.py — CrossEncoderScorer ms-marco-MiniLM-L6-v2, MMR, per-session cap, char pre-truncation 2048, degrade-with-TTL scorer cache); eval C2 boost wiring (retrieve.py `evidence.mark_for_question`, `TORTOISE_LME_EVIDENCE_BOOST_*`); `search_keys` written by the extractor but never queried (the "R2 consumer" E3 #1535 hook); `fallback_snapshot` TF-IDF (#1375) as an always-available lexical signal; recency boost threading pattern (recency_field/recency_boost → `_recency_factors`, R5) as the knob-threading precedent; `_elevated_timeout_ms` private benchmark seam (#316) as the latency-budget threading precedent; degradation contract (`leg_trace` + `retrieval_degraded`) on the ask lane.
 
 **Architecture axis** (external):
+
 - Two-stage retrieval is the production norm: fast candidate pool K=50–200, final N=5–20, cross-encoder rerank second (kunwar.page/chapter/062-reranking-with-cross-encoders; RAG Cookbook 2026 — default shortlist 30; ixprt.com — pool from the recall@k curve). Trigger rule: recall@top-20 > 0.8 with precision@top-3 < 0.6 → add reranker (mudassirkhan.me/blog/rag-reranking). Rerank AFTER hybrid/RRF fusion (same source).
 - **RRF mechanics and pitfalls** (canonical): Cormack et al. 2009, k=60 "not critical"; RRF rank-based, scale-invariant — cannot distinguish a #1 scoring 0.99 from 0.51, favors consensus over one strong signal (redis.io/blog/reciprocal-rank-fusion); **truncated lists bias fusion** and retriever-dominance must be diagnosed (arc-labs.ai/learn/reciprocal-rank-fusion); dedup across lists + id-scheme consistency are implementation prerequisites (bigdataboutique.com); convex-combination fusion more robust than RRF (arXiv 2210.11934 — *An Analysis of Fusion Functions for Hybrid Retrieval*); RRF insensitivity to score-distribution drift is why vendors default to it (OpenSearch docs via #1657).
 - **Weighted fusion precedent:** MongoDB `$rankFusion` per-retriever weights; Weaviate `alpha`; OpenSearch normalization-processor `weights` "when judged data shows one retriever should dominate" — tortoise's own #1657 measurement + shipped 1.5× vector weight already satisfy that bar (in-repo).
@@ -109,6 +112,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - Sources: web_search queries 1–3 above + in-repo #317/#1657/#1348 research docs.
 
 **Research axis (competitor precedent — MANDATORY, ≥5 competitors):**
+
 - **Mem0** — multi-signal retrieval: semantic + **BM25 + entity matching** scored in parallel and fused; "BM25 is a boost signal, not a recall expander"; **optional rerank is a second precision pass**; over-fetch `max(limit*4, 60)`; entity extraction at query time (spaCy, optional) = entity-level key expansion, **no LLM query expansion**; temporal reasoning is a write-time metadata pass, no extra LLM at search; v3 default embedder Qwen3-Embedding-0.6B. (github.com/mem0ai/mem0; docs.mem0.ai/migration/oss-v2-to-v3; docs.mem0.ai/api-reference/memory/search-memories; docs.mem0.ai/core-concepts/memory-operations/search; mem0.ai/blog/how-mem0-uses-embeddings; github.com/mem0ai/mem0 architecture.md)
 - **Zep / Graphiti** — hybrid retrieval = **semantic embeddings + BM25 (keyword) + graph traversal (BFS) per scope**, fused (RRF; "reranks results with RRF"), P95 < 200 ms; raw episodes are a **first-class scope**, not a fallback; "without reliance on LLM summarization"; **no query expansion** — graph traversal plays the expansion role. (help.getzep.com/graphiti/working-with-data/searching; getzep.com/platform/graphiti; help.getzep.com/graphiti/getting-started/overview; github.com/getzep/graphiti; neo4j.com/blog/developer/graphiti-knowledge-graph-memory/)
 - **Cognee** — retrieval = **vector seeds → graph traversal → triplet ranking → context assembly → LLM completion** (`GRAPH_COMPLETION` default); "cast the net with vectors, then traverse the graph for grounded reasoning"; hybrid searches combine vector store (chunks/summaries/entities) with the graph store. (docs.cognee.ai/core-concepts/main-operations/legacy-operations/search; cognee.ai/vectors-and-graphs-in-practice; docs.cognee.ai/python-api/search-type; cognee.ai/links-documents; docs.cognee.ai/core-concepts/architecture)
@@ -118,6 +122,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - **Industry synthesis:** (1) every serious memory product is *dense-first with sparse always-on* (mem0 BM25, Graphiti BM25, tortoise's own FTS+TF-IDF); (2) the "answer surface" competitors (Mem0 rerank, Zep context blocks) keep the LLM out of the read path; (3) rerank is the standard second stage but only *after* pool membership is sound; (4) RRF/weighted-fusion is the consensus fusion layer with known truncation/dominance pitfalls.
 
 **Ontology axis** (how the graph constrains/enables the fix — docs/ONTOLOGY.md):
+
 - `has_answer` mark on Points (§4.1) — the C2 evidence-boost material in the product lane (stored-mark fallback, source-session class; the answer-string/verbatim classes need read-time recompute the eval has, the product doesn't).
 - `CORRECTS` supersession + `status` vocabulary (§3.1, §5) — the ask lane ALREADY passes `include_terminal=True` (sdk.py:10585) so superseded claims co-retrieve with `[SUPERSEDED BY]` markers; retrieval ordering is blind to recency for non-TR questions (the #1657 L2 sub-lever: KU recency).
 - `search_keys` (§4.1 extractor-written aliases) — indexed into points, never used to expand the query (L1 PRF hook).
@@ -129,6 +134,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 ### Integration Docs
 
 **Dependencies (versions + API surfaces):**
+
 - `sentence-transformers>=3,<6` — the `embeddings` extra (pyproject.toml:42). Provides BOTH the bi-encoder (`tortoise.embeddings.EmbeddingModel` — `EmbeddingModel.get()`, `.encode([text])`, lazy singleton with `_LOAD_TIMEOUT_S`) AND the eval's `CrossEncoder` (tools/longmem_eval/rerank.py imports `from sentence_transformers import CrossEncoder`). **No new third-party dep is required for the eval-path reranker or the vector leg.**
 - `scikit-learn>=1.0` — TF-IDF fallback (embedded degrade path + `fallback_snapshot` #1375).
 - Cross-encoder model: `cross-encoder/ms-marco-MiniLM-L6-v2` (~80–90 MB, 22.7M params, 512 max_length) — RERANK_MODEL_DEFAULT, `RERANK_TRUNCATE_CHARS=2048` char pre-truncation.
@@ -139,6 +145,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 ### Codebase Explorer Findings
 
 **AFFECTED_FILES (paths + lines):**
+
 - `tortoise/sparse.py:91-111` — `tokenize_sparse_query`: drops all-digit tokens (the dollar-amount blindness); `:113+` `build_or_query` OR-union.
 - `tortoise/sdk.py:10505-10725` — `ask()` local lane: FTS query (`limit=40, pool_size=120, include_terminal=True`, no structural/expansion args), annotate, dedup (cap 3), assemble (8k/40/32 KiB), reader call; `:9810-10090` `tortoise_fts_query` (RRF fusion + `fusion_weights={"vector":1.5}` at :10127-10138; `structural_hops=0` default at :9832; `_elevated_timeout_ms` seam at :9824); `:9730-9809` `annotate_ask_hits`; `:9728+` `_ask_d8_decoration_unavailable`.
 - `tortoise/retrieval.py:53` `DEFAULT_POOL_SIZE=120`; `:97-143` `resolve_pool_size`; `:147-175` `dedup_pool`; `:185-260` `estimate_tokens`/`estimate_tokens_ask`; `:336-405` `assemble_context` (byte_cap param); `:471-590` `apply_evidence_boost` (OFF by default; `_stored_marks` fallback at :452-465).
@@ -152,6 +159,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - Tests: `tests/test_retrieval.py` (retrieval primitives — the home for new gold-turn-inclusion/cap fixtures), `tests/test_ask_sdk.py` (ask-lane pipeline — the home for ask-lane retrieval-knob tests), `tests/test_longmem_rerank.py` (eval rerank — the degrade-path tests to port), `tests/test_sparse.py` (if exists — numeric-token policy), `tests/test_ask_regression_llm.py` (product-lane LLM fixtures).
 
 **PATTERNS_OBSERVED:**
+
 - Weighted RRF already shipped (vector 1.5×, env-overridable) — L3 done; k-sweep remains.
 - Evidence-boost = product function with injectable marks — OFF everywhere; the ask lane could opt in with the stored-mark fallback (zero new code).
 - Eval R6 rerank = complete, measured, default-OFF, with a degrade-to-untouched contract and a TTL scorer cache — the pattern to port (per its own PRODUCT-PARITY NOTE, "open product decision").
@@ -160,6 +168,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - Skip-not-starve budget walk in `assemble_context` (oversized hit skipped, later hits keep their chance) — the 8k cap can still drop low-ranked gold if the premium-40 exceeds budget.
 
 **PARTIAL_IMPLEMENTATIONS:**
+
 - `rrf_fusion` weights param: fully implemented + wired in `tortoise_fts_query`; NOT exposed on the ask lane as an ask-lane knob (global product default 1.5 — fine).
 - `apply_evidence_boost`: product code, OFF, ask lane never calls it; product mark fallback is weak (source-session only — stored `has_answer`).
 - `search_keys` (E3 #1535 "R2 consumer"): extractor writes aliases; no query-expansion consumer exists.
@@ -167,6 +176,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - `_elevated_timeout_ms`: benchmark-only; a product rerank needs its own budget threading.
 
 **RECOMMENDED_TESTS (mapped to the plan below):**
+
 1. `tests/test_retrieval.py` — numeric-token policy (a `$185`-carrying turn retrieves on a money question); weighted-RRF k×weight sweep unit; evidence-boost ask-lane opt-in unit.
 2. `tests/test_ask_sdk.py` — **4 gold-turn inclusion fixtures** (ceb54acb / 1de5cff2 / gpt4_d84a3211 / 1d4e3b97: seed the question's haystack with EVAL-PARITY ingest — search_keys + has_answer + embeddings + session props + turn→point-id map per Step 0 (NOT `ask_spotcheck._seed_memory`, which is capture-shaped since #3910 but still writes no search_keys/has_answer and no eval-parity id map — its deterministic ids are `{sid}_t{i}`, not `lme:{qid}:s{si}:t{ti}`), run `ask()` with a fake reader, assert the gold turn id ∈ assembled context ids AND the answer received it); caps-under-rerank; search_keys-expansion fixture; retrieval_degraded honesty (vector-leg-absent still degraded).
 3. `tests/test_longmem_rerank.py` — port the degrade-path tests as the product rerank's contract (score-failure → untouched, length-mismatch → untouched, TTL cache).
@@ -179,6 +189,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 ### Solution Approaches (diverge — 2-3 distinct)
 
 **Approach A — "Fix the pool, then re-rank it" (retrieval-first, transfer of proven levers; RECOMMENDED pre-convergence).**
+
 - **Name:** Ask-lane retrieval hardening: membership → ordering → context.
 - **Description:** Ordered, measurement-gated set of small changes on the ask lane only: (A1) sparse numeric-token policy (stop dropping all-digit tokens — or a money/numeric-aware class) so SAME-VALUE dollar-amount turns become retrievable; (A2) guarantee the vector leg on the ask lane (documented runtime requirement for ask quality — NEVER enforced so the degraded flag/embedded carve-out stay honest; optional same-384-dim embedder probe, fresh-seed-per-candidate since cross-dim scoring is invalid); (A3) thread the existing weighted-RRF + k sweep as ask-lane knobs (mirror recency_boost); (A4) `search_keys` PRF query expansion (additive FTS-term injection with an explicit OR-cap budget — budget-compatible, no LLM); (A5) evidence-mark boost ON for the ask lane (requires the 1-field `has_answer` select in the ask fetch + mark writes in fixture/bench seeding — NOT zero new code, see verifier fix); (A6) measurement-gated cap review — **must thread the retrieval-window `limit` (the `result_ids[:limit]` cut INSIDE `tortoise_fts_query`, sdk.py:10251) in tandem with `context_item_cap`** (raising only the assemble param changes nothing — the gold is dropped before `dedup_pool`/`assemble_context`); (A7) — phase 2, gated — port the eval's cross-encoder + MMR rerank onto the ask lane (no new dep; CPU budget-threaded via the `_elevated_timeout_ms` pattern; degrade-to-current contract; feature-flag off-by-default), only if the diagnostic shows recall@50 high + top-40 ordering poor.
 - **Files:** `tortoise/sparse.py`, `tortoise/sdk.py`, `tortoise/retrieval.py` (cap constants / boost call site / expansion helper), `tools/longmem_eval/rerank.py` (port), `tools/ask_spotcheck.py`/new bench, `pyproject.toml` (docs of the embeddings requirement), `.env.example`, `docs/product/answer-surface.md`.
@@ -188,6 +199,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - **Best-fit-if:** the falsification tests do NOT clear (vector-leg-enabled still misses; caps alone don't fix) — i.e., the mixed-class diagnosis holds.
 
 **Approach B — "Coverage review: caps + second retrieval pass" (minimal).**
+
 - **Name:** Ask-lane cap review + recall pass.
 - **Description:** Raise the ask-lane context caps (items 40→up to 120, tokens 8k→up to 16k within the meter's cost bound) and/or add a second retrieval pass (query-variant re-query with expansion terms from the pool's `search_keys`/top-hit vocabulary — pseudo-relevance feedback). No rerank, no embedder requirement.
 - **Files:** `tortoise/retrieval.py` (caps), `tortoise/sdk.py` (second pass), tests.
@@ -197,6 +209,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - **Best-fit-if:** falsification (b) clears — i.e., raising caps to 120 fixes all 4 with no other change.
 
 **Approach C — "Rerank-only port + reviewed top-k" (precision-first).**
+
 - **Name:** Ask-lane cross-encoder rerank (eval R6 port).
 - **Description:** Port the eval's cross-encoder + MMR stage into the ask lane over the current 40-item pool (or a raised pool of 50–100), rerank to top-20/30, with the #317-documented CPU budget threading (restrict to ≤40 items; ONNX qint8 option; degrade-to-current on scorer failure/TTL) and a "reviewed top-k" acceptance (the runbook's other recorded option).
 - **Files:** `tools/longmem_eval/rerank.py` → product port (`tortoise/rerank.py` or into retrieval.py), `tortoise/sdk.py`, `tests/test_ask_sdk.py`, `tests/test_longmem_rerank.py` (port).
@@ -210,6 +223,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 ### Solution-Converge Rationale + Rejected Alternatives
 
 **Chosen: Approach A (retrieval-first), sequenced measurement-first with the rerank (A7) as a gated phase 2.** Rationale, quality-over-convenience:
+
 1. **Falsification first.** A0 (measurement, no code change): (a) vector-leg-ON docker baseline for the 4 golds; (b) cap-raised-120 probe; (c) long-haystack recall@k subset definition + short-baseline. If (a) clears, the issue shrinks to an ops/dependency fix + a cap review; if (b) clears, Approach B; if (c) is already green, close. This satisfies the issue's own indicator 2 ("measured before/after") and makes every subsequent lever's contribution attributable.
 2. **Fix membership before ordering.** The four failures are a pool-membership problem (vector leg + expansion attack the numeric-invisible and thin-overlap cases) plus one in-pool-outside-cap (ceb54acb — boost/weights promote it) — rerank (C) cannot save membership; caps (B) cannot add it. A1 (numeric tokens, same-value questions) + A2 (vector leg) + A4 (search_keys expansion) attack membership directly; each is small, budget-compatible, and revertible.
 3. **Free/cheap reordering first.** A3 (weighted RRF — already shipped, k-sweep) is the ~0ms reordering pillar; A4's evidence boost is a SECOND reorder lever that needs real mark wiring (1-field select + seeding writes — small, not zero-code). ceb54acb at rank ~70 needs promotion into the retrieval window — boost/weights may do it without touching caps.
@@ -217,6 +231,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 5. **Cap review is measurement-gated, never first** (B's trap: flood + cost + no lexical fix).
 
 **Rejected alternatives (with "when this WOULD have been better"):**
+
 - *Approach B (caps/second-pass as the fix)* — **better when** falsification (b) clears (all golds in-pool-with-lexical-match at 120) and context-token headroom + meter cost are confirmed; then it is a 2-line knob change. Otherwise it re-introduces the R1 flood and misses the lexical class.
 - *Approach C (rerank-only)* — **better when** falsification (a)+(b) both clear and the residual gap is top-40 ordering on a vector-leg-enabled lane; then the cross-encoder is exactly the two-stage second stage (K=50–100, N=5–20 per the playbook). It is also the right *phase 2* of Approach A under those conditions.
 - *Embedder swap to arctic-xs/s (same 384-dim)* — **better when** the A2 measurement shows bge-small is the binding constraint (re-embed within-dim, no reindex); *swap to 768/1024-dim (nomic/Qwen3)* — **better when** #265 coordination + a reindex event are accepted; out of #2070 (the #1349 domain, measured here only).
@@ -238,6 +253,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 **Testing strategy:** unit (numeric tokens, fusion sweep, boost opt-in, expansion additive property, ported rerank degrade paths) + integration docker lane (4 gold-turn inclusion fixtures asserting the gold id ∈ assembled context under the caps; recall@k subset before/after on both lanes; caps/second-pass; retrieval_degraded honesty: vector-absent still degraded) + eval parity (longmem_eval suite green unchanged; rerank knobs byte-identical-off; eval re-export of `assemble_context` unaffected) + control (search lane byte-identical when ask knobs off; `tortoise_search`/`/v1/search` never invoke ask retrieval changes — both-not-either preserved).
 
 **Acceptance criteria (mapped to O/I/T):**
+
 - **Indicator 1 →** `tests/test_ask_sdk.py` 4 gold-turn-inclusion fixtures: ceb54acb, 1de5cff2, gpt4_d84a3211, 1d4e3b97 each retrieve their gold turn **within the context caps** (assembled-context id ∈ gold ids) on the same evidence.
 - **Indicator 2 →** `tools/ask_recall_bench.py` before/after recorded in the runbook: gold-in-pool@120 and gold-in-context@cap on the long-haystack subset, both lanes.
 - **Target 0 →** 0 of the 4 recorded gold turns miss the context on re-run (the fixtures are the gate; the bench is the record).

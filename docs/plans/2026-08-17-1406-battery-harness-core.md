@@ -45,6 +45,7 @@ From test-design #1404 (integration-surface map) + issue #1406 verification chec
 | S8 Harness config | Config | Unit | corpus/thresholds/arms/budget YAML schema; [cal] table lock + cal_table_hash; gold sha256 verify at load; empty-corpus guard in loader (exit 5 at dispatch); budget guard (exit 1) |
 
 **Bug Pattern Flags (owned here):**
+
 - Silent function skips: model-call outcomes per call; episodes with any terminal non-ok outcome excluded from aggregates + counted (never silent).
 - N+1 queries: `--batch-setup` → 2 round-trips/scenario (2·N total) vs naive 4+/item.
 - Conditional guards: empty-corpus (exit 5) + budget (exit 1) both sides tested.
@@ -64,6 +65,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** `battery/` imports cleanly; `Tier`, `ExitCode`, `EpOutcome`, `ModelCallOutcome` enums + contract exceptions exist with exact values; skeleton packages (arms, probes, streams, differential, judge, recall, parity, report) import; `.gitignore` gains `battery/golds/sealed/*`.
 
 **Files:**
+
 - Create: `battery/__init__.py`, `battery/enums.py`, `battery/exceptions.py`, `battery/arms/__init__.py`, `battery/probes/__init__.py`, `battery/streams/__init__.py`, `battery/differential/__init__.py`, `battery/judge/__init__.py`, `battery/recall/__init__.py`, `battery/parity/__init__.py`, `battery/report/__init__.py`, `battery/golds/README.md`, `tests/test_battery_enums.py`
 - Modify: `.gitignore`
 
@@ -82,6 +84,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** loaders validate schemas (type-only), verify gold sha256 (mismatch/missing → exit-1 class error), raise `EmptyCorpus` on zero scenarios; cal_table_hash stable; budget estimate formula applied; smoke corpus (2 scenarios, committed fixtures) loads.
 
 **Files:**
+
 - Create: `battery/config/__init__.py`, `battery/config/corpus.py`, `battery/config/thresholds.py`, `battery/config/arms.py`, `battery/config/budget.py`, `battery/config/corpus.yaml`, `battery/config/thresholds.yaml`, `battery/config/arms.yaml`, `battery/config/budget.yaml`, `battery/golds/fixtures/gold-r1-001.txt`, `battery/golds/fixtures/gold-r1-002.txt`, `tests/test_battery_config.py`
 
 **Step 1:** Write `tests/test_battery_config.py` — scenario schema (valid/missing-field/type-violation), tier enum values, split enum, contradiction_pairs/evidence_scripts optional, gold verify (present-ok / sha-mismatch / missing-file → `GoldVerificationError`), EmptyCorpus on empty list, cal hash canonical stability (same rows → same hash; different order → same hash), budget estimate formula + over-budget flag.
@@ -101,6 +104,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** Protocol conformance test passes; mock arm emits seed-derived trajectory (≥1 turn, deterministic tool_calls/tokens/re_derivations); failure-injection double seeded by episode seed produces the exact outcome schedule.
 
 **Files:**
+
 - Create: `battery/arms/base.py`, `battery/arms/mock.py`, `tests/test_battery_arms.py`
 
 **Step 1:** Write tests — Memory/AgentContext dataclass fields; ArmAdapter protocol signature (retrieve/record/setup_scenarios/isolation_namespace); ArmUnavailable; mock arm determinism (same seed → same trajectory; different seed → different); injection policy schedule deterministic + outcome ∈ enum; **golds-absent-from-episode-context: run a mock episode and assert the episode/agent context contains no gold text and `Scenario.golds()` is the only access surface (scope DD2/AC6 pin).**
@@ -118,6 +122,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** EpisodeResult carries full trajectory; model-call outcome recorded per call with retry semantics (≤2 rate_limited / ≤1 timeout / no retry failed+fallback_cached); HarnessScorer emits the pinned metric set {n_turns, n_tool_calls, total_tokens, re_derivations} + outcome counts; aggregation excludes episodes with any terminal non-ok outcome and counts them.
 
 **Files:**
+
 - Create: `battery/runner/__init__.py`, `battery/runner/episode.py`, `battery/runner/model_calls.py`, `battery/runner/scorers.py`, `battery/runner/aggregate.py`, `tests/test_battery_runner.py`
 
 **Step 1:** Write tests — outcome enum recorded per call; retry table (rate_limited retries ≤2 then terminal; timeout ≤1; failed no retry) with an **injectable backoff seam (tests pass a zero/nulled sleeper — no real sleeps in CI)**; episode classification (any terminal non-ok → excluded, counted); **ArmUnavailable raised inside retrieve/record → runner serves deterministic cached response recorded `fallback_cached` (cache exists) or `failed` (no cache), never raises through, never silent, episode excluded + counted (scope DD8)**; HarnessScorer metric set exact {n_turns, n_tool_calls, total_tokens, re_derivations} + outcome counts; **aggregation excludes ANY terminal non-ok outcome (fallback_cached/failed/rate_limited/timeout after retries) and reports the count (AC6, DD8)**; EpisodeResult fields populated; **multi-scorer merge: two scorers returning the same metric_id → hard error at load (scope DD3)**.
@@ -135,6 +140,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** RoundTripCounter wraps `FalkorProjection.g.query`; batch path = 2 UNWIND queries/scenario (points + operators) with endpoint MATCH guards (SDK ValueError parity), idempotent guarded CREATE, call-time `compute_embedding` import; equivalence test (monkeypatched deterministic embedding stub) shows identical graph state (content_hash key, node props incl. status/promote_source/direction/label/embedding); naive baseline = SDK path with deterministic ids; negative-path parity (missing endpoint fails identically); scale test ≥50 scenarios.
 
 **Files:**
+
 - Create: `battery/runner/setup.py`, `tests/test_battery_setup.py`
 
 **Step 1:** Write tests — counter increments per g.query; batch path ≤2 queries/scenario for a 10-item scenario; equivalence naive==batch (points keyed by content_hash, operators keyed by (op_type,source,targets), node props compared: content_hash, status, direction, label, embedding — **timestamps explicitly excluded: both paths write real call-time createdAt/updatedAt which never match at microsecond resolution; the comparison never looks at them; the compared-prop set is a documented prop-SUBSET of the SDK's (event-emission divergence + is_operator handled as documented divergences, not compared)**); **NAND direction parity: the naive path calls `create_operator(op_type, src, targets, direction=None)` — the SDK's `_canonical_direction` fires ONLY on explicit None (default kwarg is "bidirectional"; verified sdk.py:4024) — so BOTH paths store `unidirectional` for NAND (never "fix" the batch to bidirectional)**; negative path (missing endpoint fails identically on both paths); idempotency (batch_setup twice → node + edge counts unchanged, no duplicate points/operators — **BATCH path only: `create_operator` has no dedup/deterministic id (fresh ulid per call, verified sdk.py:3266–3308), so the NAIVE path is idempotent for points only (dedup=True) and NOT for operators — scope the assertion to batch, never claim both**); scale ≥50 scenarios (batch = 2·N ≤ cap, naive ≫); **tagged real-model embedding test `@pytest.mark.slow` (skip when `compute_embedding` returns None — no model installed): batch path with the REAL embedding fn produces non-None embeddings on both paths (scope DD5 pin)**.
@@ -152,6 +158,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** run_id = seed+arm+scenario (random-free); artifacts written to `<out>/<attempt_ts>/<run_id>.json` + summary.json (schema v1.0, schema test); ep_outcome = converged (mock); excluded counts present; all-failed → artifacts written THEN exit 4; arm-init failure → summary-only exit 4; budget over → exit 1 before run; setup mode recorded.
 
 **Files:**
+
 - Create: `battery/runner/run.py`, `battery/runner/artifacts.py`, `tests/test_battery_run.py`
 
 **Step 1:** Write tests — artifact schema validation (run_artifact v1.0 + summary v1.0, concrete field sets from scope DD4/DD15 + the two deliberate additive fields below); run_id composition (seed+arm+scenario, random-free); per-scenario emission (2 scenarios × 2 arms → 4 artifacts); excluded counts; deterministic seed ordering; budget refusal (exit 1 class, before run) **for cost-over-budget AND for `--max-episodes > budget.max_episodes` (fixture with a cap < requested — budget wins, DD12 precedence)**; all-failed → artifacts written THEN exit 4 (b1); **arm-init failure: mock arm whose `setup_scenarios` raises ArmUnavailable → summary written (arm_present=false), ZERO episode artifacts, exit 4 (b2, scope DD7)**; **multi-arm mixed: arm A init-fails, arm B completes → exit 4, absent marked in summary, arm B's artifacts present (b2/mixed tests inject arm instances directly at run_battery() level — never via --mock/--arms, which select only resolvable battery.arms modules)**; **harness-batcher DB error (projection g.query raises) → operational exit 1, not 4**; summary schema.
@@ -171,6 +178,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** All 5 subcommands parse their pinned flags; `run` works end-to-end (mock); empty corpus → exit 5; unknown flag/subcommand → exit 1 (argparse exit-2 remapped); contract exceptions raised at dispatch → correct codes (JudgeGateBlocked→2, InconclusiveRun→3, ArmUnavailable(run-level)→4, EmptyCorpus→5); stubs exit 1 with ownership message.
 
 **Files:**
+
 - Create: `battery/cli.py`, `tests/test_battery_cli.py`, `battery/__main__.py`
 
 **Step 1:** Write tests — subcommand surface (each parses its flags); exit codes end-to-end (run ok 0, empty corpus 5, budget 1, all-failed 4); dispatch mapping via injected exceptions (2/3/4: JudgeGateBlocked→2, InconclusiveRun→3, **ArmUnavailable(run-level)→4, IsolationBreach→4**); stubs exit 1 with ownership message; argparse remap (unknown flag → exit 1); **unknown arm `--arms nope` → exit 1; bad `--scorer does.not.exist` → exit 1 (scope DD3/DD16)**; ConfigError/GoldVerificationError → exit 1; **`--mock --arms a0` → a0 WINS (no usage error; Task 6 pins --arms precedence), exactly one arm (a0) in summary**; **EmptyCorpus caught before ConfigError → exit 5, never masked to 1**.
@@ -188,6 +196,7 @@ test-routing: domain=code, Architecture=standard, UX=low, Ontology=low → unit 
 **Acceptance:** `tests/test_battery_determinism.py` runs the CLI twice via subprocess (PYTHONHASHSEED=0, TORTOISE_DB_URI="", TORTOISE_DB_PATH=<attempt tmpdir>), compares metric_values across attempt dirs with |Δ| ≤ 1e-6.
 
 **Files:**
+
 - Create: `tests/test_battery_determinism.py`
 
 **Step 1:** Write the test — subprocess `[sys.executable, "-m", "battery", "run", "--mock", "--seed", "7", "--config", <abs battery/config>, "--out", <abs attempt dir>]` run TWICE with env `{**os.environ, "PYTHONHASHSEED": "0", "TORTOISE_DB_URI": "", "TORTOISE_DB_PATH": <abs tmpdir per attempt>}` and `cwd=repo_root, timeout=120` (abs paths + `sys.executable` + timeout pinned — bare `python` may not be the uv venv; defaults resolve against CWD). CLI prints the attempt dir path on stdout (Task 6 contract); the test parses both, **ASSERTS THE TWO ATTEMPT DIRS DIFFER** (attempt_ts pinned to sub-second precision `%Y%m%d-%H%M%S-%f` — two sequential runs can land in the same second; identical dirs would silently compare a dir to itself), and compares metric_values across them with |Δ| ≤ 1e-6. Mark `@pytest.mark.slow` (each subprocess boots a fresh redislite daemon).

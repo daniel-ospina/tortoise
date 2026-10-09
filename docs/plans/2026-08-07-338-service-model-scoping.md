@@ -80,6 +80,7 @@ Cycle 1 found 3 P1s (self-host daemon shape unspecified; exclusions unfiled; mis
 ## 4. Solution Diamond + Verification Gate Summaries
 
 **Chosen approach: A-hybrid "Daemon-first, consumer-validated, license-in-parallel"** (full plan: `docs/plans/2026-08-07-338-service-model-plan.md`):
+
 - Thin `tortoise/selfhost.py` daemon reusing `create_http_app()` with additive `auth_mode` param ("tenant" default keeps hosted byte-identical; static/none omit TeamResolutionMiddleware) — NO Supabase, NO hosted machinery in the self-host image.
 - Consumer-first: `mcp_client.py` (fastmcp 3.4.6 built-in client — zero new deps) + twenty bridge conversion proves "connect, don't import" before the image ships.
 - License as parallel track (P3): BSL 1.1 LICENSE from precedent (SPDX BUSL-1.1, Couchbase, MariaDB MaxScale, CockroachDB, Sentry FSL $5M, HashiCorp, Redis/Elastic Apache-2.0 conversion) + `docs/license-notes.md` provenance split.
@@ -88,11 +89,13 @@ Cycle 1 found 3 P1s (self-host daemon shape unspecified; exclusions unfiled; mis
 **Rejected alternatives:** B (one-app factory — multi-tenant machinery + production refactor risk), C wholesale (contract-first license-last — owner blocker deferred), A as-stated (docs-first delays installable service). All with "when it would have been better" criteria in the plan §1.
 
 ### Verification Gates
+
 - **problem-verify: 2 cycles** — Cycle 1: 3 P1s (self-host daemon shape unspecified; exclusions unfiled; misdiagnosis rejection undocumented) → fixed (D1 decision block pinned; #523/#524/#525/#526 filed; rejected-framings table + falsification + confidence 85/100). Cycle 2: clean (no P0/P1; P2/P3 incorporated: docs/index.md→root index.md, incident phrasing).
 - **solution-verify: 2 cycles** — Cycle 1: 1 P1 (merge-main must be explicit P0.2 action — branch 12 commits behind, #510/#516 missing) + 5 P2 + 5 P3 → fixed (P0.2 ACTION; lifespan/origins/CLA/CI-wiring P2s; all P3s). Cycle 2: clean (no P0/P1; 2 new P2s + P3s incorporated: scripts-symlink→validation/, symbol citations, tenant-import guard, release mechanics, image ref, env table, drift note).
 - **Qwen coherence (deepseek-v4-pro): 2 cycles** — Cycle 1: 2 P1s (hosted signup dead-end gated on #518/#235; conditional-import spike) + 3 P2s → fixed (self-host primary quickstart; P0.4 import spike + structural fallback; rate-limit unit; CLI contract; sidecar phrasing). Cycle 2: 1 P2 (T3.3/T5.3 CI-wiring wording) → fixed. **Coherence: clean.** ⚠️ *Post-review owner overrides (2026-08-07): (1) "hosted = coming soon" fix REVERSED — hosted built now (epic #235 + #518/#519/#292), docs treat it as first-class, no "coming soon" debt. (2) Pre-merge coordination check DROPPED — zero external users pre-launch, no dead-end risk; both options ship fully and launch together. Priority: SAP.*
 
 ### Wiring Check
+
 | Touch Point | Type | Covered By | Status |
 |---|---|---|---|
 | create_http_app middleware stack (shared hosted/self-host) | Auth boundary | T1.1 auth_mode + G1 hosted suite + integration map row 1 | ✅ |
@@ -107,10 +110,10 @@ Cycle 1 found 3 P1s (self-host daemon shape unspecified; exclusions unfiled; mis
 | Release mechanics | Cross-cutting | T5.5 (version bump + CHANGELOG + tag v*) | ✅ |
 
 ### Complexity
+
 | Domain | Rating | Notes |
 |---|---|---|
 | Architecture | medium | Auth-mode param + daemon + image; no engine split (deferred #526) |
 | UX | low | Docs rewrite + quickstart; no UI component work |
 | Ontology | none | No entity/edge changes |
 | Total | **standard** | Per issue; ~5–7 working days, parallel tracks |
-

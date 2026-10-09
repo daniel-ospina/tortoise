@@ -60,6 +60,7 @@ zero sweep mutation, stub-Source exception class. Green.
 ## Verify-stage findings
 
 Zero P0/P1. Two named residuals:
+
 1. **T11 live-corpus smoke** — blocked on the production corpus host.
 2. **hosted_api #909 bridge** still passes explicit `contentHash=""` on
    no-hash writes (the joint preserve semantics don't cover it) — scoped to

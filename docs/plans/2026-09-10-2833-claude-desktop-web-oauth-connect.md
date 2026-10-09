@@ -34,7 +34,6 @@ subjects.team: organisation-design-team
 > The **"Plan-review disposition"** section at the bottom records all open findings from both
 > review cycles, including the ones the children now carry. Read it before implementing.
 
-
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
 **Goal:** Make the hosted MCP resource server reachable and conformant for Claude's connector, and give the Claude Desktop / Claude Web onboarding wizard a key-less OAuth path — so a user on an account without the beta Request-headers field can connect by supplying only the Server URL.
@@ -140,6 +139,7 @@ Wave D (last):
 **Intent:** Remove the same-host 307 on the registered MCP URL — the first-party `#985` incident (`hosted_api.py:993-1010`) shows this exact chain (scheme-downgraded `Location` → Fly 301 → POST→GET conversion → `GET /mcp/` 405) already broke the MCP TS SDK once.
 **Acceptance:** with `follow_redirects=False`, `GET` (`Accept: */*`) → `200`, `POST` → `401`, `OPTIONS` → `405`; identical for `/mcp/`; **no 3xx on either**; `GET` with `Accept: text/event-stream` → `405` **on both forms** (preserved behaviour, see `tests/test_mcp_http.py:362-372`); a POST accepted by the rewrite still returns SSE-framed JSON-RPC.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (add the rewrite middleware near `ForwardedProtoMiddleware` `:993`; mount area `:21197`)
 - Test: `tests/test_mcp_http.py`, `tests/test_hosted_api.py`
 
@@ -149,6 +149,7 @@ Wave D (last):
 **Step 4: Add the streaming assertion** as **`POST /mcp` with an `Accept` that includes `text/event-stream`**, asserting SSE-framed JSON-RPC. Do **not** assert that `GET` + `text/event-stream` streams — the handler answers that shape with 405 by design.
 **Step 5: Run** `tests/test_mcp_http.py tests/test_mcp_server_auth_modes.py tests/test_hosted_api.py -v` → **PASS**, including `TestProxyProtoRedirect` **unchanged** (it runs against a synthetic mini-app that installs its own `ForwardedProtoMiddleware`, so it cannot detect changes to the real app — record that as the reason it is not decision input).
 **Step 6: Record two consequences in the commit body**, with the *correct* mechanisms (plan-review cycle 1 corrected both):
+
    - `ForwardedProtoMiddleware` is **retained** — it still governs the `Location` scheme for trailing-slash 307s on ~9 other paths, incl. `/oauth/token/` and both well-known documents. Do not remove it.
    - **Rate-limit bucketing:** `_bucket_key` (`hosted_api.py:880-893`) keys on the Bearer token or `ip:<host>`, **not** on the path. So `/mcp` and `/mcp/` were never in separate buckets for a *keyed* request — but an **unauthenticated** request (no token) does fall back to the IP key, so the observable change is limited to that case. Assert this with a test rather than asserting a false mechanism.
    - Add the assertion to the test: one credential hitting `/mcp` then `/mcp/` lands in one bucket.
@@ -161,12 +162,14 @@ Wave D (last):
 **Intent:** PRM's `resource` must equal the URL the user is told to enter. Today PRM says `…/mcp` while every *connector-facing* surface says `…/mcp/`.
 **Acceptance:** the connector surfaces carry one canonical no-slash constant, equal to `mcp_resource_url(base)`; the **keyed-harness** surfaces remain slashed and that split is recorded in a code comment replacing the false no-307 claim (#2849); `parse_resource` accepts slash, no-slash, canonicalized (case/port/fragment) **and team-scoped** forms; a source-scan test proves no stale connector literal survives; the migration/notification story is written down.
 **Files — connector surfaces (→ canonical no-slash):**
+
 - `website/apps/dashboard/src/harnesses.js` (new/reused canonical constant; replace the false `:7-8` comment)
 - `website/apps/dashboard/src/main.jsx` (`:6199`, `:6232`, `:887`)
 - `website/docs.html:172` **and `:180`**; and the wrong `type` literal at `:171` (`"streamable-http"` → `"http"` — cycle-1 dropped this)
 - Served connector copy: `tortoise/onboarding/SKILL.md`, `website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md`, `website/apps/dashboard/dist/skills/tortoise-onboarding/SKILL.md`
 
 **Files — served skill trees that ALSO carry the literal (route via `skill-sync`):**
+
 - `skills/{how-to-use-tortoise,tortoise-decide,tortoise-file-finding,tortoise-onboarding}/SKILL.md` — **this is a symlink to the agent-infra repo**; `grep -rn` and `git ls-files` do not traverse it. It carries 11 occurrences. **Edit the source in agent-infra and sync**, do not edit the symlink path in this repo.
 - `website/apps/dashboard/{public,dist}/skills/{how-to-use-tortoise,tortoise-decide,tortoise-file-finding}/SKILL.md` — these three have **no** source copy in this repo; the chain is public↔dist only. `tortoise-onboarding` is the one with a source→public→dist chain.
 
@@ -194,6 +197,7 @@ Wave D (last):
 **Intent:** MCP 2025-06-18 requires the 401 to carry `WWW-Authenticate: Bearer resource_metadata="…"`; Tortoise emits it nowhere, so Claude must fall back to well-known probing on every connect.
 **Acceptance:** each of the **four tenant-resolution** 401 sites carries the challenge, and the `resource_metadata` URL returns 200; the **self-host static-key** 401s carry **no** challenge (no AS exists there); the revision status and the #217 necessary-not-sufficient caveat are stated in the PR; `GET`/`HEAD /mcp/` stays 200 as documented-public transport metadata; the `offline_access` position is recorded **with the correct premise**.
 **Files:**
+
 - Modify: `tortoise/mcp_auth.py:114-125` (`_jsonrpc_error` — add a `headers` parameter) and the challenge-emitting call sites; plus the GET/HEAD decision comment
 - Test: `tests/test_oauth_mcp.py` (`TestMcpBoundary`, flow body `:1220+`), `tests/test_mcp_server_auth_modes.py`
 
@@ -213,6 +217,7 @@ Wave D (last):
 **Intent:** `/…/oauth-protected-resource/mcp/` and `/…/oauth-authorization-server/mcp/` 307 today; a vendor troubleshooting item requires 200 with valid JSON.
 **Acceptance:** all four **registered** routes and all four trailing-slash variants return 200 for `GET` with no 3xx; the AS document is asserted with AS-shaped keys (it has no `resource` field); the non-`GET` behaviour is decided and asserted; `docs/oauth-mcp.md` carries the vendor checklist; the `openid-configuration` alias is explicitly **not** added.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (well-known routes `:20943-20961`) and/or the mount producing the 307
 - Modify: `docs/oauth-mcp.md`
 - Test: `tests/test_oauth_mcp.py` (metadata section `:226-273`)
@@ -233,6 +238,7 @@ Wave D (last):
 **Intent:** Claude re-registers per connection from Anthropic's shared egress (`160.79.104.0/21`) against a 20/hour limiter that is per-process, not global — real traffic will 429.
 **Acceptance:** with the limiter **enabled**, registrations from the Anthropic CIDR are not throttled at production-plausible aggregate volume, a non-exempt IP is still throttled at the limit, the CIDR branch is proven **reachable** through the `Fly-Client-IP` plumbing, the bucket store is bounded, the code carries **no** CIMD fetch, and the multi-instance divergence plus the sibling-table growth bound are recorded against #2853 with an owner and date.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py:20920-20922` (limiter) and the bucket store
 - Modify/annotate: `tortoise/hosted_api.py:880-893` if the key derivation changes
 - Test: new `tests/test_oauth_dcr_limit.py`
@@ -252,6 +258,7 @@ Wave D (last):
 **Intent:** The two Claude tabs render only a key-paste recipe behind a beta caveat that diverts users to other tabs, so the stated indicator ("connect with only the Server URL") is unreachable.
 **Acceptance:** on the **live** connect step, the `claude-desktop` and `claude-web` branches render a key-less OAuth recipe (Server URL + sign-in → Authorize → org chooser), require no `harnessKey`, contain no `Request headers` / `Authorization: Bearer` line and no beta caveat, name org-admin `static_headers` as the fallback **without** telling a non-admin to paste a credential, and no longer divert to other tabs; `wizardConnectTripwire.test.js` + the node suite pass; the committed `dist/` bundle is **rebuilt and committed**.
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx` — the **live** branches `:6183` (claude-desktop) and `:6225` (claude-web), their `harnessKey ?` gates, and the Continue labels `:6258`/`:6277`
 - Modify: `website/apps/dashboard/src/harnesses.js` — `HARNESS_STEPS['claude-web']:75`, `HARNESS_INTRO`, `HARNESS_INSTALL['claude-desktop']:156`, **`UNIVERSAL_COMMAND['claude-desktop']:379` and `['claude-web']:394`** (missing from cycle 1), and `HARNESS_OAUTH:300`
 - Modify: `website/apps/dashboard/src/harnesses.test.js` (`:104-113` asserts those blocks name `Authorization` — that assertion must change) and `website/apps/dashboard/src/wizardConnectTripwire.test.js`
@@ -274,11 +281,13 @@ Wave D (last):
 **Intent:** The indicator is not verifiable inside a PR; the scoping absorbed a minimal cold-start measurement so the issue cannot close on a warm-only run, and #217 proves a passing challenge does not guarantee a client connect. Cycle 1 showed the replay's listed legs miss the OAuth lifecycle's real failure modes.
 **Acceptance:** a recorded cold-start TTFB table for five endpoints; a replay that reaches `tools/list` on the canonical URL **and** exercises fault injection, warm-cache revocation, refresh concurrency and the real scope string; a human E2E script with an evidence template, named owner, target date, an existing label, the retry leg recording the entered URL form, the `frame-ancestors` check, the stale-client-state assertion, and a record of whether any GET probe hits the authless branch.
 **Files:**
+
 - Create: `docs/research/2026-09-10-2833-claude-connector-e2e.md`
 - Create: `tools/oauth_claude_replay.py`
 
 **Step 1: Replay driver.** DCR with the Claude profile (`redirect_uris: ["https://claude.ai/api/mcp/auth_callback"]`, `token_endpoint_auth_method: "none"`, `grant_types: ["authorization_code","refresh_token"]`) → `/oauth/authorize` → `/oauth/consent` → `/oauth/token` (S256 + `resource`) → `initialize`/`tools/list` on `POST <canonical>` → refresh rotation → expired-token replay. Assert no redirect on the POST, challenge present, all eight discovery checks 200. **Use the client's real scope string (`mcp offline_access`), not bare `"mcp"`.**
 **Step 2: Lifecycle legs the cycle-1 replay missed.**
+
    - **Fault injection:** raise on the Nth control-plane `query` during `_issue_tokens` (the code is consumed **before** tokens are issued, and `hosted_api.oauth_token` catches only `OAuthError`, so a PostgREST 5xx today yields a bare 500 and an **unrecoverable** grant — the client retries the same code and gets `invalid_grant`). Assert: a coherent OAuth error (not a bare 500), the code is still redeemable or the client gets a distinguishable retryable signal, and **no new refresh/access row remains live** after the failure (the orphan-credential variant).
    - **Warm-cache revocation:** on the **same** app/middleware instance, authenticate with the `oat_` token, `POST /oauth/revoke`, then immediately re-POST and assert 401 — or assert the intentional grace window explicitly and bound it. (`TeamResolutionMiddleware` holds a 60 s LRU keyed by raw token; the existing `test_revoked_oauth_token_401` builds a *fresh* app, so it cannot catch this.) Cover rotation the same way.
    - **Refresh concurrency:** two concurrent refresh requests with the same token → exactly one 200, and the loser's outcome must not force full re-authorization.
@@ -327,6 +336,7 @@ fixed against the code by an independent reviewer, including the line-level fact
 `harnessKey`).
 
 **Cycle-1 P1s: 19 of 22 fixed substantively; 1 was a restatement.**
+
 - `P1-D` (**NOT fixed — restatement**): Task 5 says "put the owner + absolute date" for
   #2853 and supplies neither. #2853 has no assignee and no date. This is the *same*
   silent-rot defect cycle 1 raised, restated.
@@ -364,6 +374,7 @@ store cap + eviction policy) **and** the #2853 owner/date. If the number is genu
 product decision, make it a **human gate before Task 5 Step 1**.
 
 **P1-NEW-1 / R2-misclassification — `main.jsx:887` and `website/docs.html:172` are KEYED surfaces.**
+
 - `main.jsx:887` is inside `wizardPromptText`, whose call sites are `pi`/`cursor` (`:6125`) and
   `claude`/`codex` (`:6175`) — no Claude-connector branch consumes it.
 - `website/docs.html:168-177` is a `.mcp.json` block for Claude Code / Cursor (`"Authorization":
@@ -430,6 +441,7 @@ Code-redemption concurrency (`_consume_code` double-issue) is untested too.
 "the client's documented recovery is one re-auth" and say so.
 
 ### Remaining P2s (recorded, not blocking)
+
 `:6225`→`:6219` line fix; "extend" vs modify the tripwire loop; the cross-language drift test is
 tautological as written (export the constant, assert from Python); the `<base>` origin for the
 challenge is unspecified (`mcp_auth.py` has no base helper and `request.base_url` inside the

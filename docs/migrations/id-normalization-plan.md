@@ -72,6 +72,7 @@ TORTOISE_DB_URI=docker://:@localhost:16380/tortoise uv run python graph-scripts/
 ### 3.1 Generate ULID for Each Non-ULID Point
 
 For every Point whose `id` does not match the canonical ULID format:
+
 1. Generate a new ULID via `tortoise.ids.ulid()`
 2. Store the mapping: `{old_id: new_ulid}` in a migration tracking set in Redis
 
@@ -101,6 +102,7 @@ Each format batch: migrate → verify → commit (proceed to next batch only aft
 **Critical:** FalkorDB edges reference Point IDs in their endpoints (source and target are node IDs stored in the edge). Every edge involving a migrated Point MUST be rewritten.
 
 For each `old_id → new_ulid` mapping:
+
 ```cypher
 -- Create the new Point node with the ULID id
 -- Copy all properties from old node
@@ -145,6 +147,7 @@ Count must be identical before/after (no point creation or deletion, only ID rew
 ### 4.2 Edge Count
 
 Same check for edges:
+
 ```cypher
 MATCH ()-[r]->() RETURN count(r)
 ```
@@ -156,6 +159,7 @@ After migration, re-run `graph-scripts/audit_ids.py`. All Points should now be i
 ### 4.4 resolve_id Verification
 
 For a random sample of migrated legacy IDs:
+
 ```python
 point = sdk.resolve_id("old_legacy_id")
 assert point is not None, f"resolve_id failed for old_legacy_id"
@@ -165,6 +169,7 @@ assert _is_ulid(point["id"]), f"resolved id {point['id']} is not ULID"
 ### 4.5 EP Propagation
 
 Run an EP propagation pass after migration to confirm no weight corruption:
+
 ```bash
 TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 -c "
 from tortoise.sdk import TortoiseSDK
@@ -190,6 +195,7 @@ tortoise restore --input /backup/tortoise-pre-id-normalization-YYYYMMDD.rdb
 ### 5.2 Per-Batch Rollback
 
 Each batch stores its mapping. Rolling back a single batch:
+
 1. Load the batch's `{old_id: new_ulid}` mapping
 2. Reverse the migration: rewrite edges back to old IDs, delete ULID nodes
 3. Restore `legacy_id` property removal
@@ -201,6 +207,7 @@ Each batch stores its mapping. Rolling back a single batch:
 ### 6.1 Cleanup
 
 After all batches pass verification:
+
 1. Remove `legacy_id` properties (optional — keep for audit trail)
 2. Update `resolve_id` to use legacy_id property for lookups
 3. Run full audit again, commit final baseline
@@ -232,6 +239,7 @@ Fix the traverse operation to never expose internal numeric IDs. This is the roo
 **⛔ This plan is a proposal. No destructive migration runs without explicit human approval.**
 
 Approval checklist:
+
 - [ ] Backup verified (restore tested on staging)
 - [ ] Dry-run results reviewed (all verification gates pass)
 - [ ] Batch order approved

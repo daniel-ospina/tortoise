@@ -43,6 +43,7 @@ gh secret list --repo daniel-ospina/tortoise | grep FLY_API_TOKEN
 After confirming deploys succeed with `FLY_API_TOKEN_DEPLOY`:
 
 1. **Rotate the full-scope token** (optional but good practice after scoping):
+
    ```bash
    fly tokens create org --org premiselabs   # creates a new full-scope token
    gh secret set FLY_API_TOKEN --body "<new-token>" --repo daniel-ospina/tortoise
@@ -105,6 +106,7 @@ EOF
 ```
 
 Settings applied:
+
 - **Require PR reviews:** min 1 approval, dismiss stale reviews on new commits
 - **Prevent force pushes:** yes
 - **Prevent branch deletion:** yes

@@ -45,6 +45,7 @@ created: 2026-09-10
 **Intent:** Remove the multi-team dead-end for resource-less OAuth clients (ChatGPT) and make team resolution consistent across preview → mint → exchange (suspended teams never bind a grant), keeping the single-team contract byte-identical.
 
 **Acceptance:**
+
 - `parse_resource(base, {base})` and `parse_resource(base, {base}/)` resolve to the bare MCP resource; `{base}/v1/keys`, `{base}/mcp/organizations/x/y`, and foreign origins still raise `invalid_resource`.
 - No-resource resolution counts only **non-suspended** teams: sole active team → today's single-team shape; >1 active team → `{org_id: None, org_name: None, resource, memberships:[{org_id, org_name, resource}]}` (200); 0 active teams → the existing 403 `invalid_grant`.
 - A declared team-scoped resource for a non-member still 403s; a declared resource for a **suspended** team 403s at preview.
@@ -52,10 +53,12 @@ created: 2026-09-10
 - `/oauth/consent` POST semantics otherwise unchanged (member + active team binds; strict no-resource multi-active-team 400 preserved).
 
 **Files:**
+
 - Modify: `tortoise/oauth.py` (`parse_resource`, `consent_preview`, `_default_team`, `issue_auth_code`, new `_selectable_teams` helper)
 - Test: `tests/test_oauth_mcp.py`
 
 **Step 1: Failing tests first** — add to `tests/test_oauth_mcp.py`:
+
 - `parse_resource` boundary: `TEST_BASE` and `TEST_BASE + "/"` → bare MCP, no team; `TEST_BASE + "/v1/keys"` → 400 `invalid_resource`; `"https://evil.example/mcp"` → 400; `TEST_BASE + "/mcp/"` → bare MCP.
 - `test_preview_multi_team_no_resource_returns_memberships` (2 active teams) → 200, `org_id is None`, `memberships` length 2, each row has a `org_resource_url` `resource`.
 - `test_preview_multi_team_origin_root_echo_returns_memberships` (resource=`TEST_BASE`) → same as above (origin-root echo is treated as no-team-scope).
@@ -70,13 +73,17 @@ created: 2026-09-10
 - `test_suspended_team_rejects_code_exchange` (existing): update — the suspension now rejects at the CONSENT POST (code never minted), so rework the test to assert the consent 403 and keep the exchange-level assertion for the refresh path only.
 
 **Step 2: Implement**
+
 1. `parse_resource`: after the existing `base_mcp` equality (which already `rstrip("/")`s), map the exact origin root to the bare MCP resource:
+
 ```python
     base_root = base.rstrip("/")
     if resource in (base_root, base_root + "/"):
         return base_mcp, None
 ```
+
 2. `_default_team` — count only non-suspended teams:
+
 ```python
 def _default_team(cp, user_id: str) -> str:
     """The user's sole ACTIVE (non-suspended) team (D4 + R1). 0 usable teams
@@ -96,7 +103,9 @@ def _default_team(cp, user_id: str) -> str:
                      "must declare a team-scoped resource indicator "
                      f"({org_resource_url('<base>', '<org_id>')} form).")
 ```
+
 3. `_selectable_teams`:
+
 ```python
 def _selectable_teams(cp, user_id: str) -> list[dict]:
     """The user's ACTIVE memberships whose teams are not durably suspended —
@@ -113,7 +122,9 @@ def _selectable_teams(cp, user_id: str) -> list[dict]:
     # deterministic chooser order (user_memberships has no ORDER BY)
     return sorted(out, key=lambda t: t["org_id"])
 ```
+
 4. `consent_preview` (replaces the current body — keeps single-team and declared-team shapes byte-identical, including the `resource` field conditional):
+
 ```python
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
     """Consent-page team preview (D4 + R1 account-chooser).
@@ -162,12 +173,15 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
                      "This account has no team. Create a team before "
                      "connecting an MCP client.")
 ```
+
 `_selectable_teams` returns teams sorted deterministically by `org_id` (stable order for the chooser; the chooser never auto-binds — see Task 2).
 5. `issue_auth_code` — assert the team is usable BEFORE inserting the code (suspension surfaces at consent, not at a later exchange):
+
 ```python
     org_id = _resolve_team(cp, user_id, base, resource)
     _assert_team_usable(cp, org_id)
 ```
+
 (place after the existing `org_id = _resolve_team(...)` line, before the code insert).
 6. Keep `_resolve_team` otherwise unchanged (its `_default_team` call now inherits suspension-aware resolution).
 
@@ -180,6 +194,7 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
 **Intent:** Let the user choose which team an OAuth grant binds when the client couldn't, with the page never dead-ending on a transient preview failure, a stale session, or a sign-in race.
 
 **Acceptance (each has a pinned static-string test in Step 1):**
+
 - Multi-membership preview → team `<select>` populated (options rebuilt from scratch on every populate — no duplicate rows on re-runs); the Authorize POST carries the selected team's scoped `resource`.
 - **Multi-team pickers NEVER auto-bind.** With `memberships.length > 1`, Authorize stays disabled until the user explicitly picks a team (`change` event) — an untouched picker cannot authorize a wrong-org default. Single-team pages (and the sole-ACTIVE-team auto-bind) render exactly as today and authorize with the bound team (no picker).
 - `#btn-auth` starts **`disabled` in the markup** and is enabled only after the preview resolves (single bound team) or an explicit selection exists; each `showConsent()` re-run disables it again until that run resolves; the handler early-returns when still disabled (double-click and pre-preview POST impossible).
@@ -188,10 +203,12 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
 - `onAuthStateChange` (`SIGNED_IN`/`INITIAL_SESSION`) auto-advances to the consent view, guarded by an in-flight flag that spans the async preview (no duplicate preview fetches / duplicate `<option>` population).
 
 **Files:**
+
 - Modify: `tortoise/oauth.py` (`_CONSENT_HTML` only; `consent_page_html` signature unchanged)
 - Test: `tests/test_oauth_mcp.py`
 
 **Step 1: Failing static-string tests** — render `consent_page_html(...)` and assert the embedded markup/script contains, per behavior:
+
 - `test_consent_html_single_team_select_not_visible`: single/auto-bound team — the served markup keeps the select `display:none` and the `team-line` visible; the JS unhide + placeholder insertion is gated on `preview.memberships.length > 1`; Authorize enables on preview resolution without any picker interaction.
 - `test_consent_html_team_picker_wiring`: `id="team-select"` present; the Authorize body expression `teamResource || PARAMS.resource || null` present; `body.resource` assignment reads the selected team resource.
 - `test_consent_html_select_hidden_by_default`: the select's initial inline style is `display:none`, and only a `memberships.length > 1` branch unhides it.
@@ -204,23 +221,28 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
 Behavior beyond these strings is explicitly NOT auto-verifiable (no jsdom layer exists for this page) — residual risk is owned by Task 5 (manual) + R3 observations, per the surface map.
 
 **Step 2: Implement in `_CONSENT_HTML`**
+
 1. Team row:
+
 ```html
 <div class="row"><span class="k">Team</span>
   <span class="v" id="team-line">resolving…</span>
   <select id="team-select" style="display:none" aria-label="Team for this connection"></select>
 </div>
 ```
+
 2. `#btn-auth` markup gains `disabled` (enabled by JS post-preview). `showConsent()` becomes in-flight-guarded, disables `#btn-auth` at every re-entry, **and resets the module-level `teamResource = null` at every entry** (the ONLY writer of `teamResource` is the current run's picker `change` handler — a re-run can never carry a stale selection into the POST); it **returns a `'stale'` sentinel when a session exists but the preview 401s**, so recovery runs OUTSIDE the guarded body (see item 4). After the preview resolves: single/auto-bound team → today's team-line text and Authorize enabled; `memberships.length > 1` → CLEAR the select's existing options, add a leading disabled `value=""` placeholder ("Choose a team…"), then append the real options (value = `m.resource`, label = `org_name (org_id)`), unhide the select, hide `team-line`, set `resource-line` to picker copy; `teamResource` is set ONLY in the select's `change` handler (the placeholder guarantees the first real pick fires `change`), and Authorize enables only then — an untouched picker cannot authorize (no silent wrong-org bind).
 3. Authorize handler: `body.resource = teamResource || PARAMS.resource || null`; early-return (with an error) if the button was never enabled; **a 401 POST response triggers one `refreshSession()` then a single re-POST that RE-READS the session (`await supabaseClient.auth.getSession()`) and uses the fresh `access_token` — only a second 401 shows the expired-session sign-in view** (no `signOut()`; the cookie is replaced by a fresh sign-in).
 4. Stale-session recovery (single driver, capped): the caller of `showConsent()` (initial load, the `onAuthStateChange` handler, and the email sign-in path) receives the `'stale'` sentinel and performs AT MOST ONE `await supabaseClient.auth.refreshSession()` (the cookie still holds a valid refresh_token — the page runs `autoRefreshToken: false`, so only the ~1h access JWT is stale), then re-invokes `showConsent()` (the in-flight guard is already cleared). A second consecutive `'stale'` renders the expired-session sign-in view with "Your session expired — sign in again." (no `signOut()` anywhere on this path — a global-scope gotrue logout would revoke the shared parent-domain session server-side, logging the user out of the dashboard on every device). No session → `showSignin()` as today; non-401 preview failures → error banner + show `#btn-retry-preview` (re-runs the guarded `showConsent`), Authorize stays disabled.
 5. After client creation:
+
 ```js
 let previewInFlight = false
 supabaseClient.auth.onAuthStateChange((event) => {
   if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && !previewInFlight) showConsent()
 })
 ```
+
 Keep all existing escaping/`_json_for_script`/nonce/CSP behavior untouched.
 
 **Step 3:** `tests/test_oauth_mcp.py` green (existing consent-page tests unchanged).
@@ -234,9 +256,11 @@ Keep all existing escaping/`_json_for_script`/nonce/CSP behavior untouched.
 **Acceptance:** All exports accept `chatgpt`; the 6 existing entries' strings are unchanged; `HARNESS_INSTALL['claude-web']()` output is byte-identical to today; chatgpt copy embeds `CHATGPT_MCP_URL` (no slash), no key, no `tt_`, no `.../mcp/` slash form.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/harnesses.js`
 
 **Step 1: Constants** — add after `MCP_URL`:
+
 ```js
 // #1701: ChatGPT's custom-connector URL — NO trailing slash. OpenAI's
 // connector validates an '/mcp' suffix, and bare POST /mcp dispatches
@@ -250,8 +274,10 @@ const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
 const WORKFLOWS_PROMPT =
   `You have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`
 ```
+
 **Step 2: Refactor `HARNESS_INSTALL['claude-web']`** so its `base` variable reads `const base = WORKFLOWS_PROMPT` (the session-filing gating paragraph is unchanged) — output byte-identical.
 **Step 3: Vocabulary maps** — add `chatgpt`:
+
 - `HARNESS_CAPTURE_SUPPORT`: `chatgpt: false`
 - `HARNESS_NAMES`: `chatgpt: 'ChatGPT'`
 - `HARNESS_SKILLLESS`: `['claude-desktop', 'claude-web', 'chatgpt']`
@@ -283,6 +309,7 @@ const WORKFLOWS_PROMPT =
 **Intent:** Render a key-less ChatGPT connect flow for wizard step 2 (self fork) that is correct for members AND owners, unreachable by the key-mint/universal-command fragments, names the onboarding org so the consent picker binds the RIGHT team, and is safe on the archived A0 rollback path.
 
 **Acceptance:**
+
 - Selecting the ChatGPT tab with no key, with a key from an earlier tab, as a member, or as an owner/admin all render the SAME key-less chatgpt flow.
 - Copy prompt fires the sticky `wizardCopied === 'harness'` state and the copy beacon; Continue calls `wizardHarnessContinue`.
 - The branch renders an org-naming line ("When Tortoise asks which team to use, choose **{shownOrgName}**") so a multi-team user picks the org they're onboarding.
@@ -290,9 +317,11 @@ const WORKFLOWS_PROMPT =
 - 6-harness renders byte-identical; the stale "covers all 6 harnesses" comment near the keyed else-branch is updated.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx`
 
 **Step 1: branch precedence + import** — add `HARNESS_OAUTH` to the named import from `./harnesses.js` (main.jsx L6). Then at the top of the self-fork `wizardStep === 2` content, above the `!harnessKey ? (...) : (...)` ternary (~L5677), insert the chatgpt branch as an unconditional sibling:
+
 ```jsx
 {wizardHarness === 'chatgpt' ? (
   /* key-less ChatGPT flow — Step 2 */
@@ -302,16 +331,20 @@ const WORKFLOWS_PROMPT =
   /* existing universal-command render — UNCHANGED */
 )}
 ```
+
 **Step 2: chatgpt content JSX** (inline; mirrors the archived wizard's step-list markup + live nav chrome):
+
 - `<ol className="harness-steps">` from `HARNESS_STEPS('chatgpt', harnessKey)` using the existing `wizardCopyStep`/`copiedStep` per-step copy buttons.
 - `HARNESS_INTRO.chatgpt` paragraph.
 - Org-naming line when `shownOrgName` is available: "When Tortoise asks which team to connect, choose **{shownOrgName}**."
 - `<pre className="snippet">` of `HARNESS_INSTALL.chatgpt()`.
 - `wizard-nav` with Back (step 1) / **Copy prompt** → a chatgpt-local copy handler that AWAITS `navigator.clipboard.writeText(HARNESS_INSTALL.chatgpt())` and only on resolution sets the sticky `wizardCopied === 'harness'` state + fires the PATCH beacon (reusing `wizardCopy` semantics); on clipboard rejection it surfaces "Copy failed — select the prompt below and press ⌘/Ctrl-C" and does NOT enable Continue (the shared `wizardCopy` fire-and-forget stays untouched so the 6 keyed harnesses are byte-identical). **Continue rendered ONLY when `wizardCopied === 'harness'`** → `wizardHarnessContinue` (mirrors the claude-web gate: a checkpoint requires a successful copy action, keeping the done card honest) / Skip for now.
 **Step 3: archived A0 wizard guard** — in the archived `!harnessKey` gate (~L5990), treat OAuth harnesses as key-satisfied:
+
 ```jsx
 {(!harnessKey && !HARNESS_OAUTH.includes(wizardHarness)) ? ( /* existing no-key UI */ ) : ( /* existing copy path */ )}
 ```
+
 **Step 4: comment updates** — refresh the main.jsx "the universal command covers all 6 harnesses" comment (~L5901) and the archived wizard block's analogous stale-count copy to the 7-tab reality.
 **Step 5:** visual smoke via `npm run dev` — chatgpt tab key-less for member/owner/no-key/with-key states; 6 existing tabs byte-identical; MemorySources capture panel shows the chatgpt row with the disabled reason (no `undefined`).
 
@@ -320,6 +353,7 @@ const WORKFLOWS_PROMPT =
 ### Task 5: Manual/UX verification checklist
 
 Carried out during implementation (Task 2/4) and recorded in the PR body:
+
 - Consent page: single-team byte-identical; **multi-team picker — an untouched picker does NOT authorize (Authorize stays disabled until an explicit selection; picking a team binds exactly that team)**; options render once (no duplicates); Authorize disabled pre-preview; retry on preview failure; stale-session recovery shows the sign-in view after one refresh attempt.
 - Wizard chatgpt: member-no-key, owner-with-key, tab-switch-after-mint, skip/back nav; org-naming line rendered; **block the clipboard once and confirm Continue stays hidden until a successful copy**; 6 tabs unchanged.
 - MemorySources: chatgpt row renders the reason (never `undefined`).
@@ -333,10 +367,12 @@ Carried out during implementation (Task 2/4) and recorded in the PR body:
 **Acceptance:** All listed test files green; docs updated.
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/harnesses.test.js`, `tests/test_onboarding_endpoints.py`, `tests/test_onboarding_analytics_patch.py`, `tests/e2e/test_dashboard_onboarding.py`, `docs/oauth-mcp.md`
 
 **Step 1: `harnesses.test.js`** — add `HARNESS_OAUTH` to the top-of-file import list from `./harnesses.js` (the new assertions reference it). Rewrite DE2E-5 vocabulary assertions: `HARNESS_ORDER.length === 7`; `SELF_INSTALL` exact `['claude','codex','cursor','pi']`; `TEACH_HUMAN` exact `['claude-desktop','claude-web','chatgpt']`; `HARNESS_OAUTH === ['chatgpt']`; disjointness (`SELF_INSTALL ∩ TEACH_HUMAN = ∅`, `HARNESS_OAUTH ∩ SELF_INSTALL = ∅`, `HARNESS_OAUTH ⊆ TEACH_HUMAN`); union == HARNESS_ORDER; `Object.keys(HARNESS_NAMES)` set == HARNESS_ORDER set. Keep the universal-command total loop. chatgpt copy assertions: includes `Developer mode`, `chatgpt.com/plugins`, `https://api.premiselabs.co/mcp` (exact), `OAuth`, a workflows-prompt marker; does NOT include `tt_`, the test key, `tortoise_health`, or `api.premiselabs.co/mcp/` (slash form). The teach-human `tortoise_health` regex applies to desktop/web only — chatgpt asserts its own in-chat verify sentence. `HARNESS_CAPTURE_SUPPORT.chatgpt === false` + reason present. Assert `HARNESS_INSTALL['claude-web']()` and `HARNESS_INSTALL.chatgpt()` share the identical workflows body (drift pin on `WORKFLOWS_PROMPT`).
 **Step 2: `test_onboarding_endpoints.py`** — `test_cross_surface_harness_vocab_contract`: keep server exact-6 assertions; change the frontend assertion to subset + carve-out:
+
 ```python
     assert frontend >= set(_HARNESS_ANALYTICS_VALUES)
     # #1701: chatgpt is a WIZARD-ONLY harness — ChatGPT never files sessions
@@ -344,6 +380,7 @@ Carried out during implementation (Task 2/4) and recorded in the PR body:
     # absent from the server capture/analytics vocabulary.
     assert frontend - set(_HARNESS_ANALYTICS_VALUES) == {"chatgpt"}
 ```
+
 **Step 3: `test_onboarding_analytics_patch.py`** — add `test_patch_chatgpt_harness_beacon_is_inert`: PATCH `{harness:'chatgpt', section:'config'}` → 200, no `artifact_copied` event, `harness`/`section` absent from the merged onboarding state (mirrors the existing vim-invalid case; documents chatgpt as intentionally beacon-less).
 **Step 4: `tests/e2e/test_dashboard_onboarding.py`** — the `.harness-tab` count assertion (~L173): 6 → 7 and refresh the stale "HARNESS_ORDER is 6 …" comment to the 7-tab reality (Claude Code leg + paste-key flow otherwise unchanged).
 **Step 5: `docs/oauth-mcp.md`** — update the token→team mapping row (multi-team now offers the consent chooser; suspended teams excluded; origin-root resource echoes accepted as the bare MCP resource) and add a short "Resource-less clients (ChatGPT)" note.
@@ -357,6 +394,7 @@ Carried out during implementation (Task 2/4) and recorded in the PR body:
 **Acceptance:** `docs/research/2026-09-10-1701-chatgpt-e2e-script.md` exists with the evidence template; dist rebuilt from the merged main.jsx.
 
 **Files:**
+
 - Create: `docs/research/2026-09-10-1701-chatgpt-e2e-script.md`
 - Modify: `website/apps/dashboard/dist/**` (rebuild)
 
@@ -366,6 +404,7 @@ Carried out during implementation (Task 2/4) and recorded in the PR body:
 ---
 
 ## Failure Modes (not covered by unit tests → observed in R3 / manual)
+
 - Consent page inside ChatGPT's OAuth webview (CDN script, cookie jar, provider redirect) — R3 observation list.
 - OpenAI plan entitlement / tool-scan heuristics — R3 records plan tier + scan result.
 - DCR shared-egress per-IP limiter pressure at launch — ops note in the PR body.
@@ -373,12 +412,14 @@ Carried out during implementation (Task 2/4) and recorded in the PR body:
 - Consent-page JS behavior beyond static strings (disable gate, retry, 401 recovery, picker selection) — Task 5 manual + R3.
 
 ## Code-notes (cycle-2/3 resolutions)
+
 - Escaping: the chatgpt copy literals containing apostrophes (`Tortoise's`, `isn't`) MUST be written with escaped quotes or double-quoted JS strings — never raw single quotes inside a single-quoted literal (`harnesses.js` + the plan snippets are illustrative).
 - `signOut()` is FORBIDDEN on the consent-page 401 paths (shared parent-domain session; global-scope gotrue logout revokes across devices) — refresh-first only, capped at ONE refresh attempt per stale cycle.
 - Multi-team pickers never auto-bind (leading disabled placeholder forces an explicit `change`); single/auto-bound teams authorize directly.
 - The wizard's chatgpt Continue gate mirrors claude-web (requires a successful copy — the chatgpt branch awaits the clipboard write).
 
 ## Verification Plan
+
 1. `uv run pytest tests/test_oauth_mcp.py tests/test_onboarding_endpoints.py tests/test_onboarding_analytics_patch.py tests/test_hosted_auth.py tests/test_mcp_server_auth_modes.py -q` (docker lane, `tortoise_test_1701`) → green.
 2. `node --test` in `website/apps/dashboard` (`src/*.test.js`) → green.
 3. `npm run build` clean; dist committed.

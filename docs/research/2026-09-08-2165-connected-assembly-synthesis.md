@@ -1,6 +1,7 @@
 # Research Synthesis — Connected Assembly for Tortoise (#2165 lane 2)
 
 **Date:** 2026-09-08 · **Mode:** synthesis of four parallel external-research passes (each source-cited, confidence-tiered, in this dir):
+
 - `2026-09-08-connected-assembly-read-paths.md` — agent-memory products' read-side assembly anatomy (Zep/Graphiti, Mem0, Letta/MemFS, LangMem, OpenAI, Bedrock, HippoRAG 1/2, GraphRAG local)
 - `2026-09-08-graphrag-retrieval-evidence-assembly.md` — GraphRAG-family mechanisms + demonstrated failure modes (DEG-RAG, GraphRAG-Bench, ER practice, ISWC'25)
 - `2026-09-08-temporal-reasoning-decomposition-assembler.md` — decomposition evidence, current-state resolution, relative-time + date arithmetic, ordering/interval assembly contract
@@ -10,6 +11,7 @@
 **Purpose:** a single compact set of DESIGN CONSTRAINTS for the what/when/why assembler, so scoping/planning agents share one evidence base. Constraints are labeled [EVIDENCE] (directly sourced) or [DESIGN] (my synthesis of evidence for this codebase).
 
 ## What the assembler is (locked from issue-scoping economics review, 2026-09-08)
+
 Deterministic (zero-LLM) read path: question → resolve subject(s) → walk the connected subgraph (Object state/lifecycle + dated Events + aboutObject-linked Points with EP/provenance) → render one dense structured block (state + timeline + evidence) → hand to the single existing reader LLM. Marginal runtime cost ≈ 0 LLM calls added. Value: information density per token, deterministic state correctness (via landed #2242 fold), provenance/EP surfacing (nobody else has EP).
 
 ## Hard evidence constraints (top findings)
@@ -33,6 +35,7 @@ Deterministic (zero-LLM) read path: question → resolve subject(s) → walk the
 9. **Anti-patterns to reject.** Type-blind BFS without question gating (Graphiti's own admitted drift); embedding-gated pools (a certain graph hit must not starve behind weak vectors); precomputed community summaries (wrong abstraction for a small dated graph); LLM consolidation at write that deletes history (Bedrock) — Tortoise's append-only + supersession fold is correct. Zero-LLM structured assembly has NO shipping precedent — the flat-facts-everyone pattern is what we're beating, not copying. [EVIDENCE]
 
 ## Open design decisions the scoping must resolve (with evidence pointers)
+
 - **Subject resolution surface:** deterministic name/alias match → disambiguation via question context → LLM fallback only on failure (constraint 7). Which resolver primitives exist in-tree (search_engine? FTS? entity name-id determinism sdk.py:1233-1240)?
 - **Block layout + token budget:** state header / dated event spine (chronological) / evidence points with EP + provenance quote; per-slice caps; total cap target <~12k (constraint 5). Flag-off or additive to existing point-only path (backward compat).
 - **Which question shapes route to assembly:** compare/ordering/interval (constraint 6), current-state (constraint 3), absolute-date; defer N-ary LLM decomposition + "ago"-relative resolution as follow-ups where evidence says deterministic assembly suffices.

@@ -16,6 +16,7 @@ aboutObjects: extractor
 ## Scope Boundaries
 
 ### In Scope
+
 - **M — Measurement integrity:** M1 dead-code fix (main can generate reports again); M2 pre-flight API ping + 4xx fail-fast (401/402/403 fatal; **judge key present — OPENAI_API_KEY — explicitly checked**; billing probe uses a realistic S1-sized call to distinguish balance vs per-request cap); M3 extractor retry/backoff + bounded `max_tokens`; M4 retry-then-fix protocol + integrity reporting (per-question `valid`, error census, printed before score — no publish-gate machinery); M5 reader pinned (model + prompt constants for the run); M6 evidence-marking recalibration (source-session attribution + verbatim anchor + raw-chunk containment; N/A-not-0.0 semantics; calibrated against the 52 healthy questions); M7 self-explanatory report (leg-mix, pool size, evidence written/retrieved, error census, write-path cost per run) + run hygiene (workers, checkpoint fingerprint, Python ≥3.12 guard, **dataset recall-semantics re-validation: `answer_session_ids` vs `answer_turn`/`has_answer` coverage vs the LongMemEval paper before trusting turn_recall as a cross-run metric**); M8 statistical discipline (shared-qid deltas, CIs at small n, flip lists).
 - **P — Production wiring:** P1 fail-closed capture (extraction errors surface; truthful `extraction_mode`; never `extracted: 0` on LLM failure); P2 provider routing (DeepSeek-direct primary + OpenRouter fallback; adapter ported from tests/ into `tortoise/`; gate matches consumer); P3 rebase to origin/main + CI drift gate; P4 quota/truncation/`client_commit_id` parity + **MITIGATES-on-capture parity** (capture path must write MITIGATES operators like the commit path does) + **hosted-capture `speaker` parity** (SDK writes `speaker` on turn points, hosted doesn't — align).
 - **E — Extraction content:** E1 session-date anchoring into S1/S2/S4 (+ `when` slot, event `startedAt`); E2 state-value facts as Points (option A: verbatim value + `quote` + `when`; master-list user-personal-state vocabulary, NO new kind); E3 atomic points + speaker attribution (existing subject mechanism: `quote`/offsets → source-turn role; `aboutSubject`) + `search_keys`; E4 S4 merges-not-replaces; E5 supersession end-to-end (fact-value contradiction detection, length-guarded; persist through ingest — payload + `client_commit_id` + CORRECTS edges; co-retrieve superseding claim; render `[SUPERSEDED BY]`/`[SUPERSES]` in embedded mode).
@@ -26,12 +27,14 @@ aboutObjects: extractor
 - **The run (phased testing protocol — see §Run/Testing Protocol below):** code review → 50-Q pilot → mechanical fixes → full 500-Q run → mechanical fixes → 50-Q confirmation → 1k only if needed. Real-backend eval (real FalkorDB + FTS index + embedder + structural kind), pre-flight checked, integrity-gated. The V3 500-Q run is the V4 baseline. **Follow-up run:** measures R6 + E6 against that baseline.
 
 ### Out of Scope
+
 - Calibration-threshold selective abstention (needs calibration data from the first valid run) — defer to V5.
 - `.env.example`/deploy-seam documentation — defer (P4 adjacency; fold in later).
 - Any ontology change: new kinds, new edge types, expansion packs — explicitly excluded (facts-as-Points, owner-approved; E7's NOOP/DELETE use existing edges + status machinery).
 - **NOTE (in-scope additions 2026-08-20):** cross-encoder rerank + MMR (R6), bi-temporal validity windows (E6), and cross-session consolidation (E7) were moved from Out of Scope to In Scope (R6/E6 sequenced-last; E7 sequenced after E5) per owner. The reader A/B (2×2) and MMR-vs-dedup tuning remain V5.
 
 ### Boundary Rationale
+
 The cut is governed by TWO principles: **every item either (a) makes the next run trustworthy (M, P, the run protocol), (b) is a code-verified fix toward the vision whose mechanism is confirmed even where its impact is unmeasured (E, R, A), or (c) is the run-calibration-dependent compounding layer (R6 cross-encoder/MMR, E6 bi-temporal) now in-scope-sequenced-last** — landed after the V3 baseline exists, measured in a follow-up run against it. E7 (cross-session consolidation) is a (b) item — its mechanism is code-verified (Graphiti dedupe-at-ingest, Mem0 4-way) and it shares E5's write-path plumbing; it ships with the V3 build, sequenced after E1/E3/E5. Anything that needs the run's calibration data and is NOT yet justified (abstention calibration) is deferred to V5. Ontology is sacred: no new kinds without a separate proposal — E6's validity windows and E7's NOOP/DELETE are additive properties + existing edges (status, supersession, links).
 
 ## Customer Value Map
@@ -79,6 +82,7 @@ The cut is governed by TWO principles: **every item either (a) makes the next ru
 ## High-Level E2E Test Cases
 
 ### E2E-1: The eval runs the REAL retrieval stack
+
 **Given:** a real FalkorDB graph with the FTS index created, an embedder installed, and a structural `kind` passed
 **When:** a question is asked whose answer is a paraphrased extracted point (different wording than the query)
 **Then:** the point surfaces in top-k via the semantic/vector leg
@@ -86,17 +90,20 @@ The cut is governed by TWO principles: **every item either (a) makes the next ru
 **And (R1 dedup):** per-session chunk count in top-k ≤ the cap — one session family can't monopolize the pool
 
 ### E2E-2: A run cannot silently degrade
+
 **Given:** a funded key (pre-flight billing probe passed) and healthy extraction
 **When:** the 500-question run executes
 **Then:** the integrity block reports `valid=true`, `invalid_rate==0` (or ≤ threshold with justification), and per-question error census
 **And:** the report is a real report (not null), with per-question leg-mix + evidence counts
 
 ### E2E-3: Evidence marking is non-vacuous
+
 **Given:** a completed run with healthy extraction (E2E-2)
 **When:** evidence recall is computed
 **Then:** `evidence_points > 0` for >95% of questions and `evidence_recall` is a real number or explicit N/A — never a forced 0.0 on an empty denominator
 
 ### E2E-4: Temporal questions are answerable
+
 **Given:** a session whose extractor received its session date (E1)
 **When:** a "how many days between X and Y" / "when did Z happen" question is asked
 **Then:** the reader answers from date-anchored points instead of abstaining
@@ -104,41 +111,48 @@ The cut is governed by TWO principles: **every item either (a) makes the next ru
 **And:** hits render in time order for time-bound questions (R5)
 
 ### E2E-5: Concrete facts survive; speaker is attributed
+
 **Given:** a conversation containing "my personal best 5K time is 27:12" (user-asserted, stated early in the conversation) and an assistant suggestion that is NOT the fact
 **When:** a knowledge-update / preference question asks for the value
 **Then:** the verbatim value (27:12) is retrievable and evidence-marked
 **And:** the answer reflects the user-asserted fact, not the assistant suggestion (speaker derived from the source-turn role via `source_turn_id`)
 
 ### E2E-6: Superseded facts surface the new value
+
 **Given:** two sessions changing the same fact ("gym at 6pm" → "gym at 5pm")
 **When:** a KU question asks the current value
 **Then:** the newer value is answered and the superseded point is co-retrieved/marked as superseded
 **And:** the supersession chain exists end-to-end in the graph (CORRECTS edges, no drops at write/ingest/read)
 
 ### E2E-7: Abstention comes from evidence, not the label
+
 **Given:** an abstention question whose fact is absent from the graph
 **When:** the reader is asked (with no `_abs` flag anywhere in the reader path)
 **Then:** the reader abstains cleanly, stating what IS present and that the asked info is absent (A1)
 
 ### E2E-8: Capture fails closed
+
 **Given:** a dead/misconfigured LLM key on the capture path
 **When:** a session is captured
 **Then:** turn points still land, extraction errors surface on the response (non-200 or additive `warnings`), and `extraction_mode` is truthful — never a silent 200 "extracted: 0"
 **And (failover variant, P2):** with the primary provider dead and the fallback configured, extraction succeeds via the fallback route and `extraction_mode` records the route taken
 
 ### E2E-9: Point-in-time restore (bi-temporal, last phase)
+
 **Given:** a fact that changed (gym 6pm → 5pm) with validity windows recorded (E6) and a question asking what the schedule WAS at an earlier date
 **When:** the point-in-time query is asked
 **Then:** the reader answers from the historically-valid value, with the current value rendered as context
 **And:** default retrieval still prefers the live value (E2E-6 still passes)
 
 ### E2E-10: Rerank + diversity (cross-encoder/MMR, last phase)
+
 **Given:** a question whose correct evidence is a paraphrased point among many near-duplicate raw chunks from one session
 **When:** retrieval returns top-k
 **Then:** the cross-encoder reranks the correct point above near-duplicates, and MMR caps per-session chunks (≤1–2) so the context isn't monopolized
 **And:** `match_source` records the rerank pass
 
 ### E2E-11: Cross-session consolidation (E7)
+
 **Given:** the same fact stated across two sessions with different wording (duplicate) and a different fact contradicted across sessions (update)
 **When:** the second session is captured
 **Then:** the duplicate resolves to a NOOP link (one linked fact, no fragmentation), and the contradiction resolves to UPDATE (supersede + REVISES, old fact invalidated soft)

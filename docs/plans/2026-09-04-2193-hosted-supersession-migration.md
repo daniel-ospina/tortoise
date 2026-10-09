@@ -10,10 +10,12 @@
 **Architecture:** Whole-§6b-loop swap (pt_ + entity lanes, hosted_api.py:6687-6741 @a0f5bc47) to ONE `apply_supersessions(proj, sdk, payload.supersessions, session_id=session_id, warn=_logger.warning)` call, mirroring §7's lazy-import + direct-call precedent. Hosted inherits the #2164 guard set (keep-first, never-guess, visible-successor, self-alias, id-style emit) with zero happy-path delta. A2 (client-visible warnings) rejected — breaks the payload-determinism contract. A3 (entity-lane-only) rejected — leaves two pt_ consumers.
 
 ### Pattern Research
+>
 > **Findings date:** 2026-09-04
 > Gate skipped: plan touches zero third-party dependencies — pure in-repo refactor onto an existing, tested helper (#2193 issue: "Research: none needed — in-repo"). PRIOR_RESEARCH: #2164 full scoping + 6 fresh-reviewer code-review cycles of the helper's guard semantics; problem-verify/solution-verify/review-gate cycles for #2193 verified every anchor against origin/main code (one verifier executed Tasks 2-4 LIVE).
 
 ### Integration Surface Map
+
 | Surface | Boundary | Test layer | Where |
 |---|---|---|---|
 | §6b loop → helper call | in-process seam | integration (direct drive) | wiring spy + end-state smoke, parity file |
@@ -44,6 +46,7 @@
 **Intent:** Document §6b's CURRENT blind behavior as failing endpoint tests; mirror TestE5PointSupersessions harness. The substance of the migration is the guard set — it must be pinned through the hosted path.
 **Acceptance:** (a) happy-path anchor green at base; (b)-(h) FAIL at base pinning blind behavior; all flip green after Task 4.
 **Files:**
+
 - Modify: `tests/test_commit_endpoint.py` (add `import json`; suite inserted between `TestE5PointSupersessions` (780-887) and `TestBudgetDE2E7` (line 888))
 
 **Step 2.1** — Add `import json` to stdlib imports.
@@ -51,6 +54,7 @@
 **Step 2.2** — Add module-level helpers `_seed_objects(client, session_id, names)` (prior-commit seeding of LIVE Objects by name + one net-new point), `_supersede_commit(client, session_id, ref, sby, *, evidence, entities)` (commit whose only supersession work is one entity record; successor rides payload.entities), `_object_row(name)` (graph read via `_team_sdk()._get_proj().g`).
 
 **Step 2.3** — Add `class Test6bEntitySupersessionGuards` with tests (assert graph outcomes / GraphEvent journal — NEVER response["warnings"], which is L1-only):
+
 - (a) `test_happy_path_entity_fold` — seed A+B; supersede A→B → A superseded/supersededBy=B, B live.
 - (b) `test_divergent_successor_keep_first` — A→B folded, then A→C → supersededBy STAYS B, C live.
 - (c) `test_same_successor_rededup_single_journal` — A→B twice with DIFFERENT evidence strings (E1 then E2 — evidence is part of the supersession canonical in commit_schema canonical_payload, so the ccid changes and the second commit is NOT an L1 replay; identical evidence would replay and make the test pass vacuously at base) → exactly ONE ObjectSuperseded GraphEvent.
@@ -69,6 +73,7 @@
 **Intent:** Pin the migration's seam shape — §6b = EXACTLY ONE apply_supersessions call with typed records, session_id, warn=hosted module logger.
 **Acceptance:** Spy fails at base (zero calls), passes after Task 4.
 **Files:**
+
 - Modify: `tests/test_commit_supersession_parity.py` (append; reuses _pt_id/_seed_baseline/_write_successors/_commit_payload_and_plan/_EXPECTED_END_STATE/SESSION_ID)
 
 **Step 3.1** — Append `test_hosted_commit_wires_apply_supersessions_once(monkeypatch, tmp_path)`: monkeypatch `tortoise.commit_ops.apply_supersessions` with a spy recording (proj, sdk, records, kwargs) that RETURNS `len(records)` (mimic a full apply — the Task-4.1 summary log formats `applied`; a None-returning spy would TypeError inside logging's % formatting); drive `_execute_commit_writes(sdk, payload, plan)`; assert len(calls)==1, proj is sdk._get_proj(), sdk_ is sdk, records == list(payload.supersessions), kwargs["session_id"]==SESSION_ID, **kwargs["warn"] == hosted_api._logger.warning** (`==` NOT `is` — Logger.warning is a bound method, fresh object per access; `is` can never pass).
@@ -81,10 +86,12 @@
 **Intent:** Whole-loop swap (NOT the entity-only slice) + parity repurpose (differential now vacuous — both arms ARE the helper).
 **Acceptance:** §6b loop gone; (b)-(h) + spy flip green; E5 green; parity repurposed; helper byte-untouched.
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (replace §6b region)
 - Modify: `tests/test_commit_supersession_parity.py` (delete differential; rename arm-alone; rewrite docstrings incl. internal 6140 refs)
 
 **Step 4.1** — Replace the whole §6b comment block + loop (6687-6741) with:
+
 ```python
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
@@ -111,6 +118,7 @@
         log("supersessions applied=%d total=%d (session=%s)",
             applied, len(payload.supersessions), session_id)
 ```
+
 (proj at ~6483 + session_id at ~6485 in scope; the applied-count summary log is the P2-3 observability fix — ops-alertable drop signal, no client-visible change.)
 
 **Step 4.2** — Run endpoint suite → ALL PASS: `uv run pytest tests/test_commit_endpoint.py::Test6bEntitySupersessionGuards tests/test_commit_endpoint.py::TestE5PointSupersessions -v`.
@@ -124,6 +132,7 @@
 **Intent:** Remove every "(phase-2) hosted §6b"-deferral/divergence reference the migration eliminates.
 **Acceptance:** Sweep clean; no stale citations remain anywhere.
 **Files:**
+
 - Modify: `tortoise/commit_ops.py` (139-143, 145-154, 278-279), `docs/event-catalog.md` (line 18), `tests/test_capture_session.py` (1521-1527 edit; ~1461 verify-only — the OUT-OF-BAND/idempotency clause stays TRUE post-migration, no edit), `tests/test_status_projection.py` (~174 verify/edit reframe to LEGACY §6b shape; 258-262, 277 reframe), `docs/ONTOLOGY.md` (132, 357 — annotate #2193 resolved)
 
 **Step 5.1** — commit_ops.py: "(phase-2) hosted §6b" → "hosted commit endpoint (_execute_commit_writes §6b, migrated in #2193)"; drop "deliberate divergence from hosted §6b's blind LIMIT 1" → "a blind LIMIT 1 would fold an arbitrary carrier".
@@ -147,6 +156,7 @@
 **Step 6.5** — PR via commit-workflow skill.
 
 ## Verification plan
+
 | Indicator | Verification |
 |---|---|
 | I1 §6b → one apply_supersessions call, warn=_logger.warning-compatible | wiring spy: one call, typed records, session_id, warn == hosted_api._logger.warning |
@@ -161,6 +171,7 @@
 | REQ sweep extended (test docstrings) | Task 5.3/5.4 |
 
 ## Acceptance criteria
+
 1. hosted_api.py has no inline supersession loop — one apply_supersessions call (I1).
 2. Test6bEntitySupersessionGuards (a)-(h) green through POST commit; (b)-(h) demonstrated RED at base (I4).
 3. GraphEvent payload carries session_id; event-catalog:18 reflects one shared emit path (I2).

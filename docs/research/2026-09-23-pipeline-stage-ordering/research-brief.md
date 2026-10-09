@@ -28,6 +28,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, pipeline stage ordering, dedup keys
 **Reframed:** *"The pipeline must minimize E[total cost] = Σ cᵢ·(items reaching stage i) subject to (a) the final accepted set being identical to any other valid order's, and (b) no stage's loss being unrecoverable. Ordering is a derived quantity under those two constraints — not a first principle."* The load-bearing word in the original question is **"correct"**, and it means *two* things the doc conflates: **cost-correct** and **loss-correct**.
 
 **Alternative framings (How Might We):**
+
 - HMW make the order fall out of *measured* selectivity and cost instead of a hunch? → the ratio rule, with a measurement harness (query-planner discipline).
 - HMW make each stage's correctness independent of its position? → then only cost decides; where that fails, the dependency is a real constraint and is the first thing to pin.
 
@@ -128,6 +129,7 @@ The adversarial pass returns the correction, and it is a **dependency**, not a c
 **Reviewer B2.3 is directionally correct and the doc's constraint-1 reasoning is wrong — but the convenient form of the claim ("one indexed hash lookup, exactly as cheap as within-batch") is NOT supported by the code. The hoist is a *proposal* whose acceptance conditions are the four below; the two observations that motivate it come first.**
 
 **Observations (not conditions):**
+
 - **The machinery exists — at the LAST stage.** `create_point(dedup=True)` resolves duplicates through `_find_point_by_content` (`sdk.py:12312`) — documented as *"the SINGLE source of truth for content-dedup resolution, shared by `create_point`, the v2 capture seam, `ingest_bundle`'s points loop, and `_content_exists`"* — whose primary clause is a direct node predicate, `MATCH (n:Point {content_hash:$ch})` (`:12375`). So the doc's "deferred to the very last stage" is accurate.
 - **It is a cost lever of unmeasured size, not a volume lever** — see the corollary below.
 
@@ -213,6 +215,7 @@ Convergent, three independent categories:
 **Verdict: yes to all three of the reviewer's propositions — flag-gating, per-rejection reason logging, and a recoverable counterfactual. All three are already recorded decisions on `#4899` (with a fourth, two-directional regression tests), so the research *confirms* them rather than introducing them. It adds one requirement whose status is a *clarification to raise*, not a settled adoption.**
 
 **Already decided (recorded on #4899, so adopt = confirm, not introduce):**
+
 1. **Flag-gated, default-off on merge** — *"so the rate effect is measurable before it is trusted."*
 2. **Every discard logged with the rule that caused it** — *"Every discard is recorded in the result-level channel with its reason, so the gate's own precision is auditable and the counterfactual is recoverable."*
 3. **Counterfactual recoverable** — a result-level channel *"not written to the graph"*, plus a *"counterfactual report is producible."*
@@ -262,6 +265,7 @@ Convergent, three independent categories:
 7. **Mark the two conditional positions** (GATE: D6 pre/post-lookup; CLASSIFY: B2.1 re-derivation) so the table does not read as settled where it is not.
 
 **Residual open questions (not resolved by this research):**
+
 - Whether the mechanical gate belongs pre- or post-lookup (review B2.4/B2.22/**D6**) — §1.3 says a lossy stage belongs after lossless ones, which argues *post*-lookup if the lookup is exact-matching; it does not settle whether *relevance* needs the lookup.
 - Whether CLASSIFY must precede S3 at all (B2.1/B2.2 — S3 and S5 appear to ask "duplicate?" twice).
 - The per-class reduction budget, the **duplicate rate** per dedup leg, and the **recall floor** (A5/B2.8/B2.16) — measurement tasks, not research ones.

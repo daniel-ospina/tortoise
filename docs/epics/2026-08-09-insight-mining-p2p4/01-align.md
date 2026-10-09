@@ -30,10 +30,12 @@ aboutObjects: tortoise
 ## Status of prior decision (7740-insight-mining-align.md)
 
 The original epic (#7740 → consolidated into #264) was decided **CONDITIONAL PROCEED** with two hard gates:
+
 1. **Gate A (prereq):** #7708 (now #320) reaches STABLE — sessions demonstrably indexed and searchable.
 2. **Gate B (calibration):** Phase 1 extraction on 20–50 sessions, ≥70% human-reviewed precision, no EP grounding regression.
 
 **Re-scope facts (2026-08-09):**
+
 - **Phase 1 IS DELIVERED and in production pilot:** `tortoise/mining.py` (ConversationMiner — transcript → Events + Points + IMPL/NAND with provenance); `tortoise/session_indexer.py` (`extract_metadata_with_llm`); MCP `tortoise_index_sessions`. Pilot tracked by #416 (OPEN, gated).
 - **Phase 3 is DELETED** per ONTOLOGY v3.2 (Action dissolved in v3.0; `instantiates` removed by #214; procedural layer = "status derived from event stream, not stored" §2). Replaced by Event→Object `aboutObject`/`uses`/`produces` wiring (§3.5).
 - **Remaining scope = Phase 2 (entity extraction & cross-session dedup) + Phase 4 (about*/structural wiring, EP propagation on extracted Points, temporal belief tracking).**
@@ -50,6 +52,7 @@ The original epic (#7740 → consolidated into #264) was decided **CONDITIONAL P
 5. **Re-run full Phase 1** — Rejected: Phase 1 is done and piloted (#416). Re-planning it wastes pipeline capacity.
 
 **Anti-post-rationalization (strongest reasons NOT to build Phases 2–4 now):**
+
 - **Gate A is NOT met:** #320 is still OPEN (I3: 4,190 conversations indexed is not complete). Building cross-session dedup on top of an incomplete event index means dedup runs over a partial universe — entity resolution quality degrades and re-runs are needed. This is a genuine hard gate for *execution*, not a sequencing caveat.
 - **Gate B is NOT closed:** the calibration milestone (which carries the ≥70% precision criterion) has not passed — it awaits #416's pilot data as input. If Phase 1 extraction is imprecise, Phase 2 dedups *noise*, and Phase 4 propagates *noise* through EP — amplifying pollution.
 - **Nuclear risk (unchanged from original align):** EP propagation on low-quality extracted Points wired through mitigation edges can nuke EP weights (the exact failure mode AGENTS.md hard-rule warns about). Phase 4's EP step must be gated: extracted Points start `status: draft`; no extraction-created Point auto-wires mitigation edges; calibration before full batch.
@@ -71,6 +74,7 @@ The original epic (#7740 → consolidated into #264) was decided **CONDITIONAL P
 **Causal chain (testable):** Sessions mined (Phase 1 ✓) → entities deduplicated + connected via about* edges (Phase 2) → extracted Points get EP confidence + temporal tracking (Phase 4) → graph answers "we already decided this" + "what changed" → users return to query → retention → conversion.
 
 **Falsification criteria (leading indicators, inherited + updated):**
+
 - Within 60 days of Phases 2–4 shipping: ≥10% of mined sessions generate ≥1 **user-initiated** graph query (search/traverse API call, excluding internal pipeline reads) per week, AND ≥3 distinct querying users.
 - Extraction precision ≥70% on a 50-session human review sample (Gate B — carried by the calibration milestone issue, not #416).
 - EP health preserved: snapshot mean grounding across all `live` epistemic Points changes ≤2% (mean absolute) after extraction batches; `status: draft` Points excluded from EP propagation entirely (guard: draft status is an explicit mining.py output contract; no auto-mitigation wiring from extraction; no auto-promotion on edge creation).
@@ -93,6 +97,7 @@ The original epic (#7740 → consolidated into #264) was decided **CONDITIONAL P
 ## Recommendation
 
 **CONDITIONAL PROCEED** — plan Phases 2–4 now (planning produces the design + MECE child issues, each created **blocked on Gates A+B**), with two execution gates:
+
 1. **Gate A:** #320 reaches STABLE (sessions indexed per I3, searchable).
 2. **Gate B:** calibration milestone passes — ≥70% human-reviewed extraction precision on a 50-session sample AND EP-grounding regression ≤2% mean absolute (metric + tooling defined in this align; calibration issue created in Decompose; #416's volume-gate outcome is an input to calibration, not the gate itself).
 

@@ -102,69 +102,81 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 > Written BEFORE user journeys — behavioral, not presentational.
 
 ### E2E-1: One-sitting first-run (the north star)
+
 **Given:** a brand-new user with no Tortoise account and no org
 **When:** they sign up (identity + email only), create a named org, pick the fork, run ONE universal command
 **Then:** the agent files Organization + User as Subjects linked `memberOf`, and the user is nudged through one real `tortoise-decide`
 **And:** the user sees both anchors + the decision in the graph, in one sitting, with no 5-step wizard and no "what do I do now" moment
 
 ### E2E-2: Overview calm
+
 **Given:** a user who has completed onboarding
 **When:** they open the dashboard Overview
 **Then:** it shows exactly 3 elements (connection status, memory digest, next action) and zero feature toggles
 **And:** every source toggle (github_connected, github_indexed, github_docs_indexed, session_recording) is reachable only via Settings → Memory sources
 
 ### E2E-3: Org-name capture
+
 **Given:** a user creating an org (not via invite)
 **When:** the org-create step renders
 **Then:** the name field is REQUIRED with an editable prefill, and the org is never silently named after the username
 
 ### E2E-4: Ontology-precise seed
+
 **Given:** a user who has connected their agent
 **When:** the agent runs the seed step
 **Then:** Organization (Subject/organization) + User (Subject/naturalPerson) are filed, linked `memberOf`, from API data (hosted) or two prompts (self-hosted)
 **And:** neither anchor is filed as Object/Statement; existing `person` subjects are normalized to `naturalPerson`
 
 ### E2E-5: Agent install across harnesses
+
 **Given:** a user on each of the 6 harnesses (Claude Code, Claude Desktop, Claude Web, Codex, Cursor, Pi)
 **When:** they run the universal setup command
 **Then:** the agent self-adjudicates its harness and self-installs MCP (4 CLI harnesses) or teaches the human the manual path (Claude Desktop, Claude Web)
 **And:** the connection is verified and reported back to the onboarding state
 
 ### E2E-6: Graph-held state resumption
+
 **Given:** a user who started onboarding (e.g. connected the agent) but did not finish (no decide yet)
 **When:** they re-enter via the Settings Setup guide or the Continue-setup card
 **Then:** onboarding resumes at exactly the next incomplete step (idempotent, never restarts)
 **And:** the state lives in an `OnboardingState` graph node, mirrored as a dismissible checklist card
 
 ### E2E-7: Invite fusion (the most failure-prone surface)
+
 **Given:** an existing user with a DIFFERENT email than an invite they received (same person, two accounts)
 **When:** they click the invite link
 **Then:** they are offered the explicit three-path choice (fuse / log out and accept with new account / accept under current account with recorded mismatch), with fuse defaulting but never silent
 **And:** the mismatch-override path requires OTP proof-of-control of the invitee email; a mismatch of a DIFFERENT person errors and signs in as the invitee
 
 ### E2E-8: Atomic new-user accept
+
 **Given:** a brand-new user clicking an invite link
 **When:** they land on the pre-filled signup
 **Then:** account + membership are created ATOMICALLY (one action, no "create then accept")
 **And:** they land in the team with agent setup as an inline skippable first action
 
 ### E2E-9: Builder catalog
+
 **Given:** a user who picked the build-an-app fork
 **When:** the build path presents the capability overview
 **Then:** the indexers+extractors catalog is shown once (session recorder, session extractor, document indexer), pulled from a registry endpoint that extends tool_registry
 **And:** every extractor/indexer module carries the code-level catalog reference note
 
 ### E2E-10: Self-hosted onboarding
+
 **Given:** a self-hosted Tortoise instance with no Supabase
 **When:** a user sets up their agent on it
 **Then:** the agent asks the two prompts (name, org), files both Subjects linked `memberOf`, and completes a `tortoise-decide` — no Supabase involved
 
 ### E2E-11: Capture disclosure (self-use)
+
 **Given:** a self-use user with session recording enabled (default-ON per #1927)
 **When:** their first capture happens
 **Then:** the capture is announced in-conversation, and Settings shows view/delete of captured transcripts (DELETE /v1/sessions/{id} works, capture-receipt cleaned)
 
 ### E2E-12: Cross-W journey (owned by W5)
+
 **Given:** a fresh user
 **When:** they complete the full journey (signup → org → fork → connect → seed → decide)
 **Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the fork-aware completion gate

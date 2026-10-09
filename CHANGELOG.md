@@ -41,7 +41,6 @@ the ephemeral namespace, with a monotonic deadline.
 - **`_sweep_quarantine_dirs`** uses the same primitive (its removal path
   stays ephemeral-scoped), removing the second `find` and its timeout.
 
-
 ### Tenancy rename — the tenant is an organization, not a "team" (#3543)
 
 The tenant identifier is now `org` across the surfaces this slice owns. Renamed
@@ -198,6 +197,7 @@ run it, connect your tools over MCP.
 ### Fixed — EP NAND under-propagation (#855)
 
 Restored genuine cascade propagation through IMPL chains. Two root causes:
+
 - **NAND base weight**: plain NAND carried the generic weight 1.0 vs
   `phi_nand`'s documented w=8.0 default → 8× weaker contradiction potential.
   Now `NAND_BASE_WEIGHT = 8.0` (mitigated NAND 8×2=16 → clamped 10.0).
@@ -224,6 +224,7 @@ Root cause: redislite spawns a dedicated server per non-reusable path, and
 orphaned them when parents were SIGKILL'd. Fixed via three layers:
 
 **Reaper (`tortoise.embedded_reaper`)**
+
 - New `python -m tortoise.embedded_reaper` CLI:
   - `--no-dry-run` (default is **dry-run** — reports, kills nothing)
   - `--batch-size N` (limit kills per run)
@@ -237,6 +238,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
 - Cron/launchd 5-min periodic install: `docs/infra/embedded-reaper-cron.md`
 
 **Stable-path unification (`tortoise.config`)**
+
 - New `TORTOISE_DB_PATH` env var — the single canonical embedded DB path
   (default `~/.tortoise/tortoise.db`); `resolve_db_path()` resolves with
   explicit precedence (`docker://` URI > `TORTOISE_DB_PATH` > non-docker URI
@@ -247,6 +249,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
   migrated to it)
 
 **Relative-path rejection (breaking)**
+
 - `FalkorProjection('tortoise.db')` now raises `ValueError` with 3 remedies.
   Relative paths are NEVER permitted — they silently created per-directory
   servers (Category-3 leak). Use `allow_nonstandard_path=True` (or env
@@ -256,6 +259,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
   (best-effort; pre-commit hook is the enforcement — see below)
 
 **Lifecycle hardening**
+
 - `FalkorProjection` now: context manager (`with ... as p:`), idempotent
   `close()`, `weakref.finalize` (GC cleanup), `atexit` (normal process exit
   never orphans). No per-instance signal handlers.
@@ -264,6 +268,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
   isolation infeasible (no preexec hook in redislite's subprocess spawn)
 
 **Migration CLI**
+
 - New `python -m tortoise migrate-db [--force]`: data-safe migration of
   legacy `~/.tortoise/embedded.db` → canonical `tortoise.db`. Backup-first
   (abort on backup failure), advisory lock, 3-way conflict discriminator,
@@ -272,6 +277,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
 - `--force` bypasses the marker / overwrites a conflicting `tortoise.db`
 
 **Regression gates**
+
 - New `tools/redis-guard.py` pre-commit/CI hook blocks reintroduction of:
   relative-path `FalkorProjection` calls, direct
   `redislite.falkordb_client` imports, `redislite.Redis` bypass, and
@@ -280,6 +286,7 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
 - `.gitignore` now ignores `*.db`
 
 ### Known limitation
+
 - **Concurrent multi-process WRITERS on one embedded redislite file lose
   data** (startup race — verified empirically). The safe embedded pattern is
   single-writer/multi-reader; route concurrent multi-process writes to

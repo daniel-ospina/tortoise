@@ -10,9 +10,11 @@
 **Architecture:** invalidate currently writes `outdated=true` + CORRECTS live but emits zero events → rebuild replays the pre-invalidate PointAdded and resurrects the claim to EP voting. Fix = new `PointInvalidated` graph event (kwargs-style), a `_fold_point_invalidated` mirror of `_fold_point_superseded` (no status write), and a pass-1b trailing-sweep fold governed by a cross-family survivor rule (keep terminalizing folds whose seq is after the id's last PointAdded re-creation; journal-append order).
 
 ### Pattern Research
+
 Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior research: #2422 (EP ghost) and #2423 (supersede rebuild) shipped; this mirrors #2423's fold machinery.
 
 ### Integration Surface Map
+
 | Surface | Layer | Notes |
 |---|---|---|
 | invalidate_point (sdk.py:4124) | unit + event-store | kwargs emit, no status write |
@@ -26,6 +28,7 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Tech Stack:** Python 3.12, FalkorDB/Cypher, tortoise journal + projection.
 
 ---
+
 ## Tasks
 
 ### Task 1: Add PointInvalidated to event registries
@@ -33,10 +36,12 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Register the new graph-event type so emission + rebuild replay are first-class.
 **Acceptance:** PointInvalidated present in both type sets; stale enumerations refreshed.
 **Files:**
+
 - Modify: `tortoise/shared_state/events.py` (CLAIM_EVENT_TYPES tuple — append "PointInvalidated" after the last member ~:172, BEFORE the close paren at :173; the :165 cite in earlier drafts pointed at the PointRetracted entry, not the tail)
 - Modify: `tortoise/sdk.py:720-733` (_GRAPH_EVENT_TYPES), `:2147-2148` (docstring)
 
 **Steps:**
+
 1. Add `"PointInvalidated"` to `_GRAPH_EVENT_TYPES` (sdk.py:720-733) and `CLAIM_EVENT_TYPES` (events.py — append at the tuple tail after the last member ~:172, before the close paren :173; both registries currently hold 10 — post-append 11).
 2. Refresh stale enumerations — replace the literal "five concrete event types" comment at events.py:161 (tuple now has 11) and the sdk.py:2147-2148 docstring listing 5 of 10; ALSO mcp_server.py:1670 and tool_registry.py:509 (`tortoise_events_poll` surfaces list 5 of 11 types); ALSO `tortoise/shared_state/tests/test_events_claim.py` (module docstring + CLAIM_TYPES const) and the event-catalog.md ⛔ note. Each fix states the new count (11).
 3. Run: `TORTOISE_TEST_CARVE_OUT=1 PYTHONPATH=$PWD .venv/bin/python -m pytest tortoise/shared_state/tests/test_events_claim.py tests/test_event_store.py -q` — expect PASS (no type-set equality pins exist).
@@ -47,9 +52,11 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Journal the invalidation so rebuild can replay it. Kwargs-style emission is mandatory — dict payload returns before the JSONL write (sdk.py:2176-2178).
 **Acceptance:** invalidate_point emits PointInvalidated after validation, before graph writes; live writes unchanged.
 **Files:**
+
 - Modify: `tortoise/sdk.py:4124-4191` (invalidate_point)
 
 **Steps:**
+
 1. In `invalidate_point`, after validation and BEFORE the SET/MERGE graph writes, kwargs-emit: `_emit_event("PointInvalidated", id=id, corrected_by=corrected_by_id, ts=now, valid_to=now, expired_at=now)` — **`ts=now` MUST be passed** (the same `now` the graph write uses) or the fold's updatedAt (`ev.get("ts")` fallback clock) drifts microseconds from the live SET clock and the Task 5 step-1 exact-stamp parity assertion fails. Mirrors supersede_point's validated-emit-then-mutate pattern (#432 anti-phantom). Crash after emit/before write is convergent: re-run revalidates + re-emits; duplicate events fold idempotently; double-invalidate already legal.
 2. Keep #2422's drop-messages-before-_mark_dirty ordering intact (do not move the EP drop relative to the epoch bump).
 3. Run: `TORTOISE_TEST_CARVE_OUT=1 PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_ep_terminal_ghost.py -q` — expect PASS (13/13, no behavior change).
@@ -60,9 +67,11 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Rebuild-time fold applying outdated=true + CORRECTS with no status change.
 **Acceptance:** Fold writes exactly: outdated=true (hardcoded — not payload-carried), validTo/expiredAt/updatedAt from payload (ts fallback), CORRECTS MERGE (keyed corrected_by); does NOT write status or validFrom.
 **Files:**
+
 - Modify: `tortoise/projection/entities.py` (near `_fold_point_superseded` :269-321)
 
 **Steps:**
+
 1. Add `_fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False) -> int` mirroring `_fold_point_superseded(self, ev: dict)` (entities.py:269-321) — parses payload inside with fallbacks. Writes: `outdated=true` (hardcoded), validTo/expiredAt/updatedAt, CORRECTS MERGE keyed `corrected_by`. Does NOT write status or validFrom. **updatedAt write is seq-gated, NOT clock-conditional** (a `$ts >= n.updatedAt` CASE can never fire: pass-1a's `_upsert_point_props` stamps every replayed node with rebuild-time `updatedAt=$now` BEFORE the trailing sweep runs, and rebuild-now always postdates the journaled invalidate ts — the ELSE arm would win every time, making rebuilt updatedAt = rebuild-now ≠ live invalidate ts). When `skip_updated_at=True` (a LATER same-id PointRevised/PointPromoted exists in the journal — see Task 4 step 4), the fold omits updatedAt so it cannot clobber the later inline stamp; otherwise it writes the journaled ts UNCONDITIONALLY (the sweep fold is the last writer on the id, achieving exact live parity like supersede's unconditional fold). Early-return 0 guard (`not id or not corrected_by`). Return matched-row count.
 2. Mirror the superseded fold's 0-row fold-miss warning semantics (warn-then-continue — a 0-row fold = point absent = nothing resurrects).
 3. Docstring: note the divergence from _fold_point_superseded (status+successor vs flag+stamps+corrected_by) so the next terminalizer doesn't blind-copy.
@@ -74,9 +83,11 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Rebuild replays invalidation. Core P1 of this issue — the fold-ordering rule resolves double-invalidate, id-reuse, and mixed supersede+invalidate.
 **Acceptance:** (a) invalidate→rebuild reproduces identical live state (outdated+stamps+CORRECTS, no status change); (b) double-invalidate with distinct corrected_by folds both CORRECTS; (c) delete+recreate id-reuse drops pre-recreation terminalizing folds; (d) supersede+invalidate mixed (both orders) converges; (e) pass-2b sees only survivors.
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` (pass-1a ~1306-1331, deferrals 1414-1434, trailing sweep 1477-1513, pass-2 raw fold_seq enumerate ~1574-1575, pass-2b succ 1584/1611)
 
 **Steps:**
+
 1. In pass-1a (which sees PointAdded in journal order over the SAME `events` list pass-1b iterates), add `enumerate()` and record `last_recreate_seq[id]` for each PointAdded — record after the isinstance guard yields the str id (the anchor needs the parsed id; "before the malformed-skips" is imprecise — the skip for malformed events is a continue, record only for valid PointAdded rows). `last_recreate_seq.get(id)` defaults to None for anchor-less ids → a None anchor means "no re-creation seen → keep all folds" (never raise on `seq > None`). PointAdded ONLY — **PointPromoted must NOT be a drop boundary** (promote is same-node draft→live; invalidate-on-draft→promote is legal live; promote never clears outdated/CORRECTS so seeding from it would silently drop the pre-promote invalidate fold).
 2. Defer PointInvalidated events to the trailing sweep alongside PointSuperseded (both families, one deferred list). **Record the enumerate() index on each deferred PointSuperseded/PointInvalidated** (same `events` list pass-1a iterates ⇒ identical seq space) — this is the ONLY source of the journal seq the survivor rule needs after pass-2's raw fold_seq enumerate is deleted (step 5). Pass-1b's deferral currently appends bare `ev` at :1434 — extend it to carry the index.
 2b. **Record a per-id `max_inline_seq[id]` in pass-1b** at the PointRevised (:1383) and PointPromoted (:1353) branches — the sweep's skip_updated_at gate (step 4) needs to know whether a same-id revise/promote event has seq AFTER the invalidate's seq; revise/promote are inline events that never enter the deferred list, so without this structure the gate has no data source. Computable pre-sweep (pass-1b iterates the same ordered events list); pass-2's :1539 enumerate runs too late.
@@ -94,9 +105,11 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Pin the new behavior: rebuild parity, no-resurrection, idempotency, mixed cases, id-reuse.
 **Acceptance:** All listed cases covered and green. Core indicator: invalidate→rebuild → identical state INCLUDING no status change + EP no-resurrection.
 **Files:**
+
 - Create: `tests/test_pointinvalidated_rebuild.py`
 
 **Steps:**
+
 1. Core indicator test: create point → invalidate (corrected_by B) → rebuild_all → assert outdated=true, validTo/expiredAt from journaled ts, **updatedAt == journaled invalidate ts** (invalidate is the id's last journal writer → the sweep fold writes ts unconditionally → exact live parity; scope: this holds for the plain case with no later same-id revise/promote), CORRECTS edge, status still 'live', EP exclusion (never in affected set / no vote).
 2. EP no-resurrection: after rebuild, the claim does not re-enter EP participation (mirror #2422 ghost assertions).
 3. Idempotency: rebuild twice → identical state (fold re-runs write the same journaled ts — stable across rebuilds, unlike pass-1a's rebuild-now stamps which the sweep fold overwrites).
@@ -115,9 +128,11 @@ Skipped — plan touches zero third-party deps (pure Python + Cypher). Prior res
 **Intent:** Catalog the new event + updated semantics.
 **Acceptance:** event-catalog + ONTOLOGY rows updated with correct citations.
 **Files:**
+
 - Modify: `docs/event-catalog.md`, `docs/ONTOLOGY.md:181` (CORRECTS row + supersession-semantics para cites 3785→4124, 3870→4209)
 
 **Steps:**
+
 1. event-catalog.md: add PointInvalidated row (semantics: flag+CORRECTS, no status).
 2. ONTOLOGY.md CORRECTS row + supersession-semantics paragraph: fix BOTH cites in THIS base — invalidate sdk.py:3785 → :4124 AND supersede sdk.py:3870 → :4209 (the #2421 docs amendment did not land in this worktree base; do not assume it).
 3. Commit: `git add -A && git commit -m "docs: PointInvalidated event catalog + cite refresh"`

@@ -800,6 +800,7 @@ surfaces:
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
+  - test_fleet_state.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
   # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
@@ -1148,6 +1149,7 @@ surfaces:
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -2553,6 +2555,11 @@ carve_out:
 # collect it and SKIP every case via the marker hook, a permanently green and
 # permanently unexecuted gate on main (the #4047 shape).
 - test_vecf32_overwrite_seams_4524.py
+# #4521: the module is module-level `embedded_only` — without this registration
+# a full URI-set selection would collect it and SKIP the case via the marker
+# hook, a permanently green and permanently unexecuted gate on main (the #4047
+# shape).
+- test_4521_revise_point_embedding.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and

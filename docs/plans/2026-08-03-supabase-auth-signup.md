@@ -29,6 +29,7 @@
 ## Journey Test Map
 
 ### Journey: Solo Dev — Signup → First Point
+
 1. **Step:** Visit landing page, click "Start free" → **Acceptance:** Redirected to signup page → **Test:** E2E-1-D
 2. **Step:** Click "Continue with GitHub" → **Acceptance:** OAuth redirect to GitHub → **Test:** E2E-1-D
 3. **Step:** Authorize GitHub OAuth → **Acceptance:** Redirected to welcome page with API key → **Test:** E2E-1-D
@@ -36,6 +37,7 @@
 5. **Step:** Runs `tortoise create-point "Hello world"` → **Acceptance:** Point created in hosted graph → **Test:** E2E-1-D
 
 ### Failure Modes
+
 - GitHub OAuth denied → **Expected behavior:** Error message, can retry → **Test:** E2E-1-D (break case)
 - Duplicate email signup → **Expected behavior:** "Email already registered" → **Test:** unit
 - Edge function timeout → **Expected behavior:** Async fallback, "Setting up..." state → **Test:** unit
@@ -50,6 +52,7 @@
 **Intent:** Enable GitHub OAuth, Google OAuth, and email/password signup in Supabase config.
 **Acceptance:** `supabase/config.toml` has all 3 providers enabled with correct redirect URLs pointing to Cloudflare Pages.
 **Files:**
+
 - Modify: `supabase/config.toml`
 
 ### Task 2: Database Migration — user_teams table
@@ -57,6 +60,7 @@
 **Intent:** Create a `user_teams` table in Supabase Postgres to store the mapping between auth users and their provisioned teams, including the API key for one-time display.
 **Acceptance:** Table exists with columns: id, user_id (FK → auth.users), org_id, org_name, api_key (plaintext for welcome page), key_hash, graph_name, created_at. Trigger on auth.users INSERT calls edge function.
 **Files:**
+
 - Create: `supabase/migrations/0001_user_teams.sql`
 
 ### Task 3: FastAPI Provision Endpoint
@@ -64,6 +68,7 @@
 **Intent:** Add `POST /api/provision` endpoint to the existing graph-viz FastAPI server that creates a team via `TortoiseSDK.team_create()` and returns the API key.
 **Acceptance:** Endpoint accepts `{org_name, user_id}` (authenticated via Supabase service role key), creates team + namespace, returns `{org_id, api_key, graph_name}`.
 **Files:**
+
 - Modify: `apps/graph-viz/server/main.py`
 
 ### Task 4: Supabase Edge Function — tenant-provision
@@ -71,6 +76,7 @@
 **Intent:** Deno Edge Function that receives auth.users INSERT webhook, sanitizes team name from user metadata, calls `POST /api/provision`, stores result in `user_teams`.
 **Acceptance:** Edge function handles all 3 auth methods (GitHub, Google, email/password), derives team name correctly, stores result, handles errors gracefully with retry.
 **Files:**
+
 - Create: `supabase/functions/tenant-provision/index.ts`
 
 ### Task 5: Signup Page
@@ -78,6 +84,7 @@
 **Intent:** Static HTML page with Supabase JS client that provides GitHub, Google, and email/password signup.
 **Acceptance:** Page renders provider buttons + email form, redirects to welcome page on success, shows errors on failure.
 **Files:**
+
 - Create: `premise-labs/signup.html`
 
 ### Task 6: Welcome Page (API Key Reveal)
@@ -85,6 +92,7 @@
 **Intent:** Post-signup page that fetches the user's API key from `user_teams` and displays it with a copy button and quickstart snippet.
 **Acceptance:** Key displayed with `tt_` prefix, copy-to-clipboard button, Python quickstart snippet with key pre-filled, link to dashboard.
 **Files:**
+
 - Create: `premise-labs/welcome.html`
 
 ### Task 7: Landing Page Update
@@ -92,6 +100,7 @@
 **Intent:** Add "Start free" CTA button to existing landing page that links to signup page.
 **Acceptance:** CTA visible, links to `/signup.html`, doesn't break existing scroll narrative.
 **Files:**
+
 - Modify: `premise-labs/index.html`
 
 ### Task 8: Tests
@@ -99,4 +108,5 @@
 **Intent:** Unit and integration tests covering the provision endpoint, edge function logic, team name sanitization, API key hashing, and duplicate handling.
 **Acceptance:** Tests pass with `python -m pytest tests/ -v` for Python tests.
 **Files:**
+
 - Create: `tests/test_hosted_auth.py`

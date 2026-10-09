@@ -65,6 +65,7 @@ aboutObjects: extractor
 **Decision:** PROCEED
 
 **Alternatives considered:**
+
 1. Baseline-first re-run — rejected by owner (no value in measuring a known-bad v2; V3 run = V4 baseline)
 2. Buy/adapt Mem0/Graphiti — rejected (loses the epistemic/graph differentiator; same measurement problem)
 3. Deploy v2 as-is — rejected (unmeasurable = unsteerable; production already runs v2 so the fix is urgent)
@@ -75,6 +76,7 @@ aboutObjects: extractor
 **Eisenhower placement:** Important + Urgent → Do now (harness+reliability core is urgent because v2 is already in production; content/retrieval ships in the same build because the run is the expensive asset).
 
 **Key assumptions:**
+
 - The 12-report corpus is accurate (independently re-verified across 3 synthesis agents) — confidence: **high**
 - Fixing the known issues yields measurable improvement on a valid run — confidence: **medium** (mechanisms code-verified, impact unmeasured)
 - Real-backend eval (real FalkorDB + embedder + FTS index) is feasible in the eval env — confidence: **medium** (infra availability TBD)

@@ -48,6 +48,7 @@ and the FalkorDB graphs are not cascaded and are never cleaned** (no cleanup
 endpoint in-repo).
 
 ## 2. Verified live inventory (read-only, prod premise-labs project
+
 `ybetwichurajbfswfeqa`, 2026-09-02)
 
 | Resource | Window scope (default) | All e2e-live (with `--all-e2e-live`) |
@@ -97,6 +98,7 @@ curl -sS -X POST "https://api.supabase.com/v1/projects/ybetwichurajbfswfeqa/data
 
 **Q1 — orphan teams (window):** expect 154 rows; each: `id` (26-hex), `name`,
 `email`, `graph_name`, `created_at`.
+
 ```sql
 SELECT t.id, t.name, t.email, t.graph_name, t.created_at::text, t.deleted_at::text
 FROM public.teams t
@@ -106,10 +108,12 @@ WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
   AND t.created_at <  '2026-09-03T00:00:00Z'
 ORDER BY t.created_at;
 ```
+
 (Drop the two `created_at` lines for the full 222 — review the 68 pre-window
 rows before including them.)
 
 **Q2 — remaining e2e-live auth users:** expect 12 rows (window: 1).
+
 ```sql
 SELECT u.id::text, u.email, u.created_at::text
 FROM auth.users u
@@ -124,6 +128,7 @@ expect `api_keys` 154, `org_memberships` 2, `invitations` 0, `abuse_events`
 2026-09-02 inventory but re-check here — check-only: the table is append-only
 via migration 0004's immutability trigger, so the script counts but never
 deletes), `audit_events` 0.
+
 ```sql
 SELECT 'api_keys' AS kind, count(*) FROM public.api_keys
   WHERE org_id IN (<ids>)
@@ -140,6 +145,7 @@ UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
 ```
 
 **Q4 — FK catalog sanity (delete-semantics evidence):**
+
 ```sql
 SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
 WHERE conrelid IN ('public.teams','public.api_keys','public.org_memberships',
@@ -148,6 +154,7 @@ WHERE conrelid IN ('public.teams','public.api_keys','public.org_memberships',
 ```
 
 **Q5 — FalkorDB graph listing (operator with `FALKORDB_CLOUD_URI`):**
+
 ```bash
 export TORTOISE_DB_URI="$FALKORDB_CLOUD_URI"
 uv run python - <<'EOF'
@@ -156,6 +163,7 @@ db = TortoiseSDK(namespace="registry")._get_proj().db
 print("\n".join(sorted(db.list_graphs())))
 EOF
 ```
+
 Cross-reference the `team_*` names against Q1's `graph_name` column — every
 matching `team_<sha256(user_id)[:26]>` graph whose team is in the orphan set is
 a delete candidate. Do **not** wildcard-delete `team_*` — the store also holds
@@ -182,6 +190,7 @@ There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
 operator cannot act as an owner. The sanctioned **purge machinery** is
 `purge_team_control_plane` (`supabase_control.py` — deletes
 api_keys → org_memberships → invitations, teams row **last** as retry anchor)
+
 + the in-repo mint-failure compensation graph calls
 (`select_graph(name).delete()`, `hosted_api.py` — register compensation and
 agent-signup compensation). The cleanup
@@ -210,6 +219,7 @@ these teams — only the per-team `team_<id>` knowledge graphs.
 ## 5. ACCESS GAP statement (what an operator must supply)
 
 **Reachable from this machine (verified):**
+
 | Access | State | Notes |
 |---|---|---|
 | Supabase prod SQL (premise-labs `ybetwichurajbfswfeqa`) | **REACHABLE** | `supabase` CLI v2.110.0 is authenticated; project is `linked: true`; `supabase db query --linked` runs as `postgres` (Management API). Full read+write SQL. |
@@ -217,6 +227,7 @@ these teams — only the per-team `team_<id>` knowledge graphs.
 | Local FalkorDB | local dev only | `premise-labs/.env` + local `docker://` container on `localhost:6379` — **dev/test store, never target** |
 
 **NOT reachable from this machine (the gap):**
+
 - **`FALKORDB_CLOUD_URI` value** (prod FalkorDB Cloud). Exists only as a gh
   secret + Fly app secret (entrypoint.sh:91-93 resolves it to
   `TORTOISE_DB_URI`). No cloud creds in any local `.env`; `redis-cli` not
@@ -232,6 +243,7 @@ these teams — only the per-team `team_<id>` knowledge graphs.
 **To execute the deletion an operator needs** (all three are gh secrets on
 daniel-ospina/tortoise; names: `SUPABASE_ACCESS_TOKEN`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_KEY`, `FALKORDB_CLOUD_URI`):
+
 1. `SUPABASE_ACCESS_TOKEN` — control-plane SQL (Management API; the scripts
    also accept the linked supabase CLI as driver).
 2. `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` — GoTrue Admin API user deletion
@@ -242,6 +254,7 @@ daniel-ospina/tortoise; names: `SUPABASE_ACCESS_TOKEN`, `SUPABASE_URL`,
 ## 6. Cleanup procedure (dry-run first; scripts are dry-run by default)
 
 Scripts (this repo, `origin/main` worktree):
+
 - `graph-scripts/2146_e2e_live_orphan_cleanup.py` — Supabase side: users,
   memberships, api_keys, invitations, abuse_events, audit trail, teams.
 - `graph-scripts/2146_falkordb_graph_cleanup.py` — FalkorDB side: drop

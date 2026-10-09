@@ -79,14 +79,17 @@ Every `_is_embedded` / embedded-specific branch found, with verified line number
 ### 3.2 Recommended strategy (hybrid, name-first + filtered wipe)
 
 **A. Server-mode `wipe()` variant** (tests/_embedded.py):
+
 - New `wipe_server(proj)` (or a `mode=` param): enumerates graphs via `list_graphs()`, **filters to `test_`/`tortoise_test_`-prefixed names**, and DETACH-DELETEs only those. Fail-closed: a graph that doesn't match the prefix is skipped (never wiped) — same safety posture as today's "refuses server mode," but scoped to test graphs. Also keeps `wipe()`'s all-graphs behavior for embedded.
 - The embedded `wipe()` keeps its refusal; the seam's `shared_proj` fixture switches to `graph_name="test_suite_<uuid>"` (or a fixed `test_tortoise_suite` per job) so bulk wipes pass the guard on docker.
 
 **B. Per-test graph names where exact-set assertions demand it:**
+
 - Files that assert exact node counts/sets (e.g. `test_embedded_concurrency` live test, EP files) use per-test namespaces `test_<file>_<uuid>` → auto-named `test_<file>_<uuid>_tortoise` graphs. Zero extra plumbing — the SDK already does this (sdk.py L1115–1123 (verifier-corrected)); proven by `test_ep_directional`.
 - Files that only need isolation-from-previous-test use the shared `test_suite_*` graph + per-test `wipe_server()`.
 
 **C. Graph-name hygiene at the seam:**
+
 - `shared_proj` / `sdk_factory` / `shared_embedded_db` fixtures become URI-aware: when `TORTOISE_DB_URI` is set → docker construction + `test_*` graph names; when unset → current embedded construction. Zero behavior change while embedded remains default (P1 constraint).
 - The `graph_name="test"` default in tests must be swept: every bulk-wipe test gets a `test_*` graph name (grep-able via `DETACH DELETE` sites listed in D4).
 
@@ -98,6 +101,7 @@ server default `"tortoise"` — which FAILS `_assert_test_graph` (bare `tortoise
 is not `test_*`/`tortoise_test_*`), so a migrated raw construction would raise
 on first write, not silently collide. That is the SAFE failure direction, but
 it means every such file must be touched (not just the wipe/assert files):
+
 - The migration must sweep ALL `FalkorProjection(path=...)` sites that omit
   `graph_name` and add a `test_*` name (or route through the URI-aware seam).
 - **How raw path-constructions reach the server:** when `TORTOISE_DB_URI` is
@@ -153,6 +157,7 @@ They pass today because: (1) they use guard-passing graph names (`tortoise_test_
 ### 4.2 Carve-out GAP found (must be added)
 
 `EmbeddedStoreBusyError` is embedded-specific (D11) but **three tests live in files NOT on the reviewer's list**:
+
 - `test_audit.py` — the (d) case (EmbeddedStoreBusyError from pid-registry probe), 1 of 27 tests
 - `test_pack_state.py` — `TestBackfillScript.test_dry_run_default_makes_no_writes` (subprocess would hit busy-error), 1 of 30
 - `test_index_directory.py` — `test_e2e9_cross_process_embedded_overlap`, 1 of 79
@@ -166,6 +171,7 @@ Verified against the allowlist at tests/test_embedded_lifecycle.py:42.
 **In carve-out — stays (18 entries):** `_embedded.py`, `fixtures/redis-guard/*` (3), `repro/reproduce_redislite_leak.py`, test_backup_e2e, test_config, test_embedded_concurrency, test_embedded_lifecycle, test_embedded_lifecycle_fast_close, test_flip_gate, test_guard, test_hard_reject, test_hosted_backup, test_migrate_db, test_ops_safety, test_pre_migration_safety, test_projection_lifecycle, test_reaper, test_redis_guard.
 
 **Drift registration — MUST migrate (7, reviewer-confirmed, verified DB-agnostic):**
+
 - `test_export_cli.py` — allowlist comment says "drift registration (#1401) — raw embedded construction"; export CLI contract is DB-agnostic (1 raw construction)
 - `test_import_endpoint.py` — drift registration; HTTP import endpoint (3 raw)
 - `test_projection.py` — 48× shared_proj hybrid already; projection internals are DB-agnostic (needs D5 index-expectation split)
@@ -175,6 +181,7 @@ Verified against the allowlist at tests/test_embedded_lifecycle.py:42.
 - `test_semantic_extractor.py` — S7 extractor behavior (1 raw)
 
 **In allowlist but NOT on reviewer's carve-out — audit verdict (8):**
+
 - `test_de2e1_entity_extraction.py` (9 raw, 0 embedded markers) → **MIGRATE**
 - `test_extractor_doc.py` (1 raw, 0 markers) → **MIGRATE**
 - `test_extractor_priors.py` (2 raw, 1 marker) → **MIGRATE** (EP-prior behavior, not embedded semantics)
@@ -249,10 +256,12 @@ The fast matrix halves run **41–58 min against a 45m watchdog** — half (b) r
 ## 7. CI cost model
 
 **Current (embedded) cost drivers, per fast-matrix job:**
+
 - ~3,400 tests (half a) × per-test redislite spawn for raw-construction files (the 163-file surface) + the #1371 fast-close tail (already bounded to seconds via `TORTOISE_FAST_ATEXIT`).
 - Observed wall: 41–58 min per half (watchdog 45m; half b routinely rides it).
 
 **Docker cost model:**
+
 - **Removes:** per-test redislite process spawn (fork + socket + RDB/SHUTDOWN teardown, historically 0.5–1s+/test), the atexit tail, orphan accumulation (the #1005/#176 leak driver), the conftest `_redislite_hygiene` sweep overhead, and the reaper's CI dependency.
 - **Adds:** one FalkorDB service container per job (GitHub Actions provisions it before pytest — already in the workflow for the live tests, #1436); per-test graph creation/wipe cost (single `DETACH DELETE` or graph-name creation, ~ms-class on the server).
 - **Net:** the dominant per-test cost (process spawn/teardown) disappears; the additive cost is a single network round-trip per wipe. **Net-neutral-to-faster** is the honest estimate — the epic's "net likely neutral-to-faster" holds.

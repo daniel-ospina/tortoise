@@ -59,6 +59,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** `_pack_config_shape_error(pc)` returns `None` for every legal family (absent, `None`, `packs: []`, well-formed incl. int `version`, `activated: "anything"`, unknown key, yaml absent/`None`) and a distinct error string for every malformed class; check order pinned.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (new function next to `_validate_import_envelope`, ~7866)
 - Test: `tests/test_export_pack_config.py` (new `TestPackConfigShapeGate` + module-level `MALFORMED_PC_CASES`)
 
@@ -79,6 +80,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** Endpoint returns 422 (never 500) with `"pack_config"` in the detail for malformed shapes, `quarantined_import` audit recorded, `_counts(db_path)["ids"] == []` (nothing landed), `last_import_sha256` unstamped, `last_import_quarantined_sha256` stamped; both wire and CLI artifact forms covered; existing `_check_foreign_kinds` 422 messages unchanged on well-formed shapes.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_validate_import_envelope` final step ~7864; docstring chain list + module-header chain summary)
 - Test: `tests/test_import_endpoint.py` (new `TestImportPackConfigShape422`)
 
@@ -99,6 +101,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** Every `MALFORMED_PC_CASES` entry raises ValueError through `_apply_import_pack_config` (single-validator drift-lock); ns↔yaml mismatch raises ValueError with a message naming both namespaces and leaves NO PackManifest/PackInstall residue; existing legal apply tests unchanged.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_apply_import_pack_config` ~7928-7987; docstring)
 - Test: `tests/test_export_pack_config.py` (`TestApplyImportPackConfig` extended)
 
@@ -119,6 +122,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** `validate_manifest` with deeply-nested yaml returns `ManifestValidation(False, ["invalid YAML: nesting too deep"])` — never raises; existing valid/invalid YAML cases unchanged.
 
 **Files:**
+
 - Modify: `tortoise/pack_manifest_store.py` (~116)
 - Test: `tests/test_pack_manifest_store.py`
 
@@ -139,6 +143,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** Endpoint tests: invalid-manifest → 422 "invalid YAML" + `last_import_sha256` NOT stamped (cleared) + `last_import_quarantined_sha256 == sha` + swap landed (`_counts["ids"] == ["pt-0"]`) + re-import 422s again (never `already`) + fixed-manifest artifact (new sha) → 200 + stamped + re-import `already`; unknown-starter → 422 + ledger clear; deeply-nested-yaml artifact → 422 (not 500) + ledger clear (REQUIRES Task 4 — its 422 source is the RecursionError catch, not Task 3); rollback case: import A (200, stamped A) → import B broken (422, ledger CLEARED — assert `not fake.tables["teams"][0].get("last_import_sha256")` immediately after the 422, distinguishing clear-from-reorder-only) → re-import A → 200 `imported: true` (re-swap, not `already`); clear-path stamp-failure injection (monkeypatched `_stamp_import_prop` raising) → 422 not 500 + warning logged; sticky-quarantine case: fail-then-succeed on the same sha (e.g. transient apply failure then fixed env) → re-import returns `already: true` (quarantine prop cleared on success); registry-mode `_stamp_import_prop` clear test (SET path stores `""`); success-with-packs → 200 + stamped + `already`. Existing `TestImportIdempotencyAndSwapSafety` green.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`import_team` stamp move ~8252-8273; `#2040` comment; `import_team` docstring carve-out)
 - Test: `tests/test_import_endpoint.py` (new `TestImportPackConfigApplyFailures`)
 
@@ -159,6 +164,7 @@ No Postgres-function business logic, no RLS, no UI. All surfaces are in-repo Pyt
 **Acceptance:** ruff clean on all touched files; `test_export_pack_config.py` + `test_pack_manifest_store.py` + `test_import_endpoint.py` green on the docker lane; plan doc carries the `<!-- plan-review:` signature; issue labels `scoped`/`planned`/`implementing` set.
 
 **Files:**
+
 - Modify: `docs/plans/2026-08-30-2040-pack-config-shape-ledger-order.md` (signature)
 
 **Step 1:** `uv run ruff check tortoise/hosted_api.py tortoise/pack_manifest_store.py tests/test_import_endpoint.py tests/test_export_pack_config.py tests/test_pack_manifest_store.py`.

@@ -90,6 +90,7 @@ scoping's main contribution; measuring it is the plan's first task.
 
 **Corpus §5's diagnosis of that imbalance is wrong — and so was the plan's first draft.** The shard
 balancer *does* have a durations map, and it *is* used:
+
 - `tools/ci_selection.py:51` — `MANIFEST = REPO / "config" / "ci-surfaces.yml"`; the fast split reads
   **`ci-surfaces.yml`**, not `surface-manifest.yml` (`config/surface-manifest.yml` genuinely has no
   `durations` key — true, but that is simply the file the corpus checked, and not the one used);

@@ -12,9 +12,11 @@ created: 2026-07-09
 > **Status:** Research draft — also our current internal tool
 
 ## What they do
+
 Agent-native memory palace: semantic search over past conversations, knowledge graph with temporal validity, agent diaries, cross-session continuity. ChromaDB backend, local-first.
 
 ## Architecture
+
 - ChromaDB for vector search
 - SQLite for KG triples with `valid_from`/`valid_to`
 - AAAK diary format for agent journals
@@ -22,6 +24,7 @@ Agent-native memory palace: semantic search over past conversations, knowledge g
 - Wings/rooms/tunnels for organizing memories
 
 ## Strengths
+
 - **Agent-native** — designed for AI agents, not humans
 - **Temporal validity** — facts have time windows
 - **Cross-session** — auto-save hooks, wake-up summaries
@@ -29,6 +32,7 @@ Agent-native memory palace: semantic search over past conversations, knowledge g
 - **Local-first** — embedded, no cloud dependency
 
 ## Weaknesses (our edge)
+
 - **No relevance model** — edges exist or do not exist, no contestability
 - **No belief propagation** — KG is declarative, not epistemic
 - **No operator logic** — no NAND/IMPL structure
@@ -36,4 +40,5 @@ Agent-native memory palace: semantic search over past conversations, knowledge g
 - **No extraction pipeline** — facts are added manually via `mempalace_kg_add`
 
 ## Role in our stack
+
 MemPalace stays as our **capture + archive** layer — verbatim session storage. The epistemic core replaces its KG and retrieval functions. The two are complementary, not competitive: MemPalace archives, we reason.

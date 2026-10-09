@@ -11,6 +11,7 @@
 ## Q1. Test isolation on a SHARED real database server
 
 ### Consensus best practice
+
 **Do NOT spin up one server per test.** Start ONE server (or one container) per test run/session, then isolate per-test with one of three canonical strategies, in order of preference:
 
 1. **Transaction rollback** — wrap each test in a transaction, roll back at the end. Fastest, but cannot observe committed state (breaks tests of `after_commit`-style behavior, uniqueness-on-commit, etc.).
@@ -22,6 +23,7 @@ For Redis-family databases specifically, the pattern is: **dedicated test DB + F
 For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation unit. The FalkorDB security guide explicitly recommends **per-graph isolation** ("use separate graph names for teams or tenants, pair with ACLs"), and every query targets a single graph key — so a **per-test graph** (or per-worker graph) is a first-class, supported isolation mechanism.
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | Jimmy Bogard, "Isolating database data in integration tests" (Los Techies) | https://lostechies.com/jimmybogard/2012/10/18/isolating-database-data-in-integration-tests/ | Canonical catalog of exactly 3 strategies: transaction rollback, drop-and-recreate DB per test ("dog slow"), and FK-ordered delete-all-data (fastest robust option; works straight against DB metadata). Guiding principle: "one test's data is completely isolated from other tests." |
@@ -36,6 +38,7 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 | qaskills, "Create a PostgreSQL Database per Test with Testcontainers" | https://qaskills.sh/blog/testcontainers-postgres-per-test-database | Balanced guidance: one container per test process, fresh database per test only "when strong isolation is needed" — a reuse/isolation tradeoff, not a default. |
 
 ### Tradeoff summary (from the above)
+
 - **Speed vs isolation vs setup cost** is the axis every source walks. Transaction rollback ≈ fastest but weakest for commit-sensitive code; truncate ≈ fast and robust; per-test DB ≈ strongest but adds setup cost per test and is generally **overkill per-test** — the community does per-*worker* or per-*process* DBs, not per-test, at 1,000+ test scale.
 
 ---
@@ -43,9 +46,11 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 ## Q2. Embedded/in-process test DB vs real server — known divergence risks
 
 ### Consensus best practice
+
 **Test against the same database system production uses.** The canonical argument: an embedded substitute is a *test double* that can pass while production fails, because SQL/dialect, type coercion, concurrency, locking, and query-planning semantics all diverge. The standard recommendation (Testcontainers, Martin Fowler, Microsoft EF Core) is to run a real instance of the production DB.
 
 **Known failure modes documented in the literature:**
+
 - Type coercion differences (SQLite accepts a float in an INTEGER column; Postgres rejects it — test passes, prod crashes).
 - Dialect differences (JSON operators, constraint enforcement, index behavior).
 - Concurrency/locking semantics (in-process = single connection world; server = real concurrency, deadlocks, connection-pool behavior).
@@ -53,6 +58,7 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 **Caveats:** embedded DBs are acknowledged as fine for pure unit tests and local dev. And in our specific case, the *vendor itself* sanctions FalkorDBLite for CI and claims API parity — but the vendor simultaneously says production workloads should run on a server, and the embedded runtime is single-process (network disabled by default), which means connection-pooling and multi-client concurrency paths are untested under FalkorDBLite.
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | Testcontainers, "Getting started with Testcontainers for Python" | https://testcontainers.com/guides/getting-started-with-testcontainers-for-python/ | "Write tests talking to **the same type of services you use in production without mocks or in-memory services**." |
@@ -70,6 +76,7 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 ## Q3. Testcontainers / containerized test DBs for Python
 
 ### Consensus best practice
+
 - **testcontainers-python is the current standard** for containerized test dependencies in Python.
 - Recommended pattern: a **session- or module-scoped container fixture** (start once, stop at session end) + an **autouse function-scoped cleanup fixture** (delete/flush data between tests). Function-scoped containers are explicitly warned against as slow.
 - Use **yield fixtures / finalizers** for setup/teardown, and set **env vars** (`DB_HOST`, `DB_PORT`, `DB_NAME`...) from the container so app code doesn't hardcode connection info.
@@ -77,6 +84,7 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 - Python community alternative: `pytest-postgresql` — session-scoped `postgresql_proc` server + per-test client fixture, using a **template DB clone per test** to get fresh-state speed.
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | Testcontainers Python guide | https://testcontainers.com/guides/getting-started-with-testcontainers-for-python/ | Shows module-scoped `PostgresContainer` fixture started once; connection params exported as env vars; autouse function-scoped fixture that `delete_all`-cleans before every test. Recommends yield fixtures and `request.addfinalizer`. |
@@ -91,11 +99,13 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 ## Q4. The "redirect" question: switching test DB construction from embedded to server
 
 ### Consensus best practice
+
 - **One seam, env-var-driven.** Connection construction should read from env vars / config (`DATABASE_URL`, `DB_HOST`, ...) at a single factory/fixture point. This is exactly the pattern the Testcontainers Python guide itself uses (`os.getenv("DB_HOST", ...)`) and the `pytest-env` plugin codifies (`DATABASE_URL` set in `pyproject.toml`). pytest fixtures are the dependency-injection mechanism for choosing the resource per test.
 - **Incremental over big-bang** where risk is high: the **strangler fig pattern** (Azure/AWS) — introduce a facade, shift consumers progressively, decommission the legacy path only when the new one is proven. Applied to test infra: redirect test-by-test or module-by-module, keeping the embedded path live until the server lane is green, then remove it.
 - There is **no canonical "test-infra strangler" literature**; the strangler citations are the general pattern, applied by analogy. **[my synthesis].**
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | Testcontainers Python guide (connection seam) | https://testcontainers.com/guides/getting-started-with-testcontainers-for-python/ | "Instead of hard-coding the database connection parameters, we are using environment variables to get the database connection parameters. This will help us to run the application in different environments without changing the code." |
@@ -109,11 +119,13 @@ For **FalkorDB specifically**: named graphs are the vendor-sanctioned isolation 
 ## Q5. Fail-closed / fail-open test semantics when the test DB is unavailable
 
 ### Consensus best practice
+
 **Fail loud. Missing Docker/DB must FAIL the run in CI, not skip.** The Testcontainers maintainers' own position (issue #343): "letting the test fail is the correct behavior." Testcontainers does a pre-flight Docker check and **errors** ("Could not find a valid Docker environment") rather than silently proceeding. Skipping (JUnit `Assume`, `skipif`) is acceptable only for **local developer convenience**, on the condition that CI guarantees the environment exists. The failure mode of skip-when-unavailable is the **vacuous pass / false green** — the pipeline reports success while the integration path was never exercised.
 
 Supporting principle from pytest-django: tests that access the DB **fail by default** if no DB is available, and DB access must be explicitly requested — there is no silent pass.
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | Testcontainers Java issue #343 | https://github.com/testcontainers/testcontainers-java/issues/343 | Maintainer: "IMO **letting the test fail is the correct behavior**"; CI should be where Docker is guaranteed; `Assume`-skipping is for local machines. |
@@ -127,12 +139,15 @@ Supporting principle from pytest-django: tests that access the DB **fail by defa
 ## Q6. Per-test vs per-file carve-out granularity
 
 ### Consensus best practice
+
 **Both mechanisms are first-class; which is "the norm" depends on how localized the special behavior is.**
+
 - **Per-test / per-class marking** is the norm when the carve-out is localized: pytest-django requires per-test `@pytest.mark.django_db` for ANY DB access; Rails documents `use_transactional_tests = false` on individual test cases/classes (not globally) when specific tests must observe transactions; Dataverse groups DB-backed tests with `@Tag("testcontainers")`.
 - **Whole-file marking** (`pytestmark = pytest.mark.<name>` at module level) is the norm when the ENTIRE module shares the property — and pytest explicitly supports selecting by marker expressions (`-m "markname and not other"`).
 - The literature contains no rule that says "never mark per-test inside a mostly-unchanged file"; the guidance is to mark at the granularity that matches the scope of behavioral difference. **[my synthesis]** — this is an inference from the above sources, not a stated rule.
 
 ### Sources
+
 | Source | URL | What it says |
 |---|---|---|
 | pytest docs, "Marking test functions with attributes" | https://docs.pytest.org/en/stable/how-to/mark.html | "You can apply custom markers to **individual tests, whole classes, or entire modules**" (`pytestmark` for module-level) and select with `-m "mark1 and not mark2"`. |
@@ -147,20 +162,28 @@ Supporting principle from pytest-django: tests that access the DB **fail by defa
 Ground rules used below: (1) evidence-backed consensus outranks convenience; (2) vendor parity claims are credited but scoped; (3) where literature is silent, labeled **[my synthesis]**.
 
 ### D-1 — Redirect scope (how broadly to point tests at the real server)
+
 **Defensible choice: full-suite redirect through a single connection seam, with the embedded path retained behind the same seam for local use — not a partial redirect.**
+
 - Evidence FOR broad redirect: every authoritative source says test on the production DB (Q2: Testcontainers, EF Core, Fowler, Neon). The vendor's own migration story is "simply swap the connection line" (FalkorDBLite docs), i.e., the seam is trivially broad by design.
 - Evidence AGAINST big-bang: strangler-fig guidance favors incremental when risk is high. With 6,000 tests, the pragmatic middle is: **the seam flips everything at once (single factory), but the *verification* of the flip is staged** — land the server lane as the gate, keep the embedded lane running as a non-gating lane during the transition (see D-3), then remove it. That is strangler discipline applied to *acceptance*, not to *code scope*.
 
 ### D-2 — Per-test vs whole-file carve-out
+
 **Defensible choice: whole-suite default = server; carve out per-test (or per-class) with an explicit marker for the minority of embedded-only tests; use file-level markers only for files that are wholly embedded-specific.**
+
 - Q6 evidence: per-test marking is the documented norm for localized differences (pytest-django, Rails); whole-file is for module-wide properties. Since our hypothesis is that embedded-only behavior is the exception, per-test markers match the evidence. If the carve-out set turns out large (>~10–20% of tests), that is a signal the divergence is broader than expected — reconsider whether the carve-outs are actually *necessary* versus *accidental* (e.g., tests accidentally relying on embedded quirks). **[my synthesis]** on the threshold; the mechanism guidance is sourced.
 
 ### D-3 — Matrix split (embedded lane + server lane in CI)
+
 **Defensible choice: yes to a temporary dual lane, with the SERVER lane as the gating (fail-closed) lane and the embedded lane as non-gating, dropped once the server lane is green and stable.**
+
 - Q3 evidence: the community pattern is a single production-like DB in CI (service container or Testcontainers); there is no canon endorsing running two DB lanes permanently. A dual lane is a **transition** artifact — the strangler "both paths live until the new is proven" state (Q4). Run server = gate, embedded = informational canary so regression surface stays visible during migration; delete the embedded lane after N consecutive green runs. **[my synthesis]** on the canary mechanics; the "test on prod DB, not two DBs" consensus is sourced.
 
 ### D-4 — Fail-closed wipe
+
 **Defensible choice: fail closed, and wipe at session/graph granularity.**
+
 - **Fail-closed:** missing/unreachable server = suite FAILURE, never skip. Directly supported by Testcontainers #343 ("letting the test fail is the correct behavior"), Testcontainers' pre-flight error, and pytest-django's fail-by-default DB access. Guard pattern to avoid: `skipif(no-docker)` at the top of the suite — that is exactly the vacuous-pass failure mode Q5 documents. If local devs without Docker need relief, gate ONLY local runs (e.g., a `--local-no-docker` opt-in), never CI. **[my synthesis]** on the opt-in flag mechanics.
 - **Wipe:** the sourced patterns are (a) drop/recreate the test DB per run (EF Core `EnsureDeleted/EnsureCreated`, Django per-run test DB), and (b) Redis-family `FLUSHDB`/dedicated-DB between tests (Q1). For FalkorDB the analogous unit is the **graph**: wipe per run at graph granularity (delete/flush the test graphs at session start — matching the vendor's per-graph isolation model), plus per-test or per-worker graph namespacing for isolation (Q1). **[my synthesis]** that graph-level flush is the FalkorDB analog of FLUSHDB; the per-graph isolation model itself is vendor-documented.
 

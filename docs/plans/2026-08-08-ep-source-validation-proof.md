@@ -55,6 +55,7 @@ with base_pc: T0=9, T1=4, T2=2, T3=1, T4=0.1.
 - **Target:** `tortoise/quadrature.py::phi_nand` (l.68)
 - **Expected (docstring intent):** "NAND: equal-quality contradiction returns to ~50%"; "When both T0(0.91): phi ≈ 0.637"; "When both baseline(0.5): phi ≈ 0.064"
 - **Actual:**
+
   | (ca, cb) | phi_nand (w=8) |
   |---|---|
   | (0.91, 0.91) | **0.5193** (docstring claims 0.637) |
@@ -62,6 +63,7 @@ with base_pc: T0=9, T1=4, T2=2, T3=1, T4=0.1.
   | (1, 1) | **1.0** (maximum — agreement!) |
   | (1, 0) | **0.0183** (minimum — contradiction) |
   | (0, 0) | **1.0** (maximum) |
+
 - `phi_nand = exp(−w·(ca(1−cb)+cb(1−ca))/2)` is maximized at (1,1) and (0,0), minimized at (1,0)/(0,1) — an **XNOR/agreement potential**, the opposite of a contradiction factor.
 - **Live EP behavior:** two gold-sourced claims joined by a NAND operator both RISE (0.909 → 0.912-0.924 at w=1-5) instead of being pushed apart.
 - **Stale docstring/comment sites:** `tortoise/quadrature.py:68-80`; `tests/test_directional_impl.py:302,359`; `tests/test_directional_impl_fix.py:335` (all cite the wrong 0.637/0.064 values).

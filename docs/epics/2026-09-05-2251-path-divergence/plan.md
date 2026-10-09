@@ -106,6 +106,7 @@ SDK leak (`sdk.close()` at 13837 is skipped when `list_graphs()` raises).
      module-level import exists at :69.
 4. **Site 2 — `_graph_has_team_namespace`:**
    - Replace the bare construction (:13835-13838) with the seam route:
+
      ```python
      try:
          sdk = _make_sdk(namespace="registry")
@@ -117,6 +118,7 @@ SDK leak (`sdk.close()` at 13837 is skipped when `list_graphs()` raises).
      except Exception:
          return True  # graph-up-unknown fail-open (unchanged)
      ```
+
      **The `_make_sdk` call sits INSIDE the outer except-catching `try`**
      (empirically proven: without this, `EmbeddedStoreBusyError` on a
      cross-process-held DB escapes → 500s onboarding GET/PATCH). Inner

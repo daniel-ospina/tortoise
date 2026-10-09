@@ -22,10 +22,12 @@ Connector events (GitHub/Linear/Slack) carry source provenance metadata — `sou
 **Root cause (not symptom):** the graph-shape projection layer ignores the provenance metadata producers already emit. The issue's literal framing ("connectors create Source nodes") would patch the symptom per-connector; the root-cause fix is central materialization in the projection choke point, which all three connectors (and any future connector) already pass through — validated by the event-sourcing precedent (Azure event-sourcing, Protean projection-granularity, TypeGraph idempotent projectors — PRIOR_RESEARCH architecture axis) and by the in-repo precedent `_upsert_document` → `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205, ONTOLOGY §3.4) which already does exactly this pattern for documents.
 
 ### Why This Framing
+
 - **Evidence:** (a) `_upsert_document` (entities.py:265) is the in-repo precedent — documents already get Source→references wiring; ONTOLOGY §3.4 §163 explicitly states "entity-reference detection in connectors remains a follow-up"; (b) all three connectors emit `source`+`sourceKind` on every event record — the metadata exists, only the projection ignores it; (c) all connector ingestion converges on `proj.apply()` → `_upsert_event` (github.ingest:260, linear.ingest, slack.ingest — verified in code); (d) per-connector emission would need ~8+ call sites across github's poll/webhook/entity paths alone, triplicated across 3 connectors — drift risk with no test covering the interaction (metronix-memory precedent, PRIOR_RESEARCH).
 - **Rejected alternatives:** see Problem Diamond below (Framing A per-connector, Framing C SDK-centralized — both rejected on evidence).
 
 ### Falsification Check
+
 Framing B fails if: (a) connector events flow through a path other than `proj.apply`/`_upsert_event` — **disconfirmed** (all three connectors call `proj.apply`); (b) materializing Source nodes changes EP weights — **disconfirmed** (SOURCE_KIND_DEFAULTS registers `github_issue`/`slack_message`/`linear_card` as explicit `None` = neutral, source_credibility.py:64-70; no inheritance change); (c) the provenance chain consumer can't traverse Event nodes — **disconfirmed** (`get_provenance_chain` matches `(entity)` label-agnostically, returns `labels(entity)`); (d) **a `source`-presence gate is safe for ALL choke-point producers — disconfirmed, FIXED**: `mining.py` `_make_event` (mining.py:417-440) emits EventRecorded with `source` but NO `sourceKind`/`sourceUrl`, applied via `api.projection.apply(record)` (mining.py:414) → the same `_upsert_event` choke point. The materialization gate must therefore fire only on a registered connector `sourceKind` or an explicit `sourceUrl` — never on bare `source` — or mined conversations would materialize spurious non-URL Source nodes.
 
 ### Confidence: 85/100
@@ -35,11 +37,13 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 ## Problem Diamond (inline, streamlined — no sub-agent dispatch per conductor)
 
 ### Alternative Problem Framings
+
 - **Framing A (original):** "Connectors must emit Source nodes" — per-connector code creates SourceCreated events + references edges. *Strength:* literal reading of the issue; *weakness:* triplicated logic, drift risk (metronix precedent), webhook/entity paths easily missed, treats a projection responsibility as a producer responsibility.
 - **Framing B (root cause — CHOSEN):** "Connector events carry source metadata that the projection's graph-materialization boundary drops" — the shared `_upsert_event` choke point must materialize Source + references from metadata already present. *Strength:* single fix covers all 3 connectors + webhook + entity paths + future connectors; rebuild-safe-by-construction (derived from EventRecorded, idempotent MERGE); matches event-sourcing canonical pattern and in-repo document precedent. *Weakness:* requires a precise gate in `_upsert_event` (fire only on registered connector sourceKind or explicit sourceUrl — NOT bare `source`, which would catch mining.py's source-only events) so non-connector producers are untouched.
 - **Framing C (SDK-centralized):** "The SDK write path should create Source nodes centrally from sourceKind on any write" (extend the create_document extractedFrom wiring, #394). *Strength:* SDK facade is a single surface; *weakness:* connectors apply events directly via `proj.apply` — they do NOT route through SDK facades, so this would rewire the connector→projection boundary for zero benefit over B.
 
 ### Adversarial / Disconfirmation Queries (run inline)
+
 1. **"Should the SDK create Source nodes centrally from sourceKind on any write?"** → No: connectors bypass SDK facades (`proj.apply(ev)` directly, github.ingest:260); SDK-central would require rewiring all connector paths. Framing C rejected on codebase evidence.
 2. **"What breaks for existing consumers if Source nodes appear now?"** → `list_sources` (sdk.py:1971) / MCP `tortoise_list_sources` will show new 0-point Sources (expected — provenance browsing gains connector sources); EP inheritance: all connector kinds neutral → **zero EP weight change** (verified SOURCE_KIND_DEFAULTS); `get_provenance_chain` starts returning rows (intended — this IS the P4 unblock); rebuild replay: connector events aren't in the JSONL log (connectors apply graph-only), so derived Sources behave exactly like existing connector-derived Events — no rebuild regression. Backward-compat research: adding node/edge types is additive-safe (TypeGraph schema-evolution, PRIOR_RESEARCH).
 3. **"Is repo-level Source granularity (`github:{repo}`) enough?"** → No: MITRE provenance guide + Springer KG-provenance survey: coarse-grained provenance has dead ends, "does not have the granularity to track how each entry was transformed"; the P4 consumer needs the specific issue/PR/message. Per-entity Source URLs are feasible: GitHub `url` field available via `gh` CLI JSON + already on webhook/entity paths; Linear GraphQL query **already selects `url`** (linear.py:87) — one line to pass through; Slack permalink via `chat_getPermalink` (WebClient already in use) or constructed `https://{workspace}.slack.com/archives/{channel}/p{ts}` (Slack docs canonical). Quality-over-convenience: per-entity wins.
@@ -48,6 +52,7 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 5. **"Should Sources be created lazily (at Point extraction via `_link_source`) instead of eagerly at event time?"** → No: lazy creation leaves connector entities without Sources until a Point exists — contradicts the issue objective (connectors create Source nodes) and leaves the P4 references edge empty for connector entities with no extracted Points. Eager-at-event-time chosen; `_link_source` remains the Point-side fallback (both coexist — `extractedFrom` and `references` are distinct edges, ONTOLOGY §3.3/§3.4).
 
 ### Boundary & Stakeholders
+
 - **In scope:** projection `_upsert_event` materialization; connector event metadata enrichment (per-entity `sourceUrl`, sourceKind fixes); sourceKind vocabulary registration; ONTOLOGY §3.4/§5 doc update; connector + projection + idempotency + list_sources regression tests.
 - **Out of scope:** P4 consumer changes (`get_provenance_chain` works as-is); EP inheritance changes (kinds stay neutral); Slack/Linear webhook support (Linear has none); connector event-log persistence (graph-only, existing behavior); `complete_source`/content hashing for connector sources; backfill of pre-existing connector entities (no connector events are persisted in JSONL, so there is nothing to backfill — graph-only materialization applies to future events only).
 - **Affected but unmentioned:** MCP `tortoise_list_sources` consumers (cosmetic new entries); any dashboards reading `list_sources`; the two-producer Object/Event id collision (`github-issue-{repo}-{number}` poll vs `{entity_id}-created` entity path) — adjacent issue, filed separately.
@@ -71,6 +76,7 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 **Trigger assessment:** Ontology axis (medium) and Architecture axis (medium) both fired; Library-deps axis NOT triggered (no new third-party deps — all plumbing in-repo; Slack SDK already used). Deduped the ontology/architecture axes against PRIOR_RESEARCH; the 3 new queries covered only demonstrated gaps (URL schemes + multi-target precedent).
 
 ### Integration Docs
+
 - **No new third-party dependencies.** All required plumbing is in-repo and battle-tested:
   - `TortoiseSDK.create_source(url, sourceKind, ...)` (sdk.py:6695) — MERGE-on-url, dual-write sourceKind↔credibilityTier, invalidates inheritance gate + reliability cache. *(Not used by the connector choke point — reference only.)*
   - `FalkorProjection.link_source_to_entity(source_url, entity_id, entity_label, source_kind)` (projection/edges.py:212) — auto-creates Source on MERGE; validates label ∈ {Document, Event, Object}. Use for the github entity-path Object reference.
@@ -84,9 +90,11 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 ## Plan (draft — implementation design will be refined in writing-plans)
 
 ### Proposed Solution (Approach 1 — chosen)
+
 **Central projection materialization + minimal connector metadata enrichment.** The projection's `_upsert_event` (single choke point for all connector events) materializes a Source node from the event's `source`/`sourceKind`/`sourceUrl` metadata when present, and wires `(Source)-[:references]->(Event {eventId})` (+ `(Source)-[:references]->(Object {id})` when the connector's entity path provides the object id). Connectors are enriched to carry per-entity `sourceUrl` and correct `sourceKind` — the producer's only job. Graph shape stays the projection's responsibility (event-sourcing principle; mirrors `_upsert_document` #205 precedent).
 
 ### Implementation Steps (task-level)
+
 1. **Projection — Source materialization in `_upsert_event` (tortoise/projection/entities.py:343):**
    - **Gate (verifier P1 fix):** materialize a Source ONLY when the event carries a registered connector `sourceKind` OR an explicit `sourceUrl` field. Pin the gate predicate as an explicit frozenset `_CONNECTOR_SOURCE_KINDS = {"github_issue", "github_pr", "linear_card", "slack_message"}` (coherence P2 fix — NOT `SOURCE_KIND_DEFAULTS` registry membership, which also contains `document` and T0-T4 tier forms; the explicit set keeps the mining.py exclusion precise). Bare `source` alone → no Source node. This excludes the second choke-point producer `mining.py` (events with `source` but no `sourceKind`, mining.py:417-440) and any other non-connector emitter.
    - On gate fire: MERGE `(s:Source {url: $sourceUrl or $source})` with **kind set only on CREATE** — `ON CREATE SET s.sourceKind=$sk, s.title=$sourceUrl, s.contentHash='', s.ingestedAt=$now`; **ON MATCH, leave `sourceKind` untouched** (`coalesce(s.sourceKind, $sk)` — coherence P1 fix: an EXISTING Source's kind is authoritative per #398 "never overwritten" contract, sdk.py:6720-6722; silent re-kind would be the metronix source_role-demotion shape). **No version bump on re-materialization** (TypeGraph churn pitfall). Note: a pre-existing `_link_source` stub (kind `'document'`) therefore keeps `document` — documented in Step 6.
@@ -102,6 +110,7 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 7. **Tests** (see Testing Strategy below).
 
 ### Testing Strategy
+
 - **Connector mapping tests** (test_github_connector.py, test_linear_connector.py, test_slack_connector.py): **add** `sourceUrl` (per-entity) + `sourceKind` assertions (PR → `github_pr`, cycle → `linear_cycle`) on emitted events; **update fixtures to carry `url`** (the poll fixtures currently drop it; webhook fixtures already pass `html_url`). Note: no sourceKind assertions exist in these test files today — these are new assertions (coherence P4 fix).
 - **Projection integration test** (test_projection.py or new test_connector_sources.py): applying a GitHub/Linear/Slack-shaped EventRecorded creates exactly one Source node (per-entity url) with correct sourceKind + `references` edge(s); non-connector events (no `source`) create no Source nodes.
 - **Idempotency test:** apply the same event twice → Source/Event/Object node counts unchanged, version unchanged (coalesced upsert). **Plus: re-apply a connector event over a PRE-EXISTING Source** — both `_link_source` stub (kind `document`) and operator-tiered variants — and assert `sourceKind` + EP unchanged (coherence P1 fix — guards the #398 kind-is-authoritative contract).
@@ -110,14 +119,17 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 - **EP no-change test:** connecting Source nodes with neutral connector kinds does not alter existing Point weights (guards the EP-neutral claim).
 
 ### Verification Plan
+
 - Full suite: `python -m pytest tests/ -v` (FalkorDBLite embedded). Live-FalkorDB run for connector integration tests per repo README.
 - Manual spot check: run github connector poll twice against a fixture repo; assert `MATCH (s:Source) RETURN count(s)` stable.
 
 ### Runtime Prerequisites
+
 - No new deps, no new services, no migrations. Slack permalink path uses the existing `SLACK_BOT_TOKEN` client. **Rate-limit note:** `chat_getPermalink` is called per message INCLUDING thread replies (poll fetches up to `limit` + `limit` replies, slack.py:60-99) — a single poll can add ~2×`limit` API calls, not one. Acceptable within Slack's tier limits; batched alternative (construct permalink when `workspace_domain` is configured) documented as a follow-up if it becomes a bottleneck.
 - **Task-ordering note:** if the `_upsert_event` gate is implemented as `SOURCE_KIND_DEFAULTS` registry membership, land Step 5 (`github_pr` registration) before or with Step 1 — otherwise PR events rely solely on the sourceUrl leg of the gate (safe in practice: PR events carry per-entity URLs and `resolve_tier` returns None for unregistered kinds — EP-neutral).
 
 ### Acceptance Criteria
+
 1. Applying a GitHub/Linear/Slack EventRecorded creates exactly one Source node keyed on the per-entity URL (with explicit container-level fallback: linear cycles → `linear:{team_key}`, slack permalink failure → `slack:{channel}` — deliberate non-URL fallback keying, documented in Rejected Alternatives), with correct `sourceKind` and `references` edge(s) to the Event (and Object on the github entity path).
 2. Re-applying the same events (re-poll) leaves node counts and versions unchanged (idempotent, no churn).
 3. Events without `source` metadata create no Source nodes; **mining-shaped events (`source` present but no sourceKind/sourceUrl, e.g. mining.py:417-440) also create no Source nodes** (regression-free for all non-connector choke-point producers).
@@ -165,17 +177,21 @@ Framing B fails if: (a) connector events flow through a path other than `proj.ap
 ## Verification Gates
 
 ### problem-verify
+
 - 2 cycles. Cycle 1: 1×P1 (mining.py gate — fixed) + precision fixes. Cycle 2: both verifiers NO ISSUES FOUND. Clean.
 
 ### solution-verify
+
 - 2 cycles. Cycle 1: 1×P1 (see log — fixed). Cycle 2: both verifiers NO ISSUES FOUND. Clean.
 
 ### Qwen coherence (Phase 5.6)
+
 - **`[QWEN-GATE] substitute reviewer used`** — qwen3.8-max provider blocked (HTTP 401). Fresh-context substitute dispatched per conductor instruction. Result: see Review Cycle Log.
 
 ---
 
 ## Clarifications
+
 None — no questions qualified for the human gate. Confidence 85/100 (problem) and approach evidence is codebase-grounded; taxonomy matches (ontology vocabulary extension `github_pr`, new graph nodes) are additive-safe and researched (TypeGraph additive schema evolution; connector kinds neutral → no EP/cost impact; no destructive ops; no new third-party deps). One optional human decision deferred to writing-plans/execution: whether Slack per-message permalinks (1 extra API call/message) are worth it vs channel-level Sources for the initial slice — the plan defaults to permalink-with-fallback, which is safe either way.
 
 ---
@@ -183,6 +199,7 @@ None — no questions qualified for the human gate. Confidence 85/100 (problem) 
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1
+
 - Verifier A: P0=0, P1=1, P2=0, P3=2, P4=1
 - Verifier B: P0=0, P1=0, P2=1, P3=2, P4=1
 - Controller action: **Fixed P1 (Verifier A — mining.py second producer)**: gate tightened to fire only on registered connector sourceKind or explicit sourceUrl (verified mining.py:414/417-440 emits `source`-only EventRecorded through the same `_upsert_event` choke point); added mining-shaped regression test to AC3 + wiring row. Also fixed: problem-statement overclaim (entity-path event github.py:198-212 lacks source/sourceKind — noted as precision fix), Plan Step 2 mechanism (url already in gh --json lists; pass-through into sourceUrl), line citations (sdk.py:7210, linear.py:91, github ingest apply sites), and added explicit disconfirmation 6 (consumer-side alternative ruled out — extractedFrom links only to Source nodes). Ignored nothing.
@@ -190,12 +207,14 @@ None — no questions qualified for the human gate. Confidence 85/100 (problem) 
 - Cycle 2 (final): both verifiers returned NO ISSUES FOUND.
 
 ### solution-verify — Cycle 1
+
 - Verifier A: P0=0, P1=0, P2=0, P3=2, P4=2
 - Verifier B: P0=0, P1=0, P2=0, P3=2, P4=0
 - Controller action: No P0/P1 → gate passes without re-dispatch. Incorporated P3×2 (both verifiers): (1) Confirmed Problem wording corrected — `source`/`sourceKind` persist as inert Event-node extra props via `_persist_extra_props` (#228), not "dropped entirely"; disconfirmation 6 honesty note added; (2) Plan Step 1 Object-wiring pinned to an explicit `sourceObjectId` field with `event.object` (title on poll paths) explicitly ruled out. Incorporated P4×2: extra-props coexistence note in Step 1; Slack rate-limit magnitude (per-message incl. thread replies ≈ 2×limit calls/poll) + Step 5-before-Step-1 ordering note if gate uses registry membership.
 - No re-dispatch needed (P2+ only → incorporate and pass).
 
 ### [QWEN-GATE] coherence — substitute reviewer
+
 - Substitute: P0=0, P1=1, P2=1, P3=3, P4=4. Controller: **Fixed P1** (Plan Step 1 `ON MATCH` sourceKind overwrite contradicted the #398 never-overwrite contract — changed to kind-set-on-CREATE-only with `coalesce(s.sourceKind, $sk)` on MATCH + pre-existing-Source idempotency test). **Fixed P2** (gate predicate pinned as explicit `_CONNECTOR_SOURCE_KINDS` frozenset, not registry membership). Incorporated P3×3 (id-collision rationale corrected + two-Events test expectation; rebuild parity note; `linear_cycle` kind) and P4×4 (ONTOLOGY §3.4 drift scoping; test wording; `_upsert_source` negative-dep note; slack lazy enrichment + fallback keying). Fix applied deterministically (code-verified) — no re-run per conductor (max 1 cycle). Coherence verdict: COHERENT — no problem↔solution drift, no dropped dimensions, no research contradictions.
 
 *(Detailed P1 descriptions appended by the controller in the finalize step — see gate notes below.)*
@@ -217,4 +236,5 @@ None — no questions qualified for the human gate. Confidence 85/100 (problem) 
 ---
 
 ## Extra Issues Filed During Scoping
+
 - **#1155** (filed 2026-08-13): two-producer Event id collision — poll path `eventId` = `github-issue-{repo}-{number}` collides with entity-path `eventId` = `{entity_id}-created` and the Object id, producing two Event nodes per issue; two-producer identity ambiguity (PRIOR_RESEARCH investigraph ID-space note). Adjacent bug — not absorbed; noted in Wiring Check.

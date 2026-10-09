@@ -23,16 +23,20 @@ subjects.team: epistemic-team
 Three evidence chains:
 
 ### 1. Extraction failed for every multi-session question
+
 From the run's authoritative checkpoint (`/tmp/lme-v2-full.json` ingest stats):
+
 - **133/133 multi-session questions have 0 extracted points, 0 entities, 0 events, 0 operators.** The graph for every MSR question contains ONLY the raw verbatim transcript blobs (`lme:{qid}:s{si}:raw`, one per session).
 - Mean **142 ingest errors per MSR question**, of which mean **47.2 are `"no embed list produced (S2/S4 empty) — nothing to embed"` — one per session**. Error kinds across the run: 21,356 `S1 chunk failed` + 21,343 `N/M S1 chunks failed` + 21,957 `no embed list` + 1,087 `S2 failed` + 1,037 `S4 failed` — all `ConnectionError: HTTPSConnectionPool(host='api.deepseek.com') Read timed out`.
 - Only **52/496 questions have any extracted points — all single-session-user** (first in run order). Extraction health decays monotonically with run position: rate-limit exhaustion, not content. Even the healthy questions are partially failed (70 errors each, 19/45 sessions with no embed list).
 
 ### 2. The flip delta on strictly shared questions is +1 net (10 wins − 9 losses / 109)
+
 - `False→True` (v2 wins): **10** · `True→False` (v2 loses): **9** · both-true 45 · both-false 45.
 - That is **+0.9pp** of the headline. The remaining **~+1.7pp comes from 12 qids the baseline run couldn't execute** (all 12 are in the baseline's network-failure list; v2 got 8/12 correct = 66.7% > category mean 52%). That chunk of the "win" is **run reliability, not a v2 capability** (baseline n_failed=15 vs v2 n_failed=4).
 
 ### 3. Retrieval quality did not improve — the reader got 4.6× more context instead
+
 | Metric (MSR category) | Baseline | v2 |
 |---|---|---|
 | session_recall@20 | 0.863 | 0.858 (≈parity) |
@@ -49,6 +53,7 @@ From the run's authoritative checkpoint (`/tmp/lme-v2-full.json` ingest stats):
 ## Where we do well / where we don't (evidence)
 
 ### Wins (10 False→True flips) — all cross-session AGGREGATION questions
+
 Every flipped win is a "how many / how much total / which most" question requiring summation or comparison across 2–5 evidence sessions — exactly what a dense whole-history context enables the reader to do itself:
 
 | qid | span | question | answer |
@@ -67,11 +72,13 @@ Every flipped win is a "how many / how much total / which most" question requiri
 All had session_recall@20 = 1.0 in v2 (evidence sessions present) with the answer embedded in a retrieved verbatim session blob. **These are the narrative-first dream questions — and they were answered WITHOUT the narrative** (S1 produced nothing).
 
 ### Losses (9 True→False flips) — reader precision failures, not retrieval failures
+
 - **Miscounts despite full context:** `10d9b85a` "1 day" vs 3 days (April workshops); `2318644b` "$270 more" hedge; `6d550036` project-count confused with "leading a team of five engineers".
 - **Hedging with evidence in context (ses@20=1.0):** `ef66a6e5` "I do not know" (2 sports), `aae3761f` "don't have that information" (15h driving), `27016adc` (10% renovation), `b3c15d39` (5-day shutter), `099778bb` (20% women leadership — "cannot be determined").
 - Failure mode = **reader arithmetic/aggregation discipline**, not retrieval. Baseline answered these from 8.2k tokens of marked turns; v2 lost them at 37.7k — the extra context is noisy for precision-count questions.
 
 ### The category is mostly unchanged
+
 45 both-true / 45 both-false on shared qids. session_recall parity (0.858 vs 0.863) means retrieval coverage neither gained nor lost. The entire observable delta sits in (a) the +1 net flip and (b) 8/12 correct on baseline-unrunnable qids.
 
 ---

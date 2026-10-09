@@ -495,7 +495,6 @@ while set, a real enumeration wipe would be silently suppressed.)
 
 ---
 
-
 ---
 
 ## 15. EXECUTION LOG — what the 2026-08-11 flip actually found (live)

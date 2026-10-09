@@ -3,6 +3,7 @@
 > Each test: **Layer** (test-design #1515 surface refs) · **Setup** (concrete) · **Given/When/Then** · **Assertions** (verifiable) · **Owned negatives**. E2E-9/10 carry V4-conditional markers per the deferred R6/E6 mechanisms; E2E-1..8 are the V3 gate set.
 
 ## E2E-1: The eval runs the REAL retrieval stack
+
 - **Layer:** e2e on live FalkorDB (surfaces 7–11) · **Setup:** `docker compose -f ../eldato/operations/memory/docker-compose.yml up -d`; P3 landed (worktree == origin/main, drift gate green); FTS index created on the real graph (Point/Event/Subject/Document; Object via #1468 fix); `pip install -e '.[embeddings]'`; `TORTOISE_DB_URI` set; harness real-backend mode wired (`resolve_backend_mode() == "real"`, recorded per question).
 - **Given:** a question whose answer is a paraphrased extracted point (different wording than the query)
 - **When:** retrieval runs with all 4 legs on
@@ -11,6 +12,7 @@
 - **Owned negatives:** embedder load failure → vector leg recorded `degraded`, never silent; FTS index missing → loud warning + leg recorded `tfidf`; no-match → empty pool with `pool_size` recorded (not an error).
 
 ## E2E-2: A run cannot silently degrade
+
 - **Layer:** harness integration (surfaces 19/20/22) · **Setup:** funded key (M2 pre-flight passed), judge key present, fresh checkpoint, workers ≥ 8 under flock.
 - **Given:** the 500-Q run executes per the phased protocol
 - **When:** the run completes
@@ -19,6 +21,7 @@
 - **Owned negatives:** corrupt checkpoint → fingerprint mismatch → clear abort, refuses stale resume; two workers racing → no lost checkpoint updates, consistent resume; judge key absent → pre-flight aborts with a clear message.
 
 ## E2E-3: Evidence marking is non-vacuous
+
 - **Layer:** harness integration + unit (surface 19) · **Setup:** M6 calibration landed (marks = source-session + verbatim anchor + raw-chunk containment); **dataset-semantics re-validation (M7) committed**: audit `answer_session_ids`/`has_answer` coverage in `xiaowu0162/longmemeval-cleaned`, assert field semantics match the recall definitions, record in report methodology.
 - **Given:** a completed run with healthy extraction (E2E-2)
 - **When:** evidence recall is computed
@@ -28,6 +31,7 @@
 - **Owned negatives:** true-abstention question (zero evidence legitimately) does not drag the denominator; paraphrase-only question has evidence marks via the calibrated predicate (n-gram/verbatim anchor).
 
 ## E2E-4: Temporal questions are answerable
+
 - **Layer:** integration (surface 28, E1) · **Setup:** `session_date` threaded into `extract_session_v2` (E1); events written with `startedAt`.
 - **Given:** a session whose extractor received its session date
 - **When:** a "how many days between X and Y" / "when did Z happen" question is asked
@@ -37,6 +41,7 @@
 - **Owned negatives:** undated session (no `startedAt`) → no false date-answer, graceful fallback recorded; TR question with no date-bearing evidence → clean abstention (A1).
 
 ## E2E-5: Concrete facts survive; speaker is attributed
+
 - **Layer:** integration (surfaces 15/17; E2/E3/E4) · **Setup:** M6 recalibrated marks landed (E2E-5's evidence-marked assertion depends on them); a pinned dataset instance: a KU/preference question with a user-asserted verbatim value + an assistant decoy.
 - **Given:** a conversation containing "my personal best 5K time is 27:12" (user-asserted, stated early in the conversation) and an assistant suggestion that is NOT the fact
 - **When:** a KU/preference question asks for the value
@@ -46,6 +51,7 @@
 - **Owned negatives:** assistant-suggestion-only turn → must NOT surface as a user fact (the negative complement); value compressed by the "counts-are-noise" filter → E2 regression, assertion fails loudly.
 
 ## E2E-6: Superseded facts surface the new value
+
 - **Layer:** integration (surface 13; E5) · **Setup:** E5 write-path (supersessions in payload + `client_commit_id` 3-site agreement) + CORRECTS edges materialized.
 - **Given:** two sessions changing the same fact ("gym at 6pm" → "gym at 5pm")
 - **When:** a KU question asks the current value
@@ -54,6 +60,7 @@
 - **Owned negatives:** self-supersede → no point→itself edge, no crash; identical-value re-assertion → NO new supersession created at E5 level (the NOOP-link assertion lives in E2E-11/E2E-10); length-guarded overlap → a 5-token point sharing 3 tokens with a 50-token point is NOT a REVISES.
 
 ## E2E-7: Abstention comes from evidence, not the label
+
 - **Layer:** reader unit + e2e (surface 4; A1) · **Setup:** reader pinned (M5); A1 fragment loaded; `_abs` never crosses (assert the reader call site receives `question_type` only).
 - **Given:** an abstention question whose fact is absent from the graph
 - **When:** the reader is asked (no `_abs` flag anywhere in the reader path)
@@ -61,6 +68,7 @@
 - **Owned negatives:** decoy-commit case (related-but-not-target fact in context) → the reader states the related fact AND the absence; partial-knowledge case → "state what IS present; explicitly state the asked info is absent".
 
 ## E2E-8: Capture fails closed (+ provider failover)
+
 - **Layer:** integration (surfaces 18/21; P1/P2) · **Setup:** fail-closed capture wired; provider routing (DS-direct primary, OR fallback).
 - **Given:** a dead/misconfigured LLM key on the capture path
 - **When:** a session is captured
@@ -69,6 +77,7 @@
 - **Owned negatives:** empty/blank conversation → never `ok=True` for nothing committed; fatal 4xx (401/402/403) → must NOT trigger failover (P2 guard); fallback flapping → no infinite provider flip-flop.
 
 ## E2E-9: Point-in-time restore (V3 mechanism; window assertions V4-conditional)
+
 - **Layer:** integration (surface 13; E5 + E6-last) · **Setup:** V3 restore mechanism = walk the supersession/CORRECTS chain from the current value to the point whose validity interval covers the target date (no first-class windows needed); E6 window-based assertions marked V4-conditional on the follow-up run.
 - **Given:** a fact that changed (gym 6pm → 5pm) and a question asking what the schedule WAS at an earlier date
 - **When:** the point-in-time query is asked
@@ -77,6 +86,7 @@
 - **Owned negatives:** ambiguous restore (two candidates, unclear interval) → explicit ambiguity signal, no silent wrong answer.
 
 ## E2E-10: Diversity + budget-capped context (R1; cross-encoder/MMR assertions V4-conditional)
+
 - **Layer:** integration (surface 25 reader-context-format/UX-3; R1 + UX-3) · **Setup:** R1 session-dedup + context budget cap; UX-3 rendering (points first, chunks backfill).
 - **Given:** a question whose evidence spans many near-duplicate raw chunks from one session
 - **When:** retrieval returns top-k and the context is rendered
@@ -85,6 +95,7 @@
 - **Owned negatives:** duplicate paraphrase across sessions → collapsed (NOOP link), no double-count in aggregation — **depends on E7/E2E-11 machinery** (R1 alone caps per-session chunks at retrieval; it does not create NOOP links); alternatively asserted at R1 level: cross-session duplicate chunks don't double-count in the context pool.
 
 ## E2E-11: Cross-session consolidation (E7)
+
 - **Layer:** integration (surface 17; E7) · **Setup:** E7 write-time 4-way on the shared real graph, with the Graphiti two-phase entity-resolution pass; depends on E1/E3/E5.
 - **Given:** the same fact stated across two sessions with different wording (duplicate) and a different fact contradicted across sessions (update), plus a fact withdrawn in a later session (retraction)
 - **When:** the later sessions are captured

@@ -31,6 +31,7 @@ Today `POST /v1/invites/accept` hard-403s on ANY email mismatch between the sess
 6. **member_progress writes without faking org completion** — accept arms the invitee's per-member slot in the org's OnboardingState node (`member_progress {user_id: []}`); W5's checkpoint stays the write surface; member entries NEVER advance org-level steps (W5 `write_member_progress` map-merge is separate from COMPLETED_STEP edges — by construction).
 
 ### Fusion union semantics (honest scope)
+
 - Registry/selfhost lane: no per-email identity directory exists (users are opaque `user_id`s on Membership/APIKey nodes) — an "existing invitee account" is not representable. `fuse` therefore executes the mismatch-override accept UNDER THE CURRENT ACCOUNT with the invite recording `accepted_via='fuse'`, `fused_from_email=<invite email>`, OTP proof. The membership + node arming are identical to accept-mismatch; the distinction is recorded and surfaced.
 - Supabase/hosted lane: same seam over the cp tables (invitations columns from a deploy-time migration); true auth-identity linking (both emails → one login, auth.admin) is auth-schema work owned with W10 RBAC — recorded on the invite, not silently deferred.
 - The SECURITY property (OTP-gated, never silent, never un-OTP'd) is identical on both lanes and is what the regression tests pin.
@@ -40,10 +41,13 @@ Today `POST /v1/invites/accept` hard-403s on ANY email mismatch between the sess
 ## 2. Contract (pinned)
 
 ### v2 opt-in
+
 Header on `POST /v1/invites/accept`: `Accept: application/vnd.tortoise.onboarding+json;version=2`.
 
 ### New endpoint — `POST /v1/invites/otp` (session-authed)
+
 Body `{"token": str}` → 200 `{"status": "otp_sent", "expires_in_s": 600}`.
+
 - Resolve invite by token (pending + unexpired) — unknown/consumed/expired → 400 `"Invalid or expired invite token"` / `"Invite token expired"` (matches accept's errors).
 - Session email == invite email → 400 `{"error_code": "otp_not_required"}` (email-match needs no proof — logging in as the invitee IS the proof).
 - Session without email → 422.
@@ -51,6 +55,7 @@ Body `{"token": str}` → 200 `{"status": "otp_sent", "expires_in_s": 600}`.
 - Rate caps (env-tunable, `RATE_LIMIT_DISABLED=1` opt-out): per-invitation sends (5 / 15 min), per-IP (10 / h), global (200 / h) — sliding-window buckets mirroring the invite-accept limiter (`_check_ip_bucket_rate_limit` helper).
 
 ### `POST /v1/invites/accept` (mismatch branch only — match path 100% unchanged)
+
 | Condition | Result |
 |---|---|
 | No v2 header | **legacy 403 byte-unchanged** (`"Invite email does not match this account"`) |
@@ -60,10 +65,12 @@ Body `{"token": str}` → 200 `{"status": "otp_sent", "expires_in_s": 600}`.
 | v2 + `path` + valid `otp` | OTP consumed (single-use) → membership under current account; invite records `accepted_at/accepted_by/otp_verified_at/otp_verified_by/accepted_via/fused_from_email`; ghost membership cleanup; 200 `{"org_id","role","accepted_via":"fuse"|"accept-mismatch","mismatch":{"invited_email":y,"recorded":true}}` |
 
 ### Admin resend / expire (owner/admin only, mirroring `DELETE /v1/invites/{id}` RBAC)
+
 - `POST /v1/invites/{invitation_id}/resend?org_id=...` → rotates the token (new plaintext returned once + hash updated + email re-sent best-effort), refreshes expiry to +7d; consumed/revoked → 409; rate-capped (max 5 resends/day per invitation, env).
 - `POST /v1/invites/{invitation_id}/expire?org_id=...` → pending invite becomes `status='expired'` + `expires_at=now` (link dies, leaves pending lists, frees the Pro capacity seat) + ghost membership cleanup; consumed → 409.
 
 ### Accept-side arming (member_progress mechanics)
+
 Every successful accept (match + mismatch-override, registry lane; mirrored seam): ensure the org's OnboardingState node exists (create-on-write seam, `ensure_onboarding_state_node`) and idempotently write the invitee's member slot `member_progress {user_id: []}` (`write_member_progress`). NEVER writes org-level COMPLETED_STEP edges; NEVER evaluates org completion for the acceptor. This is the "inline-skippable affordance mechanics": armed slot + W5 checkpoint writes; skip = no write; org completion unchanged (DE2E-8 And-clause).
 
 ---
@@ -71,9 +78,11 @@ Every successful accept (match + mismatch-override, registry lane; mirrored seam
 ## 3. Implementation steps
 
 ### Step 1 — `tortoise/email_notify.py`: `send_otp_email`
+
 Mirror `send_invite_email` (budget reserve/refund + `_skip_channel` + async `_send_invite_attempt`-style send + `on_sent` callback). Copy: 6-digit code + team name + 10-min expiry. Signature: `send_otp_email(org_name, invitee_email, code, on_sent=None)`.
 
 ### Step 2 — `tortoise/supabase_control.py`: seam (mirrors the registry lane; unit-tested on FakeControlPlane)
+
 - `invitation_otp_mint(cp, invitation_id, code_hash, expires_at, sent_at)` — PATCH invitations row (id filter) setting `otp_hash/otp_expires_at/otp_attempts=0/otp_sent_at`; row-must-match guard (returns False when the invitation vanished).
 - `invitation_otp_verify(cp, invitation_id, code_hash)` → `("ok"|"invalid"|"expired"|"no_otp")`; on ok clears the hash/expiry + sets `otp_verified_at` (single-use); invalid increments attempts, ≥5 clears the code.
 - `invitation_accept_mismatch_v2(cp, token, user_id, user_email, path, otp_verified)` — the mismatch-override accept: reuse `invitation_accept`'s checks (pending/expiry/existing-member/team kill-switches/free-cap/max_users) minus the email-match 403, + requires a verified OTP row, + PATCHes the invite with the mismatch/OTP/fusion record, + resurrect-or-insert the membership with `invited_email`. Returns the standard `{org_id, role}` + record fields.
@@ -81,9 +90,11 @@ Mirror `send_invite_email` (budget reserve/refund + `_skip_channel` + async `_se
 - `invitation_expire(cp, invitation_id, org_id)` — pending → `status='expired'`, `expires_at=now`; idempotent-ish guards.
 
 ### Step 3 — `supabase/migrations/20260902000001_invite_fusion_v2.sql` (deploy-time; conservative, pglite-styled)
+
 Add to `public.invitations`: `otp_hash text`, `otp_expires_at timestamptz`, `otp_attempts integer NOT NULL DEFAULT 0`, `otp_sent_at timestamptz`, `otp_verified_at timestamptz`, `otp_verified_by text`, `accepted_via text`, `accepted_mismatch boolean NOT NULL DEFAULT false`, `fused_from_email text`. Constraint check `accepted_via IN ('fuse','accept-mismatch')`. (Only if pglite validation passes locally is it added to `supabase/tests/pglite/validate.mjs`; otherwise it stays a normal reviewed deploy artifact like the other 2026xxxx migrations that postdate the pglite list.)
 
 ### Step 4 — `tortoise/hosted_api.py`
+
 1. `_onboarding_v2(request)` — Accept-header sniff (mimetype `application/vnd.tortoise.onboarding+json` + `version=2`).
 2. OTP send/verify registry helpers over the registry Invitation node (`_registry_invite_by_token` refactor reuse; fields `otp_hash/otp_expires_at/otp_attempts/otp_sent_at/otp_verified_at/by`), plus `_otp_rate_limit(request, token_key or ip)` sliding windows + env knobs + `RATE_LIMIT_DISABLED` opt-out.
 3. `POST /v1/invites/otp` endpoint (supabase seam `invitation_otp_mint` OR registry inline).
@@ -92,6 +103,7 @@ Add to `public.invitations`: `otp_hash text`, `otp_expires_at timestamptz`, `otp
 6. `POST /v1/invites/{invitation_id}/resend` + `POST /v1/invites/{invitation_id}/expire` (owner/admin; registry + supabase lanes; resend rate cap).
 
 ### Step 5 — Tests
+
 - `tests/test_invite_fusion_http.py` (registry lane; patched-embedded SDK pattern of `test_invites_http.py`; runs in BOTH lanes — no docker gate):
   - legacy 403 byte-unchanged golden (opt-in absent → exact `403` + `detail == "Invite email does not match this account"`).
   - 3-path discovery shape (v2 + mismatch + no path → 409, default fuse, otp_required, both paths listed).
@@ -110,6 +122,7 @@ Add to `public.invitations`: `otp_hash text`, `otp_expires_at timestamptz`, `otp
 - Ruff 0.16.4: RUF059 active — underscore-prefix unused loop vars (`for iid, ...` → `_` where unread).
 
 ### Step 6 — Local verification
+
 ```bash
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest \
   tests/test_invite_fusion_http.py tests/test_invite_fusion_docker.py \
@@ -124,6 +137,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 ---
 
 ## 4. Risks & mitigations
+
 - **Hosted seam not end-to-end runnable in CI** (no Supabase creds) → seam logic unit-tested on FakeControlPlane with the same interface the real PostgREST client uses; migration is deploy-time, conservative, mirrors existing invitation columns' style.
 - **Legacy 403 drift** → golden byte-equality test pins the legacy response; match path untouched (existing 200-byte-equality tests in test_invites_http.py still pass).
 - **OTP forgery/brute force** → hashed at rest, 6-digit space + 5-attempt cap + 10-min expiry + single-use + per-IP/send/global rate caps; code never returned by the API.

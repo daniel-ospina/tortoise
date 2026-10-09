@@ -21,6 +21,7 @@ epic: tortoise-blog-cms
 ## 1. User Journeys
 
 ### Personas
+
 | ID | Persona | Goals | Trust level |
 |----|---------|-------|-------------|
 | P1 | Agent publisher (pi, other agents) | Write + publish blog posts without human dependency | High (owner-trusted, per-agent keys) |
@@ -29,6 +30,7 @@ epic: tortoise-blog-cms
 | P4 | AI crawler (GPTBot, PerplexityBot, Googlebot) | Discover + read content from raw HTML | Anonymous |
 
 ### Journeys
+
 | Journey | Persona | Entry → Exit | Edge cases |
 |---|---|---|---|
 | J1 Agent publishes a post | P1 | has topic → writes markdown → calls publish API (per-agent key) → gets URL back → live (direct) or in review queue (default) | schema invalid, slug taken (409 on create), API down, hold_for_review set, rate limit |
@@ -44,7 +46,9 @@ epic: tortoise-blog-cms
 ## 2. Workflows
 
 ### W1 — Agent publish pipeline (J1)
+
 `Agent → POST /blog/api/posts (X-Agent-Key) → [Pages Function] validate key + zod schema → INSERT blog_posts → respond {id, slug, url}`
+
 - **Publish mode (locked, 2026-08-27 refinement):** the API accepts `status`;
   - **default `'draft'`** — post lands in the **review queue** (not public) until the owner publishes;
   - **`'published'`** — only when the owner explicitly asked the agent to publish directly (recorded in audit via `published_by`/`published_at`). No manual step in that path — the agent's instruction IS the gate (owner-trusted agents, per-agent keys).
@@ -54,30 +58,41 @@ epic: tortoise-blog-cms
 - **Rate limits (generous, per agent key):** 120 req/min burst, 2,000 req/day. A rewrite loop of N iterations is N requests over minutes — far under the limit. The limiter is unit-tested with lowered thresholds (non-deterministic across isolates at real limits).
 
 ### W2 — Review queue + post-publish review loop (J2/J3)
+
 The **review queue** surfaces three kinds of items:
+
 1. **Agent drafts** (`status='draft'`, `created_by` = agent) — the default path: agent writes, owner publishes.
 2. **Unreviewed direct-published** (`status='published' AND reviewed_at IS NULL`) — post-publish review.
 3. **Held** (`hold_for_review=true`) — stays fully private until cleared.
 
 Owner actions: mark reviewed (sets `reviewed_by`/`reviewed_at`) | edit+republish | request changes (`status→draft` + `review_note` — agent can then rewrite via PATCH and republish) | unpublish (`status→draft`; clears review state) | archive (terminal).
+
 - **Republish semantics:** after unpublish, a subsequent publish re-enters the review queue (`reviewed_at=NULL`) — never silently pre-reviewed.
 - **Human gate:** unpublish / archive / request-changes are human-only. Publish is human for queue items; direct-published items were agent-published by explicit owner instruction.
 
 ### W3 — Hold-for-review (J1 variant)
+
 `Agent sets hold_for_review=true → render Function excludes post from ALL public surfaces (article, index, sitemap, feed) → admin queue surfaces it as "held" → owner clears flag → post goes public everywhere`
+
 - **Failure mode:** images still fetchable via CDN URL (documented tradeoff, scope item 1).
 
 ### W4 — Content lifecycle
+
 `draft → published (owner publishes queue items; agent direct-publishes only on explicit instruction) | published → draft (unpublish / request-changes) | draft|published → archived (terminal — NO transitions out of archived) | agent PATCH: draft↔published on own posts, content edits on own posts`
+
 - Enforced by status CHECK + triggers (pgTAP-tested). Slug immutable after create (update path edits content/meta/status, not slug).
 
 ### W5 — SEO/render pipeline
+
 `Publish / unpublish / archive → /blog index + article render from Supabase (published, !hold, !archived) → dynamic sitemap (published only) → RSS feed (published only) → IndexNow ping (optional)`
+
 - Sitemap + feed are dynamic routes (never stale vs the deploy cycle). `robots.txt` gains a line for `/blog/sitemap.xml` (discovery).
 - **Cache discipline:** article/index responses carry `Cache-Control: public, max-age=300` with **`no-cache` (revalidate) when `updated_at` is within the last 30 minutes** (recently-edited posts) so E2E-5 freshness holds and edited content propagates promptly.
 
 ### W6 — Analytics pipeline
+
 `Page load → consent.js (existing) → if granted: posthog pageview (auto) + share_click (on share) + article_read (scroll-depth ≥80% — deterministic trigger; read-time path is unit-tested, not E2E)`
+
 - Consent decline → zero events, zero cookies (existing contract). Analytics never blocks render.
 
 ---
@@ -91,6 +106,7 @@ Owner actions: mark reviewed (sets `reviewed_by`/`reviewed_at`) | edit+republish
 **States covered in prototype:** index (posts present + **empty state**), article (cover, sections, inline image, share bar), mobile narrow viewport.
 
 **UX decisions (recorded; provenance: epic-plan §3 gate):**
+
 | # | Decision | Choice |
 |---|---|---|
 | 1A | Blog index layout | Card grid with cover images (Supabase/Vercel pattern) |
@@ -104,6 +120,7 @@ Owner actions: mark reviewed (sets `reviewed_by`/`reviewed_at`) | edit+republish
 ## 4. Data Model
 
 ### blog_posts
+
 ```sql
 CREATE TABLE public.blog_posts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -140,6 +157,7 @@ CREATE TABLE public.blog_posts (
 ```
 
 ### blog_agent_keys
+
 ```sql
 CREATE TABLE public.blog_agent_keys (
   agent_name text PRIMARY KEY,
@@ -153,9 +171,11 @@ CREATE TABLE public.blog_agent_keys (
 ```
 
 ### blog-images bucket
+
 Public-read bucket (CDN); INSERT/DELETE via service_role + admin session; 5MB cap + jpeg/png/webp MIME enforced in Function + admin upload path; **object-key sanitization: basename only, strip `..`, `/`, backslash from filenames** (path-traversal guard, unit-tested).
 
 ### Migration
+
 Single migration `supabase/migrations/0017_blog_cms.sql` — **next free sequential after 0016_oauth.sql (0011 is taken by `0011_teams_name_unique.sql`)**; timestamp-prefixed names also exist in the repo but the zero-padded sequential series is the primary convention. Includes tables, triggers, RLS, `is_admin()` helper, bucket + policies. Applied via existing `supabase-deploy.yml`.
 
 ---
@@ -163,6 +183,7 @@ Single migration `supabase/migrations/0017_blog_cms.sql` — **next free sequent
 ## 5. Architecture
 
 ### Components
+
 ```
 Cloudflare Pages (project premise-labs)                Supabase (existing project)
 ├─ website/functions/_middleware.ts        (add /blog + /blog/ prefix rule)   ├─ blog_posts, blog_agent_keys
@@ -175,6 +196,7 @@ Cloudflare Pages (project premise-labs)                Supabase (existing projec
 ├─ website/apps/blog-admin/                (React SPA, ElDato editor port)
 └─ website/blog/ static assets (favicons, og-image — served via ASSETS fallback)
 ```
+
 - **Render Function (`blog/[[path]].ts`):** markdown→HTML (`marked` + DOMPurify sanitize, protocol allowlist per §6 markdown contract), full `<head>` injection, `Cache-Control` per §2 W5. **Catch-all must fall through to `context.env.ASSETS.fetch()` for non-post paths** (`/blog/og-image.png`, favicons) — Pages runs Functions ahead of static assets; without the fallback the catch-all swallows `/blog/*` static files.
 - **Agent API (`blog/api/posts.ts`):** validates `X-Agent-Key` (sha256 vs `blog_agent_keys`), zod-validates; `POST` inserts (default `status='draft'` → review queue; `'published'` when explicitly instructed); `PATCH /:slug` updates posts where `created_by = agent_name` (403 otherwise); writes via service-role key (Pages Function secret). Rate limits 120/min + 2,000/day per key.
 - **Admin gate (`admin/[[path]].ts`):** verifies the Supabase PKCE session JWT (HS256, JWT secret env) + `is_admin()` role; serves the SPA shell; unauthenticated/non-owner → 401/redirect `/auth`. **SPA fallback is scoped to `/admin/*` only** (via this Function or `_redirects` `/admin/* /admin/index.html 200`) — **never** project-wide `single-page-application` fallback, which would turn `/blog/:slug` 404s into index.html (breaks E2E-2/4/13 + the no-soft-404 render contract).
@@ -182,6 +204,7 @@ Cloudflare Pages (project premise-labs)                Supabase (existing projec
 - **Deploy:** extend `deploy-pages.yml` to build `apps/blog-admin` + deploy; supabase-deploy applies migration. Post-deploy E2E (blog pages + legal verify unchanged).
 
 ### Failure modes
+
 - Supabase unreachable → render returns 503 + `Cache-Control: no-store` (never stale HTML); agent API returns retryable 503.
 - PostHog/consent blocked → analytics never blocks render (async, errors swallowed).
 - Slug race → UNIQUE constraint + 409 → agent retries with suffix.
@@ -195,6 +218,7 @@ Cloudflare Pages (project premise-labs)                Supabase (existing projec
 ## 6. Interfaces
 
 ### Agent API — implicit v1 (bump to `/blog/api/v2/…` on breaking change)
+
 ```ts
 // POST /blog/api/posts — CREATE (default → review queue; direct-publish when explicitly instructed)
 { title: string (1..200), body: string (markdown, 1..100_000 chars at publish),
@@ -216,23 +240,29 @@ Cloudflare Pages (project premise-labs)                Supabase (existing projec
 //   422 malformed markdown (unbalanced code fence, or body > 100KB)
 //   429 rate limit (120 req/min, 2,000 req/day per key) · 503 upstream
 ```
+
 **Draft/queue semantics:** the default path is `status='draft'` → owner publishes from the queue. An agent sets `'published'` ONLY when the owner explicitly asked for direct publishing (audited via `published_by`/`published_at`). Rewrites are PATCH updates on the agent's own posts — never blocked by the create-slug 409.
 
 ### Render contract (`GET /blog`, `/blog/:slug`)
+
 - 200 SSR HTML: full head (title=meta_title ?? `${title} | Tortoise`, meta description, canonical, OG, Twitter, JSON-LD BlogPosting + BreadcrumbList), semantic article body.
 - 404 for draft/hold/archived/unknown (no soft-404 — ensured by scoped admin SPA fallback, §5). 301 to tortoise host on company host (`/blog` prefix rule incl. trailing slash).
 
 ### Sitemap (`/blog/sitemap.xml`) + RSS (`/blog/feed.xml`)
+
 - Published-only, absolute canonical URLs, newest-first. **Discovery: `robots.txt` gains `/blog/sitemap.xml`** (cross-submission stays). Feed: RSS 2.0 with per-item title/link/description(excerpt)/pubDate.
 
 ### Share URLs
+
 `https://tortoise.premiselabs.co/blog/<slug>?utm_source=<network>&utm_medium=share`
 Networks: twitter (intent/tweet), linkedin (sharing), facebook (sharer.php), whatsapp (wa.me?text), plus copy-link + native share (no UTM on native/copy).
 
 ### PostHog events
+
 `$pageview` (auto) · `share_click {network, post_slug}` · `article_read {post_slug, depth_pct}` — consent-gated. Test observation: **Playwright network interception of the PostHog ingest endpoint** (or PostHog API query against the test project).
 
 ### Markdown contract
+
 Canonical storage = markdown. Render: `marked` → sanitize (DOMPurify allowlist: p, h2-4, ul/ol/li, a, img, blockquote, code/pre, strong/em, table; **href/src https:// or http:// only; external links `target=_blank` + `rel=noopener`; `javascript:`/`data:` stripped**). Admin: TipTap markdown import/export (`tiptap-markdown`, version-pinned) — **roundtrip integrity is a unit-tested invariant** (import(export(md)) ≡ md for the supported subset; E2E-5 asserts the DB body stays clean markdown after an edit cycle).
 
 ---
@@ -240,6 +270,7 @@ Canonical storage = markdown. Render: `marked` → sanitize (DOMPurify allowlist
 ## 7. Detailed E2E Tests
 
 **Shared fixtures (all tests):**
+
 - Agent key K1 seeded in `blog_agent_keys` (sha256 of known plaintext); K2 inactive for 404 case.
 - Owner test user seeded (Supabase auth) + `is_admin()` true; session provisioned per test (PKCE login against test project or injected session token).
 - **Isolation:** per-run unique slug suffix (or teardown deleting created rows + resetting K1) so the suite is idempotent.
@@ -271,6 +302,7 @@ Canonical storage = markdown. Render: `marked` → sanitize (DOMPurify allowlist
 ## 8. Coherence Review + Risk Analysis
 
 ### Cross-substep consistency
+
 - Create-slug 409 semantics consistent: POST insert UNIQUE conflict → 409 (W1 · §4 · §6 · E2E-8); updates go through PATCH, never blocked by 409 (E2E-8b). ✔
 - Agent edit scope consistent: W1/W4 (PATCH own posts, created_by) · §4 (created_by comment) · §6 (PATCH contract, 403) · E2E-8/8b. ✔
 - Queue-default + direct-publish consistent: W1/W2 (default draft; published on explicit instruction) · §6 (status default draft) · E2E-1 two modes. ✔
@@ -284,6 +316,7 @@ Canonical storage = markdown. Render: `marked` → sanitize (DOMPurify allowlist
 - XSS: §6 sanitize contract · E2E-14 · risk row. ✔
 
 ### Risks & mitigations
+
 | Risk | P | I | Mitigation |
 |---|---|---|---|
 | Agent-published content quality dips | M | M | Post-publish review queue, one-click unpublish, hold_for_review self-gate, review_note feedback |
@@ -300,6 +333,7 @@ Canonical storage = markdown. Render: `marked` → sanitize (DOMPurify allowlist
 | Rate limit blocking legitimate rewrites | L | M | 120 req/min + 2,000 req/day per key; rewrites are PATCH updates (cheap); unit-tested at lowered thresholds |
 
 ### Improvement opportunities (deferred, not dropped)
+
 - IndexNow instant indexing (one POST on publish — include if trivial in the agent API)
 - TOC sidebar for long posts (add when posts exceed ~1500 words)
 - MCP publish tool (thin proxy) — listed out-of-scope

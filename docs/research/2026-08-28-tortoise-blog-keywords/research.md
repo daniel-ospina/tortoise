@@ -378,29 +378,35 @@ ElDato skipped zero-volume keywords (`Skip — Zero Volume: 454`). **Tortoise de
 Per scoping plan step 7. Run as a fresh-context adversarial pass; findings below.
 
 ### A1 — "Knowledge graphs lose to vector stores on cost/accuracy" (2026 benchmarks)
+
 **Disconfirming query run:** *"is a knowledge graph worth it for agent memory — criticism, when vector store is enough"*
 **Evidence surfaced:**
+
 - Medium postmortem (2026-08): graph ingest ~$14 vs $0.03 embeddings for one user history; graph still scored lower on recall; retrieved 6× more context for a worse answer.
 - Mem0 removed its graph module in v3 (April 2026, commit a488e190) — the Mem0 paper showed the graph variant barely won overall (68.44 vs 66.88) while losing single/multi-hop, running 3× slower and 2× tokens.
 - Counter-evidence (same corpus): the structured winner in the benchmark was still doing "graph-shaped work" (atomic facts + validity windows); the temporal regression failure (41% wrong on "what was true at time T") is a *time* problem, not a topology problem — and a graph made the fix a one-liner.
 **Resolution:** The epistemic layer does not require heavy LLM entity-extraction at write time (Tortoise stores *claims* + confidence — extraction is claims from sessions, not full entity/relation graphs à la Graphiti). The "graph = expensive" critique targets entity-graph construction cost; Tortoise's claims-as-Points model sits at the cheap end. **Content must pre-empt this objection** (title/body: "memory that knows why, without the extraction bill"). Do NOT publish naive "graphs beat vectors" content — the debate is live and the anti-graph side has real numbers.
 
 ### A2 — "Agent memory is product state, not magic" (scope/trust critique)
+
 **Disconfirming query run:** *"agent memory — is it just a vector store / is it overhyped"*
 **Evidence surfaced:** Clord (2026-05): "Agent Memory Is Product State, Not Magic" — memory needs source/scope/owner/freshness/delete/conflict/audit; "The worst memory is almost-right memory"; agent memory without receipts = "haunted notebook".
 **Resolution:** This validates Tortoise's provenance/source-tier/status-lifecycle model (Source nodes, T0–T4 tiers, supersede/invalidate, aboutEdges). Content angle: **Tortoise is the "receipts" memory** — the audit-trail/claims-with-evidence position is the differentiated answer to the "memory is state" critique. Aligns with §5 (provenance Strategic tier).
 
 ### A3 — "Vector databases are the right default; graphs are overkill for most agents"
+
 **Disconfirming query run:** *"vector database enough for agent memory — when not to use a graph"*
 **Evidence surfaced:** machinelearningmastery, digitalapplied, knowlee all conclude most agents should start vector + episodic and only add graph when multi-hop becomes a recurring failure mode; atlan adds governance as the third axis.
 **Resolution:** Accept the default-for-most claim — Tortoise's answer is "the epistemic layer is orthogonal to the store choice": you can run Tortoise's claims/confidence on top of any durable store, and the graph structure is what makes contradiction/provenance first-class. Content must not overclaim "every agent needs a graph."
 
 ### A4 — "MCP is a crowded, protocol-owned space; blog can't win head terms"
+
 **Disconfirming query run:** *"MCP — is the blog content saturated / can a small vendor rank"*
 **Evidence surfaced:** modelcontextprotocol.io owns spec + tutorial head terms; 2026 guide content (tech-insider, ai-agent-guidebook) is dense; the intersection (memory × MCP) is thin — only OpenMemory/Mem0 MCP, Graphiti MCP, and vendor posts.
 **Resolution:** skip head MCP terms (documented as skip), target `mcp memory server` / `mcp knowledge graph` / `mcp server memory` intersection (QuickWin, low-diff, thin SERP). Confirmed by SERP: "mcp memory server" results are sparse and new.
 
 ### A5 — "Volumes are estimates, not Keyword Planner data" (data-quality challenge)
+
 **Disconfirming question run internally:** *is every number in this doc a real measured volume?*
 **Resolution:** No — Planner access was unavailable (C1 pending). All volumes are SERP-calibrated bands, tagged `SERP-est`, with the v2 refresh path (GSC + Planner/DataForSEO) documented. This is a *documented limitation*, not hidden — the tier assignments (the durable output) are robust to ±50% volume error because they are dominated by the *competition* signal (SERP player density), which is measured, not estimated. Strategic-tier assignments additionally rest on observed SERP emptiness (verified per-cluster), not volume numbers.
 

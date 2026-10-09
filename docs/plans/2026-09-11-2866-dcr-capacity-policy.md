@@ -80,6 +80,7 @@ file for ~120 lines. Recorded, not silently dropped.
 Task 2 rewrites, and its comment must cite the Task 3 issue numbers. Only the commit is serialized.
 
 ### Task 1: DCR scope-vector decision (`offline_access`) — independent
+
 **Intent:** Stop 400ing Claude's scope while keeping every default-scope path unchanged.
 **Acceptance:** `SCOPES_SUPPORTED == ["mcp"]`; `SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]`;
 gate `oauth.py:343` + error string `:345` + AS metadata `:857` use `SCOPES_ACCEPTED`; PRM `:839` uses
@@ -88,6 +89,7 @@ gate `oauth.py:343` + error string `:345` + AS metadata `:857` use `SCOPES_ACCEP
 **Files:** Modify `tortoise/oauth.py`; Test `tests/test_oauth_mcp.py`.
 
 ### Task 2: DCR limiter — stated policy implementation — independent
+
 **Intent:** Replace the unbounded, policy-free DCR limiter with the stated policy; shared primitive
 byte-identical.
 **Acceptance:** `_check_ip_bucket_rate_limit` source hash unchanged vs `origin/main`; `/register` calls
@@ -114,6 +116,7 @@ per call), `_oauth_dcr_trusted_net`, `_oauth_dcr_store_key`, `_oauth_dcr_reclaim
 `_check_oauth_dcr_rate_limit` per D2–D6, D8, D9; (4) switch `/register`; (5) run → PASS.
 
 ### Task 3: Sibling issue filings — independent (must precede Task 4)
+
 **Intent:** File the pre-existing defects instead of absorbing them.
 **Acceptance:** one issue each for (a) shared primitive + generic `RateLimitMiddleware._buckets`
 unbounded attacker-keyed stores; (b) `_check_claim_rate_limit` proxy-IP keying + dead 24 h prune;
@@ -123,6 +126,7 @@ and an absolute date** and the operator recipe in the body; (e) unvalidated auth
 **Files:** GitHub only.
 
 ### Task 4: Pruning owner/date + docs — depends on Task 2 and Task 3
+
 **Intent:** Remove the silent-rot on `oauth_clients` growth and document the new knobs.
 **Acceptance:** the DCR block comment names **owner @daniel-ospina (epistemic-team)** and the **absolute
 date 2026-10-15** and references #2853 + the Task 3 issue numbers; #2853 gets an assignee + dated
@@ -137,12 +141,14 @@ restates).
 `tests/test_client_ip_middleware.py`.
 
 ### Task 5: fly.toml config test — independent
+
 **Intent:** Prevent the exemption from silently becoming dead code.
 **Acceptance:** a test reads the repo `fly.toml` with `tomllib` and asserts
 `env["TORTOISE_TRUST_FLY_CLIENT_IP"] == "1"`.
 **Files:** Test `tests/test_client_ip_middleware.py`.
 
 ### Task 6: Test list (executed within Tasks 1, 2, 5)
+
 The limiter legs (a)–(y) live in `TestDcrCapacityPolicy` in `tests/test_oauth_mcp.py`, with the
 isolation fixture described in §5; the config test is Task 5.
 
@@ -207,6 +213,7 @@ cap (`PER_HOUR=1`)** — one trusted IP registering **twice** via `Fly-Client-IP
 second request → the leg discriminates), **then** the trusted aggregate binds: a **3rd trusted
 registration from a distinct IP in the same /21** → 429 with `Retry-After` present (the default
 `TRUSTED_CIDRS` is one CIDR, so the aggregate is a single bucket); (j) flag unset + spoofed `Fly-Client-IP` ⇒ not exempt; (k) flag set
+
 + no `Fly-Client-IP` + a spoofed `X-Forwarded-For` set to an address **inside** the trusted range
 (e.g. `160.79.104.11`, so a wrongly-XFF-reading impl would wrongly trust it) ⇒ not exempt; (l) anonymous aggregate binds across
 distinct keys → 429; (m) atomicity both directions + **overflow charges the aggregate** (D9);

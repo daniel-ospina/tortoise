@@ -11,7 +11,7 @@ aboutObjects: tortoise, hosted-api, docker, deploy-hosted
 
 # Deploy + Verification Runbook — hosted embeddings (#160, #566)
 
-The #160 embedding pipeline is **already merged and auto-deployed**: 
+The #160 embedding pipeline is **already merged and auto-deployed**:
 `.github/workflows/deploy-hosted.yml` deploys on every push to main touching
 `tortoise/**`, `Dockerfile.hosted`, `entrypoint.sh`, `requirements.txt`,
 `pyproject.toml`, `uv.lock`, or `fly.toml` (uses `FLY_API_TOKEN` +
@@ -76,6 +76,7 @@ curl -s -H "Authorization: Bearer $TT_KEY" \
 ## 5. Post-deploy verification (per #559 discipline)
 
 Every deploy should end with these checks recorded on the PR/issue:
+
 - [ ] `/health` 200
 - [ ] `count(n.embedding IS NOT NULL)` ≥ 90% after backfill
 - [ ] `/v1/search` returns `match_source: "rrf"` with vector participation

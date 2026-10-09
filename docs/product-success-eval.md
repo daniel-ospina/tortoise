@@ -8,6 +8,7 @@ ownedBy: epistemic-team
 ---
 
 # Tortoise — Product-Success Evaluation Spec
+
 ## "Did the memory matter?" — measurement framework for the compounding-memory claim
 
 Status: draft v1 · Owner: founder (dogfood loop) + eval battery · Scope: product/memory success (L1+), NOT extraction plumbing (L0)
@@ -19,6 +20,7 @@ Status: draft v1 · Owner: founder (dogfood loop) + eval battery · Scope: produ
 **The delta principle:** a memory feature has value only if its presence changes agent/user behavior. Every success metric is a delta (treatment vs control, or this-week vs baseline). Any metric without a defined counterfactual is decorative.
 
 **Three metric layers:**
+
 - **L0 Plumbing** (extraction worked): points created, sessions captured, consolidation ran. Necessary input — never success evidence.
 - **L1 Behavioral delta** (did it matter): recall-before-rederive, repeat-work avoided, decision consistency, contradiction surfaced, time-to-answer. **The success layer.**
 - **L2 Outcome** (user-visible value): trust, retention, activation, revenue-adjacent behavior. Pre-revenue proxies below.
@@ -26,6 +28,7 @@ Status: draft v1 · Owner: founder (dogfood loop) + eval battery · Scope: produ
 **Vanity list (tracked for diagnostics only, excluded from launch gate):** point count, extraction volume, sessions captured, retrieval count, dashboard views, "memories created" counters.
 
 **Battery architecture — three instruments, all required:**
+
 1. **Synthetic battery** (§1–2): scripted, controlled, reproducible, statistical — proves the mechanism.
 2. **In-product telemetry** (§3–5): instrumentation on real usage — proves it fires in the wild.
 3. **Dogfood audit** (§6): founder's weekly human review — validates meaning and trust.
@@ -37,17 +40,20 @@ Any one alone can be gamed. Launch gate requires all three.
 ## 1. The "did it matter" battery
 
 All three scenarios share a skeleton:
+
 - **Setup:** S1 (decision/task session) → delay spanning ≥1 consolidation run → S2 (fresh context: new conversation, no transcript carryover, same model/temperature).
 - **Design:** matched pairs, cross-over (each task run once with memory, once without, order counterbalanced), pre-registered rubric, grader blind to condition.
 - **Rule:** no scenario is a success test unless the control's behavior is also measured.
 
 ### 1a. Prior-decision recall — "the agent recalls the prior decision instead of re-deriving it"
+
 - **S1:** user+agent complete a structured decision (option/criterion/argument chain stored; decision point goes live).
 - **S2 prompt:** follow-on task whose correct output REQUIRES the S1 decision, without restating it — "draft the LICENSE headers" after the licensing decision; "write the migration plan" after the schema decision.
 - **Measured:** (1) re-derivation vs recall — re-research tool calls (re-fetch, re-compare options) before first correct answer; (2) time-to-first-correct-mention; (3) recall accuracy (output value == stored point, point ID citable); (4) user turns needed.
 - **Targets:** recall-without-rederive ≥ 90% (treatment) · re-derivation calls ≥ 5× fewer than control · time-to-correct ≤ 40% of control · exact-match accuracy ≥ 90% · user turns ≤ half of control.
 
 ### 1b. Contradiction surfacing — "a new claim contradicts an old decision and the system surfaces it"
+
 - **S1:** store decision D at live confidence.
 - **S2 (scripted):** user introduces claim C contradicting D (or a finding undermining D's rationale). System must surface the conflict (NAND/conflict notice), not silently adopt C.
 - **Measured:** detection (surfacing event within 1 turn of C) · resolution quality (supersede/mitigate with ledger entry vs silent flip-flop) · **false-positive rate** (run non-contradictory control claims through the same sessions).
@@ -55,6 +61,7 @@ All three scenarios share a skeleton:
 - **Honesty:** a surfaced contradiction the user ignores is still correct behavior — "acted-on" is tracked separately (dogfood loop).
 
 ### 1c. Answer-from-memory — "the agent answers from memory what was decided weeks ago"
+
 - **S1 at t0:** record D + full rationale. **t+21 days** (≥10 interleaved sessions, ≥5 consolidation runs): S_N asks a question answerable only from the graph — "why did we pick X over Y?"
 - **Measured:** correct-with-provenance (answer cites stored points + confidence) · hallucination rate (fabricated rationale) · time.
 - **Targets:** correct-with-provenance ≥ 80% · hallucinated rationale ≤ 10% (no-memory control fabricates ~100% — that's the delta) · time-to-answer ≤ 1 graph query / < 2 min.
@@ -69,9 +76,11 @@ All three scenarios share a skeleton:
 **Claim to prove:** a fresh-context agent with Tortoise memory performs measurably better on follow-on work than the same agent without — and the benefit grows with session count.
 
 ### Task suite
+
 10 calibrated multi-step tasks, each split across 2 sessions: S1 = analysis/decision (licensing, auth design, region selection); S2 = follow-on requiring S1 output (docs, extension, interrogation). **Calibration floor:** in pilot runs, control must show ≥ 30% decision drift and ≥ 8 re-derivation tool calls — otherwise the metric can't discriminate.
 
 ### Design
+
 - 20 runs (10 tasks × 2), matched pairs, cross-over, fresh context both sessions, 48h gap (≥1 consolidation run), same model/temp/seed.
 - Fresh conversation per session; **the only difference between arms is the graph.**
 - Pre-register per-task rubrics (what is "correct", which tool calls are "repeat work") before running.
@@ -88,9 +97,11 @@ All three scenarios share a skeleton:
 | Question repetition | user re-asks questions answered in S1 | ≤ 5% of user turns | ≥ 25% |
 
 ### Compounding (the actual claim — not just recall)
+
 Extend 5 tasks to 3-session chains (S3 follow-on after S2). **Compounding PASS:** benefit at S3 (TCA ratio vs control) ≥ benefit at S2 — the memory advantage is non-decreasing as the chain grows — AND save/recall telemetry rises week-over-week (§5). **A 2-session experiment proves recall, NOT compounding. Do not let it be marketed as compounding proof.**
 
 ### Go/no-go
+
 PASS if treatment beats control on ≥ 4 of 5 primary metrics (p<0.05), median TCA advantage ≥ 2×, consistency ≥ 95%.
 FAIL if recall is high but consistency isn't (memory retrieved but wrong) or repeat-work isn't reduced (retrieved but unused — dead weight, §7).
 
@@ -99,11 +110,13 @@ FAIL if recall is high but consistency isn't (memory retrieved but wrong) or rep
 ## 3. Recall quality & point-reuse
 
 ### Definitions (precise — these get gamed)
+
 - **Retrieval:** a stored point is returned by a recall/query path in a later session (logged: query, rank, score, trigger — agent tool call / consolidation / user).
 - **Reuse:** the retrieved point is **cited** in an agent message (product invariant: provenance everywhere → citations are parseable, attribution is free).
 - **Effective reuse (the honest metric):** removing the point changes the output. Measured by **ablation** on a 5% sample of sessions (block top-ranked retrieval, diff output). Gold standard — sample it, don't run it everywhere.
 
 ### Instrumentation
+
 - Retrieval log (above) — shipped with the recall path.
 - Citation parser → **point-use ledger** (which stored points changed what got said).
 - **Ablation sampler:** 5% of sessions run with top-1 retrieval blocked; output delta (edit distance / decision change) = effective-reuse signal.
@@ -111,6 +124,7 @@ FAIL if recall is high but consistency isn't (memory retrieved but wrong) or rep
 - **Poisoning probe:** in 2% of sessions, inject a plausible-but-wrong point into retrieval results; agent must reject it (§7, failure 2).
 
 ### Targets
+
 - **State-layer reach:** ≥ 50% of decision-class points retrieved within 14 days of creation.
 - **Epistemic reach:** ≥ 30% of all points retrieved within 30 days; never-retrieved-in-90d → flagged ROT (dashboard).
 - **Reuse:** ≥ 50% of retrievals cited · ≥ 20% of sampled outputs change when top retrieval is ablated (effective-reuse floor).
@@ -126,6 +140,7 @@ FAIL if recall is high but consistency isn't (memory retrieved but wrong) or rep
 **Design rules:** every number maps to a behavior; rot is as visible as value; a green-only dashboard is a lie.
 
 ### The 5 numbers that matter (weekly)
+
 1. **Answered from memory** — outputs citing stored points. "Your memory answered 14 questions this week."
 2. **Repeat-work avoided** — sessions where recall replaced re-derivation (repeat-work heuristic: tool calls matching a previously-stored query pattern). "You didn't redo 6 decisions this week."
 3. **Contradictions surfaced / resolved** — count + linked list (old claim, new claim, NAND, resolution state). "2 surfaced, 1 resolved, 1 open."
@@ -133,6 +148,7 @@ FAIL if recall is high but consistency isn't (memory retrieved but wrong) or rep
 5. **Noise rate** — surfaced-but-dismissed / total surfaced. "3 of 12 memory surfaces were dismissed."
 
 ### Secondary row (context, not headlines)
+
 Top entities (semantic-state layer's model of the user — "you care most about: licensing, pricing, auth") · open questions (claims with no resolution — drives the user to close them) · confidence distribution (live / draft / mitigated) · graph size (as denominator).
 
 **The honest invariant:** the dashboard must render a negative week as clearly as a positive one — "Your memory answered 0 questions this week; 3 surfaces dismissed" is a first-class view, not an error state. **If the dashboard can't be red, it can't be trusted.**
@@ -163,6 +179,7 @@ Top entities (semantic-state layer's model of the user — "you care most about:
 **Cadence:** 30–45 min weekly, fixed checklist. Founder = power user + product owner; the dogfood audit is the trust layer.
 
 ### Weekly review (5 items)
+
 1. **Extraction samples:** 15 random points (10 epistemic, 5 state-layer). Pass if value-first (decisions/options/criteria/findings, not trivia), confidence gates correct, claims true. **≥ 85% pass = extraction healthy.**
 2. **Ledger explanations:** 10 random mutations (create/IMPL/NAND/mitigate/supersede). Check edge semantics — truth attacks on points, relevance attacks on operators, mitigations in 0.10–0.50, supersessions clean edges. **≥ 80% correctly typed.**
 3. **Contradiction surfacings:** review every event (expected ≥ 2/week). Correct? Acted on? **Plus a missed-contradiction probe:** hand-check 2 sessions/week against the graph for conflicts NOT surfaced.
@@ -170,12 +187,14 @@ Top entities (semantic-state layer's model of the user — "you care most about:
 5. **The 5 dashboard numbers** (§4) + save/recall trend (§5).
 
 ### Triage ladder
+
 - **P0 (block):** trivia-heavy extraction OR false contradictions surfacing → confidence gate / expansion-pack tuning; feature is untrustworthy.
 - **P1:** decision-class recall misses (state layer not retrieved) → retrieval threshold + reranking.
 - **P2:** confidence mis-calibration (drafts that should be live) → threshold tuning.
 - **P3:** noise (retrieved but dismissed) → reranking / surface formatting.
 
 ### Launch gates — two separate gates, don't conflate
+
 - **Internal gate ("beta when X"):** 2 consecutive dogfood weeks with: ≥ 85% extraction pass · ≥ 5 real answered-from-memory events/week · ≥ 3 repeat-work-avoided/week · ≥ 2 surfacings/week with ≥ 1 acted-on and ≤ 1 false positive · stale-point rate < 20% · save/recall rising · AND synthetic battery (§1–2) green.
 - **Public gate ("strangers when Y"):** internal gate green PLUS: stranger activation ≤ 24h · synthetic battery green on the public task set · noise ≤ 30% for new users · value visible without founder-level domain knowledge.
 
@@ -186,21 +205,25 @@ Top entities (semantic-state layer's model of the user — "you care most about:
 ## 7. Adversarial checks (the honest failure modes)
 
 ### Failure 1 — Dead weight (technically correct, never used)
+
 - **Symptom:** capture and retrieval climb; behavioral delta flat; save/recall flat; sessions still re-derive; users "have memory" and it changes nothing.
 - **Caught by:** ablation sample (output delta ≈ 0 = dead weight regardless of retrieval counts) · repeat-work metric (still re-deriving = graph not consulted) · save/recall trend (flat = no compounding) · dogfood item "what did memory change this week?" — "nothing" is an answer.
 - **Kill rule:** ablated-delta < 10% of sampled outputs for 2 consecutive weeks → the retrieval path is decorative; fix or cut before launch.
 
 ### Failure 2 — Recall noise (retrieved but unhelpful or misleading)
+
 - **Symptom:** high retrieval AND high citation but low output delta; high dismiss rate; stale claims presented as current; cosmetic citations (true but irrelevant padding).
 - **Caught by:** dismiss rate ≤ 30% (else surfaced memory is noise) · **poisoning probe** (inject plausible-but-wrong point into 2% of retrievals; agent must reject ≥ 80% at high confidence) · staleness check (0% superseded points in live answers) · cosmetic-citation check (citation present, output unchanged → noise, not reuse).
 - **Kill rule:** dismiss > 40% or poison-acceptance > 20% → the surface path is lying; don't ship surfacing until fixed.
 
 ### Failure 3 — The black-box graph (can't trust what you can't see)
+
 - **Symptom:** answers accepted on faith OR everything distrusted because nothing is verifiable; "memory said" without "here's why"; the graph so confident it stops showing its work.
 - **Caught by:** provenance invariant (100% of memory-derived output carries point IDs + confidence — instrumented as a test, not a wish) · explainability spot-check (10 sampled answers: a reviewer can reconstruct the IMPL chain to source — else it's a black box) · trust telemetry (do users open provenance / edit surfaced points — edit-rate on surfaced points is a trust+engagement signal) · NAND transparency (100% of surfacings show both claims + resolution state).
 - **Kill rule:** unattributed-memory rate > 0% in production output, or any surfacing without both sides shown → trust is gone; fix the invariant.
 
 ### Cross-cutting honesty rules
+
 - **Pre-register** every test, metric, and target before data collection. Post-hoc target adjustment is disallowed (that's how vanity metrics are born).
 - Every headline metric is a **delta** (vs control or baseline). Absolute counts are denominators.
 - Vanity metrics are tracked for diagnostics and **explicitly excluded from both launch gates.**

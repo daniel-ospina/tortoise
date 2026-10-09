@@ -25,6 +25,7 @@ per-session injection census + arm markers) — with the **corrected trigger, se
 window, and placement** derived below.
 
 **Research basis (durable refs — these docs are NOT on `origin/main`):**
+
 - `docs/scoping/2026-09-07-2513-multisession-evidence-surface.md` — read at commit
   `9b822b9ac` (branch `origin/opt/2513-retrieval-scope`); §2(d), §4 C4, §6, §7.
 - `docs/scoping/2026-09-08-2519-coverage-loop.md` — in-tree; §2 (tail slice
@@ -95,6 +96,7 @@ failure entries over a multi-hour run — and inside C4's fail-open `try/except`
 would be swallowed entirely.
 
 **Mechanism (pinned, with the presentation pinned too):**
+
 1. A dedicated `ArmConflictError(Exception)` is raised by **`run.py` at arm
    resolution, before the question loop** — the block at `run.py:3488-3512` that
    resolves `coverage_loop` (`:3499-3501`) and `aggregative_flag` (`:3508`). There
@@ -184,6 +186,7 @@ falsified two specifics of the issue text. They are **not** adopted:
    the honest result is a null, not a win.
 
 **Cohorts — operationally defined (not by type label):**
+
 - **tail** = the literal `s[150:250]` question set — **100 questions**. Materialized
   at receipt time by the committed **cohort builder** (Task 4), not committed as data.
 - **head** = the **50 single-session-user** questions (selected by the same builder).
@@ -219,6 +222,7 @@ falsified two specifics of the issue text. They are **not** adopted:
    `session-transcript` by `p.session_id IN $sids AND p.lme_question_id = $q`, which
    is unreachable in a product graph because no product writer emits that kind, that
    property, or a `session_id` on a turn Point):**
+
    ```cypher
    MATCH (seed:Point) WHERE seed.id IN $seed_ids
    MATCH (s:Session)-[:CONTAINS]->(seed)
@@ -231,6 +235,7 @@ falsified two specifics of the issue text. They are **not** adopted:
    RETURN p.id, coalesce(p.session_id, s.id), coalesce(p.lme_chunk_index, -1)
    ORDER BY coalesce(p.session_id, s.id), coalesce(p.lme_chunk_index, -1), p.id
    ```
+
    The default `chunk_kind` is `TURN_POINT_KIND` (`'event'` — the product's episodic
    turn points written by `TortoiseSDK.capture_session` / hosted `POST /v1/sessions`);
    `SESSION_TRANSCRIPT_KIND` (the eval ingest's raw chunk windows) remains available
@@ -391,6 +396,7 @@ import order**. *(No lint rule forbids the function-local import in
 including `coverage_loop.py` itself at `:179,:209,:220,:355,:395,:416`. This is
 asserted by the import-order test, not by a lint gate.)*
 **Files:**
+
 - Create: `tortoise/session_reinjection.py`
 - Modify: `tortoise/retrieval.py` (constant + `session_key_of` + `DEFAULT_POOL_*` +
   `guard_and_recap_pool`), `tortoise/coverage_loop.py` (delegate)
@@ -403,6 +409,7 @@ asserted by the import-order test, not by a lint gate.)*
 **Intent:** arm the operator; make C3-1 and C4 share one guard/re-cap/annotation
 contract; single-source the chunk kind and the `match_source` leg across the eval lane.
 **Acceptance:**
+
 - CLI `--session-reinjection` / `--no-session-reinjection`,
   `--session-reinjection-guard` / `--no-session-reinjection-guard`; env
   `TORTOISE_LME_SESSION_REINJECTION`; **`ArmConflictError` raised at arm resolution
@@ -468,6 +475,7 @@ necessarily mutates `TORTOISE_DB_URI` via the `_probe` suffix, exactly as
 `test_coverage_loop.py` does at `:71`). *(`tests/test_longmem_runner.py`'s golden
 update is owned by **Task 2**, where the projection entry lands — see Task 2.)*
 **Files:**
+
 - Test: **extend** `tests/test_session_reinjection.py`
 - Modify: `tests/test_uri_env_mutations_declared.py`
 
@@ -475,6 +483,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
 
 **Intent:** the honest delta, or an honest report of why it could not be measured.
 **Acceptance:**
+
 - A **`--retrieval-only`** run on a **named revision**, with a **named receipt path**
   (`docs/scoping/receipts/2026-09-15-2517-reinjection-<sha>.json`, recorded in the PR
   body).
@@ -617,6 +626,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
 ## 8. Review cycle log
 
 ### scope-verify — cycle 1 (2 reviewers, fresh context)
+
 - problem-verify: **P1 ×1, P2 ×4, P3 ×1**; solution-verify: **P2 ×4, P3 ×4, P4 ×1**.
 - **Fixed:** seed window widened + `new_ids` gate + ablation; 13% re-attribution
   `[unverified]` + falsifier; threshold-free independent falsifiers; anchor/placement
@@ -625,6 +635,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
 - **Ignored:** numeric delta thresholds (owner forbade exit-criteria numbers).
 
 ### scope-verify — cycle 2 (2 fresh reviewers)
+
 - problem-verify: **P2 ×3, P3 ×3, P4 ×1**; solution-verify: **P2 ×2, P3 ×3, P4 ×1**.
 - **Fixed:** seed window = reader item cap + seed-limit constant; anchor → last base
   rank **in the pool**; `injected_merged`/`dropped_by_cap` census; falsifier 1 reworded;
@@ -633,6 +644,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   `tortoise/retrieval.py`; re-cap `session_key` pinned. **Gate passed** (no P0/P1).
 
 ### plan-verify — cycle 1 (Reviewers #1, #2, #5)
+
 - #1: **P1 ×4** (reader_evidence@5 missing; Task 2↔3 circular; 13% census unowned;
   fetch budget wasted on pool-present chunks), **P2 ×6**.
 - #2: **P1 ×1** (ci-surfaces is `core:` + **`sdk:`** + `eval:`), **P2 ×6**.
@@ -640,6 +652,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   **P1 ×3**, **P2 ×1**.
 
 ### plan-verify — cycle 2 (Reviewers #1, #2, #5)
+
 - #1: **P1 ×1** (both-arms-ON swallowed by `run.py:4485`), **P2 ×7**.
 - #2: **P2 ×4** (guard toggle inexpressible; chunk-kind under-assigned; Task 4 not
   actionable; Task 2↔3 file ownership).
@@ -647,6 +660,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   parameterization; guard toggle; session-key unify).
 
 ### plan-verify — cycle 3 (Reviewers #1, #2, #5) — cap reached
+
 - #1: **P1 ×1** (`annotate_pool_additions` omits `dates` → `session_date` silently
   empties; the 4-field golden cannot see it), **P2 ×3** (`DEFAULT_POOL_*` aliasing
   direction risks a two-way edge; abort has no run-level marker to assert; committed
@@ -660,6 +674,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   dependency arrow inverted).
 
 ### Deep-fix attempt (orchestrator, per plan-review cap-exit path)
+
 - **`annotate_pool_additions(hits, props, dates, *, match_source)`** — `dates` is now
   required (§0.1, §2, Task 2); the no-regression proof is **whole-dict (17-key)
   equality** (§2.3, §4).
@@ -688,6 +703,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   (Task 2 acceptance).
 
 ### plan-verify — cycle 4 (post-deep-fix re-verify)
+
 - **#1 (proportional): 0 P0/P1** — 2 P2 (`.gitignore:45` pattern misquoted; the
   function-local-import justification cited two tests that do not check it). All four
   cycle-3 findings genuinely resolved (AST-verified 17 keys incl. `session_date`;
@@ -720,6 +736,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
   Input`.
 
 ### plan-verify — cycle 5 (final confirmation)
+
 - **#1 (proportional): 1 P1, 1 P2** — the `tests/test_eval_resume_retry_failed.py`
   fixture is hand-written and consumed by a real resume (`:792/:818`), so Task 2's
   always-present fingerprint keys red it — its update was in Task 3 (the same

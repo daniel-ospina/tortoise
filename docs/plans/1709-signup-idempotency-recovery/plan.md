@@ -63,6 +63,7 @@
 **Intent:** SignupToken node CRUD + expires_at parity (scope §4).
 
 **Acceptance:**
+
 - `signup_token_lookup(plaintext) -> dict | None` via `_verify_hashed_lookup("SignupToken", "token_hash", ...)` filtered `revoked_at IS NULL` (Invitation precedent).
 - `signup_token_recover(plaintext) -> dict` — team deleted check + process-lock serialized cap-check + mint `created_via='recovery'`, `created_by='st_'+left(token_hash,12)`, `expires_at=None`; returns `{api_key, org_id, org_name, tier, graph_name}`.
 - `apikey_verify`: add `(expires_at IS None or expires_at > now)` filter (NULL-as-never-expires; legacy nodes keep authenticating).
@@ -72,6 +73,7 @@
 **Intent:** agent_signup rework + new recover endpoint + registry mint parity (scope §2-§4).
 
 **Acceptance:**
+
 - Parse body FIRST; `signup_token` only from BODY (never headers).
 - Token-present branch → shared `_agent_recover_flow`: `_check_recovery_rate_limit` (per-IP 5/24h + per-token 10/h, IP extraction identical to `_check_signup_ip_rate_limit`), `_resolve_signup_token`, uniform 422 `invalid_signup_token` for malformed/unknown/revoked/deleted, 403 `_suspended_detail()` for suspended, keyless recovery via `recover_team_key`, audit `agent_signup_recover`, recovery feed (NOT record_signup). Response `{key, org_id, org_name, graph_name, tier}`.
 - No-token mint: `_check_signup_ip_rate_limit` (unchanged 2/24h), `provision_team_with_token` (15 named + token hash), response gains `signup_token`; registry lane adds SignupToken node + APIKey `created_via:'provisioned'`/`expires_at:null` + SignupToken in the #741(c) rollback block.
@@ -83,6 +85,7 @@
 **Intent:** token persistence + recovery UX (scope §5).
 
 **Acceptance:**
+
 - `_cmd_signup`: persists `signup_token` from mint response; prints the recovery-token save prompt (TTY-only confirm); re-signup reads stored token → includes in body; 422 → warn + (TTY confirm | non-TTY fail-closed exit 1) before clearing token + fresh mint; 403 suspended → fail-closed exit 1.
 - New `tortoise recover --token st_...` subcommand → POST /v1/agent/recover → writes config incl. persisted `signup_token`.
 - Recovery-success rewrite keeps the stored token.
@@ -92,6 +95,7 @@
 **Intent:** prove the E2E acceptance criteria (scope §6).
 
 **Acceptance:**
+
 - `tests/test_agent_signup_idempotency.py` (NEW): mint returns `st_` token; sequential token re-signup → same org_id + NEW key + no second team; uniform 422 across malformed/unknown/revoked/deleted; suspended → 403; token-present bypasses mint limiter; token-present bound by recovery limiter (lock test); `/v1/agent/recover` happy path; registry-lane variants; concurrency E2E via `asyncio.gather` + `httpx.AsyncClient(ASGITransport)` (N=5 same-token → 1 team, shared org_id, non-bootstrap keys ≤ 2); parallel no-token mints → N teams.
 - `tests/test_cli_signup.py`: token persisted; 422 warn+confirm path; `recover` subcommand happy path (mock urlopen).
 - `tests/test_writer_inventory.py`: pin `rpc_calls[0]` = `provision_team_with_token` + `p_signup_token_hash` + token row landed.
@@ -100,6 +104,7 @@
 - `tests/test_agent_signup.py` UNTOUCHED (byte-identical check via `git diff`).
 
 ## Verification
+
 - Docker lane: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_agent_signup.py tests/test_agent_signup_idempotency.py tests/test_writer_inventory.py tests/test_dashboard_login.py tests/test_session_login.py tests/test_hosted_api.py -v` + full-suite regression.
 - Carve-out: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/test_guard.py -v`.
 - `npm --prefix supabase/tests/pglite run validate`.

@@ -17,23 +17,30 @@ LLM recency bias literature shows agents match a "recency player" in 78-91% of s
 ## Hypotheses
 
 ### H1: Graph Stability (Primary)
+>
 > Agents using Tortoise produce more stable conclusions across document orderings than agents using raw sequential memory.
+
 - **Metric:** Variance in final answer confidence across 4 order variants. Lower variance = more stable.
 - **Expected:** Tortoise σ²_confidence < Control σ²_confidence (directional)
 
 ### H2: Graph Alignment (Primary)
+>
 > Tortoise-constructed graphs are more similar to the reference graph than Control's memory-only conclusions.
+
 - **Metric:** Node overlap (Jaccard) between agent's extracted claims and reference graph claims. Edge overlap between agent-identified relationships and reference graph operators.
 - **Expected:** Tortoise Jaccard > Control Jaccard (directional)
 
 ### H3: Cross-Document Connection Discovery (Secondary)
+>
 > Tortoise discovers more cross-document relationships (points that require information from 2+ documents) than Control.
+
 - **Metric:** Count of correctly identified cross-document operators vs reference graph cross-document operators.
 - **Expected:** Tortoise cross-doc recall > Control cross-doc recall
 
 ## Falsification Criteria
 
 **The experiment is falsified if:**
+
 1. Both arms show equal stability across order variants (σ²_confidence within 10% of each other, AND node overlap within 5 percentage points)
 2. Neither arm discovers any cross-document connections (both arms at 0%)
 
@@ -42,12 +49,14 @@ LLM recency bias literature shows agents match a "recency player" in 78-91% of s
 ## Experimental Design
 
 ### Reference Graph
+
 - Complex business case: Series A startup, 1 year post-funding, "should we pivot?" decision
 - 30-50+ points across domains: product analytics, user research, competitor landscape, financials, team dynamics, market trends, investor relationships
 - 8-15 operators: NANDs, supports, correlates — forming trees, loops, and linear chains
 - Known ground truth answer (from graph structure)
 
 ### Document Generation
+
 - 8-12 documents (reports, memos, dashboards) totaling ~40 pages
 - Each point is embedded in context with padding/noise
 - Cross-document connections are NOT stated in any single document — require multi-hop reasoning
@@ -58,25 +67,31 @@ LLM recency bias literature shows agents match a "recency player" in 78-91% of s
 **Both arms receive the SAME documents in the SAME batches.**
 
 **Control Arm:**
+
 ```
 Batch 1: "Here are documents 1-3. What's your assessment?"
 Batch 2: "Here are documents 4-6. Has your assessment changed?"
 Batch 3: "Here are documents 7-9. What do you think now?"
 Batch 4: "Here are documents 10-12. Final assessment — should we pivot?"
 ```
+
 No external memory. Agent can reference prior responses but must hold all context in the prompt.
 
 **Tortoise Arm:**
+
 ```
 Batch 1: "Here are documents 1-3. File the key claims into the graph."
 Batch 2: "Here are documents 4-6. File the key claims and any tensions you see into the graph."
 Batch 3: "Here are documents 7-9. Continue filing into the graph."
 Batch 4: "Here are documents 10-12. File into the graph. Then, using the complete graph, give your final assessment — should we pivot?"
 ```
+
 Agent constructs a graph incrementally. Final answer uses the graph.
 
 ### Order Variants
+
 4 document orderings to test stability:
+
 1. **Chronological** — documents in narrative order
 2. **Reverse** — last document first
 3. **Domain-clustered** — product docs, then financial docs, then team docs
@@ -93,10 +108,12 @@ Agent constructs a graph incrementally. Final answer uses the graph.
 | Final answer match | Does answer match reference? | 50-75% | >75% |
 
 ### Model
+
 - deepseek/deepseek-chat via OpenRouter
 - T=0.3 (non-zero for scale variation)
 
 ### Sample Size
+
 - Validation: 1 run, 4 order variants, 2 arms = 8 trials
 - Scale: 10 runs × 4 variants × 2 arms = 80 trials
 
