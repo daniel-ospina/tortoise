@@ -38,6 +38,9 @@ REPO = Path(__file__).resolve().parents[1]
 WEBSITE = REPO / "website"
 
 # Directories that are not browser-served source.
+# NOTE: skipping `dist` exempts the repo-wide scan from build output (the dashboard's
+# `dist/` is generated, #3775) — but the blog-admin console's `dist/` is COMMITTED, so it
+# is pinned separately by `test_the_committed_blog_admin_bundle_is_migrated` below.
 SKIP_DIRS = {"node_modules", "dist", ".git", "archive", ".worktrees", "vendor", ".wrangler"}
 
 # The legacy cross-subdomain bridge: a JS-readable, parent-domain cookie holding a session.
@@ -317,6 +320,63 @@ def test_the_proxy_has_a_caller(sources):
     assert callers, (
         f"no client surface calls {PROXY_PREFIX} — the W6 proxy has no caller, so every "
         "client data call is still going somewhere else (probably a JS-readable token path)"
+    )
+
+
+# The blog-admin console's committed `dist/` is a TRACKED, served artifact (#7757 F3).
+#
+# The repo-wide browser-source scan skips every `dist/` (see SKIP_DIRS) because the
+# dashboard's is generated (#3775). The blog-admin bundle is different: `git ls-files
+# website/apps/blog-admin/dist` lists it, `tests/e2e/auth/test_admin_app_origin.py` stages
+# it and serves it as the console shell, and the #3952 console-shell guards read it. So it
+# is source-of-record, not CI output — and because the skip covered it, the bundle sat on
+# the DELETED adapter's `sb-tortoise-auth-token` path for a whole release (#7749 landed the
+# migration without a rebuild). This is its artifact-level pin. The structural fix (stop
+# tracking it and build it in CI like the dashboard) is #5502.
+BLOG_ADMIN_DIST = WEBSITE / "apps" / "blog-admin" / "dist"
+
+# The same-origin Token Handler every migrated console data call must route through. This
+# is deliberately NOT the `PROXY_PREFIX` above: `/api/v1` is the hosted-API passthrough,
+# `/api/sb` is the Supabase credential seam the console's data layer was rewritten onto.
+SB_PROXY_PREFIX = "/api/sb"
+
+
+def test_the_committed_blog_admin_bundle_is_migrated():
+    """F3 (#7757): the tracked blog-admin `dist/` must not ship the legacy token.
+
+    The repo-wide scan skips `dist/`, so it could not see that the COMMITTED console
+    bundle still carried the deleted adapter's `sb-tortoise-auth-token` cookie path and
+    none of the `/api/sb` seam. `test_admin_app_origin.py` serves that exact bundle, so
+    the console under test was the un-migrated one. Pin the artifact: no legacy marker in
+    any committed bundle, and the migrated proxy seam present.
+    """
+    bundles = sorted(p for p in BLOG_ADMIN_DIST.rglob("*.js") if p.is_file())
+    # NON-VACUITY: a missing or renamed bundle must fail loudly rather than scan zero
+    # files and report clean.
+    assert bundles, (
+        f"no committed JS bundle under {BLOG_ADMIN_DIST} — the artifact scan would pass "
+        "vacuously; rebuild with `cd website/apps/blog-admin && npm run build`"
+    )
+    offenders = []
+    for p in bundles:
+        text = _read(p)
+        for marker in LEGACY_TOKEN_MARKERS:
+            if marker in text:
+                offenders.append(f"  {p.relative_to(REPO)} references {marker!r}")
+    # Aggregate, not per-chunk: a code-split chunk need not carry the entry's seam, so only
+    # the union of committed bundles must prove the migration reached the data layer.
+    union = "\n".join(_read(p) for p in bundles)
+    if SB_PROXY_PREFIX not in union:
+        offenders.append(
+            f"  no committed bundle carries {SB_PROXY_PREFIX!r} — the console data layer "
+            "predates the BFF proxy path"
+        )
+    assert not offenders, (
+        "the committed blog-admin bundle is not migrated:\n"
+        + "\n".join(offenders)
+        + "\n\nThis artifact is COMMITTED and staged by "
+        "tests/e2e/auth/test_admin_app_origin.py; rebuild it with "
+        "`cd website/apps/blog-admin && npm run build` (#7757)."
     )
 
 
