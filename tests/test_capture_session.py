@@ -113,6 +113,24 @@ def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):
                    for e in out.get("errors", [])), out
 
 
+def test_capture_session_module_isolates_real_home(tmp_path):
+    """#3662 review (P2): pin the HOME isolation the refusal test depends on.
+
+    ``test_commit_session_refuses_without_consent_before_extraction`` reaches
+    ``record_capture_declined()``, which resolves and CREATES
+    ``$HOME/.tortoise/capture-consent-notice``. Without the module-wide HOME
+    isolation (see ``_isolated_home``) that path is the developer's real
+    ``$HOME`` and the durable #3615 notice leaks onto their machine. Assert the
+    resolved location, not the notice text.
+    """
+    from tortoise.capture_consent import capture_notice_path
+
+    assert os.environ.get("HOME") == str(tmp_path), (
+        "tests/test_capture_session.py must isolate HOME (see _isolated_home)")
+    assert capture_notice_path() == tmp_path / ".tortoise" / (
+        "capture-consent-notice")
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
@@ -126,6 +144,23 @@ def llm_extraction_provider(monkeypatch):
     (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
     the keyless path clears the seam AND the provider keys itself."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path):
+    """#3662 review (P2): never let this module write into the developer's real
+    ``$HOME``.
+
+    The unconsented-refusal test below drives
+    ``capture_consent.capture_declined_reason()`` → ``record_capture_declined()``,
+    which resolves ``Path.home()/.tortoise/capture-consent-notice`` and CREATES
+    it — so a normal pytest run left the durable #3615 migration notice in the
+    real ``$HOME``, and the next interactive ``tortoise`` command printed it.
+    Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
+    suite-wide ``_capture_consent_default_on`` grant stays in force here (unlike
+    that file's decline matrix), so the consented control test is unaffected.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 @pytest.fixture()
