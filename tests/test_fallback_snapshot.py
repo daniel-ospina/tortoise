@@ -388,8 +388,9 @@ def test_snapshot_key_memory_shares_the_store_identity(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # isolate the shared :memory: store to tmp
     fs._store.clear()
     a = TortoiseSDK(":memory:")
-    b = TortoiseSDK(":memory:")
+    b = None
     try:
+        b = TortoiseSDK(":memory:")
         proj_a, proj_b = a._get_proj(), b._get_proj()
         assert proj_a._is_embedded and proj_b._is_embedded, (
             "this test must run against the embedded store, not a redirected "
@@ -429,7 +430,7 @@ def test_snapshot_key_memory_shares_the_store_identity(tmp_path, monkeypatch):
                    for p in rebuilt["points"]), (
                        "the sibling's write must reach the rebuilt corpus")
     finally:
-        for s in (a, b):
+        for s in filter(None, (a, b)):
             try:  # noqa: SIM105
                 s._get_proj().g.query("MATCH (n) DETACH DELETE n")
             except Exception:
@@ -494,7 +495,15 @@ def test_snapshot_key_memory_fallback_is_stable_not_minted(caplog):
     The key must stay stable, and the shortfall must be reported loudly.
     """
     class _NoStoreHandle:
-        """A duck-typed projection whose client exposes no registry path."""
+        """A duck-typed projection that exposes no store handle AND REJECTS
+        the stamp the pre-fix code attempted (``__slots__``).
+
+        Both halves are load-bearing for this test: without ``__slots__`` the
+        per-projection stamp SUCCEEDS, so the old code's key was stable anyway
+        and ``k1 == k2`` passed without the fix. Only a client the token cannot
+        be stamped on reproduces the per-call re-mint.
+        """
+        __slots__ = ()
         _path = ":memory:"
         graph_name = "tortoise"
         db = object()

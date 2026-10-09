@@ -110,9 +110,17 @@ class FallbackSnapshotStore:
 _store = FallbackSnapshotStore()
 
 # Stable key for a ``:memory:`` projection whose client exposes no store
-# identity handle at all. All such projections share it: invalidation then
-# reaches every one of them (the direction that cannot serve stale data). It is
-# unreachable for a real redislite client, which always exposes ``socket_file``.
+# identity handle at all. All such projections share it, which buys
+# cacheability at the cost of per-store ISOLATION — not in one direction only:
+# this same tuple also keys the READ path (``sdk._fb_store.get(_key)``), so the
+# first such store to build caches its snapshot under it and a DIFFERENT store
+# is then served that snapshot, with no write required. That is acceptable only
+# because the branch is unreachable for a real client: a real embedded client
+# always exposes ``socket_file`` (on ``db`` or ``db.client``), and only a
+# client exposing no handle at all can land here — where two stores are
+# indistinguishable, so the real choice is a shared cacheable key versus a
+# per-call key that can never be hit. Reachability is nil today; if a real
+# client ever stops exposing a handle, this key must be revisited.
 _UNIDENTIFIED_MEMORY_STORE = "<unidentified-memory-store>"
 
 
@@ -138,10 +146,15 @@ def _embedded_store_identity(proj) -> str:
     distinguishes instances while still unifying siblings. The registry path is
     the fallback for a client that exposes only that.
 
-    When neither handle exposes a value (a foreign/duck-typed client), the key
-    is a process-wide constant — stable, shared by every such projection, and
-    logged LOUDLY — rather than re-minted per call. The old ``uuid4`` under a
-    suppressed stamp returned a fresh key on every call, so the entry could
+    When neither handle exposes a value, the key is a process-wide constant —
+    stable, shared by every such projection, and logged LOUDLY — rather than
+    re-minted per call. Sharing is NOT isolation-preserving: this tuple also
+    keys the read path, so one such store's snapshot is served to another. It
+    is safe only because the branch is unreachable for a real client — both a
+    real ``FalkorProjection`` and redislite expose ``socket_file``, so no real
+    store reaches here. The old code instead stamped a per-projection token and
+    suppressed the failed assignment, so a client that REJECTS the stamp
+    (``__slots__``/immutable) got a fresh key on every call: the entry could
     never be cache-hit and the corpus re-fetch + TF-IDF re-fit ran silently on
     every degraded search (#7773 P2).
     """
@@ -155,8 +168,11 @@ def _embedded_store_identity(proj) -> str:
     logger.error(
         "Fallback snapshot: the :memory: store identity is unavailable from "
         "the projection's client (no socket_file/settingregistryfile) — using "
-        "the process-wide unidentified-store key. The key stays stable so "
-        "invalidation still reaches every such projection (#7773 P2).",
+        "the process-wide unidentified-store key. That key is cacheable but "
+        "NOT isolated: every such store shares one snapshot slot, so one "
+        "store's snapshot can be served to another on a read. A real client "
+        "always exposes a socket_file, so this branch should be unreachable "
+        "(#7773 P2).",
     )
     return _UNIDENTIFIED_MEMORY_STORE
 
