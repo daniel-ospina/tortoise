@@ -260,10 +260,20 @@ export function clipboardWriteOffences(src) {
     // `await foo();` does not count.
     const awaitedHere = /\bawait\b/.test(before.slice(before.lastIndexOf(';') + 1))
     const prevLine = i > 0 ? lines[i - 1] : ''
-    // An earlier `await` on the previous line governs this call as long as that
-    // statement was not already terminated — `await foo();` followed by the
-    // write does NOT make the write awaited (the round-3 evasion).
-    const awaitedPrev = /\bawait\b/.test(prevLine) && !/;\s*$/.test(prevLine)
+    // An earlier `await` on the previous line governs this call only if this
+    // line CONTINUES that expression — a leading `.`/`?.`/operator/`,`.
+    // Round 4 accepted any previous-line `await`, which is effectively always
+    // true in this ASI file (only ~24 of 11k lines end in `;`), so
+    // `await foo()` followed by an un-awaited write slipped through. Round 3's
+    // stricter rule flagged that but wrongly red-flagged an awaited call split
+    // across lines; continuation is what separates the two.
+    const continuesPrev = /^\s*(\.|\?\.|,|\(|[+\-*/%&|^=?:]|\[)/.test(line)
+    // A BARE trailing `await` (no operand on its line) also governs the next
+    // line; `await foo()` does not — its operand is already complete.
+    const bareAwaitPrev = /\bawait\s*$/.test(prevLine)
+    const awaitedPrev = (continuesPrev || bareAwaitPrev)
+      && /\bawait\b/.test(prevLine)
+      && !/;\s*$/.test(prevLine)
     if (awaitedHere || awaitedPrev) return
     // `.then`/`.catch` must be attached to THIS write's own call — `[^;]*?`
     // cannot cross a statement boundary, so a `.catch` belonging to an unrelated
@@ -294,6 +304,8 @@ test('#2935 TRIPWIRE is real: it catches the shapes that evaded the first versio
     'await foo(); navigator.clipboard.writeText(x)',
     '/* not a comment anymore */ navigator.clipboard.writeText(x)',
     'await copyText("https://a"); navigator.clipboard.writeText(x)',
+    // A write that merely FOLLOWS an await is not itself awaited (round 5).
+    'await foo()\nnavigator.clipboard.writeText(x)',
     // The four round 3 named:
     'navigator.clipboard?.writeText?.(x)',
     'navigator.clipboard["writeText"](x)',
