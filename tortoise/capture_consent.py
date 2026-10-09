@@ -14,7 +14,8 @@ the consent requirement does not depend on which endpoint the config names.
 
 Consumers:
   * `tortoise/__main__.py` — the transcript-upload primitives
-    (``session capture``, ``sessions import``) fail closed here, and a command
+    (``session capture``, ``sessions import``, ``session drain``) fail closed
+    here, and a command
     whose stderr is a terminal pushes the pending migration notice once (the
     surface gate: a redirected/piped stderr consumes nothing; a pty-allocating
     non-human caller is a declared, notice-only residual).
@@ -44,8 +45,10 @@ NOT gated here, by design (recorded so the two consent contracts cannot drift,
     needs a CLIENT-CARRIED signal (an MCP request header) and is an open
     product question, not a client-side predicate (see #3662).
   * ``TortoiseSDK.capture_session`` writes to the GRAPH (embedded, or
-    ``TORTOISE_DB_URI``) — a local write, not a vendor transmission. It is out
-    of scope here because gating it would also refuse pure local writes.
+    ``TORTOISE_DB_URI``) AND sends each turn to the configured BYOK extractor
+    provider. It is out of scope here because gating it would also refuse pure
+    local writes — but it is NOT egress-free: the provider leg transmits
+    regardless of which backend ``TORTOISE_DB_URI`` names.
 
 The truthy vocabulary is NOT declared here: it delegates to the tree's single
 declared contract, `tortoise/env_truthy.py` (#4097), so this module cannot drift

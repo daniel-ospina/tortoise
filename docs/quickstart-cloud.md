@@ -145,11 +145,18 @@ is **per-surface**, not uniform (#3615):
   `TORTOISE_CAPTURE`. It carries the server-side recording policy
   (`session_recording`, default-ON) instead. Whether an explicit, agent-invoked
   capture should also require a *client-carried* consent assertion is an open
-  product question (#3662). `TortoiseSDK.capture_session` is likewise ungated —
-  it writes the graph backend named by `TORTOISE_DB_URI`, not the vendor's API,
-  so an embedded local backend keeps nothing off the machine while a
-  remote/managed `redis://`·`rediss://` backend is itself a data-egress choice
-  outside this gate.
+  product question (#3662). `TortoiseSDK.capture_session` is likewise ungated,
+  and it is **not** egress-free: it writes the graph backend named by
+  `TORTOISE_DB_URI` **and** sends each turn verbatim to the configured BYOK
+  extractor provider (BYOK is the documented default), so a remote
+  `redis://`·`rediss://` backend is itself a data-egress choice and the
+  provider leg transmits regardless of which backend is named.
+- **The in-repo Pi capture extension is not gated either.**
+  `tortoise/pi-hooks/tortoise-capture.ts` (installed by `tortoise capture
+  install`, `harness: "pi"`) POSTs the conversation on `session_shutdown` and
+  reads **no** `TORTOISE_CAPTURE` — installing it IS the opt-in. It differs
+  from the in-repo Claude Code / Codex / Cursor hooks, which file nothing
+  without this variable.
 - **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
   `agent-infra` and starts hosted capture on **credential presence**, never
   reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
