@@ -17,6 +17,8 @@ aggregative-intent detection + per-facet coverage check; the seam the
 from __future__ import annotations
 
 import inspect
+import json
+from pathlib import Path
 
 import pytest
 
@@ -149,6 +151,83 @@ def test_detector_elapsed_time_and_how_long_never_aggregative():
               "how long did the bike ride take",
               "3 days ago how much did i weigh"):
         assert agg.detect_aggregative_intent(q).is_aggregative is False, q
+
+
+# ── (a2) census frequency/count class — the #7804 false-fire regression ────
+_CENSUS_PATH = Path(__file__).resolve().parent / "_assembly_census.json"
+
+
+def _census_freq_count_rows():
+    census = json.loads(_CENSUS_PATH.read_text())
+    return [r for r in census["rows"] if r["cls"] == "frequency/count"]
+
+
+def test_census_frequency_count_rows_never_aggregative():
+    """#7804 regression pin: the 12 census ``frequency/count`` rows are date
+    arithmetic (interval / before-offset / duration / summed span), NOT
+    entity-scoped counting aggregations — every one must classify
+    ``is_aggregative=False``. Non-vacuous: the class is asserted at its
+    measured size and exact membership, so a census edit is a deliberate diff."""
+    rows = _census_freq_count_rows()
+    assert len(rows) == 12
+    assert {r["qid"] for r in rows} == {
+        "b46e15ed", "gpt4_1d80365e", "gpt4_a1b77f9c", "2ebe6c90",
+        "370a8ff4", "6e984301", "0bb5a684", "bbf86515", "c8090214",
+        "a3045048", "gpt4_4cd9eba1", "c8090214_abs",
+    }
+    for r in rows:
+        verdict = agg.detect_aggregative_intent(r["question"])
+        assert verdict.is_aggregative is False, (
+            f"census row {r['qid']} false-fired as aggregative: "
+            f"{r['question']!r}")
+
+
+def test_detector_elapsed_date_arithmetic_forms_never_aggregative():
+    """The three date-arithmetic forms the #2521 cover missed are pinned
+    explicitly (the census class): the 'have/had passed since' interval,
+    the 'have I been / did I spend|take' duration, and the 'before <X>'
+    before-offset — plus the 'in total' summed span."""
+    for q in (
+        "How many months have passed since I participated in two charity "
+        "events in a row, on consecutive days?",
+        "How many weeks had passed since I recovered from the flu when I "
+        "went on my 10th jog outdoors?",
+        "How many weeks have I been taking sculpting classes when I "
+        "invested in my own set of sculpting tools?",
+        "How many days did I spend on my solo camping trip to Yosemite "
+        "National Park?",
+        "How many days did it take me to finish 'The Nightingale' by "
+        "Kristin Hannah?",
+        "How many days before the team meeting I was preparing for did I "
+        "attend the workshop on 'Effective Communication in the Workplace'?",
+        "How many weeks in total do I spent on reading 'The Nightingale' "
+        "and listening to 'Sapiens'?",
+    ):
+        assert agg.detect_aggregative_intent(q).is_aggregative is False, q
+
+
+def test_detector_temporal_seam_parity_no_silent_drift():
+    """#7804 seam pin (#7806 review, finding ``classifier-seam-unchecked``):
+    the detector's temporal exclusion delegates to
+    ``classify_temporal_aggregate``, so the two vocabularies can never drift
+    silently. Every census row is a non-COUNT date-arithmetic shape and is
+    NOT aggregative; a genuine frequency surface classifies COUNT and STAYS
+    aggregative (the seam must not over-exclude)."""
+    from tortoise.temporal_aggregation import classify_temporal_aggregate
+    arithmetic = {"interval", "before-offset", "duration", "total"}
+    for r in _census_freq_count_rows():
+        intent = classify_temporal_aggregate(r["question"])
+        assert intent is not None, r["qid"]
+        assert intent.kind != "count", r["qid"]
+        assert intent.kind in arithmetic, r["qid"]
+        assert agg.detect_aggregative_intent(r["question"]).is_aggregative \
+            is False, r["qid"]
+    # the seam's other half: genuine counts are temporal-COUNT AND aggregative
+    for q in ("how many times did we discuss the api key migration",
+              "how often do i go to the gym"):
+        intent = classify_temporal_aggregate(q)
+        assert intent is not None and intent.kind == "count", q
+        assert agg.detect_aggregative_intent(q).is_aggregative is True, q
 
 
 # ── (b) facet enumeration + per-facet coverage check (pure math) ───────────

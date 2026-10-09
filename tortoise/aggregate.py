@@ -23,7 +23,11 @@ Layering (product-first — the eval stays a thin measuring caller):
   1. ``detect_aggregative_intent`` — hermetic, deterministic, rule-based
      classifier over the query surface (counting/quantifier patterns).
      No graph, no model, no IO: the classification table is unit-testable
-     offline.
+     offline. Its temporal exclusion delegates the
+     interval/before-offset/duration/summed-span morphology to the #2886
+     ``temporal_aggregation`` classifier, so any date-arithmetic shape that
+     classifier recognizes is excluded here too (no silent drift between
+     the two detectors; the parity pin lives in the detector test).
   2. ``facet_key_for_point`` + ``compute_facet_coverage`` — hermetic
      facet-key extraction + the pure k-of-N coverage math over a facet
      census and the current retrieval's points. Single source of truth so
@@ -66,6 +70,11 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from .temporal_aggregation import (
+    TemporalAggregateKind,
+    classify_temporal_aggregate,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -131,7 +140,15 @@ _QUANTIFIER_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 #: Elapsed-time shapes are TEMPORAL-REASONING (R5 #1544 territory — the
 #: R5 detector's ``ordering`` class), NOT counting aggregation: "how many
 #: days ago did I last run" asks a single date, and a k-of-N facet check
-#: over "days" would be meaningless. Excluded before the quantifier scan.
+#: over "days" would be meaningless. This is the FIRST of two exclusion
+#: seams: the lexical "ago/since/back/has-passed" forms are pinned here.
+#: The SECOND seam (#7804) delegates every interval / before-offset /
+#: duration / summed-span morphology to the #2886
+#: ``classify_temporal_aggregate`` classifier (see
+#: :data:`_TEMPORAL_ARITHMETIC_KINDS`) — the census ``frequency/count``
+#: class carries date-arithmetic forms ("how many months have passed
+#: since", "how many days before X did Y", "how many weeks have I been")
+#: that this cover alone missed. Excluded before the quantifier scan.
 _ELAPSED_TIME_RE = re.compile(
     r"\bhow\s+many\s+(?:days?|weeks?|months?|years?)\s+ago\b"
     r"|\b\d+\s+(?:days?|weeks?|months?|years?)\s+ago\b"
@@ -149,6 +166,24 @@ _ELAPSED_TIME_RE = re.compile(
 #: "how long" is excluded outright: it asks a duration/span (single fact,
 #: or R5/C6's temporal-ordering class), never a sum/count across facets.
 _HOW_LONG_RE = re.compile(r"\bhow\s+long\b")
+
+#: Temporal-arithmetic kinds from the #2886 classifier
+#: (``tortoise.temporal_aggregation``) — INTERVAL, BEFORE_OFFSET,
+#: DURATION, and the summed-span TOTAL. These ask DATE ARITHMETIC over two
+#: dated anchors (R5 #1544), never a k-of-N count over an entity's linked
+#: facts, so they are excluded before the quantifier scan. COUNT is
+#: deliberately NOT here: "how many times" / "how often" is a genuine
+#: counting aggregation and stays on the aggregative path. Delegating the
+#: date-arithmetic vocabulary to ``classify_temporal_aggregate`` keeps
+#: that morphology in one place: any shape it recognizes as interval /
+#: before-offset / duration / summed span is excluded here too, so the two
+#: classifiers cannot drift silently again (#7804, #2886/PR #7806).
+_TEMPORAL_ARITHMETIC_KINDS: frozenset[TemporalAggregateKind] = frozenset({
+    TemporalAggregateKind.INTERVAL,
+    TemporalAggregateKind.BEFORE_OFFSET,
+    TemporalAggregateKind.DURATION,
+    TemporalAggregateKind.TOTAL,
+})
 
 #: Self-corpus language — a query whose aggregation subject is the stored
 #: memory corpus itself has NO enumerable index N ("how many memories do I
@@ -273,9 +308,20 @@ def detect_aggregative_intent(query: str | None) -> AggregativeIntent:
     Ordered, pinned rule set:
 
     1. Non-query / empty text → not aggregative.
-    2. Elapsed-time shapes ("how many days ago", "3 weeks ago") and
-       "how long" are TEMPORAL/ordering classes (R5's domain) — NOT
-       counting aggregation.
+    2. Temporal / date-arithmetic shapes are R5's domain (#1544), NOT
+       counting aggregation — excluded before the quantifier scan. Two
+       seams: (a) the local ``_ELAPSED_TIME_RE`` / ``_HOW_LONG_RE``
+       regexes ("how many days ago", "3 weeks ago", "how much time has
+       passed since", "how long"); (b) the #2886
+       :func:`~tortoise.temporal_aggregation.classify_temporal_aggregate`
+       classifier for every interval / before-offset / duration /
+       summed-span shape ("how many months have passed since …", "how
+       many days before X did Y", "how many weeks have I been …", "how
+       many weeks in total …") — any shape that classifier recognizes as
+       date arithmetic is excluded here too, so the two detectors cannot
+       drift silently. A bare frequency count ("how many
+       times", "how often") is NOT excluded: it is a genuine counting
+       aggregation.
     3. Quantifier scan (:data:`AGGREGATIVE_QUANTIFIERS`, first match
        wins) — none matched ⇒ ``is_aggregative=False``.
     4. Scope: ``"open-ended"`` when every post-quantifier content token is
@@ -289,8 +335,14 @@ def detect_aggregative_intent(query: str | None) -> AggregativeIntent:
     if not query or not str(query).strip():
         return AggregativeIntent(False)
     q = " ".join(str(query).lower().split())
-    # 2. temporal/ordering exclusions (before the quantifier scan)
+    # 2. temporal/ordering exclusions (before the quantifier scan): the
+    #    local elapsed/"how long" regexes, then the #2886 temporal-arithmetic
+    #    classifier (single owner of the date-arithmetic vocabulary). Either
+    #    match ⇒ an R5 temporal question, never a counting aggregation.
     if _HOW_LONG_RE.search(q) or _ELAPSED_TIME_RE.search(q):
+        return AggregativeIntent(False)
+    _temporal = classify_temporal_aggregate(q)
+    if _temporal is not None and _temporal.kind in _TEMPORAL_ARITHMETIC_KINDS:
         return AggregativeIntent(False)
     # 3. quantifier scan — first match wins (precedence-ordered table)
     matched: tuple[str, re.Match[str]] | None = None
