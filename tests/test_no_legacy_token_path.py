@@ -405,7 +405,7 @@ def test_the_committed_blog_admin_bundle_is_migrated():
     # files and report clean.
     assert bundles, (
         f"no committed JS bundle under {BLOG_ADMIN_DIST} — the artifact scan would pass "
-        "vacuously; rebuild with `cd website/apps/blog-admin && npm run build`"
+        "vacuously; rebuild with `cd website/apps/blog-admin && cp .env.example .env && npm run build`"
     )
     offenders = []
     for p in bundles:
@@ -422,7 +422,7 @@ def test_the_committed_blog_admin_bundle_is_migrated():
         + "\n".join(offenders)
         + "\n\nThis artifact is COMMITTED and staged by "
         "tests/e2e/auth/test_admin_app_origin.py; rebuild it with "
-        "`cd website/apps/blog-admin && npm run build` (#7757)."
+        "`cd website/apps/blog-admin && cp .env.example .env && npm run build` (#7757)."
     )
 
 

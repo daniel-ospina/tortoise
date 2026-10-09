@@ -300,6 +300,13 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # The bundle's ACTUAL content lives in dist/assets/ — that is the
+                   # rglob target of the migration guard. Without this entry, a
+                   # change that edits the asset WITHOUT touching index.html (a
+                   # hand-edit, or a partial merge resolution) selects NO surface
+                   # and the artifact's only guard does not run on the PR that owns
+                   # it — the same silent-drop class as the entries above.
+                   "website/apps/blog-admin/dist/assets/",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,
