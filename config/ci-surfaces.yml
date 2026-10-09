@@ -891,6 +891,16 @@ surfaces:
   # measured GitHub state after a merge (row 7678 read BLOCKED while PR #7686
   # had merged). Same surface as its queue siblings above.
   - test_queue_reconcile.py
+  # #7810: the reconciliation's missing TRIGGER. Hermetic (PATH stubs for
+  # launchctl/crontab/plutil/uname/gh, a throwaway HOME + repo), so `core` can
+  # run it; it pins tools/install-queue-reconcile-schedule.sh, which schedules
+  # tools/queue_reconcile.py --apply so the queue stops re-staling whenever no
+  # lane remembers to run the tool (the #7800 defect, one level up). gh-absence
+  # is expressed through GH_BIN, NOT through the sandbox PATH: the Ubuntu runner
+  # ships gh in /usr/bin, so a PATH-based gh-absence test is CI-red there and
+  # green on macOS (it was, at c73656c59). Same surface as its queue siblings
+  # above.
+  - test_install_queue_reconcile_schedule.py
   - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
@@ -3717,6 +3727,7 @@ durations:
   test_pytest_attribution.py: 0.3
   test_queue_conflict_census.py: 0.5
   test_queue_reconcile.py: 0.6  # unmeasured
+  test_install_queue_reconcile_schedule.py: 2.0  # unmeasured — new file; carries the flat default until tools/ci_timing.py --refresh-durations collects it. Do NOT substitute a local timing (#3419/#3750: a duration is a SHARD-LAYOUT input, and a local reading does not model CI).
   test_queue_window_observe.py: 0.6
   test_registry_integrity.py: 0.7
   test_salience_labels_4917.py: 0.1
