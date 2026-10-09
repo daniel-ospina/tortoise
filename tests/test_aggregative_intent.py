@@ -17,6 +17,8 @@ aggregative-intent detection + per-facet coverage check; the seam the
 from __future__ import annotations
 
 import inspect
+import json
+from pathlib import Path
 
 import pytest
 
@@ -148,6 +150,144 @@ def test_detector_elapsed_time_and_how_long_never_aggregative():
               "how much time has passed since the migration",
               "how long did the bike ride take",
               "3 days ago how much did i weigh"):
+        assert agg.detect_aggregative_intent(q).is_aggregative is False, q
+
+
+# ── (a2) census frequency/count class — the #7804 false-fire regression ────
+_CENSUS_PATH = Path(__file__).resolve().parent / "_assembly_census.json"
+
+
+def _census_freq_count_rows():
+    census = json.loads(_CENSUS_PATH.read_text())
+    return [r for r in census["rows"] if r["cls"] == "frequency/count"]
+
+
+def test_census_frequency_count_rows_never_aggregative():
+    """#7804 regression pin: the 12 census ``frequency/count`` rows are date
+    arithmetic (interval / before-offset / duration / summed span), NOT
+    entity-scoped counting aggregations — every one must classify
+    ``is_aggregative=False``. Non-vacuous: the class is asserted at its
+    measured size and exact membership, so a census edit is a deliberate diff."""
+    rows = _census_freq_count_rows()
+    assert len(rows) == 12
+    assert {r["qid"] for r in rows} == {
+        "b46e15ed", "gpt4_1d80365e", "gpt4_a1b77f9c", "2ebe6c90",
+        "370a8ff4", "6e984301", "0bb5a684", "bbf86515", "c8090214",
+        "a3045048", "gpt4_4cd9eba1", "c8090214_abs",
+    }
+    for r in rows:
+        verdict = agg.detect_aggregative_intent(r["question"])
+        assert verdict.is_aggregative is False, (
+            f"census row {r['qid']} false-fired as aggregative: "
+            f"{r['question']!r}")
+
+
+def test_detector_elapsed_date_arithmetic_forms_never_aggregative():
+    """The three date-arithmetic forms the #2521 cover missed are pinned
+    explicitly (the census class): the 'have/had passed since' interval,
+    the 'have I been / did I spend|take' duration, and the 'before <X>'
+    before-offset — plus the 'in total' summed span."""
+    for q in (
+        "How many months have passed since I participated in two charity "
+        "events in a row, on consecutive days?",
+        "How many weeks had passed since I recovered from the flu when I "
+        "went on my 10th jog outdoors?",
+        "How many weeks have I been taking sculpting classes when I "
+        "invested in my own set of sculpting tools?",
+        "How many days did I spend on my solo camping trip to Yosemite "
+        "National Park?",
+        "How many days did it take me to finish 'The Nightingale' by "
+        "Kristin Hannah?",
+        "How many days before the team meeting I was preparing for did I "
+        "attend the workshop on 'Effective Communication in the Workplace'?",
+        "How many weeks in total do I spent on reading 'The Nightingale' "
+        "and listening to 'Sapiens'?",
+    ):
+        assert agg.detect_aggregative_intent(q).is_aggregative is False, q
+
+
+def test_detector_temporal_seam_parity_no_silent_drift():
+    """#7804 seam pin (#7806 review, finding ``classifier-seam-unchecked``):
+    the detector's temporal exclusion delegates to
+    ``classify_temporal_aggregate``, so the two vocabularies can never drift
+    silently. Every one of the 12 ``frequency/count`` census rows is a
+    non-COUNT date-arithmetic shape and is NOT aggregative; a genuine
+    frequency surface classifies COUNT and STAYS aggregative, so the seam
+    never over-excludes a counting surface. (The delegation's DELIBERATELY
+    wider over-exclusion of date-arithmetic shapes — 35 census rows, not
+    just this class — is pinned by
+    ``test_census_wide_only_one_row_stays_aggregative`` and
+    ``test_detector_delegated_exclusion_breadth_is_deliberate``; do NOT
+    narrow the classifier to satisfy the sentence above.)"""
+    from tortoise.temporal_aggregation import classify_temporal_aggregate
+    for r in _census_freq_count_rows():
+        intent = classify_temporal_aggregate(r["question"])
+        assert intent is not None, r["qid"]
+        assert intent.kind != "count", r["qid"]
+        # The detector's OWN derived set — not a re-declared literal — so this
+        # parity assertion tracks the single source of truth in aggregate.py.
+        assert intent.kind in agg._TEMPORAL_ARITHMETIC_KINDS, r["qid"]
+        assert agg.detect_aggregative_intent(r["question"]).is_aggregative \
+            is False, r["qid"]
+    # the seam's other half: genuine counts are temporal-COUNT AND aggregative
+    for q in ("how many times did we discuss the api key migration",
+              "how often do i go to the gym"):
+        intent = classify_temporal_aggregate(q)
+        assert intent is not None and intent.kind == "count", q
+        assert agg.detect_aggregative_intent(q).is_aggregative is True, q
+
+
+def test_detector_temporal_arithmetic_kind_partition_is_exhaustive():
+    """#7804 seam pin, part 2: the exclusion set is DERIVED from the #2886
+    enum (``frozenset(TemporalAggregateKind) - _COUNTING_KINDS``), so no kind
+    can drop out of it silently. This pin reds when a kind is ADDED to
+    ``TemporalAggregateKind`` — forcing the counting-vs-date-arithmetic
+    decision to be deliberate instead of an oversight (reviewer C, P2)."""
+    from tortoise.temporal_aggregation import TemporalAggregateKind as K
+    expected = {
+        "count": False,          # the only counting surface — stays aggregative
+        "total": True,
+        "interval": True,
+        "before-offset": True,
+        "duration": True,
+    }
+    assert {k.value for k in K} == set(expected), (
+        "TemporalAggregateKind grew/shrank — classify the new kind here AND "
+        "in tortoise/aggregate.py's exclusion set")
+    for kind in K:
+        assert (kind in agg._TEMPORAL_ARITHMETIC_KINDS) is expected[kind.value], \
+            kind
+
+
+def test_census_wide_only_one_row_stays_aggregative():
+    """The delegation's behavioural surface is wider than the 12
+    ``frequency/count`` rows: at this head 35 of the 133 census rows flip to
+    non-aggregative, leaving exactly one aggregative row (``a3838d2b``, a
+    genuine count of events before an event — no time unit, so no
+    date-arithmetic match). Pin the WHOLE surface, not just the issue's class,
+    so a later narrowing of the delegated classifier cannot silently restore
+    false fires while the class-only pins stay green (reviewer C, P2)."""
+    census = json.loads(_CENSUS_PATH.read_text())
+    rows = census["rows"]
+    assert len(rows) == 133
+    still = {r["qid"] for r in rows
+             if agg.detect_aggregative_intent(r["question"]).is_aggregative}
+    assert still == {"a3838d2b"}, still
+
+
+def test_detector_delegated_exclusion_breadth_is_deliberate():
+    """The delegated #2886 morphology is broader than two dated anchors: the
+    INTERVAL rule's ``<unit> … since|between`` gap also matches a unit that
+    MEASURES an elapsed span. Under the module contract (elapsed-time shapes
+    are TEMPORAL, R5 #1544) these are date arithmetic, not counts of linked
+    facts, so excluding them is intended — pinned here so the boundary is a
+    reviewed decision, not a silently inherited one (reviewer B, P2)."""
+    for q in (
+        "how many days did i work from home since the new policy started",
+        "how many days of vacation have i taken since january",
+        "how many days of pto did i use between january and march",
+        "how many days of sick leave did i take in total",
+    ):
         assert agg.detect_aggregative_intent(q).is_aggregative is False, q
 
 
