@@ -210,9 +210,15 @@ def test_detector_temporal_seam_parity_no_silent_drift():
     """#7804 seam pin (#7806 review, finding ``classifier-seam-unchecked``):
     the detector's temporal exclusion delegates to
     ``classify_temporal_aggregate``, so the two vocabularies can never drift
-    silently. Every census row is a non-COUNT date-arithmetic shape and is
-    NOT aggregative; a genuine frequency surface classifies COUNT and STAYS
-    aggregative (the seam must not over-exclude)."""
+    silently. Every one of the 12 ``frequency/count`` census rows is a
+    non-COUNT date-arithmetic shape and is NOT aggregative; a genuine
+    frequency surface classifies COUNT and STAYS aggregative, so the seam
+    never over-excludes a counting surface. (The delegation's DELIBERATELY
+    wider over-exclusion of date-arithmetic shapes — 35 census rows, not
+    just this class — is pinned by
+    ``test_census_wide_only_one_row_stays_aggregative`` and
+    ``test_detector_delegated_exclusion_breadth_is_deliberate``; do NOT
+    narrow the classifier to satisfy the sentence above.)"""
     from tortoise.temporal_aggregation import classify_temporal_aggregate
     for r in _census_freq_count_rows():
         intent = classify_temporal_aggregate(r["question"])
