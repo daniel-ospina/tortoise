@@ -217,9 +217,7 @@ def effective_verdict(rows, terminal=TERMINAL, clears=CLEARS) -> str:
     state = ""
     for row in rows:
         verdict = row.verdict
-        if verdict in clears or verdict in terminal:
-            state = verdict
-        elif not state:
+        if verdict in clears or verdict in terminal or not state:
             state = verdict
     return state
 
@@ -437,7 +435,7 @@ def build_findings_parallel(
             number = futures[fut]
             try:
                 resolved[number] = fut.result()
-            except Exception as exc:  # noqa: BLE001 - a failure is UNKNOWN, not a crash
+            except Exception as exc:  # a failure is UNKNOWN, not a crash
                 resolved[number] = Resolution(UNKNOWN, detail=f"resolution error: {exc}")
     return [_finding(n, hist[n], resolved[n]) for n in numbers]
 
