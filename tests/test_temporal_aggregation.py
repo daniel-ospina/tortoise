@@ -487,6 +487,12 @@ def test_elapsed_marker_beats_the_total_marker():
                      "exhibit?"):
         assert (classify_temporal_aggregate(anchored).kind
                 is TemporalAggregateKind.INTERVAL), anchored
+    # A comma-LESS conjunction list is a sum too: punctuation alone cannot
+    # discriminate the list reading, so the between complement is parsed.
+    bare_list = "How many days in total did I travel between New York and " \
+                "Boston and DC?"
+    assert (classify_temporal_aggregate(bare_list).kind
+            is TemporalAggregateKind.TOTAL)
     for leading in ("Since I started jogging, how many weeks in total have "
                     "passed?",
                     "Since 2020, how many days in total have I spent on "

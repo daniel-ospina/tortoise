@@ -170,15 +170,41 @@ _RE_TOTAL = re.compile(
 #: and let the resolver sum event spans while the caller supplied the true
 #: anchors. Two forms qualify:
 #:   * ``since`` anywhere;
-#:   * ``between <X> and <Y>`` — a TWO-ANCHOR interval. A comma-separated LIST
-#:     ("in total … travelled between New York, Boston and DC") is a genuine
-#:     sum and must stay TOTAL, which is why the between branch forbids commas
-#:     in either anchor.
-#: ``_RE_INTERVAL`` matches BOTH the interval and the list form of "between",
-#: so the LIST reading is discriminated HERE (and by ``_RE_TOTAL``'s precedence
-#: over ``_RE_INTERVAL``) — not by ``_RE_INTERVAL`` alone.
-_RE_ELAPSED_MARKER = re.compile(
-    r"\bsince\b|\bbetween\s+[^,?]+\s+and\s+[^,?]+", re.IGNORECASE)
+#:   * a genuine TWO-ANCHOR ``between <X> and <Y>`` (see
+#:     :func:`_two_anchor_between`). A comma-separated LIST ("in total …
+#:     travelled between New York, Boston and DC") and a comma-less
+#:     conjunction list ("between A and B and C") are genuine sums and stay
+#:     TOTAL.
+#: ``_RE_INTERVAL`` matches every form of "between" — interval and list alike
+#: — so which reading wins is decided HERE, and by ``_RE_TOTAL``'s precedence
+#: over ``_RE_INTERVAL``, not by ``_RE_INTERVAL`` alone.
+_RE_SINCE = re.compile(r"\bsince\b", re.IGNORECASE)
+#: A "between" clause, up to the next comma or question mark.
+_RE_BETWEEN_CLAUSE = re.compile(r"\bbetween\s+[^,?]+", re.IGNORECASE)
+
+
+def _two_anchor_between(question: str) -> bool:
+    """True when the question carries a genuine two-anchor ``between X and
+    Y`` — the anchored INTERVAL reading.
+
+    A LIST is a sum, not an interval, whether it is comma-separated
+    (``between New York, Boston and DC``) or a bare conjunction chain
+    (``between A and B and C``), so a clause qualifies only when it is
+    comma-free AND contains exactly ONE ``and`` (the anchor join). Punctuation
+    alone cannot discriminate the two readings, which is why the complement is
+    parsed here rather than matched with one regex."""
+    for match in _RE_BETWEEN_CLAUSE.finditer(question):
+        clause = match.group(0)
+        if len(re.findall(r"\band\b", clause, re.IGNORECASE)) == 1:
+            return True
+    return False
+
+
+def _elapsed_marker(question: str) -> bool:
+    """True when the question carries an elapsed-time marker (a ``since``
+    clause, or a two-anchor ``between``) — i.e. the caller's anchors, not a
+    summed span, are authoritative."""
+    return bool(_RE_SINCE.search(question)) or _two_anchor_between(question)
 # before-offset: "how many <unit> before/prior to/earlier than <X> …"
 _RE_BEFORE_OFFSET = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\s+"
@@ -229,6 +255,12 @@ def classify_temporal_aggregate(
     2. explicit frequency/count surface → COUNT.
     3. summed-span surface ("in total" + a time unit, and NO elapsed-time
        marker) → TOTAL.
+    3b. the SAME summed-span surface carrying an elapsed-time marker ("in
+       total … since X" / "… in total … between X and Y") → INTERVAL: the
+       caller supplied the true anchors, so they outrank the span sum. This
+       branch deliberately outranks rules 4-5 — an elapsed marker wins over
+       before-offset/duration — and returns directly so it can never fall
+       through to ``None`` (which would read as non-temporal).
     4. ``how many <unit> before/prior to/earlier than …`` → BEFORE_OFFSET.
     5. ``how many <unit> … between|since`` (incl. ``between A and B, how
        many …``) → INTERVAL.
@@ -247,7 +279,7 @@ def classify_temporal_aggregate(
         return TemporalAggregateIntent(
             TemporalAggregateKind.COUNT, unit=None, distinct=True)
     m = _RE_TOTAL.search(q)
-    if m and not _RE_ELAPSED_MARKER.search(q):
+    if m and not _elapsed_marker(q):
         return TemporalAggregateIntent(
             TemporalAggregateKind.TOTAL, unit=_unit_of(m), distinct=True)
     if m:
