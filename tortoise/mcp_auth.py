@@ -353,11 +353,13 @@ async def await_under_wait_bound(task: asyncio.Task, timeout: float, *,
       BY THIS REQUEST AND STILL IN FLIGHT, ran during this wait, the load is
       drained OUTSIDE the budget and the bound THIS SEAM WAS GIVEN is re-armed
       for the request's own work — **at most once**, so a genuinely slow
-      request still breaches. It is the RESIDUAL on the MCP seam, which passes
-      ``_TRANSPORT_WAIT_BOUND_S - elapsed``; it is the transport constant on
-      REST, which passes that constant. This helper re-arms its argument and
-      cannot know which it was given, so a seam that wants a full re-arm must
-      pass a full bound;
+      request still breaches. WHICH bound that is differs by seam: REST passes
+      the transport constant, so it re-arms a full bound; the MCP seam passes
+      ``remaining``, which is the residual
+      (``_TRANSPORT_WAIT_BOUND_S - elapsed``) when there is a transport
+      arrival, and the FULL constant when there is none (stdio). This helper
+      re-arms its argument and cannot know which it was given, so a seam that
+      wants a full re-arm must pass a full bound;
     * ``timeout <= 0`` never exempts: a deadline that was already spent before
       this seam (the pre-SSE-stall path, where ``remaining`` collapsed to 0)
       is not a cold-start case, and the exactly-once refusal contract on that
