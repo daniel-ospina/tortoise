@@ -623,7 +623,7 @@ Each layer answers a different question. All four are live mechanisms.
 >
 > **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
 >
-> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; a caller that omits it takes the operator's canonicalized direction (see the *Transition state* note in the changelog above):
+> **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy:
 >
 > - **New-claim-attacks-existing-claim → `->`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
 > - **Mutual restatement → `<->`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
@@ -1134,9 +1134,6 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
 >
-> Confidence propagates across Events and Points. Object-level confidence is **derived** from the
-> Points attached to the Object — structural edges to Subjects and Objects carry a confidence
-> *attribute*, not EP (see §3.1 and §8).
 >
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
@@ -1410,9 +1407,6 @@ semantics `addresses`; the predicate distinguishes them.
 
 **The both-ways semantics name their mutuality** (`mutuallySupportive`, `mutuallyExclusive`); the
 one-way ones do not (`supports`, `refutes`).
-
-**This table is the core set.** Packs declare additional semantics values — `funds`, `managedBy`
-and `produces` (`packs/venture/manifest.yaml`) — which align onto these core values (#7852).
 
 ### Pack Relation Declarations
 
