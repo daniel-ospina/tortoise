@@ -28,11 +28,10 @@ protection) and the legacy path runs unchanged.
 """
 from __future__ import annotations
 
-import contextlib
 import logging
+import os
 import threading
 import time
-import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +109,73 @@ class FallbackSnapshotStore:
 
 _store = FallbackSnapshotStore()
 
+# Stable key for a ``:memory:`` projection whose client exposes no store
+# identity handle at all. All such projections share it, which buys
+# cacheability at the cost of per-store ISOLATION — not in one direction only:
+# this same tuple also keys the READ path (``sdk._fb_store.get(_key)``), so the
+# first such store to build caches its snapshot under it and a DIFFERENT store
+# is then served that snapshot, with no write required. That is acceptable only
+# because the branch is unreachable for a real client: a real embedded client
+# always exposes ``socket_file`` (on ``db`` or ``db.client``), and only a
+# client exposing no handle at all can land here — where two stores are
+# indistinguishable, so the real choice is a shared cacheable key versus a
+# per-call key that can never be hit. Reachability is nil today; if a real
+# client ever stops exposing a handle, this key must be revisited.
+_UNIDENTIFIED_MEMORY_STORE = "<unidentified-memory-store>"
+
+
+def _embedded_store_identity(proj) -> str:
+    """Identity of the embedded store a ``:memory:`` projection uses.
+
+    redislite keys its running-daemon registry by ``<cwd>/:memory:.settings``,
+    so every ``FalkorProjection`` over ``":memory:"`` in one CWD attaches to the SAME
+    daemon and the SAME graph — the second sees the first's writes. The corpus
+    identity must therefore be the STORE INSTANCE, not the projection: a
+    per-projection token gives two projections over one store two keys, so
+    ``_mark_dirty``'s ``invalidate`` reaches only the writer's key and a
+    sibling's cached snapshot survives the write — a just-written point stays
+    invisible and a just-deleted point is still served until the TTL (#7773
+    P1).
+
+    The registry path alone is only the SLOT, not the instance: a daemon that
+    replaces a dead one at the same ``<cwd>/:memory:.settings`` starts a fresh
+    (empty) graph, so a key on the slot matches the dead store's cached
+    snapshot and serves phantom points (#7773 review). The live daemon's
+    ``socket_file`` is preferred: every projection attached to one daemon
+    shares it, and a replacement daemon gets a new temp socket, so the identity
+    distinguishes instances while still unifying siblings. The registry path is
+    the fallback for a client that exposes only that.
+
+    When neither handle exposes a value, the key is a process-wide constant —
+    stable, shared by every such projection, and logged LOUDLY — rather than
+    re-minted per call. Sharing is NOT isolation-preserving: this tuple also
+    keys the read path, so one such store's snapshot is served to another. It
+    is safe only because the branch is unreachable for a real client — both a
+    real ``FalkorProjection`` and redislite expose ``socket_file``, so no real
+    store reaches here. The old code instead stamped a per-projection token and
+    suppressed the failed assignment, so a client that REJECTS the stamp
+    (``__slots__``/immutable) got a fresh key on every call: the entry could
+    never be cache-hit and the corpus re-fetch + TF-IDF re-fit ran silently on
+    every degraded search (#7773 P2).
+    """
+    db = getattr(proj, "db", None)
+    handles = (db, getattr(db, "client", None))
+    for attr in ("socket_file", "settingregistryfile"):
+        for handle in handles:
+            val = getattr(handle, attr, None)
+            if isinstance(val, str) and val:
+                return os.path.realpath(val)
+    logger.error(
+        "Fallback snapshot: the :memory: store identity is unavailable from "
+        "the projection's client (no socket_file/settingregistryfile) — using "
+        "the process-wide unidentified-store key. That key is cacheable but "
+        "NOT isolated: every such store shares one snapshot slot, so one "
+        "store's snapshot can be served to another on a read. A real client "
+        "always exposes a socket_file, so this branch should be unreachable "
+        "(#7773 P2).",
+    )
+    return _UNIDENTIFIED_MEMORY_STORE
+
 
 def snapshot_key(proj, namespace: str | None) -> tuple:
     """Identity of the corpus a snapshot describes.
@@ -124,20 +190,14 @@ def snapshot_key(proj, namespace: str | None) -> tuple:
     A server/URI graph carries no file, so its identity IS its graph name
     (already the first element), matching #3049; a process holding two servers
     that carry the SAME graph name is out of contract here and still shares a
-    slot (pre-existing, and unchanged by this key). ``:memory:`` is a fresh
-    server per projection with no file to key on, so a per-projection token is
-    stamped on first use. The token — never ``id(proj)`` — is the identity:
-    ``id()`` is recycled once the projection is collected, which would let a
-    later ``:memory:`` projection inherit a snapshot built before the first was
-    closed — the same cross-store disclosure this key exists to stop.
+    slot (pre-existing, and unchanged by this key). ``:memory:`` carries no
+    file either, but it is NOT a private store per projection: redislite
+    resolves it to a shared embedded daemon whose identity is its live socket
+    (``_embedded_store_identity``).
     """
     path = getattr(proj, "_path", None)
     if path == ":memory:":
-        backend = getattr(proj, "_snapshot_store_id", None)
-        if backend is None:
-            backend = ("memory", uuid.uuid4().hex)
-            with contextlib.suppress(AttributeError, TypeError):
-                proj._snapshot_store_id = backend
+        backend = ("memory", _embedded_store_identity(proj))
     else:
         from tortoise.projection import _prewipe_db_path_identity
         backend = _prewipe_db_path_identity(path)
