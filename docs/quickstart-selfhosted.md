@@ -648,11 +648,14 @@ polls the calendar every 60 s and starts recording when an upcoming event begins
 There is no per-meeting confirmation; the only notice is a notification that
 fires automatically as recording starts (it is not a prompt), and the trigger
 does not require the event to have guests.
-- **Transcript text leaves the machine.** A watcher runs `bridge.py`, which posts
+- **Transcript text is copied into a CRM.** A watcher runs `bridge.py`, which posts
 the first 50 lines of the transcript plus decisions and commitments as a note in
 a **self-hosted Twenty** instance, and the attendees' names and emails as contact
 records. Meeting title, decisions, and commitments (no transcript excerpt) also go
-to the local Tortoise graph. No hosted Premise Labs server is contacted.
+to the local Tortoise graph. Both destinations are local by default (Twenty on
+`localhost:3001`, the Tortoise daemon on `localhost:8000`) and no hosted Premise
+Labs server is contacted — but if you point `TWENTY_BASE_URL` at a remote host,
+the transcript excerpt is sent there.
 - **Meeting counterparties are not notified.** The people on the call are not
 asked to consent and are not told they are being recorded, by this software or by
 anything downstream of it. Enabling the integration is the operator's act of
