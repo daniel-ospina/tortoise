@@ -9,7 +9,6 @@ from __future__ import annotations
 import errno
 import logging
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -613,101 +612,88 @@ def test_the_tolerated_leak_artifact_is_wired_into_session_teardown():
         "or the tolerated leak reaches no CI surface (#7735 review, F1/F2)")
 
 
-# Scope: the workflows whose jobs run the `tests/` UNIT suite and therefore own
-# the #7735 leak surface. Deliberately NOT repo-wide. The surfaces this pin does
-# NOT cover are named here with their reason, so the gap is deliberate and
-# visible instead of resting on a false "those are e2e-only" inference:
+# The CI jobs this PR makes leak-observable, named EXACTLY.
 #
-#   * `ci.yml::welcome-e2e`, `welcome-e2e-monitor.yml` and the `evals-on-demand`
-#     lanes run TARGETED file selections (e.g. tests/test_waitlist_form.py,
-#     tests/eval/retrieval/test_integration.py), not the suite. They do import
-#     `tests/conftest.py` and so install the tolerance, but the files they run
-#     construct no `TemporaryDirectory`, so no leak can be tolerated there.
-#   * `ci.yml::flip-gate` runs `bash .github/scripts/verify-cutover`, which runs
-#     pytest on ten unit files (incl. tests/test_backup_sweep.py, which has 46
-#     `TemporaryDirectory(` sites) from INSIDE A SHELL SCRIPT. No step there
-#     surfaces the artifact today, and this pin cannot see it because it scans
-#     step `run` text. Recorded as a known gap and tracked as follow-up on
-#     #7735 — not silently excluded.
+# WHY A FROZEN LIST AND NOT A REPO-WIDE SCAN. Three earlier revisions derived
+# "every pytest job" from the workflow text. Four review rounds each found
+# another hole in that derivation — bare `pytest`, `pip install … && pytest`,
+# `./.venv/bin/pytest`, a path named only in a trailing comment, a mention in an
+# unrelated step — because "every pytest job in the repository" is a claim about
+# PROCESS, which a text scan cannot certify; each fix only moved the boundary
+# (#7735 reviews, rounds 1-4). What this pin asserts instead is the behaviour
+# this PR actually delivers: the jobs below surface the artifact. Adding a
+# pytest job that runs the unit suite is a deliberate one-line addition here —
+# the same act as giving it a dump step.
 #
-# A new suite-running workflow must be added here deliberately.
-_SUITE_WORKFLOWS = ("python-ci.yml", "post-merge-validation.yml")
-# A pytest INVOCATION, not a mention: bare `pytest`, `python -m pytest`,
-# `python3 -m pytest`, `uv run pytest`. A literal allowlist of four strings let
-# `pytest -q tests/` and bare `pytest` be added blind (#7735 review, round 3).
-_PYTEST_CMD = re.compile(
-    r"python3?\s+-m\s+pytest|uv\s+run\s+pytest|(?<![\w./-])pytest(?![\w.-])")
-# A package install is not an invocation: a `pip install ... pytest-timeout …`
-# line must not make a job look like it runs the suite.
-_INSTALL_LINE = re.compile(r"\bpip3?\s+install\b")
+# DELIBERATELY NOT COVERED (recorded, not silently missed): `ci.yml::flip-gate`
+# runs `bash .github/scripts/verify-cutover`, which runs pytest on ten unit
+# files (incl. tests/test_backup_sweep.py, ~46 `TemporaryDirectory(` sites) from
+# INSIDE A SHELL SCRIPT — no step-level scan can see that, and no step there
+# surfaces the artifact today. That is follow-up on #7735, not a silent gap.
+_LEAK_SURFACED_JOBS = (
+    "python-ci.yml::test",
+    "python-ci.yml::test-slow",
+    "python-ci.yml::test-concurrency-falkor",
+    "python-ci.yml::test-track-b",
+    "python-ci.yml::test-carve-out",
+    "python-ci.yml::test-d14-hosted-api",
+    "post-merge-validation.yml::validate",
+)
+_ARTIFACT = "tempdir-hygiene-end.json"
 
 
-def _executable_lines(run: str) -> list[str]:
-    """The run text minus comment lines.
+def _surfaces_artifact(step_run: str) -> bool:
+    """True when this ONE step both names the artifact and reads it out.
 
-    A bare substring check over the whole ``run`` was satisfied by a COMMENT
-    that merely mentioned the artifact, certifying "the string occurs" rather
-    than "the artifact is surfaced" (#7735 review, round 3).
+    Comment lines and trailing `#` comments are stripped first, because a bare
+    substring check was satisfied by a comment that merely mentioned the path —
+    certifying "the string occurs" rather than "the artifact is surfaced"
+    (#7735 review, round 3). The two halves are required within the same step,
+    so an unrelated `cat` elsewhere in the job cannot stand in.
+
+    Boundary: this is a TEXT-level check. It requires the `cat` this repo's
+    seven delivered steps all use; a future rewrite to `jq`/`head` must update
+    this pin. It cannot prove the shell executed — only that the step would
+    print the file.
     """
-    return [ln for ln in run.splitlines() if not ln.lstrip().startswith("#")]
-
-
-def _runs_pytest(runs: list[str]) -> bool:
-    return any(
-        _PYTEST_CMD.search(ln) and not _INSTALL_LINE.search(ln)
-        for run in runs for ln in _executable_lines(run))
-
-
-def _surfaces_artifact(runs: list[str]) -> bool:
-    """True when some run both names the artifact and reads it out.
-
-    Both halves are required on EXECUTABLE lines: the pin's job is that a
-    tolerated leak is OBSERVABLE, and a run that only names the file in a
-    comment (or only `cat`s something else) does not surface it.
-    """
-    lines = [ln for run in runs for ln in _executable_lines(run)]
-    names = any("tempdir-hygiene-end.json" in ln for ln in lines)
+    lines = [
+        ln.split("#", 1)[0]
+        for ln in step_run.splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    names = any(_ARTIFACT in ln for ln in lines)
     reads = any("cat" in ln.split() for ln in lines)
     return names and reads
 
 
-def test_every_pytest_job_surfaces_the_tolerated_leak():
+def test_suite_jobs_surface_the_tolerated_leak():
     """#7735 review F1: the report is visible only where the workflow dumps it.
 
-    Scope: every job that INVOKES pytest in a workflow listed in
-    ``_SUITE_WORKFLOWS`` — NOT every pytest job in the repo; the constant's
-    comment names the surfaces deliberately outside it and why.
-
-    A job that runs the suite installs the process-global tolerant cleanup (via
-    ``tests/conftest.py``) and can therefore write the artifact — but only a job
-    whose workflow surfaces that file can report a tolerated leak. The first
-    revision dumped it in the ``test`` job alone, so the ``test-slow`` legs that
-    #7735 was actually measured on stayed blind. Derived from the workflow text
-    — never a frozen list of job names, which would re-stale the moment a
-    pytest job is renamed or added.
+    Every job in ``_LEAK_SURFACED_JOBS`` must carry a step that prints
+    ``tempdir-hygiene-end.json`` — see that constant for the scope and for the
+    surfaces deliberately outside it. The first revision dumped the artifact in
+    the ``test`` job alone, so the ``test-slow`` legs #7735 was actually
+    measured on stayed blind; a job that only NAMES the path still reports
+    nothing, so this asserts the two together.
     """
     import yaml
 
     root = Path(__file__).resolve().parent.parent
-    blind: list[str] = []
-    covered: list[str] = []
-    for wf_name in _SUITE_WORKFLOWS:
+    missing: list[str] = []
+    for entry in _LEAK_SURFACED_JOBS:
+        wf_name, job_name = entry.split("::", 1)
         wf = yaml.safe_load(
             (root / ".github" / "workflows" / wf_name).read_text())
-        for job_name, job in wf["jobs"].items():
-            runs = [step.get("run") or "" for step in (job.get("steps") or [])]
-            if not _runs_pytest(runs):
-                continue
-            if _surfaces_artifact(runs):
-                covered.append(f"{wf_name}::{job_name}")
-            else:
-                blind.append(f"{wf_name}::{job_name}")
-    assert covered, (
-        "no job in the suite workflows runs pytest — the scan found nothing "
-        "to certify, so this pin would pass on an empty surface")
-    assert blind == [], (
-        "these jobs run pytest but never surface the tolerated-leak artifact "
-        f"(#7735 review F1): {blind}")
+        job = (wf.get("jobs") or {}).get(job_name)
+        if job is None:
+            missing.append(f"{entry} (no such job in {wf_name})")
+            continue
+        runs = [step.get("run") or "" for step in (job.get("steps") or [])]
+        if not any(_surfaces_artifact(run) for run in runs):
+            missing.append(entry)
+    assert missing == [], (
+        "these jobs do not surface the tolerated-leak artifact "
+        f"(#7735 review F1): {missing}")
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])

@@ -1315,7 +1315,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
@@ -1853,7 +1853,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
@@ -2073,7 +2073,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
@@ -2267,7 +2267,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
@@ -2643,7 +2643,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
@@ -2811,7 +2811,7 @@ jobs:
         # serial (`XDIST_WORKERS=0`), so a single
         # session owns the path. Informational: the step never fails the job.
         # Every job that runs pytest carries this step (pinned by
-        # tests/test_tmpdir_hygiene.py::test_every_pytest_job_surfaces_the_tolerated_leak).
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
         if: always()
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
