@@ -635,26 +635,54 @@ TURN_POINT_KIND = "event"
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
     pool's bucket key (C4 #2517). ``session_id`` when present, else the
-    synthetic ``idx:{lme_session_index}`` bucket. :func:`dedup_pool` and
-    :func:`guard_and_recap_pool` default to it, and
-    ``coverage_loop._session_of`` delegates to it (function-local import —
-    the module stays a stdlib-only leaf at import time).
+    synthetic ``idx:{lme_session_index}`` bucket, else — for a hit carrying
+    no session identity at all — a PER-HIT bucket ``idx:point:{id}``
+    (#3591). :func:`dedup_pool` and :func:`guard_and_recap_pool` default to
+    it, and ``coverage_loop._session_of`` delegates to it (function-local
+    import — the module stays a stdlib-only leaf at import time).
 
-    Collapse semantics (deliberate, pinned by
-    ``tests/test_session_reinjection_rules.py::test_session_key_matches_
-    the_historical_bucket_key``): a hit carrying NEITHER ``session_id`` NOR
-    ``lme_session_index`` maps to the single bucket ``idx:-1``. Two
-    identity-less hits therefore cap together under the C5 per-session
-    cap, and :func:`seeded_sessions` drops them all as phantom ``idx:``
-    buckets (never a real graph ``p.session_id``). This is a PRE-EXISTING
-    product collapse, not a C4 decision: the key expression is the
-    historical one (unchanged here), and the product-side fix is tracked in
-    #3591 (with the sibling camel-``sessionId`` gap in #4155) — C4 documents
-    and pins it; it introduces and fixes nothing. Hits that DO carry an
-    ``lme_session_index`` are distinct per index even when ``session_id``
-    is absent/empty (``""`` is falsy but not identity-less)."""
-    return (hit.get("session_id")
-            or f"idx:{hit.get('lme_session_index', -1)}")
+    Identity semantics, in precedence order (#3591):
+
+    * ``session_id`` present and truthy ⇒ that id;
+    * else ``lme_session_index`` PRESENT (an explicit ``-1`` included) ⇒
+      ``idx:{n}``, the eval lane's own index bucket. Distinct indices are
+      distinct buckets even when ``session_id`` is absent/empty (``""`` is
+      falsy but not identity-less), and an explicit ``-1`` is an explicit
+      sentinel rather than indistinguishability — which is why it keeps the
+      historical key and is NOT rerouted to the per-hit bucket below;
+    * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
+      are two DISTINCT entities and must not share a bucket. Before #3591
+      both read ``idx:-1``, so the C5 per-session cap
+      (``max_chunks_per_session``) was applied across ALL of them at once
+      and unrelated content was dropped collectively — measured 5-in/3-out
+      at ``cap=3`` and 2-in/1-out at ``cap=1``, on chunks whose content had
+      nothing to do with each other;
+    * a hit carrying none of the three (no ``id`` either) still maps to
+      ``idx:-1``. That is the only bucket for which there is genuinely
+      nothing to key on, and it is not reachable from a real pool hit
+      (``seeded_sessions`` documents that pool hits always carry their id).
+
+    Every ``idx:*`` key is a PHANTOM with respect to a graph session: it
+    names no ``p.session_id``, so
+    :func:`tortoise.session_reinjection.seeded_sessions` drops it and
+    ``coverage_loop.coverage_gap`` excludes it from the window census — a
+    hit with no session identity cannot seed a session fetch. #3591 made
+    the phantom bucket PER-HIT; it did not make it fetchable.
+
+    Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
+    matches_the_historical_bucket_key`` (the three historical cases, all
+    unchanged) and ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
+    (the #3591 case)."""
+    session_id = hit.get("session_id")
+    if session_id:
+        return session_id
+    index = hit.get("lme_session_index")
+    if index is not None:
+        return f"idx:{index}"
+    point_id = hit.get("id")
+    if point_id:
+        return f"idx:point:{point_id}"
+    return "idx:-1"
 
 
 def ask_session_key(hit: dict) -> str:
@@ -678,8 +706,16 @@ def ask_session_key(hit: dict) -> str:
          bucket. Deliberate — the date is a fallback for a hit the fetch
          could not name, never a substitute for the name;
       4. ``idx:{lme_session_index}`` — the eval lane's index bucket; key
-         absent ⇒ the single identity-less bucket ``idx:-1`` (the collapse
-         :func:`session_key_of` documents, whose product-side fix is #3591).
+         absent ⇒ the single identity-less bucket ``idx:-1``.
+
+    ⚠️ That last leg is a DELIBERATE residual here, and it is NOT the gap
+    #3591 closed: #3591 fixed ``session_key_of``'s collapse with a per-hit
+    ``idx:point:{id}`` bucket, while THIS key keeps its own identity-less
+    bucket on purpose — it is the CONTROL that
+    ``tests/test_ask_sdk.py::test_date_leg_never_narrows_the_chunk_pool``
+    (#4106, re-measured after #4155) measures the date leg against, so it
+    moves only together with that measurement, never with a change to the
+    default key.
 
     Distinct IDENTIFIED sessions never share a bucket.
     """
@@ -701,11 +737,14 @@ def dedup_pool(annotated: list[dict], *,
                session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    :func:`session_key_of` (the hit's session_id when present, else its
-    lme_session_index) —
-    distinct IDENTIFIED sessions never share a bucket. The sole shared
-    bucket is ``idx:-1``, for hits carrying neither identity (see
-    :func:`session_key_of`).
+    :func:`session_key_of` (session_id, else the ``lme_session_index``
+    bucket, else — #3591 — a PER-HIT bucket for a hit with no session
+    identity) —
+    distinct sessions never share a bucket, and neither do two distinct
+    identity-less hits. The only shared bucket left is ``idx:-1``, for a hit
+    with nothing at all to key on (see :func:`session_key_of`).
+    ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
+    identity-less population: the pool-wide budget is what bounds it.
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
