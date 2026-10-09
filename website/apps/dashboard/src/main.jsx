@@ -956,11 +956,20 @@ const copyFailedKey = (text) => `${COPY_FAILED}|${text}`
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
   const [copyFailed, setCopyFailed] = React.useState(false)
+  // #2935 (review 4): the success flash timer must be CANCELLED, not merely
+  // value-guarded — `copied` is a boolean, so it cannot tell two successes
+  // apart, and this card is reconciled in place across a prompt change, so a
+  // pending timer from prompt A would fire and truncate prompt B's own flash.
+  const copyTimerRef = React.useRef(null)
   // #2935 (review P2): the card is reconciled IN PLACE across harness switches
   // (it renders inside a stable WizardBlock with no `key`), so a refusal on one
   // prompt left 'Copy failed' on the NEXT one — a payload never attempted, the
   // mirror of the defect this PR fixes. `copied` had the same latent staleness.
-  React.useLayoutEffect(() => { setCopied(false); setCopyFailed(false) }, [text])
+  React.useLayoutEffect(() => {
+    setCopied(false)
+    setCopyFailed(false)
+    return () => clearTimeout(copyTimerRef.current)
+  }, [text])
   // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
   // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
   // landmarks, and a shared "Setup prompt" name made them
@@ -982,7 +991,8 @@ function WizardPromptCard({ text, label }) {
     }
     setCopyFailed(false)
     setCopied(true)
-    setTimeout(() => setCopied(false), 1600)
+    clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1600)
   }, [text])
   return (
     <div className="wizard-prompt-card">

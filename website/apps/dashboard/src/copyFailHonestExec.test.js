@@ -250,18 +250,28 @@ export function clipboardWriteOffences(src) {
       || /\bClipboardItem\b/.test(line)
     if (!isCopy) return
     const at = line.search(/\bwriteText\b|\bexecCommand\s*\(|\bClipboardItem\b/)
-    const before = line.slice(0, at < 0 ? 0 : at)
+    // The bracket form's key is a blanked string body, so on the stripped line
+    // the match is at -1 — take `before` from the RAW line there, or an
+    // awaited bracket call reads as un-awaited (a false red).
+    const bracketAt = at < 0 ? rawLine.search(/\[\s*['"]writeText['"]\s*\]/) : -1
+    const before = at < 0 ? rawLine.slice(0, bracketAt < 0 ? 0 : bracketAt) : line.slice(0, at)
     // `await` must govern THIS call: since the last statement boundary, or as
     // the trailing token of the previous line. An unrelated earlier
     // `await foo();` does not count.
     const awaitedHere = /\bawait\b/.test(before.slice(before.lastIndexOf(';') + 1))
     const prevLine = i > 0 ? lines[i - 1] : ''
-    const awaitedPrev = /\bawait\b\s*\(?\s*$/.test(prevLine)
+    // An earlier `await` on the previous line governs this call as long as that
+    // statement was not already terminated — `await foo();` followed by the
+    // write does NOT make the write awaited (the round-3 evasion).
+    const awaitedPrev = /\bawait\b/.test(prevLine) && !/;\s*$/.test(prevLine)
     if (awaitedHere || awaitedPrev) return
     // `.then`/`.catch` must be attached to THIS write's own call — `[^;]*?`
     // cannot cross a statement boundary, so a `.catch` belonging to an unrelated
     // call later on the line no longer makes the write look observed.
     if (/\bwriteText\b[^;]*?\)\s*\.(then|catch)\s*\(/.test(line)) return
+    // A handler chained on the NEXT line is equally observant.
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : ''
+    if (/^\s*\.\s*(then|catch)\s*\(/.test(nextLine)) return
     offences.push(`main.jsx:${i + 1}: ${(raw[i] || '').trim()}`)
   })
   return offences
@@ -306,6 +316,11 @@ test('#2935 TRIPWIRE does not cry wolf on an observed rejection', () => {
     'await\nnavigator.clipboard.writeText(x)',
     'const s = `see navigator.clipboard.writeText(x)`',
     'const s = "navigator.clipboard.writeText(x)"',
+    // The four round 4 named:
+    'await navigator.clipboard["writeText"](x)',
+    'await navigator.clipboard?.["writeText"]?.(x)',
+    'navigator.clipboard.writeText(x)\n  .catch(() => {})',
+    'await navigator.clipboard\n  .writeText(x)',
   ]
   handled.forEach((line) => {
     assert.deepEqual(clipboardWriteOffences(line), [], `must NOT flag: ${line}`)
