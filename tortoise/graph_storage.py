@@ -18,11 +18,19 @@ handle.
    **100**, up to 10,000) and *averages* them; it is not an exact allocation.
 2. **It EXCLUDES per-graph / Redis-key overhead** (the graph's registry entry
    and auxiliary keys are not in the figure).
+3. **⛔ It is BLIND to the HNSW vector index** — measured 17.9-21.7x
+   under-report on the index share, and ~2x on the total, because the index
+   lives in the separately-loaded ``vectorset`` module. See
+   :data:`VECTOR_INDEX_EXCLUDED`. For a vector-bearing graph this is the single
+   largest resident component, so the reading is a PARTIAL measurement rather
+   than a conservative one.
 
 ⇒ So the meter reports a **range** (``min_mb``/``max_mb``/``spread_mb``), the
 ``SAMPLES`` count it used, and the number of ``repeats``, and it does not
-claim a precision it does not have. **That is acceptable as a CAP INPUT; it is
-NOT invoice-grade.** The sentence is carried verbatim on every reading
+claim a precision it does not have. **That is acceptable as a CAP INPUT for a
+graph with NO vector index; it is NOT a cap input for a vector-bearing graph,
+where it cannot see the dominant resident component** (see
+:data:`VECTOR_INDEX_EXCLUDED`). It is NOT invoice-grade either way. The sentence is carried verbatim on every reading
 (:data:`PRECISION_NOTE`, ``GraphStorageReading.precision_note``) so a reader
 cannot consume the number without it.
 
@@ -51,6 +59,7 @@ __all__ = [
     "PRECISION_NOTE",
     "SAMPLES_DEFAULT",
     "SAMPLES_MAX",
+    "VECTOR_INDEX_EXCLUDED",
     "GraphStorageReading",
     "measure_and_record_graph_storage",
     "measure_graph_storage",
@@ -77,20 +86,66 @@ SAMPLES_MAX = 10_000
 # couple of dozen is a typo, not a tighter estimate.
 REPEATS_MAX = 32
 
+#: ⛔ THE VECTOR INDEX IS NOT IN THIS READING — measured, not inferred.
+#:
+#: FalkorDB's HNSW vector index lives in a SEPARATELY-LOADED module
+#: (``MODULE LIST`` shows ``graph`` ver 60001 AND ``vectorset`` ver 1), outside
+#: both the graph's memory accounting and Redis key accounting: creating the
+#: index does NOT change the db0 key count, and ``indices_sz_mb`` does not
+#: respond to it AT ALL. Measured 2026-10-08 on a dedicated engine, 20,000
+#: nodes x 384 dims, Redis-level ``used_memory`` delta across the build
+#: (persistence OFF, so no BGSAVE fork-COW in the signal):
+#:
+#:   M    efC   build     true index   ``indices_sz_mb``   blind by
+#:    4   200   191.8 s     35.75 MiB        2.00 MB          17.9x
+#:    8   200   397.3 s     35.39 MiB        2.00 MB          17.7x
+#:   16    40   389.7 s     43.41 MiB        2.00 MB          21.7x
+#:   16   100   439.0 s     43.33 MiB        2.00 MB          21.7x
+#:   16   200   436.5 s     43.28 MiB        2.00 MB          21.6x  <- live default
+#:   32   200   442.0 s     33.92 MiB        4.00 MB           8.5x
+#:
+#: ``indices_sz_mb`` reported 2.00 MB IDENTICALLY across every config — it does
+#: not track the vector index's size and does not move with M or efConstruction.
+#: The TOTAL is understated too: the meter read 50.00 MB while the engine held
+#: 58.33 MiB of data + 43.28 MiB of index (~2x low overall).
+#:
+#: ⇒ For a VECTOR-BEARING graph the reported figure omits the single largest and
+#: most expensive resident component. Measured, not theorised: this is why the
+#: reading no longer claims to be safe as a cap input. The durable fix is a
+#: vendor answer (is there a supported way to size a tenant's vectors?), which
+#: is asked on `#5331` / the FalkorDB thread; until it lands, a cap MUST NOT be
+#: wired to this number for vector-bearing tenants.
+VECTOR_INDEX_EXCLUDED = (
+    "the HNSW VECTOR INDEX, which lives in the separately-loaded 'vectorset' "
+    "module and is absent from BOTH `total_graph_sz_mb` and `indices_sz_mb` "
+    "(measured 17.9-21.7x under-report; `indices_sz_mb` did not vary with the "
+    "index at all)"
+)
+
 #: What ``GRAPH.MEMORY USAGE`` does NOT include. The strings are part of the
 #: reading (not only of this docstring) because a consumer that only ever sees
 #: the number must still be able to read what it leaves out.
 EXCLUDED_OVERHEAD: tuple[str, ...] = (
     "per-graph overhead (the graph's registry entry and per-graph metadata)",
     "Redis-key overhead (the graph key and auxiliary keys)",
+    VECTOR_INDEX_EXCLUDED,
 )
 
 #: The one sentence a reader must see. Carried on every reading (and in its
 #: ``as_dict()``) so the estimate can never be consumed as an invoice figure.
+#:
+#: ⛔ The earlier wording ended "Acceptable as a CAP INPUT" — that claim was
+#: FALSE and is corrected here rather than deleted, because it is the sentence a
+#: cap designer would have acted on. A meter that cannot see the largest resident
+#: component of a vector-bearing graph is not a cap input; it is a partial
+#: reading with a documented blind spot.
 PRECISION_NOTE = (
     "SAMPLING ESTIMATE, not an exact allocation (FalkorDB averages SAMPLES "
-    "nodes/edges), and it EXCLUDES per-graph and Redis-key overhead. "
-    "Acceptable as a CAP INPUT; NOT invoice-grade."
+    "nodes/edges), and it EXCLUDES per-graph and Redis-key overhead "
+    "AND the HNSW vector index. For a vector-bearing graph the total is "
+    "understated ~2x and the index share by 17.9-21.7x. DO NOT use this "
+    "reading as a cap or cost input until the vector index is measurable. "
+    "NOT invoice-grade."
 )
 
 

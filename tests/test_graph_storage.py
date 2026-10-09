@@ -28,6 +28,7 @@ from tortoise import graph_storage
 from tortoise.graph_storage import (
     EXCLUDED_OVERHEAD,
     PRECISION_NOTE,
+    VECTOR_INDEX_EXCLUDED,
     REPEATS_MAX,
     SAMPLES_DEFAULT,
     SAMPLES_MAX,
@@ -417,6 +418,40 @@ def test_reading_carries_the_two_caveats():
     assert "SAMPLING ESTIMATE" in r.precision_note
     assert "EXCLUDES" in r.precision_note
     assert "NOT invoice-grade" in r.precision_note
+
+
+def test_reading_declares_the_vector_index_blind_spot():
+    """⛔ #5331: the meter cannot see the HNSW vector index (#5331-review).
+
+    Measured on a dedicated engine: ``indices_sz_mb`` reported 2.00 MB
+    IDENTICALLY across six configs whose true index cost 33.92-43.41 MiB — a
+    17.9-21.7x under-report that does not move with ``M`` or ``efConstruction``.
+    The index lives in the separately-loaded ``vectorset`` module, so it is in
+    NEITHER the total NOR the index share.
+
+    This is the load-bearing pin: the reading previously said "Acceptable as a
+    CAP INPUT", and a cap wired to it would charge for the cheap part of a
+    vector-bearing tenant while missing the component that dominates residency.
+    """
+    r = measure_graph_storage(_FakeClient([_reply(9)]), "org_x")
+    # the blind spot is on the reading, not only in the docstring
+    assert any("VECTOR INDEX" in e for e in r.excludes), r.excludes
+    assert "vector index" in r.precision_note
+    # and the false all-clear is GONE — a cap designer must not read it
+    assert "Acceptable as a CAP INPUT" not in r.precision_note
+    assert "DO NOT use this" in r.precision_note
+    # the measured magnitude travels and is discoverable as a constant
+    assert "17.9-21.7x" in PRECISION_NOTE
+    assert "17.9-21.7x" in VECTOR_INDEX_EXCLUDED
+
+
+def test_as_dict_carries_the_vector_blind_spot():
+    """GUARD: a consumer reading only the dict still learns what is missing."""
+    d = measure_graph_storage(_FakeClient([_reply(9)]), "org_x").as_dict()
+    excludes = " | ".join(d["graph_storage_excludes"])
+    assert "VECTOR INDEX" in excludes
+    assert "17.9-21.7x" in excludes
+    assert "vector index" in d["graph_storage_precision_note"]
 
 
 def test_as_dict_carries_the_caveats_too():
