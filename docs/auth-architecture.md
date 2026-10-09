@@ -398,8 +398,7 @@ consent page in `tortoise/oauth.py` writes it independently (§2.1), and migrati
 that page off it is **#3524**. Whether the cookie is still ACCEPTED as a
 credential is settled — by the consent page that issues it, and by no other
 surface: that page's inline supabase client reads it back as its session (§2.1;
-#4178 removed the last two OTHER consumers). The
-dashboard's auth state comes
+**#4178** removed the last two OTHER consumers). The dashboard's auth state comes
 from `functions/api/session.ts` and its bounce is a local same-origin
 `location.replace` built by `src/authBounce.js::authBounceTarget({ pathname:
 window.location.pathname, search, errorHash })` — a `/auth?<search>&next=<pathname+query>` target

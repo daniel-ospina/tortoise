@@ -219,7 +219,8 @@ export function isRefreshTokenDead(status: number, errorBody: string): boolean {
  *     undecodable JWT, `PGRST302` for a rejected/absent bearer, `PGRST303` for
  *     a claims failure, a message like `JWT expired`, or a GoTrue code such as
  *     `invalid_jwt` / `unusable_credential`) when it is the USER's bearer that
- *     was rejected.
+ *     was rejected. A bare mention of `jwt` is NOT such a signal (see the
+ *     message-fallback narrow below).
  *
  * Treating the first as "you are not an admin" (or as a re-auth bounce) is the
  * #3485 class: a deployment fault read as a session verdict. Status cannot tell
@@ -266,7 +267,21 @@ export function isUserTokenRejection(status: number, errorBody: string): boolean
   const text = [parsed.error, parsed.msg, parsed.message, parsed.error_description]
     .filter((v): v is string => typeof v === "string")
     .join(" ");
-  return /pgrst30[123]|\bjwt\b|invalid (?:token|claim)|token (?:has )?expired/i.test(text);
+  // The MESSAGE fallback is deliberately NARROW (#3559 review round 3). A bare
+  // `jwt` is NOT a verdict: PostgREST answers a request-level parse error with
+  // `PGRST100`, and an envelope such as
+  // `{"code":"PGRST100","message":"Your jwt configuration was rotated by an
+  // administrator"}` names the term while saying nothing about a rejected
+  // credential. Reading those as a sign-out is the #3485 direction — it clears
+  // a live session over a benign envelope. The JWT term must CO-OCCUR with a
+  // rejection/expiry verb; `pgrst30[123]`, `invalid token`/`invalid claim` and
+  // `token expired` still stand alone, and anything unrecognised stays a fault.
+  const jwtTerm = /\bjwt\b|json\s*web\s*token/i.test(text);
+  const rejectionVerb = /\b(?:expired|invalid|missing|revoked|malformed|rejected)\b/i.test(text);
+  return (
+    /pgrst30[123]|invalid (?:token|claim)|token (?:has )?expired/i.test(text) ||
+    (jwtTerm && rejectionVerb)
+  );
 }
 
 export async function refreshSession(

@@ -120,3 +120,45 @@ test('P2-4: an unrecognised code or a service-key fault stays a fault (503)', ()
     )
   }
 })
+
+// ── Round 3 (#7749 residual): a bare `jwt` in a BENIGN envelope is not a verdict ──
+//
+// The message fallback matched `\bjwt\b` on its own. PostgREST answers a
+// REQUEST-level parse error with `PGRST100`, and these three bodies name the
+// term while saying nothing about a rejected credential: matching them clears a
+// live session over a benign envelope — the #3485 direction (a fault read as a
+// credential verdict). The term must co-occur with a rejection/expiry verb.
+test('round 3: a benign `jwt` mention in a PGRST100 envelope stays a fault (503)', () => {
+  const benign = [
+    '{"code":"PGRST100","message":"Your jwt configuration was rotated by an administrator"}',
+    '{"code":"PGRST100","message":"Contact support about your JWT settings"}',
+    '{"code":"PGRST100","message":"unexpected \\"jwt\\" in query selector"}',
+  ]
+  for (const body of benign) {
+    assert.equal(
+      classifier.isUserTokenRejection(401, body),
+      false,
+      `body=${body} names \`jwt\` but reports no rejected credential — must be a FAULT (503)`,
+    )
+  }
+})
+
+// Positive control for the narrowing: the co-occurrence requirement must not
+// kill the genuine signal. Each body carries the `jwt` term WITH a
+// rejection/expiry verb, and each must still sign the user out.
+test('round 3: a `jwt` term WITH a rejection/expiry verb is still a sign-out', () => {
+  const rejections = [
+    [401, JSON.stringify({ message: 'JWT expired' })],
+    [401, JSON.stringify({ message: 'invalid JWT: unable to parse or verify signature' })],
+    [401, JSON.stringify({ msg: 'JWT is malformed' })],
+    [403, JSON.stringify({ error: 'jwt revoked' })],
+    [401, JSON.stringify({ message: 'jwt missing' })],
+  ]
+  for (const [status, body] of rejections) {
+    assert.equal(
+      classifier.isUserTokenRejection(status, body),
+      true,
+      `status=${status} body=${body} must be a sign-out`,
+    )
+  }
+})
