@@ -165,11 +165,14 @@ _RE_TOTAL = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\b[^?]*?"
     r"\b(?:in\s+total|in\s+all|altogether|combined|total)\b",
     re.IGNORECASE)
-#: An elapsed-time marker ("since"/"between") makes a question INTERVAL,
-#: not a summed span: "how many weeks IN TOTAL have passed SINCE …" would
-#: otherwise classify TOTAL and let the resolver sum event spans while the
-#: caller supplied the true anchors.
-_RE_ELAPSED_MARKER = re.compile(r"\b(?:since|between)\b", re.IGNORECASE)
+#: An elapsed-time marker ("since") makes a question INTERVAL, not a summed
+#: span: "how many weeks IN TOTAL have passed SINCE …" would otherwise
+#: classify TOTAL and let the resolver sum event spans while the caller
+#: supplied the true anchors. "between" is deliberately NOT here: it is also
+#: the LIST form ("in total … travelled between New York, Boston and DC"),
+#: which is a genuine sum, and :data:`_RE_INTERVAL` claims the interval
+#: reading on its own.
+_RE_ELAPSED_MARKER = re.compile(r"\bsince\b", re.IGNORECASE)
 # before-offset: "how many <unit> before/prior to/earlier than <X> …"
 _RE_BEFORE_OFFSET = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\s+"
@@ -181,7 +184,7 @@ _RE_BEFORE_OFFSET = re.compile(
 _RE_INTERVAL = re.compile(
     r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?|time)\b[^?]*?"
     r"\b(?:between|since)\b"
-    r"|^\s*between\b[^?]*?,\s*how\s+many\s+"
+    r"|^\s*(?:between|since)\b[^?]*?,\s*how\s+many\s+"
     r"(?P<unit2>days?|weeks?|months?|years?)\b",
     re.IGNORECASE)
 # duration: "how many <unit> did I spend/take", "how many <unit> have I been",
@@ -326,13 +329,17 @@ def _overlap_ratio(a: str, b: str) -> float:
     near-symmetric guard (max/min < 1.5) so an asymmetric token-subset is
     never folded. Kept local to avoid importing a private symbol.
 
-    DELIBERATE DEVIATION: the borrowed band floor (:data:`NOOP_MIN_OVERLAP`
-    from ``extractor_v2``) is applied here to a ratio computed over the
-    NORMALIZED content key, whereas the extractor computes its ratio over
-    ``_norm_sent`` output. The statistic therefore differs from the one the
-    floor was calibrated against — documented rather than silently forked;
-    if the extractor's guard or floor moves, this comparison and
-    :data:`NOOP_MIN_OVERLAP` must be revisited together."""
+    DELIBERATE DEVIATION: :data:`NOOP_MIN_OVERLAP` is the BAND FLOOR, but the
+    statistic it is compared against here is not the one the floor is
+    calibrated on. The committed consumer is ``extractor_v2._token_overlap``
+    — a MAX denominator plus its ``shared >= 2`` token floor — while this
+    function uses a MIN denominator with a 1.5 near-symmetric guard, over the
+    normalized content key rather than ``_norm_sent`` output. The local
+    statistic is therefore >= the committed one for the same pair, i.e. on the
+    RATIO alone this band is the looser of the two; every fold is still
+    decided by the committed ``fold_allowed`` gate, so the deviation is a
+    precision caveat rather than a silent widening. If the extractor's floor,
+    guard, or statistic moves, revisit this comparison with it."""
     ta, tb = set(a.split()), set(b.split())
     if not ta or not tb:
         return 0.0
@@ -520,9 +527,10 @@ def count_distinct_events(
     restatement trap closed).
 
     Deterministic canonicalisation: events are ordered by
-    ``(session_date, event_id, normalized content)`` — a total key, so
-    same-date / undated identity-less rows never tie-break on input index —
-    and identity clusters are resolved order-independently (union-find over
+    ``(session_date, event_id, normalized content, span bounds)`` — a total
+    key, so same-date / undated identity-less rows never tie-break on input
+    index, and the TOTAL path's cluster span cannot follow input order — and
+    identity clusters are resolved order-independently (union-find over
     the pairwise fold relation), so the count does not depend on input
     order. Identity is exclusive: an explicit event id collapses ONLY a
     repeated occurrence of the same id,

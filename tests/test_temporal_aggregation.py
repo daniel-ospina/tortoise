@@ -470,6 +470,20 @@ def test_elapsed_marker_beats_the_total_marker():
         q, start="2025-01-01", end="2025-06-01")
     assert res.value == difference_in_unit("2025-01-01", "2025-06-01", "weeks")
     assert res.reason is None
+    # The suppression must not be a blanket word-match:
+    #   * "between" as a LIST is a genuine sum, not an interval;
+    #   * a LEADING elapsed clause must land on INTERVAL, never on None (None
+    #     reads as "not temporal" and would file the row as unclassified).
+    listed = ("How many days in total did I travel between New York, "
+              "Boston and DC?")
+    assert (classify_temporal_aggregate(listed).kind
+            is TemporalAggregateKind.TOTAL)
+    for leading in ("Since I started jogging, how many weeks in total have "
+                    "passed?",
+                    "Since 2020, how many days in total have I spent on "
+                    "this?"):
+        assert (classify_temporal_aggregate(leading).kind
+                is TemporalAggregateKind.INTERVAL), leading
 
 
 def test_abstained_tally_counters_are_unset(monkeypatch):
@@ -488,6 +502,14 @@ def test_abstained_tally_counters_are_unset(monkeypatch):
     assert real.reason is None
     assert real.n_events == 1
     assert real.collapsed == real.n_input - real.n_events
+    # The OTHER abstention return (months cannot be inverted from a day sum)
+    # must satisfy the same contract — a regression that returned a collapsed
+    # of n_input there would otherwise pass the whole suite.
+    months = count_distinct_events(
+        [{"id": "r1", "content": "Reading A.", "start_date": "2025-01-01",
+          "end_date": "2025-01-15"}], unit="months", total=True)
+    assert months.reason == "no_unit"
+    assert (months.n_events, months.collapsed) == (0, 0)
 
 
 def test_resolve_path_runs_over_all_12_census_qids():

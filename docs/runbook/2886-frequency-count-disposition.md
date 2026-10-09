@@ -56,6 +56,7 @@ contains these 12 qids):
 | **abstention-control** (correct refusal) | 1 | `c8090214_abs` — the row records `reader_refusal`, so refusing is correct, not a capability fix |
 | **conversion** (gold admitted, reader wrong) | 0 | — |
 | **fixed-by-admission** (gold admitted, reader right) | 0 | — |
+| **unmeasured** (recorded evidence missing) | 0 | e.g. a row with no `gold_admitted`, an admitted row with no `label`, or an `_abs` row whose `reader_refusal` is not recorded — never reported as a disposition the row did not carry |
 
 **`conversion` is UNREACHABLE by construction, not measured as zero.** All
 three arms in the committed 8-arm file that carry `gold_admitted` rows
@@ -74,11 +75,12 @@ committed data without being conflated with the loaded arm. Resolving it
 requires the 12 re-run under `applied-rerank` (the reported remainder,
 below).
 
-Per-question rows are a strict superset of the
-`2578-measured-outcomes.jsonl` row shape: all ten source fields (arm / qid /
-cls / label / context_tokens / **pool_limit** / **pool_depth** /
-gold_admitted / reader_refusal / answer) plus the reclassification
-(`reclassified_cls`, `aggregate_kind`, `aggregate_unit`) and `disposition`.
+Per-question rows are a strict superset of the 2578 row shape (the tool reads
+`2578-measured-outcomes-133.jsonl`; both committed 2578 files carry the same
+ten keys): all ten source fields (arm / qid / cls / label / context_tokens /
+**pool_limit** / **pool_depth** / gold_admitted / reader_refusal / answer)
+plus the reclassification (`reclassified_cls`, `aggregate_kind`,
+`aggregate_unit`), `disposition` and `issue`.
 Regenerate:
 
 ```bash
@@ -107,8 +109,9 @@ bypassed (a reader-model swap stays #2013-gated).
 **Restatement trap.** Distinct-event identity is: explicit `event_id` → else
 normalized content → else the repo's committed conservative paraphrase band
 (`extractor_v2.fold_allowed` + `NOOP_MIN_OVERLAP`). Events are canonicalised
-in `(session_date, event_id, normalized content)` order — a **total** key, so
-same-date / undated identity-less rows never tie-break on input index — and
+in `(session_date, event_id, normalized content, span bounds)` order — a
+**total** key, so same-date / undated identity-less rows never tie-break on
+input index and the TOTAL path's cluster span cannot follow input order — and
 restatements are clustered order-independently (union-find over the pairwise
 fold relation, i.e. its transitive closure, not a greedy sequential scan),
 so the earliest articulation wins and the tally is input-order independent. A
@@ -134,10 +137,11 @@ The issue's **Scope** asks for the literal count/frequency surface. A comment
 in this issue's own thread measured the class and recommended *against*
 building a count aggregator ("it would add a capability no census question
 requires"), re-scoping to date-difference resolution. This change does the
-re-scope **and** lands the count/total tally, because a measured negative is
-only checkable if the capability it denies exists: `test_census_class_has_no_
-frequency_surface` states that no census member needs the tally, and the tally
-is what makes that statement falsifiable rather than asserted.
+re-scope **and** lands the count/total tally. The reason is falsifiability, not
+necessity: `test_census_class_has_no_frequency_surface` states from the
+question texts that no census member needs a tally, and this change makes that
+statement checkable against a working implementation of the capability instead
+of against a reading of the corpus.
 
 The tally path has **no production caller today** — it is exercised by tests
 and by the resolution seam. Its first real consumer is remainder item 2
