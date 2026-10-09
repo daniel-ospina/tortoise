@@ -2064,17 +2064,21 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              direction: str = "bidirectional") -> dict:
+                              direction: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
-    direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
-      direction. Default is mutual (both directions); pass 'unidirectional'
-      for a directed attack (attacker's truth penalizes the target, no
-      back-pressure).
+    direction: 'bidirectional' or 'unidirectional' — EP propagation direction.
+      ABSENT (None) canonicalizes PER op_type: IMPL → 'bidirectional' (mutual),
+      NAND → 'unidirectional' (a directed attack — attacker's truth penalizes
+      the target, no back-pressure). An explicit value always overrides. #7813:
+      this parameter previously defaulted to the string 'bidirectional', so a
+      non-None value was passed straight through and the per-op_type
+      canonicalization never ran — every NAND an agent created without an
+      explicit direction was therefore MUTUAL.
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.

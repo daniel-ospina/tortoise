@@ -1,12 +1,17 @@
 """Directed NAND operator tests (#753 — P0 fix: NAND attack semantics).
 
-NAND direction semantics (#753, product-owner decision 2026-08-09):
-  - DEFAULT is bidirectional (mutual contradiction — "A and B can't both
-    be true" is logically symmetric).
-  - An agent may explicitly declare direction="unidirectional" for a
-    DIRECTED attack: the attacker's truth penalizes the target, and the
-    back-message guard in ep.py ensures the attacker receives NO factor
-    message (Dung-style attack).
+NAND direction semantics (#753; canonical default revised by #7813):
+  - DEFAULT (direction ABSENT) is PER op_type, not one global constant
+    (CYCLE-25, ontology v3.6 §5.2.7): IMPL → "bidirectional", NAND →
+    "unidirectional" (the extraction default — a new claim attacks the
+    existing one). Before #7813 the parameter defaulted to the STRING
+    "bidirectional", which shadowed that canonicalization entirely, so every
+    omitted-direction NAND was silently MUTUAL. See sdk._canonical_direction.
+  - A caller may explicitly declare either direction. direction="bidirectional"
+    makes a NAND mutual ("A and B can't both be true", logically symmetric);
+    direction="unidirectional" is a DIRECTED attack — the attacker's truth
+    penalizes the target, and the back-message guard in ep.py ensures the
+    attacker receives NO factor message (Dung-style attack).
   - N-ary directed NAND decomposes as source→each-target (no arbitrary
     target↔target directed attacks).
 The symmetric phi_nand potential was measured to behave as an "agreement
@@ -59,28 +64,52 @@ def sdk(tmp_path):
     return TortoiseSDK(db_path=str(tmp_path / "t.db"))
 
 
-def test_nand_defaults_to_bidirectional(sdk):
-    """NAND defaults to bidirectional (mutual) for all op types; the agent may
-    explicitly declare a directed (unidirectional) attack."""
+def test_operator_direction_defaults_are_per_op_type(sdk):
+    """#7813 REGRESSION — the per-op_type default must not be shadowed.
+
+    The defect: ``create_operator``'s ``direction`` parameter defaulted to the
+    STRING "bidirectional". Because a string default is never None, the
+    ``if direction is None: direction = self._canonical_direction(...)`` branch
+    was UNREACHABLE on the default path, so every caller that omitted
+    ``direction`` got a MUTUAL NAND even though ontology v3.6 §5.2.7 says
+    NAND → "unidirectional". A bidirectional NAND damages BOTH endpoints (a
+    unidirectional one spares the attacker), so the bug silently inverted the
+    meaning of "X attacks Y" and made the best-measured option rank last on the
+    storage-architecture decision.
+
+    This asserts all three legs of the contract in one place so the shadowing
+    cannot silently return: the op_type default for NAND, the op_type default
+    for IMPL, and that an explicit value still overrides.
+    """
     a = make_point(sdk, "a")
     b = make_point(sdk, "b")
     c = make_point(sdk, "c")
+
+    # Leg 1: NAND with direction ABSENT -> unidirectional (was bidirectional).
     nand = sdk.create_operator("NAND", a["id"], [b["id"]])
+    # Leg 2: IMPL with direction ABSENT -> bidirectional (unchanged).
     impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
-    directed = sdk.create_operator("NAND", a["id"], [c["id"]], direction="unidirectional")
+    # Leg 3: an explicit direction always overrides the op_type default.
+    nand_mutual = sdk.create_operator(
+        "NAND", a["id"], [c["id"]], direction="bidirectional")
+
     proj = sdk._get_proj()
-    d_nand = proj.g.query(
-        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": nand["id"]}
-    ).result_set[0][0]
-    d_impl = proj.g.query(
-        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": impl["id"]}
-    ).result_set[0][0]
-    d_dir = proj.g.query(
-        "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": directed["id"]}
-    ).result_set[0][0]
-    assert d_nand == "bidirectional", "NAND must default to bidirectional (mutual)"
-    assert d_impl == "bidirectional"
-    assert d_dir == "unidirectional", "explicit unidirectional must be honored"
+    def _direction(op):
+        return proj.g.query(
+            "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": op["id"]}
+        ).result_set[0][0]
+
+    assert _direction(nand) == "unidirectional", (
+        "NAND with direction absent must canonicalize to unidirectional "
+        "(ontology v3.6 §5.2.7) — a non-None parameter default shadows "
+        "create_operator's _canonical_direction call (#7813)"
+    )
+    assert _direction(impl) == "bidirectional", (
+        "IMPL with direction absent must stay bidirectional (#7813)"
+    )
+    assert _direction(nand_mutual) == "bidirectional", (
+        "an explicit direction must override the op_type default (#7813)"
+    )
 
 
 def test_directed_attack_lowers_target(sdk):
@@ -205,8 +234,15 @@ def test_reinstatement(sdk):
 
 
 def test_mcp_tool_honors_direction(sdk, tmp_path, monkeypatch):
-    """The MCP tool default is bidirectional (mutual); an agent passing
-    direction='unidirectional' gets a directed attack stored."""
+    """#7813 — the MCP tool must NOT re-shadow the SDK's per-op_type default.
+
+    ``tortoise_create_operator`` previously defaulted its ``direction`` to the
+    STRING "bidirectional" and passed it through explicitly, so a non-None
+    value reached ``create_operator`` and the CYCLE-25 canonicalization never
+    ran. Fixing ``sdk.create_operator`` alone would therefore have left every
+    agent-created NAND mutual: the MCP surface is the only path most agents
+    use, so this leg is what makes the SDK fix observable in practice.
+    """
     import os
     _prev_db = os.environ.get("TORTOISE_DB_PATH")
     # Epic #1647 (PR #1684 CI-fix): the tool SDK (_get_sdk) reads
@@ -235,7 +271,11 @@ def test_mcp_tool_honors_direction(sdk, tmp_path, monkeypatch):
         d_dir = proj.g.query(
             "MATCH (o:Point {id:$id}) RETURN o.direction",
             params={"id": res_directed["id"]}).result_set[0][0]
-        assert d_def == "bidirectional", "MCP tool must default to bidirectional"
+        assert d_def == "unidirectional", (
+            "MCP tool with direction absent must canonicalize to unidirectional "
+            "for NAND — a non-None tool default shadows the SDK's "
+            "_canonical_direction call (#7813)"
+        )
         assert d_dir == "unidirectional", "explicit directed must be honored"
     finally:
         _transport_mode.reset(tok_mode)

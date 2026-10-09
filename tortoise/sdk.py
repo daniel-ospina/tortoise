@@ -10114,7 +10114,7 @@ class TortoiseSDK:
 
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
-                        direction: str = "bidirectional",
+                        direction: str | None = None,
                         promote_source: bool = True) -> dict:
         """Create an operator Point with optional semantic label.
 
@@ -10125,10 +10125,16 @@ class TortoiseSDK:
             it damps, so it can express neither an op_type nor a bridge. It is
             created by ``mitigate_operator`` AFTER the operator exists.
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
-          - direction: "bidirectional" (default) or "unidirectional" — explicit
-            flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
-            Default bidirectional (mutual) for all op types; pass
-            "unidirectional" for a directed attack (no back-pressure).
+          - direction: "bidirectional" or "unidirectional" — explicit flag
+            controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8; v3.6
+            §5.2.7). ABSENT (None) canonicalizes PER op_type rather than to one
+            global constant: IMPL → "bidirectional" (mutual), NAND →
+            "unidirectional" (a directed attack — the extraction default). An
+            explicit value always overrides. #7813: this parameter previously
+            defaulted to the STRING "bidirectional", so `direction` was never
+            None and the per-op_type canonicalization below was UNREACHABLE —
+            every omitted-direction NAND was created mutual. See
+            ``_canonical_direction`` (sdk.py).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
           - promote_source: default True preserves the #131 draft→live lifecycle
             (source point goes live when its first edge is created). Pass
