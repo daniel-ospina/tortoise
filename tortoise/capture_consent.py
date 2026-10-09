@@ -55,11 +55,11 @@ overwrite each other silently, #3662):
     configured LLM provider whenever ``OPENAI_API_KEY`` is present — the one
     other suppression is the test-only ``TORTOISE_INDEX_NO_NETWORK``, which
     forces metadata extraction off at the SDK boundary (``sdk.py`` honors it at
-    both ``index_file`` and ``index_directory``; ``tortoise/session_indexer.py``).
-    Unlike the two seams above, this one
-    EGRESSES rather than merely skipping a gate, and it is the one path on which
-    "no transcript leaves the machine" is false — so an absolute promise is
-    wrong and only "on the consent-gated paths" is true.
+    both ``index_file`` and ``index_directory`` in ``tortoise/session_indexer.py``).
+    All three seams can transmit, and this one egresses AMBIENTLY — with no user
+    action at all — so an absolute "no transcript leaves the machine" promise is
+    wrong for more than one surface, and only "on the consent-gated paths" is
+    true.
 
 The truthy vocabulary is NOT declared here: it delegates to the tree's single
 declared contract, `tortoise/env_truthy.py` (#4097), so this module cannot drift

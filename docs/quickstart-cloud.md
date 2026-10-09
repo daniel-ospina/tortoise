@@ -179,9 +179,12 @@ To let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
 export TORTOISE_CAPTURE=1     # truthy: 1 / true / yes / on
 ```
 
-Without it the hook no-ops and prints a notice; sessions stay on the machine.
-The visible line repeats on each session close while a legacy credential is
-present — only the durable copy is one-time. This is a deliberate behavior
+Without it the hook files no session and prints a notice. That covers the
+**capture** leg only: the same hook still runs the ambient indexer sweep
+unconditionally (it sits outside the capture branch), so session content is not
+necessarily machine-local — see the seam list above. The visible line repeats on
+each session close while a legacy credential is present — only the durable copy
+is one-time. This is a deliberate behavior
 change: capture used to follow the
 credential. The requirement is **host-agnostic** — it applies to a self-hosted
 endpoint too (a self-hosted daemon is still data leaving the machine), so the

@@ -113,6 +113,7 @@ noticing:
 | `tortoise/claude-hooks/session-end.sh` | client (bash twin) | **YES** | same upload, ambient path |
 | `TortoiseSDK.commit_session` → `_post_commit` | client | **YES** (#3662) | POSTs the derived payload to `/v1/sessions/commit` |
 | `tortoise/mcp_server.py::tortoise_session_capture` | **server** | **NO** (deferred) | the client host's env is unreadable server-side; gate is the server policy `session_recording` (default-ON, #1927). The real fix is a *client-carried* signal (an MCP request header) — an open product decision, #3662 |
+| ambient indexer sweep (`tortoise index directory <corpus> --metadata`) | client (ambient) | **NO** | the `session-end.sh` hook runs it **unconditionally** (outside its capture branch), and `session_indexer.py` posts conversation-derived text to an OpenAI-compatible endpoint whenever a provider key is set — so it is a surface that EGRESSES with no user action |
 | `TortoiseSDK.capture_session` | client | **NO** (by design) | writes the graph backend named by `TORTOISE_DB_URI` **and** sends each turn to the configured BYOK extractor provider, so it is not egress-free; gating it would also refuse pure local writes |
 | Pi `reflect-hook` (agent-infra) | client | **NO** (open) | keys capture on credential presence; agent-infra#1117 |
 | Pi capture extension (`tortoise/pi-hooks/tortoise-capture.ts`) | client | **NO** (by design) | POSTs the conversation on `session_shutdown` and reads no `TORTOISE_CAPTURE`; installing the extension IS the opt-in |

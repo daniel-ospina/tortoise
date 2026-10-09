@@ -235,8 +235,10 @@ def test_session_end_no_capture_without_explicit_opt_in(tmp_path, transcript):
     assert r.returncode == 0, f"hook must exit 0 (stderr: {r.stderr})"
     calls = log.read_text() if log.exists() else ""
     assert "session capture" not in calls, calls
-    # The LOCAL reindex sweep is not capture — it never leaves the machine and
-    # must keep running (the consent gate may not disable local memory).
+    # The LOCAL reindex sweep is not capture and must keep running (the consent
+    # gate may not disable local memory). It is NOT guaranteed machine-local
+    # though: when the metadata extractor is configured with a provider key it
+    # posts conversation-derived text to that provider.
     assert "index directory" in _wait_for(log, "index directory"), calls
 
 
