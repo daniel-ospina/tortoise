@@ -136,7 +136,6 @@ IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
 READY_TIMEOUT = 60
 #: The shared instances every lane and the orchestration graph depend on, PLUS
-#: the private containers of particular peer lanes that must never be removed.
 #: particular peer lanes' private containers that must never be removed. It is
 #: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
 #: prefix rule refuses them anyway, and the list is what refuses a FUTURE name
