@@ -219,10 +219,12 @@ install_preflight() {
 # itself be escaped again.
 #
 # ⛔ WHAT THE FAILURE ACTUALLY LOOKS LIKE, STATED ACCURATELY. An unescaped
-# `&`/`<` does NOT produce a silent success: `plutil -lint` rejects a raw
-# ampersand in a string value, and `launchctl bootstrap` parses the plist
-# before that, so a malformed render fails LOUDLY (rc 1, "rendered plist is
-# invalid"). The escaping is what makes such a path INSTALLABLE AT ALL —
+# `&`/`<` does NOT produce a silent success. `launchctl bootstrap` is called
+# first (see install_darwin) and parses the plist, so an unparseable render
+# fails there with "ERROR: launchctl bootstrap failed …" and rc 1, and
+# install_darwin returns before the trailing `plutil -lint` guard is ever
+# reached — that guard's "rendered plist is invalid" message cannot appear for
+# this input. The escaping is what makes such a path INSTALLABLE AT ALL —
 # without it the installer simply cannot be used from a checkout whose path
 # contains `&`, rather than installing something broken. (Contrast the heredoc
 # defect recorded at the template: there the leak lands inside an XML COMMENT,

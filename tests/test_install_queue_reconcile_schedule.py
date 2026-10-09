@@ -289,8 +289,11 @@ def test_the_validated_queue_path_is_passed_to_the_job(tmp_path):
     The installer refuses when its queue path is missing, so an install that
     validated `$CLAIMS_QUEUE` but let the job fall back to the tool's
     HOME-derived default would either fail on every fire (exit 3) or silently
-    reconcile a DIFFERENT queue than the one that was checked — with no signal
-    anywhere, because `--status` reports the validated path.
+    reconcile a DIFFERENT queue than the one that was checked — which is why the
+    flag is passed at all (before the `--status` rework there was no surface
+    that would have said so; `--status` now reads the job's own `--queue` back
+    and flags its absence, so this pin and that report are two halves of the
+    same guarantee).
 
     Mutation: drop the explicit `--queue` argument -> the rendered job carries
     no queue and the assertion fails -> RED.
@@ -592,8 +595,47 @@ def test_status_reads_the_INSTALLED_job_not_the_invoking_shell(tmp_path):
     assert f"  queue      : {queue_b}" in res.stdout, res.stdout
     # …and only the JOB's appears in the installed-artifact block.
     installed = res.stdout.split("installed job (read FROM the plist")[1]
-    assert str(queue_a) in installed, res.stdout
+    # Pin EVERY value the installed block reads, inside the block itself — an
+    # assertion against the whole stdout is satisfied by the env-derived block
+    # (which prints the same strings from the invoking shell), so it cannot fail
+    # for the reason the test name implies.
+    assert f"  queue      : {queue_a}" in installed, res.stdout
     assert str(queue_b) not in installed, res.stdout
+    assert "  interpreter: /usr/bin/true" in installed, res.stdout
+    assert f"  tool       : {sb['repo'] / 'tools' / 'queue_reconcile.py'}" in installed, res.stdout
+    assert "  interval   : 21600s" in installed, res.stdout
+
+
+def test_status_reports_entity_bearing_paths_unescaped(tmp_path):
+    """The installed block shows the RAW value, not its XML entity form.
+
+    The plist stores `&`/`<` escaped (that is what makes rendering
+    well-formed); a reader that forgot to unescape would report the operator a
+    path that does not exist on disk — the same lie, in the other direction.
+    BOTH the tool and the queue are entity-bearing here, because unescaping is
+    done per value and dropping it from one call site is otherwise invisible.
+
+    Mutation: drop the `_plist_unescape` call on either the tool or the queue ->
+    the block shows `R&amp;D` / `&lt;lab&gt;` -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    tricky = tmp_path / "R&D <lab>" / "repo"
+    (tricky / "tools").mkdir(parents=True)
+    (tricky / "tools" / "queue_reconcile.py").write_text("# stub\n", encoding="utf-8")
+    sb["env"]["TORTOISE_REPO"] = str(tricky)
+    qfile = tmp_path / "R&D <lab>" / "state" / "queues" / "CLAIMS.tsv"
+    qfile.parent.mkdir(parents=True)
+    qfile.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(qfile)
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    res = _status(sb, target)
+    installed = res.stdout.split("installed job (read FROM the plist")[1]
+    assert f"  tool       : {tricky / 'tools' / 'queue_reconcile.py'}" in installed, res.stdout
+    assert f"  queue      : {qfile}" in installed, res.stdout
+    assert "&amp;" not in installed, res.stdout
+    assert "&lt;" not in installed, res.stdout
+    assert "&gt;" not in installed, res.stdout
 
 
 def test_status_flags_a_plist_installed_without_an_explicit_queue(tmp_path):
@@ -633,10 +675,14 @@ def test_status_names_the_installed_tool_when_it_differs(tmp_path):
     other = tmp_path / "other-repo"
     (other / "tools").mkdir(parents=True)
     (other / "tools" / "queue_reconcile.py").write_text("# stub\n", encoding="utf-8")
+    installed_tool = str(sb["repo"] / "tools" / "queue_reconcile.py")
     sb["env"]["TORTOISE_REPO"] = str(other)
     res = _status(sb, target)
     assert res.returncode == 0, (res.stdout, res.stderr)
     assert "differs from this checkout" in res.stdout, res.stdout
+    # …and the warning names the INSTALLED path, so a reader that got an empty
+    # or mis-read ProgramArguments word cannot satisfy this by accident.
+    assert f"the job runs '{installed_tool}'" in res.stdout, res.stdout
 
 
 def test_status_says_loaded_no_for_an_unloaded_job_and_states_the_remedy(tmp_path):
@@ -673,17 +719,17 @@ def test_xml_special_characters_in_paths_are_escaped(tmp_path):
     and launchd must receive the RAW path back after parsing.
 
     Substitution without XML escaping produces a document a strict parser
-    rejects — while the install still reports success, so the job is installed
-    from a plist launchd cannot read. (An `&` in a checkout path is ordinary:
-    "R&D".)
+    rejects. (An `&` in a checkout path is ordinary: "R&D".)
 
     ⛔ CORRECTION FROM CYCLE 1: the comment this test used to mirror claimed the
-    failure was SILENT. It is not — `plutil -lint` rejects a raw ampersand and
-    `launchctl bootstrap` parses first, so a real machine fails loudly. The
-    silent-success shape is observable ONLY here, because this sandbox stubs
-    `plutil`/`launchctl` to exit 0 unconditionally; the property under test is
-    therefore "rendering produces a well-formed document", which is what makes
-    such a path installable at all.
+    failure was SILENT — that the install reported success and left a job
+    launchd could not read. It is not: `launchctl bootstrap` is called first and
+    parses the plist, so a real machine fails LOUDLY (install_darwin returns 1
+    before the trailing `plutil -lint` guard). The silent-success shape is
+    observable ONLY here, because this sandbox stubs `plutil`/`launchctl` to
+    exit 0 unconditionally; the property under test is therefore "rendering
+    produces a well-formed document", which is what makes such a path
+    installable at all.
 
     Mutation: remove the `_xml_escape` calls from `render_plist` -> the rendered
     plist fails `plistlib.load` (ExpatError) -> RED.
