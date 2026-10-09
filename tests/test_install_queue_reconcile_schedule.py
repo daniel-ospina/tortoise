@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import subprocess
 from pathlib import Path
 
@@ -534,14 +535,11 @@ def test_unchanged_plist_with_an_unloaded_job_is_bootstrapped(tmp_path):
     assert (sb["log"] / "loaded").exists(), "the unloaded agent was not re-bootstrapped"
 
 
-# ── P3: rendered output must survive special characters in paths ───────────
-
 def test_status_reports_the_queue_the_job_actually_reads(tmp_path):
-    """`--status` must name the SAME queue the job is passed — otherwise a
-    mismatched queue is undetectable from the only surface a human reads.
+    """The queue the installer VALIDATES is the queue the job is PASSED.
 
-    Mutation: drop `--queue` from ProgramArguments while `--status` keeps
-    printing `$QUEUE_PATH` -> the operator sees a path the job never reads.
+    Mutation: drop `--queue` from ProgramArguments -> the rendered job carries
+    no queue -> RED.
     """
     sb = _sandbox(tmp_path)
     custom = tmp_path / "elsewhere" / "CLAIMS.tsv"
@@ -555,6 +553,90 @@ def test_status_reports_the_queue_the_job_actually_reads(tmp_path):
     assert f"queue      : {custom}" in res.stdout, res.stdout
     args = _program_args(target / PLIST_NAME)
     assert args[args.index("--queue") + 1] == str(custom), args
+
+
+# ── --status: the diagnostic must not lie about what is installed ──────────
+
+def test_status_reads_the_INSTALLED_job_not_the_invoking_shell(tmp_path):
+    """`--status` must answer "what will the scheduler actually run?" from the
+    INSTALLED artifact, not from the environment it happens to be invoked in.
+
+    The live agent is normally installed from a DIFFERENT checkout than the one
+    running `--status` (here: the main worktree while a lane works in a feature
+    worktree), so env-derived lines named interpreter/tool/queue can all
+    describe a job that does not exist. This is the one surface a human has for
+    the scheduled job, and the job WRITES into a shared fleet file — it must not
+    be able to lie.
+
+    Mutation: derive the queue line from `$QUEUE_PATH` only (drop the
+    `_plist_arg_after` read) -> the "installed job" block reports the
+    diagnosing shell's queue while the job reads the installed one -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    queue_a = tmp_path / "A" / "CLAIMS.tsv"
+    queue_a.parent.mkdir(parents=True)
+    queue_a.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(queue_a)
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+
+    # Now DIAGNOSE from a different environment than the one that installed it.
+    queue_b = tmp_path / "B" / "CLAIMS.tsv"
+    queue_b.parent.mkdir(parents=True)
+    queue_b.write_text("# pr\tlane\tverdict\treason\n", encoding="utf-8")
+    sb["env"]["CLAIMS_QUEUE"] = str(queue_b)
+    res = _status(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    # Both are reported, each labelled with its source…
+    assert f"  queue      : {queue_a}" in res.stdout, res.stdout
+    assert f"  queue      : {queue_b}" in res.stdout, res.stdout
+    # …and only the JOB's appears in the installed-artifact block.
+    installed = res.stdout.split("installed job (read FROM the plist")[1]
+    assert str(queue_a) in installed, res.stdout
+    assert str(queue_b) not in installed, res.stdout
+
+
+def test_status_flags_a_plist_installed_without_an_explicit_queue(tmp_path):
+    """An earlier version's install carries no `--queue`, so the job silently
+    falls back to the tool's own `HOME`-derived default. `--status` must SAY
+    that instead of printing the diagnosing shell's path as if it were the
+    job's — the ambiguous state is the whole reason the flag was added.
+
+    Mutation: treat a missing `--queue` as "print $QUEUE_PATH" -> the operator
+    sees a queue the job does not read -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    plist = target / PLIST_NAME
+    plist.write_text(
+        re.sub(r"\n    <string>--queue</string>\n    <string>[^<]*</string>", "",
+               plist.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+    res = _status(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<ABSENT" in res.stdout, res.stdout
+
+
+def test_status_names_the_installed_tool_when_it_differs(tmp_path):
+    """Running `--status` from a checkout other than the one the job was
+    installed from is the NORMAL case (main vs a feature worktree); the report
+    must call the divergence out rather than print the local tool path.
+
+    Mutation: drop the installed-vs-local tool comparison -> the divergence is
+    silent -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    target = tmp_path / "agents"
+    assert _install(sb, target).returncode == 0
+    other = tmp_path / "other-repo"
+    (other / "tools").mkdir(parents=True)
+    (other / "tools" / "queue_reconcile.py").write_text("# stub\n", encoding="utf-8")
+    sb["env"]["TORTOISE_REPO"] = str(other)
+    res = _status(sb, target)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "differs from this checkout" in res.stdout, res.stdout
 
 
 def test_status_says_loaded_no_for_an_unloaded_job_and_states_the_remedy(tmp_path):
@@ -584,6 +666,8 @@ def test_status_says_loaded_no_for_an_unloaded_job_and_states_the_remedy(tmp_pat
     assert "loaded     : yes" in _status(sb, target).stdout
 
 
+# ── P3: rendered output must survive special characters in paths ───────────
+
 def test_xml_special_characters_in_paths_are_escaped(tmp_path):
     """A repo path containing `&` or `<` must still render a WELL-FORMED plist,
     and launchd must receive the RAW path back after parsing.
@@ -592,6 +676,14 @@ def test_xml_special_characters_in_paths_are_escaped(tmp_path):
     rejects — while the install still reports success, so the job is installed
     from a plist launchd cannot read. (An `&` in a checkout path is ordinary:
     "R&D".)
+
+    ⛔ CORRECTION FROM CYCLE 1: the comment this test used to mirror claimed the
+    failure was SILENT. It is not — `plutil -lint` rejects a raw ampersand and
+    `launchctl bootstrap` parses first, so a real machine fails loudly. The
+    silent-success shape is observable ONLY here, because this sandbox stubs
+    `plutil`/`launchctl` to exit 0 unconditionally; the property under test is
+    therefore "rendering produces a well-formed document", which is what makes
+    such a path installable at all.
 
     Mutation: remove the `_xml_escape` calls from `render_plist` -> the rendered
     plist fails `plistlib.load` (ExpatError) -> RED.
@@ -616,8 +708,9 @@ def test_cron_special_characters_in_paths_are_escaped(tmp_path):
     """crontab reads `%` as a command separator and backslash as its escape, so
     an unescaped `%` in any path silently truncates the schedule line.
 
-    Mutation: remove the `_cron_escape` calls -> the literal `%` survives into
-    the crontab line and the assertion fails -> RED.
+    Mutation: remove the `_cron_word` `%`-escaping (`"${1//%/\\%}"` -> `"$1"`)
+    -> the literal `%` survives into the crontab line and the assertion fails
+    -> RED.
     """
     sb = _sandbox(tmp_path, uname="Linux")
     custom = tmp_path / "we%ird" / "CLAIMS.tsv"

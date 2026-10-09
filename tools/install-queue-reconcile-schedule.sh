@@ -39,9 +39,12 @@
 #     already terminal, so a re-run cannot flag a corrected row again;
 #   * ONLY PROOF-BACKED CORRECTIONS — the applyable set is
 #     `{MERGED_WHILE_NOT_LANDED}` alone; a merged PR with its merge commit is
-#     the proof the correct verdict is `LANDED`. Every kind that needs a human
-#     read (BLOCKED_ON_CLOSED_ISSUE, CLOSED_ISSUE_WHILE_NON_TEMINAL, UNKNOWN,
-#     MALFORMED) is REPORTED and never written.
+#     the proof the correct verdict is `LANDED`. EVERY kind outside that set is
+#     REPORTED and never written — the ones needing a human read
+#     (BLOCKED_ON_CLOSED_ISSUE, CLOSED_ISSUE_WHILE_NON_TERMINAL, UNKNOWN,
+#     MALFORMED) and equally LANDED_BUT_PR_NOT_MERGED, which is hard-coded
+#     report-only too. Stated as a complement rather than a list so it cannot go
+#     stale when the taxonomy grows.
 #
 # THE TOOL'S EXIT CODE IS A REPORT, NOT A JOB HEALTH SIGNAL
 # ---------------------------------------------------------
@@ -211,11 +214,20 @@ install_preflight() {
 }
 
 # ── escaping ──────────────────────────────────────────────────────────────
-# XML-escape a value before it is substituted into the plist template. Without
-# this, a repo path containing `&` ("R&D") or `<` renders a plist that is NOT
-# well-formed — yet the install still reports success, so the job is installed
-# from a document launchd cannot parse. `&` MUST be replaced FIRST, or the `&`
-# that the other replacements introduce would itself be escaped again.
+# XML-escape a value before it is substituted into the plist template. `&` must
+# be replaced FIRST, or the `&` that the other replacements introduce would
+# itself be escaped again.
+#
+# ⛔ WHAT THE FAILURE ACTUALLY LOOKS LIKE, STATED ACCURATELY. An unescaped
+# `&`/`<` does NOT produce a silent success: `plutil -lint` rejects a raw
+# ampersand in a string value, and `launchctl bootstrap` parses the plist
+# before that, so a malformed render fails LOUDLY (rc 1, "rendered plist is
+# invalid"). The escaping is what makes such a path INSTALLABLE AT ALL —
+# without it the installer simply cannot be used from a checkout whose path
+# contains `&`, rather than installing something broken. (Contrast the heredoc
+# defect recorded at the template: there the leak lands inside an XML COMMENT,
+# and `plutil -lint` is lenient about comment bodies — so THAT one really is
+# silent, OK to plutil and rejected by expat.)
 _xml_escape() {
     local s="$1"
     s="${s//&/&amp;}"
@@ -440,6 +452,50 @@ job_loaded() {
     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1
 }
 
+# ── reading back what was INSTALLED (the only truth about a scheduled job) ──
+# `--status` must not answer "what will launchd run?" with the INVOKING shell's
+# environment: the live agent is usually installed from a DIFFERENT checkout
+# (here: the main worktree, while `--status` is often run from a feature
+# worktree), so env-derived lines named `interpreter`/`tool`/`queue` can all
+# describe a job that does not exist. These read the rendered plist — the same
+# document launchd parses — straight from its XML (no plutil dependency, so the
+# values are real in the test sandbox too).
+_plist_unescape() {
+    local s="$1"
+    s="${s//&lt;/<}"
+    s="${s//&gt;/>}"
+    s="${s//&amp;/&}"
+    printf '%s' "$s"
+}
+
+_plist_program_args() {
+    awk '
+        /<key>ProgramArguments<\/key>/ { inarr = 1; next }
+        inarr && /<\/array>/ { inarr = 0 }
+        inarr {
+            line = $0
+            sub(/^[[:space:]]*<string>/, "", line)
+            sub(/<\/string>[[:space:]]*$/, "", line)
+            if (line != $0) print line
+        }
+    ' "$1"
+}
+
+_plist_arg_after() { # $1 = plist, $2 = flag whose VALUE is wanted
+    _plist_program_args "$1" | awk -v flag="$2" 'seen { print; exit } $0 == flag { seen = 1 }'
+}
+
+_plist_integer() { # $1 = plist, $2 = key
+    awk -v key="$2" '
+        index($0, "<key>" key "</key>") {
+            line = $0
+            sub(/.*<integer>/, "", line)
+            sub(/<\/integer>.*/, "", line)
+            if (line != $0) { print line; exit }
+        }
+    ' "$1"
+}
+
 install_darwin() {
     require_standard_agents_dir || return $?
     install_preflight || return $?
@@ -513,23 +569,47 @@ install_linux() {
 
 status() {
     echo "=== $LABEL ==="
-    echo "repo       : $REPO"
-    echo "tool       : $TOOL"
-    echo "interpreter: $PYTHON_BIN ($("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo '?'))"
-    echo "queue      : $QUEUE_PATH"
-    echo "gh         : ${GH_BIN:-<not found>}"
-    echo "interval   : ${QUEUE_RECONCILE_INTERVAL}s"
-    echo "log        : $LOG_PATH"
+    # ⛔ THESE ARE THE INVOCATION's values, NOT the installed job's. They are
+    # labelled as such, and the block below reads the installed plist back,
+    # because the live agent is commonly installed from a different checkout
+    # than the one running `--status`.
+    echo "configured (from THIS shell's environment — not necessarily installed):"
+    echo "  repo       : $REPO"
+    echo "  tool       : $TOOL"
+    echo "  interpreter: $PYTHON_BIN ($("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo '?'))"
+    echo "  queue      : $QUEUE_PATH"
+    echo "  gh         : ${GH_BIN:-<not found>}"
+    echo "  interval   : ${QUEUE_RECONCILE_INTERVAL}s"
+    echo "  log        : $LOG_PATH"
     case "$(uname -s)" in
         Darwin)
             if [ -f "$PLIST_PATH" ]; then
+                local args q installed_tool
+                args="$(_plist_program_args "$PLIST_PATH")"
+                q="$(_plist_unescape "$(_plist_arg_after "$PLIST_PATH" --queue)")"
+                installed_tool="$(_plist_unescape "$(printf '%s\n' "$args" | sed -n 2p)")"
                 echo "installed  : $PLIST_PATH"
-                if grep -qF -- "<string>--apply</string>" "$PLIST_PATH"; then
-                    echo "mode       : ARMED (--apply)"
+                echo "installed job (read FROM the plist — what launchd will run):"
+                echo "  interpreter: $(_plist_unescape "$(printf '%s\n' "$args" | sed -n 1p)")"
+                echo "  tool       : $installed_tool"
+                if [ -n "$q" ]; then
+                    echo "  queue      : $q"
                 else
-                    echo "mode       : report-only (no --apply)"
+                    echo "  queue      : <ABSENT — installed by an earlier version of this"
+                    echo "               script, so the job falls back to the tool's own"
+                    echo "               default; re-run this script with no arguments>"
                 fi
-                plutil -lint "$PLIST_PATH" >/dev/null 2>&1 && echo "plist lint : OK"
+                echo "  interval   : $(_plist_integer "$PLIST_PATH" StartInterval)s"
+                if grep -qF -- "<string>--apply</string>" "$PLIST_PATH"; then
+                    echo "  mode       : ARMED (--apply)"
+                else
+                    echo "  mode       : report-only (no --apply)"
+                fi
+                if [ "$installed_tool" != "$TOOL" ]; then
+                    echo "  ⚠ the installed job's tool differs from this checkout's —"
+                    echo "    the job runs '$installed_tool', not '$TOOL'."
+                fi
+                plutil -lint "$PLIST_PATH" >/dev/null 2>&1 && echo "  plist lint : OK"
                 local row
                 row="$(launchctl list 2>/dev/null | grep -F "$LABEL" || true)"
                 # job_loaded is the SAME predicate install_darwin acts on, so
@@ -537,14 +617,14 @@ status() {
                 # the job is loaded (launchctl list is a host-domain view and can
                 # miss a GUI-domain agent that `launchctl print` finds).
                 if job_loaded; then
-                    echo "loaded     : yes"
-                    [ -n "$row" ] && echo "             launchctl list: $row"
-                    echo "             (the exit code column is the tool's REPORT code: 0 clean,"
-                    echo "              1 findings, 2 UNKNOWN present, 3 queue missing. 1/2 are the"
-                    echo "              normal steady state while a report-only row stands — read"
-                    echo "              $LOG_PATH for what the run actually measured.)"
+                    echo "  loaded     : yes"
+                    [ -n "$row" ] && echo "               launchctl list: $row"
+                    echo "               (the exit code column is the tool's REPORT code: 0 clean,"
+                    echo "                1 findings, 2 UNKNOWN present, 3 queue missing. 1/2 are the"
+                    echo "                normal steady state while a report-only row stands — read"
+                    echo "                $LOG_PATH for what the run actually measured.)"
                 else
-                    echo "loaded     : NO — run this script with no arguments to load it"
+                    echo "  loaded     : NO — run this script with no arguments to load it"
                 fi
             else
                 echo "installed  : NOT installed ($PLIST_PATH missing)"
@@ -552,7 +632,7 @@ status() {
             ;;
         Linux)
             if $CRONTAB_CMD -l 2>/dev/null | grep -qF "$CRON_MARKER"; then
-                echo "installed  : cron entry present:"
+                echo "installed  : cron entry present (this IS the job — read it):"
                 $CRONTAB_CMD -l 2>/dev/null | grep -F "$CRON_MARKER" -A1
             else
                 echo "installed  : NOT installed (no $CRON_MARKER in crontab)"
