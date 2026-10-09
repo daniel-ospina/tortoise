@@ -18,7 +18,7 @@ Want to run it yourself instead? See [quickstart-selfhosted.md](quickstart-selfh
 
 ## 1. Sign up and get your API key
 
-1. Go to **https://tortoise.premiselabs.co/signup** (Supabase sign-up — email or social login).
+1. Go to **<https://tortoise.premiselabs.co/signup>** (Supabase sign-up — email or social login).
 2. After signup, the welcome page shows your API key (starts with `tt_`) — copy it right away. It's shown **once** (like `POST /v1/team/keys`), so store it somewhere safe; if you lose it, create a new one via `POST /v1/team/keys`.
 
 ### Zero-email signup (CLI)
@@ -32,7 +32,7 @@ tortoise signup
 #    Config saved to .tortoise (shown once — store it)
 ```
 
-2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact support@premiselabs.co.
+2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact <support@premiselabs.co>.
 
 ## 2. Connect your agent (MCP over HTTP)
 
@@ -132,10 +132,40 @@ tortoise context                                    # memory digest for session-
 Filing a transcript to Tortoise Cloud is **off by default**, and what gates it
 is **per-surface**, not uniform (#3615):
 
-- **The in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
+- **The consent-gated in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
   (`tortoise/capture_consent.py`), which is credential-independent — exporting
   `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
-  enable capture there; it only authenticates the connection.
+  enable capture there; it only authenticates the connection. The gated paths
+  are the Claude Code `session-end.sh` hook (plus `tortoise session drain`,
+  which its `SessionStart` counterpart runs in the background), `tortoise
+  session capture` / `tortoise sessions import`, and the SDK's client
+  transmission (`TortoiseSDK.commit_session` → `POST /v1/sessions/commit`).
+- **The hosted MCP tool `tortoise_session_capture` is not gated by this
+  variable** — it executes on the server, which cannot read the client host's
+  `TORTOISE_CAPTURE`. It carries the server-side recording policy
+  (`session_recording`, default-ON) instead. Whether an explicit, agent-invoked
+  capture should also require a *client-carried* consent assertion is an open
+  product question (#3662). `TortoiseSDK.capture_session` is likewise ungated,
+  and it is **not** egress-free: it writes the graph backend named by
+  `TORTOISE_DB_URI` **and** sends each turn verbatim to the configured BYOK
+  extractor provider (BYOK is the documented default), so a remote
+  `redis://`·`rediss://` backend is itself a data-egress choice and the
+  provider leg transmits regardless of which backend is named.
+- **The ambient indexer sweep is not gated, and it does egress.** The Claude
+  Code `session-end.sh` hook runs `tortoise index directory <corpus> --metadata`
+  **unconditionally** — outside its `TORTOISE_CAPTURE` branch — and
+  `tortoise/session_indexer.py` posts conversation-derived text to an
+  OpenAI-compatible endpoint whenever `OPENAI_API_KEY` is set (the one other
+  suppression is the test-only `TORTOISE_INDEX_NO_NETWORK=1`). So everything
+  above is a statement about the **consent-gated paths**; on this one an
+  absolute "no transcript leaves the machine" claim is false (tracked with the
+  other ungated seams, #3662).
+- **The in-repo Pi capture extension is not gated either.**
+  `tortoise/pi-hooks/tortoise-capture.ts` (installed by `tortoise capture
+  install`, `harness: "pi"`) POSTs the conversation on `session_shutdown` and
+  reads **no** `TORTOISE_CAPTURE` — installing it IS the opt-in. It differs
+  from the in-repo Claude Code / Codex / Cursor hooks, which file nothing
+  without this variable.
 - **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
   `agent-infra` and starts hosted capture on **credential presence**, never
   reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
@@ -149,9 +179,12 @@ To let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
 export TORTOISE_CAPTURE=1     # truthy: 1 / true / yes / on
 ```
 
-Without it the hook no-ops and prints a notice; sessions stay on the machine.
-The visible line repeats on each session close while a legacy credential is
-present — only the durable copy is one-time. This is a deliberate behavior
+Without it the hook files no session and prints a notice. That covers the
+**capture** leg only: the same hook still runs the ambient indexer sweep
+unconditionally (it sits outside the capture branch), so session content is not
+necessarily machine-local — see the seam list above. The visible line repeats on
+each session close while a legacy credential is present — only the durable copy
+is one-time. This is a deliberate behavior
 change: capture used to follow the
 credential. The requirement is **host-agnostic** — it applies to a self-hosted
 endpoint too (a self-hosted daemon is still data leaving the machine), so the

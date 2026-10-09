@@ -5891,6 +5891,26 @@ class TortoiseSDK:
         import os
         import uuid
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #3662: consent FIRST — this is the SDK sibling of the gated CLI
+        # primitives (`session capture` / `sessions import`), which also refuse
+        # before doing any work, so no extraction (and therefore no BYOK provider
+        # call over the raw conversation) is spent on a transmission the host has
+        # not authorised. The check is NOT the only enforcement point: the
+        # transmitting primitive `_post_commit` re-checks, so a future caller
+        # cannot bypass consent by calling it directly. One predicate
+        # (`tortoise/capture_consent.py::capture_declined_reason`), two
+        # enforcement points (defense in depth).
+        from tortoise.capture_consent import capture_declined_reason
+        declined = capture_declined_reason()
+        if declined is not None:
+            # A structured `ok=False` — the method's own contract is "errors are
+            # surfaced", never a raise out of a public entry point. The shape
+            # carries `payload: None` like every other non-ok return of this
+            # method, so a caller that uniformly reads result["payload"] on
+            # `not ok` does not KeyError on the decline branch alone.
+            return {"session_id": session_id, "ok": False,
+                    "errors": [declined], "error": declined,
+                    "payload": None}
         extractor = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
         if extractor == "v1" or summary is not None:
             return self._commit_session_v1(
@@ -26686,9 +26706,26 @@ def _now_iso() -> str:
 
 
 def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
-    """POST the derived payload to /v1/sessions/commit (replay-safe)."""
-    import os  # noqa: I001
+    """POST the derived payload to /v1/sessions/commit (replay-safe).
+
+    #3662: this is the client TRANSMISSION primitive for session-derived content
+    (summary / points / entities / story_arc), so it fails closed on the
+    explicit `TORTOISE_CAPTURE` consent (#3615). Placed HERE — not on a shared
+    helper and not only on the public caller — because #3615's recorded model is
+    "the gate belongs on the primitives that TRANSMIT": every caller of this
+    function, present or future, inherits the gate.
+
+    Raises `PermissionError` rather than returning a refusal dict: the two
+    callers merge a returned dict into the response and set `ok=True`, so a
+    dict-shaped refusal would read as a successful commit. Their existing
+    `except Exception` channel already turns this into a structured `ok=False`.
+    """
+    import os  # noqa: I001 — `requests` is imported mid-block, same as before
+    from tortoise.capture_consent import capture_declined_reason
     from tortoise.commit_schema import compute_client_commit_id
+    declined = capture_declined_reason()
+    if declined is not None:
+        raise PermissionError(declined)
     payload["client_commit_id"] = compute_client_commit_id(
         payload["session_id"], payload["points"], payload["entities"],
         payload["operators"], payload["summary"], payload["story_arc"],

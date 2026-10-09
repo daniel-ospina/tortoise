@@ -61,6 +61,162 @@ def test_commit_session_threads_session_date(sdk, monkeypatch):
     assert received[1] == "2026-08-01"
 
 
+# ── #3662: the SDK transmission path requires explicit consent ────────────
+# `_post_commit` is the in-repo CLIENT-side transmission primitive for
+# session-derived content; #3615's predicate did not reach it, so
+# `commit_session` uploaded with no opt-in. The gate now runs twice: first here
+# (before any extraction is spent), then at `_post_commit` itself (the
+# bypass-proof chokepoint, pinned in tests/test_capture_consent.py).
+
+def _valid_v2_payload() -> dict:
+    """A Layer-1 payload the gate ACCEPTS.
+
+    Both tests below need a mocked extraction that would genuinely reach
+    `_post_commit`. With an empty ``{}`` (or a payload the Layer-1 gate
+    rejects) the SDK appends an error, returns ``ok=False`` BEFORE the POST, and
+    the refusal test's ``posted == []`` would hold whether or not the consent
+    gate existed — the gate would then be pinned only by ``extracted == []``.
+
+    The shape mirrors ``tests/test_commit_schema.py``'s proven fixture: an
+    EMPTY ``client_commit_id`` finalized with the schema's own
+    ``compute_client_commit_id``, and a ``provenance_refs`` entry — the gate
+    resolves ``source_ref`` against the emitted sources / provenance refs.
+    """
+    from tortoise.commit_schema import compute_client_commit_id
+
+    raw = {
+        "schema_version": "1",
+        "session_id": "sess_3662_consent",
+        "client_commit_id": "",
+        "captured_at": "2026-08-11T10:00:00Z",
+        "extractor": {"version": "value@1.0.0", "mode": "byok",
+                      "calibration_version": "v3"},
+        "summary": "consent-gate fixture",
+        "story_arc": "",
+        "provenance_refs": [{"path": "session.md", "spans": ["0-10"]}],
+        "sources": [],
+        "entities": [],
+        "points": [{
+            "id": "pt_" + "3662" * 16,
+            "content": "an unconsented transmission must not leave the machine",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "",
+            "status": "live",
+        }],
+        "operators": [],
+        "telemetry": {
+            "extractor": {"version": "value@1.0.0", "mode": "byok",
+                          "calibration_version": "v3"},
+            "model": {"provider": "anthropic", "id": "claude-3-7",
+                      "cfg_hash": "h1"},
+            "counts": {"kept": 1, "candidate": 1, "segment": 1, "window": 1,
+                       "empty_windows": 0},
+            "keep_ratio": 1.0,
+            "dedup_hits": 0,
+            "frontier_calls": 0,
+            "llm_cost_usd": 0.0,
+            "extraction_ms": 1,
+            "retry_count": 0,
+            "last_error_code": None,
+            "confidence_histogram": [0] * 10,
+        },
+    }
+    raw["client_commit_id"] = compute_client_commit_id(
+        raw["session_id"], raw["points"], raw["entities"], raw["operators"],
+        raw["summary"], raw["story_arc"], raw.get("events", []),
+        raw.get("supersessions", []))
+    return raw
+
+
+def _extract_with_payload(payload: dict, extracted: list):
+    """A stand-in for ``extract_session_v2`` that records the call."""
+    def _fake(model, conversation, **kw):
+        extracted.append(conversation)
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+    return _fake
+
+
+def test_commit_session_refuses_without_consent_before_extraction(
+        sdk, monkeypatch):
+    """FAIL-ON (before the fix): extraction runs and `_post_commit` is reached,
+    so the recorder is hit and the result is `ok=True`.
+
+    The refusal must land BEFORE extraction: an unconsented transmission must
+    not spend a BYOK provider call over the raw conversation, and the CLI's
+    gated twins (`session capture` / `sessions import`) also refuse before any
+    work. `monkeypatch.delenv` is the explicit negative the suite-wide
+    `_capture_consent_default_on` grant (tests/conftest.py) requires."""
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    posted: list = []
+    monkeypatch.setattr("tortoise.sdk._post_commit",
+                        lambda *a, **k: posted.append(a) or {"ok": True})
+    extracted: list = []
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_with_payload(_valid_v2_payload(), extracted))
+    out = sdk.commit_session(CONV)
+    assert out["ok"] is False, out
+    assert any("explicit consent" in e for e in out["errors"]), out["errors"]
+    assert extracted == [], "the refusal must precede extraction"
+    assert posted == [], "an unconsented commit must not POST"
+    # The decline carries the same result shape as every other non-ok return
+    # of this method (e.g. the v1 gate-failure path), so a caller that
+    # uniformly reads `payload` on `not ok` does not KeyError on this branch.
+    assert "payload" in out and out["payload"] is None, out
+
+
+def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):
+    """Control: the refusal is consent-dependent, not always-on.
+
+    Without this, a gate that refused unconditionally would pass the negative
+    test above."""
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    posted: list = []
+    monkeypatch.setattr("tortoise.sdk._post_commit",
+                        lambda *a, **k: posted.append(a) or {"ok": True})
+    extracted: list = []
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_with_payload(_valid_v2_payload(), extracted))
+    out = sdk.commit_session(CONV)
+    assert extracted, "the consented path must not be refused before extraction"
+    # The fail-on companion to the refusal test: this SAME mocked extraction is
+    # one that genuinely reaches the transmitting primitive, so `posted == []`
+    # there is the gate's doing and not an early return for another reason.
+    assert posted, "the consented path must reach the transmitting primitive"
+    assert out["ok"] is True, out
+    assert not any("explicit consent" in str(e)
+                   for e in out.get("errors", [])), out
+
+
+def test_capture_session_module_isolates_real_home(tmp_path):
+    """#3662 review (P2): pin the HOME isolation the refusal test depends on.
+
+    ``test_commit_session_refuses_without_consent_before_extraction`` reaches
+    ``record_capture_declined()``, which resolves and CREATES
+    ``$HOME/.tortoise/capture-consent-notice``. Without the module-wide HOME
+    isolation (see ``_isolated_home``) that path is the developer's real
+    ``$HOME`` and the durable #3615 notice leaks onto their machine. Assert the
+    resolved location, not the notice text.
+    """
+    from tortoise.capture_consent import capture_notice_path
+
+    assert os.environ.get("HOME") == str(tmp_path), (
+        "tests/test_capture_session.py must isolate HOME (see _isolated_home)")
+    assert capture_notice_path() == tmp_path / ".tortoise" / (
+        "capture-consent-notice")
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
@@ -74,6 +230,23 @@ def llm_extraction_provider(monkeypatch):
     (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
     the keyless path clears the seam AND the provider keys itself."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path):
+    """#3662 review (P2): never let this module write into the developer's real
+    ``$HOME``.
+
+    The unconsented-refusal test below drives
+    ``capture_consent.capture_declined_reason()`` → ``record_capture_declined()``,
+    which resolves ``Path.home()/.tortoise/capture-consent-notice`` and CREATES
+    it — so a normal pytest run left the durable #3615 migration notice in the
+    real ``$HOME``, and the next interactive ``tortoise`` command printed it.
+    Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
+    suite-wide ``_capture_consent_default_on`` grant stays in force here (unlike
+    that file's decline matrix), so the consented control test is unaffected.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 @pytest.fixture()

@@ -49,8 +49,9 @@
 # opt the machine into shipping transcripts. With the opt-in absent the capture
 # step is skipped (a notice on stderr, repeated on each session close while a
 # legacy credential is present; only the durable file is one-time) and the hook
-# still exits 0; the LOCAL reindex sweep below still runs — it never leaves the
-# machine.
+# still exits 0; the LOCAL reindex sweep below still runs — it is NOT guaranteed
+# machine-local (it can post conversation-derived text to the configured metadata
+# provider), but the consent gate must not disable local memory.
 # For a LOCAL-only graph, replace the capture step with:
 #   tortoise index --dir ~/.tortoise/docs/conversations/.
 #
