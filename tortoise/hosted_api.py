@@ -22,6 +22,7 @@ import functools
 import hmac
 import inspect
 import ipaddress
+import itertools
 import json as _json
 import logging
 import math
@@ -963,29 +964,41 @@ mcp_http_app = create_http_app(
 
 #: #4493: the explicit row bound for the Supabase org enumeration, set EQUAL to
 #: the project's PostgREST ``max_rows`` (``supabase/config.toml`` → ``[api]
-#: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
-#: reads ``Content-Range``, and PostgREST silently caps a row LIST at
-#: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
-#: no error. Requesting ``limit`` equal to the cap is the smallest containment:
-#: a result that FILLS it is treated as possibly-truncated.
+#: max_rows = 1000``). Pre-#5388, ``SupabaseControlPlane.query`` neither
+#: paginated nor read ``Content-Range``, and PostgREST silently caps a row LIST
+#: at ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list
+#: with no error.
 #:
 #: The two callers need opposite things from that signal, so completeness is
 #: EXPLICIT via ``require_complete`` rather than encoded as an empty list
 #: (#5388):
 #:   * ``_refresh_cost_allocation`` passes ``require_complete=True`` — a partial
-#:     fleet must never PRUNE orgs from the published metric, so a filled page
-#:     returns ``None`` and the refresh keeps last-known-good.
+#:     fleet must never PRUNE orgs from the published metric, so an
+#:     unconfirmable fleet returns ``None`` and the refresh keeps
+#:     last-known-good.
 #:   * ``_sweep_events`` uses the default — a partial page is still worth
 #:     sweeping, so it processes the rows it received. Returning ``[]`` here
 #:     (the previous shape) silently skipped fleet-wide event retention at
 #:     >=1000 orgs.
 #:
-#: RESIDUAL LIMITATION (#5388): a genuinely COMPLETE 1000-org fleet is
-#: indistinguishable from a truncated page, so the cost refresh treats it as
-#: unavailable (fail closed — freezing the metric is safer than pruning). The
-#: general fix reads ``Content-Range`` or paginates in ``supabase_control`` (or
-#: uses an ``array_agg`` RPC, the #3665 pattern).
+#: #5388 fix: completeness is read from the SERVER, not inferred from a page
+#: boundary. The Supabase branch walks pages and takes the total from
+#: ``Content-Range`` (``Prefer: count=exact``), so a complete 1000-org fleet is
+#: no longer rejected and a genuinely truncated one is still caught. Residual:
+#: a server that states NO total is complete only when the walk reaches an
+#: EMPTY page, and a local page-cap exit is NOT proof — that case still fails
+#: closed for ``require_complete``.
 _ORG_ENUMERATION_MAX_ROWS = 1000
+
+#: Page-walk bound for the enumeration (#5388). Guards against an endless walk
+#: when a server never returns an EMPTY page — the ONLY end-of-walk signal this
+#: walk has. (An earlier wording said "nor returns short pages"; a short page is
+#: NOT a signal here — believing it is would reintroduce the round-1 fail-open.)
+#: A page cap is NOT proof of completeness, so the page-cap
+#: exit leaves ``exhausted`` False; ``exhausted`` is a NECESSARY conjunct of
+#: ``complete`` below, so the fail-closed caller still refuses.
+#: 100 pages = 100k orgs, ~100x the fleet size the 1000-row cap was sized for.
+_ORG_ENUMERATION_MAX_PAGES = 100
 
 
 def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | None:
@@ -997,25 +1010,31 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
     production caller on the same hourly interval. The two share the one
     offload pool below.
 
-    ⚠️ ``[]`` is returned on ANY failure, so it is NOT proof of an empty
-    fleet; the allocation caller treats a falsy result as "enumeration
-    unavailable" and fails closed rather than reading it as "no orgs, no cost".
+    ⚠️ The failure shape DEPENDS on the caller, so neither result may be read
+    as "no orgs": ``require_complete=True`` returns ``None`` (UNKNOWN) on ANY
+    failure and whenever the walk cannot confirm the fleet, and the default
+    returns ``[]`` — which is likewise NOT proof of an empty fleet. The
+    allocation caller treats either as "enumeration unavailable" and fails
+    closed rather than reading it as "no orgs, no cost".
     Supabase mode (post-#669 flip): enumerates from Supabase orgs via the
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph. Registry mode: the Org nodes from the
     registry_control_plane graph via _make_sdk(namespace="registry").
-    Returns [] on any failure — the sweep is best-effort.
+    Returns ``None`` (``require_complete``) or ``[]`` on failure — neither is
+    proof of an empty fleet; the sweep is best-effort.
 
-    #4493/#5388: the Supabase branch requests an explicit ``limit`` and cannot
-    distinguish a complete page from a server-truncated one (no
-    ``Content-Range`` read, no pagination). Completeness is therefore an
-    EXPLICIT contract, not encoded as emptiness:
+    #4493/#5388: completeness is a FIRST-CLASS property read from the SERVER,
+    not inferred from a page boundary. The Supabase branch walks pages ordered
+    by ``id`` and takes the row total from ``Content-Range`` (asking for
+    ``Prefer: count=exact`` on the first page), so "is this the whole fleet?" is
+    answered by the server rather than guessed. Completeness remains an EXPLICIT
+    contract, not encoded as emptiness:
 
     * ``require_complete=True`` (the cost-allocation caller) returns ``None``
-      when the page FILLS the limit — "the fleet could not be confirmed",
-      which the caller maps to its unavailable/last-known-good path.
-    * the default returns the rows received even when the page filled — the
-      best-effort retention sweep must process a partial page rather than
+      when the walk could not CONFIRM the whole fleet — which the caller maps to
+      its unavailable/last-known-good path.
+    * the default returns the rows received even when the walk was cut short —
+      the best-effort retention sweep must process a partial page rather than
       purge nothing for the whole fleet.
     """
     try:
@@ -1024,22 +1043,174 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "organizations", select=["id", "name"],
-                filters=[("deleted_at", "is", None)],
-                limit=_ORG_ENUMERATION_MAX_ROWS,
-            )
-            parsed = [{"org_id": r["id"], "name": r.get("name")} for r in rows]
-            if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
-                # A filled page may be truncated (#5388): PostgREST caps a row
-                # list silently. Fail CLOSED for a caller that needs the whole
-                # fleet; let a best-effort caller process what it got.
+            cp = get_control_plane()
+            # #5388: WALK the pages and take completeness from the SERVER's own
+            # row count (`Content-Range`, via ``count_exact``), instead of
+            # inferring it from a page boundary. The old shape asked for
+            # ``limit == max_rows`` and called a FULL page "possibly truncated",
+            # which was wrong in both directions: it rejected a genuinely
+            # complete 1000-org fleet, and it silently stopped working on a
+            # deployment whose ``max_rows`` was lower than the requested bound
+            # (a short page, no signal).
+            # A seam object that predates the total-aware read still enumerates
+            # correctly — it simply cannot state a total, which is the
+            # documented no-total case (completeness then rests on reaching an
+            # EMPTY page). Without this branch the call raises ``AttributeError``,
+            # and the handler below turns an interface mismatch into an EMPTY
+            # fleet for the best-effort caller — a silent under-enumeration on
+            # the very path #5388 is about. Presence alone is not enough: a
+            # truthy but NON-CALLABLE attribute would raise ``TypeError``, which
+            # that same handler swallows into that same empty fleet. This
+            # NARROWS the hole rather than closing it: a CALLABLE whose signature
+            # rejects ``count_exact`` still raises, and is still swallowed, so a
+            # seam object must accept that parameter to keep its total.
+            _total_aware = getattr(cp, "query_with_total", None)
+            if not callable(_total_aware):
+                def _read_page(table, **kw):
+                    kw.pop("count_exact", None)
+                    return cp.query(table, **kw), None
+            else:
+                _read_page = _total_aware
+
+            rows: list[dict] = []
+            seen_ids: set[str] = set()
+            total: int | None = None
+            exhausted = False
+            last_id: str | None = None
+            for _page in range(_ORG_ENUMERATION_MAX_PAGES):
+                page_filters: list[tuple[str, str, object]] = [
+                    ("deleted_at", "is", None),
+                ]
+                if last_id is not None:
+                    # KEYSET, not offset. `offset` paginates a MOVING window: a
+                    # concurrent INSERT whose id sorts before the cursor
+                    # shifts every later page, so one row is served twice and
+                    # an original is SKIPPED — yet the duplicate still counts
+                    # toward the total, so the walk would report COMPLETE and
+                    # the cost refresh would PRUNE the skipped org. That is the
+                    # exact class #5388 exists to prevent, so the cursor is the
+                    # last id we SAW, which no concurrent write can move.
+                    page_filters.append(("id", "gt", last_id))
+                # Capture BEFORE the call, from the PRE-call cursor. Computed
+                # afterwards it is always False, because the page we just read
+                # advanced `last_id`.
+                asked_for_count = last_id is None
+                page, page_total = _read_page(
+                    "organizations", select=["id", "name"],
+                    filters=page_filters,
+                    # A stable `order` is REQUIRED: keyset paging is only sound
+                    # if the cursor column is the sort key.
+                    order="id", limit=_ORG_ENUMERATION_MAX_ROWS,
+                    # The total is a property of the FILTER, not the page, so
+                    # one exact count is enough — later pages reuse it.
+                    count_exact=(last_id is None),
+                )
+                rows.extend(page)
+                seen_ids.update(r["id"] for r in page)
+                if page:
+                    last_id = page[-1]["id"]
+                # The fleet count is only meaningful from the page that ASKED
+                # for it — page 1, the ``count_exact`` page. Any later page is
+                # cursor-filtered, so its ``Content-Range`` total counts the
+                # REMAINING rows, not the fleet. "The first non-None total" is
+                # NOT the same rule: if page 1 states nothing and a later page
+                # states a remainder, adopting that number makes the
+                # completeness check satisfiable while rows are still unserved.
+                if asked_for_count and page_total is not None:
+                    total = page_total
+                if page:
+                    page_ids = [r["id"] for r in page]
+                    # The cursor must be the page MAXIMUM, which is only true if
+                    # the server honoured ``order="id"``. A server that filters
+                    # by ``id > cursor`` but returns rows in another order makes
+                    # ``page[-1]`` a NON-max id: the cursor then advances past
+                    # ids that were never served, they are excluded forever, and
+                    # because the walk still ends on an empty page it reports
+                    # COMPLETE and the destructive caller PRUNES them. Refusing
+                    # to certify is the correct response — `order` is part of
+                    # the contract and this is the one place that can check it.
+                    unsorted = any(a >= b for a, b in itertools.pairwise(page_ids))
+                    # A falsy id cannot be a CURSOR: ``id > None`` is not a
+                    # filter, it is a restart, so the walk cannot continue past
+                    # it. The row is already counted in ``seen_ids`` and is
+                    # still returned to a best-effort caller — what the falsy id
+                    # forbids is CERTIFICATION, which the break below enforces.
+                    if unsorted or not all(page_ids):
+                        # No empty page was reached, so ``exhausted`` stays
+                        # False — and ``exhausted`` is a NECESSARY conjunct of
+                        # ``complete`` below, so this break cannot certify
+                        # however large ``seen_ids`` has grown against the
+                        # stated total. (Before round 6 the total branch
+                        # bypassed ``exhausted``, and this break DID certify.)
+                        break
+                    last_id = page_ids[-1]
+                if not page:
+                    # THE sound end-of-walk signal: the server returned no more
+                    # rows for this filter. Nothing weaker works — a short page
+                    # is a per-request cap, and a satisfied total is a SNAPSHOT
+                    # that concurrent inserts can pass while originals are still
+                    # unserved.
+                    exhausted = True
+                    break
+
+            # Dedupe by id, FIRST occurrence winning, ORDER PRESERVED. The rows
+            # returned must be the same SET the certificate counted: a server
+            # whose cursor is INCLUSIVE (or that otherwise serves an overlapping
+            # page) would still report the walk COMPLETE on the distinct count
+            # while publishing one org twice, and the cost refresh would carry
+            # that duplicate into the metric's label set. Order is preserved
+            # because re-ordering the fleet is a gratuitous change for every
+            # consumer.
+            # A FALSY id cannot key a dedupe any more than it can be a cursor,
+            # so such a row is emitted unchanged, in place: it is still returned
+            # to a best-effort caller — what it forbids is CERTIFICATION,
+            # decided above.
+            emitted: set[str] = set()
+            parsed: list[dict] = []
+            for r in rows:
+                rid = r["id"]
+                if rid:
+                    if rid in emitted:
+                        continue
+                    emitted.add(rid)
+                parsed.append({"org_id": rid, "name": r.get("name")})
+            # Completeness. The walk above stops only on an EMPTY page (or the
+            # page cap, which leaves ``exhausted`` False); only THEN is it asked
+            # whether the fleet is complete:
+            #   * with a server total -> count DISTINCT ids against it (a
+            #     duplicated row is not progress, and letting one satisfy the
+            #     total is how a shifted window certifies an incomplete fleet);
+            #   * with NO total -> the empty page IS the signal.
+            # A total of 0 is NOT evidence of an empty fleet — it is the absence
+            # of a usable count — so it takes the `exhausted` branch too. As
+            # `len(seen) >= 0` it would be vacuously satisfied and certify a
+            # page-cap exit, which is exactly what the `exhausted` conjunct is
+            # there to refuse.
+            # Two shapes were REMOVED here and must not come back (#5388): a
+            # short page as end-of-data (wrong whenever a server's per-request
+            # cap is below our ``limit`` — the exact deployment this issue names,
+            # and a fail-OPEN that pruned real orgs), and a satisfied total as a
+            # STOP condition (wrong because the total is a page-1 snapshot while
+            # ``seen_ids`` grows with concurrent inserts).
+            # ``exhausted`` is a NECESSARY conjunct, not the fallback arm of an
+            # either/or. Written as `len(seen_ids) >= total if total > 0 else
+            # exhausted` the total branch BYPASSED ``exhausted`` completely, so
+            # every exit that is deliberately NOT an end-of-walk could still
+            # certify: the `unsorted`/falsy `break` above and the page-cap exit
+            # both leave ``exhausted`` False, yet returned rows as COMPLETE as
+            # soon as the stated total was satisfied. A server that mis-orders
+            # one page and states a total therefore turned this file's own
+            # refuse-to-certify guard into a PRUNE. The total may only ever
+            # DOWNGRADE a walk that already reached an empty page; it can never
+            # promote one that did not.
+            complete = exhausted and (total is None or len(seen_ids) >= total)
+            if not complete:
                 _logger.warning(
-                    "org enumeration filled its explicit limit (%d rows) — a "
-                    "possibly-truncated page; require_complete=%s (fail-closed "
-                    "for the cost metric: a truncated page must never prune "
+                    "org enumeration is INCOMPLETE: %d row(s) walked, server "
+                    "total=%s, exhausted=%s — require_complete=%s (fail-closed "
+                    "for the cost metric: an incomplete fleet must never prune "
                     "orgs)",
-                    _ORG_ENUMERATION_MAX_ROWS, require_complete)
+                    len(rows), total, exhausted, require_complete)
                 if require_complete:
                     return None
             return parsed
@@ -1067,7 +1238,14 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
         return [{"org_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
     except Exception:
-        return []
+        # #5388: the exception means the fleet is UNKNOWN, and
+        # `require_complete` already defines UNKNOWN as None. Returning ``[]``
+        # here is a FAIL-OPEN: an empty list is indistinguishable from a
+        # genuinely empty fleet, and the destructive caller
+        # (`_refresh_cost_allocation`) PRUNES every org when it sees one — so a
+        # transient transport or schema error would wipe the whole metric. The
+        # best-effort caller keeps ``[]`` (it must never fail a sweep).
+        return None if require_complete else []
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1271,7 +1449,17 @@ def _sweep_events() -> None:
                 _logger.warning("event retention sweep skipped: registry graph probe failed")
                 return
         # Sweep every registered org's graph (registry Org nodes).
-        for org in _iter_registered_orgs():
+        # ``_iter_registered_orgs`` is typed ``list[dict] | None``: the
+        # ``require_complete`` path can return ``None``. This default path does
+        # not, today — but the sweep must not depend on that accident.
+        #
+        # WITHOUT this guard a ``None`` would raise ``TypeError``, which the
+        # outer handler below catches and logs as "event retention sweep
+        # failed" before returning — stopping the WHOLE fleet's retention for
+        # that pass. WITH it, a ``None`` becomes a SILENT zero-org sweep: the
+        # loop body never runs and NOTHING is logged. So the guard prevents the
+        # crash; it does NOT make the stop visible.
+        for org in (_iter_registered_orgs() or []):
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue
             try:
@@ -1415,10 +1603,11 @@ async def _refresh_cost_allocation() -> None:
     def _run() -> None:
         rows = _iter_registered_orgs(require_complete=True)
         if rows is None:
-            # The page filled its bound and ``query`` cannot tell a complete
-            # 1000-org fleet from a truncated one (#5388): the fleet is
-            # UNKNOWN, so publish an unavailable snapshot and leave the metric
-            # at last-known-good rather than pruning orgs beyond the page.
+            # The walk could NOT confirm the whole fleet (#5388): either the
+            # server stated a total the walk never reached, or it stated no
+            # total and no page ever came back EMPTY. The fleet is UNKNOWN, so
+            # publish an unavailable snapshot and leave the metric at
+            # last-known-good rather than pruning orgs on a partial list.
             refresh_and_publish([])
             return
         orgs = [o["org_id"] for o in rows if o.get("org_id")]

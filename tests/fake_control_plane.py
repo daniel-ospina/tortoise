@@ -1431,6 +1431,44 @@ class FakeControlPlane:
             raise fault["exc"]
         return result
 
+    def query_with_total(self, table: str, *, select: list[str] | None = None,
+                         filters: list[tuple[str, str, object]] | None = None,
+                         method: str = "GET", json_body: dict | None = None,
+                         order: str | None = None, limit: int | None = None,
+                         timeout: object | None = None,
+                         count_exact: bool = False) -> tuple[list[dict], int | None]:
+        """#5388: the total-aware shape of :meth:`query`.
+
+        The fake has no PostgREST ``Content-Range`` header, so it reports
+        ``total=None`` — "the server did not state a count" — which is the
+        honest double, NOT ``len(rows)`` (that would assert the page is always
+        the whole result set and hide exactly the bug #5388 is about).
+
+        A test that needs a KNOWN total must override this method (see
+        ``tests/test_5388_org_enumeration_completeness.py``), which is the only
+        way to exercise the complete-vs-truncated decision.
+        """
+        _ = count_exact
+        # #5388: KEYSET paging. The cursor is an `id > last` filter, not an
+        # offset — offset paging on a moving window can serve a row twice and
+        # skip an original while still satisfying a stated total. The cursor
+        # filter is stripped before delegating (the fake's `query` does not
+        # implement ordering/range semantics) and applied here.
+        last = None
+        rest = []
+        for f in (filters or []):
+            if len(f) == 3 and f[0] == "id" and f[1] == "gt":
+                last = f[2]
+            else:
+                rest.append(f)
+        rows_all = self.query(table, select=select, filters=rest or None,
+                              method=method, json_body=json_body, order=order,
+                              limit=None, timeout=timeout)
+        if last is not None:
+            rows_all = [r for r in rows_all if r.get("id") and r["id"] > last]
+        page = rows_all[:limit] if limit is not None else rows_all
+        return page, None
+
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,
                     method: str = "GET", json_body: dict | None = None,

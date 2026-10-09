@@ -105,13 +105,18 @@ across differing windows is deferred to the #5045 substrate.
 
 An unreadable input is **never** reported as `0`:
 
-* the org enumeration (`_iter_registered_orgs`) returns `[]` on *any* failure,
-  so an empty list is treated as **unavailable**, never as "a fleet with no
-  orgs". The cost caller additionally passes `require_complete=True`: when the
-  Supabase page fills its explicit limit an incomplete/possibly-truncated page
-  returns `None` (the fleet is UNKNOWN, so the metric stays last-known-good),
-  while the best-effort event-retention sweep still processes the page it
-  received (#5388 tracks the residual exactly-at-the-cap ambiguity);
+* the org enumeration (`_iter_registered_orgs`) makes completeness a
+  **server-read property** rather than a guess from a page boundary (#5388).
+  The Supabase path walks pages ordered by `id` with a keyset cursor and takes
+  the fleet size from the server's own `Content-Range` row total (asking for
+  `Prefer: count=exact` on the first page); the walk is complete only when it
+  reached an **empty page** *and* the distinct ids it saw are at least that
+  total. A fleet larger than the 1000-row page size is walked **past** that cap
+  rather than rejected. On any failure it returns `None` for a
+  completeness-demanding caller — the fleet is UNKNOWN, so the metric stays
+  last-known-good — and `[]` for a best-effort one, so an empty list is treated
+  as **unavailable**, never as "a fleet with no orgs"; the event-retention sweep
+  still processes whatever rows it received;
 * the proportional basis is read with `metering.measure_write_ops`, which
   **raises** on an unreadable window or read (unlike `get_current_usage`, which
   degrades to a zero view — the reason it is not used here: its failure path is
@@ -190,12 +195,17 @@ declared total is 0 (unconfigured) or no org carries weight.
 
 * The writer runs on the existing hourly maintenance loop
   (`hosted_api._event_retention_loop`), so the metric is first populated within
-  one interval after boot **provided the enumeration is confirmable**. At or
-  above the 1000-org enumeration cap, or on repeated enumeration failure, the
-  cost caller fails closed on every cycle and the metric stays last-known-good
-  (or empty if it was never populated), with no on-metric evidence that it is
-  not live. It is best-effort: a refresh failure can never terminate event
-  retention.
+  one interval after boot **provided the enumeration is confirmable**. A fleet
+  larger than the 1000-row page size is fine — the walk pages past it — but the
+  cost caller fails closed on every cycle (and the metric stays last-known-good,
+  or empty if it was never populated) whenever the walk cannot CONFIRM the whole
+  fleet. That is any of: it never reached an empty page (it hit its page cap, or
+  it refused to advance a cursor it could not trust on an out-of-order or
+  falsy-id page, or no total was stated and an empty page was the only available
+  signal); or it did reach one but the distinct ids it saw fell short of the
+  stated total; or the enumeration raised. There is no on-metric evidence that
+  the metric is not live. It is best-effort: a refresh failure can never
+  terminate event retention.
 * The org label is bounded (`MAX_ORG_LABELS`, default 512, with a fixed
   `__other__` overflow child), so org growth cannot blow up the metric's
   cardinality.
