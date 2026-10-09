@@ -487,7 +487,7 @@ def test_install_probe_is_not_capture_gated(tmp_path):
 # The defect this pins: #3615's confirmed problem statement said "no in-repo
 # path requires an explicit non-credential opt-in", but `TortoiseSDK`'s
 # `_post_commit` (POST `/v1/sessions/commit`) shipped session-derived content
-# with no consent check — the one in-repo, CLIENT-side transmission primitive
+# with no consent check — the in-repo, CLIENT-side transmission primitive
 # the predicate did not reach. The hosted MCP tool
 # (`mcp_server.tortoise_session_capture`) is deliberately NOT gated here: it
 # executes server-side, so the client host's `TORTOISE_CAPTURE` is unreadable

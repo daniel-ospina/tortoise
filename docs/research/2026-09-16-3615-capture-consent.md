@@ -115,6 +115,7 @@ noticing:
 | `tortoise/mcp_server.py::tortoise_session_capture` | **server** | **NO** (deferred) | the client host's env is unreadable server-side; gate is the server policy `session_recording` (default-ON, #1927). The real fix is a *client-carried* signal (an MCP request header) — an open product decision, #3662 |
 | `TortoiseSDK.capture_session` | client | **NO** (by design) | writes the graph backend named by `TORTOISE_DB_URI` **and** sends each turn to the configured BYOK extractor provider, so it is not egress-free; gating it would also refuse pure local writes |
 | Pi `reflect-hook` (agent-infra) | client | **NO** (open) | keys capture on credential presence; agent-infra#1117 |
+| Pi capture extension (`tortoise/pi-hooks/tortoise-capture.ts`) | client | **NO** (by design) | POSTs the conversation on `session_shutdown` and reads no `TORTOISE_CAPTURE`; installing the extension IS the opt-in |
 
 The enforcement shape for the #3662 row follows the layer model above: the
 predicate lives once in `tortoise/capture_consent.py`, and the gate sits on the
@@ -222,11 +223,9 @@ agent-infra's `reflect-hook.ts` is a separate repo (companion issue
 daniel-ospina/agent-infra#1117). The in-repo
 MCP tool `tortoise_session_capture` (and a hosted-backend `TortoiseSDK.capture_session`) routes
 through that same server primitive and is likewise declared out of the client gate with its
-rationale recorded in the table above (companion issue #3662). The same carve-out covers the SDK's
-sibling `commit_session` → `POST /v1/sessions/commit` path (`tortoise/sdk.py::_post_commit`), which
-also selects its credential from `api_key or $TORTOISE_API_KEY`: it is an explicit SDK call rather
-than an automatic client path, and its payload is derived (summary/points/entities), not a raw
-transcript — but it is named here so the enumeration is complete for the class "a credential must
-not authorize transmission." #3615 therefore fixes the in-repo
+rationale recorded in the table above (companion issue #3662). The SDK's sibling
+`commit_session` → `POST /v1/sessions/commit` path (`tortoise/sdk.py::_post_commit`) WAS named
+here as a carve-out; **#3662 closed it** — `_post_commit` now refuses when consent is declined,
+so it is gated like the other in-repo client paths. #3615 therefore fixes the in-repo
 **automatic client paths** and declares every cross-layer dependency rather than claiming
 end-to-end closure.
