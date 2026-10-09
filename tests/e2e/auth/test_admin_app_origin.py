@@ -188,7 +188,13 @@ def stack(_dashboard_dist_built, tmp_path_factory):
             "--compatibility-date=2026-08-26",
             "--d1", "SESSIONS",
             "--persist-to", str(PERSIST),
-            "-b", f"SUPABASE_URL={MOCK_URL}",
+            # DELIBERATELY a trailing slash (#3559 P2-2): it is a legal spelling of
+            # SUPABASE_URL and used to break the gate's `is_admin()` URL (the base
+            # became `//`, so the RPC path was `//rest/v1/rpc/is_admin`). The
+            # sibling /api/sb suite does the same on purpose; keeping it here makes
+            # this whole suite a permanent guard on the admin normalisation rather
+            # than a one-off case.
+            "-b", f"SUPABASE_URL={MOCK_URL}/",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             # Both the gate's RPC and the proxy's upstream live on the mock.
             "-b", f"BLOG_ORIGIN={MOCK_URL}",
@@ -238,6 +244,26 @@ def _state() -> dict:
 
 def _set_admin(value: bool) -> None:
     req = urllib.request.Request(f"{MOCK_URL}/__mock/admin", method="POST", data=json.dumps({"value": value}).encode())
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
+
+
+def _set_upstream_fault(
+    value: bool, target: str = "admin", status: int = 500, body: dict | None = None
+) -> None:
+    """Fault the `is_admin` RPC at a chosen status AND body (#3559 P2-1).
+
+    The 401/403 classification is BODY-dependent (a JWT error is the USER's
+    token; `Invalid API key` is the SERVICE's), so status alone cannot express
+    the case.
+    """
+    payload: dict = {"value": value, "target": target, "status": status}
+    if body is not None:
+        payload["body"] = body
+    req = urllib.request.Request(
+        f"{MOCK_URL}/__mock/upstream-fault", method="POST", data=json.dumps(payload).encode()
+    )
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=15) as r:
         r.read()
@@ -302,6 +328,40 @@ def test_a_signed_in_non_admin_gets_an_explicit_403(stack):
         _set_admin(True)
     assert status == 403, f"a signed-in non-admin must be 403, got {status}"
     assert "Not a blog admin" in body, body[:200]
+
+
+def test_admin_check_rejected_user_token_bounces_to_auth(stack):
+    """The USER's bearer rejected by PostgREST still re-authenticates (302).
+
+    The body-aware classifier must not have regressed the case this gate is
+    built around: a genuinely rejected user token is a stale bounce, not a 503.
+    """
+    _reset()
+    _set_upstream_fault(True, status=401, body={"code": "PGRST301", "message": "JWT expired"})
+    try:
+        status, _body, headers = _req("/admin", cookie=f"__Host-session={HANDLE}")
+    finally:
+        _set_upstream_fault(False)
+    assert status == 302, f"a rejected user token must re-authenticate, got {status}"
+    assert headers.get("Location", "") == "/auth?next=%2Fadmin&stale=1", headers.get("Location")
+
+
+def test_admin_check_service_key_fault_is_503_not_a_bounce(stack):
+    """A rotated/wrong `SUPABASE_ANON_KEY` is OUR fault → 503, never a bounce.
+
+    This route used to classify the `is_admin` rejection by STATUS alone
+    (401/403 → re-authenticate), so the gateway rejecting the SERVICE credential
+    became an auth bounce — the #3485 class. The BODY now separates the two.
+    """
+    _reset()
+    _set_upstream_fault(True, status=401, body={"error": "Invalid API key"})
+    try:
+        status, body, _headers = _req("/admin", cookie=f"__Host-session={HANDLE}")
+    finally:
+        _set_upstream_fault(False)
+    assert status == 503, f"a service-key fault must be 503 (retry), got {status} {body[:200]}"
+    assert status != 302, "a configuration fault must not bounce the operator to sign-in"
+    assert status != 403, "a configuration fault is not an access decision"
 
 
 def test_blog_api_proxy_forwards_the_server_minted_credential(stack):

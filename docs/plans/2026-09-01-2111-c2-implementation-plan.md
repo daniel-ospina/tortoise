@@ -43,26 +43,31 @@ aboutObjects: tortoise-hosted-platform
 ## Tasks (TDD — mint helper FIRST so the service has its dependency)
 
 ### Task 1: Auth format gates accept `tk_`
+
 **Intent:** minted tk_ keys must authenticate (E2E-1's credential is useless at 401 invalid_format).
 **Acceptance:** tk_ resolves via get_current_org (both modes) + MCP + body-validation sites; tt_ unchanged; other prefixes 401.
 **Files:** Modify `tortoise/hosted_api.py` (:1299, :3288, :9917, :10023, :10114, :686) + `tortoise/mcp_auth.py` (:151) + `tortoise/sdk.py` (:12457 fast-path); Test `tests/test_hosted_auth.py`, `tests/test_mcp_server_auth_modes.py`.
 **Steps:** module constant `_KEY_PREFIXES = ("tt_", "tk_")` (shared importable); replace `startswith("tt_")` → `startswith(_KEY_PREFIXES)` at all sites incl. the sdk fast-path; tests: tk_ resolve both modes + MCP + bad-prefix 401.
 
 ### Task 2: Seam helpers — insert/delete graph, count graph keys, registry status filter
+
 **Intent:** Supabase graphs INSERT (C1 deferred it), rollback delete, key_count source, and the registry count fix E2E-8 needs.
 **Acceptance:** `insert_graph`/`delete_graph_row`/`count_graph_keys` (both modes) work; registry `graph_count` excludes status='deleted' (P1 #3).
 **Files:** Modify `tortoise/supabase_control.py`, `tortoise/sdk.py` (graph_count registry branch + graph_key_ids); Test `tests/test_supabase_control.py`, `tests/test_control_plane.py`.
 **Steps:**
+
 1. `insert_graph(cp, row)` POST to graphs; `delete_graph_row(cp, org_id, graph_id)` DELETE by id+team.
 2. `count_graph_keys` (Supabase: api_keys count where graph_id; registry: MATCH (k:APIKey {graph_id})).
 3. **Registry graph_count: `MATCH (g:Graph {org_id:$tid}) WHERE g.status IS NULL OR g.status <> 'deleted' RETURN count(g)`** — C1's docstring promised C3 would do this; C2's delete makes it C2's requirement (E2E-8 slot release + registry↔Supabase parity R3).
 4. Tests: insert/delete/count; graph_count after soft-delete decrements (registry mode).
 
 ### Task 3: Shared per-graph key mint `_mint_graph_key` (C3's dependency)
+
 **Intent:** the ONE mint (delegation stamping, max_api_keys gate, reveal-once, tk_) — C3's standalone endpoints consume this exact function (D0).
 **Acceptance:** mint returns {id, key_plaintext, key_prefix, scopes, delegation_depth, graph_id, created_by_key_id, created_at}; hash-only stored; key-cap → 409-mapped; plaintext once; works both modes incl. registry tk_.
 **Files:** Modify `tortoise/hosted_api.py` (helper near create_api_key), `tortoise/supabase_control.py` (insert_api_key C1-column passthrough verified), `tortoise/sdk.py` (apikey_create `prefix` kwarg, back-compat default "tt_"); Test `tests/test_hosted_api.py`, `tests/test_supabase_control.py`.
 **Steps:**
+
 1. `apikey_create` registry: add `prefix: str = "tt_"` kwarg (back-compat); registry mint passes "tk_".
 2. `insert_api_key` Supabase: verify C1 columns (graph_id/scopes/delegation_depth/created_by_key_id) flow through the POST (it's a passthrough — add explicit doc).
 3. `_mint_graph_key(org_id, graph_id, requested_scopes, caller_key_id)` → scopes ∩ child-policy (D5), tk_ token, lookup_hash, key_prefix, deleg=0, created_by_key_id; key-cap pre-check (count active keys ≥ max_api_keys → `_KeyCapExceeded` → caller maps 409); Supabase → insert_api_key; registry → apikey_create(prefix="tk_", ...).
@@ -70,10 +75,12 @@ aboutObjects: tortoise-hosted-platform
 5. Tests: mint both modes (scopes filtered, deleg=0, tk_ prefix, reveal-once — plaintext NOT re-listed).
 
 ### Task 4: The ONE provisioning service `_provision_graph` + both endpoints
+
 **Intent:** tier→suspension→name→quota→mint→rollback in one function; E2E-1/3/7/11 semantics.
 **Acceptance:** both endpoints → identical 201 {graph, key, key_plaintext, revealed_once}; free→402 FIRST; solo 1st custom→201; solo 3rd→409+X-Graph-Quota; key-cap→409+rollback (no orphan); concurrent→never over cap; deleg=0 key→403 (E2E-4-negative); cross-team key→404 (P1 #6); unknown team→404.
 **Files:** Modify `tortoise/hosted_api.py`; Test `tests/test_hosted_api.py` (TestProvisioningService).
 **Steps:**
+
 1. `_tier_gate(team)`: tier == "free" → 402 upgrade-CTA (BEFORE quota — W1 ordering). Solo+ passes.
 2. `_graph_quota_gate(team)`: max_graphs finite + graph_count >= max → 409 + `X-Graph-Quota: <count>/<max>` + upgrade-CTA body. (pro/team max_graphs None = unlimited; no warn band.)
 3. `_provision_graph(team, name, requested_scopes, caller_key_id)` — per-team asyncio.Lock (`_PROVISION_LOCKS` dict): name validation (empty→422; dup-active→409 — check INSIDE the lock, registry has no unique index) → quota gate → `insert_graph`/`_graph_create` → `_mint_graph_key` (Task 3) → post-insert re-count (over cap → rollback graph → 409) → 201 envelope. On ANY failure after graph write → rollback (D11) → mapped status.
@@ -83,10 +90,12 @@ aboutObjects: tortoise-hosted-platform
 7. Tests: E2E-1 (201 envelope, reveal-once, 409 dup), E2E-3 (free 402 FIRST / solo 1st 201 / solo 3rd 409+header), E2E-4-negative (deleg=0 key → 403), 401 revoked caller, cross-team 404, unknown-team 404, key-cap 409 + no orphan (graph_list empty).
 
 ### Task 5: `DELETE /v1/graphs/{id}` + `GET /v1/graphs` extension
+
 **Intent:** lifecycle + list (E2E-8).
 **Acceptance:** DELETE 204 + tombstone + keys 401 + slot freed (next provision 201) + same-name recreate 201 + default 403 + missing 404; GET rows status+key_count, default-first, no point_count.
 **Files:** Modify `tortoise/hosted_api.py`, `tortoise/supabase_control.py`, `tortoise/sdk.py`; Test `tests/test_hosted_api.py`, `tests/test_control_plane.py`.
 **Steps:**
+
 1. `soft_delete_graph` (Supabase): UPDATE status='deleted' WHERE id AND org_id AND kind<>'default' → 0 rows → distinguish default (403) vs missing (404) by a prior kind lookup.
 2. Registry `graph_delete(org_id, graph_id)`: SET status='deleted' (kind='default' guard → 403).
 3. Auth wiring (P2 from review): key path → resolve + `graphs:delete` scope (403 missing scope) + team match (404); session path → `_require_owner_admin` (403 non-owner).
@@ -95,10 +104,12 @@ aboutObjects: tortoise-hosted-platform
 6. Tests: full E2E-8 sequence (delete → 204 → key 401 → provision ok → same-name 201 → default 403) + 403 missing-scope + 404.
 
 ### Task 6: Concurrency + rollback drill + full verification
+
 **Intent:** E2E-11 + no-orphan proof + suite runs.
 **Acceptance:** 8 concurrent on 1-free-slot → exactly 1×201 + 7×409, count ≤ cap; key-cap drill → no orphan graph; full docker lane + carve-out + PGlite green.
 **Files:** Test `tests/test_hosted_api.py`, `tests/test_supabase_control.py`.
 **Steps:**
+
 1. Concurrency: asyncio.gather 8 on a solo team with 1 free slot → 1×201/7×409 (both modes); graph_count ≤ cap after.
 2. Rollback drills: key-cap → 409 + graph_list empty; forced graph-insert failure → mapped 500 + no key orphan.
 3. No-charge assertion (E2E-7): quota reject path never touches billing (holds by construction — assert no billing seam call in the gate; gated on existing test-env support).

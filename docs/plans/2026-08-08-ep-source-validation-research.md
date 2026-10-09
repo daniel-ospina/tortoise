@@ -79,6 +79,7 @@ Call chain: `compute_confidence` (sdk.py:1682) → `_hydrate_evidence` (1765) �
 ## Pre-existing Regression (carry-forward, NOT introduced by us)
 
 `tests/test_ep_nary_falsification.py::test_run_converges_with_gentle_factor` FAILS on origin/main:
+
 - Mechanism: `_RecordingEP` reads `ep._node_cache` after `run()` — but #330 made `run()` call `_clear_caches()` → `AttributeError: '_RecordingEP' object has no attribute '_node_cache'` (line 333).
 - This is a test-harness issue interacting with the #330 cache lifecycle, not an EP math bug. Parallel agent owns ep.py; this test fix belongs with #341 branch (or documented). Decision: fix the test harness (read cache before run completes / capture via _flush_cache) — it's test-side, additive, and makes the suite green. Flag in PR description.
 
@@ -95,6 +96,7 @@ One embedded test fails intermittently under parallel process contention (resear
 ## Codebase Explorer Findings (Phase 3 — controller-run)
 
 ### Key API surface for the test suite
+
 - `TortoiseSDK(db_path)` — embedded mode (tempfile path). `fresh_sdk()` contextmanager pattern in test_source_inheritance_own.py.
 - `create_point(kind, content, extractedFrom=url)` — single URL string only (list MERGEs a broken Source with list url). Multi-source: create_point(extractedFrom=url1) + `sdk._get_proj()._link_source(pid, url2)`.
 - `_link_source(point_id, source_ref, source_kind="document")` — edges.py:177; MERGE on url; auto-creates stub Source with ingestedAt=_now_iso().
@@ -111,14 +113,17 @@ One embedded test fails intermittently under parallel process contention (resear
 - `_RecordingEP` (test_ep_nary_falsification.py:234) stubs graph I/O; run() calls _clear_caches() at end (#330) which deletes _node_cache → the failing test reads post-run cache. Fix: capture in _flush_cache or override _clear_caches to snapshot.
 
 ### Existing test_ep_sources.py (1103 lines — to be rewritten)
+
 - Helpers: TIER_MAP (l.33), TIER_PC (l.41), log_aggregate_pc (l.53), log_aggregate_prior (l.66), log_aggregate_prior_mixed (l.77, FICTIONAL NAND→beta), fresh_sdk (l.105, Docker-only db_path=None+namespace), set_source_evidence (l.137, set_point_baseline bypass), set_aggregated_evidence (l.152), make_point (l.128?), make_operator (l.~136), beta_mean (l.~98).
 - Test classes: TestLogAggregationMath (incl. test_nand_contribution_to_beta l.308, test_nand_only_below_baseline l.325, test_equal_tier_contradiction_neutral l.335 — FICTIONAL), TestSituation1..10 (set_point_baseline-based), TestScenarioB_LoopySingleSource, TestScenarioC_LoopyDualSource, TestEdgeCases.
 - All integration tests use set_point_baseline → validate fictional prior-level model, Docker-only. To be replaced by real-path tests.
 
 ### test_source_inheritance_own.py (817 lines — real-path template, keep)
+
 - TestCorroboration (2×T4 > 1×T4 exact), TestAntiSybil (100 T4 < 1 T2; 1000 T4 ≈ 1 T3), TestTierOrdering, plus temporal/legacy/NAND-reliability/assessment tests. Embedded, prior-level via ep_alpha.
 
 ### conftest.py
+
 - Forces test graphs to tortoise_test_ prefix; autouse per-test graph recomposition; embedded falkordblite via redislite. TortoiseSDK(db_path=tempfile) works in embedded mode.
 
 ### No imports of test_ep_sources.py helpers anywhere (verified zero matches) — rewrite is isolated.

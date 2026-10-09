@@ -74,6 +74,7 @@ created: 2026-09-24
 | 11 | `config/ci-surfaces.yml` | Infra | — | integrity | new test file registered under `core` | `ci_selection --integrity` red |
 
 ### Bug pattern flags
+
 - **Conditional guard**: every `if confidence >= tau_hi` branch needs both-side tests.
 - **Silent function skips**: the "refused" path must be journaled, not dropped.
 - **Ambiguous zero return**: `link_entity` returns 0 for an already-existing edge AND for an absent endpoint pair — never infer "already present" from 0; re-probe the edge.
@@ -130,10 +131,11 @@ changes the rate.
 ## Task 7 — CI registration + surface checks
 
 **Intent:** the tests actually run in CI; no accidental surface change.
-**Acceptance:** `config/ci-surfaces.yml` lists the new test under `core`; `python3 tools/ci_selection.py --integrity` exits 0; `tools/surface-guard.py` + `tools/surface_manifest.py check` pass (no new public SDK/MCP member).
+**Acceptance:** `config/ci-surfaces.yml` lists the new test under `core`; `uv run python tools/ci_selection.py --integrity` exits 0; `tools/surface-guard.py` + `tools/surface_manifest.py check` pass (no new public SDK/MCP member).
 **Files:** Modify `config/ci-surfaces.yml`.
 
 ## Risks
+
 - **`sdk.py` is a SHARED_MODULE → full CI matrix.** Expected; the lane is expensive but correct.
 - **Hosted SDKs set no `event_log_path`** → binder edges there are live-only (pre-existing behavior). Documented, not fixed here.
 - **Real LLM τ calibration (D4) is NOT covered** — the fixture measures policy only.

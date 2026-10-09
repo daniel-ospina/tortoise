@@ -55,10 +55,12 @@ The issue's re-scope says: *"the page must not overclaim — verify actual produ
 ## 1. Rejected alternatives
 
 ### Approach A — Legal-Family Clone (hand-authored HTML, full pin discipline)
+
 **Why not:** The code↔claim link is human-maintained pins in an opt-in e2e suite. Stale pins are green — the exact failure the binding constraint forbids. The present-tense-guard interplay is a real landmine (only if security sentences enter `PINNED_CANONICAL`, but that is precisely how A would "extend" the pin machinery). Prose citations rot. Its ONE genuinely strong property — full legal-family served-content membership — is captured by the hybrid (LEGAL_PAGES membership is cheap and safe; the guard machinery is NOT auto-applied by membership, verified).
 **When A WOULD have been better:** if the code surfaces were unknowable/unverifiable and the only truthful thing to check was served content against owner-approved copy (pure marketing claims with no code anchor). Or if the team refused any tooling. Neither holds here — every claim has a real code anchor, and the repo already runs the pricing.json parity pattern.
 
 ### Approach B — Canonical Markdown + Build Step + Repo-Local Code-Parity Tests
+
 **Why not:** Better authoring UX, but the verification patterns live in a *separate* test file from the claim text — they can drift independently (the "two-copy problem" moves up a level instead of disappearing). Phrase-anchored greps false-positive on comments and cannot express absence/SOC-2 semantics well. The deployed HTML + build output need a determinism test anyway (B carries C's parity burden without C's structural coupling). SOC 2 coverage is weaker (page-text regexes only).
 **When B WOULD have been better:** if the page were long-form prose (500+ words/section, heavy markdown formatting, tables everywhere) where JSON string escaping becomes genuinely painful and reviewers are humans reading markdown diffs. This page is 5 short technical sections + a status table — the authoring friction of JSON is modest.
 
@@ -75,6 +77,7 @@ Ship a static `/security` page on the tortoise.premiselabs.co host (served by th
 **Renderer:** `website/security_render.py` (stdlib only, deterministic — no timestamps; all dates come from the JSON). Reuses the dpa.html template elements (below). Renders `website/security.html`, which is COMMITTED.
 
 **Enforcement (three layers):**
+
 1. **Repo-local executable checks** — `tests/test_website_security.py` (stdlib, zero network, fast): schema validation (every claim MUST have non-empty `must_contain`; `soc2.status` ∈ enum; sources must exist), then **executes each claim's check against the actual source files**, then byte-parity committed-HTML vs in-memory render, plus tag-balance and the negation-safe SOC 2/credential-scoping structural checks on the committed HTML.
 2. **Served-content e2e** — `tests/e2e/test_legal_pages.py` extensions (all opt-in via `RUN_LEGAL_E2E=1`, run pre-merge in ci.yml `legal-e2e` against a local wrangler preview AND post-deploy in deploy-pages.yml `verify-legal` with `ALLOW_PROD=1`).
 3. **Deploy-time render verification** — deploy-pages.yml staging step re-renders from JSON and byte-compares against the committed HTML; mismatch fails the deploy.
@@ -98,12 +101,15 @@ Claim wording directions (all five sections) — every claim includes the scopin
 **meta:** last_updated, effective_date (yyyy-mm-dd), version. **revision_history:** one changelog entry with "Initial publication" (required by the LEGAL_PAGES revision-history gate).
 
 ### Step 2 — `website/security_render.py` (stdlib renderer, dpa.html template elements to reuse)
+
 Self-contained inline CSS + dark theme (`--bg:#060b14` palette, serif body, mono meta-labels, ~720px max-width) · topbar (← Back to product + `tortoise.premiselabs.co` host) · `.doc-type` label ("Security") · h1 + lede · `.meta` table (Last updated / Effective date / Version) · callout (relationship to Privacy Policy §7 + DPA §7 — the per-surface note) · h2 sections · tables (subprocessor-style status table for SOC 2 milestones; revision-history table) · footer (Premise Labs · Tortoise · Back to product). Deterministic output — byte-stable across runs.
 
 ### Step 3 — `website/security.html` (generated, committed)
+
 Run the renderer; commit the output. This is what Pages serves. (`website/**` trigger already covers it — no workflow change needed for deploy.)
 
 ### Step 4 — `tests/test_website_security.py` (NEW, repo-local, stdlib, zero network)
+
 1. Schema validation of security.json (structure, non-empty must_contain per claim, soc2.status enum, sources exist on disk).
 2. **Execute every claim check** against the actual source files (normalized, case-insensitive substring must_contain; must_not_contain).
 3. Render parity: invoke the renderer in-memory/subprocess → byte-compare with committed security.html.
@@ -113,9 +119,11 @@ Run the renderer; commit the output. This is what Pages serves. (`website/**` tr
 7. Scope-sentence present.
 
 ### Step 5 — `.github/workflows/python-ci.yml` (CRITICAL wiring)
+
 The `test` job uses EXPLICIT half a/b allowlists (verified this session — `test_website_static` is listed in half b). **Add `test_website_security` to the half-b files list.** Without this, the executable claim checks never run in CI. (`uv-lock-check` dev-group collection will auto-collect it — stdlib only, no new deps.)
 
 ### Step 6 — `tests/e2e/test_legal_pages.py` (tuple extensions + new served-content test)
+
 - `LEGAL_PAGES += ("/security",)` → auto-covers revision-history presence + exactly-once effective date (the two LEGAL_PAGES-iterating tests).
 - `FOOTER_LINK_HREFS += ("/security",)` → the 5 footer pages must link it.
 - `CRAWL_PAGES += ("/security",)` → final-200 + external-link crawl (page must contain NO external hrefs — internal relative links only, so nothing new joins the rate-limited external crawl).
@@ -123,12 +131,15 @@ The `test` job uses EXPLICIT half a/b allowlists (verified this session — `tes
 - Add `"/security"` to the `test_mobile_render_no_horizontal_scroll` parametrize set (dpa-template is responsive at 480px).
 
 ### Step 7 — Footer links on all 5 pages
+
 `product.html` (`nav.legal-footer` — add `<a href="/security">Security</a>`), `welcome.html` (footer), `signup.html` (`.footer` div), `signin.html` (`.footer` div), `self-hosted.html` (footer line). No middleware change needed — non-root paths pass through on both hosts (verified `_middleware.ts`).
 
 ### Step 8 — `.github/workflows/deploy-pages.yml` staging step
+
 Add a step before `wrangler pages deploy`: `python3 website/security_render.py --check` (or render-to-temp + byte-compare with committed security.html); mismatch → fail the deploy. Trigger paths: NO change (artifacts live under `website/**`). The existing `verify-legal` post-deploy job picks up the extended e2e suite automatically.
 
 ### Step 9 — this document + deferred issue
+
 `docs/scoping/2026-08-13-309-security-page-scope.md` (this file). File the deferred privacy/dpa wording issue (below).
 
 ## 5. Testing strategy
@@ -144,6 +155,7 @@ The SOC 2 negation-safe check is the highest-risk claim (page-only, no code anch
 ## 6. Verification plan (E2E-7-D Security Baseline — documentation portion)
 
 The implementer proves the indicators:
+
 1. **Route renders**: locally `cd website && npx wrangler@4 pages dev . --port 8788 --ip 127.0.0.1` + `RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788 python -m pytest tests/e2e/test_legal_pages.py -k security -v` (pre-merge proof); ci.yml `legal-e2e` job green; post-deploy `verify-legal` green on https://premiselabs.co/security + https://tortoise.premiselabs.co/security (ALLOW_PROD=1).
 2. **Footer link present**: `test_footer_legal_links_on_all_site_pages` (unconditional — all 4 FOOTER_PAGES) + `test_tortoise_host_footer_half` (gated) + `_footer_links_present` in the crawl tests — all green after the 5 footer edits.
 3. **No broken links**: `test_crawl_all_pages_final_200` (includes /security) + external crawl (security page ships zero external hrefs).

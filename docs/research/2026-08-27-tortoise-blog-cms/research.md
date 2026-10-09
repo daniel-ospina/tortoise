@@ -27,11 +27,13 @@ review in CMS; keep self-host download simple."
 > marketing blog into the self-hostable product download, and (c) building more CMS than is needed.
 
 **Alternative framings considered:**
+
 - HMW let agents publish reviewed content to *any* marketing surface, not just this blog?
 - HMW give Tortoise a content publishing workflow *without* coupling it to the Tortoise product?
 - HMW achieve agent-write + human-review + SEO with the *smallest* possible system?
 
 **Assumption map:**
+
 | Assumption | Status |
 |---|---|
 | Blog must live inside the webapp (same domain) | [unverified] — blog on same domain is best for SEO (domain authority), but a subdomain is possible |
@@ -76,6 +78,7 @@ From `website/website_architecture.md` (2026-08-14) + live inspection:
 | `api.premiselabs.co` | Hosted FastAPI | Fly.io |
 
 Relevant existing infra:
+
 - **SEO infra already in place:** `robots.txt` (cross-submission of 3 sitemaps), `sitemap-product.xml`, `sitemap-company.xml`, canonical tags on all indexable pages, `_redirects`, host-consolidation 301s, HSTS. Middleware has a `TORTOISE_ONLY` route set (blog routes would join it).
 - **Supabase project managed in-repo:** `supabase/migrations/0001…0016+` with teams/memberships (`role`: owner/admin/member), api_keys, provisioning RPCs. No "site admin" concept yet — the blog admin gate needs a decision (owner/admin role vs allowlist).
 - **Deploy:** `.github/workflows/deploy-pages.yml` deploys `website/**` changes to Pages on push to main touching `website/**`; `supabase-deploy.yml` applies migrations.
@@ -107,6 +110,7 @@ Tortoise memory checkpoint: **unavailable** (no `TORTOISE_API_KEY` in env) — n
 The canonical agent-CMS workflow: **the agent never touches the publish state.** Agents create
 content in `draft`, a human reviews and advances to `published`. Multiple sources converge on
 hard rules:
+
 - "Never publish from an automated step. Generation writes drafts. Only a person changes status to published." (Cosmic)
 - KernelCMS: draft-only agent principal, `evalGate` (quality CI) + `requestReview` (human inbox) are the *only* advancement paths.
 - Abhishek Shankar's typology: the **Scribe pattern** "works because it leaves the authority topology unchanged. The agent is, structurally, a very fast copywriter."
@@ -281,6 +285,7 @@ blog *posts* are Supabase rows + Storage images and never touch git. So the "blo
 critical repo" concern is mostly resolved by architecture either way.
 
 **Option A — blog plumbing in the tortoise repo `website/` (RECOMMENDED):**
+
 - Pros: same Pages project = same domain path `/blog/…` (SEO-optimal, per §3.6); existing
   deploy-pages.yml pipeline; existing middleware/SEO/design tokens; one repo to reason about.
 - Cons: PRs land in the critical public product repo (mitigated: additive `website/blog*`
@@ -289,6 +294,7 @@ critical repo" concern is mostly resolved by architecture either way.
 - Self-host impact: none (verified §2.3).
 
 **Option B — separate repo + separate Pages project:**
+
 - Pros: total isolation from the product repo; independent deploy cadence.
 - Cons: cannot serve `/blog/…` on tortoise.premiselabs.co without a Worker proxy or host
   change; would force a subdomain (blog.premiselabs.co) which reopens the SEO consolidation

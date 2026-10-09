@@ -204,6 +204,93 @@ export function isRefreshTokenDead(status: number, errorBody: string): boolean {
   );
 }
 
+/**
+ * Did an `is_admin()` rejection name a DEAD USER CREDENTIAL, or is it OUR fault?
+ *
+ * `is_admin()` is called with BOTH credentials at once: the project anon key as
+ * `apikey` (the SERVICE's credential) and the user's minted access token as
+ * `Authorization` (the USER's). A 401/403 from that call is therefore AMBIGUOUS
+ * BY STATUS ALONE:
+ *
+ *   - the Supabase gateway answers **401** when `apikey` does not match a
+ *     configured key at all — a rotated/wrong `SUPABASE_ANON_KEY`, i.e. an
+ *     infrastructure/configuration fault; and
+ *   - PostgREST answers **401/403** with a JWT error (`PGRST301` for an
+ *     undecodable JWT, `PGRST302` for a rejected/absent bearer, `PGRST303` for
+ *     a claims failure, a message like `JWT expired`, or a GoTrue code such as
+ *     `invalid_jwt` / `unusable_credential`) when it is the USER's bearer that
+ *     was rejected. A bare mention of `jwt` is NOT such a signal (see the
+ *     message-fallback narrow below).
+ *
+ * Treating the first as "you are not an admin" (or as a re-auth bounce) is the
+ * #3485 class: a deployment fault read as a session verdict. Status cannot tell
+ * them apart, so the BODY decides — exactly the mechanism `isRefreshTokenDead`
+ * (refresh grant) and `/auth/password`'s `isCredentialRejection` (password
+ * grant) already use: only a POSITIVE credential signal is a rejection, and
+ * everything else — including an unreadable or unexpected body — is a fault
+ * (503, retryable). Failing toward "try again" is the safe direction; failing
+ * toward "you are signed out" is the bug.
+ */
+export function isUserTokenRejection(status: number, errorBody: string): boolean {
+  if (status >= 500 || status === 429) return false;
+  // 403 from PostgREST is also `42501 insufficient privileges` — a permission
+  // CONFIGURATION fault, not a credential verdict — so it only counts when the
+  // body names a JWT failure, never by status alone.
+  if (status !== 401 && status !== 403) return false;
+  // ONLY a JSON error envelope can name a credential failure. A NON-JSON body is
+  // — by construction — not a Supabase/PostgREST error, so it can never be
+  // EVIDENCE that the USER's bearer was rejected: an HTML config or WAF error
+  // page that happens to contain `jwt` / `invalid token`, a truncated response,
+  // or an empty body is a deployment fault, not a session verdict. Testing the
+  // RAW text made a WAF page a sign-out (#3485). Unparseable → fault (503).
+  let parsed: {
+    code?: string;
+    error?: string;
+    msg?: string;
+    message?: string;
+    error_description?: string;
+  };
+  try {
+    parsed = JSON.parse(errorBody) as typeof parsed;
+  } catch {
+    return false;
+  }
+  if (parsed === null || typeof parsed !== "object") return false;
+  // The CODE field FIRST: it is the provider's own identifier, and the message
+  // wording is theirs to change. `\bjwt\b` could never match GoTrue's
+  // `INVALID_JWT` — `_` is a word character, so there is no boundary before
+  // `jwt` — and `PGRST302` / `UNUSABLE_CREDENTIAL` were missed entirely, so a
+  // user whose bearer the gateway rejected was never signed out. Anything not
+  // recognised here is NOT a credential verdict and stays a fault (503).
+  const code = typeof parsed.code === "string" ? parsed.code : "";
+  if (/^(?:pgrst30[123]|invalid_jwt|bad_jwt|unusable_credential)$/i.test(code)) return true;
+  // The MESSAGE fallback. The envelope fields are INDEPENDENT statements, so a
+  // JWT term and its rejection must appear in the SAME field: a term in one
+  // field and a verb in another attests to nothing about the caller's bearer —
+  // `{"message":"query selector jwt","error_description":"the request expired
+  // while parsing"}` is a request-level parse fault (PGRST100), not a session
+  // verdict. Likewise a `jwt` mention is not a verdict when it names SERVER
+  // configuration: `jwt configuration`, `JWT secret` and `jwt settings`
+  // describe our infrastructure, never the caller's token, so the term carries
+  // a config exclusion. The rejection family covers the whole family gateways
+  // actually emit — `failed`, `verif…`, `decod…`, `pars…`, `signature`,
+  // `mismatch`, `unverifiab…`, `absent`, `not valid`, `not provided` and the
+  // expiry/validity words. `pgrst30[123]`, `invalid token`, `invalid claim` and
+  // `token expired` still stand alone, and anything unrecognised stays a fault
+  // (503).
+  const jwtTerm =
+    /\bjson web tokens?\b|\bjwt\b(?!\s+(?:configuration|config|settings?|secret)\b)/i;
+  const rejection =
+    /\b(?:expired|invalid|missing|revoked|malformed|rejected|unverifiab\w*|verif\w*|decod\w*|pars\w*|signature|mismatch|fail\w*|absent)\b|\bnot\s+(?:valid|provided)\b/i;
+  const bareCredentialVerdict = /pgrst30[123]|invalid (?:token|claim)|token (?:has )?expired/i;
+  for (const field of [parsed.error, parsed.msg, parsed.message, parsed.error_description]) {
+    if (typeof field !== "string") continue;
+    if (bareCredentialVerdict.test(field)) return true;
+    if (jwtTerm.test(field) && rejection.test(field)) return true;
+  }
+  return false;
+}
+
 export async function refreshSession(
   env: SupabaseEnv,
   refreshToken: string,

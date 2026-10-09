@@ -9,6 +9,7 @@ The six-month test: keep what a decision-maker would still need in six months.
 Mechanics are dropped; their MEANING is kept.
 
 KEEP (restated at the level of meaning):
+
 - the full story arc: what happened, in order, why — decisions, discoveries,
   pivots, and the reasoning behind each
 - State: which subjects/objects changed and how
@@ -18,6 +19,7 @@ KEEP (restated at the level of meaning):
 - the connections between layers (who decided what, what caused what)
 
 DROP the mechanics — say what they MEAN, not what they are:
+
 - issue/PR numbers → "the CI blocker" / "another session had already resolved
   it" / "a residual defect remained"
 - commit hashes, function names, line numbers, code snippets → the DEFECT

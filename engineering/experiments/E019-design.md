@@ -11,10 +11,12 @@
 ## 2. Independent Variable
 
 **EP propagation mode:**
+
 - `bidirectional` — messages flow both ways on all IMPL edges (current behavior)
 - `directed` — messages flow only source→target on IMPL edges (A→B means A sends to B, not reverse)
 
 **Graph parameters:**
+
 - Shared conclusion count: 1, 2, 3 (how many conclusions A and B share)
 - B's source tier: T4, T2, T0 (how strongly anchored B is)
 - A's source tier: T0 (always high, to maximize cascade potential)
@@ -28,6 +30,7 @@
 ## 4. Graph Construction
 
 ### Base topology (1 shared conclusion)
+
 ```
 Sources_A → A ──IMPL──→ C1
                          ↑
@@ -37,6 +40,7 @@ Sources_B → B ──IMPL─────┤
 ```
 
 ### Extended topology (3 shared conclusions)
+
 ```
 Sources_A → A ──IMPL──→ C1
                    ┌───→ C1a
@@ -57,6 +61,7 @@ Both source→target and target→source messages on every IMPL edge.
 
 **Directed mode (experimental):**
 Only source→target messages on IMPL edges. The target does NOT send feedback to the source through the IMPL edge. This requires a one-line change in `ep.py`:
+
 ```python
 # Current: messages sent to both id_a and id_b
 self._write_message(op_id, id_a, *damped_a, op_type)
@@ -68,6 +73,7 @@ self._write_message(op_id, id_b, *damped_b, op_type)  # target receives
 ```
 
 ### Anchored C2 (5 additional IMPL sources)
+
 ```
 Sources_A → A ──IMPL──→ C1
                          ↑
@@ -79,10 +85,12 @@ Sources_B → B ──IMPL─────┤
                                ←──IMPL── S4(T2)
                                ←──IMPL── S5(T2)
 ```
+
 C2 has 5 independent T2 source points plus B. B's feedback must compete
 with 5 other IMPL signals. Test: does the cascade break through anchoring?
 
 ### Anchoring gradient (low → medium → high)
+
 ```
 Sources_A → A ──IMPL──→ C1
                          ↑
@@ -100,6 +108,7 @@ Sources_B → B ──IMPL─────┤
                                ←──IMPL── S4(T2)
                                ←──IMPL── S5(T2)
 ```
+
 Tests the gradient: how many anchor points does C2 need before the
 bidirectional cascade from A's invalidation becomes undetectable?
 

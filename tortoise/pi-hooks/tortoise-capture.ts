@@ -327,6 +327,64 @@ export function modelLabel(model: unknown): string | undefined {
   return clean ? clean.slice(0, 128) : undefined;
 }
 
+/** #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
+ *  here as well as at the server (`_SESSION_CAPTURED_AT_SOURCE_VALUES`) because
+ *  the spool is the leg that can lose the conversation: a source the server
+ *  refuses is a 422, a 422 is classified PERMANENT, and the drain then unlinks
+ *  the entry's turn log — the only copy. Normalising here makes that refusal
+ *  unreachable from either spool leg. */
+const CLIENT_CAPTURED_AT_SOURCES = new Set(["cli_observed", "file_mtime", "unknown"]);
+
+/** A usable client capture instant, or `undefined`.
+ *
+ *  `typeof !== "number"` already refuses `true`/`false` (a JSON bool is not a
+ *  clock), and `Number.isFinite` refuses `NaN`/`Infinity` — which do NOT
+ *  round-trip: `JSON.stringify` emits `null` for them, so the Python leg would
+ *  read a stamp of `null` where this leg wrote a number. */
+function finiteInstant(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Resolve the client stamp as a PAIR: the instant with ITS OWN clock.
+ *
+ *  Never resolved independently. A source names the clock that PRODUCED the
+ *  instant, so pairing a stored instant with a later writer's source relabels a
+ *  real observation with a clock that did not make it — and because `unknown`
+ *  DISABLES the floor while an absent source PASSES it, that relabelling flips
+ *  a verifiable session to unverifiable (#3516 §B review: reproduced PASSED ->
+ *  DISABLED).
+ *
+ *  Precedence is first-writer-wins on the INSTANT (matching the lane's monotone
+ *  rule and the server's `coalesce`), with the source taken from the SAME
+ *  writer. Falsiness is not absence: `0.0` is the epoch and is a real value. */
+function stampPair(
+  prior: SpoolMeta | undefined,
+  snapshot: { clientCapturedAt?: number; clientCapturedAtSource?: string },
+): [number | undefined, string | undefined] {
+  const candidates: Array<[unknown, unknown]> = [
+    [prior?.client_captured_at, prior?.client_captured_at_source],
+    [snapshot.clientCapturedAt, snapshot.clientCapturedAtSource],
+  ];
+  for (const [instant, source] of candidates) {
+    const at = finiteInstant(instant);
+    if (at === undefined) continue;
+    // piece 12 row 1: the Pi recorder always has a clock and claims NO source,
+    // and an absent source PASSES the floor. Absent stays absent — never filled
+    // in from the other writer.
+    if (source === undefined || source === null) return [at, undefined];
+    // An unrecognised token becomes `unknown`, which DISABLES the floor:
+    // dropping it instead would leave the source absent, PASSING a session
+    // whose clock we demonstrably cannot name.
+    return [
+      at,
+      typeof source === "string" && CLIENT_CAPTURED_AT_SOURCES.has(source)
+        ? source
+        : "unknown",
+    ];
+  }
+  return [undefined, undefined];
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -343,6 +401,12 @@ export function buildCapturePayload(args: {
    * in-process hook passes 'hook' when it SPOOLS (see `spoolSnapshot`).
    */
   captureLane?: string;
+  /** #3516 §B / #3515 piece 12: the client's OWN capture instant (unix seconds)
+   *  and the clock it came from, for the timestamp floor. Omitted = absent, and
+   *  a drain must forward exactly what the ENTRY carries — inventing an instant
+   *  on a lane-less pre-#3516 entry would make the floor pass on nothing. */
+  clientCapturedAt?: number;
+  clientCapturedAtSource?: string;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
@@ -352,6 +416,22 @@ export function buildCapturePayload(args: {
     machine_id: args.machineId,
   };
   if (args.captureLane) payload.capture_lane = args.captureLane;
+  // NORMALISED at the WIRE, not only at the writer. The drain forwards whatever
+  // is on disk, and the two legs share one directory — so a meta the OTHER leg
+  // (or a hand-edit) left with an unrecognised token would otherwise be posted
+  // verbatim, and the server's refusal is a 422, a 422 is classified PERMANENT,
+  // and `discardEntry` then unlinks the ONLY copy of the conversation.
+  const postedAt = finiteInstant(args.clientCapturedAt);
+  if (postedAt !== undefined) {
+    payload.client_captured_at = postedAt;
+    const src = args.clientCapturedAtSource;
+    if (src !== undefined && src !== null) {
+      payload.client_captured_at_source =
+        typeof src === "string" && CLIENT_CAPTURED_AT_SOURCES.has(src)
+          ? src
+          : "unknown";
+    }
+  }
   if (args.model) payload.model = args.model;
   return payload;
 }
@@ -500,6 +580,12 @@ export interface SpoolMeta {
    *  entry spooled by the Pi hook must carry it — or a later drain files the
    *  capture lane-less and a WORKING hook reads as not-live (#3515 piece 8). */
   capture_lane?: string;
+  /** #3516 §B / #3515 piece 12: the CLIENT capture instant and its clock. The
+   *  floor compares this against the install time, so it must survive the spool
+   *  and reach the wire; the two legs share this directory, so both must carry
+   *  the keys or one leg drains the other's entry without them. */
+  client_captured_at?: number;
+  client_captured_at_source?: string;
   created_at: string;
   updated_at: string;
   turns_count: number;
@@ -521,6 +607,12 @@ export interface SpoolMeta {
    *  stranded and a working hook reads as not-live. Entries filed before this
    *  field existed have neither lane nor `filed_lane`, so they compare equal. */
   filed_lane?: string;
+  /** #3516 §B: the STAMP the 2xx actually carried. Same reasoning as
+   *  `filed_lane` — the stamp is metadata, not content, so a content-only
+   *  marker would strand a stamp that appeared after the filing. Omitted when
+   *  the wire carried none, so entries filed before this field existed compare
+   *  equal. */
+  filed_stamp?: number;
   filed_at?: string;
 }
 
@@ -541,6 +633,8 @@ export interface SpoolSnapshot {
   /** #3516 §B: the lane this snapshot's PRODUCER claims ('hook' for the
    *  in-process hook). Omitted/undefined = no lane — never fabricated. */
   captureLane?: string;
+  clientCapturedAt?: number;
+  clientCapturedAtSource?: string;
 }
 
 export interface SpoolBounds {
@@ -908,6 +1002,11 @@ export function writeSpoolEntry(
   // then OMITS the key. (A stored empty lane is reachable only from a crafted
   // or corrupt meta — which is why it has its own test.)
   const lane = prior?.capture_lane || snapshot.captureLane;
+  // #3516 §B / piece 12: the stamp and its clock resolve as a PAIR, so a later
+  // writer can never relabel an earlier writer's instant with its own clock.
+  // The store-sync backstop ships the SAME session after this leg, and a later,
+  // weaker clock must not replace the hook's own observation.
+  const [clientCapturedAt, clientCapturedAtSource] = stampPair(prior, snapshot);
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the
   // content, so without this bypass an entry first written lane-less (a
@@ -916,6 +1015,12 @@ export function writeSpoolEntry(
   // hook would file as not-live, the false-negative this feature exists to
   // remove.
   const laneUpgrade = !!snapshot.captureLane && !prior?.capture_lane;
+  // The SAME upgrade bypass for the stamp: it is metadata, not content, so a
+  // byte-identical re-snapshot that newly carries one must not be deduped away
+  // — the entry would stay timeless forever and the floor could never run.
+  const stampUpgrade =
+    finiteInstant(snapshot.clientCapturedAt) !== undefined &&
+    finiteInstant(prior?.client_captured_at) === undefined;
 
   // Dedup: a snapshot that is byte-identical to what is stored already is a
   // no-op — no rewrite, no re-upload (incremental capture must not amplify
@@ -924,7 +1029,8 @@ export function writeSpoolEntry(
     prior !== undefined &&
     stored.length === snapshot.turns.length &&
     prior.content_digest === contentDigest(snapshot.turns) &&
-    !laneUpgrade;
+    !laneUpgrade &&
+    !stampUpgrade;
   if (sameContent) {
     return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
   }
@@ -953,6 +1059,12 @@ export function writeSpoolEntry(
     machine_id: snapshot.machineId,
     ...(snapshot.model ? { model: snapshot.model } : {}),
     ...(lane ? { capture_lane: lane } : {}),
+    ...(clientCapturedAt !== undefined
+      ? { client_captured_at: clientCapturedAt }
+      : {}),
+    ...(clientCapturedAt !== undefined && clientCapturedAtSource
+      ? { client_captured_at_source: clientCapturedAtSource }
+      : {}),
     created_at: prior?.created_at ?? now,
     updated_at: now,
     turns_count: snapshot.turns.length,
@@ -974,9 +1086,14 @@ export function writeSpoolEntry(
     // writer's `and not lane_upgrade`.
     ...(prior?.filed_key &&
     prior.content_digest === contentDigest(snapshot.turns) &&
-    !laneUpgrade
+    !laneUpgrade &&
+    // #3516 §B: the SAME invalidation for a stamp UPGRADE — the stamp is not
+    // part of `filed_key` either, so an entry filed without one would keep its
+    // marker and be skipped forever, and the stamp would never reach the wire.
+    // Mirrors the Python writer's `and not stamp_upgrade`.
+    !stampUpgrade
       ? { filed_key: prior.filed_key, filed_lane: prior.filed_lane,
-          filed_at: prior.filed_at }
+          filed_stamp: prior.filed_stamp, filed_at: prior.filed_at }
       : {}),
   };
   const metaText = `${JSON.stringify(meta, null, 2)}\n`;
@@ -1253,7 +1370,13 @@ export async function flushSpool(
     // `===` against this leg's ABSENT key would bypass the skip and re-POST an
     // entry the other leg had already filed (#3516 §B).
     if (meta.filed_key && meta.filed_key === meta.capture_key &&
-        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined)) {
+        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined) &&
+        // Compared against the SAME normalisation the payload uses: the wire
+        // carries `finiteInstant(...)`, so comparing the RAW disk value can never
+        // match for a value the guards refuse — and the drain never rewrites the
+        // meta, so such an entry would re-POST its full transcript on EVERY
+        // drain, forever (#4714 amplification).
+        (meta.filed_stamp ?? undefined) === finiteInstant(meta.client_captured_at)) {
       summary.skipped += 1;
       continue;
     }
@@ -1296,6 +1419,10 @@ export async function flushSpool(
         // The ENTRY's lane, not this process's: a lane-less import entry
         // drained here must stay lane-less.
         captureLane: meta.capture_lane,
+        // #3516 §B / piece 12: the ENTRY's stamp, exactly as it stands — a
+        // lane-less pre-#3516 entry has none and must post without the keys.
+        clientCapturedAt: meta.client_captured_at,
+        clientCapturedAtSource: meta.client_captured_at_source,
       });
       const res = await postCapture(cfg, payload, doFetch, opts.timeoutMs);
       if (res.ok) {
@@ -1334,13 +1461,24 @@ export async function flushSpool(
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
         const postedLane = payload.capture_lane as string | undefined;
+        // #3516 §B: the stamp is part of the posted identity for the same
+        // reason the lane is — metadata, not content — so a stamp appearing
+        // while the POST is in flight must not be cancelled and stranded.
+        const postedStamp = payload.client_captured_at as number | undefined;
         if (
           onDisk &&
           contentDigest(onDiskTurns) === postedDigest &&
-          onDisk.capture_lane === postedLane
+          onDisk.capture_lane === postedLane &&
+          // Normalised on BOTH sides of the CAS, for the same reason as the skip
+          // clause: `postedStamp` is what the WIRE carried, so the raw disk value
+          // can never equal it.
+          finiteInstant(onDisk.client_captured_at) === postedStamp
         ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
           onDisk.filed_lane = postedLane;
+          // `undefined` is OMITTED by JSON.stringify, which is exactly the
+          // "the wire carried none" encoding the skip clause expects.
+          onDisk.filed_stamp = postedStamp;
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;
           onDisk.next_attempt_at_ms = 0;
@@ -1366,7 +1504,8 @@ export async function flushSpool(
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
       if (pending.filed_key && pending.filed_key === pending.capture_key &&
-          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined)) {
+          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined) &&
+          (pending.filed_stamp ?? undefined) === finiteInstant(pending.client_captured_at)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the
@@ -1529,6 +1668,11 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           // #3516 §B: this IS the in-process hook, so the entry it spools
           // claims 'hook' — the drain later forwards it verbatim.
           captureLane: "hook",
+          // #3516 §B / piece 12 row 1: the in-process recorder stamps its OWN
+          // clock at turn observation, and carries NO source — piece 12's row
+          // reads "none — the recorder always has a clock". Unix SECONDS, the
+          // unit the floor compares in (`Date.now()` is ms; do not pass it raw).
+          clientCapturedAt: Date.now() / 1000,
         },
         bounds,
       );

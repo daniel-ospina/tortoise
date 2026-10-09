@@ -40,10 +40,10 @@ REQUIRED ACCESS (operator)
 
 Usage (dry-run first, then execute):
   # 1) list what would be deleted (no writes)
-  python3 graph-scripts/4220_blog_residue_cleanup.py --prefix both
+  uv run python graph-scripts/4220_blog_residue_cleanup.py --prefix both
   # 2) review the listed slugs/counts
   # 3) delete + verify 0 remain
-  python3 graph-scripts/4220_blog_residue_cleanup.py --prefix both --execute
+  uv run python graph-scripts/4220_blog_residue_cleanup.py --prefix both --execute
 
 Exit codes: 0 = goal met (dry-run listed / execute left 0 rows); 1 = deletes ran
 but rows remain (goal not met); 2 = refused or could-not-determine (missing

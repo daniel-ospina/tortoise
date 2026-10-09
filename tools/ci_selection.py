@@ -224,6 +224,15 @@ SHARED_MODULES = (
     # `core` only and a break it induced in an api/eval/ep test would never run
     # on the PR that made it (the #1349/#3332/#3910 under-selection class).
     "tests/_verdict.py",
+    # #7655: the SIGALRM integrity guard (`tests/_signal_hygiene.py`) is imported
+    # at conftest MODULE level and installs the suite-wide autouse fixture that
+    # refuses an in-process `signal.alarm` / `setitimer(ITIMER_REAL)` /
+    # `signal.signal(SIGALRM, …)` while the harness owns the per-test timer.
+    # Same class as `_verdict.py` above: not a `test_*.py` file, so the manifest
+    # never classifies it — without this entry a change to the guard would
+    # select `core` only, and a break it induced in an api/eval/ep test would
+    # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
+    "tests/_signal_hygiene.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -248,16 +257,13 @@ SOURCE_PATTERNS = {
                    "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
-                   # #3485: the shared cross-subdomain session bridge is a
-                   # website asset whose guard test
-                   # (test_cross_subdomain_cookie_sync.py) reads it directly.
-                   # Without this entry a bridge-only PR matched no pattern,
-                   # fell into NON_PYTHON_PREFIXES -> changed == [] -> tier-1
-                   # smoke, and the guard for the file under review never ran
-                   # (the #1349/#3332/#3616 silent-drop class). The file is
-                   # dual-registered: this surface owns the website guards,
-                   # `api` keeps its existing membership.
-                   "website/assets/supabase-session.js",
+                   # #3559: the shared cross-subdomain bridge
+                   # (`website/assets/supabase-session.js`) was DELETED with its
+                   # entry here. Its guard
+                   # (`test_cross_subdomain_cookie_sync.py`) now proves its
+                   # ABSENCE, and the surviving subjects that guard holds
+                   # (`signup.html`, `main.jsx`) are already listed in this
+                   # surface.
                    # #3332: the public pages that own a guard test in this surface.
                    # docs.html + faq.html -> test_website_docs_consistency.py;
                    # product.html + welcome.html -> test_website_static.py;
@@ -331,19 +337,17 @@ SOURCE_PATTERNS = {
                    # `test_source_patterns_all_name_something_real`.
                    "website/apps/blog-admin/src/lib/blog-api.ts",
                    "website/apps/blog-admin/src/hooks/useAuth.ts",
-                   # #4171: two more guarded files this branch MODIFIED while leaving
-                   # them unselectable, found by review after the directory entry
-                   # landed. `supabase.ts` is read by exact constant in
-                   # `test_cross_subdomain_cookie_sync.py` (four STORAGE_KEY/cookie
-                   # scope assertions) and by
-                   # `test_session_bridge_fragment_retention.py`;
-                   # `blog/_shared/admin-auth.ts` by
+                   # #4171/#4178: guarded files that must select their guard.
+                   # `blog/_shared/admin-auth.ts` is read by
                    # `test_no_legacy_token_path.py`'s store-fault-vs-signed-out
-                   # semantics guard. Both are non-tier-1 `onboarding` guards, so
-                   # editing these files shipped green with their guard never
-                   # running — the same #1349/#3332 class, and inconsistent with
-                   # the sibling entries directly above.
-                   "website/apps/blog-admin/src/lib/supabase.ts",
+                   # semantics guard, and `backend.ts` (which replaced the
+                   # DELETED `blog-admin/src/lib/supabase.ts`) is read by
+                   # `test_cross_subdomain_cookie_sync.py` and
+                   # `test_session_bridge_fragment_retention.py`. Both are
+                   # non-tier-1 `onboarding` guards, so editing these files would
+                   # otherwise ship green with their guard never running — the
+                   # same #1349/#3332 class as the sibling entries above.
+                   "website/apps/blog-admin/src/lib/backend.ts",
                    "website/functions/blog/_shared/admin-auth.ts",
                    # #3523: the dashboard's unknown-address guard
                    # (tests/test_dashboard_unknown_address.py) reads the Pages
@@ -3243,7 +3247,7 @@ def _ci_manifest_module():
     ``ci_manifest`` imports this module back for the manifest helpers, so the
     import is lazy and must not create a second copy under a different name
     (which would split module state under pytest). The RUNNING module is probed
-    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    FIRST: ``uv run python tools/ci_manifest.py`` executes that file as ``__main__``,
     which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
     name-only lookup imported a SECOND copy of the same file.
     """

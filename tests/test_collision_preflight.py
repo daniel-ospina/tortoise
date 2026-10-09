@@ -756,6 +756,79 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
+    def test_advisory_surface_cannot_refuse_a_number_that_is_the_issue(self):
+        """An ADVISORY surface must never be able to force exit 2 (#7009).
+
+        The advisory closed-PR sample's elements are whatever the payload
+        returned, and `_pr_terminal_state` accepts a NON-TERMINAL `state` — so an
+        UNSCOPED number==issue refusal raised `NotAWorkItem` from the ADVISORY
+        scan too: a surface with no authority to block stopped a dispatch with
+        exit 2, stderr only and no report at all.
+
+        `test_closed_pr_own_number_is_weak_not_blocking` structurally could not
+        catch it. It does put a number==issue PR on the advisory surface, but its
+        fixture omits `state`, which `gh_fixtures` normalizes to "closed" — i.e.
+        TERMINAL — so the guard's `terminal is None` clause was False and the
+        number clause never decided. This test is that same shape with the state
+        made non-terminal: the one value that reaches the guard, and therefore the
+        only shape that pins the scoping.
+
+        Measured 2026-10-07: it fails against the PRE-FIX tool (`origin/main`, exit
+        2, "is an OPEN PULL REQUEST") and passes here. It also passes against the
+        intermediate tool that scoped on `use_closing_field` instead of
+        `surface.authority` — those two are behaviourally identical at the
+        production call sites, so this test pins that SOME scope exists.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "body": "restored in #3061", "state": "OPEN",
+            "headRefName": "fix/2712-pin-preflight-test",
+        }])
+        rc, out = self.run_tool()
+        # The hit is still REPORTED — an advisory surface reports, it just cannot
+        # block — and the verdict stays CLEAN at exit 0.
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("PR number == issue (3061)", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The pre-fix symptom, pinned by its exact text: the refusal must not be
+        # reachable from the CLOSED sample.
+        self.assertNotIn("is an OPEN PULL REQUEST", out)
+
+    def test_blocking_surface_without_the_closing_field_reports_it_unread(self):
+        """A BLOCKING surface that never requested the closing field must not
+        claim the PR "names no closing issue".
+
+        The refusal guard keys on `surface.authority` (may this surface refuse?)
+        while the closing-reference read keys on `use_closing_field` (did the
+        CALLER request the field?). Those are different questions, and this is the
+        only shape where they diverge: authority BLOCKING with the field not
+        requested. `linked` stays empty but `unreadable` is True, so the message
+        says the field could not be read instead of asserting contents the tool
+        never looked at.
+
+        No production call site reaches this arm today — which is exactly why it
+        needs a test. A branch already shipped in this PR unpinned (the
+        `use_closing_field` scoping at `48ceaca5a`), and a defence that no test
+        exercises can be deleted without anything going red: mutation confirmed a
+        hard `raise` substituted for this arm left the whole suite green.
+        """
+        cp = _tool_module()
+        surface = cp.Surface("open PRs", authority=cp.AUTHORITY_BLOCKING)
+        pr = {
+            "number": 3061, "state": "open", "title": "fix(scanner): something",
+            "headRefName": "fix/3061-something", "body": "",
+        }
+        with self.assertRaises(cp.NotAWorkItem) as caught:
+            cp.scan_pr_surface(surface, [pr], 3061, cp.Identity(),
+                               use_closing_field=False)
+        message = str(caught.exception)
+        # The refusal still happens — the arm changes only what it CLAIMS.
+        self.assertIn("is an OPEN PULL REQUEST", message)
+        self.assertIn("closing-reference field could not be read", message)
+        # The present-and-empty wording belongs to a field that was READ.
+        self.assertNotIn("It names no closing issue", message)
+
     def test_open_pr_own_number_REFUSES_instead_of_cleaning(self):
         """An OPEN PR's number is not a work item — the run must refuse (#7009).
 
@@ -2594,7 +2667,16 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
-        self.assertIn("terminal tests are NOT applied here", remote_row)
+        # #7693: the terminal tests still do not run on a remote ref's NAME — and
+        # now NOTHING clears a remote ref, because the demotion was REMOVED after
+        # eight review rounds found seven live false-CLEANs in it. This note is
+        # emitted on every run and sits next to a blocking HIT, so it must not
+        # claim a demotion; asserting on it is also what stops the stale sentence
+        # from being restored (the previous assertion here matched `#7693` and so
+        # passed against BOTH the demoting and the non-demoting tool — vacuous).
+        self.assertIn("terminal tests are not applied to these refs by name", remote_row)
+        self.assertIn("no remote ref is cleared as the terminal TWIN", remote_row)
+        self.assertNotIn("IS demoted", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
     def test_remote_tracking_ref_is_not_judged_terminal(self):
@@ -2620,6 +2702,268 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[remote branches]", out)
         self.assertNotIn("squash-merged", out)
+
+    def test_remote_twin_of_a_terminal_local_branch_is_not_demoted(self):
+        # #7693. The remote twin of a branch this run PROVED terminal sits at the
+        # same immutable commit. A now-REMOVED demotion used to clear it, and only
+        # after confirming the sha against the remote itself; that confirmation is
+        # GONE with the demotion (see the removal block in `run_preflight`), so the
+        # ref BLOCKS even though `origin` here is a real bare repo holding that sha.
+        # Kept as the reverse-pin: this is the case a re-added demotion would clear
+        # first.
+        ref = f"fix/{ISSUE}-landed"
+        bare = self.tmp / "bare.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", "HEAD")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4243, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        # ⛔ INVERTED: the #7693 remote-ref demotion was REMOVED after eight review
+        # rounds found seven live false-CLEANs in it (see the block in
+        # `run_preflight`). A terminal local twin does NOT demote its remote twin
+        # any more, even when the remote genuinely holds that tip — an over-block,
+        # taken over a gate that can silently let two lanes into one checkout. This
+        # test is kept as the REVERSE assertion so the demotion cannot be re-added
+        # without deliberately deleting it.
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+
+    def test_remote_twin_with_no_confirmable_live_tip_still_blocks(self):
+        # #7693. A remote ref that cannot be READ keeps blocking. This was the
+        # fail-closed half of a demotion that had a live-tip confirmation; the
+        # demotion is GONE (see the removal block in `run_preflight`), so the
+        # assertion now holds for a simpler reason — nothing clears a remote ref.
+        # Kept because it is the cheapest test that a remote ref still blocks, and
+        # it is what would fail if the demotion were re-added returning on an
+        # unreadable remote.
+        ref = f"fix/{ISSUE}-unverifiable"
+        _git(self.repo, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        _git(self.repo, "update-ref", f"refs/heads/{ref}", "HEAD")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", "HEAD")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4245, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+
+    def test_remote_twin_of_a_reused_branch_still_blocks(self):
+        # #7693, the SHARPEST test in this file, and the reverse-pin for the
+        # removed demotion. It was written to kill the live false-CLEAN a REUSE
+        # produces — the local twin and the CACHED remote ref both sit at the
+        # terminal sha S (nothing here fetches; that is the whole hazard) while the
+        # REMOTE has moved to T, so only a live read could tell them apart. The
+        # live read is GONE, so this now asserts the simpler truth — a remote ref
+        # whose branch moved on must BLOCK — and it is the test that fails if
+        # anyone re-adds a demotion that reads the cache instead of the remote.
+        ref = f"fix/{ISSUE}-reused"
+        bare = self.tmp / "bare.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        # The branch is REUSED elsewhere and the remote moves on. NOTE: a push
+        # advances the local remote-tracking ref too, so the cache is reset to the
+        # stale sha AFTER the second push — that is what "nobody has fetched since
+        # S" actually looks like, and it is the whole hazard.
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.assertEqual(
+            self._git_out("rev-parse", f"refs/remotes/origin/{ref}"), terminal_sha,
+            "precondition: the local cache must still show the terminal sha",
+        )
+        self.gh_fixtures(closed_prs=[{
+            "number": 4246, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+
+    def test_remote_ref_in_a_namespace_two_remotes_share_blocks(self):
+        # #7693 P1. `refs/remotes/origin/X` need not cache ORIGIN's branch: with
+        # `remote.fork.fetch=+refs/heads/*:refs/remotes/origin/*` it caches FORK's.
+        # Deriving the remote from the ref's first path segment queried `origin`,
+        # which held that branch at the stale sha, and demoted a LIVE branch —
+        # the wrong-remote false-CLEAN. A namespace owned by two remotes is
+        # AMBIGUOUS, and ambiguity on a blocking surface is not resolved by
+        # guessing: the ref must keep blocking.
+        ref = f"fix/{ISSUE}-shared-ns"
+        bare_origin = self.tmp / "bare-origin.git"
+        bare_fork = self.tmp / "bare-fork.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare_origin))
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare_fork))
+        _git(self.repo, "remote", "set-url", "origin", str(bare_origin))
+        _git(self.repo, "remote", "add", "fork", str(bare_fork))
+        _git(self.repo, "config", "remote.fork.fetch",
+             "+refs/heads/*:refs/remotes/origin/*")
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        # fork holds the same branch LIVE, moved. The cache is reset afterwards for
+        # the same reason as in the reuse test above (a push moves it).
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "fork", f"{moved}:refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4247, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+
+    def test_narrow_glob_refspec_does_not_demote_a_live_branch(self):
+        # #7693 round 3, the defect that killed the "longest prefix" design.
+        # `git remote set-branches origin 'fix/*'` writes
+        # `+refs/heads/fix/*:refs/remotes/origin/fix/*`, so
+        # `refs/remotes/origin/fix/X` caches the branch `fix/X` — but the
+        # remainder after the prefix reads just `X`. Reconstructing the branch
+        # from the ref name therefore queried `refs/heads/X`, which sat at the
+        # stale sha, and DEMOTED a live branch (measured through the real CLI:
+        # `VERDICT: CLEAN (exit 0)` while `refs/heads/fix/X` was at T).
+        #
+        # The forward mapping has no such freedom: `fix/X` is substituted into
+        # the destination and lands on `refs/remotes/origin/fix/X` exactly.
+        ref = f"refs/remotes/origin/fix/{ISSUE}-narrow"
+        # A sibling that genuinely sits at the old sha — the thing the broken
+        # reconstruction latched onto.
+        _git(self.repo, "branch", "-q", f"{ISSUE}-narrow", "HEAD")
+        terminal_sha = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", "-q", f"fix/{ISSUE}-narrow", "HEAD")
+        bare = self.tmp / "narrow.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/fix/*:refs/remotes/origin/fix/*")
+        _git(self.repo, "push", "-q", "origin",
+             f"refs/heads/fix/{ISSUE}-narrow:refs/heads/fix/{ISSUE}-narrow")
+        # The branch this ref caches is REUSED and moves on; the sibling stays put.
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin",
+             f"{moved}:refs/heads/fix/{ISSUE}-narrow")
+        _git(self.repo, "update-ref", ref, terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4248, "title": "land it", "body": "", "state": "closed",
+            "headRefName": f"fix/{ISSUE}-narrow", "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_narrowed_refspec_leftover_ref_is_not_demoted(self):
+        # #7693 round 4 P1. A remote whose CURRENT refspec cannot write the ref is
+        # SKIPPED by the prefilter — but the ref can be a LEFTOVER from before the
+        # refspec was NARROWED (`git remote set-branches origin main`, the code's
+        # own non-glob trap) and still sits in a LIVE namespace, so the remote can
+        # hold it at a different sha. The first cut returned `False` without
+        # reading anything and printed "CONFIRMED as this remote branch's CURRENT
+        # tip" for a branch it never looked at (reproduced through the real CLI).
+        ref = f"fix/{ISSUE}-narrowed"
+        bare = self.tmp / "narrowed.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        # The remote holds it LIVE at a different sha ...
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/heads/{ref}")
+        # ... and the refspec is then narrowed so it no longer covers this branch,
+        # while the stale cache ref survives.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4251, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_refspec_sourced_outside_refs_heads_does_not_demote(self):
+        # #7693 round 4 P1. `ls-remote --heads` LISTS ONLY `refs/heads/*`, but a
+        # refspec's SOURCE need not live there: with
+        # `+refs/pull/*/head:refs/remotes/origin/pr/*` the live holder is
+        # `refs/pull/N/head`, which `--heads` never lists — so the forward map was
+        # applied to a FILTERED list, concluded "no holder", and demoted a live
+        # ref (reproduced through the real CLI).
+        ref = f"refs/remotes/origin/pr/{ISSUE}"
+        bare = self.tmp / "pullref.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/pull/*/head:refs/remotes/origin/pr/*")
+        # A terminal local twin, kept only to preserve the demotion-era fixture:
+        # nothing matches a witness against the remote any more.
+        _git(self.repo, "branch", "-q", f"fix/{ISSUE}-prsource")
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/fix/{ISSUE}-prsource")
+        _git(self.repo, "push", "-q", "origin",
+             f"{terminal_sha}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "commit", "--allow-empty", "-m", "reuse")
+        moved = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "push", "-q", "origin", f"{moved}:refs/pull/{ISSUE}/head")
+        _git(self.repo, "update-ref", ref, terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4252, "title": "land it", "body": "", "state": "closed",
+            "headRefName": f"fix/{ISSUE}-prsource", "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_remote_branch_deleted_after_merge_still_blocks(self):
+        # #7693 round 6 — DELIBERATELY REVERTED, and inverted from the round-3
+        # version that expected a demotion. A branch deleted on the remote offers
+        # NO mapping, and "no advertised head maps onto this ref" cannot tell
+        # DELETED from LEFTOVER-UNDER-A-DIFFERENT-SOURCE. Round 6 reproduced a
+        # live false-CLEAN from exactly that conflation, so absence no longer
+        # demotes: a same-sha mapping is required. The deleted case therefore
+        # BLOCKS — the fail-closed annoyance the round-5 record named as the
+        # acceptable trade. Pinned so nobody re-adds the demotion without reading
+        # why it was removed.
+        ref = f"fix/{ISSUE}-deleted"
+        bare = self.tmp / "del.git"
+        _git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+        _git(self.repo, "remote", "set-url", "origin", str(bare))
+        _git(self.repo, "branch", "-q", ref)
+        terminal_sha = self._git_out("rev-parse", f"refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f"refs/heads/{ref}:refs/heads/{ref}")
+        _git(self.repo, "push", "-q", "origin", f":refs/heads/{ref}")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", terminal_sha)
+        self.gh_fixtures(closed_prs=[{
+            "number": 4249, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": terminal_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
 
     def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
         # C2-2. The absent-field contract is applied PER ELEMENT too. A field

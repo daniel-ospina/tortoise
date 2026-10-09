@@ -66,9 +66,11 @@ broke another). All 11 C1 failures stayed failed.
 ## 5. The fix wave (product slices, each cached-cycle-testable)
 
 ### Slice A — assembly: dedup + cap + order (start here; no extractor change)
+
 Near-duplicate evidence fills the window (a distilled point + its source raw
 chunks + its turns all restating the same fact). Product-side, in the retrieval
 assembly:
+
 1. Collapse a distilled point with its own source chunks/turns into ONE entry
    (keep the point + ONE verbatim source ref), so one fact occupies one slot.
 2. Cross-item near-dupe dedup (embedding/similarity or shared-anchor overlap)
@@ -81,6 +83,7 @@ single 4-h re-ingest ONLY if ingest output changes (Slice A does NOT touch the
 extractor → cached ingest HITS → fast cycle immediately).
 
 ### Slice B — value fidelity: verbatim value-spans on value-bearing points
+
 The aggregation errors (300-vs-100, $60-vs-$12) = the consumer summed wrong or
 wrong-quantity numbers because the distilled point carried a paraphrase or lost
 the exact value. Extend the extraction's value-fidelity discipline (#2542
@@ -91,6 +94,7 @@ sum/count" reliable for ANY consumer. Requires an extractor change → ONE 4-h
 re-ingest, then cached cycles.
 
 ### Slice C (diagnostic, labeled, never a product number) — reader probes
+
 Use reader-prompt variants in the eval ONLY to answer: for preference questions,
 does a "ground in the user's stated facts, name them, no generic advice"
 instruction move 50% → X (i.e., is the residual assembly-shaped or
@@ -100,12 +104,14 @@ sum" move it? The answers decide how much of the gap is closable by Slice A+B
 honest residual).
 
 ### Explicitly NOT in this wave
+
 - More recall machinery, larger windows, retrieve-many-memories (Mem0-style):
   recall is saturated and flooding measurably hurts.
 - Reader model/prompt changes as fixes (see §3).
 - Knowledge-update / temporal categories: separate cycles on their own slices.
 
 ## 6. Acceptance + honest framing
+
 - Slice A gate: C1's 0.780 reproduced (no regression) + the 2 C2 regressions
   recovered when the arms are re-enabled on top of the fixed assembly (the arms
   stay OFF-by-default; Slice A must make the product robust to them).
@@ -116,6 +122,7 @@ honest residual).
   official judge + method line.
 
 ## 7. Evidence files
+
 - docs/research/2026-09-09-context-window-best-practices.md
 - docs/research/2026-09-09-competitor-memory-architecture.md
 - docs/research/2026-09-09-longmemeval-internals.md
@@ -135,6 +142,7 @@ dedup, value/verbatim-first ordering), tri-state eval arm
 regressions; docker suites green.
 
 ### Fresh-context review findings + fixes (all merged with #2687)
+
 - **P1 (value-safety violation):** the RATIO-based collapse merged DIFFERENT
   facts on production-length frames (20–35-token quotes) — measured "tea set
   300 dollars" vs "…400 dollars" collapsed, erasing the $400 claim. Toy-frame
@@ -151,6 +159,7 @@ regressions; docker suites green.
   exact pre-arm shape, D2).
 
 ### Key mechanism finding (drives Slice B)
+
 `_render_block` renders **only `content`** — the verbatim `quote` field is
 NEVER in the reader context today. C1/C2 therefore fed the reader only
 paraphrased distillations + raw chunks. Slice A's package is the FIRST
@@ -162,12 +171,14 @@ exactly where each gold value lives (point content / point quote / chunk /
 nowhere) from the fresh graphs.
 
 ### Measurement plan (ingest-cache fingerprint constraint — corrected)
+
 The ingest fingerprint rides the repo `git_sha` AND the read-side arm
 booleans (`coverage_loop` / `entity_key_expansion` / `evidence_boost`) — so a
 cycle with a DIFFERENT arm config CANNOT reuse another arm config's cached
 graphs. `TORTOISE_LME_EVIDENCE_ASSEMBLY` is NOT in run.py's fingerprint
 (read-side, env-read inside retrieve) → flipping it alone does NOT invalidate
 the cache. Consequences:
+
 - **Run A (control, arms OFF, assembly OFF)** arms cache-A (arms-OFF fp).
 - **Run B (assembly ON, arms OFF)** shares cache-A → ~40 min after Run A.
 - **Run C (arms ON + assembly ON)** has a DIFFERENT fp → needs its OWN full

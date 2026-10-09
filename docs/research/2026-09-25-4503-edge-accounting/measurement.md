@@ -38,6 +38,7 @@ naming the branch here is not a convenience — it is the only tree that *can* h
 the ancestry gate only vacuously (the named SHA *was* `origin/main`). Every locator in §1 was re-read
 against `a2a08beaa` on **2026-09-26** and is unchanged. Three things make that sound, and none is an
 assumption:
+
 - The branch tree contains the declared base (`228f416e9` — see the Base line above) —
   `git merge-base --is-ancestor 228f416e9 HEAD` succeeds. (`a2a08beaa`, cited here in an earlier
   revision, is the SUPERSEDED pre-rebase base, not the declared one — the command was right, the
@@ -168,7 +169,7 @@ isolated** `falkordb/falkordb:latest` container, staged writes, `redis-cli INFO 
 `used_memory` read between stages. No other tenant shares the instance. Reproduce with:
 
 ```
-python3 tools/edge_census.py probe --n 5000
+uv run python tools/edge_census.py probe --n 5000
 ```
 
 **Raw stage readings, n=5,000 nodes / 4,999 edges** — the shipped tool's receipt of record, verbatim (`python3 tools/edge_census.py probe --n 5000 --json`):

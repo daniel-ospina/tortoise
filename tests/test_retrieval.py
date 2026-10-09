@@ -52,6 +52,8 @@ from tortoise.retrieval import (
 from tortoise.retry import (
     WriteStageRetriesExhausted,
     call_with_predicate,
+    graph_abort_family,
+    retryable_aborted_write,
     retryable_transient,
 )
 
@@ -798,6 +800,22 @@ def test_retryable_transient_predicate_matrix():
         "currently unable to persist to disk")) is True
     assert retryable_transient(redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")) is False
+    # #7405 (review P2-2): the replaced-graph / write-lock aborts are NOT in
+    # this transport predicate. They ARE retryable, but only on the SDK write
+    # path (`retryable_aborted_write`): an error retryable at BOTH layers was
+    # multiplied by the eval's outer phase loop wrapping the SDK's inner write
+    # retry. Keeping the replaced-graph / write-lock family out of the phase
+    # predicate makes the layers disjoint for THAT family only — MISCONF is
+    # deliberately in BOTH predicates, so its nesting is bounded, not disjoint.
+    # See test_retryable_aborted_write_excludes_ambiguous_transports.
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is False
+    assert retryable_transient(redis_exc.ResponseError(
+        "graph is read-only")) is False
 
     # HTTPError classes EXCLUDED FIRST (HTTPError IS-A URLError IS-A OSError)
     for code in (401, 429, 500):
@@ -895,6 +913,671 @@ def test_call_with_predicate_retry_loop():
     with pytest.raises(redis_exc.TimeoutError):
         call_with_predicate(_always_transient, predicate=retryable_transient,
                             retries=1, what="t", marker_armed=False)
+
+
+def test_graph_write_retry_reissues_on_the_same_stateless_handle():
+    """#7405 (review P1-2): the retry re-issues on the SAME cached handle.
+
+    Measured contract for this client: ``falkordb``'s ``Graph`` is STATELESS —
+    it holds only ``name`` + ``execute_command`` and re-issues ``GRAPH.QUERY
+    <name>`` on every call — so the replaced-graph abort is a per-query race,
+    NOT a poisoned handle. The reviewer reproduced an abort, then a retry on the
+    same handle/client that succeeded with one write and no duplicate.
+
+    The earlier ``on_retry`` cache-drop (and its ``calls['resolve'] == 2``
+    assertion) was therefore REMOVED: it rebuilt the whole ``FalkorProjection``
+    for nothing, and the assertion held with or without the drop (the retry
+    lambda calls ``_get_proj()`` on every attempt anyway).
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    def _sdk_with(behaviour):
+        """A TortoiseSDK with no __init__ — no DB, no embedder — whose graph
+        handle fails according to `behaviour(call_index)`.
+
+        ``_get_proj`` HONOURS the ``sdk._proj`` cache the way the real method
+        does, and appends whatever it returns to ``handles``. Returning a fixed
+        local object instead would make ``len({id(h) for h in handles}) == 1``
+        a TAUTOLOGY: every element would be the same object by construction, so
+        no production change could falsify it (measured: reintroducing
+        ``self._proj = None`` on the retry path left the old version of this
+        test GREEN).
+        """
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        calls = {"query": 0, "resolve": 0}
+        # Hold the OBJECTS, not their addresses: the mutation this assertion
+        # exists to kill is `self._proj = None`, which drops the last strong
+        # reference, so an id-only list could see the address reused and pass
+        # for the wrong reason (allocator behaviour, not a test property).
+        handles: list[object] = []
+
+        class _G:
+            def query(self, *a, **k):
+                calls["query"] += 1
+                return behaviour(calls["query"])
+
+            def execute_command(self, *a, **k):
+                # #7685: the graph-replaced abort is only retried when the
+                # graph still EXISTS (#7685_A). This fake models a REBUILD.
+                assert a[0] == "EXISTS"
+                return 1
+
+        def _get_proj():
+            calls["resolve"] += 1
+            if sdk._proj is None:
+                sdk._proj = type("_Proj", (), {"g": _G(),
+                                               "graph_name": "g7685"})()
+            handles.append(sdk._proj)
+            return sdk._proj
+
+        sdk._proj = None
+        sdk._get_proj = _get_proj
+        sdk._graph_write_retry_count = 0
+        return sdk, calls, handles
+
+    # 1. one abort, then success -> the write is re-issued on the SAME handle
+    sdk, calls, handles = _sdk_with(
+        lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
+    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} attempt(s)"
+    assert len({id(h) for h in handles}) == 1, (
+        "the retry must reuse the same (stateless) handle — no re-resolution")
+    assert sdk._graph_write_retry_count == 1, (
+        "the inner retry must be observable: the eval's ingest_retries folds "
+        "this private counter in (#7405 P1-1)")
+
+    # 2. exhaustion: the ORIGINAL error surfaces (unchanged in TYPE — callers
+    #    bucket on the class, so a wrapper type would silently misbucket), the
+    #    sentinel is not leaked, and the counter still counts
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert calls["query"] == 4, "1 attempt + 3 retries before exhaustion"
+    assert sdk._graph_write_retry_count == 3
+
+    # 3. a NON-retryable error is re-raised unchanged and is not retried at all
+    sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(
+        redis_exc.ResponseError("WRONGTYPE Operation against a key")))
+    with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
+        sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
+    assert calls["query"] == 1, "a deterministic error must never be retried"
+    assert sdk._graph_write_retry_count == 0
+
+
+def test_the_FIRST_write_of_create_point_goes_through_the_retry():
+    """#7405, review P0: ``_advance_ep_version`` is create_point's FIRST graph write.
+
+    Wrapping only the later ``CREATE`` left the retry DEAD CODE in the failure mode
+    it targets: under #7405 *every* write is refused, so the epoch MERGE raises
+    first and the wrapper is never entered. This pins the ORDER of the fix, and
+    (review P1-2) that the re-issue happens on the SAME handle the abort hit.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    replaced = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+    seen: list[str] = []
+    state = {"query": 0, "resolve": 0}
+    # Hold the OBJECTS, not their addresses — see the sibling test above for
+    # why an id-only list is unsound when the mutation frees the reference.
+    handles: list[object] = []
+
+    class _G:
+        def query(self, cypher, *a, **k):
+            seen.append(cypher)
+            state["query"] += 1
+            if state["query"] == 1:
+                raise replaced
+            return type("R", (), {"result_set": [[7]]})()
+
+        def execute_command(self, *a, **k):
+            # #7685: a REBUILD leaves the graph present, so the retry is
+            # authorized.
+            assert a[0] == "EXISTS"
+            return 1
+
+    def _get_proj():
+        # Same honest cache contract as the sibling test above: a re-resolve
+        # must produce a DIFFERENT object, so
+        # `len({id(h) for h in handles}) == 1` — and the
+        # `state['resolve'] == 1` assertion — can actually fail if production
+        # re-resolves on the retry path.
+        state["resolve"] += 1
+        if sdk._proj is None:
+            sdk._proj = type("_Proj", (), {"g": _G(),
+                                           "graph_name": "g7685"})()
+        handles.append(sdk._proj)
+        return sdk._proj
+
+    sdk._proj = None
+    sdk._get_proj = _get_proj
+    sdk._graph_write_retry_count = 0
+
+    assert sdk._advance_ep_version() == 7
+    assert state["query"] == 2, "the FIRST write was retried once"
+    assert state["resolve"] == 1, (
+        "one resolve; the retry reuses the same (stateless) handle — no "
+        "cache-drop. If the FIRST write is not wrapped, the abort escapes and "
+        "the wrapper around the later CREATE is unreachable (dead code)")
+    assert len({id(h) for h in handles}) == 1, "the same handle was reused across attempts"
+    assert sdk._graph_write_retry_count == 1
+    assert "EpMeta" in seen[0], "the first write is the epoch MERGE"
+
+
+def test_retryable_aborted_write_excludes_ambiguous_transports():
+    """#7405, review P1: the write path gates on THIS, not on ``retryable_transient``.
+
+    ``create_point`` issues a bare ``CREATE`` with a client-minted id and there is no
+    uniqueness constraint on ``Point.id``, so a retry after a TIMEOUT — where the
+    server may have applied the write and only the reply was lost — can mint two
+    points with one id. Only definitive *did not land* refusals may be retried, so
+    this predicate must be a STRICT SUBSET of the transport one.
+    """
+    # definitively not applied -> safe to re-issue even for a bare CREATE.
+    # #7685: the graph-abort text is NOT sufficient on its own — the SAME
+    # sentence also describes a plain deletion — so it requires the state probe
+    # (see the #7685 tests below; without a probe the predicate must fail LOUD).
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting"),
+        graph_exists=lambda: True) is True
+    # case-insensitive (the engine's casing is not a contract)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Graph was deleted or replaced while the query was running, aborting"),
+        graph_exists=lambda: True) is True
+    # the SAME "aborted before mutating" family: the write lock is held
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Errors writing to the AOF file: No space left on device")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "MISCONF Redis is configured to save RDB snapshots, but it is "
+        "currently unable to persist to disk")) is True
+
+    # AMBIGUOUS: the write may already be applied. NEVER retried on this path.
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+    assert retryable_aborted_write(redis_exc.ConnectionError("stall")) is False
+    assert retryable_aborted_write(ConnectionResetError("reset")) is False
+    # the asymmetry is the entire safety property — assert both halves together
+    assert retryable_transient(redis_exc.TimeoutError("stall")) is True
+    assert retryable_aborted_write(redis_exc.TimeoutError("stall")) is False
+
+    # unrelated responses stay out
+    assert retryable_aborted_write(redis_exc.ResponseError("WRONGTYPE x")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError("graph is read-only")) is False
+
+
+def test_aborted_write_predicate_is_anchored_on_the_abort_context():
+    """#7405 (review P3): the predicate must not fire on a message that merely
+    CONTAINS an abort-ish phrase.
+
+    It gates a bare, NON-IDEMPOTENT ``CREATE`` (no uniqueness constraint on
+    ``Point.id``), so a false positive is exactly the duplicate-point failure
+    this PR exists to prevent. The unanchored alternation matched any message
+    containing the phrases — measured: three crafted non-abort diagnostics all
+    returned True. Only the MEASURED engine refusals may match.
+    """
+    # the engine's abort refusals, on both code paths, still match
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting"),
+        graph_exists=lambda: True) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Write query aborted: another write is in progress")) is True
+
+    # lookalikes: the phrase appears, but NOT as an abort refusal — retrying
+    # these would re-issue a CREATE that may well have landed.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "graph was deleted or replaced appears in this unrelated diagnostic")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "metrics report saw another write is in progress counters")) is False
+
+
+def test_aborted_write_predicate_covers_the_graph_query_write_path():
+    """#7405 (P2): the ``GRAPH.QUERY`` write-path slot refusal is retryable.
+
+    The engine reports a contended slot on two distinct paths and the predicate
+    previously matched only one. The constraint path (_B_) emits
+    ``Write query aborted: another write is in progress``; the ``GRAPH.QUERY``
+    write path (``execute_query_write``) emits
+    ``ERR another write is in progress, retry the query``. That second message
+    is the one ``create_point``'s bare ``CREATE`` and ``_advance_ep_version``'s
+    ``MERGE`` actually receive, so missing it left a contended write raised
+    instead of retried — the write-loss this PR targets. The engine's own
+    concurrency test documents the message as retryable and the message itself
+    instructs a retry; the engine's comment at the raise site records that the
+    slot was NOT claimed, i.e. the same *did not land* semantics.
+    """
+    # the write-path refusal, exactly as the engine emits it (the client strips
+    # the ``ERR`` code from wire errors — measured on v6 — but a directly
+    # constructed ``ResponseError`` may keep it, so both forms are accepted)
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress, retry the query")) is True
+    # casing is not a contract
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "Another write is in progress, retry the query")) is True
+
+    # still anchored: the phrase alone is NOT enough — the engine's clause is
+    # ``another write is in progress, retry the query``; a bare status mention
+    # without the retry instruction must not gate a non-idempotent re-issue.
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress")) is False
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress on key X but completed fine")) is False
+
+
+# ── #7685: a REBUILT graph must retry; a DELETED graph must stay LOUD ────────
+#
+# The #7615 retry could not tell the two apart and got BOTH directions wrong:
+#
+# (A) the v6 core reports ONE sentence for two realities —
+#     ``graph was deleted or replaced while the query was running, aborting`` —
+#     so `retryable_aborted_write` said "retry" for a plain deletion too, and
+#     the re-issued CREATE landed in an auto-created EMPTY graph while the
+#     caller was told SUCCESS (#6666 silent-success class).
+# (B) the C core (MODULE LIST ver 42004 = the docker-compose.yml-pinned
+#     falkordb-server v4.20.4, the documented default lane) reports the SAME race
+#     as ``Encountered different graph value when opened key <name>`` (rebuild)
+#     or ``Encountered an empty key when opened key <name>`` (deleted). Neither
+#     literal was matched, so the retry was INERT on the lane most users run.
+#
+# Both literals below are MEASURED live (see #7685): v6 on
+# ``docker://:@127.0.0.1:16379`` (ver 60001), C core on ``127.0.0.1:16390``
+# (ver 42004), each with a heavy write in flight and GRAPH.DELETE at t=0.30 s.
+_DELETED_OR_REPLACED = (
+    "graph was deleted or replaced while the query was running, aborting")
+_C_CORE_REBUILT = "Encountered different graph value when opened key g7685"
+_C_CORE_DELETED = "Encountered an empty key when opened key g7685"
+_GRAPH_ABORT_LITERALS = (_DELETED_OR_REPLACED, _C_CORE_REBUILT, _C_CORE_DELETED)
+
+
+def test_graph_abort_text_alone_never_authorizes_a_retry():
+    """#7685(A): the engine's graph-abort text admits a DELETION as well.
+
+    Answering "retry" from the text alone is exactly how a deletion became a
+    SUCCESS into a fresh empty graph. With no state probe the predicate must
+    refuse — a missed retry is loud; a false retry is silent data loss.
+    """
+    for text in _GRAPH_ABORT_LITERALS:
+        assert retryable_aborted_write(redis_exc.ResponseError(text)) is False, (
+            f"text alone must not authorize a retry: {text!r}")
+
+
+def test_graph_state_separates_a_rebuild_from_a_deletion():
+    """#7685(A)+(B): STATE — not text — is the discriminator.
+
+    Measured on both cores: a rebuild leaves the graph key present
+    (``EXISTS 1``) and a plain deletion leaves it absent (``EXISTS 0``). So the
+    same engine message retries for a rebuild and RAISES for a deletion.
+    """
+    for text in _GRAPH_ABORT_LITERALS:
+        exc = redis_exc.ResponseError(text)
+        assert retryable_aborted_write(exc, graph_exists=lambda: True) is True
+        assert retryable_aborted_write(exc, graph_exists=lambda: False) is False
+
+
+def test_graph_exists_probe_is_not_consulted_for_state_independent_aborts():
+    """Only the graph-abort family may be gated on graph existence.
+
+    A write-slot refusal and a MISCONF refusal say nothing about whether the
+    graph exists, so they stay retryable unconditionally. A probe that raises
+    if consulted proves those arms never reach it.
+    """
+    def _boom():
+        raise AssertionError("the state probe must not be consulted")
+
+    for text in ("Write query aborted: another write is in progress",
+                 "ERR another write is in progress, retry the query",
+                 "MISCONF Errors writing to the AOF file: No space left on device"):
+        assert retryable_aborted_write(
+            redis_exc.ResponseError(text), graph_exists=_boom) is True
+
+
+def test_a_failing_graph_state_probe_fails_loud():
+    """If existence cannot be established, the retry is NOT authorized.
+
+    The safe direction is the loud one: a missed retry surfaces the engine's
+    abort; an unauthorized retry can report success against a graph the caller
+    never wrote to.
+    """
+    def _boom():
+        raise RuntimeError("EXISTS probe unavailable")
+
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(_DELETED_OR_REPLACED), graph_exists=_boom) is False
+
+
+def test_c_core_abort_clauses_are_anchored():
+    """#7685(B): the C-core literals are whole engine messages, not prose.
+
+    The predicate gates a bare, non-idempotent ``CREATE``; a lookalike
+    diagnostic must not authorize a re-issue that may duplicate a point.
+    """
+    for text in (
+        "metrics: encountered an empty key when opened key counters",
+        "note: encountered different graph value when opened key appears here",
+    ):
+        assert retryable_aborted_write(
+            redis_exc.ResponseError(text), graph_exists=lambda: True) is False
+
+
+def test_the_v6_abort_clause_is_anchored_to_the_message_start():
+    """#7685 review rounds 1+3: a parse-error ECHO must not authorize a retry.
+
+    Measured on v6 (ver 60001) with the abort sentence embedded in the offending
+    CYPHER: the engine echoes it inside ``errCtx:`` with newlines COLLAPSED TO
+    SPACES — ``Invalid input 'RETURNNN': expected end of input, errCtx: MATCH (n)
+    RETURNNN graph was deleted or replaced while the query was running, aborting
+    RE..., pos 9`` — so the sentence lands MID-message, never at position 0. The
+    clause is therefore anchored with ``\\A`` (message start), not ``^`` +
+    MULTILINE: a line-start anchor still matches a multi-line echo, which
+    ``\\A`` makes structurally impossible. Under-matching is the safe direction
+    for a non-idempotent re-issue.
+    """
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(_DELETED_OR_REPLACED),
+        graph_exists=lambda: True) is True
+    # the client strips ``ERR`` from wire errors, but a message that still
+    # carries the code is the same abort
+    assert retryable_aborted_write(
+        redis_exc.ResponseError("ERR " + _DELETED_OR_REPLACED),
+        graph_exists=lambda: True) is True
+    # leading/trailing WHITESPACE is normalized — a bare newline is not an echo
+    assert retryable_aborted_write(
+        redis_exc.ResponseError("\n" + _DELETED_OR_REPLACED + "\n"),
+        graph_exists=lambda: True) is True
+    # ...but the abort must be THE MESSAGE, not a clause inside a diagnostic
+    # the MEASURED v6 echo (newlines collapsed) — not a crafted approximation
+    measured_echo = (
+        "Invalid input 'RETURNNN': expected end of input, errCtx: MATCH (n) "
+        "RETURNNN " + _DELETED_OR_REPLACED + " RE..., pos 9")
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(measured_echo),
+        graph_exists=lambda: True) is False
+    # and a multi-line echo cannot slip through either (#7685 review round 3)
+    multiline_echo = (
+        "Invalid input 'RETURNNN': expected end of input, errCtx: CYPHER "
+        "c=\"MATCH (n)\n" + _DELETED_OR_REPLACED + "\" RETURNNN, pos 9")
+    assert retryable_aborted_write(
+        redis_exc.ResponseError(multiline_echo),
+        graph_exists=lambda: True) is False
+
+
+def test_the_write_lock_clause_is_anchored_to_the_message_start():
+    """#7685 review round 3: the echo hazard applies to the write-slot arm too.
+
+    The write-slot refusal is state-INDEPENDENT, so it bypasses the EXISTS probe
+    entirely — a false positive would re-issue a bare, non-idempotent ``CREATE``
+    with no state check at all. Anchoring to the message start (not a line start)
+    closes the echo path for this arm as well.
+    """
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        "ERR another write is in progress, retry the query")) is True
+    assert retryable_aborted_write(redis_exc.ResponseError(
+        'Invalid input ... errCtx: CYPHER c="another write is in progress, '
+        'retry the query" RETURNNN, pos 80')) is False
+
+
+def test_a_composite_abort_message_is_decided_by_what_it_starts_with():
+    """#7685 review round 3: ONE classifier, and the ANCHORED signal wins.
+
+    ``_MISCONF_RE`` is an unanchored search while ``_GRAPH_ABORT_RE`` is
+    ``\\A``-anchored, so on a message carrying both the ordering decides the arm.
+    The anchored match is the authoritative one — the message IS that abort — so
+    it must be decided first: with MISCONF first, a graph-abort message that
+    merely MENTIONS persistence would take the state-independent arm and be
+    retried with NO ``EXISTS`` probe, i.e. straight into an auto-created EMPTY
+    graph. Both orders are tested; the leading-MISCONF case must stay
+    unconditional (the round-2 regression).
+    """
+    leading_abort = (_DELETED_OR_REPLACED
+                     + " (MISCONF errors writing to the AOF file)")
+    exc = redis_exc.ResponseError(leading_abort)
+    assert graph_abort_family(exc) is True
+    assert retryable_aborted_write(exc, graph_exists=lambda: False) is False
+    assert retryable_aborted_write(exc, graph_exists=lambda: True) is True
+
+    # the graph-abort clause NOT at the message start is not the abort; the
+    # LEADING MISCONF refusal is, and that arm stays unconditional
+    leading_misconf = ("MISCONF Errors writing to the AOF file: No space left "
+                       "on device\n" + _DELETED_OR_REPLACED)
+
+    def _boom():
+        raise AssertionError("a state-independent arm must not probe graph state")
+
+    exc2 = redis_exc.ResponseError(leading_misconf)
+    assert graph_abort_family(exc2) is False
+    assert retryable_aborted_write(exc2, graph_exists=_boom) is True
+
+    # ...and end-to-end, the discriminating direction: an abort that MENTIONS
+    # persistence with the key ABSENT must be refused LOUD. Reorder the arms and
+    # this retries into a fresh empty graph (mutation-verified).
+    sdk, g = _sdk_for_graph_abort(abort=leading_abort, graph_exists=False)
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert (g.attempts, g.applied) == (1, 0)
+
+    sdk, g = _sdk_for_graph_abort(abort=leading_abort, graph_exists=True)
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t") == "ok"
+    assert (g.attempts, g.applied) == (2, 1)
+
+    # ...and the leading-MISCONF form is retried even with the key absent
+    sdk, g = _sdk_for_graph_abort(abort=leading_misconf, graph_exists=False)
+
+    def _write(_sdk=sdk):
+        return _sdk._proj.g.query("MERGE (m:EpMeta)")
+
+    assert sdk._graph_write_with_retry(_write, what="t") == "ok"
+    assert (g.attempts, g.applied, g.probes) == (2, 1, 0)
+
+
+def _sdk_for_graph_abort(*, abort: str, graph_exists: bool = True,
+                         probe_results: list | None = None):
+    """A ``TortoiseSDK.__new__`` (no DB, no embedder) whose fake graph raises
+    ``abort`` on its FIRST write, then succeeds.
+
+    ``graph_exists`` is the answer every EXISTS probe gives; ``probe_results``
+    overrides it with a per-probe sequence (a ``BaseException`` entry makes the
+    probe raise), so the classification-time probe can differ from the
+    re-issue-time one. Tracks attempts/probes/applied writes separately so the
+    "applied exactly once" property is measured, not assumed.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    class _G:
+        def __init__(self):
+            self.attempts = 0
+            self.applied = 0
+            self.probes = 0
+
+        def query(self, *a, **k):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise redis_exc.ResponseError(abort)
+            self.applied += 1
+            return "ok"
+
+        def execute_command(self, *a, **k):
+            assert a == ("EXISTS", "g7685"), f"unexpected probe {a!r}"
+            self.probes += 1
+            if probe_results is not None:
+                answer = probe_results[
+                    min(self.probes - 1, len(probe_results) - 1)]
+            else:
+                answer = 1 if graph_exists else 0
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+    g = _G()
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+    sdk._proj = type("_Proj", (), {"g": g, "graph_name": "g7685"})()
+    sdk._graph_write_retry_count = 0
+    return sdk, g
+
+
+def test_a_deleted_graph_write_raises_instead_of_reporting_success():
+    """#7685(A), as BEHAVIOR: a real deletion must not return success.
+
+    With the graph ABSENT (``EXISTS 0``) the wrapped write must surface the
+    engine's abort and must not be re-issued at all — reporting success would
+    tell the caller its write landed while the data it wrote against is gone.
+    """
+    sdk, g = _sdk_for_graph_abort(abort=_DELETED_OR_REPLACED, graph_exists=False)
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert g.attempts == 1, "a deleted graph must not be re-issued at all"
+    assert g.applied == 0, "nothing may be reported as applied"
+
+
+def test_a_rebuilt_graph_retries_and_applies_the_statement_exactly_once():
+    """#7685 target: the rebuild case is UNCHANGED — one retry, one application."""
+    sdk, g = _sdk_for_graph_abort(abort=_DELETED_OR_REPLACED, graph_exists=True)
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t") == "ok"
+    assert g.attempts == 2, "exactly one retry"
+    assert g.applied == 1, "exactly one application — no duplicate write"
+    assert sdk._graph_write_retry_count == 1
+
+
+def test_the_c_core_rebuild_retries_and_its_delete_stays_loud():
+    """#7685(B): the C core (ver 42004, the documented default lane).
+
+    The rebuild literal must retry — it did NOT, so #7405 was unresolved for the
+    lane most users run. The delete literal must stay loud.
+    """
+    sdk, g = _sdk_for_graph_abort(abort=_C_CORE_REBUILT, graph_exists=True)
+    assert sdk._graph_write_with_retry(
+        lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t") == "ok"
+    assert (g.attempts, g.applied) == (2, 1), "one retry, one application"
+
+    sdk, g = _sdk_for_graph_abort(abort=_C_CORE_DELETED, graph_exists=False)
+    with pytest.raises(redis_exc.ResponseError, match="empty key"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert (g.attempts, g.applied) == (1, 0), "a deletion is never re-issued"
+
+
+def test_a_deletion_landing_in_the_backoff_is_still_refused():
+    """#7685 review round 1: the classification-time probe is STALE.
+
+    ``call_with_predicate`` evaluates the predicate BEFORE it sleeps (1-8 s), so
+    the graph can be deleted after the predicate already answered. The re-issue
+    is probed AGAIN immediately before the write, and that deletion must still be
+    loud rather than auto-create an empty graph.
+
+    probe 1 (classification) = present; probe 2 (pre-issue) = absent; the
+    re-raised abort is then probed by the predicate (probe 3) = absent.
+    """
+    sdk, g = _sdk_for_graph_abort(
+        abort=_DELETED_OR_REPLACED, probe_results=[1, 0, 0])
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk._graph_write_with_retry(
+            lambda: sdk._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert g.attempts == 1, (
+        "the re-issue was refused before fn ran — no write into a fresh graph")
+    assert g.applied == 0, "nothing may be reported as applied"
+    assert g.probes >= 2, "both the classification and the pre-issue probes ran"
+
+
+def test_graph_exists_fails_loud_when_the_probe_cannot_answer():
+    """#7685 review round 1: every branch that cannot answer returns False.
+
+    A degraded projection becomes a loud miss, never a retry into a fresh graph.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+
+    class _Raising:
+        graph_name = "g7685"
+
+        class g:  # mirrors the projection's handle attribute name
+            @staticmethod
+            def execute_command(*a, **k):
+                raise redis_exc.ConnectionError("probe down")
+
+    assert sdk._graph_exists(None) is False
+    assert sdk._graph_exists(type("_P", (), {"g": object()})()) is False
+    assert sdk._graph_exists(_Raising()) is False
+
+    # ...and end-to-end: a rebuild abort with a raising probe RAISES (loud),
+    # it is not retried into an auto-created graph.
+    sdk2, g = _sdk_for_graph_abort(
+        abort=_DELETED_OR_REPLACED,
+        probe_results=[redis_exc.ConnectionError("probe down")])
+    with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+        sdk2._graph_write_with_retry(
+            lambda: sdk2._proj.g.query("CREATE (:Point {id:'p'})"), what="t")
+    assert (g.attempts, g.applied) == (1, 0)
+
+
+def test_state_independent_arms_retry_even_when_the_graph_key_is_absent():
+    """#7685 review round 2 — regression: gate the re-issue probe to the family.
+
+    The predicate deliberately never consults graph state for the write-slot /
+    MISCONF arms. Applying the pre-issue probe to them would turn a contended or
+    persistence-refused write into a hard failure whenever the key was missing
+    (measured before this fix: ``query_calls=1``, ``retry_count=3``, the MISCONF
+    error raised, while the graph was merely absent).
+    """
+    for text in ("MISCONF Errors writing to the AOF file: No space left on device",
+                 "ERR another write is in progress, retry the query"):
+        sdk, g = _sdk_for_graph_abort(abort=text, graph_exists=False)
+
+        def _write(_sdk=sdk):
+            return _sdk._proj.g.query("MERGE (m:EpMeta)")
+
+        assert sdk._graph_write_with_retry(_write, what="t") == "ok"
+        assert g.attempts == 2, f"the write must be re-issued: {text!r}"
+        assert g.applied == 1, "exactly one application"
+        assert g.probes == 0, "graph state must not be consulted for this arm"
+        assert sdk._graph_write_retry_count == 1, "one real re-issue"
+
+
+def test_graph_exists_works_through_a_real_projection(tmp_path):
+    """#7685 review round 1: the REAL ``_GuardedGraph`` forwarding is pinned.
+
+    The other #7685 tests stub ``execute_command``; this one exercises the actual
+    probe on the backend the lane provides — the live graph when
+    ``TORTOISE_DB_URI`` is set (the docker lane), embedded otherwise — so a
+    broken forwarding path cannot leave production silently never retrying.
+    Deterministic: no race, just presence then absence.
+    """
+    import contextlib
+    import os
+    import uuid
+
+    from tortoise.sdk import TortoiseSDK
+
+    uri = os.environ.get("TORTOISE_DB_URI")
+    # An explicit path forces the EMBEDDED branch, so passing None when a URI is
+    # configured is what actually exercises the live lane (review round 2).
+    sdk = TortoiseSDK(None if uri else str(tmp_path / "exists7685.db"),
+                      namespace=f"test_7685_exists_{uuid.uuid4().hex[:8]}")
+    try:
+        proj = sdk._get_proj()
+        assert sdk._graph_exists(proj) is True, (
+            "the projection materializes its graph at construction")
+        proj.g.execute_command("GRAPH.DELETE", proj.graph_name)
+        assert sdk._graph_exists(proj) is False, (
+            "EXISTS through the real guarded handle must see the deletion")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()  # teardown is best-effort
 
 
 def test_retry_import_identity():

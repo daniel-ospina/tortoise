@@ -352,6 +352,7 @@ derivation, granularity and storage are part of the pre-registration:
   assertion names it explicitly.
 
 **Secondary (all pre-registered):**
+
 1. Reader refusal rate per arm (judge-independent signal).
 2. Context **words** per arm — mean, median, IQR, max, distinct-value count (the measured unit is
    whitespace words, §5; the ~1.3× word→token conversion is noted only against external figures).
@@ -576,6 +577,7 @@ apply (F3 may still fire on its own terms).
 
 Run `gpt4_4929293a` (known oracle-correct, wedding question) through **all four** arms
 (A/B/C/no-context). **STOP and fix if any of:**
+
 - B or C produces an empty or content-less context **other than the frozen zero-seed sentinel** —
   a question that renders the literal `[no context retrieved]` sentinel is recorded under its
   `zero_seed` flag (§3) and does **not** by itself trigger this STOP,
@@ -586,6 +588,7 @@ Run `gpt4_4929293a` (known oracle-correct, wedding question) through **all four*
 
 **Gold-field leakage test (hard stop-condition — detects *use*, not just printing; both parts must
 pass on all 52 questions before the run).**
+
 1. *Perturbation run.* The **scratch namespace set is a full per-question copy of all 52 eval
    graphs** — one scratch namespace per question, each a copy of that question's eval namespace
    (same points, same properties) — so the perturbation hits exactly the point set the run would

@@ -1,10 +1,12 @@
-# drift-guard CI gate (epic #1509 P3 / issue #1531; #4174)
-# Fails when a long-lived branch has drifted from origin/main beyond the
-# threshold (commits on main missing from the branch), OR when a merge of the
-# branch would not keep main's content for a path main moved AND the merge is
-# conflict-free (#4174 — the conflict-free revert; predicate corrected by
-# #7455). The v3 epic's real-backend E2Es all gate on
-# 'worktree == origin/main' — this makes the gate loud. The tool fetches
+# drift-guard CI gate (epic #1509 P3 / issue #1531; #4174; #4764)
+# Fails when a merge of the branch would not keep main's content for a path
+# main moved AND the merge is conflict-free (#4174 — the conflict-free revert;
+# predicate corrected by #7455). It also REPORTS how far behind origin/main the
+# branch is, and since #4764 does NOT fail on that distance: the count was a
+# proxy for a stale measurement, and it reddened branches that were merely
+# behind (measured 2026-10-07: 24 and 21 commits behind, every other check
+# green). The revert arm is unchanged and is what this gate still refuses:
+# a merge that would not keep main's content. The tool fetches
 # origin/main first and fails closed when freshness cannot be proven, so a
 # never-fetched worktree cannot pass on a stale ref.
 #

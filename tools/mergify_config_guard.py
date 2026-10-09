@@ -14,25 +14,25 @@ violate now fail closed.
 
 USAGE
 -----
-    python3 tools/mergify_config_guard.py --static
+    uv run python tools/mergify_config_guard.py --static
         exit 0 = every static clause passes (SATISFIED)
         exit 1 = a clause is violated (DIVERGED)
         exit 2 = config absent/unreadable, a duplicate/merge YAML key, an
                  unrecognised injection mode, or absent gate record (UNAVAILABLE)
 
-    python3 tools/mergify_config_guard.py --live
+    uv run python tools/mergify_config_guard.py --live
         OPERATIONAL, needs an admin credential (`Administration: read`); it is
         NOT run by CI — a fail-closed admin read inside CI would deadlock every
         PR (`GITHUB_TOKEN` cannot hold `Administration: read`).
         exit 0 = I1 SATISFIED; 1 = DIVERGED; 2 = UNAVAILABLE (recorded non-clean)
 
-    python3 tools/mergify_config_guard.py --recut
+    uv run python tools/mergify_config_guard.py --recut
         Recompute I10's `gate_digest` from HEAD and refresh `verified_at`.
         This is the documented, bypass-free fix path when I10 reds because the
         gate's definition changed (the digest is HEAD-computed, so the fix is a
         re-cut, never a `--admin` merge).
 
-    python3 tools/mergify_config_guard.py --staleness
+    uv run python tools/mergify_config_guard.py --staleness
         NON-GATING, DIGEST-AWARE freshness query. It distinguishes a stale
         record that still attests HEAD (safe: only the timestamp moves) from a
         record whose digest DISAGREES with HEAD (NOT safe: an automatic re-cut
@@ -43,7 +43,7 @@ USAGE
         The weekly `mergify-guard-recut` workflow uses it to decide whether a
         refresh is needed; it never gates a pull request.
 
-    python3 tools/mergify_config_guard.py --print-digest
+    uv run python tools/mergify_config_guard.py --print-digest
         Print the head-computed `gate_digest` (used to author the record).
 
 I10 FRESHNESS IS SELF-HEALING (never a timer that freezes the repo)
@@ -1723,7 +1723,7 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
         return (
             EXIT_DIVERGED,
             "gate_digest(head) != record.gate_digest — the gate definition changed; "
-            "re-cut with `python3 tools/mergify_config_guard.py --recut` "
+            "re-cut with `uv run python tools/mergify_config_guard.py --recut` "
             "(the documented fix path, never `--admin`)",
         )
     verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
@@ -1763,7 +1763,7 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
                 f"STALENESS: {RECORD_REL}.verified_at is {age.days}d old "
                 f"(> {RECORD_FRESH_DAYS}d) and the automatic refresh of the gate "
                 f"digest failed: {type(exc).__name__}: {exc} — refresh with "
-                "`python3 tools/mergify_config_guard.py --recut`",
+                "`uv run python tools/mergify_config_guard.py --recut`",
             )
         if healed != head_digest:
             # Not staleness and not the ordinary divergence check (which already
@@ -1774,14 +1774,14 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
                 f"the gate digest is not stable across two reads "
                 f"({healed[:12]}… != {head_digest[:12]}…) while refreshing a stale "
                 f"{RECORD_REL} — a concurrent gate-definition change; re-run, then "
-                "refresh with `python3 tools/mergify_config_guard.py --recut`",
+                "refresh with `uv run python tools/mergify_config_guard.py --recut`",
             )
         return (
             EXIT_OK,
             f"AUTO-REFRESHED: {RECORD_REL}.verified_at was {age.days}d old "
             f"(> {RECORD_FRESH_DAYS}d); digest already matched HEAD "
             f"({recorded[:12]}…), so re-cutting changes only the timestamp — "
-            "persist it with `python3 tools/mergify_config_guard.py --recut`",
+            "persist it with `uv run python tools/mergify_config_guard.py --recut`",
         )
     return EXIT_OK, f"gate_digest matches head and was verified {_iso(verified_at)}"
 
@@ -2083,7 +2083,7 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
             "so an automatic re-cut would launder a real gate change as a "
             "timestamp-only refresh. Refusing to re-cut; a human must review the "
             "gate diff and then re-cut with "
-            "`python3 tools/mergify_config_guard.py --recut`"
+            "`uv run python tools/mergify_config_guard.py --recut`"
         ]
     try:
         verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
@@ -2095,7 +2095,7 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
             f"STALE: {RECORD_REL}.verified_at is {age.days}d old "
             f"(> {RECORD_FRESH_DAYS}d) and gate_digest matches HEAD "
             f"({recorded[:12]}…) — only the attestation timestamp moves; refresh "
-            "with `python3 tools/mergify_config_guard.py --recut`"
+            "with `uv run python tools/mergify_config_guard.py --recut`"
         ]
     return EXIT_OK, [
         f"FRESH: {RECORD_REL}.verified_at is {age.days}d old (<= {RECORD_FRESH_DAYS}d) "

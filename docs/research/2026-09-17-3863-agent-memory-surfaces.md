@@ -27,6 +27,7 @@ ownedBy: epistemic-team
 | **Letta** (formerly MemGPT) | Agent runtime with self-editing memory blocks | **18** always loaded, `counted from source` (`LETTA_TOOLS`): `memory`, `memory_apply_patch`, `Read`, `Edit`, `Write`, `exec_command`, `write_stdin`, `ViewImage`, `UpdatePlan`, `Task`, `TaskOutput`, `TaskStop`, `Monitor`, `SendAgentMessage`, `Skill`, `AskUserQuestion`, `EnterWorktree`, `ExitWorktree`<br>**66** total defined (`toolDefinitions`), of which 48 are model-specific aliases (Claude/Codex/Gemini variants of the same job) | **One tool per job.** Memory is **one** tool named `memory` driven by a `command` argument (`create` / `str_replace` / `insert` / `delete` / `rename`) — counted from the tool docstring in the archive branch. Legacy individual memory tools also exist there: `core_memory_append`, `core_memory_replace`, `memory_replace`, `memory_insert`, `memory_apply_patch`, `memory_rethink`, `rethink_memory`, `memory_finish_edits`, `archival_memory_insert`, `archival_memory_search`, `conversation_search`, `send_message` | **PARTIALLY exposed.** Memory is *blocks* — labeled, editable, size-limited context sections, each with `read_only` / `hidden` flags — addressed by label (`human`, `persona`). The agent edits its own memory directly. There is no entity/relation/traversal tool: blocks plus archival search, not a graph | **YES — model-profile driven.** `StartupToolsetPreference = auto \| codex \| default \| gemini \| letta`; the switch picks the tool *names and schemas* that match the model family (codex → `apply_patch`/`shell`, gemini → `read_file_gemini`/`list_directory`, letta → the model-independent set above). An `exclude` list is also supported | `https://github.com/letta-ai/letta-code/blob/main/src/tools/letta-toolset.ts` + `.../src/tools/tool-definitions.ts`; `https://github.com/letta-ai/letta/blob/archive/letta/functions/function_sets/base.py` |
 
 **Discrepancies worth stating (not smoothed):**
+
 - Graphiti: third-party references report **9 tools** (`https://policylayer.com/tools/graphiti`) and a different naming set (`add_episode`/`search_facts`, `https://getzep-graphiti.mintlify.app/advanced/mcp-server`). The source on `main` has 13. The surface is a moving target — pin the commit before comparing. ⚠️ *unverified which third-party set matches any released tag.*
 - Mem0: the OSS MCP server (9 tools) does **not** contain `list_events` / `get_event_status`; the docs list them. So the docs describe the **hosted** server. Two products, two counts — do not merge them.
 - Cognee: earlier `cognee-mcp` versions exposed far more tools (`cognify`, `search`, `prune`, …). On `main` today there are 4. ⚠️ *unverified count for older versions.*
@@ -76,6 +77,7 @@ Our measured surface (from `config/surface-manifest.yml`, `cut_at_commit: 4488de
 **Verdict: yes — 99 is an outlier among agent-memory systems, and not marginally so.** The four comparables' always-loaded surfaces sum to **44 tools**; ours is more than **twice all four combined**. Letta — the largest of them — deliberately holds 18 ("one preferred tool for each job") and still ships a toolset switch on top; Cognee pins **3** and defers the rest. There is no memory system in this comparison that advertises anything close to 99.
 
 Two honest qualifications:
+
 1. **We are not like-for-like bigger.** Ours is a graph-memory *and* reasoning engine with sessions, sources and mining; Graphiti is a memory store. Part of the gap is genuine product scope.
 2. **But the gap is not explained by scope alone.** 64 of our 99 tools have never been called in our own telemetry, and 63 of our 152 SDK methods have no agent path at all (41 with no caller found, 20 called only from our own engine, tooling or tenant REST, plus the 2 `control-plane` methods no MCP tool and no CLI verb calls). Roughly two-thirds of the advertised surface is unproven, and it is advertised by default.
 
@@ -127,6 +129,7 @@ Evidence: Mem0's core README: "the same `search_memories` MCP tool and six skill
 **Make the group the tier: pin one always-advertised tool per group (plus the small graph-structure set that is our differentiator), defer the remainder behind tool search, and collapse the duplicate clusters into the canonical member that the baseline already names.**
 
 Target shape — **99 advertised → ~14 advertised, all 99 still callable**:
+
 - **11 pinned**, one per group, each with a `mode`/`type` argument in the shape we already ship (`tortoise_recall`, `tortoise_get`)
 - **~3 graph-structure tools pinned deliberately** (`search` nodes, `search` relations, fetch-one-edge) — the Graphiti lesson that structure deserves a *small set of high-value verbs*
 - **Everything else deferred** (`admin`, `onboarding` not advertised by default at all; `journal`, `sources`, `mining` moved behind background ingest)
@@ -145,6 +148,7 @@ Target shape — **99 advertised → ~14 advertised, all 99 still callable**:
 (The other two declared clusters, `query` and `operator-action`, are *not* split across groups — they are intra-group duplicates and are handled by the same collapse, not by the cross-group argument.)
 
 **The evidence behind it:**
+
 1. **Every comparable stays small.** Always-loaded counts: Cognee 4 (3 pinned), Mem0 9 (1 in plugin form), Graphiti 13, Letta 18. Ours is 99. Nothing in the category validates 99.
 2. **The platform-level guidance says defer at 10+ tools, and reports measured accuracy gains** (49% → 74% on Opus 4; wrong *tool selection*, not vendor opinion, is the named failure mode) — `https://www.anthropic.com/engineering/advanced-tool-use`.
 3. **We already shipped this pattern twice** — `tortoise_recall` (`mode`) and `tortoise_get` (`type`, absorbing six getters). This is not a new architecture; it is the existing one applied to 11 groups instead of 2 tools.
@@ -187,6 +191,7 @@ Target shape — **99 advertised → ~14 advertised, all 99 still callable**:
 | 19 | `https://toolrouter.com/blog/too-many-mcp-tools`, `https://getunblocked.com/blog/mcp-tool-overload/`, `https://www.channel.tel/blog/mcp-server-monolith-fix-tool-scoping`, `https://eclipsesource.com/blogs/2026/01/22/mcp-context-overload/` | degradation thresholds 20–30 / 30–50 / budget 15–20 per agent | **[LOW]** ⚠️ single-source per figure — treat the direction as solid, the numbers as unverified |
 
 **Explicitly not established here**
+
 - ⚠️ No comparable publishes a hard "N tools is too many" number. Every specific figure is practitioner opinion.
 - ⚠️ Mem0's hosted 11-tool surface is read from docs, not counted — the server is hosted and closed.
 - ⚠️ Cognee's historical tool count (pre-3.x) is unverified; only today's `main` was counted.

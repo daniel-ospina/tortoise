@@ -90,6 +90,7 @@ land (tortoise.premiselabs.co)
 ```
 land → "Self-hosting docs →" → GitHub README → pip install → tortoise init → tortoise onboard (init→index→demo→doctor)
 ```
+
 Existing self-hosted CLI is robust (`_cmd_onboard`: 5-step chain, idempotent, banners). **Gap is journey depth on the landing/docs surface, not engine work.**
 
 ### Key recovery pattern (WEB research, HIGH confidence)
@@ -123,6 +124,7 @@ The dashboard's Keys/Sessions tabs call `api.premiselabs.co` with bearer `tt_` k
 **The core technical problem:** signup/welcome live on `tortoise.premiselabs.co`, dashboard on `app.premiselabs.co`. supabase-js v2 persists to `localStorage` by default → **origin-scoped → sessions do NOT cross subdomains.**
 
 **The correct pattern:**
+
 1. **Parent-domain cookies** (`Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure`) on BOTH subdomains — via a custom `storage` adapter passed to `createClient`, or `@supabase/ssr`'s framework-agnostic `createBrowserClient`.
 2. **PKCE flow** (`flowType: 'pkce'`) on both — tokens live in cookies, not localStorage.
 3. Same cookie name on both (`sb-<project-ref>-auth-token`).
@@ -143,6 +145,7 @@ The dashboard's Keys/Sessions tabs call `api.premiselabs.co` with bearer `tt_` k
 ### Funnel analytics (WEB research, HIGH confidence)
 
 **PostHog** = best fit: native funnels, tiny JS snippet for static pages, official Python SDK for server-side events (critical — `first_api_call` is a server-side event), generous free tier, Cloudflare Worker reverse proxy for first-party + ad-blocker bypass.
+
 - Custom Supabase events table = most control/cheapest, but you build funnel queries yourself.
 - Plausible = traffic only, no funnels in Community Edition — wrong tool for activation funnels.
 - **Event schema:** `user_signed_up` → `email_confirmed`/`signup_verified` → `tenant_provisioned` (server) → `api_key_created` (server) → `dashboard_opened` → `first_api_call` (server middleware = activation). Identity: `identify(user_id)` web-side at signup; `distinct_id` = Supabase user UUID server-side.
@@ -190,6 +193,7 @@ Public auto-provisioning (signup → namespace + demo graph per user) has **no r
 ## Raw Research Sources
 
 **UX/Strategy sub-agent** (web research 2026-08-07):
+
 - Stripe keys best practices — docs.stripe.com/keys-best-practices · docs.stripe.com/keys
 - Vercel AI Gateway API keys (show-once) — vercel.com/docs/ai-gateway/api-keys · vercel.com/changelog/new-token-formats-and-secret-scanning
 - OpenAI key safety — help.openai.com/en/articles/5112595-best-practices-for-api-key-safety
@@ -200,6 +204,7 @@ Public auto-provisioning (signup → namespace + demo graph per user) has **no r
 - Funnel leaks — saasfoundersclub.org/blog/why-users-sign-up-but-never-use-your-saas · candystudio.design/blog/why-your-saas-dashboard-confuses-users
 
 **Tech sub-agent** (web research 2026-08-07):
+
 - Supabase cross-subdomain session — github.com/orgs/supabase/discussions/5742 · github.com/supabase/supabase-js/issues/1396 · supabase.com/docs/guides/auth/sessions/pkce-flow · supabase.com/docs/reference/javascript/auth-exchangecodeforsession · staticbot.dev/blog/supabase-auth-multi-nuxt-subdomains · micheleong.com/blog/share-sessions-subdomains-supabase · supabase.com/docs/guides/auth/server-side/creating-a-client
 - PKCE detectSessionInUrl caveat — github.com/supabase/supabase-js/issues/931
 - Plaintext-at-rest / hashing — OWASP Cryptographic Storage + Key Management + Secrets Management cheat sheets · apikeys.guide/docs/security/hashing-and-storage.md · docs.aws.amazon.com/kms/latest/developerguide/concepts.html (envelope encryption)

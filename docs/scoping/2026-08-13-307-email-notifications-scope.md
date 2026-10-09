@@ -133,6 +133,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 | S8 | `_lifespan` shutdown drain | Runtime | unit (task registry) | create_task loss at shutdown |
 
 **Bug Pattern Flags:**
+
 - Resend 200 ≠ delivered — `email_sent_at` = provider-accepted, never "delivered"; message id logged for post-hoc lookup.
 - Retrying 4xx burns reputation — 4xx never retried (photonconsole/DVARA).
 - Duplicate sends under retry — Idempotency-Key on both profiles (recovery: `recovery:{code_hash}`; invite: `invite:{token_hash}` — unify with Task 3).
@@ -149,6 +150,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** `send_invite_email` never raises and stamps `email_sent_at` only on provider-accept (200); `send_recovery_link` retries 0.5/2/8s on transient-only with `Idempotency-Key: recovery:{code_hash}`, no-retry on 4xx, returns `(ok, message_id)`; both honor `RESEND_API_KEY`/`RESEND_FROM_EMAIL`/`EMAIL_LINK_BASE_URL` envs with once-per-process skip logging; templates HTML-escape all interpolated values; secrets never appear in logs (redact_safe).
 
 **Files:**
+
 - Create: `tortoise/email_notify.py`
 - Create: `tests/test_email_notify.py`
 
@@ -170,6 +172,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** Migration applies idempotently (`supabase db push --linked --include-all` dry-run); `recovery_codes` has unique index on `code_hash`; invitations gains `email_sent_at timestamptz NULL` + GRANT update to service_role + GRANT SELECT of `email_sent_at` to authenticated; registry mode unaffected (email_sent_at = Invitation node property, set by the hook task).
 
 **Files:**
+
 - Create: `supabase/migrations/0011_transactional_email.sql`
 
 **Step 1:** `ALTER TABLE public.invitations ADD COLUMN IF NOT EXISTS email_sent_at timestamptz;` + extend the existing `GRANT SELECT (…, email_sent_at)` and service_role ALL (already table-level).
@@ -185,6 +188,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** Every successful mint (both branches) schedules exactly one invite email with the minted token; `email_sent_at` set on provider-accept (Supabase row / registry node property); a mocked send failure still returns the existing 200 mint response + `email_status: "failed"` (or `"unconfigured"`) + redacted WARNING — never silent (coherence-fix); dedup-safe with stable `Idempotency-Key: invite:{token_hash}` (coherence-fix: prevents double-send on crash-retry); registry-mode email works with the same module (no Supabase dependency for the invite hook); spoofed-Host requests still build links from `EMAIL_LINK_BASE_URL`.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (invite_to_team, both branches)
 - Modify: `tortoise/supabase_control.py` (email_sent_at write helper for invitations)
 - Create: `tests/test_invites_email_http.py`
@@ -204,6 +208,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** Identical 200 for known/unknown session emails (known = `teams.email` match in Supabase mode; registry mode → 501 with clear detail; session with no email claim → identical 200, no mint — uniform across all such sessions); **uniform 503 for ALL requests when the sender is unavailable-by-config** (RESEND_API_KEY / RESEND_FROM_EMAIL missing — no enumeration signal, deploy-time misconfiguration is loud; tested) (coherence-fix); per-email 3/hr + per-IP 5/hr buckets (429 with Retry-After on exhaustion; `RATE_LIMIT_DISABLED=1` opt-out; per-replica N× multiplier documented and accepted — single-use + 30-min TTL bounds harm; shared-store limiter = follow-up issue) (coherence-fix); known email → code minted (CSPRNG ≥256-bit, SHA-256(pepper+code) at rest, 30-min TTL) + link email sent awaited with the Task 1 retry budget; unknown → nothing minted/sent; code never in the response; link host from `EMAIL_LINK_BASE_URL`; stale rows for the email deleted on trigger.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (limiter refactor + new endpoint)
 - Modify: `tortoise/supabase_control.py` (recovery-code mint/consume helpers)
 - Create: `tests/test_recovery_email.py`
@@ -225,6 +230,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** `purpose=recovery` with valid `recovery_code` → code consumed (used_at set) and key minted per existing recovery rules; expired/used/wrong code → 400 "Invalid or expired recovery link" and NO mint; code omitted → mint proceeds exactly as today; bootstrap purpose with a code → 422 (code is recovery-only); registry mode with a code → 400 (codes are hosted-only; no table).
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`session_key` + `_session_key_supabase`)
 - Modify: `tests/test_session_key_http.py` (extend)
 - Modify: `tests/test_auth_flip.py` (Supabase branch, if it covers session-key mint — verify at implementation)
@@ -244,6 +250,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** Both pages are static (no build step), set `Referrer-Policy: no-referrer` (meta), read their query param client-side and redirect to `https://app.premiselabs.co/?invite_token=…` / `?recover_code=…`; invite page also links signup for no-account invitees; no API calls from these origins (no CORS change needed); token/code never rendered into the DOM beyond the redirect (or logged).
 
 **Files:**
+
 - Create: `website/invite-accept.html`
 - Create: `website/recover.html`
 - Modify: `tests/test_website_static.py` (if it enumerates pages — verify; add parity checks for the two new pages: presence of referrer policy, param pass-through JS)
@@ -263,6 +270,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** With `?invite_token=…` + active session → accept attempted once, success/error surfaced, param stripped (`history.replaceState` precedent at main.jsx:168); with param + no session → stashed and accepted after sign-in; with `?recover_code=…` → recovery mint with code, key adopted via existing recoverKey flow; keys panel gains "Email me a recovery link" → POST `/v1/session/recovery-email` → "Check your inbox — no email? Resend" + 429 copy; param re-entry on refresh does not resubmit (stripped after first handling).
 
 **Files:**
+
 - Modify: `website/apps/dashboard/src/main.jsx`
 
 **Step 1:** Extend the URLSearchParams effect (main.jsx:168) with `invite_token` and `recover_code` handling + strip-after-handle.
@@ -282,6 +290,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** `deploy-hosted.yml` passes `RESEND_FROM_EMAIL` + `EMAIL_LINK_BASE_URL` when set (pattern: BILLING_NOTIFY_TO lines 118-119); `.env.example` documents all three transactional vars; `_lifespan` (hosted_api.py:170) awaits `email_notify.drain_pending_sends(timeout=2.0)` on shutdown (create_task-loss mitigation); `RESEND_API_KEY` + `RESEND_FROM_EMAIL` documented as Fly secrets; migration 0011 applied via existing `supabase-deploy.yml` db push (no workflow change).
 
 **Files:**
+
 - Modify: `.github/workflows/deploy-hosted.yml`
 - Modify: `.env.example`
 - Modify: `tortoise/hosted_api.py` (`_lifespan`)
@@ -304,6 +313,7 @@ New env var, read by `email_notify.py` (both senders) and the recovery trigger. 
 **Acceptance:** `tests/test_email_integration_resend.py` marked `@pytest.mark.integration`, skipped unless `RESEND_API_KEY` + `RESEND_FROM_EMAIL` set; sends to `delivered@resend.dev` (expect last_event=delivered) and `bounced@resend.dev` (expect bounced) via the real `email_notify` module; polls `GET https://api.resend.com/emails/{id}` until terminal event (60s timeout); asserts `email_sent_at`-style semantics (provider-accepted 200 with id) AND the terminal event — never "delivered" from a bare 200.
 
 **Files:**
+
 - Create: `tests/test_email_integration_resend.py`
 
 **Step 1:** Env-gated fixture (skip if no `RESEND_API_KEY`); use `_send_resend` with test addresses; retrieve + poll the email record; assert terminal events.
@@ -349,6 +359,7 @@ Each acceptance criterion is verified by:
 ## 7. Acceptance Criteria
 
 **Overall (#307):**
+
 - [ ] Invite mint on both branches of `POST /v1/invites` schedules exactly one email carrying the accept link `{EMAIL_LINK_BASE_URL}/invite-accept.html?token=…`; send failure never fails the mint; `email_sent_at` reflects provider-acceptance only.
 - [ ] `POST /v1/session/recovery-email` returns byte-identical 200 for known/unknown session emails (uniform 503 only when sender config absent); per-email 3/hr + per-IP 5/hr with Retry-After; known-only code mint (CSPRNG ≥256-bit, SHA-256 at rest, 30min TTL, single-use, re-mint invalidates prior code); link host from `EMAIL_LINK_BASE_URL`, never Host header.
 - [ ] `purpose=recovery` mint accepts optional `recovery_code` (validated before mint, consumed atomically, single-use); no-code mint unchanged; invalid/expired/used → 400.
@@ -390,6 +401,7 @@ Each acceptance criterion is verified by:
 ## 10. Extra Issues Filed During Scoping (per skill — no silent absorption)
 
 > To file as separate GitHub issues (not absorbed):
+
 - **Rate-limit the accept surface** (`POST /v1/invites/accept`): OWASP recommends per-token/IP/global caps; none today. Security hardening follow-up.
 - **`welcome_url` hardcoded** at hosted_api.py:4801 — adjacent tech debt (EMAIL_LINK_BASE_URL makes a second hardcoded host visible); consolidate.
 - **`notify.py` FROM hardcoded** (`billing@premiselabs.co`) — migrate to `RESEND_FROM_EMAIL` so one domain/identity is managed in env (out of scope here).
@@ -404,6 +416,7 @@ Each acceptance criterion is verified by:
 **Dependency:** none new at runtime. Reuses `httpx>=0.27` (pyproject.toml:19, pinned `httpx==0.28.1` in requirements.txt) — the **plain-httpx client, not the `resend` Python SDK**, because (a) `notify.py:66-74` already ships the exact pattern in production (billing, #310) and (b) the SDK adds a dep for a one-POST surface with no async/retry value we don't already implement (research: resend SDK v2.35.0, MIT, py>=3.7, async via httpx extra — redundant). No jinja2 (templates are in-repo string templates, html.escape'd).
 
 **Resend API surface (verified 2026-08-13, resend.com/docs):**
+
 - Endpoint: `POST https://api.resend.com/emails` — auth `Authorization: Bearer re_<key>`; **`User-Agent` header documented as REQUIRED (403 without) — verify against live billing sender at implementation (`notify.py` sends httpx's default UA and works; migrate notify.py to the explicit header if confirmed)**; body: `from` (verified-sender), `to[]` (max 50), `subject`, `html`, `text`, `reply_to`, `bcc`, `cc`, `tags`, `template{id,variables}` (hosted — rejected: unversioned); response `200 {"id": "…"}`.
 - Rate limits: 10 req/s per TEAM (all keys share) — concurrency cap (Semaphore(4)) with documented headroom; retry-on-429 (transient-only budget).
 - Idempotency: `Idempotency-Key` header, 24h expiry, 256 chars — used on both profiles.

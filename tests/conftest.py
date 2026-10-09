@@ -63,6 +63,14 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 # delenv/patch it (`test_2952_degraded_read`).
 os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
 
+# #6960: the budget for the cold embedder load that the opt-out above makes
+# SYNCHRONOUS lives at the end of this import preamble — see the note beside
+# `from tests._embedded import shared_proj`. It must NOT be set here: importing
+# `tortoise.embeddings` runs `tortoise/__init__`, which reaches the embedded
+# reaper, and the reaper resolves its lock path from the temp dir AT IMPORT. Set
+# here it would run BEFORE `install_session_tmpdir()`, freezing `_LOCK_PATH` on
+# the machine-shared dir (#3752/#1658) and reddening test_reaper's scoping guard.
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old
@@ -113,7 +121,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._tmpdir_hygiene import (  # noqa: E402
     install_scan_guard,
     install_session_tmpdir,
+    install_tolerant_tempdir_cleanup,
     sweep_stale_session_roots,
+    write_tolerated_cleanup_report,
 )
 
 install_session_tmpdir()
@@ -124,6 +134,51 @@ install_session_tmpdir()
 # session.
 sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_scan_guard()
+# #7735: `TemporaryDirectory.__exit__` cleans up with `ignore_errors=False`, so a
+# directory a live embedded server still holds raises ENOTEMPTY out of teardown
+# and reddens a shard whose tests all passed. Same invariant as this module's own
+# teardown ("teardown must not convert a green suite red"), so it is fixed once
+# here for every ``TemporaryDirectory(`` call site — counted by
+# `git grep -o "TemporaryDirectory(" -- tests/ | wc -l` (OCCURRENCES, not
+# lines: one line can hold two calls). No literal count is quoted on purpose:
+# that command counts this comment too, so a number here re-stales on the very
+# edit that adds it (#7735 review, F3a) — rather than per test file. It tolerates ONLY
+# ENOTEMPTY and records the directory it leaves behind — deliberately not
+# `ignore_cleanup_errors=True`, which would swallow every rmtree failure. The
+# record is flushed to `tempdir-hygiene-end.json` at session end, because a
+# passing test's log record is discarded by capture (#7735 review, F1).
+install_tolerant_tempdir_cleanup()
+
+# #6960: budget the cold embedder load this lane pays SYNCHRONOUSLY.
+#
+# The opt-out above (#7015) removes the warm-up that would have ABSORBED that
+# load, so the first `create_point` (`encode_for_store` -> `EmbeddingModel.get`)
+# pays it in-line. The product default (`_LOAD_TIMEOUT_S = 90.0`) is a REQUEST-path
+# trade: blocking longer is worse than degrading. A pytest process is the OPPOSITE
+# trade — it has a 15m shard watchdog and ~5m of real work — so abandoning a load
+# that would have finished is strictly worse than waiting for it.
+#
+# Measured 2026-10-08 (this box, loadavg 172 on 10 CPUs): a cold load is 50.5s
+# against that 90s budget, a 1.8x margin, while CI cold-loads one model in THREE
+# shards at once on a 4-vCPU runner. On run 37723572956 the timeout fired
+# repeatedly — a 90s block plus the 60s negative-cache gap is a 150s cycle and
+# 900/150 = 6 — so six abandoned loads consumed the whole watchdog and killed
+# test (c), test (f) and test (g) mid-line on the SAME test, reddening the
+# required `python-ci-gate` on main and with it every PR's entry gate.
+#
+# 270.0, not 300.0 and not 240.0. The shard ALSO runs pytest's per-test
+# `--timeout=300` (python-ci.yml), and the point is for THIS budget to fire FIRST,
+# so the load is reported as a load rather than abandoned by the test harness at
+# the same instant — 300 == 300 was the original defect. Within that ceiling the
+# budget goes as high as the headroom allows, because the failure it prevents is
+# ABANDONMENT: the worst cold load this incident OBSERVED was 204.64s (the
+# previously-hanging test passed at 133.55s and 204.64s once the budget covered
+# it), so 240 left only 1.17x over what we have actually seen. It stays at or
+# under the hosted pre-warm's 300.0 (`hosted_api.py`), so this lane never
+# out-budgets the lane that runs the same cold torch import.
+from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane  # noqa: E402
+
+_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0
 
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
@@ -962,6 +1017,12 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
             }, fh, indent=2)
     except Exception:
         pass
+    # #7735: same capture trap as #1103 above — a PASSING test's
+    # `logger.warning` is discarded (verified: 0 occurrences under the CI
+    # flags), so the tolerated ENOTEMPTY leaks are mirrored to their own
+    # artifact, which the workflow dumps. Best-effort; writes nothing when no
+    # leak was tolerated.
+    write_tolerated_cleanup_report()
 
 
 # ── Epic #1647 Task 2 Step 7 (P2-14/P0-3/P1-8/P1-9/P2-3/P2-4) ─────────────
@@ -2105,6 +2166,16 @@ def force_sparse_tfidf(monkeypatch):
         lambda cls, load_timeout=None: None))
     return None
 
+
+# ── #7655: keep pytest-timeout's per-test guard from being disarmed ────────
+# pytest-timeout's default `signal` method shares `ITIMER_REAL` with the code
+# under test, so an in-process `signal.alarm()` silently replaces the per-test
+# timeout (measured: a `sleep(60)` after `signal.alarm(600)` ran to a 15 s
+# outer bound instead of failing at `--timeout=3`). The autouse fixture below
+# refuses that takeover while the harness owns the timer, and
+# `tests._signal_hygiene.harness_safe_sigalrm` is the sanctioned way for a test
+# to use SIGALRM. Mechanism + regression pins: `tests/test_timeout_not_disarmable.py`.
+from tests._signal_hygiene import harness_sigalrm_integrity  # noqa: E402, F401
 
 # ── #4069: per-test temp-directory teardown ────────────────────────────────
 # `$TMPDIR` churned to 362,962 entries with nothing older than three days:

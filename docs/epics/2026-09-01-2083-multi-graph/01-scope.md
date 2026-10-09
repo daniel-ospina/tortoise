@@ -78,49 +78,58 @@ The cut follows the product decision + research: **graph = isolation boundary, k
 ## High-Level E2E Test Cases
 
 ### E2E-1: Provision a graph with a per-graph key
+
 **Given:** a pro-tier team with a scoped key carrying `graphs:create`
 **When:** the developer calls `POST /v1/organizations/{org_id}/graphs` with a graph name
 **Then:** a graph is created (status active) with a derived namespace, and the response contains the graph metadata + a per-graph API key whose plaintext appears exactly once (`revealed_once: true`)
 **And:** the returned per-graph key reads/writes the new graph successfully (write a point, read it back)
 
 ### E2E-2: Per-graph key isolation — cross-graph denial
+
 **Given:** team T with graphs A and B, and keyA bound to graph A
 **When:** keyA attempts any read/write operation against graph B (ask, analyze, search, MCP, direct SDK, sessions, context)
 **Then:** the operation is denied at the boundary with an auth/scope error — keyA can never touch graph B's data
 **And:** the same holds with the data-layer ACL: a graph-A-scoped FalkorDB credential gets NOPERM on graph B (verified separately — defense-in-depth)
 
 ### E2E-3: Tier gate — provisioning is pro+ (both control-plane modes)
+
 **Given:** a free-tier team (max_graphs=1) and a solo-tier team (max_graphs=2), each with a team key, in BOTH control-plane modes (Supabase hosted + registry selfhost)
 **When:** either team attempts to provision beyond its tier limit (free: a 2nd graph; solo: a 3rd)
 **Then:** the mint is rejected with a quota/tier error (402/409), and the team can see its graph-count usage in the dashboard
 
 ### E2E-4: One-level-deep — minted keys cannot provision
+
 **Given:** a key minted by provisioning (fixed child policy: no `graphs:create`/`graphs:delete`/`keys:manage` scopes, regardless of the minting key's scopes)
 **When:** that key calls the graph-create/delete or key-management endpoints
 **Then:** the call is denied (403) — minted keys can never create/delete graphs or mint sibling keys, in either control-plane mode
 
 ### E2E-5: Existing-team migration — default graph keeps working
+
 **Given:** a team that existed before this epic with a team-scoped key and data in its default graph
 **When:** the epic ships and the team uses its existing key (no changes)
 **Then:** the key still reads/writes the default graph (graph 0) — no migration action, no key rotation, no data move
 **And:** the default graph is not deletable
 
 ### E2E-6: Delivery-shape tenancy — context + sessions resolve per graph
+
 **Given:** a per-graph key for graph A
 **When:** the key calls `GET /v1/context` and `POST /v1/sessions` (with `session_recording` inherited from the team default)
 **Then:** both resolve to graph A's memory — context is graph-A scoped, session points land in graph A, and cross-graph context is never surfaced
 
 ### E2E-7: Quota + revocation lifecycle (both control-plane modes)
+
 **Given:** a SOLO-tier team at the soft-warning threshold of its graph-count quota (2 of 2, default + 1 custom) in BOTH control-plane modes (Supabase hosted — where the quota source is built by this epic — + registry selfhost); pro/team are unlimited per pricing.json (finite pro caps are an open product decision at Human Gate #2)
 **When:** the team provisions one more graph, then revokes a graph key
 **Then:** the team is rejected with a clear quota error at the cap (409, not silently billed), and a revoked graph key immediately returns 401 on the next request in every surface. (v1 ships cap-reject only — the 80% soft-warning band is deferred; no banner in v1.)
 
 ### E2E-8: Graph lifecycle — list, delete, quota release + name reuse
+
 **Given:** a pro team with 2 active custom graphs and a per-graph key for one of them
 **When:** the team lists graphs (both listed, default first), deletes one graph, then recreates the same name
 **Then:** the deleted graph no longer appears in graph_list; its per-graph key is revoked with it (401 on next use); its graph-count quota slot is released (a subsequent provision succeeds — deleted graphs do not count against the tier cap); the recreated name succeeds (tombstones don't squat names); the default graph cannot be deleted
 
 ### E2E-9: Key scopes + legacy team keys
+
 **Given:** a key with `graphs:create` + `graphs:delete` + `keys:manage` scopes, a read-only key (`graphs:read`) for graph A, and a legacy team key (`tkm_`)
 **When:** the read-only key attempts a write to graph A (create point, delete, ingest); the scoped key provisions a graph, deletes a graph, renames the team, and rotates/revokes another key; the legacy key performs a data op on the default graph
 **Then:** the read-only key's write is denied (401/403) while its reads succeed; `graphs:create` works without `graphs:delete` (separate scopes); management ops succeed via the scoped key; the minted key cannot manage keys or mint new keys; a second key minted for graph A (multiple keys per graph) works independently of the first; the legacy key still reads/writes the default graph (back-compat)

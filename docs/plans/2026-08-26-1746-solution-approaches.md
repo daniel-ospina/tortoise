@@ -36,12 +36,14 @@ Every approach carries the same telemetry/census substrate; it is the decision g
 **Defense location: parse boundary (consumption).**
 
 ### Description
+
 Leave S2/S4 prompts, the S4 full-re-emit contract, the provider path, and the 8000 cap untouched.
 Replace the binary parse-or-retry in `_complete_parsed`/`_parse_json` with a bounded, census-visible
 recovery ladder. Each rung is a recorded event; failures end as either recovered output (warned) or
 a censused, warned fallback — never silent.
 
 Ladder per attempt (rungs 1-4 in-process on the same completion; rung 5 = the retry; rung 6 = floor):
+
 1. `_parse_json` canonical (unchanged: fences, brace-balance, tail-cuts).
 2. **Sanitize** — strip/escape raw control chars (incl. newlines) inside string literals only
    (structural whitespace preserved). Neutralizes H2's output-side vector without waiting for
@@ -60,6 +62,7 @@ Ladder per attempt (rungs 1-4 in-process on the same completion; rung 5 = the re
    `truncated_parse_error` or `parse_error` + warning. Never `valid=true` with data loss.
 
 ### Files touched
+
 - `tortoise/extractor_v2.py` — `_parse_json` rungs 2-4, `_complete_parsed` rung 5, new
   OUTPUT_CONTRACT schema validator, census classes.
 - `tools/longmem_eval/run.py`, `tools/longmem_eval/report.py` — shared foundation projection.
@@ -68,10 +71,12 @@ Ladder per attempt (rungs 1-4 in-process on the same completion; rung 5 = the re
 - `tests/test_extractor_reliability.py` — new census-class tests.
 
 ### Architecture
+
 Single choke point between provider output and graph writes. Ladder layers are independently
 testable with fixtures (raw control chars, missing comma, mid-string truncation, fence-wrapped).
 
 ### Risks
+
 - Repair/partial-accept can emit semantically-degraded-but-valid output; schema gates structure,
   not meaning — every recovery must stay censused + warned so the report can audit what repair did.
 - Ladder complexity is real surface (5+ rungs); rung 4 overlaps the existing tail-cuts (rung 1) and
@@ -80,12 +85,14 @@ testable with fixtures (raw control chars, missing comma, mid-string truncation,
   ladder makes failures visible, not absent.
 
 ### Tradeoffs
+
 Fastest to land; zero prompt churn → zero #1695 collision; hypothesis-agnostic (works whichever of
 H1/H2/H3 dominates); schema validator is reusable by Approach C. Against: symptom-grade — failure
 surface remains, and the gate must decide whether recovered-and-warned (`partial_parse`) counts as
 "clean" for criterion 1 (aggregated class definition).
 
 ### Best-fit-if
+
 Attribution (H1 vs H2 vs H3) is still uncertain and we want a robust floor plus an informative fresh
 run before committing to a bigger lever; #1695 prompt sequencing is near-term; or we want the
 cheapest defense that satisfies criterion 3 immediately.
@@ -97,6 +104,7 @@ cheapest defense that satisfies criterion 3 immediately.
 **Defense location: generation source (contract + input + provider parity).**
 
 ### Description
+
 Three coordinated changes attacking root causes where output is produced:
 
 1. **S4 contract inversion → gaps-only deltas.** S4 emits only delta instructions — `adds` (new
@@ -124,6 +132,7 @@ with the delta contract this branch should be ~never) → censused fallback. Oth
 re-prompt with the error excerpt on attempt 2.
 
 ### Files touched
+
 - `tortoise/extractor_v2.py` — S4_TMPL delta-grammar rewrite, `merge_embed_lists` → deep-merge +
   delta validation, `_s4_merge_stats`, E3 quote sanitation at template-fill, retry branch.
 - `tortoise/model_adapters.py` — `DeepSeekDirectModel.complete` response_format.
@@ -132,11 +141,13 @@ re-prompt with the error excerpt on attempt 2.
   field-level update semantics, removes); model_adapters body assertion.
 
 ### Architecture
+
 The contract bounds output size (kills H3 structurally), JSON mode constrains structure (kills H1),
 input sanitation removes the contamination vector (kills H2). The parse boundary stays canonical;
 retries become the exception path, not the primary recovery.
 
 ### Risks
+
 - **Deep-merge is the largest new failure surface in the design space**: dangling delta refs (S4
   references a changed/omitted S2 key), exhaustively-undefined field-update semantics (slots
   replace-vs-merge? quote/source_turn_id carried?), and a merge bug corrupts the embed list
@@ -151,12 +162,14 @@ retries become the exception path, not the primary recovery.
   re-verified (highest regression risk of the three approaches).
 
 ### Tradeoffs
+
 The only approach that eliminates the truncation class rather than recovering it: structural
 guarantee, smaller S4 payloads (cheaper/faster per question), and a byproduct H1 test. Against:
 deepest change surface, merge-semantics ownership, prompt collision with #1695, and prompt-text
 change lands in the same window as #1695 (attribution coupling).
 
 ### Best-fit-if
+
 We want the strongest structural guarantee on criterion 1 and will own deep-merge semantics +
 delta-validation; the gate's tolerance for recovered-but-warned outcomes is low; we want the H1
 test as a side effect; and #1695 sequencing can be coordinated (joint-effect note).
@@ -168,7 +181,9 @@ test as a side effect; and #1695 sequencing can be coordinated (joint-effect not
 **Defense location: provider/decode layer, with an explicit two-stage decision gate.**
 
 ### Description
+
 **Stage 1 — constrained decoding + schema gate:**
+
 1. **JSON-mode parity on both adapters** — `response_format={"type":"json_object"}` on
    `DeepSeekDirectModel` (mirroring OpenRouterModel:111-113), plus attempt
    `{"type":"json_schema","json_schema":{...}}` where honored (json_object is schema-free and weaker;
@@ -193,6 +208,7 @@ insufficient for truncation → escalate to Approach B's delta contract as a SEC
 sanitize rung. Non-parse-class failures → #1747 trigger (unchanged).
 
 ### Files touched
+
 - `tortoise/model_adapters.py` — `DeepSeekDirectModel` response_format + schema mode.
 - `tortoise/extractor_v2.py` — schema validator, error-informed retry, S4 chunked emit (option b),
   census classes.
@@ -202,12 +218,14 @@ sanitize rung. Non-parse-class failures → #1747 trigger (unchanged).
   merge, response_format body-assertion tests.
 
 ### Architecture
+
 The model cannot emit malformed structure by construction (if honored); a schema gate + error-
 informed retry catches what constrained decoding still allows; the gate is a two-stage decision
 machine — run 1 tests the cheapest structural lever, census classes decide whether run 2 needs the
 contract inversion.
 
 ### Risks
+
 - Provider dependence is the whole bet: if the direct API silently ignores `response_format` (the
   H1 observation makes this plausible), stage 1 degrades to today's behavior and the run is
   uninformative — mitigated by the pre-flight probe, but the probe must actually distinguish
@@ -221,12 +239,14 @@ contract inversion.
   baselines).
 
 ### Tradeoffs
+
 Prompts untouched at stage 1 (no #1695 collision); strongest structural guarantee at the cheapest
 per-question cost (no output inflation, no parse-side complexity); fully reversible (toggle/env).
 Against: provider-honor risk, schema maintenance coupling, and criterion 1 may close only on run 2 —
 the approach explicitly budgets for escalation.
 
 ### Best-fit-if
+
 We'll run the pre-flight probe and trust provider-level guarantees; prompt text should stay frozen
 for #1695; the team prefers a reversible lever and an explicit two-stage escalation over a single
 run; a second fresh run for escalation is acceptable cost.

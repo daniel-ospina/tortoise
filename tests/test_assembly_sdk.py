@@ -378,6 +378,14 @@ _A4_OFF_CHUNKS = {
 #: order drift here is the engine's opaque fulltext sequence moving (see
 #: ``_assert_golden`` layer 2), i.e. re-capture territory rather than a content
 #: regression — the multiset check in the tests keeps the two distinguishable.
+#:
+#: #3019 RE-CAPTURE: the fused leg's tie-break is now the entity's ``id``, so
+#: these rows come back in id order where they previously came back in the
+#: engine's opaque row order. Three keys moved, all by the same adjacent swap
+#: (the 2026-08-10 couch row now precedes the 2026-09-01 sold row, both before
+#: ``sess-bookshelf``). No key's multiset changed — the tests assert the live
+#: sequence and the ``_A4_OFF_ROWS`` set together, so a re-capture that dropped
+#: or added a row cannot hide behind this.
 _A4_OFF_ORDERED = {
     "what is the current status of the couch?": (
         _HEADER_CHUNK,
@@ -387,8 +395,8 @@ _A4_OFF_ORDERED = {
     "compare the couch and the dog bed, which should i keep?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     "what was the couch status two weeks ago?": (
@@ -399,16 +407,16 @@ _A4_OFF_ORDERED = {
     "which came first - the couch or the dog bed?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     CANARY_QUESTION: (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
         "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",

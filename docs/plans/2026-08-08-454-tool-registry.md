@@ -25,11 +25,13 @@ subjects.team: epistemic-team
 **Canonical library:** FastMCP 3.4.6 `FunctionTool.from_function(annotations=ToolAnnotations | None)` — verified in-venv. `mcp.add_tool(tool)` takes a single tool object. The `@mcp.tool()` decorator internally calls `from_function` with extracted annotations — our adapter replicates this call explicitly.
 
 **Competitor-variance patterns observed:**
+
 - FastMCP's `FastMCP.tool()` decorator wraps `FunctionTool.from_function()` — the adapter is just a different call site
 - `ToolAnnotations` is a Pydantic model with `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — all optional Booleans
 - FastAPI `APIRouter` supports `add_api_route()` for programmatic registration with Pydantic models
 
 **Pitfalls:**
+
 - FastMCP's `add_tool` signature: `def add_tool(self, tool: FunctionTool | BaseTool) -> None` — it takes a single tool object, not fn + annotations separately
 - `FunctionTool.from_function` has 16 params — we only need `fn`, `name`, `description`, `annotations`; the rest default
 - FastAPI `add_api_route()` requires endpoint functions to be `async def` and use `Depends()` for auth — the adapter must generate async wrappers around sync SDK methods
@@ -49,16 +51,19 @@ subjects.team: epistemic-team
 ### Journey Test Map
 
 **Journey 1: New SDK method lands in both surfaces**
+
 1. Dev adds `sdk.new_method()` → **Acceptance:** Tests pass for SDK method alone
 2. Dev adds one registry entry in `tool_registry.py` → **Acceptance:** `derived_HTTP_ALLOWED` auto-updates; no manual sync
 3. MCP surface auto-registers `tortoise_new_method` → **Acceptance:** `tools/list` shows new tool
 4. REST surface auto-registers `POST /v1/new-method` → **Acceptance:** Endpoint is live with Pydantic model
 
 **Journey 2: Excluded tool stays excluded**
+
 1. `tortoise_team_create` has `http_policy=False` → **Acceptance:** NOT in derived HTTP_ALLOWED; NOT in REST routes
 2. `tortoise_backfill_v25` has `http_policy=False` → **Acceptance:** NOT in derived HTTP_ALLOWED
 
 **Failure Modes:**
+
 - Registry entry has wrong `sdk_method` reference → **Expected:** Gate 1 assertion test catches it (tool name → method lookup mismatch)
 - Duplicate tool name → **Expected:** Registry init raises ValueError
 - Adapter fails on FastMCP API change → **Expected:** Gate 1 spike validates API contract before transcription
@@ -83,6 +88,7 @@ subjects.team: epistemic-team
 **Intent:** Validate that `FunctionTool.from_function(annotations=ToolAnnotations(...))` produces a tool with annotations intact, before transcribing 56 tools. De-risk the highest-risk unknown.
 **Acceptance:** A single spike test proves `mcp.add_tool(FunctionTool.from_function(fn=..., annotations=...))` registers a tool whose `tools/list` response includes annotations. Test file exists at `tests/test_tool_registry.py` with a `TestToolDefinition` class.
 **Files:**
+
 - Create: `tests/test_tool_registry.py`
 - Modify: (none — spike only; won't be committed as behavior)
 
@@ -135,12 +141,15 @@ class TestFastMCPAddToolSpike:
 ```
 
 **Step 2:** Run spike test
+
 ```
 python -m pytest tests/test_tool_registry.py::TestFastMCPAddToolSpike -v
 ```
+
 Expected: 2 PASS
 
 **Step 3:** Commit spike (this gates whether we can use `from_function` directly)
+
 ```
 git add tests/test_tool_registry.py
 git commit -m "spike: validate FastMCP add_tool(from_function(annotations=...)) for #454"
@@ -153,6 +162,7 @@ git commit -m "spike: validate FastMCP add_tool(from_function(annotations=...)) 
 **Intent:** Create the canonical `tortoise/tool_registry.py` with `ToolDefinition` dataclass, `RestSpec` dataclass, and the `TOOL_REGISTRY` list populated with 56 entries transcribed from current `@mcp.tool()` decorators. No behavior change — this is a data module only.
 **Acceptance:** `TOOL_REGISTRY` contains 56 entries. Each entry has `name`, `description`, `annotations`, `http_policy`, `sdk_method`. `derived_HTTP_ALLOWED == current HTTP_ALLOWED` (from `mcp_auth.py` on the #236 branch). Import doesn't trigger circular imports.
 **Files:**
+
 - Create: `tortoise/tool_registry.py`
 - Modify: `tests/test_tool_registry.py`
 
@@ -198,6 +208,7 @@ class TestRegistryEquivalence:
 ```
 
 **Step 2:** Run — expected FAIL (module doesn't exist)
+
 ```
 python -m pytest tests/test_tool_registry.py::TestRegistryEquivalence -v
 ```
@@ -266,16 +277,19 @@ def get_http_allowed() -> frozenset[str]:
 ```
 
 **Step 4:** Rerun equivalence test — iterate until PASS
+
 ```
 python -m pytest tests/test_tool_registry.py::TestRegistryEquivalence -v
 ```
 
 **Step 5:** Verify import doesn't trigger circular imports
+
 ```
 python -c "from tortoise.tool_registry import TOOL_REGISTRY; print(len(TOOL_REGISTRY))"
 ```
 
 **Step 6:** Commit
+
 ```
 git add tortoise/tool_registry.py tests/test_tool_registry.py
 git commit -m "feat: add ToolDefinition dataclass + registry module (Gate 1) for #454"
@@ -288,6 +302,7 @@ git commit -m "feat: add ToolDefinition dataclass + registry module (Gate 1) for
 **Intent:** Create the adapter that reads `TOOL_REGISTRY` and emits `mcp.add_tool(FunctionTool.from_function(...))` for each entry. Remove only the `@mcp.tool()` decorator lines from `mcp_server.py` — preserve all tool function bodies as callable handlers. The adapter wraps each function via `FunctionTool.from_function(fn=function_body, name=..., description=..., annotations=...)`.
 **Acceptance:** `tools/list` output identical before/after cutover. All existing MCP tests pass (`test_mcp_server.py`, `test_mcp_http.py`). `_http_tool_filter_registered` guard preserved. Test-swap pattern (`mcp_mod.sdk = test_sdk`) intact. Tool function bodies remain in `mcp_server.py` (only decorators removed).
 **Files:**
+
 - Create: `tortoise/tool_registry.py` (add `FastMCPAdapter` class)
 - Modify: `tortoise/mcp_server.py` (replace `@mcp.tool()` blocks with registry call)
 
@@ -333,6 +348,7 @@ class TestFastMCPAdapter:
 **Step 2:** Implement `FastMCPAdapter` in `tortoise/tool_registry.py`
 
 **Step 3:** Cut over `mcp_server.py`:
+
 - Remove only the `@mcp.tool()` decorator lines (56 lines) — **preserve every function body** (they are the handler callables the adapter wraps)
 - Add at the bottom (before `main()`):
 
@@ -346,11 +362,13 @@ _adapter.register_all(TOOL_REGISTRY, sdk_getter=_get_sdk)
 ⚠️ **DO NOT delete the tool function bodies.** The adapter calls `FunctionTool.from_function(fn=tortoise_create_point, name="tortoise_create_point", ...)` — each function must remain as a module-level callable.
 
 **Step 4:** Run existing MCP tests — must all PASS
+
 ```
 python -m pytest tests/test_mcp_server.py tests/test_mcp_http.py -v
 ```
 
 **Step 5:** Commit
+
 ```
 git add tortoise/tool_registry.py tortoise/mcp_server.py tests/test_tool_registry.py
 git commit -m "feat: FastMCPAdapter cutover — registry-driven tool registration (Gate 2) for #454"
@@ -363,6 +381,7 @@ git commit -m "feat: FastMCPAdapter cutover — registry-driven tool registratio
 **Intent:** Replace the literal `HTTP_ALLOWED` frozenset in `mcp_auth.py` with a derived import from `tool_registry.get_http_allowed()`. Preserve the `_HTTPToolFilter` transform and `_http_tool_filter_registered` guard.
 **Acceptance:** `test_http_allowed_populated_default_deny` passes with derived set. `HTTP_ALLOWED` value is identical to literal.
 **Files:**
+
 - Modify: `tortoise/mcp_auth.py`
 - Modify: `tests/test_mcp_http.py` (if needed)
 
@@ -375,11 +394,13 @@ HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
 ```
 
 **Step 2:** Run equivalence assertion + HTTP tests
+
 ```
 python -m pytest tests/test_tool_registry.py::TestRegistryEquivalence tests/test_mcp_http.py -v
 ```
 
 **Step 3:** Commit
+
 ```
 git add tortoise/mcp_auth.py
 git commit -m "feat: derive HTTP_ALLOWED from tool registry (Gate 2 finish) for #454"
@@ -392,12 +413,14 @@ git commit -m "feat: derive HTTP_ALLOWED from tool registry (Gate 2 finish) for 
 **Intent:** Pre-step for Gate 3: classify 8 REST tool-ops as SDK-backed vs raw-Cypher, add `RestSpec` entries to SDK-backed ops, document raw-Cypher ops with plan to extract SDK methods (or exclude from registry). The 4 raw-Cypher ops (`list_points`, `get_point`, `capture_session`, `list_sessions`) need `sdk_method` references extracted or documented as exclusions.
 **Acceptance:** Registry has `rest_spec` populated for 4 SDK-backed ops. 4 raw-Cypher ops have `handler_override` set (with existing raw-Cypher handler) OR are documented as excluded. `capture_session` dedup bug is documented (filed as separate issue).
 **Files:**
+
 - Modify: `tortoise/tool_registry.py`
 - Modify: `tortoise/hosted_api.py` (add handler references for raw-Cypher ops if needed)
 
 **Step 1:** Add `RestSpec` for SDK-backed ops + `handler_override` for raw-Cypher ops
 
 Classification:
+
 | REST endpoint | SDK-backed? | SDK method |
 |---|---|---|
 | `POST /v1/points` | YES | `create_point` |
@@ -412,6 +435,7 @@ Classification:
 **Step 2:** Populate `rest_spec` on SDK-backed entries; set `handler_override` to the raw-Cypher function references for the 4 raw ops.
 
 **Step 3:** Commit
+
 ```
 git add tortoise/tool_registry.py
 git commit -m "feat: classify REST endpoints + add RestSpec entries (Gate 3 pre-step) for #454"
@@ -424,6 +448,7 @@ git commit -m "feat: classify REST endpoints + add RestSpec entries (Gate 3 pre-
 **Intent:** Create the adapter that reads `TOOL_REGISTRY` entries with `rest_spec` populated and generates FastAPI route registrations via `APIRouter.add_api_route()`. Wire through `hosted_api.py`'s `create_http_app` or equivalent. Surface policies (audit logging, team limits, dream enqueue) stay in the route handlers — adapter only registers routes.
 **Acceptance:** All 8 REST tool-ops are registered via adapter (4 SDK-backed + 4 raw-Cypher with handler_override). `test_hosted_api.py` tests pass. Existing REST routes match pre-cutover paths, methods, and response shapes.
 **Files:**
+
 - Create: `tortoise/tool_registry.py` (add `FastAPIRouterAdapter` class)
 - Modify: `tortoise/hosted_api.py`
 
@@ -459,11 +484,13 @@ class TestFastAPIRouterAdapter:
 For raw-Cypher ops, preserve existing handler functions as `handler_override` references.
 
 **Step 4:** Run hosted API tests
+
 ```
 python -m pytest tests/test_hosted_api.py -v
 ```
 
 **Step 5:** CLI smoke test
+
 ```
 python -m tortoise hosted_api &
 curl http://localhost:8000/health
@@ -472,6 +499,7 @@ kill %1
 ```
 
 **Step 6:** Commit
+
 ```
 git add tortoise/tool_registry.py tortoise/hosted_api.py tests/test_tool_registry.py
 git commit -m "feat: FastAPIRouterAdapter — registry-driven REST routes (Gate 3) for #454"
@@ -484,28 +512,35 @@ git commit -m "feat: FastAPIRouterAdapter — registry-driven REST routes (Gate 
 **Intent:** Remove any remaining manual `@mcp.tool()` decorator-created tool bodies (if any were left as comments), verify zero divergence, update the dangling 236-tool-scope-table reference (see #491), and run full regression.
 **Acceptance:** `grep -r '@mcp.tool()' tortoise/` returns zero results (or only the registry registration call). `grep -r '@app.(get|post|delete)' tortoise/hosted_api.py` returns only control-plane endpoints. All tests pass. Dangling 236-tool-scope-table.md reference updated to point at the real source: `tortoise/tool_registry.py` (`get_http_allowed()`) + `tortoise/mcp_auth.py` (`HTTP_ALLOWED`, registry-derived per #454).
 **Files:**
+
 - Modify: `tortoise/mcp_server.py`
 - Modify: `tortoise/hosted_api.py`
 - Modify: `tortoise/mcp_auth.py` (optional — update docstring reference)
 
 **Step 1:** Verify zero `@mcp.tool()` decorators remain
+
 ```
 grep -c '@mcp.tool()' tortoise/mcp_server.py
 ```
+
 Expected: 0 (or 0 in tool-definition context)
 
 **Step 2:** Verify REST routes are adapter-driven
+
 ```
 grep '@app\.\(get\|post\|delete\)' tortoise/hosted_api.py
 ```
+
 Expected: only control-plane routes (/internal/*, /health/*, /v1/team/*, /v1/team/keys/*)
 
 **Step 3:** Full test suite
+
 ```
 python -m pytest tests/ -v
 ```
 
 **Step 4:** Commit
+
 ```
 git add -A
 git commit -m "feat: cleanup — remove dead code, final regression for #454"
@@ -522,6 +557,7 @@ After saving, invoke `plan-review` to validate this plan before execution.
 ## Branch Prerequisites
 
 Before starting implementation:
+
 1. **Ensure `mcp_auth.py` is available:** The equivalence test in Task 1 imports `HTTP_ALLOWED` from `tortoise/mcp_auth.py`. This file was created in #236 (MCP Streamable HTTP) and lives on sibling branches. If missing from this branch, rebase onto or merge from the latest `main` that includes #236.
 2. **Tool count note:** The registry transcription covers 56 tools present on this branch. The `mcp_auth.py` from post-#485 branches includes 2 additional tools (`tortoise_list_tags`, `tortoise_query_points_by_tag`) — the equivalence test will need those registry entries added if `mcp_auth.py` is taken from a post-#485 state. Verify tool count by running `grep -c '@mcp.tool()' tortoise/mcp_server.py` before starting Task 1.
 3. **Verify FastMCP 3.4.6 is installed:** `python -c "import fastmcp; assert fastmcp.__version__ == '3.4.6'"`

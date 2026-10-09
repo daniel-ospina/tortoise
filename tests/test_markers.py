@@ -80,6 +80,15 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    # #7677: the retry-idempotency tests drive REAL org creation through the
+    # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
+    # is the same construction the endpoint under test uses, and the behaviour
+    # being pinned (a same-owner retry resolving to the org the abandoned first
+    # attempt already committed, via ``org_by_name``) is the seed→resolution
+    # coupling itself. A test_* rename would exercise a DIFFERENT graph than the
+    # code resolves, which is the one thing these tests must not do. Same
+    # prod-coupled class as test_agent_signup / test_cohort_cost_cap.
+    "test_7677_create_org_retry_idempotent.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
     "test_cli_serve.py": {"registry": "prod-coupled"},
@@ -639,6 +648,18 @@ def test_no_redirect_stems_registry_exact():
         # pin reding on the addition is the pin working as designed, so the
         # stem is DECLARED here rather than exempted.
         "test_4921_construct_lock",
+        # #4521: the `_revise_point` guard asserts the EMBEDDED engine's stored
+        # type for a revised Point — it reads `typeof()` back off a real embedded
+        # store. The module is `embedded_only`, so under a URI the hook SKIPS the
+        # whole module (it never runs, and no List is written); a redirected
+        # construction would instead run against the server lane, which lands the
+        # same `vecf32` write, so the assertion would certify nothing. This is the
+        # same rationale registered with the stem in tests/_embedded.py, and the
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4921 shape).
+        "test_4521_revise_point_embedding",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

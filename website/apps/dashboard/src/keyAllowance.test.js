@@ -10,6 +10,7 @@
 // with no pre-cap line at all.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { LIMIT_CONTACT } from './limitContact.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -108,10 +109,10 @@ test('#3874/#4355: numbered notices keep the approved number sentence (source ch
   // gone because it described the very ordering #4355 replaced.
   assert.equal(
     upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }),
-    "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot — or upgrade to add more.")
+    `You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot — or upgrade to add more.${LIMIT_CONTACT}`)
   assert.equal(
     rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }),
-    "You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit — or upgrade to add more.")
+    `You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit — or upgrade to add more.${LIMIT_CONTACT}`)
   assert.doesNotMatch(rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }),
     /before revoking this one/,
     'the pre-#4355 mint-then-revoke mechanism clause must not return')
@@ -121,9 +122,9 @@ test('#4335: the notices drop the upgrade clause when no upgrade path exists', (
   const up = upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
   const rot = rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
   assert.equal(up,
-    "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot.")
+    `You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot.${LIMIT_CONTACT}`)
   assert.equal(rot,
-    "You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit.")
+    `You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit.${LIMIT_CONTACT}`)
   assert.doesNotMatch(up, /upgrade/)
   assert.doesNotMatch(rot, /upgrade/)
   // Degraded (no number) variant too.
@@ -156,7 +157,7 @@ test('#2699: the numbered create notice offers the achievable remedy, never rege
 test('#2699: the degraded (no-number) create notice offers the achievable remedy, never regenerate', () => {
   const up = upgradeNoticeFrom('', {})
   assert.equal(up,
-    "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more.")
+    `You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more.${LIMIT_CONTACT}`)
   assert.match(up, /Revoke an existing key to free a slot/, up)
   assert.doesNotMatch(up, /regenerate/i, up)
   assert.doesNotMatch(up, /\bof \d+ API keys\b/, `must not invent a limit: ${up}`)

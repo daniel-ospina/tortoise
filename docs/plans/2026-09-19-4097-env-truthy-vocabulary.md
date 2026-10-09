@@ -43,6 +43,7 @@ version CI pins at `.github/workflows/ci.yml:1199`).
 **Acceptance:** `tortoise/env_truthy.py` exists, imports only the stdlib, and exports
 `TRUTHY`/`FALSY`/`is_truthy`/`env_flag` whose full input matrix is pinned by tests.
 **Files:**
+
 - Create: `tortoise/env_truthy.py`
 - Test: `tests/test_env_truthy.py`
 
@@ -180,6 +181,7 @@ referent as an alias so no importer breaks.
 owners; every migrated site agrees with the predicate it replaced on the whole `_MATRIX` except at the
 declared cells in Step 3.
 **Files:**
+
 - Modify: `tortoise/backup_config.py`, `retrieval.py`, `rerank.py`, `why.py`, `monitoring.py`,
   `sdk.py`, `hosted_api.py`, `extractor_v2.py`, `projection/__init__.py`, `embeddings.py`,
   `cimd.py`, `frontmatter_validator.py`, `model_adapters.py`
@@ -342,6 +344,7 @@ destructive one narrow and *mark* that departure so it cannot be tidied away.
 `TORTOISE_TEST_SWEEP_TEAM_STRAYS=yes` still does NOT; the exception is pinned by a test that cites the
 OVERRIDES line.
 **Files:**
+
 - Modify: `tortoise/embedded_lifecycle.py`, `tests/_embedded.py`
 - Test: `tests/test_env_truthy.py`
 
@@ -358,6 +361,7 @@ def _fast_atexit_enabled() -> bool:
     """
     return is_truthy(os.environ.get("TORTOISE_FAST_ATEXIT"))
 ```
+
 then `if not _fast_atexit_enabled(): return False` in `atexit_fast_close` (was `!= "1"`).
 
 ```python
@@ -366,6 +370,7 @@ def _carve_out_opted_in() -> bool:
     """The TORTOISE_TEST_CARVE_OUT opt-in, through the declared contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_TEST_CARVE_OUT"))
 ```
+
 then `if _carve_out_opted_in(): return` in `_assert_p4_uri_required` (was `== "1"`).
 
 **Step 2: the deliberate exception** — `_team_sweep_allowed` keeps `== "1"`:
@@ -395,6 +400,7 @@ shared vocabulary a test, not a hope.
 standalone with `redislite`/`falkordb`/`redis`/`httpx` blocked (both PASS today — verified
 independently in three review cycles).
 **Files:**
+
 - Modify: `tortoise/embedded_reaper.py` (the resolver body changes to use the new constant — **not**
   comment-only)
 - Test: `tests/test_env_truthy.py`
@@ -437,6 +443,7 @@ blocklist purity probe; and an AST assertion that every module `tortoise/env_tru
 **Acceptance:** a new vocabulary literal, or a new/extra narrow `== "1"` read, reds the suite and names
 the file.
 **Files:**
+
 - Modify: `tests/test_env_truthy.py`
 
 **Step 1: the scanner — the implementation, verbatim** (a regex cannot do this: it misses

@@ -24,6 +24,7 @@ aboutSubjects: tortoise
 5. **Build the battery as a public/commercial benchmark product.** Rejected for now — out of scope, high maintenance cost, no revenue path identified. The battery is internal validation tooling first; a public benchmark is a later packaging decision.
 
 **Anti-post-rationalization — strongest reasons NOT to build:**
+
 - **The claim may fail.** 2604.20006 found memory helps remembering most, reasoning least. Our own probes might show the graph does not move reasoning outcomes — falsifying the product thesis. That is precisely why we must build this before marketing the claim; a falsification is cheaper now than in the market.
 - **Eval infra is expensive, ships no user-facing feature.** Harness + 5 arms + 3 benchmark integrations is real engineering that doesn't add a product surface. Opportunity cost against extraction quality (#1350), onboarding, and the launch roadmap.
 - **Self-fulfilling test risk.** Probes built on our own primitives (NAND surfacing, EP calibration) could measure the engine's own API rather than agent-level reasoning outcomes. Mitigation: probes are agent-level behavioral scenarios with blind rubrics, scored by external judges — and the differential arms (non-Tortoise systems) run the SAME probes, so the design can't be Tortoise-shaped without being caught by the matched-recall control.
@@ -43,6 +44,7 @@ aboutSubjects: tortoise
 ## Profit Growth Alignment (Step 3)
 
 **Causal chain (testable):**
+
 1. Battery clears Tier-1 (capability) + Tier-2 (improvement) + Tier-3 (uniqueness at matched recall) → measured, published delta: "Tortoise improves agent reasoning outcomes; generic memory systems do not."
 2. Measured delta → differentiated positioning vs generic memory products (Mem0/Zep-class) → the moat claim becomes evidence-backed rather than asserted.
 3. Evidence-backed claim → conversion: eval-informed buyers (the agent-memory market buys on benchmarks) choose the product; retention: the longitudinal result ("agent gets better with live use") is the compounding-memory product promise.
@@ -71,6 +73,7 @@ aboutSubjects: tortoise
 **Eisenhower placement:** Important / Not Urgent — Schedule. Gates the claim, not the launch.
 
 **Key assumptions:**
+
 - The graph's reasoning contribution is measurable at agent level by our probes — confidence: **medium** (2604.20006's task-dependence finding says reasoning gains are the hardest axis; probes are designed to catch a null result, not guarantee one)
 - Matched-recall is achievable at the reasoning-relevant level and operationally defined (top-K factual F1, K=5, partial-match regime pre-committed) — confidence: **medium** (recall backends are off-the-shelf and #1144 infra exists; the *meaningful* match — decision-relevant claims surfaced, not just facts — is the open question and is defined ex ante rather than assumed)
 - The battery will complete before the claim goes public — confidence: **medium** (marketing timing is outside this epic's control; reclassification trigger in place: reasoning positioning in launch messaging ⇒ Do-now)

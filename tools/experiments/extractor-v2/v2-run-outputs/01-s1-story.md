@@ -7,6 +7,7 @@ The root cause was confirmed: the draft-filter introduced in #943 silently exclu
 The fix had two parts: (1) migrating 11 EP tests to create `status="live"` points (preserving production semantics), and (2) adding a non-silent warning that names the operator and every input's status when a draft-strip degenerates an operator.
 
 **Epistemic Logic:**
+
 - **IMPL (supports):** The fix approach was chosen over the alternative (changing production draft-filter semantics) because preserving production behavior is a durable constraint — the draft-filter is correct for production, tests were simply using the wrong status.
 
 - **NAND (undermines):** The review revealed two P2 findings that would have blocked the merge gate: (1) the diagnostic's id-truncation (`cid[:8]`) is useless because point IDs share a timestamp prefix for ~2-month windows, making all labels identical; (2) `test_context_free_produces_consistent_ranking` in the migrated file was still using draft points, creating a vacuous pass — the exact failure mode the PR was fixing, left dead in the same file.
@@ -14,6 +15,7 @@ The fix had two parts: (1) migrating 11 EP tests to create `status="live"` point
 - **MITIGATES (tempers):** The environment's extreme I/O contention (load 175-238, multiple wedged full-suite runs from other agents) caused subagent stalls and timeouts, but the fix was verified through targeted test runs that proved all 11 originally-red tests pass post-rebase.
 
 **Durable Beliefs:**
+
 - The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.
 
 - Point IDs are ULID-style (`<hex-timestamp>-<uuid12>`), so `cid[:8]` is a timestamp prefix shared by all points in a ~2-month window — insufficient for disambiguation.
@@ -23,6 +25,7 @@ The fix had two parts: (1) migrating 11 EP tests to create `status="live"` point
 - The text-first pattern (emit text before any tool calls) beats the subagent stall on this environment.
 
 **Remaining Open Work (post-P0 merge):**
+
 - P1: #981 CLI config drift (blocks copy-paste onboarding)
 - Mission: #969 harness clickthrough capstone
 - Mission: #979 hosted E2E suite implementation (spec #980 merged)
@@ -51,6 +54,7 @@ This was found by a reviewer (P2 conf 95) and fixed.
 This test is still broken on main.
 
 **Epistemic state:**
+
 - **Supports:** The fix approach was optimal (11 migrations × `status="live"` + non-silent degenerate-operator exclusion warning) — the fact that the dead subagent's same commits shipped independently via #1000 confirms this was the correct fix.
 
 - **Undermines (artifacts):** The `cid[:8]` label format in #1000 is now on main with the exact flaw flagged in review (P2 conf 85).

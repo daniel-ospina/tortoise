@@ -23,6 +23,7 @@ aboutObjects: tortoise
 > System actors: **Operator** (human running the mining pipeline), **Agent/CLI user** (querying the graph), **MCP caller** (automation), **Reviewer** (human validating extraction/dedup candidates). This is an API/CLI/MCP feature — no GUI.
 
 ### J-1: Batch mine a session corpus (Operator)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | Operator | Run `mine_corpus` over session files (or MCP `tortoise_mine_conversations`) | Pipeline walks files, per-session extraction | Sessions queued |
@@ -33,6 +34,7 @@ aboutObjects: tortoise
 | **Edge cases:** empty corpus (0 sessions → empty report), malformed session (skipped + counted), LLM failure (keyword/rule fallback), duplicate session file (file_hash skip).
 
 ### J-2: Verify a dedup candidate (Reviewer)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | Reviewer | Query dedup candidates (`list_dedup_candidates`) | Returns pairs {existing, candidate, similarity, method} | Candidate list |
@@ -41,6 +43,7 @@ aboutObjects: tortoise
 | **Edge cases:** empty queue, candidate already reviewed, merge of Point-level content dedup ("we already decided this") surfaces as read-only link, not destructive merge.
 
 ### J-3: Query "what exists" after mining (Agent/CLI user)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | Agent | Search `tortoise_search "port migration"` | Returns Points + Events + Objects | Results |
@@ -49,6 +52,7 @@ aboutObjects: tortoise
 | **Edge cases:** no objects found (empty result), object exists but no Points (orphan — flagged), draft Points hidden from live EP queries.
 
 ### J-4: Track a belief over time (Agent/CLI user)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | Agent | Query belief timeline for a topic | Points sorted by `validFrom` with NAND/supersede links | Timeline |
@@ -56,6 +60,7 @@ aboutObjects: tortoise
 | **Edge cases:** single decision (no timeline), contradictory decisions without dates (validFrom fallback to session ingest).
 
 ### J-5: Promote mined content to live (Reviewer)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | Reviewer | List draft extraction Points (`list_drafts` / `list_dedup_candidates` type=content) | Draft Points with provenance + dedup context | Queue |
@@ -64,6 +69,7 @@ aboutObjects: tortoise
 | **Edge cases:** empty queue; point already promoted (no-op); promote on quarantined batch → blocked with `{blocked, reason, batch_id}` (promote_point contract); EP drift on promote → blocked until the batch's W-3 grounding snapshot passes.
 
 ### J-6: Automated batch via MCP (MCP caller)
+
 | Step | Actor | Action | System response | Exit state |
 |---|---|---|---|---|
 | 1 | MCP caller | Invoke `tortoise_mine_conversations` (scheduled) | Batch runs with per-file error reporting | Batch report |
@@ -76,6 +82,7 @@ aboutObjects: tortoise
 ## 2. Workflows
 
 ### W-1: Entity extraction (per session)
+
 ```
 transcript/document
   → [Phase-1 extractor: Points + operators]          (existing, reused)
@@ -89,9 +96,11 @@ transcript/document
   → [wire: (Point)-[:aboutObject]->(Object), (Event)-[:aboutObject]->(Object)]
   → [fallback: LLM failure → rule/keyword entity detection only]
 ```
+
 **Automation points:** batch MCP tool; per-session extraction independent (parallelizable, throttled via `mine_corpus(max_concurrency=...)`). **Manual intervention:** dedup-candidate review queue (J-2) for the ambiguity band and content-dedup candidates. **Failure modes:** LLM parse error → fallback; embedding model unavailable → exact+fuzzy only (no semantic tier); objectKind unknown → `other`; auto-merge false positive → reviewer rejection (`DedupeRejected`/`reviewed:true`).
 
 ### W-2: Content dedup ("we already decided this")
+
 ```
 extracted decision Points (new batch, all draft)
   → [tier 1: content hash vs existing decision Points]   (reuse _content_hash / _content_exists, pointKind-scoped)
@@ -100,9 +109,11 @@ extracted decision Points (new batch, all draft)
   → [candidate prior is LIVE → surface to review queue (no auto-link — a draft must never wire an operator to a live Point)]
   → [hit above merge-threshold: reviewer decides; keep candidate draft until promotion]
 ```
+
 **Failure modes:** embedding threshold mis-calibrated (θ from calibration milestone); false merge → reviewer rejection path; no embedding model → hash-only dedup (degraded but safe).
 
 ### W-3: EP-safe batch commit (extraction batch)
+
 ```
 batch complete
   → [verify all extraction Points status: draft]
@@ -111,9 +122,11 @@ batch complete
   → [snapshot mean grounding pre/post (≤2% mean absolute)]  (Gate B tooling)
   → [pass: batch committed, drafts enter review queue]; [fail: BATCH quarantined (batch-level), no promotion, re-review via J-5]
 ```
+
 **Failure modes:** any live-status Point found in extraction output → batch block; EP drift >2% → batch quarantine + re-review; quarantine recovery = fix cause + re-run batch (resumable progress file).
 
 ### W-4: Temporal belief wiring
+
 ```
 new decision Point (draft) with validFrom = session date
   → [search prior decision Points on same aboutObject/topic]
@@ -122,6 +135,7 @@ new decision Point (draft) with validFrom = session date
   → [explicit replacement? ("supersede"/"we changed our mind") → supersede_point(CORRECTS) after review (live path)]
   → [else: no temporal edge]
 ```
+
 **#438 boundary carve-out:** W-4 creates point-to-point NAND/CORRECTS edges between a NEW conversation-extracted draft and EXISTING Points. This is conversation-triggered and draft-side (no discovery over the graph's own structure), so it stays in #264; #438 remains discovery of connections between EXISTING Points without a conversation trigger. The carve-out is auditable in code: TemporalWire only runs inside the mining post-pass with an explicit `source_session` provenance.
 **Failure modes:** prior decision not found (partial index — Gate A risk); dates missing → validFrom = session ingest date (documented fallback); live prior → review-queue routing (never a silent skip).
 
@@ -130,6 +144,7 @@ new decision Point (draft) with validFrom = session date
 ## 3. Prototype (markdown diagram — non-GUI feature)
 
 ### Pipeline topology (target state)
+
 ```
 ┌─ Session files (~/.tortoise/docs/conversations/) ─┐
 │                                                   │
@@ -148,10 +163,12 @@ new decision Point (draft) with validFrom = session date
 ```
 
 ### State machine (extraction Point lifecycle)
+
 ```
 extracted (draft) ──► review queue ──► live        [promotion ONLY via explicit reviewer approval]
      └── batch quarantine (EP drift / batch fail) ──► re-review ──► re-run batch (resumable)
 ```
+
 **Draft→live:** ONLY via `promote_point` (reviewer-approved API), never via SDK #131 edge auto-promotion for extraction paths (`create_operator(promote_source=False)`).
 **Status vocabulary:** stored status stays within existing `POINT_STATUS_VALUES = {live, draft, outdated, archived}` (sdk.py:28) — **no new stored status**. "Reviewed" is a DERIVED flag (a `ReviewRecorded` event / `reviewed: true` property), not a stored status. Quarantine is BATCH-level (W-3), not a Point state — a quarantined batch's Points stay `draft` until re-review.
 
@@ -162,6 +179,7 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 > No new node types — reuses ONTOLOGY v3.2 entities. Changes are new properties, edges, and lifecycle rules.
 
 ### 4.1 Object (existing, new write semantics)
+
 - `id`: deterministic canonical id = `obj_` + sha256(normalized_canonical_name)[:12] via the existing content-hash helper (`ids.content_hash`, domain-separated input `f"obj:{normalized}"` — no third sha256 helper; consolidate `_content_hash`/`ids.content_hash` duplication opportunistically).
 - `canonical_name`: normalized entity name (lowercase, whitespace-collapsed, punctuation-stripped for matching; display `title` preserves original).
 - `resolved_from`: list of pre-merge names (dedup audit trail) — set on merge.
@@ -169,6 +187,7 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 - No stored `status` (derived per ONTOLOGY §2/§4.3 — projected from event stream at query time; mirrors §3 state machine in this plan).
 
 ### 4.2 Point (existing, new extraction rules)
+
 - `status`: `draft` on creation by extraction (explicit output contract). **Promotion to `live` ONLY via `promote_point` — the SDK #131 auto-promotion (`create_operator` SET s.status='live', sdk.py:1010-1012) is bypassed for extraction paths via `create_operator(promote_source=False)`.** No new stored status values (POINT_STATUS_VALUES unchanged); "reviewed" is a derived flag (`reviewed: true` property or `ReviewRecorded` event).
 - Dedup/batch properties (pending-queue persistence, §4.4): `dedup_candidate: true`, `dedup_method`, `dedup_similarity`, `dedup_target_id` on candidate Points; `batch_id` on every extraction Point (quarantine lock + stranded-batch detection).
 - `validFrom`: real session date (from session frontmatter `date`/`startedAt`; fallback `ingestedAt`).
@@ -176,6 +195,7 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 - Provenance: `extractedFrom` → Source; `aboutEvent` → session Event (Phase 4).
 
 ### 4.3 Edges (existing predicates — no new predicates)
+
 | Edge | From→To | Used for | Notes |
 |---|---|---|---|
 | `aboutObject` | Point/Event → Object | entity wiring | replaces INSTANTIATES for issue/PR |
@@ -188,12 +208,14 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 | `extractedFrom` | Point → Source | claim provenance | existing |
 
 ### 4.4 Constraints
+
 - **No `INSTANTIATES` writes** anywhere (removed #214) — `_connect_issue_objects`, `session_indexer.py`, `ranking.py`, `security.py` migrated.
 - **Extraction never auto-wires operators to live Points** — operator edges from extraction connect only draft endpoints, created via `create_operator(promote_source=False)`; content dedup links draft-to-draft only (live prior → review queue, W-2); temporal NAND links draft-to-draft only (live prior → review queue, W-4).
 - **Deterministic canonical id, single scheme:** `obj_` + sha256(normalized canonical name)[:12] via the existing content-hash helper (domain-separated input); the resolver's exact tier ALSO recognizes legacy `issue_*`/`pr_*` prefixed ids (from `_connect_issue_objects`, sdk.py:4336) so the same entity never becomes two Objects across paths.
 - Dedup artifacts: `DedupeRecorded` event in event log (type `DedupeRecorded`) OR `canonical_id`/`resolved_from` property — E2E-2 asserts at least one. Rejection state: `DedupeRejected` event type OR `reviewed: true` property on the candidate (J-2 skip-re-surfacing).
 
 ### 4.5 EP integrity
+
 - **Draft exclusion at FACTOR-EXTRACTION TIME (not just TortoiseEP):** a shared status filter (`status <> 'draft'`) applied in ALL of: `TortoiseEP._affected_claims`/`_affected_factors` (ep.py:338/363) — filter draft as targets AND strip draft ids from `input_ids` AND filter draft operator sources (`o.status <> 'draft'`); `extract_svbp_factors` (projection/__init__.py:907 — graph-wide, currently no filter); `_bfs_select_operators` (analyze.py:326); `_select_subgraph` (sdk.py:1832). A draft-connected operator must change NO live claim's posterior. **Operator nodes created by extraction ALSO carry `status: 'draft'`** (today `create_operator` writes no status property, sdk.py:1003, and the event path defaults to `live` via `coalesce($st, n.status, 'live')`, projection/entities.py:113) — `create_operator(promote_source=False)` sets both the operator node's status AND skips the #131 source promotion. The shared filter is parameterized: `_live_only(clause, include_draft=False)` so `run(include_draft=True)` can re-include drafts consistently across all four call sites.
 - **Behavior-change note (not back-compat):** flipping EP's default to exclude drafts IS an intentional behavior change — `create_point` defaults new Points to `status: 'draft'` (sdk.py:456) and current EP applies no status filter, so any existing draft Point wired into an operator chain currently contributes to posteriors. The flip is gated by Gate B (drift check ≤2% mean grounding); callers that need legacy behavior pass `include_draft=True`.
 - Grounding snapshot: `analyze.py` gains a pre/post batch mean-grounding query (Gate B tooling; sample = full live Point set).
@@ -203,6 +225,7 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 ## 5. Architecture
 
 ### 5.1 Components
+
 | Component | File | Responsibility | New/Existing |
 |---|---|---|---|
 | EntityStage | extend `tortoise/extractor.py` `_SemanticStage` (extractor.py:636) — add span + canonical_candidates prompt params | LLM entity extraction (domain-aware kind vocab via domain_loader) + rules pre-filter via existing issues/prs metadata (session_indexer.py:204) | EXTEND |
@@ -217,12 +240,14 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 | MCP surface | `tortoise/mcp_server.py` | `tortoise_mine_conversations`, `tortoise_list_dedup_candidates`, `tortoise_approve_merge`, `tortoise_promote_point`, `tortoise_belief_timeline` | NEW |
 
 ### 5.2 Boundaries
+
 - **Extraction (Phase 2) vs discovery (#438):** #264 writes Objects/Points from conversation text; #438 discovers IMPL/NAND between existing Points. No shared component; `entity_resolver` is not a graph-walking connector.
 - **Dedup vs EP:** content dedup links draft Points only; promotion to live is a separate reviewer-gated step. EP never sees drafts.
 - **Wiring vs ingestion:** `ingest_corpus` keeps file-level indexing; entity wiring is a post-extraction pass (idempotent MERGE).
 - **Failure isolation:** LLM failure → rule fallback; embedding failure → exact+fuzzy; batch failure → quarantine (no partial live writes).
 
 ### 5.3 Deployment
+
 - Same package (`pip install -e .`); no new services. Batch via MCP/CLI; no real-time requirement (scope non-goal).
 - Calibration milestone runs in an isolated batch (FalkorDBLite or a staging graph) before touching production graph (Gate B).
 
@@ -231,6 +256,7 @@ extracted (draft) ──► review queue ──► live        [promotion ONLY v
 ## 6. Interfaces (contract-first)
 
 ### 6.1 Python API (SDK)
+
 ```
 # Phase 2
 # RENAMED to avoid collision with extractor.py:861 extract_entities (S7 document semantics)
@@ -273,6 +299,7 @@ def belief_timeline(self, topic: str) -> list[dict]:
 ```
 
 ### 6.2 MCP tools
+
 | Tool | Inputs | Output |
 |---|---|---|
 | `tortoise_mine_conversations` | `directory`, `extract_entities`=true, `llm_model`, `progress_file` | batch summary + per-file failures |
@@ -282,6 +309,7 @@ def belief_timeline(self, topic: str) -> list[dict]:
 | `tortoise_belief_timeline` | `topic` | dated belief chain |
 
 ### 6.3 Internal contracts
+
 - `_semantic_dedup` generalization (sdk.py:2348 — currently hardcoded to `pointKind:'checkpoint-item'`, returns below-threshold candidates only): add `pointKind` param + `return_pairs: bool` mode (returns {candidate, existing, similarity} pairs for above-threshold hits) + `similarity_out`. W-2 tier 2 calls with `pointKind='decision'`, `return_pairs=True`, threshold θ from calibration milestone.
 - `_content_exists` (sdk.py:2260 — currently matches ANY non-operator Point by content_hash): add optional `pointKind` scoping so a duplicate observation never suppresses a decision (W-2 tier 1).
 - `ep.py`/SVBP draft filter: shared `_live_only(clause, include_draft=False)` predicate at factor-extraction time (signature matches §4.5; the clause is parameterized across ALL four call sites — TortoiseEP._affected_claims/_affected_factors, extract_svbp_factors, _bfs_select_operators, _select_subgraph); `run(operator_ids, ..., include_draft: bool = False)` default excludes draft. **Signature back-compatible** (all existing callers — dream.py:80, sdk.py:1913, ingest.py:103/573 — call without include_draft) but **behaviorally a gated change** (see §4.5 note; Gate B drift check).
@@ -299,8 +327,10 @@ def belief_timeline(self, topic: str) -> list[dict]:
 **Deterministic-fixture preamble (applies to ALL extraction tests):** Phase-2 entity extraction is LLM-driven. Every DE2E that exercises entity extraction injects a **deterministic entity-stage mock** (new `EntityStageMock` returning fixed `{name, objectKind, canonical_candidates}` sets per seed transcript — same pattern as `MockExtractor` in extractor.py:206) via `mine_conversation(..., entity_stage=EntityStageMock)`. LLM-dependent outcomes are NEVER asserted against live model output. Embedding similarity in the semantic tier is mocked to fixed values where tier behavior is asserted (no dependence on model availability). Threshold constants are PINNED in a test fixture (`AUTO_MERGE_THRESHOLD=0.92`, `REVIEW_THRESHOLD=0.60`) — calibration keeps production values within the pinned band; tests assert against pinned values only.
 
 ### DE2E-1: Session → Entity Objects with provenance
+
 **Setup:** FalkorDBLite; seed one mined session transcript (contains "port 16379", "FalkorDB", "tortoise#123"); `EntityStageMock` returns {port 16379 → other, FalkorDB → tool, tortoise#123 → workitem}.
 **Steps:**
+
 1. Run `mine_conversation(transcript, "s1", api, extract_entities=True, entity_stage=EntityStageMock)`.
 2. Query `MATCH (o:Object) WHERE o.canonical_name IN ["port 16379","falkordb","tortoise#123"] RETURN o`.
 3. Query `(p:Point)-[:aboutObject]->(o:Object)` and `(e:Event)-[:aboutObject]->(o:Object)`.
@@ -310,11 +340,13 @@ def belief_timeline(self, topic: str) -> list[dict]:
 **Assertions:** ≥1 Object per entity (objectKind tool/other/workitem); aboutObject edges exist Point+Event side; aboutEvent edges exist for occurrence Points; full provenance chain `extractedFrom → references` present; no Subject stubs.
 
 ### DE2E-2: Cross-session entity dedup
+
 **Setup:** transcripts A ("port migration"), B ("port 16379 change"), same effort — `EntityStageMock` returns canonical candidates that resolve the same entity; PLUS a legacy session ingested via `ingest_corpus` with an issue ref (exercises legacy `issue_*` id path). A third entity pair sits in the ambiguity band (sim pinned 0.75, between REVIEW 0.60 and AUTO 0.92).
 **Steps:** mine A and B; count `:Object` nodes whose canonical_name resolves to the same entity; check `DedupeRecorded` log event or `resolved_from` property on survivor; re-run mining of B → no new Object; verify a legacy `issue_*`-id Object and a new-scheme Object for the same entity are recognized as the same by the exact tier; run `list_dedup_candidates(candidate_type="entity")` for the ambiguity-band pair; `approve_merge(action="merge")` on it; then `approve_merge(action="reject")` on a second ambiguity pair.
 **Assertions:** exactly ONE Object for the entity across BOTH paths; both sessions' Points wire via aboutObject; dedup artifact exists (DedupeRecorded/canonical_id/resolved_from); idempotent (re-mine adds 0 Objects); legacy/new canonical schemes unified; ambiguity-band pair surfaces as `candidate_type: entity`; merge → `canonical_id`/`resolved_from` + DedupeRecorded; **reject → candidate stays a separate Object, no canonical_id/resolved_from written, `reviewed:true`/`DedupeRejected` present, `list_dedup_candidates` no longer returns it**.
 
 ### DE2E-3: Content dedup — "we already decided this"
+
 **Setup:** prior session D1 contains decision "change default port to 16379" (LIVE, post-review); new session D2 restates it verbatim (hash-tier detectable); D2b paraphrase variant (embedding tier, mocked sim 0.88).
 **Steps:** mine D2 with content dedup (tier1 hash + tier2 embedding, pointKind='decision'); check D2's decision Point is draft; query candidates; re-run mining of D2 (idempotency).
 **Assertions:** no new live decision Point created for the duplicate; candidate surfaced with method and `candidate_type: content`; D2 Point remains `draft`; because D1 is LIVE, NO IMPL operator auto-wired from D2 to D1 (W-2 live-prior rule) — link is pending review via the candidate queue; **re-run → candidate count unchanged, no duplicate IMPL link, no new DedupeRecorded event**.
@@ -323,17 +355,20 @@ def belief_timeline(self, topic: str) -> list[dict]:
 **Variant C (approve vs live prior):** `approve_merge(action="merge")` on the content candidate where D1 is LIVE → NON-destructive: no Object merge (Points don't merge), the IMPL "already decided" link is scheduled and wired at D2's PROMOTION time (live→live, per W-2 approve semantics); assert after promote: exactly one IMPL wired, both Points live, no duplicate decision Point.
 
 ### DE2E-4: Extracted Points are EP-safe (non-vacuous)
+
 **Setup:** batch of 5 sessions mined; ≥2 sessions contain contradictory decisions (so a W-4 NAND exists between two draft Points); a DELIBERATE LEAK fixture: a pre-existing LIVE operator from a live claim to one draft Point is constructed; EP run with `include_draft=False`; mean-grounding snapshot query (new `mean_grounding()` helper, formula: mean over `confidence` of live non-operator Points, sampled pre/post batch).
 **Steps:** assert all extraction Points `status: draft`; assert all extraction-created OPERATOR nodes have `status: 'draft'`; assert no draft-to-live wiring; snapshot mean grounding before/after; run EP on the leak graph with `include_draft=False` AND a CONTROL run with `include_draft=True`; run SVBP path (`extract_svbp_factors`) with a draft in the factor universe; run `_bfs_select_operators` (analyze.py) and `_select_subgraph` (sdk.py) paths with a draft in scope.
 **Assertions:** 100% extraction Points + operator nodes draft; grounding delta ≤2% mean absolute; **leak scenario: with include_draft=False the live claim's posterior is invariant; with include_draft=True the same graph CHANGES the posterior — proving the filter (not the wiring) is causal**; SVBP path AND `_bfs_select_operators` AND `_select_subgraph` independently exclude drafts (all four §4.5 call sites tested, not just TortoiseEP+SVBP); W-4 NAND between two draft Points leaves both `draft`.
 
 ### DE2E-5: produces/uses wiring + INSTANTIATES drift removal
+
 **Setup:** session with decision + edited artifact (`redis.conf`, EntityStageMock returns it as objectKind document); issue/PR-bearing session through `ingest_corpus(eventKind="AgentSession")`.
 **Steps:** mine session; run ingest path; grep graph for `INSTANTIATES`; run ranking query on aboutObject-connected session; check security whitelist.
 **Assertions:** decision Event `produces` decision Point; session Event `uses` artifact Object; zero `INSTANTIATES` edges on both paths; **aboutObject session appears in top-5 ranking results AND ranking score with aboutObject edges > score without them (observable baseline)**; whitelist has no INSTANTIATES.
 **Variant (Point-origin negative):** a graph with ONLY Point-origin aboutObject edges (no Event-origin) → session boost UNCHANGED (Point/Document-origin aboutObject edges must not inflate session boosts — Event-anchored rewrite, §6.3).
 
 ### DE2E-6: Temporal belief tracking
+
 **Setup:** D1 "use port 16379" (date T1), D2 "revert to 16380, 16379 was wrong" (date T2>T1); D3 explicit replacement case "supersede the port decision".
 **Steps:** mine all; query belief timeline.
 **Assertions:** D1/D2 linked by NAND; validFrom=T1/T2 on respective Points; timeline shows ordered chain; D3 branch → CORRECTS + D1 `outdated:true` via `supersede_point`.
@@ -341,16 +376,19 @@ def belief_timeline(self, topic: str) -> list[dict]:
 **Negative:** session with NO frontmatter date → validFrom == ingestedAt (documented fallback).
 
 ### DE2E-7: Gate gating (pytest-level contract)
+
 **Setup:** `check_gates(child_issue)` is a WORKFLOW-LAYER helper (issue-workflow skill / CLI — GitHub-coupled); the SDK exposes local `calibration_passed()` marker. Unit-test `calibration_passed()` with mocked milestone marker set/unset; test `check_gates` in the CLI helper with mocked #320/calibration states.
 **Steps:** call `calibration_passed()` with marker absent → False; marker present → True; invoke `check_gates` with #320 open + calibration open → blocked; both closed → clear.
 **Assertions:** `check_gates` returns blocked=true with reasons when either gate open; blocked=false when both closed; the workflow refuses to start implementation while blocked; no graph writes. (Full issue-workflow skill integration verified manually at execution time — the pytest contract is `calibration_passed` + `check_gates` CLI unit.)
 
 ### DE2E-8: Promotion gate + quarantine recovery + zombie operators
+
 **Setup:** extraction batch produced draft Points; one quarantined batch exists via explicit `quarantine_batch(batch_id)` API (test-side primitive, §6.1) OR by forcing the documented trigger (EP drift >2% via the leak fixture); one draft-to-draft NAND between two draft Points exists (W-4).
 **Steps:** call `promote_point` on a draft; call `promote_point` on a Point in a quarantined batch; fix the drift cause; re-run the quarantined batch via resumable progress file; assert un-quarantine; query EP/search for the promoted Point; promote BOTH endpoints of the draft NAND.
 **Assertions:** promoted Point becomes `live` and appears in EP + search; promote on quarantined batch is BLOCKED with `{blocked, reason, batch_id}`; draft Points without promotion stay invisible to EP and search; **recovery loop: batch un-quarantined after re-run passes W-3, its Points enter the review queue and remain draft until promotion**; **after both NAND endpoints promoted, the incident operator node is ALSO live (no zombie draft operator — EP now propagates the contradiction)**.
 
 ### Negative cases (each in DE2E format, deterministic fixtures)
+
 - **DE2E-N1 Malformed session** (missing frontmatter, unparseable body) → skipped, counted in `failed`, batch continues.
 - **DE2E-N2 LLM extraction failure** (mock that raises on first call) → rule/keyword fallback produces entities or empty list, no crash; fallback correctness asserted (known refs extracted).
 - **DE2E-N3 Embedding model unavailable** (mock raises on embedding) → exact+fuzzy only, semantic tier skipped with log entry.
@@ -370,7 +408,9 @@ def belief_timeline(self, topic: str) -> list[dict]:
 ## 8. Coherence Review + Risk Analysis
 
 ### 8.1 Cross-substep drift checkpoints
+
 - **Journey↔Workflow↔DE2E mapping (explicit):**
+
   | Journey | Workflow | DE2E |
   |---|---|---|
   | J-1 batch mine | W-1 entity extraction, W-2 dedup, W-3 EP-safe commit | DE2E-1, 2, 3, 4, 7 |
@@ -379,11 +419,13 @@ def belief_timeline(self, topic: str) -> list[dict]:
   | J-4 belief timeline | W-4 temporal | DE2E-6 |
   | J-5 promotion | W-3 post-pass (promotion gate) | DE2E-8 |
   | J-6 MCP automation | W-1..W-4 via MCP | DE2E-7, negative cases |
+
 - Scope E2E-1..7 ↔ Detailed DE2E-1..8: 1:1 correspondence (scope E2E-5's ingest-path assertion carried into DE2E-5; scope E2E-6's CORRECTS branch in DE2E-6; promotion gate added as DE2E-8 from reviewer feedback).
 - Data model §4 ↔ Interfaces §6: `canonical_name`/`resolved_from`/`validFrom`/`candidate_type`/`reviewed` properties referenced in both; no interface references an undefined field; `promote_point`/`promote_source`/`create_object(id=)`/`mine_corpus` contracts defined.
 - Architecture §5 ↔ Data model §4: EntityResolver writes Objects (single canonical scheme); EpSafeCommit owns the draft filter at factor-extraction time (TortoiseEP + SVBP + analyze); no ownership overlap.
 
 ### 8.2 Risks + Mitigations
+
 | # | Risk | Severity | Mitigation |
 |---|---|---|---|
 | R1 | Graph pollution from low-quality extraction degrades EP (nuclear risk) | High | Draft-status Points excluded from EP; no auto-wire; calibration Gate B before batch; quarantine on drift |
@@ -405,6 +447,7 @@ def belief_timeline(self, topic: str) -> list[dict]:
 | R17 | mine_corpus duplicates security-sensitive ingest machinery | Medium | mine_corpus COMPOSES ingest_corpus (security, resume, file_hash) — no parallel walker |
 
 ### 8.3 Improvement opportunities
+
 - Reuse `_semantic_dedup` (not reinvent) — reduces Phase 2 scope to adapter+threshold.
 - Entity pre-filter via existing issues/prs metadata (session_indexer.py:204) cuts LLM calls for known refs.
 - Batch summary report gives operators a pollution health check per run (early drift detection).
@@ -412,6 +455,7 @@ def belief_timeline(self, topic: str) -> list[dict]:
 - `mine_corpus` composes `ingest_corpus` (security, resume, file_hash) instead of a second walker.
 
 ### 8.4 Additive drift acknowledged (coherence reviewer, accepted)
+
 - `check_gates`/`quarantine_batch`/`list_quarantined`/`calibration_passed` are NOT in scope (03-scope.md) — they are justified additions: quarantine implements W-3's drift-fail path; check_gates makes E2E-7 pytest-testable; DE2E-8 acknowledges the promotion gate. `check_gates` stays in the workflow layer (no new SDK GitHub dependency); SDK exposes only the local `calibration_passed()` marker. Scope E2E-7's "no graph writes until gates satisfied" is enforced by the workflow refusing to start (DE2E-7 unit-tests `calibration_passed` + CLI `check_gates`; full skill integration verified at execution time).
 - Scope E2E-4 wording amended: "no auto-wiring to LIVE Points" (draft-to-draft permitted with draft operator nodes under EP draft exclusion) — narrows the align guard ("no auto-mitigation wiring from extraction") with justification: draft operators are EP-inert (excluded at factor-extraction time, §4.5), so auto-linking drafts to drafts does not propagate pollution; it surfaces contradiction links for review while keeping the graph safe.
 - NOT-NOW (recorded, no scope creep): autonomous high-confidence merges (post-calibration), alias/co-reference lexicon (v2), batch-optimized entity pre-filter, whole-session near-dup detection, reviewer UI for candidate queue, one-time backfill of 4,190 historical sessions.

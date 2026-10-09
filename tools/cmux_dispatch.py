@@ -115,13 +115,28 @@ those bytes are what the prompt consumes. Readiness is an asymmetry — the prom
 marker AND the absence of pi's status bar (see `boot_blocked`) — never a
 position-based guess.
 
+NO FOOTER, NO SEND (#7158)
+--------------------------
+Readiness is a POSITIVE signal about the LIVE pane, not the absence of a known
+failure: pi's footer (status bar) must be drawn and no shell prompt may appear
+BELOW it before the tool writes. Two dead-pane shapes otherwise pass a "is a bar
+present anywhere" test — one with no footer at all, and one whose previous pi
+session left its footer in the scrollback above a freshly printed shell prompt —
+and in both the bytes go to a bare login shell, which EXECUTES them. The earlier
+revision treated the no-footer shape as a slow boot and sent anyway
+("confirmation will decide"); but confirmation runs AFTER the bytes are written,
+so it cannot un-execute a command. The gate now fails CLOSED — a footer drawn
+with no shell prompt below it, on the initial attempt AND on the dismiss-and-
+resend recovery. A genuinely slow boot is raised via `--ready-timeout`; a refusal
+is recoverable, an executed brief is not.
+
 USAGE
 -----
-    python3 tools/cmux_dispatch.py send --workspace workspace:12 \
+    uv run python tools/cmux_dispatch.py send --workspace workspace:12 \
         --label B4 --file /path/to/brief.txt
-    python3 tools/cmux_dispatch.py wait-ready --workspace workspace:12
-    python3 tools/cmux_dispatch.py verify --workspace workspace:12 --text "pointer"
-    python3 tools/cmux_dispatch.py state --workspace workspace:12
+    uv run python tools/cmux_dispatch.py wait-ready --workspace workspace:12
+    uv run python tools/cmux_dispatch.py verify --workspace workspace:12 --text "pointer"
+    uv run python tools/cmux_dispatch.py state --workspace workspace:12
 
 EXIT CODES
 ----------
@@ -131,6 +146,55 @@ EXIT CODES
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
+
+A transport failure (exit 3) is NOT a consumption failure (exit 1), and the two
+stay distinguishable. But a failure to REACH cmux — a non-zero rc on any
+`list-workspaces` read or on the text `send`, a transport error raised at any
+gate, or a spawn/exec `OSError` (converted at the source in `Cmux.run`, so a
+non-executable `--cmux` fails like a missing binary or a timeout) — and an
+`unknown-workspace` (exit 2), the DOCUMENTED post-cutover loss mode, no longer
+DROPS the notice: the payload is appended to the orchestrator inbox and the
+result/CLI reports which channel carried it (`channel: inbox`). If the inbox
+fallback ALSO fails, the result carries both diagnostics (`channel: none`) and
+says explicitly that the notice is not recorded anywhere (#4842).
+
+The fallback fires ONLY where the notice would otherwise vanish — an unreachable
+transport, or a workspace that is not listed. It does NOT fire on the ordinary
+`sent-but-not-consumed` / refused-`send_enter` outcome, nor on the PRE-SEND
+`never-became-ready` refusal (a blocked or unreadable-blind pane, where nothing
+was ever written): those are negative-pinned, and in the ordinary consumption
+failure the bytes did reach a live transport, so an entry there would be a
+duplicate rather than a rescue. Those outcomes deliberately do NOT append.
+
+That justification is NOT true of every exclusion, and the exception is named
+here so it is not re-derived: the RECOVERY-branch `never-became-ready` (the
+boot-block prompt ATE the first send and the re-send was refused rather than
+written blind) loses the notice outright, and the recovery re-send does not
+inspect its own rc either, so a refused retry also rides the no-append path.
+That is a LOSS, is deliberate here, and is a scoped follow-up on the issue —
+it is why the line above reads "do NOT append" rather than "cannot lose".
+
+Honest limits, stated so they are not read as durability guarantees:
+
+  * the append is a buffered `write`, NOT `fsync`'d — it returns before the bytes
+    reach stable storage, so a machine crash inside that window can still lose
+    it. (A send FAILURE is covered; a machine CRASH is not.)
+  * a transport death DURING CONFIRMATION cannot be told apart from "the pane got
+    it", so the inbox can carry a notice the pane also carries: a DUPLICATE
+    rather than a loss — and that holds only while the append itself succeeds;
+    if it fails too, `channel: none` records that nothing is recorded anywhere.
+  * the RECOVERY-branch `never-became-ready` is a real LOSS, not a duplicate: the
+    first send was eaten by the boot-block prompt, the re-send was refused, and
+    its rc is not inspected, so nothing is recorded anywhere. Deliberate and
+    scoped as a follow-up on the issue; it is excluded from the "never lost"
+    claim above ON PURPOSE.
+
+The `[YYYY-MM-DD HH:MM:SS TZ] [LABEL] <one line>` prefix is the convention
+`notify-orchestrator.sh` emits on its FIRST line (`printf '[%s] [%s] %s\n'`,
+2026-09-16), but that script does NOT flatten a multi-line message and other
+writers use different shapes: measured 2026-10-08 against the live inbox, 6,963
+of 7,441 lines do not match `^\\[ts\\] \\[label\\]`. This tool emits the flattened
+one-line prefix anyway — line-orientation is what keeps a line readable by eye.
 """
 
 from __future__ import annotations
@@ -154,6 +218,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -162,12 +227,62 @@ from dataclasses import dataclass, field
 #: The exact string pi prints before awaiting a keypress.
 BOOT_BLOCK_MARKER = "Press any key to continue"
 
-#: pi's status bar context-window indicator, e.g. `0.0%/700k (auto)` on a fresh
-#: idle pane and `3.8%/700k (auto)` mid-turn. Its presence is the cheapest
-#: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
-#: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
-#: NO `↑`/`↓` counters — do not key readiness off those.
-READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
+#: pi's footer markers. The canonical one is the context-budget token
+#: (`N.N%/Nk (auto)`, or `?/Nk (auto)` when `getContextUsage()` has a null percent
+#: after a compaction). Its presence is the cheapest reliable "the TUI owns stdin
+#: now" signal: the footer is drawn only after the boot-block prompt has been
+#: satisfied, and a *fresh idle* pane shows NO `↑`/`↓` counters — do not key
+#: readiness off those.
+#:
+#: The token can also be MISSING on a live pane: a banner printed over the footer
+#: tears the line and leaves only the model badge (verbatim capture, 2026-09-26:
+#: `…jsonlepseek) deepseek-flash • high`). This fleet's own liveness checks accept
+#: the badge for exactly that reason (`orchestrator-heartbeat.sh` `_pane_has_pi`,
+#: `safe-send.sh`), so requiring the token alone refused a healthy lane (#7158
+#: round 7).
+#:
+#: The badge is `${modelName} • ${thinkingLevel}` (`footer.js`), and the levels are
+#: `off|minimal|low|medium|high|xhigh|max` (`thinking off` when off). The level SET
+#: is finite and known, so it is ENUMERATED — a generic `• <word>` let ordinary
+#: output (a markdown bullet) forge a footer block and move the prompt scan anchor
+#: below a live shell prompt (#7158 round 9).
+#:
+#: `(auto)` is deliberately NOT a marker: it is only ever appended to the budget
+#: token (so it adds no coverage), and as a lone token it is the easiest thing for
+#: arbitrary output to hit.
+READY_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmM]\b"  # N.N%/Nk or ?/Nk
+    r"|\u2022 (?:thinking off|off|minimal|low|medium|high|xhigh|max)\b"  # model badge
+)
+
+#: pi's footer prints the working directory on the line DIRECTLY ABOVE the stats
+#: line — `FooterComponent.render` builds `[pwdLine, statsLine, ...statuses]` — so
+#: a stats-shaped line with a pwd line above it is a genuine footer BLOCK, while
+#: one without is output that merely LOOKS like a stats line. That distinction is
+#: what keeps shell output which mimics the stats shape from hiding the prompt
+#: ABOVE it (#7158 round 6). `formatCwdForFooter` renders the cwd as an absolute
+#: path or a `~`-relative one and appends `(branch)` and ` • <sessionName>` — so
+#: the pwd line can be BARE `~` (cwd == HOME), which a `\S` requirement rejected,
+#: losing the anchor and refusing a healthy lane (#7158 round 9). Match the
+#: PREFIX only; a missed real pwd line is the fail-open direction.
+PWD_LINE_RE = re.compile(r"^\s*(?:~|/)")
+
+#: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
+#: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
+#: STANDALONE token (`%`, `$`, `#`, `>` at a whitespace/line boundary), or a
+#: line-ending `%` not preceded by a digit, or a `$ # >` followed by whitespace or
+#: end anywhere (which catches `bash-3.2$ `, `[root@host ~]# ls -la`). The digit
+#: guard on line-ending `%` is what keeps a real percentage (`Uploading 50%`,
+#: `Progress 99%`) from being read as a prompt; `#general thread` has no sigil
+#: followed by whitespace, so pi's own status text is not flagged.
+#: RESIDUAL (FAIL-OPEN, not fail-closed): a `%` prompt whose sigil abuts a digit
+#: (`~/proj2%`) is indistinguishable from a percentage and is not flagged, as are
+#: arrow prompts (`❯`, `➜`). Neither is emitted by this fleet's shells
+#: (`/bin/zsh -ic 'exec pi'` → `%n@%m %1~ %# `, bash → `\h:\W \u\$ ` — the sigil
+#: always follows a space). An extension status containing `[#$>]` followed by
+#: whitespace (`Cost: $ 0.003`, `# general`) IS flagged — that direction is
+#: fail-closed, and no status this fleet sets contains such a token.
+SHELL_PROMPT_RE = re.compile(r"(?:(?:^|\s)[%$#>](?=\s|$)|(?<!\d)%\s*$|[#$>](?=\s|$))")
 
 #: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
 #: chars with a trailing `…`, so the fingerprint MUST come from the head of the
@@ -259,6 +374,63 @@ TRUNCATION_ELLIPSIS = "..."
 PENDING_MIN_CHARS = 16
 
 
+#: The durable fallback channel (#4842). When cmux cannot be reached — or the
+#: workspace is not in the list (the documented post-cutover loss mode) — the
+#: notice must not vanish: it is appended to the orchestrator inbox, the surface
+#: the orchestrator already treats as intake truth.
+#:
+#: `notify-orchestrator.sh` writes the `[YYYY-MM-DD HH:MM:SS TZ] [LABEL] <msg>`
+#: prefix on its FIRST line (`printf '[%s] [%s] %s\n'`, since 2026-09-16, "Durable
+#: record first — never lose the signal to a failed send"), but it does NOT
+#: flatten a multi-line message and other writers use other shapes: measured
+#: 2026-10-08 against the live inbox, 6,963 of 7,441 lines do not match
+#: `^\[ts\] \[label\]`. This tool emits the flattened `[ts] [label] <one line>`
+#: form because a line read by eye must stay one line — it does NOT claim every
+#: line in the file shares that shape.
+#:
+#: The append is a buffered `write`, not `fsync`'d: durable against a send
+#: failure, not against a machine crash inside the write window.
+INBOX_ENV = "CMUX_DISPATCH_INBOX"
+DEFAULT_INBOX = "~/.pi/agent/state/orchestrator-inbox.log"
+INBOX_FALLBACK_LABEL = "cmux-dispatch"
+
+
+def orchestrator_inbox_path() -> Path:
+    """The inbox the durable fallback appends to (env-overridable for tests)."""
+    return Path(os.environ.get(INBOX_ENV) or DEFAULT_INBOX).expanduser()
+
+
+def inbox_record(label: str, text: str) -> str:
+    """One flattened `[ts] [label] <one line>` inbox record.
+
+    BOTH `label` and `text` are flattened, because either can carry an embedded
+    newline and the inbox is line-oriented: an unflattened `--label` such as
+    `"B7]\\n[1999-01-01 00:00:00 XX] [INJECTED"` would otherwise forge a second,
+    attacker-shaped record line. The same one-line invariant the watcher
+    documents for `cmux send` (newlines arrive as Enters) applies here.
+    """
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    lane = " ".join((label or "").split()) or INBOX_FALLBACK_LABEL
+    return f"[{stamp}] [{lane}] {' '.join(text.split())}"
+
+
+def append_to_inbox(label: str, text: str) -> Path:
+    """Append the notice to the durable inbox and return the path written.
+
+    Raises on failure — the CALLER must report both diagnostics rather than let
+    the notice disappear (a swallowed exception here is exactly the silent-loss
+    bug #4842 exists to close). The failure is not always an `OSError`:
+    `Path.expanduser()` raises `RuntimeError` on an unexpandable home and
+    `handle.write` raises `UnicodeEncodeError` for a lone surrogate, so callers
+    catch broadly and treat the exception as a diagnostic.
+    """
+    path = orchestrator_inbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(inbox_record(label, text) + "\n")
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Pure decision helpers (unit-tested without any cmux)
 # --------------------------------------------------------------------------- #
@@ -286,6 +458,33 @@ def _last_status_bar_end(screen: str | None) -> int:
     """Offset just past the LAST status bar in the capture, or -1 if none."""
     matches = list(READY_RE.finditer(screen or ""))
     return matches[-1].end() if matches else -1
+
+
+def _is_pwd_line(line: str) -> bool:
+    """True when a line looks like pi's footer pwd line (not a shell prompt)."""
+    return bool(PWD_LINE_RE.match(line)) and not SHELL_PROMPT_RE.search(line)
+
+
+def _footer_stats_end(screen: str | None) -> int:
+    """Offset just past the LAST stats line that belongs to a pi footer BLOCK,
+    i.e. is directly preceded (ignoring blank lines) by a pwd line, or -1.
+
+    This is the anchor `shell_prompt_below_footer` scans from: a stats-shaped
+    line WITHOUT a pwd line above it is not a footer — it is output. See
+    `PWD_LINE_RE`.
+    """
+    text = screen or ""
+    prev_nonempty: str | None = None
+    pos = 0
+    best = -1
+    for line in text.split("\n"):
+        match = READY_RE.search(line)
+        if match and prev_nonempty is not None and _is_pwd_line(prev_nonempty):
+            best = pos + match.end()
+        if line.strip():
+            prev_nonempty = line
+        pos += len(line) + 1
+    return best
 
 
 def status_bar_present(screen: str | None) -> bool:
@@ -324,9 +523,110 @@ def boot_blocked(screen: str | None) -> bool:
     return _last_status_bar_end(screen) < marker_at
 
 
+def shell_prompt_below_footer(screen: str | None) -> bool:
+    """True when a shell prompt is drawn BELOW the last pi footer.
+
+    A status bar ANYWHERE is not evidence that the CURRENT process owns stdin.
+    pi renders inline, so a pane whose pi exited retains the dead session's
+    footer in the scrollback while the shell prints its prompt BELOW it — the
+    same ordering trap `boot_blocked` documents for the boot-block marker, in
+    the case where no marker is present to catch it. That prompt is what makes
+    the stale frame EXECUTABLE: bytes sent there run as commands (#7158).
+
+    A prompt is detected by a shell sigil used as a prompt token — standalone
+    (`host % ls -la`), line-ending (`user@host dir %`), or followed by
+    whitespace/end anywhere (`bash-3.2$ `, `[root@host ~]# ls -la`). pi's own
+    footer and its EXTENSION-STATUS lines carry no such sigil (`Loop: <slug>
+    (cycle 2)`, `#general thread`), and a line-ending `%` preceded by a digit is
+    excluded so `Uploading 50%` stays READY. pi pushes status lines BELOW its
+    stats line whenever an extension calls `ctx.ui.setStatus` (verified in the
+    installed renderer: `modes/interactive/components/footer.js`), so "the footer
+    must be the literal last line" would refuse healthy lanes.
+
+    The scan starts just past the last FOOTER BLOCK — the last stats line with a
+    pwd line above it (`_footer_stats_end`) — and covers every line after it, plus
+    the remainder of the anchor line itself (a crash mid-render leaves the prompt
+    appended to the footer's own row). Anchoring on "the last stats-shaped line"
+    alone is bypassable: shell OUTPUT below the prompt which mimics the stats shape
+    (`host % ` then a line reading `42.0%/700k (auto)`) would place the prompt ABOVE
+    the anchor and hide it. Requiring a real footer block (a pwd line above the
+    stats) rejects that; when no block exists at all the anchor falls back to the
+    last stats-shaped line, which is the conservative (more-scanning) choice.
+
+    RESIDUALS — direction stated honestly:
+    * FAIL-OPEN (INHERENT to judging liveness from screen content, not fixable by
+      this heuristic): shell output that reproduces an ENTIRE pi footer block — a
+      pwd-shaped line (`~`/`/` prefix) directly above a line carrying a genuine
+      marker (a real budget token, or a real badge level such as `• high`) — moves
+      the anchor down past the prompt. Enumerating the badge levels (round 9) makes
+      an arbitrary bullet like `• item one` no longer a marker, but a shell can
+      still print `• high`. The durable signal is process/session liveness, not
+      screen content (#7159).
+    * FAIL-OPEN (narrow): a `%` prompt whose sigil abuts a digit (`~/proj2%`) is
+      indistinguishable from a percentage, and arrow prompts (`❯`, `➜`) are
+      outside the class. Neither is emitted by this fleet's shells.
+    * FAIL-CLOSED: an extension status containing `[#$>]` followed by whitespace
+      (`Cost: $ 0.003`, `# general`) is refused; no status this fleet sets does,
+      and when there is no footer block at all the whole capture is scanned (see
+      below), which can only over-refuse.
+    """
+    text = screen or ""
+    end = _footer_stats_end(text)
+    if end < 0:
+        # ⛔ NO TRUSTWORTHY FOOTER BLOCK. Anchor on the last marker alone and the
+        # scan sits BELOW the marker, so a loose marker printed by the shell
+        # (`host % echo '(auto)'` then `(auto)`) hides the prompt ABOVE it and
+        # declares a bare shell READY (#7158 round 8). Without a block, scan the
+        # WHOLE capture — the fail-closed direction. A live pane does not reach
+        # this branch: pi always draws the pwd line above the stats line
+        # (`footer.js` `[pwdLine, statsLine, ...statuses]`).
+        return any(
+            line.strip() and SHELL_PROMPT_RE.search(line)
+            for line in text.splitlines()
+        )
+    # Scan the whole tail INCLUDING the remainder of the anchor line, so a prompt
+    # appended to a non-newline-terminated footer row is still caught.
+    return any(
+        line.strip() and SHELL_PROMPT_RE.search(line)
+        for line in text[end:].splitlines()
+    )
+
+
+def not_ready_reason(screen: str | None) -> str:
+    """Why a pane is not ready, in operator terms.
+
+    `shell_prompt_below_footer` falls back to scanning the WHOLE capture when no
+    footer BLOCK exists, so a pane with NO footer at all (a bare login shell)
+    also reports True. Branching on it alone would therefore tell the operator
+    "a shell prompt is drawn BELOW pi's footer" for a pane where no footer was
+    ever drawn — naming a footer that does not exist and sending the reader
+    after the wrong failure. Check presence first, then position.
+    """
+    if boot_blocked(screen):
+        return (
+            "pi is sitting on its `Press any key to continue...` boot-block "
+            "prompt, which eats what is typed at it"
+        )
+    if status_bar_present(screen) and shell_prompt_below_footer(screen):
+        return (
+            "a shell prompt is drawn BELOW pi's footer, so the pane has "
+            "returned to a shell"
+        )
+    return "no pi footer (status bar) was drawn"
+
+
 def screen_ready(screen: str | None) -> bool:
-    """True when pi's TUI owns stdin: a status bar drawn after any prompt."""
-    return status_bar_present(screen) and not boot_blocked(screen)
+    """True when pi's LIVE TUI owns stdin.
+
+    Three requirements: a footer is present, no boot-block marker follows it, and
+    no shell prompt is drawn below it — a stale footer above a live shell prompt
+    is an executable pane, not a ready one (#7158).
+    """
+    return (
+        status_bar_present(screen)
+        and not boot_blocked(screen)
+        and not shell_prompt_below_footer(screen)
+    )
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -772,6 +1072,19 @@ class Cmux:
             # credentials or confidential content) into the caller's log. The
             # tool otherwise logs only byte counts and a 40-char fingerprint.
             return CmuxResult(124, "", self._describe(argv), argv)
+        except OSError as exc:
+            # A SPAWN/EXEC failure — `PermissionError` for a non-executable
+            # `--cmux`, or any other `OSError` from starting the process. It is a
+            # TRANSPORT failure exactly like the two above: left to propagate it
+            # sails past every `except CmuxTransportError` and every durable
+            # fallback, and the notice is recorded NOWHERE (the silent loss #4842
+            # exists to close). Returned as a non-zero rc (POSIX 126, "found but
+            # not executable") so it rides the SAME conversion every other read
+            # and transport fault uses. `FileNotFoundError` is caught above — it
+            # is an `OSError` subclass, so this handler must stay after it.
+            # Like the timeout branch, the error text names only the binary (the
+            # exec failure is on the executable, never the `--` payload).
+            return CmuxResult(126, "", f"cmux could not be spawned: {exc}", argv)
         return CmuxResult(proc.returncode, proc.stdout or "", proc.stderr or "", argv)
 
     @staticmethod
@@ -831,6 +1144,12 @@ class DispatchResult:
     recoveries: list[str] = field(default_factory=list)
     fingerprint: str = ""
     reason: str = ""
+    #: Which channel carried the bytes — the question a transport failure makes
+    #: ambiguous (#4842). `transport` = the text send reached cmux, `inbox` = the
+    #: durable orchestrator-inbox fallback, `none` = NEITHER (the notice is not
+    #: recorded anywhere), `""` = nothing was transmitted (usage/readiness refusal).
+    #: Orthogonal to `status`, which carries whether the notification CONSUMED.
+    channel: str = ""
 
     def as_json(self) -> dict:
         return {
@@ -841,6 +1160,7 @@ class DispatchResult:
             "recoveries": self.recoveries,
             "fingerprint": self.fingerprint,
             "reason": self.reason,
+            "channel": self.channel,
         }
 
 
@@ -861,6 +1181,102 @@ class Dispatcher:
 
     def log(self, message: str) -> None:
         self._log(message)
+
+    def _deliver_via_inbox(self, tag: str, text: str, label: str) -> tuple[str, str]:
+        """Append the notice to the durable inbox; return `(channel, note)`.
+
+        NEVER raises. When the fallback itself fails, that failure is a
+        DIAGNOSTIC the caller must carry, not an exception: a crash here would
+        lose the notice a second time and hand the caller an exit 1 that no
+        transport failure ever produces. The catch is deliberately broad —
+        `Path.expanduser()` raises `RuntimeError` on an unexpandable home and a
+        lone surrogate in the payload raises `UnicodeEncodeError`, NEITHER an
+        `OSError` — so both diagnostics always reach the result.
+        """
+        try:
+            path = append_to_inbox(label, text)
+        except Exception as exc:  # broad by design: report, never crash
+            self.log(f"{tag}durable inbox fallback failed: {exc}")
+            return (
+                "none",
+                f" — durable inbox fallback FAILED ({exc}): the notice is not "
+                f"recorded anywhere",
+            )
+        self.log(f"{tag}notice appended to the durable inbox: {path}")
+        return "inbox", f" — delivered via the durable inbox (channel: inbox): {path}"
+
+    def _fallback_failure(
+        self,
+        tag: str,
+        status: str,
+        fp: str,
+        detail: str,
+        text: str,
+        label: str,
+        attempts: int = 0,
+        recoveries: list[str] | None = None,
+        reason: str = "",
+    ) -> DispatchResult:
+        """A failure result that still DELIVERS the notice via the inbox (#4842).
+
+        Before this, a bail returned its exit code and DROPPED the payload: the
+        caller learned the dispatch failed and the orchestrator never learned a
+        lane had finished — the exact failure the notifier exists to eliminate,
+        and one that fires under the congestion that makes "which lane finished"
+        matter most (measured 2026-09-23: `cmux unreachable: cmux timed out` at
+        load 95-113), and again after the 2026-09-24 workspace cutover, when
+        every lane's notice aimed at the retired id landed as `unknown-workspace`
+        (`notify-orchestrator.sh` records it: live delivery was failing for EVERY
+        lane). The fallback appends the notice to the orchestrator inbox.
+
+        The STATUS/exit is preserved, not collapsed to success: `transport-error`
+        stays exit 3 and `unknown-workspace` stays exit 2, so the failure stays
+        distinguishable from `sent-but-not-consumed` (a CONSUMPTION failure,
+        exit 1) — the whole reason this tool exists. If BOTH channels fail, the
+        detail carries both diagnostics, `channel` is `none`, and the detail says
+        the notice is not recorded anywhere.
+
+        ⚠️ TRADE-OFF, deliberate: a transport failure DURING CONFIRMATION means the
+        bytes may already have landed, so the inbox can carry a notice the pane
+        also carries — a DUPLICATE. That direction is chosen on purpose: a
+        duplicate notice is recoverable and obvious, a LOST one is neither, and
+        the transport cannot tell us which happened.
+        """
+        channel, note = self._deliver_via_inbox(tag, text, label)
+        return DispatchResult(
+            False,
+            status,
+            detail + note,
+            attempts=attempts,
+            recoveries=recoveries or [],
+            fingerprint=fp,
+            reason=reason,
+            channel=channel,
+        )
+
+    def _transport_failure(
+        self,
+        tag: str,
+        fp: str,
+        detail: str,
+        text: str,
+        label: str,
+        attempts: int = 0,
+        recoveries: list[str] | None = None,
+        reason: str = "",
+    ) -> DispatchResult:
+        """A transport failure (exit 3) routed through the durable inbox fallback."""
+        return self._fallback_failure(
+            tag,
+            "transport-error",
+            fp,
+            detail,
+            text,
+            label,
+            attempts=attempts,
+            recoveries=recoveries,
+            reason=reason,
+        )
 
     # -- reads --------------------------------------------------------------- #
 
@@ -919,9 +1335,10 @@ class Dispatcher:
         Returns `(ready, blocked_now, last_screen)`.
 
         `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
-        is PROVABLY not accepting input, so the caller must refuse. If the prompt
-        was seen earlier but is gone now, the caller may proceed best-effort —
-        confirmation and recovery still gate success.
+        is PROVABLY not accepting input, so the caller must refuse. `ready=False`
+        means no pi footer was drawn by the deadline; the caller must ALSO refuse
+        — there is no "best-effort proceed" (removed in #7158): a readable pane
+        with no live pi is a bare shell, and bytes written there are executed.
         """
         deadline = self.now() + timeout
         screen: str | None = ""
@@ -1019,16 +1436,23 @@ class Dispatcher:
         try:
             before = self.wait_for_workspace(workspace, appear_timeout)
         except CmuxTransportError as exc:
-            return DispatchResult(
-                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            return self._transport_failure(
+                tag, fp, f"{tag}cmux unreachable: {exc}", text, label
             )
         if before is None:
-            return DispatchResult(
-                False,
+            # The 2026-09-24 cutover's documented loss mode: every lane-completion
+            # notice aimed at the retired workspace id landed here and was
+            # recorded NOWHERE (notify-orchestrator.sh: "live delivery was failing
+            # for every lane"). Same durable fallback, but the status/exit stay
+            # `unknown-workspace`/2 so the diagnosis is not erased.
+            return self._fallback_failure(
+                tag,
                 "unknown-workspace",
+                fp,
                 f"{tag}{workspace} not found in `cmux list-workspaces --json` "
                 f"after {appear_timeout:g}s",
-                fingerprint=fp,
+                text,
+                label,
             )
 
         # --- gate: never send into a boot-blocked prompt -------------------- #
@@ -1038,8 +1462,8 @@ class Dispatcher:
                 workspace, ready_timeout, surface
             )
         except CmuxTransportError as exc:
-            return DispatchResult(
-                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            return self._transport_failure(
+                tag, fp, f"{tag}cmux unreachable: {exc}", text, label
             )
         if blocked_now:
             return DispatchResult(
@@ -1063,9 +1487,25 @@ class Dispatcher:
                 fingerprint=fp,
             )
         if not ready:
-            self.log(
-                f"{tag}no ready signal after {ready_timeout:g}s — sending anyway "
-                f"(confirmation will decide)"
+            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but pi does not
+            # own stdin: either no footer was ever drawn, or a stale footer sits
+            # above a live shell prompt. In both cases the pane may be a bare
+            # login shell (a dead lane), which EXECUTES the bytes as a command.
+            # The old fail-open ("sending anyway — confirmation will decide")
+            # wrote the brief first and observed afterwards; confirmation cannot
+            # undo an executed command. A genuinely slow boot is a caller concern
+            # (--ready-timeout); a refusal is recoverable, an executed brief is
+            # not.
+            reason = not_ready_reason(gate_screen)
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: {reason} within {ready_timeout:g}s — "
+                f"refusing to send into a pane with no live pi: the bytes would "
+                f"be typed into a bare shell and EXECUTED. Confirm the lane has "
+                f"a live pi (or raise --ready-timeout for a slow boot), then "
+                f"re-dispatch.",
+                fingerprint=fp,
             )
 
         # --- pre-send baseline (novelty for the pending-turn check) --------- #
@@ -1079,25 +1519,69 @@ class Dispatcher:
         # novel.
         before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
         if before_screen is None:
-            # A transient `read-screen` failure is recoverable — retry once before
-            # giving up the `queued` verdict for this send.
+            # A transient `read-screen` failure is recoverable — retry once.
             before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
-            if before_screen is None:
-                self.log(
-                    f"{tag}no readable pre-send baseline — the queued verdict "
-                    f"will fail closed for this attempt"
-                )
+
+        # ⛔ RE-ASSERT READINESS ON THE FRESH READ (#7158, TOCTOU). The gate
+        # (`wait_until_safe_to_send`) was ready, but the pane can die in the gap
+        # before this read — the window is one `read-screen`, which is not bounded
+        # under fleet load. Writing on a stale `ready` is how the brief lands in a
+        # bare shell; judge the read we already hold instead. An UNREADABLE read is
+        # a refusal too, not a licence to write blind: with the pane state unknown,
+        # a dead pane would EXECUTE the brief, and a refusal is recoverable while an
+        # executed brief is not. This mirrors the resend path, which already
+        # refuses when its fresh read is unreadable (`screen_ready(None)` is False).
+        if before_screen is None:
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: the pre-send read failed twice, so readiness "
+                f"could not be re-checked — refusing to write blind: had the pane "
+                f"died after the gate passed, the bytes would be typed into a bare "
+                f"shell and EXECUTED. Re-dispatch once the pane is readable.",
+                fingerprint=fp,
+            )
+        # Judge readiness on the SAME window depth the gate used. `before_screen`
+        # is deliberately read deeper (`RECOVERY_SCREEN_LINES`) because the
+        # pending-turn baseline below must share the CONFIRMATION read's scope —
+        # but `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        # capture, so a 300-line window can carry an older shell prompt line that
+        # the gate's 80-line window does not. Without this slice the two judgements
+        # disagree about the same pane: the gate declares READY, the deeper
+        # re-assert refuses, and the refusal is reported as "a shell prompt is drawn
+        # BELOW pi's footer" when the truth is that no footer BLOCK was found at all
+        # (the shape `SCREEN_LIVE_WITH_TORN_FOOTER` models). The last
+        # `DEFAULT_SCREEN_LINES` lines are exactly what a `read-screen --lines 80`
+        # returns, so this is the gate's own window. A pane that genuinely died
+        # still draws its prompt in those last lines, so the fail-closed direction
+        # is intact — only the lines BELOW the gate's view stop being able to
+        # over-refuse.
+        gate_window = "\n".join(
+            before_screen.splitlines()[-DEFAULT_SCREEN_LINES:]
+        )
+        if not screen_ready(gate_window):
+            reason = not_ready_reason(gate_window)
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace}: {reason} on the pre-send read — refusing to "
+                f"send into a pane with no live pi: the bytes would be typed "
+                f"into a bare shell and EXECUTED. Re-dispatch once the pane is "
+                f"idle.",
+                fingerprint=fp,
+            )
 
         # --- transmit ------------------------------------------------------- #
         self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
         text_result = self.cmux.send_text(workspace, text, surface)
         if text_result.rc != 0:
-            return DispatchResult(
-                False,
-                "transport-error",
+            return self._transport_failure(
+                tag,
+                fp,
                 f"{tag}cmux send (text) rc={text_result.rc}: "
                 f"{text_result.err.strip() or 'no stderr'}",
-                fingerprint=fp,
+                text,
+                label,
             )
         enter_result = self.cmux.send_enter(workspace, surface)
         if enter_result.rc != 0:
@@ -1108,10 +1592,13 @@ class Dispatcher:
                 f"(rc={enter_result.rc}) — the message may sit unsent",
                 attempts=1,
                 fingerprint=fp,
+                channel="transport",
             )
 
         # --- confirm the ARTIFACT, then recover ----------------------------- #
-        result = DispatchResult(False, "sent-but-not-consumed", "", fingerprint=fp)
+        result = DispatchResult(
+            False, "sent-but-not-consumed", "", fingerprint=fp, channel="transport"
+        )
         # The grace window is at least a full consume budget: a submission that is
         # real but slow to appear (cmux writes it at the turn boundary, and under
         # load reads time out) must not be mistaken for a lost one, because
@@ -1124,9 +1611,19 @@ class Dispatcher:
                     workspace, before, fp, consume_timeout
                 )
             except CmuxTransportError as exc:
-                result.status = "transport-error"
-                result.detail = f"{tag}cmux unreachable while confirming: {exc}"
-                return result
+                return self._transport_failure(
+                    tag,
+                    fp,
+                    f"{tag}cmux unreachable while confirming: {exc}",
+                    text,
+                    label,
+                    # Carry forward what THIS send already learned — the transport
+                    # died mid-confirmation, so the attempt count and the
+                    # recoveries tried are evidence, not noise.
+                    attempts=result.attempts,
+                    recoveries=result.recoveries,
+                    reason=result.reason,
+                )
             result.reason = reason
             if consumed:
                 result.ok = True
@@ -1169,9 +1666,22 @@ class Dispatcher:
                 # Do not ADD bytes until the artifact has had a grace window to
                 # catch up — re-sending a message that did in fact land would
                 # DUPLICATE it in the lane.
-                late_consumed, late_reason, _ = self.wait_consumed(
-                    workspace, before, fp, grace
-                )
+                try:
+                    late_consumed, late_reason, _ = self.wait_consumed(
+                        workspace, before, fp, grace
+                    )
+                except CmuxTransportError as exc:
+                    return self._transport_failure(
+                        tag,
+                        fp,
+                        f"{tag}cmux unreachable in the pre-recovery grace window: "
+                        f"{exc}",
+                        text,
+                        label,
+                        attempts=result.attempts,
+                        recoveries=result.recoveries,
+                        reason=result.reason,
+                    )
                 if late_consumed:
                     result.ok = True
                     result.status = "consumed"
@@ -1194,11 +1704,29 @@ class Dispatcher:
                 # writing into a pane whose state we cannot read, would recreate
                 # the very corruption this tool prevents.
                 dismissal = self.cmux.send_enter(workspace, surface)
-                recovery_ready, recovery_blocked, recovery_screen = (
-                    self.wait_until_safe_to_send(
-                        workspace, RECOVERY_READY_TIMEOUT, surface
+                try:
+                    recovery_ready, recovery_blocked, recovery_screen = (
+                        self.wait_until_safe_to_send(
+                            workspace, RECOVERY_READY_TIMEOUT, surface
+                        )
                     )
-                )
+                except CmuxTransportError as exc:
+                    # The RECOVERY-site gate, wrapped exactly like its sibling at
+                    # the first gate. The text was eaten, so an un-wrapped raise
+                    # here is the notice recorded NOWHERE — the loss this whole
+                    # fallback exists to prevent. Carry the evidence this send
+                    # already gathered (attempt/recoveries/reason).
+                    return self._transport_failure(
+                        tag,
+                        fp,
+                        f"{tag}cmux unreachable in the boot-block recovery gate: "
+                        f"{exc}",
+                        text,
+                        label,
+                        attempts=result.attempts,
+                        recoveries=result.recoveries,
+                        reason=result.reason,
+                    )
                 if recovery_blocked or (not recovery_ready and recovery_screen is None):
                     result.ok = False
                     result.status = "never-became-ready"
@@ -1212,13 +1740,57 @@ class Dispatcher:
                     )
                     return result
                 if not recovery_ready:
-                    self.log(
-                        f"{tag}recovery: no ready signal — re-sending anyway "
-                        f"(confirmation will decide)"
+                    # ⛔ SAME FAIL-CLOSED RULE AS THE INITIAL GATE (#7158): the
+                    # pane became readable after the dismissal but never drew
+                    # pi's footer, so there is still no evidence a pi owns
+                    # stdin. Re-sending would write the brief into whatever is
+                    # there. Refuse rather than fall back to the old
+                    # "re-sending anyway (confirmation will decide)".
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was dismissed but never presented "
+                        f"pi's footer within {RECOVERY_READY_TIMEOUT:g}s — the "
+                        f"re-send was REFUSED rather than written into a pane "
+                        f"with no live pi. Re-dispatch once the pane is idle."
                     )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
             else:
+                # ⛔ R_RESEND writes the brief a SECOND time, so it must face the
+                # same liveness gate as the first send (#7158). The `screen` used
+                # by `recovery_action` was read BEFORE the duplicate-guard grace
+                # window (`grace`, up to a full consume budget), so it can be
+                # stale by the time we write; re-read immediately before the
+                # write and re-assert readiness rather than trusting the older
+                # frame.
+                fresh_screen = self.screen(
+                    workspace, surface, lines=RECOVERY_SCREEN_LINES
+                )
+                # Judged on the SAME window as the gate, for the SAME reason the
+                # pre-send re-assert is sliced (see `gate_window` above): this
+                # read is `RECOVERY_SCREEN_LINES` deep, and
+                # `shell_prompt_below_footer`'s no-footer-block fallback scans the
+                # WHOLE capture, so an unsliced window can carry an older shell
+                # prompt line the gate's 80-line window never saw. Without this
+                # slice the gate approves the pane and this re-assert refuses it,
+                # reporting "a shell prompt is drawn BELOW pi's footer" when no
+                # footer BLOCK was found at all — a lost delivery, in the one path
+                # that exists to RESCUE a delivery.
+                fresh_window = "\n".join(
+                    (fresh_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
+                )
+                if not screen_ready(fresh_window):
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} was not ready immediately before the "
+                        f"recovery re-send ({not_ready_reason(fresh_window)}) — the "
+                        f"re-send was REFUSED rather than written into a pane with "
+                        f"no live pi. Re-dispatch once the pane is idle."
+                    )
+                    return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
 

@@ -51,6 +51,7 @@ facet_date_constraint` (a declared mirror of it). Those answer "which dated slic
 this question need?", a **filter** question. C6 asks a different question — "does this question
 want the *current* version, or a *pinned* past one?" — a **rank-preference** question. Forking them
 would collide on the word `recency` (a window there, a freshness preference here). So:
+
 - `detect_temporal_intent(query) -> TemporalIntent` with `kind ∈ {"prefer-latest", "date-pinned",
   None}` — deliberately disjoint from `{"interval","recency","ordering"}`. `prefer-latest` = current
   intent ("now", "currently", "these days", "still", "latest", "most recent", "has X changed",
@@ -87,6 +88,7 @@ would collide on the word `recency` (a window there, a freshness preference here
   after it is not.
 
 **D3 — Where each half of the mechanism lives (corrected after review cycle 1).**
+
 - **Query-side date anchor → product (`tortoise_fts_query`).** The method gains two optional
   kwargs: `query_date: str | None = None`, `time_aware: bool = False`. When `time_aware` is on,
   `query_date` is present and the detected intent is `prefer-latest`, the **dense-leg embedding**
@@ -230,6 +232,7 @@ Runtime prerequisites: `TORTOISE_DB_URI` (docker FalkorDB) for the integration t
 ## Tasks
 
 ### Task 1: `tortoise/time_aware.py` (pure module)
+
 **Intent:** Own the C6 mechanism in the product layer.
 **Acceptance:** AC 1–3. `ruff` clean; no DB/LLM import at module scope.
 **Files:** Create `tortoise/time_aware.py`; Test `tests/test_time_aware_2520.py` (hermetic).
@@ -240,6 +243,7 @@ status-only-retracted), and the vocabulary-disjointness assertion vs `detect_tim
 implement until green.
 
 ### Task 2: `tortoise_fts_query` dense-leg anchor
+
 **Intent:** Make the date anchor reach the embedding.
 **Acceptance:** AC 4–5.
 **Files:** Modify `tortoise/sdk.py`; Test `tests/test_time_aware_sdk_2520.py` (docker half — the
@@ -252,6 +256,7 @@ Steps: add kwargs + docstring; factor the decision into `dense_query_for`; use t
 for the vector encode only; off path byte-identical (no import on the off path).
 
 ### Task 3: eval arm (`retrieve.py`)
+
 **Intent:** The sealed A/B can switch the lever on and reconstruct the arm; the reorder survives
 `hybrid_search`'s sort.
 **Acceptance:** AC 6.
@@ -259,6 +264,7 @@ for the vector encode only; off path byte-identical (no import on the off path).
 `tests/test_coverage_loop.py`; Test `tests/test_time_aware_eval_2520.py`
 (docker, FTS-only, embedder-independent) — the reorder + `_hybrid_kwargs` threading + outcome.
 Steps:
+
 1. Hoist `question_date = question.get("question_date", "") or None` **above** the `hybrid_search`
    call (it is currently bound only inside the `if is_tr:` block and later for the reader header —
    cycle-2 P0: referencing it earlier raises `UnboundLocalError` for every question). Reuse the one
@@ -279,6 +285,7 @@ Steps:
    `applied`/`tr_excluded`).
 
 ### Task 4: harness plumbing (`run.py`)
+
 **Intent:** An unarmed lever is a dead lever.
 **Acceptance:** AC 7.
 **Files:** Modify `tools/longmem_eval/run.py` (D8 site checklist), `tests/test_longmem_runner.py` (the
@@ -294,6 +301,7 @@ published-report allow-list; the CLI flag pair; the main resolve; the main `run_
 call.
 
 ### Task 5: CI registration + verification
+
 **Intent:** An unregistered test file never runs.
 **Acceptance:** AC 8 + the files are selected by the tooling.
 **Files:** Modify `config/ci-surfaces.yml`.

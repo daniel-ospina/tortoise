@@ -236,7 +236,7 @@ jobs:
             echo "Re-verify against \`origin/main\` — or a tree that contains the claimed fix — then replace the provenance line:"
             echo
             echo '```'
-            echo '$ python3 tools/finding_provenance.py --emit'
+            echo '$ uv run python tools/finding_provenance.py --emit'
             echo '```'
             echo
             if [ "$KIND" = "comment" ]; then

@@ -938,8 +938,8 @@ def _require_node() -> None:
     `pytest.skip` would report the suite GREEN with every behavioural test in
     this file silently unrun — the #3080/#3930/#3952 contract would evaporate
     while CI stayed green. The sibling harness
-    (`tests/test_cross_subdomain_cookie_sync.py`) fails by name in the same
-    condition (#3786); this mirrors it.
+    (`tests/test_session_bridge_fragment_retention.py::_require_node`) fails by
+    name in the same condition (#3786); this mirrors it.
     """
     if not shutil.which("node"):
         pytest.fail(

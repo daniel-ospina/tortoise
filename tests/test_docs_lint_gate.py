@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def _step(name: str) -> dict:
         if step.get("name") == name:
             return step
     raise AssertionError(f"no step named {name!r} in the `docs` job (#2386)")
+
+
+def _step_by_id(step_id: str) -> dict:
+    for step in _docs_job().get("steps") or []:
+        if step.get("id") == step_id:
+            return step
+    raise AssertionError(f"no step with id {step_id!r} in the `docs` job (#7628)")
 
 
 def _checkout_step() -> dict:
@@ -246,9 +254,246 @@ def test_detection_step_is_executable_fail_closed_shell():
     assert "::error::" in code, (
         "the step must fail LOUDLY when it cannot compute the changed set (#2386)"
     )
+    # #7628: the base must be the base branch's TIP, resolved by the `base_tip`
+    # step — NOT `github.event.pull_request.base.sha`, which is the PR's
+    # MERGE-BASE. Pairing the merge-base with a merge-ref checkout made this diff
+    # include the base branch's own newly-landed commits, so a PR that was merely
+    # behind was failed for findings it did not author (#7542).
     assert (step.get("env") or {}).get("BASE_SHA") == (
-        "${{ github.event.pull_request.base.sha }}"
-    ), "the base SHA must arrive through `env: BASE_SHA` (#2386)"
+        "${{ steps.base_tip.outputs.sha }}"
+    ), "the changed-set base must be the resolved base TIP, not pull_request.base.sha (#7628)"
+
+
+def test_base_is_resolved_from_the_base_branch_tip_not_the_merge_base():
+    """#7628: the changed set must be THIS PR's changes, not the base's own.
+
+    The defect: `BASE_SHA` was bound to `github.event.pull_request.base.sha`, which
+    is the PR's MERGE-BASE, while the checkout is the MERGE ref (`refs/pull/N/merge`)
+    that GitHub builds on the base's CURRENT tip. So `merge-base...HEAD` swallowed
+    every commit the base branch landed after the merge-base, and a PR one commit
+    behind was failed for the base's own finding. Measured on #7542: base.sha ==
+    merge-base(16bb2ab12, main) == be01e05c0, while the evaluated tree sat on
+    3c1fc8086, whose #7611 introduced the offending MD018.
+
+    The guard is the shape of the fix: the base is RESOLVED, and the merge-base
+    field is not used as the base anywhere in this job.
+    """
+    steps = _docs_job().get("steps") or []
+    by_id = {s["id"]: s for s in steps if s.get("id")}
+
+    base_tip = by_id.get("base_tip")
+    assert base_tip is not None, (
+        "the base tip must be resolved by its own step: the diff step's body is "
+        "EXECUTED offline by this module, so it cannot fetch (#7628)"
+    )
+
+    code = base_tip["run"]
+    assert "git fetch" in code, "the step must fetch the base branch (#7628)"
+    assert "refs/heads/${BASE_REF}" in code, (
+        "it must fetch the BASE BRANCH, on the strength of a ref name (#7628)"
+    )
+    assert (base_tip.get("env") or {}).get("BASE_REF") == (
+        "${{ github.event.pull_request.base.ref }}"
+    ), "the base ref must arrive through `env: BASE_REF` (#2386)"
+    assert "${{ " not in code and "${{}}" not in code, (
+        "the run body must be pure bash: a `${{ }}` interpolation is evaluated "
+        "before the shell sees it (#2386)"
+    )
+    assert "::error::" in code and "exit 1" in code, (
+        "an empty base ref must fail closed rather than leave an empty output (#2386)"
+    )
+    assert base_tip.get("if") == "${{ !inputs.main_health }}", (
+        "a scheduled main-health call has no PR base, so this step is inert there "
+        "(#5215 Task 8)"
+    )
+
+    assert by_id["changed"]["env"]["BASE_SHA"] == "${{ steps.base_tip.outputs.sha }}", (
+        "the diff step must consume the RESOLVED tip (#7628)"
+    )
+
+    # ...and the resolver must run BEFORE its consumer. Reordering the two makes
+    # `steps.base_tip.outputs.sha` evaluate EMPTY when `changed` reads it, and
+    # `changed`'s own fail-closed guard then reds EVERY pull request — a
+    # whole-fleet outage that a suite asserting only the binding would ship
+    # (#7628 review).
+    ids = [s.get("id") for s in steps]
+    assert ids.index(BASE_TIP_STEP_ID) < ids.index("changed"), (
+        "the base-tip resolver must precede `changed`, or its output is empty there (#7628)"
+    )
+
+    # The regression itself: the merge-base field is no longer the base.
+    for step in steps:
+        assert "pull_request.base.sha" not in yaml.safe_dump(step), (
+            "the PR's merge-base must not be used as the changed-set base anywhere "
+            "in the `docs` job — that is the #7628 defect, and using it in a second "
+            "place would reintroduce it (#545 DRIFT_BASE_SHA is a separate job)"
+        )
+
+
+# ── the base-tip resolver (executed) ─────────────────────────────────────────
+#
+# #7628 review: the resolver's fail-closed behaviour was asserted only by STRING
+# PRESENCE (`"::error::" in code and "exit 1" in code`) while the sibling diff
+# step's body is EXECUTED. That is the text-scan this module exists to replace, and
+# it left the resolver's own discipline unpinned: deleting the load-bearing
+# `SHA="$(git rev-parse …)"` ASSIGNMENT (whose exit status `set -e` propagates) in
+# favour of a nested `echo "sha=$(…)"` — whose status is DISCARDED — kept the suite
+# green. The body is executable offline, so it is executed: the remote is a LOCAL
+# bare repo, so no step of this test touches the network.
+
+BASE_TIP_STEP_ID = "base_tip"
+
+
+def _repo_with_bare_remote(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose `origin` is a LOCAL bare remote, already carrying `main`."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(remote)],
+        check=True,
+        capture_output=True,
+    )
+    repo = _repo(tmp_path)
+    (repo / "seed.md").write_text("# seed\n", encoding="utf-8")
+    sha = _commit(repo, "base")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-q", "origin", "main")
+    # The push leaves a LOCAL tracking ref behind. Delete it and ASSERT it is gone, so
+    # the positive control can only be satisfied by the step's OWN fetch — otherwise a
+    # mutation to the fetch DESTINATION still resolves (#7628 review).
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "-d", "refs/remotes/origin/main"],
+        check=True, capture_output=True,
+    )
+    assert not _has_tracking_ref(repo), (
+        "the fixture must start with NO local tracking ref, or the fetch is not tested"
+    )
+    return repo, sha
+
+
+def _has_tracking_ref(repo: Path) -> bool:
+    """Does `refs/remotes/origin/main` exist locally?"""
+    return (
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "refs/remotes/origin/main"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
+def _run_base_tip(
+    tmp_path: Path, repo: Path, base_ref: str | None, shim_dir: Path | None = None
+) -> tuple[subprocess.CompletedProcess, str]:
+    """Run the workflow's real resolver `run:` body inside `repo`.
+
+    `base_ref=None` leaves `BASE_REF` UNSET (not empty) — the other spelling the
+    `${BASE_REF:-}` guard must survive. `shim_dir` is prepended to PATH so a test
+    can make `git` itself misbehave.
+    """
+    body = _step_by_id(BASE_TIP_STEP_ID)["run"]
+    script = tmp_path / "base-tip.sh"
+    script.write_text(body, encoding="utf-8")
+    output = tmp_path / "base-tip-output"
+    output.write_text("", encoding="utf-8")
+
+    env = {key: value for key, value in os.environ.items() if key in ("PATH", "HOME", "LANG")}
+    if shim_dir is not None:
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["GITHUB_OUTPUT"] = str(output)
+    if base_ref is not None:
+        env["BASE_REF"] = base_ref
+
+    # NO harness-supplied `-e`: the body's own `set -euo pipefail` must be the thing
+    # that aborts a failing step, or a mutation deleting it escapes the suite while
+    # the assignment-discipline test above still passes (#7628 review).
+    proc = subprocess.run(
+        ["bash", str(script)],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return proc, output.read_text(encoding="utf-8")
+
+
+def _git_shim_failing(tmp_path: Path, subcommand: str) -> Path:
+    """A PATH shim whose `git <subcommand>` exits 1 and delegates everything else."""
+    # `shutil.which`, NOT `subprocess.run(["command", "-v", "git"])`. `command` is a
+    # SHELL BUILTIN: macOS happens to ship a real `/usr/bin/command` so the subprocess
+    # form works there, but the Linux CI runner has no such binary and it raised
+    # `FileNotFoundError: 'command'` — a macOS-only pass that failed on GitHub-hosted.
+    resolved = shutil.which("git") or "git"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "{subcommand}" ]; then exit 1; fi\n'
+        f'exec "{resolved}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return shim_dir
+
+
+def test_base_tip_step_publishes_the_resolved_tip(tmp_path: Path):
+    """Positive control: the resolver fetches the base branch and publishes its tip."""
+    repo, sha = _repo_with_bare_remote(tmp_path)
+    proc, output = _run_base_tip(tmp_path, repo, "main")
+    assert proc.returncode == 0, proc.stderr
+    assert f"sha={sha}" in output, (
+        f"the resolver must publish the base branch TIP as `sha=` (#7628); got {output!r}"
+    )
+    # ...and it must be the STEP'S OWN fetch that created the ref it read — the
+    # fixture removed it, so a mutation to the fetch destination cannot pass here.
+    assert _has_tracking_ref(repo), (
+        "the step's own `git fetch` must create refs/remotes/origin/main; it was absent "
+        "before the step ran, so resolving it means the fetch DID NOT put it there (#7628)"
+    )
+
+
+def test_base_tip_step_fails_closed_on_an_empty_ref(tmp_path: Path):
+    """An empty ref must fail LOUDLY, not publish an empty output (#2386 one input over)."""
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    for spelling in ("", None):
+        proc, output = _run_base_tip(tmp_path, repo, spelling)
+        assert proc.returncode != 0, (
+            f"BASE_REF={spelling!r} must fail closed, not leave an empty `sha=` (#7628)"
+        )
+        assert "sha=" not in output, "an empty ref must not publish an output"
+
+
+def test_base_tip_step_fails_closed_when_the_ref_does_not_resolve(tmp_path: Path):
+    """A ref that cannot be fetched takes the step down rather than yielding empty."""
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    proc, output = _run_base_tip(tmp_path, repo, "no-such-branch")
+    assert proc.returncode != 0, proc.stderr
+    assert "sha=" not in output
+
+
+def test_base_tip_step_fails_when_rev_parse_fails_even_though_the_fetch_succeeded(
+    tmp_path: Path,
+):
+    """#7628 review: the ASSIGNMENT is load-bearing, and this is what pins it.
+
+    `SHA="$(git rev-parse …)"` propagates the substitution's exit status under
+    `set -e`, so a failed `rev-parse` fails the STEP; the nested
+    `echo "sha=$(…)"` spelling DISCARDS that status and publishes whatever the
+    substitution printed while still exiting 0 — a silent green. The fetch is made
+    to SUCCEED and only `rev-parse` to fail, so the fetch's own failure cannot be
+    what this test is observing; it observes the assignment discipline itself.
+    """
+    repo, _ = _repo_with_bare_remote(tmp_path)
+    shim_dir = _git_shim_failing(tmp_path, "rev-parse")
+    proc, output = _run_base_tip(tmp_path, repo, "main", shim_dir=shim_dir)
+    assert proc.returncode != 0, (
+        "a failed `git rev-parse` must FAIL THE STEP (the assignment propagates its "
+        f"status under `set -e`); the step exited 0 and published {output!r}"
+    )
+    assert "sha=" not in output, (
+        "a failed `rev-parse` must not publish an output — that is the silent green "
+        "the guard exists to prevent (#2386/#7628)"
+    )
 
 
 # ── the detection step's verdicts (executed) ─────────────────────────────────
@@ -271,6 +516,72 @@ def test_detection_reports_changed_markdown(tmp_path: Path):
     assert _changed_list(tmp_path) == ["./a.md", "./b.md"]
 
 
+def test_detection_excludes_the_base_branch_when_the_tip_moved_past_the_merge(
+    tmp_path: Path,
+):
+    """#7628: the shape the fix EXISTS for — a base tip NEWER than HEAD's first parent.
+
+    Every other detection test builds a LINEAR graph, where `BASE_SHA` is an ancestor
+    of HEAD and `A...HEAD` and `A..HEAD` are the SAME diff — so none of them can tell
+    the fix from the bug. Here the tip is a SIBLING of the merge commit, which is the
+    state production is in whenever the base branch moves after the merge ref is cut:
+    `base..HEAD` then inverts the base branch's own commits into the changed set (a
+    modified `.md` comes back as `M`, and `--diff-filter=ACMR` keeps `M`), while
+    `base...HEAD` stays exactly this PR's changes.
+    """
+    repo = _repo(tmp_path)
+    (repo / "seed.md").write_text("# seed\n", encoding="utf-8")
+    a = _commit(repo, "A")
+    (repo / "main1.md").write_text("# main1\n", encoding="utf-8")
+    m1 = _commit(repo, "M1")  # the base tip at the moment the merge ref is cut
+
+    _git(repo, "checkout", "-q", "-b", "pr", a)
+    (repo / "pr.md").write_text("# pr\n", encoding="utf-8")
+    _commit(repo, "PR")
+
+    # The merge ref itself: a MERGE of the then-current tip and the PR head, on NO
+    # branch — which is what `actions/checkout` puts at HEAD for a `pull_request`.
+    _git(repo, "checkout", "-q", "--detach", m1)
+    _git(
+        repo,
+        "-c",
+        "user.email=pin@example.com",
+        "-c",
+        "user.name=pin",
+        "merge",
+        "--no-ff",
+        "-m",
+        "merge",
+        "pr",
+    )
+    merged = _git(repo, "rev-parse", "HEAD")
+
+    # ...and the base branch moves on again, so the TIP is NOT an ancestor of HEAD.
+    # It MODIFIES a file that exists on both sides — a modification comes back as `M`
+    # and `--diff-filter=ACMR` KEEPS it, which is what makes the two-dot form differ.
+    _git(repo, "checkout", "-q", "main")
+    (repo / "seed.md").write_text("# seed\n\nmain moved on\n", encoding="utf-8")
+    (repo / "main2.md").write_text("# main2\n", encoding="utf-8")
+    tip = _commit(repo, "M2")
+
+    assert _git(repo, "merge-base", tip, merged) == m1, (
+        "the fixture must be DIVERGENT: the tip and the merge commit share only M1"
+    )
+
+    # HEAD is what `actions/checkout` leaves behind — the MERGE ref, not the branch —
+    # while the base tip is a SIBLING of it. That pair is the production shape.
+    _git(repo, "checkout", "-q", "--detach", merged)
+    assert _git(repo, "rev-parse", "HEAD") == merged
+
+    proc, output = _run_detection(tmp_path, repo, tip)
+    assert proc.returncode == 0, proc.stderr
+    assert _changed_list(tmp_path) == ["./pr.md"], (
+        "the changed set must be THIS PR's markdown only; the base branch's own "
+        f"main1.md/main2.md are not this PR's changes (#7628) — got {_changed_list(tmp_path)}"
+    )
+    assert _output_count(output) == "1"
+
+
 def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
     """A clean empty result must be `count=0`, so both lint steps skip."""
     repo = _repo(tmp_path)
@@ -286,6 +597,30 @@ def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
         "would make the `count != '0'` gate pass and run the linter with no args "
         "— i.e. lint the WHOLE repo (#2386)"
     )
+    assert _changed_list(tmp_path) == []
+
+
+def test_detection_excludes_vendored_markdown(tmp_path: Path):
+    """Vendored markdown is not in the lint population (#7534).
+
+    A `node_modules` re-install rewrites those files, so a finding there cannot be
+    fixed by hand and the baseline generator (`_population`), the cli2 config's
+    `ignores` and THIS diff all exclude the tree. A vendored-only change must
+    yield `count=0` — not a lint step that lints fewer files than the differ is
+    told to expect and reds the required check fail-closed.
+    """
+    repo = _repo(tmp_path)
+    (repo / "a.md").write_text("# a\n", encoding="utf-8")
+    vend = repo / "website" / "apps" / "dashboard" / "node_modules" / "pkg"
+    vend.mkdir(parents=True)
+    (vend / "README.md").write_text("# v\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (vend / "README.md").write_text("# v\n\nchanged\n", encoding="utf-8")
+    _commit(repo, "change")
+
+    proc, output = _run_detection(tmp_path, repo, base)
+    assert proc.returncode == 0, proc.stderr
+    assert _output_count(output) == "0"
     assert _changed_list(tmp_path) == []
 
 

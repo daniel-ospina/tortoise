@@ -28,6 +28,7 @@ The interactive confidence path — `compute_confidence()` with no explicit scop
 **Decision: keep two BFS implementations, unify the `max_hops=None` SEMANTIC — do NOT merge the BFSes.** Rationale: `ep._affected_claims` (ep.py:564, returns **claims**, any-edge bidirectional expansion, plain-point + direct-edge #888 W5 support, `is_operator OR op_type` detection, in-BFS draft-frontier strip) and `analyze._bfs_select_operators` (analyze.py:332, returns **operators**, rel_filter/IMPL-directional/NAND-always-bidirectional, 200-op cap, `{is_operator:true}` detection, draft-anchor strip) are different contracts consumed by different shipped surfaces — `tortoise_analyze` (tool_registry.py:456) exposes rel_filter/direction to end users. A literal merge risks the analyze path's direction semantics for zero benefit to this epic. **BFS merge is out of scope for #395 → belongs to #901.**
 
 What this epic DOES:
+
 1. **`max_hops: int | None = 2`** in both — currently `None > 0` TypeError at ep.py:635, `range(None)` crash at analyze.py:368. Replace the `for _ in range(max_hops)` loops with `while` loops that break when the frontier is empty.
 2. **Thread max_hops through the write-back deterministically** so the write-back set == the run set (fixes the documented dream.py:88 footgun and the current sdk.py:3362 recompute-with-default-2 under-coverage).
 3. **Resolve the 1-vs-2 hop-cap inconsistency** in the anchors path (`_select_subgraph` max_hops=1 default → `ep.run` default 2): thread a single max_hops through both. Note `_mark_dirty`'s contract ("do not reduce the dream's max_hops below 2", sdk.py:3210-3214) is dream-specific and untouched.
@@ -36,6 +37,7 @@ What this epic DOES:
 ### Degeneration Guard (in-BFS, not post-hoc — P1 fix)
 
 `_affected_claims` BFS is N+1 at BFS time (per-claim `_live_neighbors` query ep.py:649 + per-claim direct-edge query ep.py:653). For `max_hops=None` that's ~2 queries per claim across the whole component — the guard must fire **before** the BFS explodes:
+
 - **Per-hop frontier cap** (growth bound): abort/fall-back before the next hop expands when the frontier exceeds a threshold (align with the 200-op precedent; threshold from Phase-3 profiling measurements). P3 note: the cap should trigger only COMBINED with the ≈full-graph size bound, not on frontier width alone — a legitimately dense 10-50-claim zone through a hub operator could otherwise false-positive and degrade exact-closure runs.
 - **Affected ≈ full-graph detection** (size bound): if collected ≥ configured fraction of graph claims → warn + fall back (the interactive path never expands unboundedly; this is the EFBP worst-case-reverts-to-full-BP regime, Nath & Domingos AAAI 2010).
 - **Interactive-path guard contract (P1 fix, cycle-2):** the guard NEVER aborts the interactive no-arg path. It proceeds with the cap applied and returns `{iterations, converged, confidences, diagnostic: "degenerate_full_graph"/"truncated"}` — preserving the `{iterations, converged, confidences}` contract that `__main__.py:2735` and tool_registry.py:194 depend on. The "fall back to dream_all" language applies ONLY to the dreaming tier (dream.py), never inside the no-arg compute path. Add a companion attribute `ep._last_truncated: bool` (mirroring `_last_affected`, reset at run entry, set when the per-hop cap or ≈full guard fires) so the harness asserts `truncated: true` against the fixed 2-tuple + attribute contract. `run()`'s return stays a 2-tuple; diagnostics travel via the result dict + `_last_truncated`. **Two-tier grounding ([QWEN-GATE] P2 fix):** dreaming tier = EFBP reversion (recompute-to-full); interactive tier = Ihler bounded-error truncation — each tier cited to its result, so the capped-exclusion tolerance rule is self-consistent and #901 does not "fix" the interactive truncation into a reversion.
@@ -88,6 +90,7 @@ What this epic DOES:
 ### FALSIFICATION — Phase-3 profiling gate (converted from a hedge to a gate)
 
 The plan MUST open with profiling on the production 1,827-op graph, split: extract / BFS / EP-loop / write-back / evidence-maintenance (`_hydrate_evidence` sdk.py:3371, `_apply_source_inheritance` sdk.py:3443 — ≥3 global queries per call: assessments, extractedFrom sources, inherited-baseline revert) + **connected-component distribution** (P2 fix). Gate outputs:
+
 1. **Component sizing** — if the graph is ONE giant connected component, `max_hops=None` closure = whole graph → the cap becomes the only localization → "local" = "capped component", boundary tolerance governs. If components are small (typical claim-zone graphs), exact-closure holds. **This determines whether the epic's core value survives — hard prerequisite for plan sign-off.**
 2. **Per-phase timings** — if extract/evidence-maintenance dominate over EP-loop even after localization, delta A + scoped evidence hydration become load-bearing.
 3. **Delta A scope is CONDITIONAL on this result** (F4 analysis: the no-arg path may not need `extract_svbp_factors` at all once it's local).
@@ -97,10 +100,12 @@ The plan MUST open with profiling on the production 1,827-op graph, split: extra
 ## Verification Gates
 
 ### problem-verify: 2 cycles, clean | 0 issues remain
+
 - Cycle 1: Verifier A (P0=0, P1=0, P2=7, P3=3, P4=1); Verifier B (P0=0, **P1=4**, P2=9, P3=2, P4=1). Controller action: fixed all 4 P1s (undefined tolerance metric → split assertions; hidden write-back N+1 + dream.py twin → write-path design; dirty-roots double-extract → no-arg contract; missed F4 dream-reuse framing → added + converge rationale). Incorporated P2s (dual-BFS, caller sweep, seed contract, jax env-gate, concurrency precondition, degeneration guard, evidence-maintenance profiling, research operationalization) + P3s (citation precision, Sumer venue, [unverified] tags). Re-dispatched.
 - Cycle 2: Verifier A (P0=0, P1=0, P2=1, P3=9); Verifier B (P0=0, **P1=4**, P2=10, P3=6, P4=1) — new P1s (run() signature ripple, tolerance metric domain, in-BFS guard, no-arg delegation seams). All fixed in v3 (non-breaking run() contract, pinned metric domain, in-BFS per-hop guard, no-arg new-wiring contract). **Streamlined-mode note:** max-1-redispatch capped further cycles; fixes applied per verifier-prescribed resolutions, documented. Gate passes on controller judgment with fixes recorded.
 
 ### solution-verify: 1 cycle + 1 re-dispatch, clean | 0 issues remain
+
 - Cycle 1: Verifier A (P0=0, P1=1, P2=4, P3=2, P4=1); Verifier B (P0=0, **P1=4**, P2=10, P3=5, P4=1). Controller fixed all 5 P1s: (A1) unrecorded BFS/cap/hop decisions → canonical-subgraph clause; (B1) HTTP request-scoped SDK no-arg hole → HTTP factors/anchors-required contract; (B2) `_last_affected` stale-on-early-return → assign-before-early-returns contract; (B3) "ONE BFS" merge trap → two-BFS, unified None semantic; (B4) cap/tolerance circularity → cap-as-guard + split assertions. Incorporated P2s (clean-graph short-circuit, double-pass justification, shuffle seeding, `_evidence` call-scoped, per-caller migration targets, extract consumer note, empty-state table, op_type-only vector, component sizing, single-pass fallback). Re-dispatched.
 - Cycle 2: **both verifiers NO ISSUES FOUND** (see review cycle log).
 
@@ -159,15 +164,18 @@ None — no questions qualified for human pause. The re-scoped O/I/T and converg
 **Axis ratings:** Architecture = **high** (EP engine + projection + SDK + MCP + dreaming — core algorithmic architecture). UX = low. Ontology = low (no schema changes; confidence semantics preserved — `confidence` property, ONTOLOGY §4.1). Library-deps = none (no new third-party deps). Research fired on the high Architecture axis. Findings date: 2026-08-13.
 
 **Canonical — incremental/affected-region belief propagation:**
+
 - **EFBP — Expanding Frontier Belief Propagation (Nath & Domingos, AAAI 2010)** [source: homes.cs.washington.edu/~pedrod/papers/aaai10b.pdf / mlanthology.org]. The canonical precedent for EXACTLY this pattern: reuses previous run's messages, propagates only in the affected region ∆ (neighbors added when message change > γ), worst case reverts to full BP. Provides **bounds on belief differences between EFBP and standard BP** under bounded potentials. → **Engaged:** the "worst case reverts to full BP" is the degeneration-guard rationale; the affected-region machinery justifies `max_hops=None` + warm-start.
 - **Sumer, Acar, Ihler, Mettu — Adaptive Exact Inference in Graphical Models, JMLR 12 (2011)** [source: jmlr.org/papers/volume12/sumer11a; earlier IJCAI'11]. Dynamic graph updates in O(log n) via hierarchical clustering; **exponential in cluster boundary for loopy graphs**; change propagation. → **Engaged:** boundary-exponential result makes boundary-size test vectors mandatory, not optional.
 
 **Pitfalls — loopy BP convergence, warm-start/message-censoring correctness:**
+
 - **Ihler, Fisher, Willsky — Loopy Belief Propagation: Convergence and Effects of Message Errors, JMLR 6 (2005)** [source: jmlr.org/papers/volume6/ihler05a]. **Message censoring/reuse has BOUNDED posterior error** (Theorem 15: bounded dynamic-range distortion → bounded deviation from the fixed point); convergence sufficient conditions (Simon's condition, contraction); **damping improves convergence** (supports the λ=0.5 note in the issue). → **Engaged:** grounds the 0.02 boundary tolerance; justifies warm-start correctness claim.
 - **Mooij & Kappen — Sufficient Conditions for Convergence of the Sum-Product Algorithm (IEEE Trans. IT)** [source: staff.fnwi.uva.nl/j.m.mooij]. Unique-fixed-point conditions irrespective of initialization. → Engaged: supports the issue's Banach/damping note — convergence is guaranteed under contraction conditions, not universally on loopy graphs.
 - **Ihler — Accuracy Bounds for Belief Propagation (arXiv:1206.5277)**. Confidence-interval bounds on BP marginals; weak-potential graphs converge fast and are accurate. → Engaged: tolerance is achievable where BP is well-behaved (weak potentials); strong potentials widen bounds (documented exclusion).
 
 **Competitor-precedent — practical systems:**
+
 - **GraphScope Ingress — Incrementalize Graph Algorithms** [source: graphscope.io/docs/latest/analytical_engine/ingress]. Message-driven differentiation; affected-vertices activation; only vertices receiving changed messages recompute. → Engaged: production-system confirmation of the affected-region pattern; batched per-hop message handling.
 - **Reactive Message Passing (Bagaev & de Vries, arXiv:2112.13251)** — schedule-free reactive factor-graph inference. → **CUT** (no new deps; reactive schedule machinery is out of scope for a call-site fix — recorded cut).
 - **Streaming BP (STREAMBP, NeurIPS 2021)** — R-local streaming updates on new-vertex arrival. → Engaged at principle level (locality of update) — mechanism is in-scope code, not new algorithm.
@@ -211,24 +219,28 @@ None — no questions qualified for human pause. The re-scoped O/I/T and converg
 ## Review Cycle Log
 
 ### problem-verify — Cycle 1
+
 - Verifier A: P0=0, P1=0, P2=7, P3=3, P4=1
 - Verifier B: P0=0, P1=4, P2=9, P3=2, P4=1
 - Controller action: Fixed all 4 P1s (tolerance metric → split assertions; write-back N+1 → write-path design; dirty-roots double-extract → no-arg contract; F4 framing → added + converge rationale). Incorporated P2s (dual-BFS, caller sweep incl. file_pricing_decision.py:128 + 11 test files, seed contract, jax env-gate rationale, concurrency precondition, degeneration guard, evidence-maintenance profiling, research operationalization) + P3s (None>0 guard site, CLI 2732 vs 2730, projection/__init__.py not shim, Sumer venue).
 - Re-dispatching...
 
 ### problem-verify — Cycle 2
+
 - Verifier A: P0=0, P1=0, P2=1, P3=9 (tolerance metric vacuous in own regime → split again; F4 rejection rationale missing; caller sweep recount: 9 files + decide_licensing.py:155 + test_event_provenance.py:309)
 - Verifier B: P0=0, P1=4, P2=10, P3=6, P4=1 (run() 3-tuple breaks ingest.py:103/566 → non-breaking _last_affected; tolerance metric domain → local affected ∪ seeds only; in-BFS guard → per-hop cap; no-arg delegation seams → new-wiring with pre-clear seed capture)
-- Controller action: Fixed all 4 P1s per verifier-prescribed resolutions. Incorporated P2s (harness seeding + converged-asserted, fixture isolation, 200-cap decision, #901 cross-team handoff clause, file_pricing_decision explicit migration, _evidence leak call-scoped, ReactiveMP/Ingress cut). 
+- Controller action: Fixed all 4 P1s per verifier-prescribed resolutions. Incorporated P2s (harness seeding + converged-asserted, fixture isolation, 200-cap decision, #901 cross-team handoff clause, file_pricing_decision explicit migration, _evidence leak call-scoped, ReactiveMP/Ingress cut).
 - **Streamlined-mode note:** max-1-redispatch cap → fixes applied and documented; gate passes on controller judgment (fixes follow verifier prescriptions verbatim).
 
 ### solution-verify — Cycle 1
+
 - Verifier A: P0=0, P1=1, P2=4, P3=2, P4=1 (canonical-BFS/cap/hop decisions unrecorded)
 - Verifier B: P0=0, P1=4, P2=10, P3=5, P4=1 (HTTP request-scoped SDK no-arg hole; _last_affected stale-on-early-return; "ONE BFS" merge trap; cap/tolerance circularity)
 - Controller action: Fixed all 5 P1s (canonical-subgraph clause with two-BFS decision; HTTP factors/anchors-required contract; _last_affected assign-before-early-returns; cap-as-guard + split tolerance assertions). Incorporated P2s (clean-graph short-circuit, double-pass justification, shuffle seeding, _evidence call-scoped, per-caller migration targets, extract consumer note, empty-state table, op_type-only vector, component sizing, single-pass fallback).
 - Re-dispatching...
 
 ### solution-verify — Cycle 2
+
 - Verifier A: P0=0, P1=1, P2=5, P3=6, P4=2 (degeneration-guard fallback seam on interactive no-arg path — guard must not abort the contract; `_last_truncated` transport; P2s: run-depth semantic, dream dirty-root clearing, extractor op_type parity, fixture-isolation contradiction, Δ=0-exact precondition)
 - Verifier B: P0=0, P1=1, P2=6, P3=5 (HTTP enforcement locus — SDK can't produce `no_dirty_state_http`; must live in mcp_server handler; P2s: test_decide.py:418 diagnostic conflict, HTTP anchors+None unbounded surface, _evidence-reset false isolation, local-vs-global shuffle seeding, analyze.py second None-arithmetic site, extractor predicate)
 - Controller action: Fixed both P1s per verifier prescriptions (interactive guard never aborts the contract + `ep._last_truncated`; HTTP enforcement in mcp_server handler with test + hosted-caller migration row). Incorporated all high-value P2s (run-depth semantic, dream dirty-root clearing fix, op_type-aware extractor + consistency test, wipe-rebuild fixture isolation, local Random/sorted seeding + re-pin, both analyze.py None sites + int-equivalence test, test_decide.py:418 diagnostic migration, HTTP anchors+None bound, Δ=0 weak-potential precondition, precise canonical-BFS-consistency definition, boundary vectors in truncated regime).
@@ -237,6 +249,7 @@ None — no questions qualified for human pause. The re-scoped O/I/T and converg
 ### Phase 5.6 Coherence — substitute reviewer (qwen3.8-max BLOCKED, 401)
 
 **[QWEN-GATE] substitute reviewer used** (deepseek-v4-flash fresh context — qwen3.8-max API blocked with 401). Findings: P1×2 (dirty-root seed verification missing end-to-end; AC5 Indicator-1 surface qualification — HTTP vs stdio), P2×5 (full-side baseline pinning to `ep.run`/`_affected_factors`; Integration Docs seeding contradiction; EFBP grounding slippage → two-tier mapping; scoped evidence hydration conditional home; HTTP anchors+None OR → clamp decision).
+
 - Controller action: fixed both P1s (end-to-end dirty-root seed vector + bypass-path audit row; AC5 qualified to stdio/embedded + HTTP disable-contract + ep_version → #901) and all five P2s (baseline pinned, seeding line corrected, two-tier grounding, conditional step 10, clamp decision + atomic shipment). All fixes incorporated; no re-run needed (per-gate rule: fix P1 once, document).
 
 ## Complexity

@@ -1540,9 +1540,12 @@ def invitation_accept(cp, token: str, user_id: str,
     # org via the email link. Non-consuming (before the single-use PATCH).
     if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
+        from tortoise.quota import with_limit_contact
         raise InvitationError(
-            "You already have a free team — this team requires a paid plan "
-            "to join", status=402)
+            with_limit_contact(
+                "You already have a free team — this team "
+                "requires a paid plan to join"),
+            status=402)
     from tortoise.pricing import tier_limits
     tier = org.get("tier") or "free"
     lim = tier_limits(tier)
@@ -1557,8 +1560,9 @@ def invitation_accept(cp, token: str, user_id: str,
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
+            from tortoise.quota import with_limit_contact
             raise InvitationError(
-                "Member limit reached", status=402)
+                with_limit_contact("Member limit reached"), status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) then verify.
     accept_body: dict = {"status": "accepted", "accepted_at": now.isoformat()}
@@ -2532,7 +2536,8 @@ def active_membership_org_ids(cp, user_id: str) -> list[str]:
     return [row.get("org_id") for row in rows if row.get("org_id")]
 
 
-def provision_org(cp, **params: object) -> None:
+def provision_org(cp, *, prior_org_ids: list[str] | None = None,
+                  **params: object) -> None:
     """Call the atomic provision_org SECURITY DEFINER RPC (migration 0010).
 
     One transaction: orgs + org_memberships + api_keys (idempotent
@@ -2550,6 +2555,21 @@ def provision_org(cp, **params: object) -> None:
     uses keyless; a session-key mint writes the api_keys row later. Raises
     RuntimeError on failure (fail-closed): a failed provision surfaces as a
     500, and the caller cleans up any data-plane graph it created first.
+
+    ``prior_org_ids`` (#7678) is NOT part of the RPC body: it is the
+    creator's active memberships a caller already read, handed to the
+    post-RPC onboarding init so it does not re-issue the same control-plane
+    read on the same request. ``None`` keeps the legacy behaviour. Keyword-
+    only on purpose — it can never be smuggled into ``params`` and passed to
+    the RPC. ``_ensure_onboarding_node_after_provision`` filters out the
+    just-provisioned ``org_id``; the RPC inserts exactly one new active owner
+    membership for ``org_id``, so the list is identical to the post-RPC read
+    IT WOULD HAVE MADE in the absence of a concurrent membership mutation. A
+    caller that supplies it therefore accepts that window (the create-org lane
+    holds ``_org_create_lock`` across the read and the RPC, which serialises
+    the invite-accept lane; it does NOT serialise the account-deletion cascade
+    or owner-initiated member removal). Only the derived fork/compact choice
+    is affected, never the provision itself.
     """
     cp.rpc("provision_team", params)
 
@@ -2582,7 +2602,8 @@ def provision_org(cp, **params: object) -> None:
     # PRIOR memberships; the mirror reads jsonb onboarding_complete
     # one-directionally, never clobbers).
     if org_id:
-        _ensure_onboarding_node_after_provision(cp, org_id, params)
+        _ensure_onboarding_node_after_provision(cp, org_id, params,
+                                                prior_org_ids=prior_org_ids)
 
 
 # ── Agent signup tokens + keyless recovery (#1709, 20260814000001) ─────────
@@ -2618,11 +2639,20 @@ def provision_org_with_token(cp, **params: object) -> None:
 
 
 def _ensure_onboarding_node_after_provision(cp, org_id: str,
-                                            params: dict) -> None:
+                                            params: dict,
+                                            *,
+                                            prior_org_ids: list[str] | None = None) -> None:
     """Best-effort OnboardingState node init after an atomic provision.
     Never blocks provisioning (a graph failure self-heals on the next FLOW
     write via the create-on-write seam); the mirror read is one-directional
-    (jsonb onboarding_complete → status 'complete', never clobber)."""
+    (jsonb onboarding_complete → status 'complete', never clobber).
+
+    ``prior_org_ids`` (#7678): when a caller already read the creator's active
+    memberships (the create-org lane does, before this worker runs), pass them
+    here and the duplicate ``active_membership_org_ids`` control-plane read is
+    skipped. ``None`` keeps the legacy read for callers that have no such
+    value (register/signup/onboarding).
+    """
     try:
         from tortoise import hosted_api as _ha
         from tortoise.onboarding import state as _os
@@ -2634,10 +2664,10 @@ def _ensure_onboarding_node_after_provision(cp, org_id: str,
         except Exception:
             mirror = None
         creator = params.get("p_user_id") or None
-        prior_ids: list[str] = []
-        if creator:
-            prior_ids = [tid for tid in active_membership_org_ids(cp, creator)
-                         if tid != org_id]
+        if prior_org_ids is None:
+            prior_org_ids = (active_membership_org_ids(cp, creator)
+                             if creator else [])
+        prior_ids = [tid for tid in prior_org_ids if tid != org_id]
         prior_fork = None
         if prior_ids:
             try:
@@ -2898,6 +2928,88 @@ def org_by_name(cp, name: str) -> dict | None:
     """Org row for a name (create_org duplicate-name 409)."""
     rows = cp.query("organizations", select=["id"], filters=[("name", "eq", name)])
     return rows[0] if rows else None
+
+
+def owned_org_replay(cp, org_id: str, user_id: str) -> dict | None:
+    """#7677: the idempotent-create REPLAY of an existing org, or None.
+
+    The transport wait bound abandons but never cancels the create handler
+    (``WaitBoundMiddleware._track_wait_bound_request``), so an abandoned
+    ``POST /v1/organizations`` can still commit the orgs row + the owner
+    membership. The refusal the caller receives advertises a retry, and that
+    retry re-enters ``create_org`` where ``org_by_name`` now finds the row the
+    FIRST attempt created — a 409 for the caller's own organization.
+
+    This resolves the advertised retry on the same (owner, name) identity, not
+    on any observation about the abandoned first attempt: the code can see only
+    that the name is taken by a live, non-pending org the caller actively owns,
+    never WHEN or BY WHICH attempt that row was committed. So an org the same
+    owner created months ago under the same name replays identically — the rule
+    is "create is idempotent on (owner, name)", which is broader than "resolve
+    the abandoned first attempt" and is safe because ownership is verified and
+    the unique index keeps it one row. It refuses nothing
+    that should still refuse: it returns the create response ONLY when the
+    existing org is unambiguously the caller's own org, and every other
+    duplicate is still a 409. The safe rule, established from the data:
+
+    - the caller must be an ACTIVE **owner** of the org (``role='owner'``,
+      ``status='active'``). An active member/admin of someone else's org owns
+      nothing, so a collaborator cannot claim it as their own create; a
+      removed membership is not ownership either.
+    - the org must NOT be soft-deleted (``deleted_at``): its name is still
+      taken, and a deleted org is not the org the create lane produces.
+    - the org must NOT be ``pending_payment``: #2789 defines that state as
+      not-yet-real (no graph, hidden from every surface) and the create lane
+      NEVER mints it — it is not "the same create" and must not be surfaced
+      as a successful one.
+
+    Returns ``{"org_id", "graph_name", "tier"}`` (the create response minus
+    ``name``, which the caller already holds) or None (→ the caller's 409).
+    The caller has already resolved ``org_id`` from ``org_by_name``.
+
+    DECLARED RESIDUAL (not closed here, recorded on #7677): the retry is
+    resolved only once the abandoned first attempt has COMMITTED. While it is
+    still running, ``org_by_name`` returns None, so the retry proceeds as a
+    fresh create and mints a new ``org_id`` (materialising an orphan
+    ``org_<id>`` graph) before losing the name race. On today's single-process
+    topology the per-user in-process ``_org_create_lock`` makes the retry queue
+    behind the abandoned handler and then reach this replay, so that window is
+    not reachable here; it becomes reachable wherever more than one process or
+    instance serves the caller, and the two stores then diverge:
+
+    - Supabase: ``uq_teams_name`` (migration 0011) is NON-PARTIAL, so the race
+      becomes the 0011 unique violation → the same 409.
+    - registry (the lane whose own docstring declares multi-process selfhost):
+      there is no unique index, so two processes can both pass their dup-name
+      check and mint two same-named Teams — a second org, #1954's documented
+      multi-process gap, which is worse than the 409 this fix removes.
+
+    Closing it needs a client-supplied idempotency key or a cross-process
+    interlock, not a name lookup. (Separately, the org-create rate limit is
+    checked BEFORE this replay, so a rate-limited caller gets the honest,
+    retryable 429 and reaches the replay once the window passes — pinned by
+    ``test_rate_limited_retry_still_429_before_the_replay``.)
+
+    The MCP surface (``mcp_server.tortoise_org_create``) has the same
+    bounded-abandon vs non-idempotent-create shape; it is stdio-only, declares
+    ``idempotentHint=false`` and is out of this change's scope — recorded on
+    #7677 as a bounded sibling.
+    """
+    row = org_by_id(cp, org_id)
+    if row is None:
+        return None
+    if row.get("deleted_at") is not None:
+        return None
+    if row.get("subscription_status") == _PENDING_PAYMENT_STATUS:
+        return None
+    mem = membership_for_user_org(cp, user_id, org_id)
+    if mem is None or mem.get("role") != "owner":
+        return None
+    return {
+        "org_id": org_id,
+        "graph_name": row.get("graph_name") or f"org_{org_id}",
+        "tier": row.get("tier") or "free",
+    }
 
 
 def org_api_keys(cp, org_id: str,
@@ -4339,8 +4451,9 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
+            from tortoise.quota import with_limit_contact
             raise InvitationError(
-                "Member limit reached", status=402)
+                with_limit_contact("Member limit reached"), status=402)
 
     # #1877 free-org entitlement (join side): the target org has no
     # active paid subscription AND the invitee already holds a free org →
@@ -4348,9 +4461,12 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     from tortoise.supabase_control import _BILLING_ACTIVE_STATUSES
     if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
+        from tortoise.quota import with_limit_contact
         raise InvitationError(
-            "You already have a free team — this team requires a paid plan "
-            "to join", status=402)
+            with_limit_contact(
+                "You already have a free team — this team "
+                "requires a paid plan to join"),
+            status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) — the PATCH's
     # OWN matched-row count is the authoritative claim (P2-1 cross-lane

@@ -46,6 +46,7 @@ n/a — no user-facing journeys. Verification = `--integrity` clean, `--emit-pus
 **Intent:** the manifest becomes the single source for the push matrix, and `--integrity` fails closed on BOTH drift surfaces (unlisted files AND files absent from / duplicated across the executed legs AND workflow re-hardcoding).
 
 **Acceptance:**
+
 - New constant `ENV_BROKEN_FILES = {"test_agent_signup.py"}` (top-level names; the `tests/e2e` directory is excluded by construction — `unlisted_tests` only globs top-level).
 - `push_legs(manifest)` returns `{"half_a": [...], "half_b": [...], "slow": [...], "env_broken": [...]}`: fast = sorted distinct classified files − slow − env-broken; `half_a = fast[0::2]`, `half_b = fast[1::2]`; `push_extra` (manifest key, `.py` names) appended to half b. Half names are `.py`-less (workflow format).
 - `leg_coverage_issues(manifest)` returns a list: every classified file in exactly one of {half_a ∪ half_b ∪ slow ∪ env_broken}; leg overlaps flagged (fast∩slow, fast∩env-broken, slow∩env-broken); env-broken names must be classified; push_extra entries must not be classified top-level files.
@@ -62,6 +63,7 @@ n/a — no user-facing journeys. Verification = `--integrity` clean, `--emit-pus
 **Intent:** the hardcoded 181-name halves disappear; the push matrix is emitted by the selector so registration in the manifest is sufficient (indicator c).
 
 **Acceptance:**
+
 - `changes` job gains a step `Emit push matrix` (always runs, both events) writing `matrix_a`/`matrix_b` outputs from `--emit-push-matrix`.
 - `test` job `strategy.matrix.include` becomes two rows: `{half: a, files: ${{ fromJSON(needs.changes.outputs.matrix_a) }} }` and `{half: b, files: ...matrix_b}`; the hardcoded `files: >-` lists are deleted.
 - `ENV_BROKEN_FILES` env var removed (replaced by a comment pointing at `tools/ci_selection.py`).

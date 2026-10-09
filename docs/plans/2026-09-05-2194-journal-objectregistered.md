@@ -12,16 +12,20 @@
 **Architecture:** SDK-local, probe-gated emission in `_create_entity` (A1 — scoping decision, verified across problem-verify/solution-verify/second-model/Phase-7 gates). When an event log is configured and the label is Object, a pre-apply existence probe on the canonical deterministic id + name (`MATCH (o:Object {id:$cid, name:$name})` — the name conjunct hardens against a cross-name sha-digest collision, which would otherwise fail-closed on a genuinely-new registration) discriminates a canonical re-mention (row exists → skip; the issue's only-on-create mandate) from a first canonical registration (no row → fresh create OR #1155 stub adoption → journal). `createdAt` is synthesized into the event dict pre-apply ONLY on the journaling path (probe-no-row), so live, journal, and replay carry the identical value (#2164-P4 drift class) while re-mentions and journal-less SDKs stay byte-identical to pre-#2194. Stub adoption: `_upsert_object` ON MATCH adopts the synthesized `createdAt` via `coalesce(o.createdAt, $ca)` (idempotent — existing created value wins; the #1155 coalesce-id pattern in the same clause) so the adopted live node, the journal, and replay all carry it. Emission is post-apply (phantom-event ordering hazard — a journaled registration whose live apply never happened would replay-create a phantom node) through the existing `_emit_event` JSONL-only path (`ObjectRegistered ∉ _GRAPH_EVENT_TYPES` → no GraphEvent-store double-write). Rebuild consumers already exist: pass-1b `_upsert_object` (projection/__init__.py:1389) + the deferred fold sweep (:1417-1434). No-op when `event_log_path` is unset (S1 bound — journal-less SDKs stay byte-identical EXCEPT the unconditional `point`/`payload` drop, a deliberate tenant-visible narrowing identical on both lanes to avoid divergent persistence — see docs/ONTOLOGY.md §4.3; same bound as #2061/#2164/#2193).
 
 ### Pattern Research
+>
 > **Findings date:** 2026-09-05
 > Gate skipped: plan touches zero third-party dependencies — pure in-repo refactor onto existing mechanisms. Axis research (Architecture = medium+) fired 2 external queries (scoping §External Research); a pre-approval external validation pass fired 3 more (below). PRIOR_RESEARCH: #2164 full scoping + 6 fresh-reviewer code-review cycles of the fold machinery; the #2194 scoping ran problem-verify/solution-verify/second-model(coherence)/Phase-7 review gates — every anchor re-verified against origin/main code by multiple independent reviewers.
 
 **External validation pass (2026-09-05, pre-approval — 3 queries, canonical sources):**
+
 1. **Emit-once creation facts + idempotent consumers** (Microsoft event-sourcing: consumers MUST be idempotent under at-least-once; CockroachDB idempotency-and-ordering: naturally-idempotent events or txn-id dedupe; idempotency-key literature: deterministic hash of identifying fields). → Validates only-on-create emission (at-most-once fact log) + replay MERGE-by-name idempotency (safety net for TOCTOU duplicates) + the `obj-<sha26(name)>` deterministic id; corroborates the A3 rejection (avoid double-emitted create facts in the fact log even when consumers tolerate them).
 2. **FalkorDB MERGE stats** (docs.falkordb.com: idempotent MERGE + "Nodes created: N"; Go clients expose `NodesCreated()`; DeepWiki OpMerge: concurrent same-key MERGEs → postponed matches). → Confirms docker-lane `nodes_created` attribution exists (A2 would work there) and the embedded quirk root cause; the probe design is backend-agnostic (depends on no statistics) — A2 rejection stands.
 3. **Dual-write compensation without outbox** (Confluent dual-write; AWS transactional outbox; Kleppmann log-as-source-of-truth; Microsoft compensating-transaction). → Cross-store outbox impossible; the accepted-loss structure (apply-then-emit ordering, fold-miss warnings as missing-event detection, #548 Point snapshot, #2296 Object backstop) is the documented compensating set for outbox-less dual writes.
+
 > Two intermediate queries hit 429 rate limits and were retried; all three surfaces validated with no plan changes warranted.
 
 **In-repo precedents (load-bearing):**
+
 - **EventRecorded mirror** (sdk.py:14026-14051): emit after `proj.apply`, full applied-dict mirror minus `("type","id","point","payload","event_id","ts","initiated_by","projection_version")`, JSONL-only type, best-effort, no sibling double-emission.
 - **EventAPI `add_object`** (api.py:248-261): snake `object_kind`, `createdAt=now_iso()` stamped at emit — the reference producer shape + createdAt convention.
 - **Pre-write existence probe** (bundle-ingest sdk.py:6280-6290): `MATCH (n:Object {name:$name}) RETURN n.id` before create — in-repo probe precedent. #2194 probes by **canonical id** (not name): a name-probe would wrongly skip stub adoption (node exists under a random ulid → name-probe hits, but the canonical registration is genuinely new).
@@ -30,6 +34,7 @@
 - **SourceCreated merge-attribution** (entities.py:979-1002; sdk.py:15421-15427): `nodes_created` NOT race-safe on the embedded backend under concurrent same-key MERGEs — reason the solution uses a probe (backend-agnostic, in-process-serial capture) rather than threading MERGE statistics through the shared `apply()` contract (A2, rejected).
 
 ### Integration Surface Map
+
 | Surface | Boundary | Test layer | Where |
 |---|---|---|---|
 | `_create_entity` Object journaling (sdk.py) | in-process seam | integration (docker lane) | T1/T2 new file: ON CREATE only; re-mention no double-journal; stub adoption journaled; no-log gate |
@@ -41,6 +46,7 @@
 | EventAPI/connector producers (api.py, mining, github) | distinct seam | regression | T5: test_entity_stage / test_semantic_extractor unchanged |
 
 ### Failure Modes
+
 - **Probe TOCTOU** (concurrent same-name create, both probe-empty) → two journal lines → replay idempotent (MERGE by name; ON MATCH never touches status; first line's createdAt wins) → accepted, documented in the emission comment.
 - **Probe failure (query raises)** → **fail-open-to-journal** with a warning (durable bias — a duplicate line is replay-safe and matches the EventAPI unconditional precedent; a skip would silently re-open the node-loss bug). Wrapped in try/except around the probe only.
 - **Log append failure (registration side)** → `_emit_event` best-effort warn-and-continue (existing sdk.py:1892-1904); the Object is live-but-not-durable for that write (≡ pre-fix; no regression) — pinned by T2 test 11 (append raises → create succeeds + warning + live node; rebuild omits it). No Object #548-snapshot backstop exists — **accepted and documented** (loss-backstop tracked in #2296).
@@ -61,6 +67,7 @@
 **Intent:** Pin every mandated behavior BEFORE code changes: capture→rebuild→fold round-trip (indicator 2), plain unfolded Object survival (indicator 1+3), re-mention no-double-journal (only-on-create), stub-adoption canonicalization survival, createdAt parity + no envelope pollution (byte-identity), no-log gate, re-mention-after-fold no-resurrect.
 **Acceptance:** New tests exist and FAIL for the right pre-fix reason (zero ObjectRegistered lines → Object absent post-rebuild; no double-journal guard yet). Baseline 19 in test_status_projection.py untouched.
 **Files:**
+
 - Create: `tests/test_object_registered_journal.py` (docker lane — NOT in the tests/_embedded.py carve-out)
 
 **Step 1.1** — Write the tests (all use `TortoiseSDK(str(tmp_path / "<n>.db"), event_log_path=str(events / "events.jsonl"))` with `events.mkdir()`; `sdk.close()` in `finally`; distinct DB paths per SDK pairing so docker-lane redirect hashes don't collide). **RED acceptance applies to tests 1-7; tests 8-9 are green-pin guards** (see Step 1.2). Tests 6/7 pass **scalar** reserved props (`point='x'`, `payload='y'`) — dict values would raise the FalkorDB non-primitive-property error pre-fix, tripping the no-setup-error RED rule. Boolean asserts on DB-read scalars use equality (`== False`) not identity (`is False`) — the JSONL+FalkorDB round-trip can return `0`/`None` instead of Python `False`:
@@ -84,6 +91,7 @@
 **Intent:** Implement A1 in `_create_entity` (sdk.py) — probe-gated, mirror-exact, post-apply emission — making Task 1's tests pass.
 **Acceptance:** Task 1 file fully green; journal-less SDK behavior byte-identical (no-log test passes); no change to the Event branch's behavior.
 **Files:**
+
 - Modify: `tortoise/sdk.py:13969-14073` (`_create_entity`)
 - Modify: `tortoise/projection/entities.py:316-367` (`_upsert_object` ON MATCH — createdAt adoption clause)
 - Test: `tests/test_object_registered_journal.py` (adds tests 10-13 post-T2)
@@ -91,6 +99,7 @@
 **Step 2.1** — Code change (single region; keep the Event block shape and its #2061 comment; re-anchor START via `grep -n "def _create_entity"`, TAIL via `grep -n "# #452: Subject/Object MERGE by name"`). **Acceptance wording note**: "journal-less SDK byte-identical" means identical EXCEPT the unconditional `point`/`payload` drop (a deliberate narrowing — test 7 asserts the drop on the journal-less lane too; a journal-gated pop would create divergent journaled/journal-less live persistence, the exact drift class this issue fights):
 
 (a) Extend the reserved-name pop to Object (Event precedent at :14010-14018 — `point`/`payload` are `_emit_event`-reserved kwargs; grep-verified no in-repo caller passes them on Object creates; the pop is REQUIRED for replay parity — without it a caller prop would persist live via `_persist_extra_props` but be dropped from the journal mirror):
+
 ```python
 if label in ("Event", "Object"):
     event.pop("point", None)
@@ -98,6 +107,7 @@ if label in ("Event", "Object"):
 ```
 
 (b) Pre-apply existence probe on the CANONICAL id + name FIRST (determines the journal decision), then synthesize `createdAt` ONLY on the journaling path, then apply, then emit (phantom-event ordering: emission strictly after `proj.apply`):
+
 ```python
 # (#2194) Journal ObjectRegistered on FIRST canonical registration only —
 # probe the deterministic canonical id + name (obj-<sha26(name)>) before
@@ -135,7 +145,9 @@ if _journal_object_registration and "createdAt" not in event:
     from .ids import now_iso  # noqa: I001
     event["createdAt"] = now_iso()
 ```
+
 …after `apply_result = proj.apply(event)`:
+
 ```python
 if label == "Object" and _journal_object_registration:
     # (#2194) Mirror the EventRecorded block below: payload = the exact
@@ -172,6 +184,7 @@ if label == "Object" and _journal_object_registration:
 **Intent:** The 4 manual `_emit_event("ObjectRegistered",...)` sites were written "until the separate OD2 journaling issue lands" — this is that issue. Restore each test's true purpose so the fix is actually verified (redundant manual emissions would mask an auto-journal regression). **T3 DEPENDS ON T2** — the scaffolding only becomes redundant/incorrect after T2 lands; do NOT run T3 before T2.
 **Acceptance:** 19 baseline tests green with auto-journaling active; no test journals the same registration twice for the same purpose; docstrings no longer claim "SDK capture Objects are NOT journaled".
 **Files:**
+
 - Modify: `tests/test_status_projection.py`
 
 **Step 3.1** — `test_rebuild_all_restores_object_superseded_fold` (:145-209): **drop** the manual `sdk._emit_event("ObjectRegistered", id=oid, ...)` (:184) — `create_entity` at the top now auto-journals the registration; the replay gets its node from the real production line. Rewrite the docstring (delete the "NOT journaled … until the separate OD2 journaling issue lands" note at :158-164); optionally strengthen: assert the auto journal contains exactly one ObjectRegistered for the name.
@@ -193,6 +206,7 @@ if label == "Object" and _journal_object_registration:
 **Intent:** Remove every now-false "Objects are NOT journaled" / "Events only" artifact and make the fold-sweep warning honest about residual 0-row fold sources (pre-#2194 journals, legacy/raw producers, delete races).
 **Acceptance:** `grep -rn "OD2 capture gap\|journaled EventRecorded for Events only\|SDK capture-created Objects are NOT journaled" tortoise/ tests/ docs/` returns only the reworded warning + historical/legacy-format text.
 **Files:**
+
 - Modify: `tortoise/sdk.py`, `tortoise/projection/__init__.py`, possibly `docs/ONTOLOGY.md`
 
 **Step 4.1** — sdk.py `_create_entity` docstring (:13971-13973): "...SDK-created Events additionally journal EventRecorded via ``_emit_event`` (#2061)" → add "SDK-created Objects journal ``ObjectRegistered`` on first canonical registration (probe-gated, #2194); Events journal unconditionally (#2061)."
@@ -216,6 +230,7 @@ if label == "Object" and _journal_object_registration:
 **Files:** none (verification)
 
 **Step 5.1** — Target suites (docker lane, in order):
+
 ```bash
 export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/test_object_registered_journal.py tests/test_status_projection.py -v
@@ -228,6 +243,7 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 **Step 5.2** — Embedded carve-out spot check: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/test_guard.py -v` (cross-lane safety).
 
 **Step 5.3** — Acceptance criteria ↔ issue indicators:
+
 | Indicator | Criterion | Test |
 |---|---|---|
 | 1. `_create_entity` emits ObjectRegistered when it creates an Object | Exactly one line per fresh create; probe skip on canonical re-mention; no-op when `event_log_path` unset | T1 tests 2/3/7 |
@@ -238,11 +254,13 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 **Step 5.4** — commit-workflow skill (mandatory gate before merge: pre-flight typecheck/tests, PR, code-review + test-review gates, merge). Commit any residual: `git add -A && git commit -m "chore(#2194): verification pass"` if needed before the PR.
 
 ## Runtime prerequisites
+
 - Docker FalkorDB up on localhost:6379 (else `docker compose -f ../eldato/operations/memory/docker-compose.yml up -d`).
 - `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'` for docker-lane runs.
 - Worktree `feat/2194-journal-objectregistered` at base ef5d8421; `.venv` symlinked (no install needed).
 
 ## Out of scope (documented, not silently expanded — filed as follow-ups)
+
 - **SubjectAdded journaling** — identical `_create_entity` gap for Subjects → **#2295**.
 - **Durability write-surface invariant / Object loss backstop (extend the #548 pre-wipe snapshot or journal repair)** + capture aboutObject/CONTAINS/session-link edge durability → **#2296**.
 - **EventAPI `add_object` unconditional journaling** — a different producer (own `_emit`), relied on by mining/connector lanes; unchanged.

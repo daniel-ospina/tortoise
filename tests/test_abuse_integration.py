@@ -228,10 +228,14 @@ class TestPointBurst:
         assert len(flag_rows) >= 2
         assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
 
-    def test_boundary_crossing_suspends_and_403(self, env):
-        """A breach persisting past flagged_at + window suspends (delta 13).
+    def test_boundary_crossing_alerts_and_does_not_403(self, env):
+        """A breach persisting past flagged_at + window escalates to a HUMAN
+        review alert — NOT to a suspension. #5425 owner ruling: "we should just
+        have rate-limits and if they want more they need to speak with us".
+
         The fake clock is compressed: age flagged_at 2h into the past while
-        the window sum stays over threshold."""
+        the window sum stays over threshold.
+        """
         fake = env["fake"]
         with TestClient(env["app"]) as tc:
             for i in range(6):
@@ -251,12 +255,20 @@ class TestPointBurst:
                           if e["event_type"] == "point_create"]
             point_rows[0]["created_at"] = band  # continuity evidence
             self._post_point(tc, 99)  # evaluation now crosses the boundary
-            assert fake.tables["organizations"][0]["suspended_at"] is not None
-            # next authed request 403s with the SUSPENDED contract
-            r = tc.get("/v1/team/keys", headers=_auth())
-            assert r.status_code == 403
-            assert r.json()["detail"]["code"] == "SUSPENDED"
-        assert "abuse_suspended" in [c[0] for c in env["notified"]]
+            # #5425: stage 2 does NOT suspend, and the customer is not locked out.
+            assert fake.tables["organizations"][0]["suspended_at"] is None
+            assert tc.get("/v1/team/keys", headers=_auth()).status_code != 403
+            # The escalation is a human-review alert — a dashboard row the
+            # operator can see AND a notification, never an "auto-suspended" lie.
+            assert [e for e in fake.tables["abuse_events"]
+                    if e["event_type"] == "review_needed"]
+            kinds = [c[0] for c in env["notified"]]
+            assert "abuse_review_needed" in kinds
+            assert "abuse_suspended" not in kinds
+            # The 403 contract is UNCHANGED — it now requires a deliberate
+            # OPERATOR suspend, which the engine no longer performs for anyone.
+            fake.rpc("abuse_suspend", {"p_org_id": TEAM})
+            assert tc.get("/v1/team/keys", headers=_auth()).status_code == 403
 
     def test_non_create_writes_never_trip_r1(self, env):
         """Delta 8: only Point CREATION records. REST has no point-update

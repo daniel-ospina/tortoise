@@ -4,6 +4,7 @@ import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
+import { LIMIT_CONTACT, withLimitContact } from './limitContact.js'
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
@@ -788,9 +789,11 @@ const COOKIE_DOMAIN = '.premiselabs.co'
 // `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
 // 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
 // silently dropped; Secure over http → dropped) → getSession() null → bounce
-// to /auth on every load. Mirrors website/assets/supabase-session.js (and
-// tortoise/oauth.py) — KEEP IN SYNC (tests/test_cross_subdomain_cookie_sync.py
-// asserts helper parity across the adapters).
+// to /auth on every load. Mirrors the host-conditional helpers in
+// tortoise/oauth.py — the shared website/assets/supabase-session.js bridge was
+// DELETED in #3559, so oauth.py is now the only sibling (and this is a MARKER
+// writer, not a session adapter: tests/test_cross_subdomain_cookie_sync.py
+// pins the helper parity).
 const isLocal = () => {
   const h = window.location.hostname
   if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true
@@ -3953,9 +3956,8 @@ function claimIntentInFlight() {
     if (response && response.status === 401) {
       // #1511 semantic, ported: the BFF's OWN 401 means — and only ever means —
       // "not signed in", so welcome must never render for unauthenticated
-      // users. Clear the session and go to /auth. (A store fault is 503 and is
+      // users. Leave for /auth. (A store fault is 503 and is
       // deliberately NOT handled here: it shows, it never redirects — #3485.)
-      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
       // #1860 (P3-5): preserve the search params — /auth's OAuth-error
       // banner reads ?error=... #1909: an error FRAGMENT rides along too.
       bounceToAuth(window.location.search, oauthErrorHash())
@@ -4017,10 +4019,40 @@ function claimIntentInFlight() {
             if (inviteRes.ok) {
               try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
               setBanner('Welcome to the organization! Your membership is active.')
+              // #5254: the accept body carries the INVITED org (`{org_id, role}`
+              // — hosted_api.accept_invite). Without selecting it here, the
+              // mount's #1912 / Round-8 first-healthy pin owns orgIdRef, so a
+              // user who is ALREADY a member of another org lands on that org
+              // — NOT the one the invite link just added them to, while the
+              // account-menu accept path (acceptPendingInvite) switched
+              // correctly. Read the org and mirror that path (`await
+              // loadTeams()` then `switchTeam(org_id)`, same order).
+              let invitedOrgId = ''
+              try {
+                const accepted = await inviteRes.json()
+                invitedOrgId = (accepted && accepted.org_id) || ''
+              } catch { /* unreadable body — fall back to the first-healthy pin */ }
               // #2538: propagate the accepted invite to wizard state so
               // loadTeams fires and the welcomeHasOrg chain triggers the
               // dashboard route guard (invited users skip onboarding).
-              await loadTeams().catch(() => {})
+              const acceptedTeams = await loadTeams().catch(() => null)
+              // Prefer the invited org only when it is PRESENT and NOT
+              // SUSPENDED — the #1912 rule is not weakened (a suspended
+              // membership never becomes the default). Skipped when the pin
+              // already landed on it (the single-membership invitee, which
+              // worked before this fix): switching then would only repeat the
+              // mount's own loads. When the roster read itself fails
+              // (`loadTeams` returns null — a transient fault, or a Round-12
+              // sign-out) the invited org cannot be checked at all, so nothing
+              // is selected and the mount's own pin stands: the fail-safe
+              // direction, since a switch to an unverifiable org could select
+              // a suspended one.
+              const invited = Array.isArray(acceptedTeams)
+                ? acceptedTeams.find((t) => t.org_id === invitedOrgId)
+                : null
+              if (invited && !invited.suspended_at && invitedOrgId !== orgIdRef.current) {
+                switchTeam(invitedOrgId)
+              }
             } else {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
@@ -4342,7 +4374,6 @@ function claimIntentInFlight() {
       sessionTokenRef.current = null
       setTeams([])
       setAuthed(false)
-      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
       bounceToAuth()
     }
     window.addEventListener('focus', onFocus)
@@ -4713,10 +4744,9 @@ function claimIntentInFlight() {
     // #1511: the key-only card is gone — after signOut the dashboard has NO
     // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
     // the absolute target) so the sign-out lands on the login page instead of
-    // the dead redirect shell. clearStoredSession is belt-and-braces (signOut
-    // already clears the cookie via the adapter; a blocked script is covered
-    // by the mount-effect redirect on next load).
-    if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+    // the dead redirect shell. Sign-out is the server `POST /api/session`
+    // (the fetch above), which clears the HttpOnly `__Host-session` cookie;
+    // there is nothing client-side to clear — the browser holds no session.
     bounceToAuth()
   }
 
@@ -5256,8 +5286,8 @@ function claimIntentInFlight() {
           // gate's.
           // (Named by symbol, never by line number: a citation into this file
           // is a claim that re-stales on the next edit above it.)
-          ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
-          : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
+          ? withLimitContact('You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.')
+          : withLimitContact('You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.'))
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -5510,7 +5540,8 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #4639: carry the STRUCTURED status so the banner's nudge gate
           // reads the 402 rather than guessing from the copy.
-          setError({ message: 'Graph limit reached for this tier — upgrade to add more graphs.', status: res.status })
+          setError({ message: withLimitContact(
+            'Graph limit reached for this tier — upgrade to add more graphs.'), status: res.status })
           return
         }
         if (res.status === 409) {
@@ -5518,7 +5549,10 @@ function claimIntentInFlight() {
           // OR API-key cap (the create mints the graph's first key; a full
           // key table rolls the graph back with a 409). The detail is
           // authoritative (plan §6.2 contract).
-          setError({ message: b.detail || 'Graph limit reached — delete a graph or upgrade.', status: res.status })
+          // #5425: the server's detail carries the contact route; the FALLBACK
+          // literal did not, so a 409 without a detail left the customer with
+          // no way to talk to us.
+          setError({ message: b.detail || withLimitContact('Graph limit reached — delete a graph or upgrade.'), status: res.status })
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)
@@ -5898,7 +5932,14 @@ function claimIntentInFlight() {
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
           // #4639: carry the structured 402 for the banner's nudge gate.
-          setError({ message: typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.', status: res.status })
+          // #5425: the server's string detail carries the contact route, but
+          // THIS fallback did not — a non-string or absent detail (proxied /
+          // empty body) left the customer at a tier ceiling with no way to talk
+          // to us. The server's own copies of this sentence are routed, so this
+          // one was the only silent copy (round 6).
+          setError({ message: typeof b.detail === 'string'
+            ? b.detail
+            : withLimitContact('Invites require the Builder or Team tier — upgrade to invite members.'), status: res.status })
           setBusy(false)
           return
         }
@@ -7528,11 +7569,35 @@ function claimIntentInFlight() {
                           ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
-                      if (capNotice) {
+                      // #2940: keyed on `capNotice` ALONE this arm was skipped on
+                      // the reachable build-fork cap path — the 402 mint handler
+                      // sets the wizard's own `wizardDurableCapped` (see the
+                      // `doneCanMintFresh` gate) and never sets `capNotice` — so
+                      // the lede below rendered "Create an API key and call the
+                      // Tortoise SDK from your app." directly above the body's
+                      // role="alert" reporting that the plan's key limit was
+                      // reached.
+                      // `!harnessKey` guards BOTH halves, because neither signal
+                      // is cleared by a successful paste — `capNotice` is raised
+                      // by the Keys-tab create/rotate 402 as well, and
+                      // `wizardDurableCapped` by this step's own mint 402 — so an
+                      // unguarded arm told a user who had just pasted a key to
+                      // paste one. A key in hand ends the cap arm.
+                      // The role arm above has already run, so a member never
+                      // reaches this branch.
+                      if ((capNotice || wizardDurableCapped) && !harnessKey) {
                         return <p className="welcome-lede">{isBuildFork
                           ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
                           : 'Paste an API key to connect your agent.'}</p>
                       }
+                      // #2940 (review P2): with a key in hand AND `capNotice` set
+                      // (Keys-tab 402, re-entered through the header Setup
+                      // button) the body renders the cap notice and the paste row
+                      // and no chooser at all, so falling through would put
+                      // wizardStepSub's "Pick which harness to connect." over a
+                      // body that offers no pick. Suppress the lede; the body's
+                      // own cap notice carries the state.
+                      if (capNotice && harnessKey) return null
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
                     return <p className="welcome-lede">{headSub}</p>
@@ -8900,7 +8965,7 @@ function claimIntentInFlight() {
                       accessible NAME (aria-labelledby) — a screen reader must
                       hear the gate, not a generic "Create a new organization". */}
                   <h3 id="create-org-title-limit">You can only have one free organization</h3>
-                  <p className="dim" id="create-org-desc-limit">Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.</p>
+                  <p className="dim" id="create-org-desc-limit">{withLimitContact("Individual users can create one organization. To create another, purchase a subscription for it — or upgrade your current organization.")}</p>
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     {/* #2392 (a11y): autoFocus moves focus INTO the dialog on
@@ -9053,7 +9118,9 @@ function claimIntentInFlight() {
             <ul>
               {alerts.map((a, i) => (
                 <li key={i}>
-                  <strong>{a.type}</strong> — {a.message}{' '}
+                  {/* #5425/round 7: `type` is our internal enum (recovery_velocity,
+                      flag, read_velocity) — the customer reads the human LABEL. */}
+                  <strong>{a.label || a.type}</strong> — {a.message}{' '}
                   <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
                 </li>
               ))}
@@ -9654,7 +9721,8 @@ function claimIntentInFlight() {
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
-                    <button className="ghost" onClick={upgrade}>Upgrade to add more</button>
+                    <button className="ghost" onClick={upgrade}>Upgrade to add more.</button>
+                    {LIMIT_CONTACT}
                   </span>
                 ) : (
                   <div className="inline-form">
@@ -10120,7 +10188,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.{LIMIT_CONTACT}</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

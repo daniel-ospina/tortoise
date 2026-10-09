@@ -45,6 +45,7 @@ E2E-6 → E5/P4 · E2E-7 → A1/M5 · E2E-8 → P1/P2/M2 · E2E-9 → E6/A2 · E
 | epic-decompose | MECE verifier | ✅ MECE CLEAN (2 blocking fixes + re-verify) |
 
 ## Known intentional gaps (owner-approved, not defects)
+
 - E6/R6 in-scope-sequenced-last (post-baseline) — measured in the capstone's follow-up run
 - 1k benchmark — owner-gated, not automatic
 - Reader A/B (2×2) — deferred to V5

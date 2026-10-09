@@ -48,6 +48,7 @@ I'll ask you a few questions — answer yes or no."
 PRs, so when you ask about past decisions, your agent will know what happened."
 
 **If yes:**
+
 1. Ask: "What's your GitHub organization or username?"
 2. Call `tortoise_onboarding_github_connect(org=<answer>)`. This returns an
    `auth_url` — tell the user to open it in their browser to authorize.
@@ -70,6 +71,7 @@ items with a lifecycle record — no claim extraction. This runs in the
 background — you'll see results in your next session."
 
 **If yes:**
+
 1. Call `tortoise_onboarding_github_index(org=<org from Q1>)`. Returns a
    `job_id`.
 2. Show: "✅ Indexing started (job: [job_id]). Issues become work items
@@ -84,6 +86,7 @@ background — you'll see results in your next session."
 
 **Ask:** "Record your agent sessions as memory? Here's what this actually
 means:
+
 - **What's recorded:** session turns are extracted into memory (Session +
 turn points) and filed to your team's graph.
 - **Default:** recording is ON by default — covered by the ToS you accepted
@@ -99,6 +102,7 @@ turn points) and filed to your team's graph.
   sessions stay."
 
 **If yes:**
+
 1. Call `tortoise_onboarding_session_recording(enabled=true)` — writes the
    `session_recording` flag (the same key the dashboard's Memory sources
    off-switch reads — one source of truth). The flag defaults ON; if it's
@@ -115,6 +119,7 @@ turn points) and filed to your team's graph.
    fallback: a stdio agent must not silently bypass the capture gate.)
 
 **If no:**
+
 1. Call `tortoise_onboarding_session_recording(enabled=false)` — writes the
    off-switch flag (`session_recording=false`) the same way the dashboard's
    Memory sources toggle does — one source of truth. Quiet off-switch: no
@@ -129,6 +134,7 @@ turn points) and filed to your team's graph.
 looks like — a few decisions connected by evidence and contradictions."
 
 **If yes:**
+
 1. Create the demo graph with `tortoise_onboarding_demo_create()` — idempotent,
    builds a 4-layer demo (decisions + evidence + operators).
 2. Call `tortoise_summarize_structure()` to get graph stats.
@@ -150,6 +156,7 @@ looks like — a few decisions connected by evidence and contradictions."
 directory of markdown files, I can index them into your memory."
 
 **If yes:**
+
 1. Ask: "What directory contains your markdown files? Provide an absolute path."
 2. Set expectations BEFORE calling: "Indexing can take a few minutes for large
    corpora (a few hundred files ≈ minutes on embedded; it runs in the

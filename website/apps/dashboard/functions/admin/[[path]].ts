@@ -40,6 +40,7 @@
 
 import { type Env, SESSION_COOKIE, getSession, readCookie } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
+import { isUserTokenRejection } from "../_shared/auth/supabase";
 import { ADMIN_CSP } from "../_shared/security-headers";
 
 const AUTH_PATH = "/auth";
@@ -140,7 +141,9 @@ async function verifySession(env: AdminGateEnv, handle: string): Promise<Session
  */
 async function isAdmin(env: AdminGateEnv, accessToken: string): Promise<{ kind: AdminCheckKind }> {
   try {
-    const res = await fetch(`${env.SUPABASE_URL ?? ""}/rest/v1/rpc/is_admin`, {
+    // Trailing slash removed: `SUPABASE_URL=…/` would otherwise build
+    // `//rest/v1/rpc/is_admin`. Same normalisation as the /api/sb proxy.
+    const res = await fetch(`${(env.SUPABASE_URL ?? "").replace(/\/+$/, "")}/rest/v1/rpc/is_admin`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -152,10 +155,17 @@ async function isAdmin(env: AdminGateEnv, accessToken: string): Promise<{ kind: 
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
-      // A rejected USER token means re-authenticate. Anything else (a missing
-      // RPC, a rotated key, a 5xx) is OUR problem and must be 503 — showing
-      // "not an admin" would be a lie that costs an hour to debug.
-      if (res.status === 401 || res.status === 403) return { kind: "unauthenticated" };
+      // A 401/403 is AMBIGUOUS: it is produced both by a rejected USER bearer
+      // (PostgREST `PGRST301` / `JWT expired`) and by a rotated/wrong
+      // `SUPABASE_ANON_KEY` (the gateway rejecting the SERVICE credential).
+      // Only the BODY can separate them. A rejected user token means
+      // re-authenticate; anything else — a gateway/service-key fault, a missing
+      // RPC, a 5xx — is OUR problem and must be 503, never a bounce that reads
+      // as "your session is stale" (#3485). Same classifier as
+      // `api/sb/[[path]].ts::checkAdmin`, so the two surfaces agree.
+      if (isUserTokenRejection(res.status, await res.text().catch(() => ""))) {
+        return { kind: "unauthenticated" };
+      }
       return { kind: "unavailable" };
     }
     const isAdminUser = (await res.json()) === true;

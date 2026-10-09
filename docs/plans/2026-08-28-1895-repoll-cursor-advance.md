@@ -42,6 +42,7 @@ aboutObjects: github-index-cursor, tortoise-github-indexer
 > **Findings date:** 2026-08-28. **Gate skipped:** plan touches ZERO new third-party dependencies (stdlib + in-repo patterns only — `github_map._norm_issue`, the existing `_inside_cursor` skip rules, the existing `since`/DRAIN walk). Step A (prior research intake) ran: the #1895 issue body (O/I/T + context + research-needed), the P1-4 DRAIN design (PR #1792), T2-P4 composite-cursor design, and the three divergence approaches below, all re-verified against source this session.
 
 **Codebase-verified mechanics:**
+
 - GitHub stream order (`sort=updated&direction=desc`) delivers each exact `updated_at` second as a **contiguous run**; within-second tie order is unspecified. A per-second buffer can therefore always be completed by waiting for a different second (or walk end) — no extra ordering information is needed. **Assumption (documented, same contract the existing composite cursor already makes):** the stream is globally non-increasing in `updated_at`, so each second's items arrive contiguously across pages. GitHub guarantees `sort=updated` ordering; within-second ties are the only unspecified axis (neutralized by the buffer). Defensive hardening (merge same-second sub-blocks across a second-transition) is possible but not required — the current code fails identically under any non-contiguous stream, so A1 is never a regression on this axis.
 - The composite cursor is exact-once **iff** every minted boundary second's processed set is an ASC prefix — the number tiebreak `<= cursor.number` then decides the boundary exactly. The fix must make this a **structural invariant** (never mint from a partial second-block), not a representational workaround.
 - GitHub's `since` is inclusive and carried in Link next-URLs (DIFF window = `[cursor.updated_at − 1s, ∞)`; DRAIN strips `since` for the full walk) — unchanged by this plan; the DIFF window's `−1s` conservative over-fetch (the boundary second **and** the previous second re-probed idempotently) is pre-existing and preserved.
@@ -64,6 +65,7 @@ aboutObjects: github-index-cursor, tortoise-github-indexer
 **Mechanism (validated end-to-end on the production shape):** in `_fetch_items`, drop the two per-page re-sorts. Buffer each exact `updated_at` second as a contiguous run (the API stream is updated-DESC, so each second arrives as one contiguous block; the block is complete when a different second appears or the walk ends). Flush each **complete** block sorted `(updated_at, number)` ASC, feeding items through `_inside_cursor` and the cap. A cap/quota cut lands **mid-flush of a complete block** — the processed set at the cut second is by construction a contiguous ASC prefix, so the minted composite cursor always expresses the true processed set. The unprocessed buffered high numbers are dropped and re-fetched next run (DRAIN refetches from the top anyway). Plus the small `index_repo` fix: a **0-processed run that did not cap/quota-cut mints a CLEAN boundary cursor from the input cursor** (drops `truncated`), so a fully-drained backlog exits DRAIN.
 
 **Rationale (outcome quality):**
+
 - **Structural, not representational:** the prefix invariant is guaranteed by construction (a partial second-block is never flushed), so the loss variant is **impossible** — not just mitigated. The freeze variant is impossible twice over: the boundary always advances while backlog remains (each run drains ≥ 1 new ASC-prefix chunk ≤ cap), and the truncated-clear path exits DRAIN once drained.
 - **Exact cap preserved:** processing stays `<= cap` exactly (hard ceiling, `_MAX_ITEMS_PER_RUN = 500` stays meaningful for cost control).
 - **Zero schema churn:** cursor shape unchanged (`{updated_at, number[, truncated]}`); hosted_api models/validation/tests untouched; the legacy frozen cursor `{1425, truncated, S}` is *healed in place* by the same machinery (first DRAIN run either drains or 0-processed-clears).
@@ -71,6 +73,7 @@ aboutObjects: github-index-cursor, tortoise-github-indexer
 - **Production cost is bounded and terminating (during the drain):** per-run fetch = the full DRAIN walk (~19-20 pages on the production repo — the boundary block S is the walk's FINAL second, so A1 must fetch through the stream end to complete it; same order as today's frozen runs, which already re-walk the full stream at 0 processed) but the state machine terminates: RUN1 500 → RUN2 500 → RUN3 500 → RUN4 385 → RUN5 (DIFF) clears the production freeze, vs today's infinite re-walk. Cap bounds PROCESSED/write volume (≤ 500 — the real cost control). **Fetch-cost caveat (plan-verify cycle 1):** when the cap cuts on the walk's FINAL second (production: the 1425-item S block is the oldest active second), A1 fetches the entire remaining stream before flushing — a FIRST run under today's code stops fetching at the cap (~page 5); A1 fetches to the stream end (~19 pages). On a repo whose oldest active second is a mass-update (tens of thousands of issues) every DRAIN/DIFF poll re-walks the full stream — tracked as a follow-up (fetch-budget guard, §Follow-ups); the drain path itself is unaffected (today's frozen runs already walk the full stream). **Steady-state caveat (post-drain — empirically verified, plan-verify cycle 1):** the DIFF window `[cursor.updated_at − 1s, ∞)` re-probes the pre-boundary second each poll (DIFF `_inside_cursor` skips only the cursor's own second); on a dense-boundary repo the probe consumes the whole cap and mints a cursor REGRESSED to the older second + re-stamps `truncated`. Verified 4-poll cycle on the production shape: `{S+1,1885} → {S,500,truncated} → {S,1000,truncated} → {S,1425} → {S+1,1885} → …` (poll 1 DIFF re-probes the S block and caps mid-block → `{S,500,t}`; poll 2 DRAIN processes exactly 500 more (#501..#1000) → `{S,1000,t}` — NOT 1040, which belongs to the initial drain from 40; poll 3 drains the remaining 425 → clean `{S,1425}`; poll 4 DIFF re-probes idempotently → `{S+1,1885}`. Truncated re-stamped on 2 of every 4 polls; every poll re-walks the full stream on this shape — the since-window covers the entire stream). Idempotent (0 mints, no loss), correct, but not "free" — the issue's headline symptom ("re-polls keep running DRAIN") recurs in milder form. Tracked by the MANDATORY fast-follow issue filed with this PR; the naive monotonic-skip fold-in is UNSAFE (skips the DRAIN backlog — §Follow-ups) and must NOT be added here.
 
 **Edge cases (each traced + most empirically validated):**
+
 - **Quota break mid-block:** `quota_check` fires per-item in `index_repo` against the ASC-flushed list ⇒ break leaves a prefix at the boundary ⇒ cursor `{S, N, truncated}` valid; next DRAIN resumes at the tail. (Existing `test_quota_break_stamps_truncated_cursor` covers the single-page case; `test_quota_break_at_item_zero_keeps_truncated` covers the break-before-first-item branch.)
 - **`issues_beyond_window` on a 0-processed clear run:** `total_estimate` (rel="last" upper bound) still reports the full stream total, so the truncated-clear run can show "N issues beyond window" while actually draining nothing — a pre-existing reporting quirk (any full-walk DRAIN run reports the total); the number is an upper bound over the whole stream, not a backlog measure. Not changed by this fix.
 - **Exact-cap-multiple end:** 500 new items, cap 500 ⇒ run mints `{S, 500, truncated}` honestly; next run 0-processed ⇒ truncated-clear mints clean `{S, 500}` ⇒ next run DIFF (validated).
@@ -96,6 +99,7 @@ aboutObjects: github-index-cursor, tortoise-github-indexer
 ### Task 1: Rework `_fetch_items` — second-buffered ASC flush
 
 **Files:**
+
 - Modify: `tortoise/indexer/github_indexer.py` (`_fetch_items`, ~line 312-410)
 - Test: `tests/test_github_indexer.py`
 
@@ -151,6 +155,7 @@ def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
 **Step 2:** Run it — verify it FAILS on the current code (run 1 cursor `{S, 1425, truncated}`; the `#1/#40/#41/#1385` assertions fail).
 
 **Step 3: Implement** — replace the `_fetch_items` walk loop with the second-buffered flush. Exact change:
+
 - Delete both per-page `batch = sorted(batch, key=..., reverse=True)` blocks (the re-sort becomes a per-**block** ASC sort inside the flush). ⚠️ The SECOND site (the post-fetch `batch = sorted(r.json(), ...)`) ALSO rebinds `batch` — when deleting the sort, keep the rebind as `batch = r.json()` followed by the unchanged `urls = self._link_header_urls(...)` / `next_url = urls.get("next")` / `total_estimate` refresh; losing the rebind re-iterates the stale batch forever (infinite loop against a non-empty page).
 - Insert a `_flush(block)` closure + the `current_second`/`block` buffering in the walk loop (see pseudocode below).
 - Update the docstring (new `#1895` paragraph).
@@ -206,6 +211,7 @@ def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
 ### Task 2: `index_repo` — truncated-clear on clean 0-processed drain
 
 **Files:**
+
 - Modify: `tortoise/indexer/github_indexer.py` (`index_repo` cursor mint, ~line 754-786)
 - Test: `tests/test_github_indexer.py`
 
@@ -334,6 +340,7 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 ### Task 3: Mock — deterministic within-second shuffle mode
 
 **Files:**
+
 - Modify: `tests/_github_mock.py` (`MockGitHubTransport.__init__` + issues handler)
 - Test: `tests/test_github_indexer.py`
 
@@ -362,6 +369,7 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 ### Task 4 (optional, stretch): hosted_api-level re-poll drain
 
 **Files:**
+
 - Test: `tests/test_github_index_lifecycle.py` (extend the existing `mock_github` pattern with a cap-limited transport)
 
 `test_repoll_drains_and_clears_truncated_persisted`: seed a transport with an **exact cap-multiple shape — 600 items @ one second S, page_size 100** (the PRODUCTION shape would need FOUR runs — initial poll + 3 DRAIN re-polls, three of them cap-truncated — to clear truncated: 40→540→1040→1425, run 4 uncapped — so a single re-poll cannot demonstrate the clear; plan-verify cycle 1). Sequence: POST `/v1/index/github` → run 1 truncates at 500 → persisted cursor `{S, 500, truncated}`; POST `/v1/index/github/re-poll` (DRAIN) → drains 100 → persisted cursor clean `{S, 600}` (no `truncated` key); POST re-poll again → DIFF — assert `github_index_cursor["acme/repo1"] == {"updated_at": S, "number": 600}` AND that re-poll's first issues request carries `since` (via `transport.issue_query_params()`), 0 new nodes. Optional because the indexer-level tests (Tasks 1-2) cover the acceptance; this one proves the persistence round-trip end-to-end.
@@ -369,11 +377,13 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 ## Testing Strategy
 
 **Existing tests that verify behavior (must stay green — all traced, docker lane verified on HEAD):**
+
 - `tests/test_github_indexer.py`: `test_drain_mode_drains_backlog_across_runs` (multi-run DRAIN), `test_cursor_same_second_boundary` (cap=1 same-second exact-once), `test_cursor_persists_and_stops_walk` (exact cursor dict), `test_truncation_reports_issues_beyond_window`, `test_quota_break_stamps_truncated_cursor`, `test_quota_check_error_re_raised`, `test_mid_walk_401_honest_fail`, `test_fetch_error_raises_for_transport`, `test_rerun_zero_new_nodes`, lifecycle/object-only tests, PR tests.
 - `tests/test_github_index_lifecycle.py`: `test_cursor_and_backfill_marker_persisted`, `test_issue_ingest_no_longer_consumes_points_quota` (clean cursor, no truncated), `test_resolve_repos_failure_preserves_persisted_cursors`, `test_second_run_full_org_with_cursors`, `test_state_keys_survive_patch_roundtrip`.
 - No existing test asserts a truncated cursor STAYS truncated on a 0-processed run (grep-verified) — the truncated-clear breaks nothing.
 
 **New tests (all in `tests/test_github_indexer.py` unless noted):**
+
 1. `test_second_block_spanning_pages_drains_and_advances_boundary` — the issue-required integration test: ≥2 consecutive capped runs over a synthetic backlog advance the boundary and eventually clear `truncated`; exact production shape (1425 @ one second + 460 newer); asserts the no-loss Object census including the pre-fix-skipped low numbers.
 2. `test_exact_cap_multiple_mints_clean_and_next_run_is_diff` (+ `test_truncated_clears_on_zero_processed_drain`) — review round 2: an exact-cap-multiple run now mints CLEAN `{S, 500}` in ONE run (the walk-end flush no longer stamps a spurious `truncated` when the final block is fully consumed — no wasted DRAIN re-walk); a legacy truncated cursor whose backlog is already indexed still heals (0-processed DRAIN → clean cursor + `gap_audit_required` marker).
 3. `test_stuck_truncated_cursor_clears_on_empty_drain` — the legacy frozen-cursor shape heals: 0-processed DRAIN mints a clean cursor (+ `gap_audit_required` marker, round 2).

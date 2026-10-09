@@ -19,6 +19,7 @@ created: 2026-08-13
 ## Substep 1 — User Journeys
 
 **Personas:**
+
 - **P1 — SDK operator:** an agent or engineer calling the Tortoise Python SDK (direct or via MCP).
 - **P2 — Hosted tenant:** a team using `/v1` endpoints on the hosted platform.
 - **P3 — Graph maintainer:** the operator responsible for graph health (ops/engineering).
@@ -140,6 +141,7 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 | Message state | graph-persisted (above) | **No new store.** Warm-start = `run(warm_start=True)`: load graph messages (existing), skip updates with Δ ≤ γ, flush back (existing). No in-memory mirror → no two-sources-of-truth. Cache-key discipline: `(op_id, claim_id, rel_type)` + separate forward/back slots. |
 
 **Integrity constraints (engine level):**
+
 - `confidence` + `lastDreamedAt` written in the SAME Cypher query (dream.py L112 atomic-SET pattern extended — the per-claim loop is L109-117) — never two interleavable writes (surface 5 atomicity).
 - `lastDreamedAt` updated ONLY when the run converges for that region; non-converged affected claims keep their old stamp (so they re-enter the staleness ranking — retention and freshness don't undermine each other).
 - **Status→live transitions (`promote_point` and any equivalent) call `_mark_dirty`** (verified gap: sdk.py L1835 does not today); `dream()` does NOT clear dirty roots on converged runs that produced zero affected claims (draft-excluded runs — #780).
@@ -173,6 +175,7 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 **Terminology note (scope↔plan):** the scope doc's "carry over the math" / "carried-over refresh" = the plan's **warm-start** (reuse the prior pass's graph-persisted message state, skip deltas ≤ fixed γ). Same mechanism; the plan standardizes on "warm-start" with this mapping note.
 
 **Key architecture decisions (from review):**
+
 - **Warm-start state lives in the graph, not in a process-level cache.** Because messages are already persisted on edges and `run()` already loads them at entry, warm-start needs no new cross-run store — eliminating the hosted-mode problem (SDK rebuilt per drain would have killed an SDK-scoped cache) and the fast-path race (only `warm_start=True` runs, which are Dreamer-locked, engage the γ-skip). Invalidation is a write-path graph/cache operation (drop messages for affected edges), not a cache-owner lifecycle.
 - **No new concurrency surface beyond existing locks.** `Dreamer._lock` covers dream-cycle runs; `compute_confidence` calls `run(warm_start=False)` and never touches γ-skip state. Write-path invalidation acquires `Dreamer._lock` (or defers via topology-version check at next run — implementation choice, must be race-tested).
 - **Null-semantics split:** scheduler ranks null = stalest (first-deploy/crash recovery works); report displays "never dreamed". No special-case handling anywhere else.
@@ -196,19 +199,23 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 **Contract-first — all interfaces:**
 
 **I1 — SDK `dream()`** (backward-compatible, additive):
+
 ```
 dream(dirty_only: bool = True, full: bool = False, mode: str | None = None,
       max_hops: int = 2, budget: int | None = None) -> dict  # budget=None → the existing
       # _bfs_select_operators 200-operator selector cap — every pass is bounded by
       # construction; an explicit budget overrides it
 ```
+
 **Precedence (explicit — resolves the review P1):**
+
 1. Explicit `mode` (∈ {"local", "stale-first", "full"}) **wins over** the `full`/`dirty_only` sugar.
 2. `full=True` maps to `mode="full"` **only when `mode is None`**.
 3. `mode=None` + `full=False` → auto-select by context (write → local; scheduled → stale-first; small-graph/first-run → full).
 4. `mode` × `_dirty_roots`: `local` operates on dirty roots (and unions explicit anchors); `stale-first` operates on the staleness-ranked window (dirty roots always unioned in, per W2); `full` ignores dirty roots.
 
 **Per-mode return shapes (explicit key sets):**
+
 - `local`: `{mode, iterations, converged, affected_claims, budget_used, coverage}` — `converged` retained for sdk.dream()'s dirty-root logic (reads `result.get("converged")`).
 - `stale-first`: `{mode, batches, converged_all, converged, affected_claims, budget_used, coverage}` — `converged` = this pass's window-level convergence (used by the dirty logic); `budget_used` = distinct operators processed after dedup.
 - `full`: `{mode, batches, total_affected, converged_all, budget_used, coverage, scanned_count}` (existing `batches/total_affected/converged_all` preserved; `scanned_count` = operator-less claims trivially stamped by the scan path — matches DE2E-1).
@@ -240,6 +247,7 @@ dream(dirty_only: bool = True, full: bool = False, mode: str | None = None,
 Each case is implementable as an automated test. **Harness (fixed per review):** hermetic embedded pattern per `tests/test_dream.py` (tempfile-backed `TortoiseSDK`, claims `status="live"` for the #780 draft filter) — NOT `tests/test_ep_directional.py`, which is Docker-gated (FalkorDBLite lacks live-docker graph semantics; its numeric cascades are calibrated against live FalkorDB). Docker-gated variants get hermetic twins; numeric thresholds re-locked at calibration on the embedded runner. No G-gates corpus fixture exists in code — a dedicated **EP-parity fixture builder** is defined below. Per-test fresh fixtures (uuid-namespace/tempfile) → order-independent under pytest-randomly; in-process state (hosted metrics, dirty sets) reset per test.
 
 **Fixtures (shared builders):**
+
 - `F1 — EP-parity corpus`: deterministic builder (defined in this epic's test module; ~60 claims / 20 premises / 25 IMPL edges / 6 derivation trees / 10 contradictions / 5 near-dups — synthetic corpus v1 shape from the eval spec, realized as code with fixed seed). Used for DE2E-6a/6b.
 - `F2 — staleness fixture`: regions manufactured by **direct Cypher `SET lastDreamedAt` with fixed ISO timestamps** (never wall-clock dreaming — sub-second passes would produce identical stamps → flaky) + one null-stamp region.
 - `F3 — fails-to-converge fixture`: dedicated builder with a specified oscillating structure (strong opposing baselines on a mutual/triangle NAND loop; structure verified at calibration to fail convergence within max_iter — the eval-spec B7 odd-NAND triangle is NOT suitable: it currently converges trivially).
@@ -247,6 +255,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - `F5 — diagnostics fixture`: representative synthetic graph (pinned node/edge counts + fan-out distribution); real-snapshot run optional/skipped in CI.
 
 **DE2E-1 — Full-graph refresh covers every reachable claim** (E2E-1)
+
 - Setup: F2-style fixture with ≥3 disconnected regions, each with ≥1 operator; mix of live claims + ≥1 operator-less/isolated claim; record pre-pass confidence.
 - Act: `sdk.dream(full=True)`; capture t0/t1 around the call.
 - Assert: every non-operator reachable claim has `lastDreamedAt` in [t0, t1] (window assertion — never exact-equality to an implicit pass timestamp); operator-less claims stamped by the **trivial-scan path** (explicit query, independent of EP flush) and reported separately from reachable (total_affected = reachable only; scanned_count = operator-less stamped); `converged_all` True; return shape per I1 full key-set.
@@ -254,6 +263,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - **Atomicity sub-case:** injected partial failure mid write-back → both `confidence` and `lastDreamedAt` present or neither (same-query rule, surface 5).
 
 **DE2E-2 — Stale-first pass is bounded, staleness-ranked, deduped** (E2E-2)
+
 - Setup: F2 staleness fixture (old / medium / fresh / null stamps, fixed ISO) + a retained-dirty root outside the top-N.
 - Act: `dream(mode="stale-first", budget=<B>)` repeatedly to full coverage.
 - Assert: **primary outcomes** (not window-mechanics coupling): per-pass `budget_used ≤ B` (distinct operators after dedup — overlapping windows share operator sets, union not recompute); stalest region first each pass (null ranks first; deterministic id tie-break); retained-dirty root included despite being outside top-N (union); eventual full coverage within a bounded number of passes; all-null graph → single pass (window = full).
@@ -261,6 +271,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - **Index sub-assertion (D2-3):** the `:Point(is_operator, lastDreamedAt)` index exists (idempotent at init for ALL DBs) and the ranking query uses it (query-plan or presence check); null-inclusion semantics pinned (nulls rankable as stalest — via index inclusion or explicit null-scan union).
 
 **DE2E-3 — Write-triggered refresh keeps isolation + precedence matrix + operator-less write** (E2E-3)
+
 - Setup: freshly written claim + unrelated claims in another region.
 - Act: write → `_mark_dirty` → `dream()` (default local).
 - Assert: affected claims refreshed; unrelated claims |Δconf| ≤ 0.01 (G7, re-locked at calibration); return shape pinned to I1 local key-set `{mode, iterations, converged, affected_claims, budget_used, coverage}` (concrete, typed — not "backward-compatible" vagueness).
@@ -269,28 +280,33 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - **Write-path structural sub-case (D2-5):** the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path.
 
 **DE2E-4 — Freshness signal on reads; draft→promote stays stale** (E2E-4 — report endpoint cut; freshness assertions re-scoped)
+
 - Setup: F2 staleness fixture (3 stamped regions + null region) + a live claim that is then demoted to draft and promoted back.
 - Act: read a claim via `get_point` (assert `lastDreamedAt` present on the read — free via properties); then a dream pass.
 - Assert: each claim's `lastDreamedAt` is present and matches the last pass that touched it (null-stamp claim has null until a pass touches it); **draft→promote negative (fixed):** after demote+promote the claim re-enters `_dirty_roots` (promote→_mark_dirty fix) and the next pass re-stamps/re-derives it — asserted on the dirty-set/next-pass effect (dirty ≠ stale; the scheduler behavior is DE2E-2's null-ranks-stalest, not a report assertion).
 - **Zero-affected retention sub-case:** draft-only dirty roots + converged run with zero affected claims (#780 draft-excluded) → roots REMAIN dirty and are re-dreamed after promote.
 
 **DE2E-5 — Lifecycle events absorb into dreaming + invalidation on transfer** (E2E-5)
+
 - Setup: a claim + its operator; then supersede (L1777), invalidate (L1475), approve_merge (transitive L2616).
 - Act: after each lifecycle write, run a dream pass.
 - Assert: both endpoints enter dirty set; **transferred edges' `msg_*`/`back_msg_*` properties are DROPPED** after supersede/invalidate/approve_merge (graph-queryable observable — not "dream log" vagueness); surviving node re-derived confidence equals a from-scratch recompute within 1e-3.
 
 **DE2E-6a — Warm-start equivalence (hard gate)** (E2E-6a)
+
 - Setup: F1 EP-parity corpus; fixed seed.
 - Act: run from-scratch (`warm_start=False`); mutate evidence; run warm-started (`warm_start=True`) **with NO message-flushing run interleaved between mutation and the warm-started execution** (prevents vacuous pass: a from-scratch reference run after mutation would re-flush fresh messages, hiding broken invalidation).
 - Assert: `(iterations, converged, max|Δconf|)` within tolerance vs an isolated from-scratch run on the same post-mutation state — tolerance pinned at max|Δconf| ≤ 1e-3 (consistent with `test_rerun_stability_immutable_baselines`), re-locked at calibration; `converged` equality asserted; iterations recorded, not gated. MUST pass — failure blocks shipping warm-start (fallback: γ-skip disabled; epic targets still met).
 - Negative cases (each: mutate → warm-started directly, no interleaved flush): (a) delete an operator; (b) supersede (edge transfer); (c) baseline change with identical topology; (d) **non-converged run flushes messages → warm-start** still equivalent (ep.py flushes on non-convergence — torn-seed risk); (e) **simulated partial flush** (crash mid-`_flush_cache`) → warm-start equivalence holds within tolerance → equivalence still holds (outcome assertion, not message-absence mechanism).
 
 **DE2E-6b — Warm-start cost (measurement)** (E2E-6b)
+
 - Setup: F1 fixture.
 - Act: record factor-update count + wall time, warm vs from-scratch.
 - Assert: **metric presence/recording only** — never wall-clock thresholds (CI variance would flake); savings surfaced in health metrics for the diagnostics decision.
 
 **DE2E-7 — Non-converged region retained, not stamped fresh, retried with cap** (E2E-7)
+
 - Setup: F3 fails-to-converge fixture; Dreamer attempt-cap configurable + backoff/clock injected (no real sleeps — flaky/slow otherwise).
 - Act — **two explicit sub-scenarios, non-disjunctive:**
   - 7a: dream → non-converged → inspect dirty set + stamps → resolve conflicting evidence → dream again.
@@ -299,21 +315,25 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - Assert 7b: region dropped from dirty set + surfaced as `stale_unresolved` in health metrics with pinned metric fields (attempt count, backoff state).
 
 **DE2E-8 — Dream health observable, silent death detectable** (E2E-8)
+
 - Setup: dreamer with stale backlog; in-process metrics/worker state reset per test (conftest `_reset_ip_rate_limits` pattern). Alarm trigger defined **counter-based** (not wall-clock): backlog > 0 ∧ output count == 0 since last pass.
 - Act: hosted — GET `/v1/dream/health`; embedded — `dream_health_check()`; MCP — `dream`/`dream_health_check` tools (no staleness_report tool — cut at human gate 2).
 - Assert: last-pass ts, coverage %, failure rate, operator counts surfaced (both surfaces); **alarm fires** when backlog > 0 AND zero output (EP stubbed to no-op via monkeypatch — layer-scoped); **positive-control (fixed):** non-empty backlog + a real converging run that produces output → alarm MUST NOT fire (an implementation that fires on backlog alone fails this — catches the ignored-output-conjunct bug); **MCP error mapping:** `BudgetExceededError` → ERR_QUOTA, unknown mode → ERR_INVALID_ARG (mcp_server.py:497 codes); no false positive on healthy idle.
 
 **DE2E-9 — Freshness reduces staleness error (Indicator 3 acceptance)** (E2E-9)
+
 - Setup: F4 frozen-ground-truth fixture (oracle on sandboxed clone). **Fixture validation step:** assert a from-scratch recompute on the mutated fixture moves confidence by > ε (otherwise the test is trivially green/flaky — the mutation must be load-bearing). Mutated region is **forced to be the stalest-ranked** (so the coverage→error test measures the causal path).
 - Act: measure stale-error = mean |Δ| (stale confidence vs oracle); run stale-first passes with increasing coverage (coverage per I1 stale-first semantics: affected / remaining-stale-before-pass); re-measure.
 - Assert: error shrinks below the pinned threshold — **ε = mean |Δ| ≤ 0.01, X = coverage ≥ 80%** (re-locked at calibration); error curve recorded in health metrics; eval spec gains this staleness-error gate next to G7 (thresholds pinned BEFORE implementation, not tuned post-hoc).
 
 **DE2E-10 — Graph-scale diagnostics gate** (E2E-10)
+
 - Setup: F5 representative synthetic fixture (pinned counts/fan-out); real-snapshot run optional (skipped in CI — external dependency).
 - Act: run diagnostics script.
 - Assert (**automated = measurable invariants only**): node/edge counts > 0; fan-out distribution sums to edge count; region/neighborhood sizes and connected-component stats emitted. **The stale-first-vs-full decision is a HUMAN gate** recorded in epic docs (not a CI assertion — a "decision recorded" assertion can't fail meaningfully); if full wins at our scale, items 3–5 are simplified via a recorded plan amendment BEFORE implementation.
 
 **DE2E-11 — Hosted budget accounting (#329), 429 contract, mode-wiring parity** (new — surface 6)
+
 - Setup: hosted fixture with capped hourly full-pass bucket; two tenants.
 - Act: tenant A — `/v1/dream` mode=full twice (bucket cap); then mode=stale-first; tenant B — full-mode interleave.
 - Assert: **full-mode passes (incl. via override) consume the #329 bucket; stale-first window passes do NOT** (bounded solely by per-pass operator budget); exhaustion returns **429 with `Retry-After` header** (seconds until hourly reset); rejection is explicit (error body), never silent; two-tenant interleave does not corrupt per-tenant accounting (surface 6 race).
@@ -321,6 +341,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - **Scope note (D3-5):** adding `Retry-After` to the pre-existing full-mode 429 is a CONSCIOUS scope addition (consistent with the §6.1 contract) — recorded here so it isn't silent creep.
 
 **DE2E-12 — Concurrency + crash recovery** (new — surfaces 3/7/8)
+
 - Setup: single-SDK embedded (redislite is not multi-connection-safe — multi-SDK variants gated to live FalkorDB); injectable failure points for crash simulation.
 - Cases: (a) **single-SDK threaded concurrent dreams** — `Dreamer._lock` serializes; assert identical results within tolerance (not bitwise); (b) **write-during-dream race** — supersede/baseline landing mid `warm_start=True` pass → no stale-message reuse, consistent final state (lock- or version-check-tested); (c) **fast-path interleave** — `compute_confidence` + dream without γ-skip corruption; (d) **crash-mid-pass** — fail between write-back batches (drop in-memory dirty set) → un-stamped claims re-selected by the next scheduled stale-first pass (self-heal); document embedded-write-triggered-only residual (no daemon, #176).
 

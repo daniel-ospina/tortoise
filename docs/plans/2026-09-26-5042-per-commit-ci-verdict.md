@@ -183,6 +183,7 @@ re-derives one.
 `tests/test_ci_verdict.py` covers the checklist, the polarity decisions, group separation, read
 failure and truncation; the CLI exits 2 (never a verdict) when the surface cannot be read.
 **Files:**
+
 - Create: `tools/ci_verdict.py`
 - Create: `tests/test_ci_verdict.py`
 - Create: `docs/plans/2026-09-26-5042-per-commit-ci-verdict.md` (this file)
@@ -205,7 +206,7 @@ seam is covered); pagination shortfall → read failure; missing `total_count` �
 body → read failure; partial read → exit 2; CLI exit codes 0/1/2/3/4.
 
 **Step 4 smoke (recorded 2026-09-26; sha corrected 2026-09-26 review):**
-`python3 tools/ci_verdict.py --repo daniel-ospina/tortoise <full-40-hex-sha>` —
+`uv run python tools/ci_verdict.py --repo daniel-ospina/tortoise <full-40-hex-sha>` —
 `main@99a98ddc5a37304b80232ba61d1a0a70f4fcf026` → `red` (24 groups, 2 red — a real pre-existing
 `Post-merge validation / lint` base red); PR 5406 head → `red` (48 groups). A **short** sha
 (e.g. `99a98ddc5`) is refused with exit 2 (`_require_full_sha`) — the earlier record quoted the
@@ -252,6 +253,7 @@ reads it, or the migration changes merge behaviour.
 **Intent:** The rail's `check_surface_probe` is the largest re-derivation site; it must read the
 verdict, not a per-name rollup.
 **Acceptance:**
+
 - The probe's green/red/pending decision is the verdict, and the rail feeds its **already-fetched**
   payload through the pure function (the CLI's `--check-runs-json`/`--runs-json` seam). The run map
   must be built **unconditionally** (not only on reds) and must carry `workflowDatabaseId` as well as

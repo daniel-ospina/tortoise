@@ -15,6 +15,7 @@ created: 2026-07-08
 ## Problem
 
 Points need two-axis attribution:
+
 - **Who** said it (Agent — human or AI)
 - **On whose behalf** (organizational unit — Role, Team, or Organization)
 
@@ -25,6 +26,7 @@ The spectrum runs from solo vibecoders (one person, multiple products, no formal
 ### 1. PROV-O: `actedOnBehalfOf` is the W3C standard
 
 The canonical provenance ontology models exactly this split:
+
 - `prov:Agent` performs an activity
 - `prov:actedOnBehalfOf` — Agent A acts on behalf of Agent B; B retains responsibility
 - Standard example: `:derek` `actedOnBehalfOf` `:national_newspaper_inc`
@@ -34,6 +36,7 @@ This is a delegation pattern, not direct attribution. The acting agent is record
 ### 2. Mem0: four-scope memory model
 
 Mem0 tags every memory write with at least one of: `user_id`, `agent_id`, `run_id`, `app_id`/`org_id`. Key behaviors:
+
 - Passing only `user_id` returns records where `org_id` is null (solo mode)
 - Queries compose: "all memories for user X within org Y"
 - At least one ID required per write
@@ -43,6 +46,7 @@ This is the closest production implementation of our model. Maps: `user_id` → 
 ### 3. Personal Knowledge Management: flat tagging, emergent structure
 
 PKM systems (Obsidian, Roam, InfraNodus) have converged on flat, non-hierarchical tagging over folder hierarchies:
+
 - "Start lazily, let patterns emerge from accumulated material"
 - Tags should be easy to remember, concrete, and enable productive behavior
 - Wiki-links over folders — notes belong to multiple categories simultaneously
@@ -52,10 +56,12 @@ Validates `affiliation` as a flat string (not a structured FK). Resolution can d
 ### 4. Agent memory: episodic vs semantic split
 
 Cognitive science splits declarative memory into:
+
 - **Episodic** — event-specific: "the user told me about the bug on Tuesday"
 - **Semantic** — persistent: "the project uses PostgreSQL"
 
 Agent systems mirror this:
+
 - **Episodic** (`speaker`) — who said it in this moment. Session-scoped, ephemeral.
 - **Semantic** (`affiliation`) — whose position is this. Cross-session, persistent.
 

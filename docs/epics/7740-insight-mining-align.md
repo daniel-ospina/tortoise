@@ -6,12 +6,14 @@
 ## Adversarial Test (Step 1)
 
 **Alternatives considered:**
+
 1. **Do nothing — rely on manual capture** — Rejected: doesn't scale to ~947 sessions; hosted product needs autonomous accumulation.
 2. **Search-only (improve session search, no extraction)** — Partially valid and a REAL sequencing alternative: with ~0 paying users, the honest question is whether ANY graph enrichment is the right move before user acquisition. **"Search + acquire users first, then extract"** is a genuine alternative this decision must weigh. It is rejected ONLY for sequencing: search gaps (#7770/#7774) are the urgent prerequisite and must ship first, but extraction is the compounding differentiator that makes the product feel alive. The two are not substitutes — extraction is deferred, not eliminated, behind a #7708 stability gate.
 3. **Hindsight-style flat consolidation, no cross-ontology wiring** — Rejected: flat summaries don't feed EP confidence or cross-lens discovery — the two differentiators that justify the graph.
 4. **Rule-based extraction (regex/keyword) instead of LLM** — Cheap but low precision for decisions/hypotheses; LLM extraction is the differentiator. Rules can supplement entity extraction later.
 
 **Anti-post-rationalization (strongest reasons NOT to build):**
+
 - **Prereq #7708 is OPEN with unresolved search gaps (#7770/#7774) and the local container is currently down** — the foundation is demonstrably NOT stable. Extraction built on a broken foundation produces Points nobody can find. This is a hard gate, not a sequencing caveat.
 - LLM extraction cost: ~947 sessions × API calls is non-trivial; batch throttling required.
 - Extraction quality varies by model; low-confidence Points **pollute the graph and degrade EP belief propagation** — the graph's core differentiator. Bad Points wired through mitigation edges can nuke EP weights (the exact failure mode AGENTS.md hard-rule warns about).
@@ -34,6 +36,7 @@
 **Causal chain (testable):** Sessions mined → Points/Objects/Actions accumulate → graph becomes the "team brain" → users return to query it → retention → conversion.
 
 **Falsification criteria (leading indicators):**
+
 - Within 60 days of extraction shipping: ≥10% of mined sessions generate ≥1 graph query (search/traverse) per week
 - Extraction precision ≥70% (human review of a 50-session sample): low-precision extractions are filtered, not merged
 - EP health preserved: no regression in mean grounding across existing Points after extraction batch (guard against graph pollution)
@@ -51,11 +54,14 @@
 - Users value mined insights over raw search — confidence: **LOW** (zero evidence at ~0 users; the falsification criteria above will test this)
 
 ## Recommendation
+
 **CONDITIONAL PROCEED** with two hard gates:
+
 1. **Gate A (prereq):** #7708 reaches STABLE — search gaps (#7770/#7774) merged, sessions demonstrably searchable. No extraction work before this.
 2. **Gate B (calibration):** Phase 1 extraction runs on 20–50 sessions; human review confirms ≥70% precision; EP health check shows no grounding regression. Full-batch execution only after Gate B passes.
 
 Phases 2–4 (entities/actions/cross-ontology) are deferred behind both gates. This is the honest decision: the epic is worth building (compounding differentiator), but its prerequisites are not yet met, and its core hypothesis (users value mined insights; extraction won't pollute the graph) is unproven at ~0 users.
 
 ## Routing
+
 CONDITIONAL PROCEED → do NOT advance to epic-research yet. The epic's plan doc should be prepared, but implementation waits on Gate A (#7708 STABLE). Epic-align gate: reviewer issues addressed (confidence downgrades, EP-pollution assumption added, falsifiable profit chain, honest matrix).

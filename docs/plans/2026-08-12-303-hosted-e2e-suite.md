@@ -117,6 +117,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** make the E2E-5-D backup→restore journey runnable hermetically through the real HTTP surface (subprocess boundary forbids monkeypatch; shipped pricing.json gates /backups 402 for all tiers).
 **Acceptance:** `TORTOISE_BACKUP_STORAGE=memory` makes `/backups` use MemoryStorage; unknown value fails closed (RuntimeError, never silent R2); startup warning logged when the knob is active; `tests/e2e/hosted/fixtures/pricing-e2e.json` exists — canonical product/pricing.json PLUS pro/team `features.daily_backups: true` PLUS an `e2e_small` tier (all `_REQUIRED_LIMIT_KEYS` present; `max_graph_nodes: 8`) for the E2E-2-D cap breach; `cryptography>=42` added to the `[test]` extra (JWKS/ES256 mint — it is NOT in the current `.[test]` closure) and `uv.lock` regenerated (`uv lock`); full `python -m pytest tests/ -q` stays green (seam default = R2, zero behavior change when unset).
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`_backup_storage()`, ~line 4885)
 - Modify: `pyproject.toml` (`[test]` extra) + `uv.lock` (regen)
 - Create: `tests/e2e/hosted/fixtures/pricing-e2e.json`
@@ -127,6 +128,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** the reusable substrate: real-server boot, session-JWT mint, disposable tenants, RUN_HOSTED_E2E gate with E2E_BASE_URL/ALLOW_PROD handling.
 **Acceptance:** `hosted_server` (session) boots uvicorn subprocess on a free port, ready on `/health/ready` (60s cap, stderr tail on failure), torn down reliably; `bare_hosted_server` (session, lazy) boots the minimal-env variant for unconfigured negatives (checkout 503 / webhook 500 / github 503); `jwks_mock` serves the RSA JWKS before the first JWT request; `session_jwt(user_id)` mints valid tokens; `tenant_factory` registers tenants via `/v1/register` with unique emails (remote mode: 3 shared tenants max — server-side register limit is 3/hr/IP — cases reuse them); without `RUN_HOSTED_E2E` every module skips with a clear message; `E2E_BASE_URL` remote mode skips server boot; https without `ALLOW_PROD=1` skips.
 **Files:**
+
 - Create: `tests/e2e/hosted/conftest.py`
 
 ### Task 3: Cases E2E-1-D..E2E-3-D (journey start, quota, billing)
@@ -134,6 +136,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** cover signup→provision→key→Point, free-tier fail-closed limits, and the hermetic Pro upgrade (signed webhooks, zero Stripe network).
 **Acceptance:** `test_01_signup_provision.py`, `test_02_free_tier_limits.py`, `test_03_billing_upgrade.py` pass against the local server; each case >=2 negative tests; E2E-3-D asserts tier=pro + pro limits in `/v1/team` after two signed events, plus tampered-sig 400 / unconfigured-checkout 503 / unknown-price 400.
 **Files:**
+
 - Create: `tests/e2e/hosted/test_01_signup_provision.py`, `test_02_free_tier_limits.py`, `test_03_billing_upgrade.py`
 
 ### Task 4: Cases E2E-4-D..E2E-6-D (isolation, backup/restore, export/delete)
@@ -141,6 +144,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** tenant isolation on real sockets; the full backup→restore journey through the public endpoints (memory seam + pricing fixture); owner-only export + team deletion via session JWTs.
 **Acceptance:** `test_04_tenant_isolation.py`, `test_05_backup_restore.py`, `test_06_export_delete.py` pass; E2E-5-D restores mutated graph to original content and asserts integrity; E2E-6-D provisions its tenant via `/internal/provision` (created_by = the JWT sub — `/v1/register` creates NO Membership node, so `_require_owner` would 403 for register-created teams), writes points with the returned-provision key path or session-minted key, then uses minted JWTs; asserts 401 without session and 403 for foreign owner.
 **Files:**
+
 - Create: `tests/e2e/hosted/test_04_tenant_isolation.py`, `test_05_backup_restore.py`, `test_06_export_delete.py`
 
 ### Task 5: Cases E2E-7-D..E2E-9-D (security, multi-team, GitHub)
@@ -148,6 +152,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** security baseline posture over the wire; multi-team membership + RBAC via session JWTs; GitHub connect surface (hermetic positives, skip-guarded exchange).
 **Acceptance:** `test_07_security_baseline.py`, `test_08_multi_team.py`, `test_09_github_integration.py` pass; auth matrix 4 legs 401; HSTS present; `/health/security` ok; E2E-8-D bumps its team to tier=team via the signed-webhook helper BEFORE inviting (invites 402 below team tier, hosted_api.py:3055), invite accept flow works on registry plane with real JWTs; connect returns auth_url+state; callback bad state 404.
 **Files:**
+
 - Create: `tests/e2e/hosted/test_07_security_baseline.py`, `test_08_multi_team.py`, `test_09_github_integration.py`
 
 ### Task 6: Cases E2E-10-D..E2E-12-D (sessions, MCP, selfhost migration)
@@ -155,6 +160,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** agent session capture with LLM mock-mode extraction; MCP Streamable-HTTP handshake + tool call (SSE framing); selfhost→hosted migration parity with a second real server.
 **Acceptance:** `test_10_session_capture.py`, `test_11_mcp_connect.py`, `test_12_selfhost_migration.py` pass; MCP tools/call creates a Point readable via REST; selfhost daemon boots on its own DB path with static key auth; migration asserts query parity; cross-surface keys rejected.
 **Files:**
+
 - Create: `tests/e2e/hosted/test_10_session_capture.py`, `test_11_mcp_connect.py`, `test_12_selfhost_migration.py`
 
 ### Task 7: CI job + docs
@@ -162,6 +168,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** wire the suite into CI following legal-e2e/welcome-e2e patterns; document the reconstruction + run instructions.
 **Acceptance:** `hosted-e2e` job in `.github/workflows/ci.yml` (no secrets, no chromium install, 15m cap, concurrency group, skip-warning step); `tests/e2e/hosted/README.md` documents run modes, env contract, the 12-case map, and the reconstruction note.
 **Files:**
+
 - Modify: `.github/workflows/ci.yml`
 - Create: `tests/e2e/hosted/README.md`
 
@@ -170,6 +177,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 **Intent:** proof the whole contract holds: suite green, main suite green, runtime <5 min, skip behavior correct.
 **Acceptance:** `RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs` green locally; `python -m pytest tests/ -q` green (embedded, no Docker); plain `python -m pytest tests/e2e/hosted/ -q` without the env = all skipped with clear reason; total runtime reported <5 min.
 **Files:**
+
 - Test: (no new files)
 
 ---
@@ -187,7 +195,6 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 - Dashboard SPA clickthrough (website/apps/dashboard: hardcoded prod `API_BASE`, localhost absent from CORS allowlist — a local browser leg cannot reach a local API without product changes). Adjacent gap to file once gh rate-limit clears: dashboard E2E + configurable API base.
 - Live-prod signup/OAuth/email-confirmation legs (welcome-e2e + legal-e2e own the website browser surface; this suite is API-journey).
 - Stripe real-checkout / R2 / GitHub token-exchange positive legs — skip-guarded per-leg on `STRIPE_TEST_*` / `R2_*` / `GITHUB_CLIENT_SECRET` (E2E-3-D precedent), loud skips in CI.
-
 
 ---
 

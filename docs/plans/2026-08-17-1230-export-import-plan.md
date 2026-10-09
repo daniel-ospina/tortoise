@@ -54,6 +54,7 @@ Domain complexity (from scoping): Architecture **high**, Security **high**, Onto
 **Intent:** Self-hosters produce a portable, versioned, encrypted artifact from their local graph. This is the first half of the migration path (Indicator 1).
 **Acceptance:** `tortoise export --output graph.tortoise` (with local FalkorDB) produces a file whose clear header is `{format: "tortoise-export-v1", artifact_version: 1, encrypted: true, algorithm: "AES-256-GCM", key_fingerprint, exported_at}` containing zero graph content; `--decrypt`-style verification (or import Task 2) recovers the full graph with identical counts. `--no-encrypt` exists but warns loudly. Stdout emits ONE JSON line (machine contract, like the index path). `tortoise_check_structure` on a restored copy matches source counts.
 **Files:**
+
 - Modify: `tortoise/__main__.py` (add `_cmd_export` + subparser in `main`)
 - Modify: `tortoise/hosted_backup.py` (add envelope constants/helpers if not already present — reuse `DUMP_FORMAT`, `encrypt_backup`)
 - Create: `tortoise/export.py` (envelope build + canonical sha256 + key handling)
@@ -107,6 +108,7 @@ Run: `uv run pytest tests/test_export_cli.py -v` — Expected: PASS. Then `uv ru
 **Intent:** Hosted ingests the artifact into a team graph — the second half of the migration path (Indicator 2). Security-critical: the endpoint accepts arbitrary graph content into a tenant graph.
 **Acceptance:** An owner-authenticated team key can import a valid artifact (supplying the artifact key) → team graph node/edge counts + Point IDs match the artifact (verified via `tortoise_check_structure`); foreign-key/team 403; payload over cap 413 (enforced while streaming, not just Content-Length); rate-exceeded 429; tampered envelope → 422 + quarantine (audit logged, live graph untouched); re-import of the same plaintext sha256 → 200 `{"imported": false, "already": true}`; swap is atomic (crash mid-import leaves the old graph intact); `restore_backup` behavior unchanged (refactor regression-tested).
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (new route at `POST /v1/organizations/{org_id}/import` + caps + quarantine; `_SENSITIVE_OP_LIMITS` already lives here at ~line 1628 — extend with `"import": 5`)
 - Modify: `tortoise/hosted_backup.py` (extract the temp-restore→verify→swap stage of `restore_backup` into a shared helper `_restore_into_temp_verify_swap(...)`; import calls it directly with an explicit `graph_name_override` — `restore_backup` keeps its storage/manifest layer and delegates to the same helper)
 - Test: `tests/hosted/test_import_endpoint.py` (harness matching E2E-6-D export tests)
@@ -161,12 +163,14 @@ Run: `uv run pytest tests/hosted/test_import_endpoint.py tests/hosted/test_backu
 **Intent:** Prove the full migration path end-to-end at parity with (stronger than) the E2E-12-D baseline, and document it so self-hosters can find it (Indicators 3 + 4).
 **Acceptance:** New parity test in `tests/e2e/hosted/test_12_selfhost_migration.py` passes: selfhost graph (points + operators + events) → `tortoise export` → import into fresh hosted team → `tortoise_check_structure` node/edge counts, Point IDs, and edge count all match source. Both quickstarts' migration sections reference `tortoise export` → import and downgrade the "no automated import today" caveat.
 **Files:**
+
 - Modify: `tests/e2e/hosted/test_12_selfhost_migration.py` (add parity journey)
 - Modify: `docs/quickstart-selfhosted.md` §7, `docs/quickstart-cloud.md` §6
 - Modify: `CHANGELOG.md`
 - Test: the parity test itself (`test_parity_export_import` — pinned name, referenced by the `-k parity` selector) + docs link check
 
 **Step 1: Write the failing parity E2E** (`test_parity_export_import`) — build a selfhost graph with ≥3 points (one with a Point ID assertion) + ≥1 operator + ≥1 edge; run `tortoise export` (subprocess); register fresh hosted team; `POST /v1/organizations/{org_id}/import` with the artifact key; assert:
+
 - `tortoise_check_structure` node count == source node count, edge count == source edge count
 - every source Point ID present in hosted graph (survives round-trip)
 - edge count via `MATCH ()-[r]->() RETURN count(r)` == source edge count

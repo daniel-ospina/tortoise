@@ -32,7 +32,6 @@ created: 2026-09-02
 > disabled / active. The scope's S5/S6 mixed-fixture e2e + CI job (AC5) did
 > NOT ship in PR #2175 — tracked as follow-up issue #2178.
 
-
 > Consolidated scoping (double-diamond, verified). Companion research: `docs/research/2026-09-02-api-keys-table-session-credentials.md` (commit both as S0 first-chore). Issue: #2166. Complexity: standard. Team: epistemic-team. Worktree: `feat/2166-keys-table-durable-only`.
 
 ## 0. Problem (confirmed, narrowed indicator-1 form)
@@ -40,11 +39,13 @@ created: 2026-09-02
 The API Keys surface's managed-list model is incoherent: it renders rows of mixed nature — deliberate durable keys (`created_via` provisioned, legacy NULL), system-minted durable fallbacks (recovery), and auto-minted 24h temporary credentials (bootstrap) — and its status vocabulary misrepresents them: temporary credentials masquerade as manageable rows, the live in-use credential appears as an unexplained undeletable bare "active" row, disabled keys render "active", and expired/revoked rows persist with no explanation. **#2166 ships the client-model half** (ships before #2167 removes the login auto-mint): a coherent classification + rendering in which the managed list is durable-only by an explicit `created_via` predicate, temporary (bootstrap) credentials surface in a separate labeled non-actionable section, every row's status is truthful, and every blocked row carries a visible plain-language explanation.
 
 ### Three incoherence classes (all closed by this scope)
+
 1. **Temporary-credential masquerade** — bootstrap rows look like manageable keys. → separate section (class-1 closed).
 2. **Unexplained live durable key** — the row the browser/agents are using is bare "active" + undeletable. → "In use" status + replace-first explanation. Closure is for the LIVE key only; a **non-live system-minted recovery leftover still renders as an unexplained "active" actionable row this release** (deliberate-vs-fallback provenance needs server data → separate provenance issue; user-visible gap stated, not hidden).
 3. **Status lies + clutter** — disabled renders active; expired-as-live never guarded; swept noise accumulates. → truthful statuses; swept rows behind a filter; durable revocations stay inline with dates.
 
 ### Falsification
+
 Wrong if: production already behaves post-#2167; a deliberate user-facing session-key affordance exists; recovery is server-documented as deliberate-user keys; the narrowed explanation still fails a fresh-user e2e with a realistic mixed fixture; sequencing inversion (#2167/W2 first → section moot — S0/S6 checks).
 
 ## 1. Boundary (what #2166 is NOT)
@@ -60,6 +61,7 @@ Wrong if: production already behaves post-#2167; a deliberate user-facing sessio
 sessionKey.js becomes ONE classification engine producing row view-models; main.jsx consumes declaratively. One pass per render. Chosen over: **A** (per-call-site decision fns — repeats the disconnected-ternary architecture that caused the incoherence; no structural link blocked↔explained), **C** (single-table zone-header — fails "clearly separate section" + lifecycle-column semantics + worse W2 removal seam; documented fallback if human gate rejects a new DOM section), **B-with-useMemo** (refs-reactivity footgun).
 
 ### Classification model (final)
+
 - `keyZone(k)` → `'swept'` (created_via==='bootstrap' && revoked_at) | `'session'` (created_via==='bootstrap' && !revoked_at) | `'managed'` (everything else — provisioned/recovery/NULL, incl. durable revoked). No double-render by construction.
 - `managedStatus(k, activeKey)` order: **revoked** (revoked_at) > **expired** (expires_at past — never live regardless of held) > **in-use** (delegates to unchanged `isActiveKey`) > **disabled** (enabled===false; enabled absent → enabled, registry parity) > **active**.
 - `sessionExpiryText(expiresAt, nowMs)` — **clock injected** (memorySourcesStatus convention; deterministic node tests); returns `{expired}` only; formatting stays in main.jsx `fmtTime`.
@@ -73,6 +75,7 @@ sessionKey.js becomes ONE classification engine producing row view-models; main.
 - main.jsx: import normalizeKeys; delete wrapper ~L4019-4023; call once per render, NO useMemo (n ≤ ~10; refs-at-render matches current wrapper semantics); DOM consumes VM only. `isSessionKey` removed; "ephemeral" string (L5498) dies with the status-cell rewrite. Fixture/harness tokens must NOT embed banned user-facing substrings: use neutral `tt_live_recovery_key_abcdef0123456789` (prefix slice `tt_live_re`), and the harness mint must stay on the SILENT mount path (no createKey-style plaintext disclosure — `setNewKey` ~L3765/3990 renders into the `.new-key` code box L5453).
 
 ### Pinned user-facing copy (FINAL — plain language, no internal taxonomy)
+
 | Element | Copy |
 |---|---|
 | Status labels | Active / In use / Disabled / Expired / Revoked |
@@ -90,6 +93,7 @@ sessionKey.js becomes ONE classification engine producing row view-models; main.
 UI copy rules: NO "durable"/"ephemeral"/"session credential" in user-facing strings (internal names only); "permanent key" ↔ "temporary keys"; user vocabulary chosen NOW (e2e fragments pin it — rewording after pins is the expensive direction).
 
 ### DOM (final)
+
 - Existing `<table>` L5457: managed rows only — status cell renders truthful statusLabel with status-appropriate classes (disabled/expired muted, revoked red, live green — text labels, never color-only, WCAG 1.4.1); reason lines render **status-adjacent at BODY color 13-14px** (NOT .dim.small — 3.7:1 fails AA 4.5:1 at 12px; the reason IS the AC2 deliverable); actions cell from canToggle/canRevoke; rename from canRename. Add `scope="col"` to thead while rewriting. SECTION SUB also at body color (same AA ruling — it is remediation copy, not secondary framing; .dim reserved for genuinely secondary text: group notes, dates, banner). Wrap in `.keys-table-wrap{overflow-x:auto}` (created-dates `toLocaleString()` with seconds are unbreakable ~150px).
 - Second `<tbody id="swept-rows">` **always in the DOM** with `hidden={!showRevoked}` (stable aria-controls target); zone label = plain `<td colSpan={5} className="dim small">` row (NOT `<th>` in tbody); swept rows render prefix + revoked/expired date.
 - Toggle: ghost.small under the table's left edge, before the section, visible only when swept>0: "Show expired temporary keys (N)" ↔ "Hide expired temporary keys", aria-expanded + aria-controls="swept-rows". `setShowRevoked(false)` added to switchTeam's existing reset block (~L3252); logout covered by remount. Sticky cross-team preference NOT chosen.
@@ -119,6 +123,7 @@ UI copy rules: NO "durable"/"ephemeral"/"session credential" in user-facing stri
 - **S6 CI enforcement + regression + gate**: new CI job — spec explicitly (NO existing job does this; the welcome/legal e2e job ci.yml:357-398 is RUN_LEGAL_E2E on :8788 only — it builds no dist and runs no dashboard server): pip/playwright deps + **TWO wrangler boots** — `website/` on :8788 (auth) and `website/apps/dashboard` serving the committed `dist/` on :8790 (the mixed module inherits the gate/session_login_flow two-server harness and navigates via proxied prod-domains; without :8790 the module red-fails connection-refused) — then `RUN_DASHBOARD_E2E=1 pytest tests/e2e/test_keys_table_mixed.py -v`. NO npm build inside CI (committed-dist convention — a stale/missing dist commit fails the job red = tripwire). Run the job locally once before PR. Regression must NOT change: tests/test_hosted_api.py L905-949, test_cli_team_keys.py, test_session_key_http.py, test_auth_flip.py, existing 4 empty-keys e2e, onboarding/session_login_flow. Fallback if job flaky at execution: CI grep steps (no ephemeral/durable/session-credential user-facing; no `isSessionKey(` refs) + documented decision in PR — and taking the fallback REQUIRES an AC5 amendment (AC5 is categorical: the mixed e2e runs in CI via this job). npm run build → commit dist (12 tracked files — established convention). commit-workflow → PR.
 
 ## 4. Acceptance criteria (mapped + amended at Phase 7)
+
 1. No temporary (bootstrap) credential appears in the MANAGED ROWS list (default view) — live bootstraps appear only in the separate non-actionable Temporary keys section. (Swept bootstrap rows live in the labeled second-tbody sub-zone behind the filter — a distinct bin, not a managed row, per AC3.)
 2. Every managed row is either fully actionable with truthful status (active/disabled/revoked w/ date), or carries a visible plain-language explanation of the specific reason (in-use/expired pinned copy; member limits; revoked self-explained). [owner view; reason-invariant unit-enforced]
 3. Swept temporary rows are behind the filter; durable revoked rows render inline truthfully with revocation date; nothing presents an expired credential as live.
@@ -127,9 +132,11 @@ UI copy rules: NO "durable"/"ephemeral"/"session credential" in user-facing stri
 6. A non-expert can explain every row — no internal-taxonomy jargon in user-facing strings (grep + e2e body assertions; "permanent/temporary" vocabulary).
 
 ## 5. Verification plan
+
 node --test sessionKey.test.js green · docker-lane pytest hosted_api + cli_team_keys green (no server touch) · npm run dev clickthrough incl. 320-375px pass · RUN_DASHBOARD_E2E pytest (mixed module + gate + session_login_flow + onboarding) after dist rebuild · CI job green · grep no ephemeral/durable/session-credential in user-facing src + no isSessionKey( refs · dist rebuilt + committed.
 
 ## 6. Known limitations (state honestly in the PR + issue)
+
 - Non-live system-minted recovery rows render indistinguishably from deliberate keys (active, actionable) — provenance needs server data → separate issue. User-visible gap this release.
 - System-rotated durable rows (recovery-cap rotation) render "Revoked" + date WITHOUT rotation cause — the rotation banner discloses cause only in the rotating client; causeless inline revocation for other clients.
 - Member banner says management "requires an owner or admin" while server DELETE is team-scoped (no role gate) — surface-scoped wording; DELETE role-guard parity is a separate issue that owns the banner text.
@@ -141,10 +148,12 @@ node --test sessionKey.test.js green · docker-lane pytest hosted_api + cli_team
 - Key-login/anon modes safe by construction: session-gate redirect (~L4196-4228) prevents reaching the keys table; isActiveKey unchanged protects any live user key.
 
 ## 7. Files touched (complete)
+
 sessionKey.js (rewrite; keep isActiveKey; remove isSessionKey) | sessionKey.test.js (re-express + new) | main.jsx (import L26; delete wrapper L4019-4023; rewrite keys render L5457-5523 VM-driven; session section; swept tbody + toggle; member banner; qualified empty; comment hygiene L24-25/L4014-4018; switchTeam reset; .keys-table-wrap) | index.css (additive; .session-section chrome; L141-147 comment) | tests/e2e/test_keys_table_mixed.py (NEW) | .github/workflows/ci.yml (NEW e2e job) | docs/research/2026-09-02-api-keys-table-session-credentials.md + docs/scoping/2026-09-02-2166-api-keys-table-scoping.md (S0 first-chore commit) | dist/ (rebuild + commit).
 ZERO-CHANGE: server list_api_keys 4477-4559 · mintSessionKey 2116-2196 · revokeKey 3886-3930 + re-mint 3899-3925 · keyIdFromValue 4026-4036 · wizard ~3594-3700 + ~4291-4404 · loadAll 3012-3046 · toggle/rename 3824-3881 · CLI · keys STATE (L600) · gate.py existing tests.
 
 ## 8. Wiring
+
 | Surface | Touch | Coverage |
 |---|---|---|
 | Data stores | none (no migration) | — |

@@ -14,6 +14,7 @@ aboutObjects: Source, Point, Operator
 ---
 
 ---
+
 title: "Issue #398 — Source Credibility Scoring: Scoping Output"
 aboutSubjects: organisation-design-team, epistemic-team
 aboutObjects: Source, Point, Operator
@@ -39,6 +40,7 @@ connector changes, migrations, or per-operator complexity.
 ## Verification Gates
 
 ### problem-verify: 1 cycle, clean (2 verifiers, NO P0/P1; P2s incorporated)
+
 - **problem-diverge:** 4 framings (dead-on-arrival wiring; staleness/invalidation; representation conflict;
   original) + full devil's-advocate report. All factual claims verified against code by verifiers.
 - **problem-converge:** 2 independent agents converged (84/84) on "wire the dormant ontology-aligned
@@ -48,6 +50,7 @@ connector changes, migrations, or per-operator complexity.
   sourceKind annotations = audit domain, out of scope); indicator-1 verification line.
 
 ### solution-verify: 2 cycles, clean (2 verifiers × 2 rounds)
+
 - **Round 1:** 3 genuinely distinct approaches; converge picked Approach 2 (derivation module +
   provenance-marked baselines) on quality (testability, backward compat, ontology compliance). P1s found:
   NAND double-count; mitigation formula/carrier; pack-registry wiring.
@@ -76,6 +79,7 @@ connector changes, migrations, or per-operator complexity.
     mandatory (MERGE on url); per-call `recency_decay` (never env default).
 
 ### Qwen coherence check: substituted with fresh-context sub-agent (Qwen3.8-max unavailable) — see Phase 7
+
 ### Phase 7 parallel review: 3 reviewers (codebase/docs, devil's advocate, coherence) — N/A: UX (backend-only), Epic (standalone)
 
 ## Plan (approach 2 — derivation module + provenance-marked baselines)
@@ -207,6 +211,7 @@ annotations land in the same PR.
 | U | MCP trimmable (P3) | Keep minimal MCP (2 tools + create_source tier passthrough); SDK-first. |
 
 ### Rejected in cycle 2
+
 - **Per-source mean decay** (re-verifier R9): destroys anti-Sybil + monotonicity. Replaced by tier-most-recent decay (B).
 - **Migration/backfill of legacy baselines**: violates no-migration constraint; production never ran inheritance. Advisory-only (A).
 - **Legacy kind defaults** (github_issue→T2 etc.): the forbidden auto-mapping under a new name. Identity + None only (D).

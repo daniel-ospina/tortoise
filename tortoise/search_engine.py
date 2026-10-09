@@ -6,6 +6,7 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import math
 import os
 import re
 import threading
@@ -15,7 +16,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
 from .env_truthy import is_truthy
-from .security import entity_label
+from .security import entity_label, validate_entity_type
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -834,8 +835,9 @@ def run_fts_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. Document FTS searches the _searchText index
     (#125) which concatenates title+summary+topics.
-    Returns n.url for source (canonical key, #448), n.eventId for event,
-    n.id for all other entity types.
+    Returns n.url for source and document (the :Source canonical key, #448 — a
+    document IS a :Source), n.eventId for event, n.id for all other entity
+    types.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at EVERY exit branch (the FTS leg is recorded AT THE SOURCE, never
@@ -862,6 +864,13 @@ def run_fts_query(
     breaker additionally short-circuits after consecutive slow/failed
     queries so a wedged DB stops eating caller latency.
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY, not at the label: the breaker short-circuit below
+    # returns [] before any label exists, so a guard placed there would let an
+    # invalid type through silently whenever the breaker is open.
+    validate_entity_type(entity_type)
+
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
         if leg_trace is not None:
@@ -883,7 +892,10 @@ def run_fts_query(
                    else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
                 + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
-                "ORDER BY score DESC "
+                # #3019: every row scores a constant 1.0, so this leg is ONE giant
+                # tie and DB row order would otherwise decide each operator's RRF
+                # rank. The secondary key makes the order a function of the data.
+                "ORDER BY score DESC, n.id ASC "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -912,9 +924,19 @@ def run_fts_query(
     # the Source label (`_searchText`) — there is no :Document index. The
     # caller-facing entity_type stays "document".
     # point→Point, event→Event, subject→Subject
+    # NOTE: this leg keeps its own derivation rather than entity_label() —
+    # migrating all three legs onto that mapping is #5407's scope.
     label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
+    #
+    # #3019 KNOWN RESIDUAL (sibling gap, NOT a regression): `object` has the
+    # same NULL-key shape and is not closed here. A :Object is merged by its
+    # `name`, and the live write path mints it id-less (`MERGE (o:Object
+    # {name:$name})`, hosted_api), so the `else` below orders those rows on a
+    # NULL `id`. Out of this change's scope: the remedy is a coalesce KEY, not
+    # a field rename, so it changes the ORDER BY expression shape in all three
+    # legs. Evidence recorded on #3019.
     if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
@@ -964,7 +986,9 @@ def run_fts_query(
             "YIELD node, score "
             + status_filter +
             f"RETURN node.{id_field}, score "
-            "ORDER BY score DESC "
+            # #3019: rank alone does not order a tie, and RRF is rank-based — see
+            # the operator path above.
+            f"ORDER BY score DESC, node.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1053,8 +1077,8 @@ def run_vector_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
     matching the entity_type (Event/Subject/Document/Object/...), and results
-    return the entity's id field: url for source (canonical key, #448),
-    eventId for event, id for all other entity types.
+    return the entity's id field: url for source and document (the :Source
+    canonical key, #448), eventId for event, id for all other entity types.
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
@@ -1088,6 +1112,13 @@ def run_vector_query(
     timeout, and the per-strategy circuit breaker short-circuits after
     consecutive slow/failed queries. (#249)
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY: the empty-query_vec return and the breaker
+    # short-circuit below both precede the label derivation, so a guard placed
+    # at the label would be skipped by either.
+    validate_entity_type(entity_type)
+
     #: #4199 — the read's OWN scope carries no dense material. Resolved once
     #: below (before the query) and applied to every HEALTHY outcome record.
     _scope_hollow = False
@@ -1265,11 +1296,22 @@ def run_vector_query(
                     )
                 # Signature A (RediSearch-style): repo-pinned docker image
                 # falkordb/falkordb-server:v4.16.7.
+                #
+                # #6214: A yields NO score column, and the pre-#6214 code
+                # substituted the row POSITION for one — so ANY re-sort was
+                # unsafe for it (it would have reversed the ranking, not
+                # merely made it deterministic). Obtain the distance from the
+                # yielded node instead, so BOTH signatures hand the ONE
+                # ordering pass below a comparable value: a cosine distance,
+                # the same quantity signature B's engine score carries. If
+                # the engine lacks vec.cosineDistance the query raises and the
+                # outer handler degrades to the brute-force scan as before.
                 return (
                     f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                     "YIELD node "
                     + vec_status_filter +
-                    f"RETURN node.{id_field} "
+                    f"RETURN node.{id_field}, "
+                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score "
                     "LIMIT $limit"
                 )
 
@@ -1300,75 +1342,75 @@ def run_vector_query(
             fallback = "A" if preferred == "B" else "B"
             try:
                 rows = _query_nodes(preferred)
-                sig = preferred
             except Exception as e:
                 if not _signature_failure(str(e).lower()):
                     raise  # non-signature failure → brute-force below
                 rows = _query_nodes(fallback)
-                sig = fallback
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
-            if sig == "B":
-                # #5583: the engine's value here is a DISTANCE (lower is
-                # better), NOT a similarity. `db.idx.vector.queryNodes`
-                # returns `1 - cosine` for a
-                # `similarityFunction: 'cosine'` index: a PERFECT match comes
-                # back as 0.0 and an orthogonal one as 1.0. Passing that
-                # through as a similarity inverted this leg exactly — the
-                # WORST row scored highest, and every `min_similarity` floor
-                # discarded the rows it exists to keep. Measured on the
-                # docker lane (falkordb-server, module ver 42004): a query
-                # identical to the stored vector scored 0.0, an orthogonal
-                # one scored 1.0.
-                #
-                # The conversion mirrors this function's own scan fallback
-                # below (`1.0 / (1.0 + distance)`): both branches derive a
-                # similarity from a distance, so they agree on polarity.
-                # Cosine distance lies in [0, 2], so `1 - d` lies in [-1, 1]
-                # and the [0, 1] clamp still maps a perfect match to 1.0.
-                # The engine's row order is ALREADY best-first, so only the
-                # value changes here; the order is passed through untouched.
-                out = []
-                for row in rows:
-                    try:
-                        distance = float(row[1])
-                    except (IndexError, TypeError, ValueError):
-                        distance = None
-                    # An unreadable score carries no evidence of similarity —
-                    # send it to the floor (0.0), never to the ceiling.
-                    score = 0.0 if distance is None else 1.0 - distance
-                    out.append((row[0], max(0.0, min(1.0, score))))
-                if min_similarity is not None and out:
-                    # Score is a true cosine similarity now — filter directly.
-                    # Only claim the FLOOR when there was something to filter: a
-                    # zero-row
-                    # index result is `empty_results`, not a relevance verdict
-                    # (claiming the floor there would suppress the caller's
-                    # legitimate degraded fallback, #4028 review P1).
-                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
-                    if not kept:
-                        _record(ran=True, degraded=False,
-                                reason=BELOW_RELEVANCE_FLOOR, count=0,
-                                mechanism=MECHANISM_INDEX)
-                        return []
-                    out = kept
-                _record(ran=True, degraded=False, reason="ok", count=len(out),
-                        mechanism=MECHANISM_INDEX)
-                return out
-            # Index results are ranked by similarity; assign rank-based scores.
-            # RRF fusion uses rank not absolute scores; single-strategy mode
-            # gets reasonable descending ordering.
-            # #4028: signature A returns NO absolute similarity, only a
-            # rank-ordered id list, so the relevance floor cannot be applied
-            # on this branch (an engine artefact, declared in the PR: the
-            # measured defect is the embedded/brute-force lane).
-            total = len(rows)
-            _record(ran=True, degraded=False, reason="ok", count=total,
+            # #6214: EQUAL-DISTANCE ROWS MUST COME BACK IN ONE ORDER. This
+            # index leg feeds rank-based RRF fusion, so a tie-order flip
+            # changes the fused ranking. Both signatures now RETURN a cosine
+            # DISTANCE — B yields the engine's own score, A computes
+            # vec.cosineDistance over the yielded node (the pre-#6214 A
+            # substituted the row POSITION for a score, so ANY re-sort would
+            # have reversed its ranking) — and the engine's tie order is
+            # replaced here, ONCE, by (distance, id). There is deliberately no
+            # second ordering predicate (no per-signature Cypher ORDER BY):
+            # one sort, over the one shape both signatures now produce, so the
+            # two cannot drift apart.
+            #
+            # #5583: the engine's value is a DISTANCE (lower is better), NOT a
+            # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
+            # `similarityFunction: 'cosine'` index: a PERFECT match comes back
+            # as 0.0 and an orthogonal one as 1.0. Passing that through as a
+            # similarity inverted this leg exactly — the WORST row scored
+            # highest, and every `min_similarity` floor discarded the rows it
+            # exists to keep. Measured on the docker lane (falkordb-server,
+            # module ver 42004): a query identical to the stored vector scored
+            # 0.0, an orthogonal one scored 1.0.
+            #
+            # The conversion mirrors this function's own scan fallback below
+            # (`1.0 / (1.0 + distance)`): both derive a similarity from a
+            # distance, so they agree on polarity. Cosine distance lies in
+            # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
+            # maps a perfect match to 1.0.
+            annotated: list[tuple[float | None, str]] = []
+            for row in rows:
+                try:
+                    distance = float(row[1])
+                except (IndexError, TypeError, ValueError):
+                    distance = None
+                annotated.append((distance, row[0]))
+            # An unreadable distance carries no evidence of similarity — rank
+            # it LAST and id-order it among its peers rather than letting it
+            # win a tie. `inf` is the sort key, not the reported score.
+            annotated.sort(key=lambda item: (
+                item[0] if item[0] is not None else float("inf"), item[1]))
+            out = [
+                (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
+                for dist, pid in annotated
+            ]
+            if min_similarity is not None and out:
+                # Score is a true cosine similarity now, for BOTH signatures —
+                # filter directly. Only claim the FLOOR when there was
+                # something to filter: a zero-row index result is
+                # `empty_results`, not a relevance verdict (claiming the floor
+                # there would suppress the caller's legitimate degraded
+                # fallback, #4028 review P1).
+                kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                if not kept:
+                    _record(ran=True, degraded=False,
+                            reason=BELOW_RELEVANCE_FLOOR, count=0,
+                            mechanism=MECHANISM_INDEX)
+                    return []
+                out = kept
+            _record(ran=True, degraded=False, reason="ok", count=len(out),
                     mechanism=MECHANISM_INDEX)
-            return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
+            return out
         except Exception as e:
             msg = str(e).lower()
             if "index" in msg or "not found" in msg or "does not exist" in msg:
@@ -1417,7 +1459,9 @@ def run_vector_query(
             "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
-            "ORDER BY score DESC "
+            # #3019: a distance tie (equal values, or repeated rows) must not fall
+            # through to DB row order.
+            f"ORDER BY score DESC, n.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1508,6 +1552,11 @@ def run_structural_query(
     hang the structural strategy (the third leg of the degradation chain);
     the per-strategy breaker short-circuits after consecutive failures.
     """
+    # #5404: entity_type is caller-controlled, and this leg interpolates its
+    # capitalized form into a Cypher LABEL — the label is query STRUCTURE.
+    # Guard at the ENTRY so the rejection does not depend on which branch runs.
+    validate_entity_type(entity_type)
+
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
         if leg_trace is not None:
@@ -1533,8 +1582,30 @@ def run_structural_query(
     else:
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
-    if entity_type == "source":
-        id_field = "url"  # #149: Source canonical key is url, not id
+    if entity_type in ("source", "document"):
+        # #149: a :Source's canonical key is url, not id. #3019: `document`
+        # belongs in this branch for the same D10 reason the label block above
+        # gives — a document IS a :Source (`_searchText` is indexed on the
+        # Source label), so the ordering key is the :Source key. This leg was
+        # the inconsistent one: the FTS leg's id_field block and the vector
+        # leg's already map document->url.
+        #
+        # The id state on that path, read from the code rather than assumed:
+        # `_mint_source_stub` (projection/edges.py — the stub every provenance
+        # link mints) sets url/sourceKind/contentHash/ingestedAt and never sets
+        # `id`; `_upsert_source` sets `s.id` only in its ON CREATE clause; and a
+        # document write that adopts the stub REPAIRS the id (`_upsert_document`
+        # runs `SET s.id=coalesce(s.id, $id)`, as does the hosted session
+        # commit). So `id` is NULL for the window between minting and adoption,
+        # and ordering on it there resolves NOTHING: the tie fell back to DB row
+        # order — the defect this PR exists to close — and every returned pid
+        # was None. url is the key that is correct in BOTH states.
+        #
+        # `object` is a KNOWN RESIDUAL: its canonical key is `name` and the
+        # live write path mints it id-less, so the `else` below still orders
+        # those rows on NULL — see the same note where the key is first resolved
+        # (the FTS leg's id_field block).
+        id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
     else:
@@ -1585,6 +1656,10 @@ def run_structural_query(
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
             f"RETURN n.{id_field} "
+            # #3019: this leg scores every row a CONSTANT (1.0 / 0.5, below), so
+            # with no secondary key the WHOLE leg is an unordered tie and the
+            # caller's rank — hence the fused top-k — is DB row order.
+            f"ORDER BY n.{id_field} ASC "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -1654,7 +1729,10 @@ def expand_structural_hops(
                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
             + " WITH n, min(length(path)) AS hops "
             "RETURN n.id AS id, hops "
-            "ORDER BY hops ASC "
+            # #3019: `hops ASC` alone leaves equal-hop candidates in engine row
+            # order, so with more candidates than `limit` both MEMBERSHIP and
+            # rank are DB-order dependent.
+            "ORDER BY hops ASC, n.id ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1726,7 +1804,44 @@ def rrf_fusion(
         # (weights defaults to None → all 1.0).
         w = 1.0
         if strategy_names is not None and weights:
+            # PRECONDITION: `strategy_names` must be at least as long as
+            # `ranked_lists` (both call sites build it alongside them). The
+            # lookup below indexes `strategy_names[i]`, so a SHORTER list raises
+            # IndexError here — a dead `... else i` fallback used to sit on the
+            # warning line below, implying a tolerance that never existed
+            # (#3019 review). Deliberately left failing loudly rather than
+            # defaulting to 1.0: a misaligned list would silently misweight a leg.
             w = weights.get(strategy_names[i], 1.0)
+            # #3019 part 2: a NaN weight makes every fused score from that leg
+            # NaN, and tuple comparison against NaN is False in BOTH directions,
+            # so the ``(-score, id)`` key below silently degrades to insertion
+            # order for those candidates — losing the determinism #2952
+            # established. An INFINITE weight does not damage the ORDER
+            # (``inf == inf`` is True) but it does destroy the SCORE signal: one
+            # leg's infinite scores swamp every other leg. The guard below is
+            # therefore ``not isfinite``, deliberately collapsing BOTH NaN and
+            # ±inf to 1.0 — and it warns, rather than substituting silently. A
+            # candidate carried only by
+            # another leg keeps a finite score, so the SCORE damage is per-leg —
+            # but the ORDER damage is global: NaN compares False in BOTH
+            # directions against everything, so the comparator is inconsistent
+            # and the resulting order is arbitrary, not merely the NaN rows.
+            # ``json.loads`` accepts bare ``NaN``/``Infinity``, so
+            # TORTOISE_FUSION_WEIGHTS can carry one, and a kwarg caller can pass
+            # one. Guarded at the ROOT so every entry point is covered, not just
+            # the env parse.
+            if not math.isfinite(w):
+                # #3019: `json.loads` accepts bare NaN/Infinity, and a NaN
+                # weight makes every score from that leg NaN — the
+                # `(-score, id)` tie-break then compares False both ways and
+                # degrades to insertion order. Warn rather than substitute
+                # silently: the recorded default is not equal weighting
+                # (PRODUCTION DEFAULT, tortoise/sdk.py).
+                logger.warning(
+                    "non-finite RRF weight for %r (%r) — using 1.0",
+                    strategy_names[i], w,
+                )
+                w = 1.0
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
@@ -1738,10 +1853,12 @@ def rrf_fusion(
             w = recency_weights.get(pid, 0.0)
             if w > 0:
                 scores[pid] = scores[pid] * (1.0 + recency_boost * w)
-    # #2952: deterministic TOTAL order over ties. RRF scores tie constantly on
-    # real corpora (a doc at the same rank in different legs, or FalkorDBLite's
-    # fulltext scores, which are 0.0 for every doc). A stable sort alone keeps
-    # tie order at the mercy of the order the caller passed ``ranked_lists`` in
+    # #2952: deterministic TOTAL order over ties. RRF is rank-based, so its
+    # scores tie constantly on real corpora (a doc at the same rank in different
+    # legs) — and a leg's OWN ranking, which RRF then consumes, is arbitrary
+    # whenever that leg's rows tie on the leg's own score. A stable sort alone
+    # keeps tie order at the mercy of the order the caller passed
+    # ``ranked_lists`` in
     # — which in the SDK is ``as_completed`` (thread COMPLETION) order, i.e.
     # wall-clock/timing dependent. ``(-score, id)`` makes the fused order a pure
     # function of the leg CONTENTS, so the same (graph, query, params) always
@@ -1824,6 +1941,13 @@ def degradation_chain(
         against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
     """
+    # #5404: this is the public orchestration entry point, and the collection
+    # loop below swallows every strategy exception by design (a failed leg
+    # must DEGRADE, not crash the read). An unvalidated entity_type would
+    # therefore be swallowed into an empty result — the fail-open symptom this
+    # issue closes — so the guard belongs here, ahead of the workers.
+    validate_entity_type(entity_type)
+
     import concurrent.futures
 
     results: dict[str, list[tuple[str, float]]] = {}

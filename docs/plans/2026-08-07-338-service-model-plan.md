@@ -17,6 +17,7 @@
 **Choice:** Approach **A's architecture** (thin daemon reusing `create_http_app` + `auth_mode` param, NO Supabase — exactly as scope D1 pins) **plus C's client-first insight absorbed** (a real MCP consumer — the bridge — validates the daemon contract before the image ships), **with the license track running in parallel from Phase 0 instead of first or last.**
 
 **Why A-hybrid wins (evidence from codebase):**
+
 - `create_http_app()` (mcp_server.py, ~:896 — cite by symbol, line drifts) already bakes multi-tenant auth into its middleware stack: `TeamResolutionMiddleware` demands `Bearer tt_` tokens, lazily imports `hosted_api._make_sdk`, and resolves against the Supabase-backed registry (`apikey_verify`). Approach B ships this + the dream queue + `/internal/*` in the self-host image — the exact multi-tenant coupling class behind the 2026-08-05 incident and the verifier findings. D1 pins against it.
 - The `auth_mode` param is a small, **backwards-compatible additive** change: default `"tenant"` reproduces hosted byte-for-byte; `"static"`/`"none"` simply omit `TeamResolutionMiddleware` from the middleware list (no dead code in the image — it's not imported at all in those modes). Hosted regression suite is the gate.
 - fastmcp 3.4.6 (pinned) ships `fastmcp.client.Client` + `StreamableHttpTransport` + `BearerAuth` (verified installed). The thin MCP client wraps it — **zero new third-party deps**, so the research-intake gate is justifiably skipped. C's client is genuinely cheap and seeds #526.
@@ -63,12 +64,14 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 ## 4. Phased Implementation
 
 ### Phase 0 — Preconditions (parallel, ~0.5 day)
+
 - **P0.1 CLA audit (D3 dep):** `git log --format='%an' | sort -u` + LICENSE history + CONTRIBUTORS check → findings into `docs/license-notes.md` §Audit. **Explicitly reconcile `daniel-ospina` vs `Daniel Ospina` author strings (same human, different git config — count them as one contributor).**
 - **P0.2 Merge main into feat/338 (ACTION, not verify):** branch base predates #510 (tool_registry.py canonical ToolDefinition/RestSpec — the client/driver contract) and #516 (embeddings cache path fix that T4.1 depends on). `git fetch origin main && git cherry-pick <base>..origin/main` (or PR base update), then re-run the FULL hosted suite. Post-merge: re-verify `HTTP_ALLOWED` is registry-derived (moved from hardcoded frozenset `mcp_auth.py:63`), re-derive T1.4 `tools/list` assertions against the registry, and confirm `create_http_app` signature drift (currently `mcp_server.py:896`). THEN edit `create_http_app` (T1.1).
 - **P0.3 ASGI-spike:** confirm `create_http_app()` serves via httpx `ASGITransport` (no socket) — decides whether daemon tests are ASGI-level (preferred) or subprocess-level. Output: one line in plan-review.
 - **P0.4 Conditional-import spike (T1.1 risk):** verify Python import caching cannot produce false-positive `TeamResolutionMiddleware` imports in static/none modes under ASGI worker reuse (same process previously ran tenant mode). **If uncertain → structural fallback:** keep `create_http_app` tenant-mode-only (unchanged) and add `create_selfhost_app()` calling a lower-level factory without tenant middleware. The `auth_mode` param is preferred but not worth a hosted-outage risk; decision recorded in plan-review.
 
 ### Phase 1 — Daemon (D1, Indicator path — highest-risk code first)
+
 **GATE G1:** daemon boots + serves MCP + `/health`; hosted byte-identical (full existing suite green).
 
 - **T1.1 `auth_mode` param on `create_http_app`** — `tortoise/mcp_server.py` (cite by symbol, line drifts; ~:896 at plan time; P0.2 merge shifts lines). Signature: `auth_mode: Literal["tenant","static","none"]="tenant", api_key: str | None = None`. Middleware list conditional: `TeamResolutionMiddleware` only when `"tenant"`; `"static"` adds small `StaticKeyMiddleware` (constant-time compare, lives in `tortoise/mcp_auth.py` next to siblings, one-directional dep); `"none"` = security headers/body-size/rate-limit only. **Guard the function-level `from tortoise.mcp_auth import (TeamResolutionMiddleware, ...)` import (mcp_server.py ~:914, currently unconditional) behind the tenant branch** so static/none modes never reference it. Default preserves hosted exactly. Tests: `tests/test_mcp_server_auth_modes.py` — all three modes: 401 without key, 200 with, tenant-mode regression (existing auth tests unchanged).
@@ -77,6 +80,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 - **T1.4 `tests/test_selfhost.py`** — ASGI: `/health` 200, `/health/ready` 200 with embedded DB, MCP `initialize` + `tools/list`; subprocess smoke: `python -m tortoise.selfhost` on ephemeral port, real HTTP handshake. **Note: `_HTTPToolFilter` applies to selfhost too — operator-only tools (`team_create`, `backfill_v25`, `ingest_corpus`) remain HTTP-hidden (stdio-only); document in the daemon README.**
 
 ### Phase 2 — Consumer validation (C absorbed: D5 + D6) — depends on Phase 1
+
 **GATE G2:** bridge pushes points through the daemon over MCP with **zero engine imports**; `.mcp.json` connects to self-host.
 
 - **T2.1 `tortoise/mcp_client.py`** (new, ~100 lines) — thin wrapper over `fastmcp.client.Client` + `StreamableHttpTransport` + `BearerAuth`; tool names/params derived from `tool_registry.py` #510 (single source of truth); config `TORTOISE_MCP_URL` (default `http://localhost:8000/mcp`); graceful degradation (daemon down → `tortoise_unavailable` status, exit 0). Seeds #526. **SUPERSEDED 2026-09-17 (#3832 / D5): the exit-0 half of this clause is reversed FOR THE CLI PROBE ONLY — the clause was a LIBRARY contract (the driver never raises so script callers skip cleanly), but the exit code is the CLI probe presenting the result to a human or an agent harness, and a degraded probe must not look like success there. The library keeps never-raising and returning the payload; the `tortoise-client status` probe now exits `0` available · `3` degraded (can't reach it) · `4` unconfigured (not set up), keeping `1` for a query that genuinely fails and `2` for argparse. **The status WORDS were superseded again on 2026-09-18 (#3805 / roadmap §7 item 9): the ONE recorded vocabulary is `available | empty | degraded | unconfigured`, declared in `tortoise/status_vocabulary.py` and imported — never re-minted — by BOTH client surfaces (`client/tortoise_client/cli.py` and the S9 `tortoise/tortoise_client.py`, whose `status` payload and error values moved to `degraded` / `unconfigured`). The exit codes are unchanged; `empty` is `0`.** The original clause is retained here so the reversal reads as deliberate rather than as a contradiction.** Tests: `tests/test_mcp_client.py` against in-process daemon fixture (FalkorDBLite).
@@ -84,6 +88,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 - **T2.3 `.mcp.json` (D6)** — tortoise entry → `http://localhost:8000/mcp` (dev-local, docs-marked); remove hardcoded absolute cwd (`/Users/danielospina/Documents/GitHub/tortoise`); hosted endpoint noted as alternative. **Accepted drift: README's .mcp.json snippet is updated later in T5.1 (G2–G5 window where docs lag config — noted, not blocking).**
 
 ### Phase 3 — License track (D3, owner "Why") — parallel with Phases 1–2
+
 **GATE G3:** four-file license consistency + owner/legal approval (human gate).
 
 - **T3.1 `LICENSE`** — canonical BUSL-1.1 text + filled parameter block + AUG per §3 mapping. **`docs/license-notes.md`** — provenance split (clause→precedent URLs, rationale, audit findings).
@@ -91,6 +96,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 - **T3.3 `validation/check-license-surface.py`** (new; repo-local — `scripts/` is an agent-infra symlink) — asserts all four surfaces (LICENSE/README/pyproject/index.md) declare BSL 1.1 + $5M AUG + Mozilla Public License 2.0 (MPL-2.0) conversion. **Placement:** repo-local `.ci-checks/check-license-surface.sh` (precedent: `.ci-checks/check-test-isolation.sh`) — do NOT wire into `python-ci.yml`, which is a symlink to agent-infra templates (cross-repo blast radius + agent-infra version-sync pre-commit). **CI activation deferred to T5.3** (README/index not yet converged until Phase 5 — wiring at T3.3 leaves CI red through Phase 3–4). Prevents the tri-state from re-occurring (root cause: graph decision never synced to files).
 
 ### Phase 4 — Image + compose (D2, the #1 Indicator) — depends on Phase 1; overlaps Phase 2
+
 **GATE G4:** `docker run` → `/health` 200 → MCP `initialize` handshake in CI; compose variant boots.
 
 - **T4.1 `Dockerfile.selfhost`** (new) — modeled on `Dockerfile.hosted` (bookworm, requirements, `pip install -e .`); embeddings cache via `[embeddings]` extra (parity; note: optional at runtime).
@@ -98,6 +104,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 - **T4.3 `docker-compose.yml`** (root) — daemon + `falkordb` sidecar (AOF on, named volume, healthcheck) = documented durable path. **Do NOT bundle FalkorDB inside the Tortoise image** (official image SSPLv1 — license interaction + incident history).
 
 ### Phase 5 — Docs convergence (D4) + graph (D7) — depends on G3 + G4
+
 **GATE G5:** all acceptance criteria green; code-review gate (commit-workflow) passes.
 
 - **T5.1 `README.md` service-first rewrite** — Install → Connect → Query (MongoDB Atlas pattern); **hosted AND self-host are BOTH first-class quickstart paths — no "coming soon" debt, no pre-launch coordination check. Owner direction (2026-08-07): hosted is being built now (epic #235 + #518/#519/#292) and Tortoise has ZERO external users pre-launch — there is no one to hit a dead end, so both paths ship fully and launch together.** Include an env-var table (`TORTOISE_DB_URI`/`TORTOISE_DB_PATH`, `TORTOISE_API_KEY` footgun, `TORTOISE_HOST/PORT/RATE_LIMIT` = 100 req/min per IP) + operator-tools note (HTTP-hidden, stdio-only) as the daemon's doc home: hosted signup (free tier) OR `docker run`/`docker compose`; `claude mcp add tortoise http://localhost:8000/mcp` / `codex mcp add` / `.mcp.json` snippet; query = MCP tools + REST (#525); `pip install` demoted to "SDK for local dev/scripting"; **License/FAQ block** (D3 content: BSL + $5M AUG self-host; hosted = commercial outside grant; MIT products connect via MCP/REST and never inherit terms; Mozilla Public License 2.0 (MPL-2.0) conversion in 4 years; BSL-threshold + enterprise-blocklist framing per carried-forward risks).
@@ -122,6 +129,7 @@ LICENSE = committed legal instrument (canonical BUSL-1.1 + parameters + AUG, mac
 | 7 | License surface (4 files) | Config | Guard | Config (script) | BUSL-1.1 + $5M AUG + MPL-2.0 in LICENSE/README/pyproject/index.md | tri-state regression (root cause: graph unsynced) |
 
 ### Bug Pattern Flags
+
 - **Conditional guards** (auth_mode branches): boundary tests for all three modes; both sides of every branch (flag: tenant middleware leaking into static/none).
 - **Silent function skips** (bridge): verify push reaches the real MCP call — no hardcoded fallback/early return (existing `tortoise_available()` pattern must become a real connectivity check, not a silent pass).
 - **Race/process** (subprocess smoke): embedded DB process leaks (prior `redislite-process-leak` plan exists in this dir) — subprocess tests must terminate uvicorn cleanly.

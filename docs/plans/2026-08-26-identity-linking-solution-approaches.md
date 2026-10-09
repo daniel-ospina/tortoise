@@ -60,6 +60,7 @@ external `enable_manual_linking` state is verified.
 ### Description
 
 **P1 (ships alone):**
+
 - New bounded inventory surface: `GET /v1/user/identity` (backend) returning,
   for the session user only: providers + verified emails + last_sign_in_at
   (from `auth.identities` via service role), password-capability
@@ -74,6 +75,7 @@ external `enable_manual_linking` state is verified.
   `display_name` and NEVER touches `username` (C7 — two namespaces, one rule).
 
 **P2 (ships later, gated):**
+
 - Linking via vendored `supabase.linkIdentity` (C13): OAuth popups
   (GitHub/Google) + email+password via OTP (verified-email-only, C2). No
   admin-create anywhere (C6 — `handle_new_user` placeholder never fires
@@ -248,6 +250,7 @@ permanently — no GoTrue-table reads in the browser path) and separates
 
 **C1 — Demote `teams.email` (ONLY if falsification probes confirm multi-team
 demand):**
+
 - Migration: drop `uq_teams_email` (20260813000004 P3-FIX-S); `teams.email`
   becomes a nullable, non-unique per-team contact/display field; the signup
   idempotency key re-anchors from `org_by_email` (hosted_api ~3003) to "any
@@ -260,6 +263,7 @@ demand):**
   directly; the banner floor = mirror + password-capability + keys.
 
 **C2 — Bounded slice (DEFAULT FALLBACK — keep `uq_teams_email`):**
+
 - `teams.email` stays the anti-duplicate registry for SIGNUP only; a hard
   invariant: **identity flows never write `teams.email`** (lint/test guard +
   documented rule). The linking path creates `auth.identities` rows only;

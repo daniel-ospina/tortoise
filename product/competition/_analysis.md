@@ -249,6 +249,7 @@ Zep's website says "Context Graph Engine" and "Context Lake" — but these are p
 
 **1. Graphiti IS the architecture.**
 Zep markets "Context Graph Engine" as proprietary secret sauce. But Graphiti (`github.com/getzep/graphiti`, ~31K stars, crossed 20K) is the actual implementation:
+
 - Entity extraction from Episodes
 - Relationship inference with temporal validity
 - Fact invalidation when new data contradicts old facts
@@ -259,6 +260,7 @@ The "Context Graph Engine" is Graphiti with proprietary scaling, multi-tenancy, 
 
 **2. The "Context Lake" is a multi-tenancy + governance layer.**
 The Context Lake adds what Graphiti lacks:
+
 - Multi-tenant isolation (Graphiti is single-subject)
 - ABAC (attribute-based access control)
 - Retention policies + Legal Hold
@@ -269,6 +271,7 @@ These are not graph operations — they're infrastructure operations. Zep's prop
 
 **3. No Postgres — they went graph-native from day one.**
 Unlike Honcho (which hides graph ops in Postgres JSONB + LLM tool calls), Zep chose Neo4j/FalkorDB as the primary store. This means:
+
 - Graph traversal is O(path_length), not exponential
 - No "hidden graph" — the architecture is honest about what it is
 - Trade-off: new infrastructure (graph DB) vs. Honcho's "use what you already have" (Postgres)
@@ -879,6 +882,7 @@ Modified:  w = p_B · p_R · credibility(B, mechanical_domain)
 Where `credibility(B, domain)` is NOT a scalar per source, but a vector per (source, mechanical domain) pair. A source's credibility on "marketplace dynamics" doesn't transfer to "consumer psychology." The credibility term gates liveness: a test is only alive if the counterpoint comes from a source with demonstrated credibility in the relevant mechanical domain.
 
 **Concrete example:**
+
 - Counterpoint B: "Paid outperforms organic" — backed by a VC known for marketplace expertise (credibility = 0.9 in "marketplace dynamics")
 - Counterpoint B': "Paid outperforms organic" — backed by an anonymous blog (credibility = 0.1 in "marketplace dynamics")
 - Under Connor's model: both have the same liveness if p_B and p_R are equal
@@ -936,6 +940,7 @@ These new edge types don't replace R(A,B) — they augment it. `R(A,B)` still ex
 **Connor's operators:** All of type R(A,B) — "B is relevant to A." Single edge type, tradeable, adversarial.
 
 **The problem:** "Relevance" conflates at least five different relationships:
+
 - "B proves A false" (contradiction — should reduce confidence in A)
 - "B is evidence FOR A" (support — should increase confidence)
 - "B reveals the conditions under which A is true" (qualification — should contextualize A)
@@ -979,6 +984,7 @@ Where pathway_diversity(i,j) = |{distinct mechanical pathways connecting i to j}
 A point connected to 3 resolution events through 3 different mechanical pathways gets 3× the grounding of a point connected to 3 resolution events through the same pathway repeated. This prevents "grounding farming" — running the same experiment 10 times doesn't create 10× grounding.
 
 **Concrete example:**
+
 - Claim: "Organic outperforms paid"
 - Resolution event E1: test of "repeat purchase rate" mechanism → grounding contribution: 1 pathway
 - Resolution event E2: test of "repeat purchase rate" mechanism AGAIN → grounding contribution: 0 (same pathway, already counted)
@@ -994,6 +1000,7 @@ A point connected to 3 resolution events through 3 different mechanical pathways
 **Connor's track records:** Per-position ledger of adverse trials survived. h-weighted. Attached to positions, not persons. Measures "did this position survive when evidence went against it?"
 
 **The problem:** A position can survive an adverse trial for two very different reasons:
+
 1. **Mechanical soundness:** The underlying mechanical model was correct, and the trial's apparent contradiction was resolved by identifying boundary conditions
 2. **Luck:** The trial happened to use boundary conditions where the position was accidentally correct, but the mechanical model was wrong
 
@@ -1013,6 +1020,7 @@ Our trial record:
 ```
 
 This enables:
+
 - **Mechanical survivorship:** Track not just "did the position survive?" but "did the MECHANICAL MODEL survive?" A position that survived because its model was right → high track record. A position that survived because boundary conditions happened to align → lower track record.
 - **Boundary condition discovery:** When a trial reveals new boundary conditions (the position is true, but only under narrower conditions than previously thought), this is valuable learning — the track record should reflect that the position WAS correct but IS NOW contextualized.
 - **Model deprecation:** When a position's underlying mechanical model is superseded by a better model, the track record of the OLD model should be preserved as historical context but not applied to the NEW model.

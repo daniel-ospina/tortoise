@@ -307,3 +307,121 @@ def test_search_snapshot_legacy_delegation(sdk, monkeypatch):
     snap["model_id"] = None
     results = fs.search_snapshot("alpha", snap, limit=10)
     assert len(results) == 1, "must delegate to the legacy scorer"
+
+
+# ── #7760: per-store isolation ───────────────────────────────────────
+
+def test_snapshot_store_isolated_across_embedded_dbs(tmp_path, monkeypatch):
+    """#7760: the snapshot store must not serve one embedded DB's corpus to
+    another.
+
+    Every embedded DB defaults to ``graph_name='tortoise'``, so the old
+    ``(graph_name, namespace)`` key collided across files: a point written by
+    one test's SDK surfaced in another test's degraded search — the leaked
+    ``fallback producer probe point`` in
+    ``tests/test_tortoise_search.py::test_sdk_fts_query_empty`` caused by
+    ``tests/test_subject_layer_read_surfaces_4889.py``. Both files must be
+    safe in ONE process, which is the property the sharder assumes.
+
+    The embedded mode is forced explicitly. On a URI-bearing session (the lane
+    CI runs for a full selection) ``TortoiseSDK(<path>)`` is redirected to a
+    server and derives a per-path graph name, so the old key would already
+    differ and this test would pass without the fix. Deleting the URI keeps
+    both SDKs genuinely embedded, so the test guards ``snapshot_key`` on every
+    lane instead of only the carve-out lane.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    fs._store.clear()
+    a = TortoiseSDK(str(tmp_path / "a.db"))
+    b = TortoiseSDK(str(tmp_path / "b.db"))
+    try:
+        proj_a = a._get_proj()
+        proj_b = b._get_proj()
+        assert proj_a._is_embedded and proj_b._is_embedded, (
+            "this test must run against embedded stores, not a redirected "
+            "server — otherwise it passes without the fix")
+        ka = fs.snapshot_key(proj_a, None)
+        kb = fs.snapshot_key(proj_b, None)
+        assert ka != kb, (
+            "distinct embedded DBs must derive distinct snapshot keys, got "
+            f"{ka!r} for both")
+        a.create_point("statement", "fallback producer probe point")
+        _no_match_query(a)  # builds + caches A's corpus snapshot
+        assert fs._store.get(ka) is not None, "A must cache its own snapshot"
+        assert fs._store.get(kb) is None, (
+            "another embedded DB's snapshot is visible under this DB's key")
+        # End-to-end shape of the original leak: B's degraded search must not
+        # return A's point.
+        b_hits = _no_match_query(b)
+        assert all(r["content"] != "fallback producer probe point"
+                   for r in b_hits), (
+                    "another embedded DB's point leaked into this search: "
+                    f"{[r['content'] for r in b_hits]}")
+    finally:
+        for s in (a, b):
+            try:  # noqa: SIM105
+                s.close()
+            except Exception:
+                pass
+        fs._store.clear()
+
+
+def test_snapshot_key_memory_identity_is_stamped_not_recycled():
+    """#7760 review: ``:memory:`` must not key on ``id()``.
+
+    A ``:memory:`` projection has no file, so it is identified by a token
+    stamped on the projection. ``id()`` would be recycled once the projection
+    is collected, so a later ``:memory:`` store could inherit a snapshot built
+    before the first was closed — the same cross-store disclosure this key
+    exists to stop. The token is stable for one projection and absent from a
+    fresh one.
+    """
+    class _MemoryProj:
+        _path = ":memory:"
+        graph_name = "tortoise"
+
+    p = _MemoryProj()
+    key = fs.snapshot_key(p, None)
+    assert fs.snapshot_key(p, None) == key, (
+        "the key must be stable for the same projection")
+    assert getattr(p, "_snapshot_store_id", None) == key[1], (
+        "the identity must be the stamped token, not a recyclable id()")
+    assert fs.snapshot_key(_MemoryProj(), None) != key, (
+        "a fresh in-memory store must not inherit the token")
+
+
+def _snap():
+    return {"built_at": time.monotonic(), "dirty": False, "points": [],
+            "vectorizer": None, "doc_vecs": None, "model_id": None}
+
+
+def test_snapshot_store_is_bounded_and_lru(monkeypatch):
+    """#7760 review: per-backend keys must not make the store grow without
+    bound; eviction is LRU so a hot store survives.
+
+    The old ``(graph_name, namespace)`` key was bounded by the number of such
+    pairs a process held; a per-backend key is not, so a long-lived process
+    that opens many distinct embedded DBs (or ``:memory:`` stores) would retain
+    one corpus each. A read bumps an entry so the hosted per-request-SDK
+    pattern keeps its one graph's snapshot.
+    """
+    monkeypatch.setattr(fs, "MAX_SNAPSHOT_ENTRIES", 3)
+    fs._store.clear()
+    try:
+        for i in range(5):
+            fs._store.put((f"g{i}", None, None), _snap())
+        assert len(fs._store._store) == 3, (
+            "the store must not grow past MAX_SNAPSHOT_ENTRIES")
+        assert fs._store.get(("g0", None, None)) is None, "oldest must be gone"
+
+        fs._store.clear()
+        for i in range(3):
+            fs._store.put((f"g{i}", None, None), _snap())
+        assert fs._store.get(("g0", None, None)) is not None  # read bumps g0
+        fs._store.put(("g3", None, None), _snap())
+        assert fs._store.get(("g0", None, None)) is not None, (
+            "a recently-read entry must survive the cap (LRU, not FIFO)")
+        assert fs._store.get(("g1", None, None)) is None, (
+            "the least-recently-used entry is evicted")
+    finally:
+        fs._store.clear()

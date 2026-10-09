@@ -1,6 +1,7 @@
 # ADR-009: Server-Side Embedding Model Selection for Hosted Tortoise
 
 **Status:** Accepted (2026-08-21 — gate verdict + user decision; see Evidence Summary)
+
   - Statistical verdict: **bge-small +15.7% turn_recall@10 (p=0.0005, BH-FDR clean)**,
     arctic-xs +10.6% (p=0.0135, BH-FDR clean), arctic-s -8.9% (ns) vs MiniLM control
     (0.679 ± 0.39, n=138 paired, Docker FalkorDB surface, 0 failures)
@@ -95,6 +96,7 @@ spot-check's own n = the full filtered-split question set. WAIVED when the escal
 run fires (the judged HNSW run supersedes it).
 
 **Outcomes:**
+
 - **PASS(model):** PR2 is created (subject to preconditions (a)-(e) below).
 - **NO-WINNER:** no candidate beats control ≥Δ with FDR-clean CIs on either
   co-primary metric → **no swap** with the negative evidence attached; non-embedder
@@ -124,6 +126,7 @@ with the pilot evidence (**pilot close requires HUMAN confirmation**; the +2pp l
 is a 0.6σ read at n≈150).
 
 **PR2 preconditions (a)-(e) — enforced by gate_1349.py:**
+
 - (a) `gate_1349.py` verdict = **PASS**.
 - (b) **product-call.json** = `server-side` (enum ∈ {server-side, selfhost-only,
   reject-swap}; asked BEFORE the burn at the T7→T8 gate; no response in 24h →

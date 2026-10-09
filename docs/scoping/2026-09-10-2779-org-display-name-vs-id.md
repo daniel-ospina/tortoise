@@ -256,6 +256,7 @@ Identifier "acme" is already used. Try: acme-2
 ```
 validate_display_name(raw) -> str            # raises ValueError with the message
 ```
+
 1. `trim()`
 2. reject if empty → `"Organization name can't be empty."`
 3. collapse internal whitespace runs (`\s+` → `" "`)
@@ -615,6 +616,7 @@ it, and it is safe to ship later because the identifier is immutable.
 | Whether `Team.name` should also carry a separate `display_name` property in the registry graph | no — `name` is the display name, `id` is the identifier; same shape as `teams` | consistency with the Supabase lane and with `graphs.name` |
 
 **Product decisions to confirm before slice 2 lands** (flagged, not blocking slice 1):
+
 1. Display names may repeat globally (D4). This changes the 409-on-duplicate-name
    behaviour and updates `tests/test_one_free_org_entitlement.py` and the dashboard
    e2e that assert it.

@@ -813,6 +813,15 @@ def test_event_retention_loop_awaits_the_cost_refresh():
                 # path's tuple in ``_run_boot_sweeps``.
                 ("deleted-account purge", "_purge_deleted_accounts", "offload"),
                 ("oauth retention", "_sweep_oauth_retention", "offload"),
+                # #4241: the period-anchor repair. Declared here because the pin
+                # exists to force a new periodic step to be DELIBERATE; it sits
+                # in the same relative order as the boot tuple in
+                # ``_run_boot_sweeps``, and it MUST be an offload — the RPC is
+                # sync control-plane work, so a direct await would put it on the
+                # event loop and the guard would swallow an ``await None``
+                # TypeError every interval.
+                ("metering period reconciliation",
+                 "_reconcile_metering_periods", "offload"),
                 ("cost allocation refresh", "_refresh_cost_allocation", "direct")]
     assert body == expected, (
         "the periodic body must guard exactly these steps, in order, each sync "
@@ -1206,6 +1215,14 @@ _BOOT_SWEEPS = (
     ("purge", "_purge_deleted_orgs", "boot deleted-team purge sweep"),
     ("account", "_purge_deleted_accounts", "boot deleted-account purge sweep"),
     ("oauth", "_sweep_oauth_retention", "boot oauth retention sweep"),
+    # #4241: the period-anchor repair. Declared HERE so the parametrization
+    # below covers it too. It is LAST in this tuple, so an unguarded raise here
+    # would not abandon a sweep after it — it is caught because the raise
+    # propagates out of `asyncio.run(...)` and because the caplog label
+    # assertion must still see its step run. Earlier entries carry the
+    # abandon-the-rest rationale; this one carries "every step is guarded".
+    ("metering", "_reconcile_metering_periods",
+     "boot metering period reconciliation sweep"),
 )
 
 

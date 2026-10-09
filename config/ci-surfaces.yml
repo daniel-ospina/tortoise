@@ -55,6 +55,7 @@ carve_shards: 3
 
 surfaces:
   api:
+  - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
   # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
@@ -66,6 +67,13 @@ surfaces:
   - test_1162_add_operator_local_svbp.py
   - test_3660_session_upload_identity.py
   - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
+  # #3998 (D30): the absent-raw state is a first-class VALUE on the source
+  # record, and the provenance read paths report it — labelled per cause,
+  # never raising, never holding the bytes. Registered under `api` because the
+  # change is carried by `tortoise/sdk.py`, a SHARED_MODULE (so it runs on the
+  # full matrix anyway); the registration is what pins it to a surface at all,
+  # without which a guard whose own file changes alone never runs.
+  - test_3998_raw_absent_state.py
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
@@ -74,6 +82,12 @@ surfaces:
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
   - test_capture_lane_3516.py
+  # #3516 §B: the client-timestamp floor's inputs (`client_captured_at` + its `_source`).
+  # DUAL-REGISTERED with `core` for the same reason as the lane entry above: the touched
+  # files span BOTH surfaces — `hosted_api.py` / `sdk.py` / `__main__.py` select `api`,
+  # while `capture_spool.py` / `capture_install.py` match no named surface and fall
+  # through to `core` — so a core-only PR must still run the floor's controls.
+  - test_3516_client_captured_at.py
   # #5199: DUAL-REGISTERED with `core` for the same reason as `test_boot_regressions.py`
   # BELOW in this list. `tortoise/hosted_api.py` is an exact-surface (`api`) match that REPLACES the
   # `core` fallback, but this file's structural guard pins the session→document call
@@ -151,6 +165,12 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #7678: the org-create lane's dedicated control-plane pool + the single
+  # membership read. Same dual registration as the offload guard above and for
+  # the same reason: the files it guards are tortoise/hosted_api.py,
+  # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
+  # `api` surface.
+  - test_org_create_pool_7678.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -408,6 +428,14 @@ surfaces:
   # SELECTS `api` — a named-surface match REPLACES the `core` fallback, so a
   # core-only registration would never run on an api-only PR.
   - test_cost_allocation.py
+  # #4241: the metering period-anchor repair's periodic caller. Registered with
+  # `api` because the step (`_reconcile_metering_periods`) and both call sites
+  # live in `tortoise/hosted_api.py`, which SELECTS `api` — a named-surface match
+  # REPLACES the `core` fallback (#2938), so a core-only registration would never
+  # run on an api-only PR. Without this line
+  # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
+  # be classified — the scope-v5 drift trap).
+  - test_4241_metering_period_reconciliation.py
   # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
   # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
   # SOURCE_PATTERN) while the metric family/writer/reader live in
@@ -485,6 +513,15 @@ surfaces:
   - test_session_auth.py
   - test_capture_consent.py   # #3615: capture consent predicate + durable migration notice (CLI/parity)
   - test_session_capture_e2e.py
+  # #5498: the session read projection is ONE declaration
+  # (tortoise/session_projection.py) derived from by the hosted read surfaces,
+  # the SDK read and the self-hosted CLI. Registered under `api` because both
+  # `tortoise/__main__.py` and `tortoise/hosted_api.py` (the CLI commands and
+  # the wire dicts this file pins) map to `api` — a named-surface match REPLACES
+  # the `core` fallback, so registering only `core` would stop it running on an
+  # api-only PR. `tortoise/sdk.py` is a SHARED_MODULE, so the re-export identity
+  # assertion runs under the full matrix without a separate registration.
+  - test_session_cli_parity_5498.py
   - test_session_context.py
   - test_session_extraction_modes.py
   - test_session_index_health.py
@@ -721,6 +758,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
   # the writer path #4028 left open, so residue regenerated after each purge.
@@ -770,8 +808,14 @@ surfaces:
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
+  - test_fleet_state.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
+  # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
+  # `setitimer(ITIMER_REAL)` / `signal.signal(SIGALRM, …)` from silently
+  # disarming pytest-timeout's per-test guard. DB-free, no network — the
+  # default `core` surface is correct.
+  - test_timeout_not_disarmable.py
   - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
@@ -841,6 +885,7 @@ surfaces:
   # hand count. Same surface as its siblings test_merge_throughput.py /
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
+  - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
   # here. main has since registered it in `core` (see the `test_pack_cli.py`
@@ -1066,6 +1111,7 @@ surfaces:
   - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
@@ -1111,6 +1157,7 @@ surfaces:
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -1264,6 +1311,11 @@ surfaces:
   # `__main__.py` select `api`. Dual-registered for the same reason as the
   # `test_capture_spool.py` entry above — a core-only PR must still run it.
   - test_capture_lane_3516.py
+  # #3516 §B: the client-timestamp floor's inputs. The `core` arm is the load-bearing
+  # one: `capture_install.py` (the floor function) and `capture_spool.py` (the stamp's
+  # carry-forward) both select `core`, and a core-only PR that reverted either would
+  # otherwise run no guard at all.
+  - test_3516_client_captured_at.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
@@ -1626,6 +1678,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_determinism_tie_order_3019.py
   # #4999: the vector leg's trace must report WHICH path it took (index vs
   # brute-force scan). Pins the unpatterned engine module
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
@@ -1638,6 +1691,25 @@ surfaces:
   # (the inventory read), which fall to the `core` fallback — same rationale as
   # test_4999_vector_mechanism.py above.
   - test_4997_vector_index_parity.py
+  # #5404: the entity_type -> Cypher-label guard must be ENFORCED, not merely
+  # declared — `tortoise/security.py::validate_entity_type` was inert while the
+  # legs interpolated a caller-controlled string into a Cypher LABEL. Pins the
+  # unpatterned engine module `tortoise/search_engine.py` (the three runners plus
+  # degradation_chain), which falls to the `core` fallback — same rationale as
+  # test_4997_vector_index_parity.py above. DB-free: the guard precedes all
+  # database work, which is what makes the entry placement observable.
+  - test_5404_entity_type_guard.py
+  # #5407: the range/full-text label sets the index sweep creates must not
+  # drift from the labels the VECTOR leg's declared routing resolves to.
+  # `_ensure_indexes` declared its sets as inline literals with nothing tying
+  # them to that routing, so a served label could be added and its
+  # range/full-text index silently never created — it then degrades to
+  # `index_missing`/an empty FTS run, and the structural leg falls back to a
+  # label scan. The labels are now module-level declarations and this pins
+  # their coverage against BOTH the sweep sets and the `_REQUIRED_*`
+  # schema-current gate. The VECTOR index is NOT covered: its labels are still
+  # literals and it needs neither index kind. DB-free: reads declarations only.
+  - test_5407_index_label_parity.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   # #4199: the dense leg's material is judged against the READ's own kind
@@ -1998,9 +2070,12 @@ surfaces:
   - test_pi_capture_hooks.py
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
-  # #3485: dual-registered with `api` (cross-surface registration is deliberate,
-  # #2913). This is the website-guard home for the shared session-bridge asset:
-  # a `website/assets/supabase-session.js` change selects this surface via
+  # #3485/#3559: dual-registered with `api` (cross-surface registration is
+  # deliberate, #2913). This was the website-guard home for the shared
+  # session-bridge asset; the bridge (`website/assets/supabase-session.js`) was
+  # DELETED in #3559, so this guard now proves its ABSENCE and covers the
+  # surviving subjects it still reads (`main.jsx`, `signup.html`, `backend.ts`).
+  # A `website/apps/blog-admin/src/lib/backend.ts` change selects this surface via
   # SOURCE_PATTERNS, so the guard runs on the PR that edits the file it guards.
   - test_cross_subdomain_cookie_sync.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
@@ -2036,10 +2111,12 @@ surfaces:
   # through the same-origin BFF. It lives at the tests/ root because it scans all
   # of website/, not just the onboarding pages.
   - test_no_legacy_token_path.py
-  # #3503: the fragment-retention regression gate for the legacy cross-subdomain
-  # bridge (a failed session-cookie write must not destroy the only copy of the
-  # credential). Pure Node-harness + cookie-jar shim, no browser/network, so it
-  # runs in the python-ci matrix. Moves to the deletion test when #3559 lands.
+  # #3503/#3559: the fragment-retention regression gate for the legacy
+  # cross-subdomain bridge. The bridge is DELETED (#3559), so the gate is now its
+  # absence proof — the failed-write/destroyed-fragment class is unreachable
+  # because no browser surface writes a session at all. Pure static, no
+  # browser/network, so it runs in the python-ci matrix. It still exports
+  # `_require_node`, which `test_oauth_consent_pkce.py` imports.
   - test_session_bridge_fragment_retention.py
   - test_waitlist_form.py
   - test_w7_publish.py
@@ -2307,6 +2384,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
+- test_rebuild_parity_fail_loud_3585.py  # #3585: 76 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED 2026-10-08 WHEN THE FILE COLLECTED 47; it now collects 76, of which #7719 contributed 10 (66 -> 76), so ~36s is a LOWER bound and the committed 45.0 weight predates those 10 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -2395,8 +2473,8 @@ slow_files:
 # The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
 # job's own drift-guard step fails closed if the union stops matching this list.
-# Both legs are budgeted from that weight (a 35m watchdog under a 40m cap for
-# 13.82m legs), pinned by
+# Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
+# 14.192m / 14.188m legs), pinned by
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
@@ -2490,6 +2568,11 @@ carve_out:
 # collect it and SKIP every case via the marker hook, a permanently green and
 # permanently unexecuted gate on main (the #4047 shape).
 - test_vecf32_overwrite_seams_4524.py
+# #4521: the module is module-level `embedded_only` — without this registration
+# a full URI-set selection would collect it and SKIP the case via the marker
+# hook, a permanently green and permanently unexecuted gate on main (the #4047
+# shape).
+- test_4521_revise_point_embedding.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
@@ -2948,6 +3031,16 @@ durations:
   test_wipe_server.py: 5.1
   test_boot_regressions.py: 4.2
   test_de2e1_entity_extraction.py: 2.1
+  # #3019: measured 2026-10-05 LOCALLY under the embedded carve-out config
+  # (`TORTOISE_TEST_CARVE_OUT=1`) — 7.10s for the file (a second run 8.31s; one
+  # embedding fixture is 5.16s of the setup). The
+  # row also changes the fast-pool durations coverage (#3400): a file with no
+  # durations row packs at the flat default, so whether removing this row keeps
+  # the pool above `DURATION_COVERAGE_MIN` must be measured at that head rather
+  # than assumed. Refresh from the first post-merge CI run that measures it. No
+  # pool size or percentage is restated here on purpose — see the same rule on
+  # the `#3400` rows above.
+  test_determinism_tie_order_3019.py: 7.1
   test_epic903_staleness.py: 2.6
   test_epic903_observability.py: 3.1
   test_lme_m6_evidence.py: 2.4
@@ -3341,6 +3434,7 @@ durations:
   test_render.py: 0.2
   test_rebuild_recreate_content_parity.py: 2.5
   test_rebuild_graph_only_derived_parity.py: 2.2
+  test_rebuild_parity_fail_loud_3585.py: 45.0  # #3585: 76 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency; cycle-3 adds a second name-only supersede, a rename-materialized forward reference, a forward-reference-by-name guard, an incarnation-reuse case, an early-ambiguity-then-zero-carrier refusal, and two backup.restore fail-loud cases; cycle-4 pins the single trailing supersede sweep and the name-MERGE id collapse; cycle-5 gives the state-op arm the same name-MERGE parity and makes `_object_target` linear; cycle-6 keys the carrier index on the graph's MERGE key — never the display `name or title` fallback — and mirrors a falsy `state["name"]` rename, removing the two false refusals that guard introduced; cycle-7 models the ids whose creation makes NO graph node (a state op on them is a 0-row miss) and PRESERVES a merge key through an unusable-name re-creation, closing the fail-OPEN class cycle-6 opened). STILL IN `slow_files`, but NOT for the reason the original note gave — that reason was a measurement artifact. The previous lane committed a 520.0 PLACEHOLDER (explicitly labelled not a measurement) and then 709.0, the upper of two readings taken 2026-10-07 while THIS HOST was at a 1-minute load average of ~97 (the fleet's own overload); on a healthy docker lane the file runs in ~36s (measured here 2026-10-08, when the file collected 47 tests: 47 passed in 35.62s; five further independent runs land in 35.6-48.0s, and 109s only with HF online). 709 was therefore ~15-20x the real cost, and the real cost is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives from 900/2.5 — so the #6133 invariant does NOT exclude this file at its real cost. (It DID exclude it at the 520.0 and 709.0 weights this map committed, and at the 469.2s reading that note recorded — 469.2 was measured, never committed — because that test reads the COMMITTED map and never a runtime measurement. So the two notes disagree about the file's COST, not about what the invariant does.) The placement in `slow_files` is retained deliberately rather than reverted in the same diff: it costs ~36s on a 14.19m leg that runs on every full push anyway, and the LOADED cost is the uncertain quantity a fast shard's 15m watchdog would have to absorb. 45.0 is committed as the weight: it sits at the top of the range of healthy readings this note cites (35.6-48.0s; 45.0 is 3s under the slowest of them), which keeps the `test_slow_leg_bounds_clear_the_committed_work` bound close to honest. It is deliberately NOT inflated past the slowest reading — a weight chosen to make a sentence true is the same error this note exists to correct. Revisit the placement with `tools/ci_timing.py --refresh-durations`, whose CI measurement settles it.
   test_restore_container_recovery.py: 0.1
   test_sdk_adapter_cap.py: 0.1
   test_sentry.py: 0.1
@@ -3353,6 +3447,7 @@ durations:
   # entry exists because registering the file left the fast pool at 667/742
   # durations = 89.9%, one file below the DURATION_COVERAGE_MIN = 0.90 floor.
   test_capture_lane_3516.py: 15.0  # unmeasured on the docker lane
+  test_3516_client_captured_at.py: 12.0  # measured 2026-10-08 on the docker lane (36 tests, 4 with graph round-trips)
   test_session_import_desktop.py: 0.1
   test_session_indexer_ollama.py: 0.2
   test_session_login_helpers.py: 0.1

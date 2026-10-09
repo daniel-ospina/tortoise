@@ -137,6 +137,7 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - Unique constraint requirement from the issue ("one-team-per-identity") → reframed as **one-token-per-team** via `uq_agent_signup_tokens_team` (see O/I-T deviation block above).
 
 ### 2. `agent_signup` (hosted_api.py:6856)
+
 - Parse optional `signup_token` from the BODY (never a header — proxies log headers; X-Device-Id stays ignored per #741(a)).
 - **Rate-limit ordering (solution-verify P1):** the 2/24h mint limiter (hosted_api.py:2060) currently runs pre-parse at :6876. The mint bucket must bound **minting only** — parse the body first and apply `_check_signup_ip_rate_limit` ONLY on the no-token path. A token-present request is a recovery (possession-authenticated), never a mint, and must not consume or be blocked by the mint bucket. ⛔ **But the token-present branch gets a COMPENSATING recovery limiter (Cycle-2 P1):** it performs the same `recover_team_key` mint as `/v1/agent/recover`, so it SHARES the recovery rate limiter (per-IP bucket + per-token attempt cap + recovery-velocity feed) via the same `_check_recovery_rate_limit` helper — a stolen token must not enable unbounded mint/revoke churn on that surface. Lock test: an IP over the recovery per-IP cap is 429'd on token-present signup too.
 - **Token present:** validate format (`st_` + 64 hex), hash, `resolve_signup_token` (RPC):
@@ -149,18 +150,21 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - Response-shape note (contract hygiene): mint returns `identity`; token-present recovery omits it. Documented, harmless (CLI doesn't consume `identity`); kept minimal.
 
 ### 3. New endpoint — `POST /v1/agent/recover` (hosted_api.py, alongside agent_signup)
+
 - Body `{signup_token}`; same verification as the token-present signup path (shared helper `_resolve_signup_token(cp, token) -> org_id | None` wrapping the RPC).
 - **Rate limiting — its own bucket, NOT the 2/24h signup bucket:** shared `_check_recovery_rate_limit` helper used by BOTH `/v1/agent/recover` AND the token-present signup branch: per-IP bucket (e.g., 5/24h, `_RECOVER_BUCKETS` pattern) + per-token attempt cap (e.g., 10/h, keyed on the token **hash**, not the raw token) + recovery-velocity feed (mirror SignupVelocityTracker at abuse.py:678; ops email + dashboard alert parity). Precision (Cycle-3 P4): bucket counts **attempts** (invalid-token probes burn the per-IP bucket — acceptable given the uniform 422, but decided); 429 body error_code = `over_recovery_ip_rate_limit` (mirrors `over_signup_ip_rate_limit`); **IP extraction is IDENTICAL to `_check_signup_ip_rate_limit`** (`request.state.client_ip` fallback chain — otherwise the shared bucket splits into two half-caps; unit test asserts the same key from both endpoints).
 - Returns `{key, org_id, org_name, graph_name, tier}`; CLI writes config. Registry lane: same flow against the SignupToken node (sdk.py `signup_token_lookup` / `signup_token_recover` methods).
 - **Token revocation lifecycle (solution-verify P1 + Cycle-2 P2/Cycle-3 P3):** `revoked_at` is written by the **support runbook only** — documented steps: (1) verify ownership via audit_events detail JSONB (claim/IP history) + `appeal_url()` channel; (2) audited SQL revoke of the token; (3) **revoke keys minted via this token** — `created_via='recovery' AND created_by = 'st_'||left(token_hash,12)`, correlated with audit_events timestamps (keys minted after the last owner-confirmed mint / after the reported compromise); note `created_by` is **token-attributable by design** — it identifies the token, not the human, so the correlation is timestamp-based, not owner-based; (4) **re-credential the verified owner** — mechanism MUST be chosen: (a) an internal audit-gated support tool (app context, has the pepper) that generates a fresh token + key and writes both rows, or (b) explicitly out of the floor: "post-revoke the owner must fresh-signup (new team, old data orphaned) or restore from backup" — the pepper lives in app code, NOT SQL, so plain SQL cannot mint a fresh token/key; pick one in the plan; (5) confirm. Registry lane (selfhost): `MATCH (s:SignupToken {token_hash}) SET s.revoked_at = $now` — operator DB access (documented). A leaked token is the same compromise class as a leaked key (0600 file, hash-only at rest) and the runbook closes it. Token rotation on recovery (mint a fresh token each recovery, revoke the old) is REJECTED: the lost-response window would strand a user whose rotated token never arrived. A user-facing revoke action (post-claim dashboard/CLI "revoke recovery token") is a follow-up issue.
 
 ### 4. Registry lane parity (selfhost, FalkorDB)
+
 - Mint path (hosted_api.py:6980-7000): add `CREATE (:SignupToken {token_hash, org_id, created_at})` + APIKey node gains `created_via: 'provisioned'` and `expires_at: NULL` props (parity with Supabase lane — owned by THIS issue per the task brief). ⛔ **The SignupToken node creation MUST be added to the #741(c) rollback block** (hosted_api.py:7010-7020 DETACH DELETE Team/APIKey/Membership + graph drop) — a failed registry mint must not leave an orphan SignupToken pointing at a deleted team. Test the partial-failure case.
 - `sdk.py apikey_verify` (:11299-11315): add `expires_at` filtering with **NULL-as-never-expires semantics** — `expires_at IS NULL OR expires_at > now` — mirroring the REST path (hosted_api.py:1214-1225). Without the NULL clause, every legacy selfhost key (no expires_at prop) would stop authenticating. Add a legacy-node test.
 - Existing legacy APIKey nodes lack created_via/expires_at → display fallback: created_via NULL → "legacy", expires_at NULL → "never" (dashboard heuristic); AC-7 pins the NEW-key behavior only. A one-shot backfill pass is optional/out of scope.
 - Recovery: `signup_token_lookup` + `signup_token_recover` sdk methods against the SignupToken node (reuse the `_verify_hashed_lookup("Invitation", ...)` precedent at sdk.py:11394). Concurrency: token rows are new nodes (no pre-existing duplicate ambiguity — unlike identity-based dedupe, which would need a reconciliation pass over the 14-key incident history).
 
 ### 5. CLI (`tortoise/__main__.py` + credentials file)
+
 - ⛔ **Sequencing contract (solution-verify P1):** #1708 currently has ZERO committed code (branch == main; plan-only). Merge order is **#1708 → #1709**. This issue defines the token-persistence contract INDEPENDENTLY so it cannot strand on #1708 details: field `signup_token` in the credentials store (0600; `~/.tortoise/credentials.json` once #1708 lands, else the current `.tortoise` config — the field is additive in either case). E2E-7 (list_api_keys created_via/expires_at) is a #1708 deliverable — this issue VERIFIES it, doesn't build it.
 - Persist `signup_token` in the credentials store; print the recovery-token prompt at mint (confirm-prompt "type YES you saved it").
 - Re-signup path: if credentials contain a signup_token, send it; on 422 `invalid_signup_token` → **warn the user first** ("your recovery token is invalid — this will create a NEW team; the old team will be unreachable") and require confirmation before clearing the token + minting fresh (a revoked or truncated token must not silently orphan the original team — solution-verify P3); on 403 (suspended team) → **fail closed, exit 1** with the suspended message — no fresh mint, no orphan prompt (Cycle-2 P3: the CLI must not push a suspended-team holder toward orphaning their team); on success (recovery) → rewrite config.
@@ -168,6 +172,7 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - No change to the reuse-before-mint logic from #1708 (it makes signup rare; this is the backstop).
 
 ### 6. Testing
+
 - `tests/test_agent_signup.py`:
   - Mint returns `signup_token` (starts `st_`, 64+ chars); re-signup with token → same org_id, NEW key, no second team (sequential).
   - **Uniform 422 across FOUR cases** (assert identical body): malformed, unknown, revoked, and valid-token-but-team-soft-deleted — the oracle-free contract. **Suspended team is a distinct 403** `_suspended_detail()` (possession-authenticated; platform convention).
@@ -184,6 +189,7 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 - Registry legacy-node test: APIKey node without expires_at prop still verifies (NULL-as-never-expires).
 
 ### Acceptance Criteria (E2E)
+
 1. `tortoise signup` twice, same machine/config: 2nd run reuses (no call, #1708) OR re-presents token → **1 team total, key rotated, 0 new teams**.
 2. Parallel POSTs, same signup_token → **1 team, 1 graph**; responses resolve to the same org_id.
 3. Config lost, token saved → `tortoise recover --token st_...` → new key, same team, memories intact (Supabase + registry lanes).
@@ -196,21 +202,27 @@ GRANT SELECT, INSERT, UPDATE ON public.agent_signup_tokens TO service_role;
 ## Rejected Alternatives
 
 ### B — Client-chosen opaque device_id + format whitelist + recovery code (the #741(a) reversal)
+
 Client keeps sending `{identity: device_id}` (CLI already does); server validates format (never `reg-`), dedupes on it, issues a recovery code at mint. **Rejected:** the ONLY approach that actually reverses #741(a) (the issue's red line), creates a pre-squat lockout primitive (attacker who obtains the pre-mint device_id — a 48-bit handle in request headers/logs — mints first → victim's mint dead-ends), stores the secret-equivalent at rest as the identity, needs a permanent format-whitelist maintenance burden against every future identity namespace, and its dedupe anchor is NULLed by claim (20260813000004) → post-claim second-team mint. **When this WOULD have been better:** if the team explicitly approves the #741(a) reversal and prioritizes the smallest client diff + server-side dedupe of the fresh-device concurrent race (C's lost-response window) over posture — and accepts the recovery-code-as-sole-safeguard tradeoff.
 
 ### A — HMAC-derived identity from a client device_secret + recovery code
+
 Client persists a high-entropy `device_secret`; server derives `dev-<HMAC-SHA256(PEPPER, secret)[:24]>`; secret never at rest server-side; recovery = secret + server-issued code. **Rejected:** statistically equal to C on oracle/TOCTOU and better than B on hygiene, but (a) the secret pre-exists the mint → pre-squat lockout in substance (attacker with the secret derives the identity and squats — the HMAC does not help), (b) the identity anchor is NULLed by claim → same post-claim gap as B (needs a dual-store anchor, converging on C's table), (c) response contract churn (dev- prefix breaks the locked `startswith("anon-")` assertions), (d) pepper-rotation blast radius on the dedupe guarantee, (e) registry reconciliation pass over the incident-history duplicate identities, (f) two conceptual artifacts (device identity vs code) for the user. **When this WOULD have been better:** if the control plane must attribute teams to devices via a stable server-derived identity (audit/analytics/dashboard correlations), or if reviewers reject "no identity at all" as a doctrine — A is the conservative fallback that keeps "identity is server-derived" in spirit.
 
 ### Support-runbook-only recovery (no credential issued at mint)
+
 Dedupe by token but recovery = contact support (audit trail → manual rotate). **Rejected:** the O/I/T explicitly demands "config lost → user recovers without support escalation"; the runbook remains the last-resort floor, not the design.
 
 ### KMS-envelope recoverable keys (from #1708's rejected list)
+
 Store keys encrypted so a dedupe-hit can return the ORIGINAL key. **Rejected in #1708 for the correct reason (security):** turns the dedupe-hit into a key-retrieval oracle — anyone with the identity retrieves a live key, violating #1082's key-possession gate. Not revived here.
 
 ### Two-step reserve-then-commit (`POST /signup/begin` → token, then `POST /signup/complete`)
+
 **Shrinks but does not close** C's lost-response window under a server-issued-token model (the begin token is server-issued — NOT a #741(a) reversal; the client persists it before the team mint; a retry completes the same mint IF the begin response arrived). **Rejected:** new endpoint + orphan-token GC + two-step client contract for a narrow window already bounded by #1708 client reuse + the 2/24h IP limiter; the orphaned team is empty/harmless. **When this WOULD have been better:** if the fresh-device concurrent-first-mint race must dedupe server-side (C cannot — no anchor exists pre-mint).
 
 ### Explicitly OUT (filed separately)
+
 - **`create_onboarding_team` orphan mint (hosted_api.py:7713-7760)** — mints a key whose plaintext is never returned + a fresh `anon-{uuid12}` per call. Auth-gated (session team), low harm (dead credential), and fixing it requires either returning the key (one-line response change + test) or relaxing the RPC's NOT NULL key contract (blast radius into register_user/teams/claim tests). **Out of #1709 scope; filed as follow-up issue.** Rationale: "file extra issues, don't silently absorb" — it is a distinct endpoint with a distinct fix, and #1708 already flagged it as noted-not-blocking. Dedupe-by-session-user for onboarding is also OUT (session users have user_id; the dedupe story is the claim/session path, not signup).
 - **Dedupe-by-session-user for onboarding** — OUT (auth-gated; different identity model).
 
@@ -255,9 +267,11 @@ Overall tier: **complex** (matches issue label).
 ## Verification Gates
 
 ### problem-verify
+
 VALIDATED by #1708's gates (2 fresh-context verifiers) — not re-run per the task brief.
 
 ### solution-verify
+
 - **Cycle 1:** 2 fresh-context verifiers dispatched. **P0 = 0 both.** Distinct P1s: 6 (rate-limit contradiction on token-present path; token revocation lifecycle; undefined recovery data-access layer; provision_team param placement vs append-only gate; #1708 zero-code sequencing; O/I-T re-anchoring needs ratification). P2s: 5 (concurrency key-count math; suspended/deleted-team branch; recovery created_by; apikey_verify NULL semantics; #1708 CLI coupling). P3s/P4s: 7 (two-step misclassification; O/I-T key-material reconciliation sentence; CLI 422 silent orphan; registry rollback missing SignupToken; legacy-node display; concurrency-test parallel mechanism; token_hash spelling + Invitation precedent; response-shape asymmetry).
 - **Controller action (Cycle 1):** ALL 6 P1s FIXED (limiter bypass on token-present path + lock test; revocation runbook + follow-up issue; resolve_signup_token/recover_team_key RPCs; CREATE OR REPLACE in new migration; sequencing contract + independent token-persistence contract; explicit O/I-T deviation block). ALL P2/P3/P4 incorporated. Re-dispatching both verifiers (Cycle 2).
 - **Cycle 2:** Both verifiers RE-DISPATCH verdict — P0=0, P1=3 (deduped): (1) CREATE OR REPLACE trailing-param mechanism is empirically false on PG16 — creates an OVERLOAD (old-arity calls ambiguous; new overload inherits Supabase default ACL = anon-executable mint primitive); (2) concurrency cap math wrong (free max_api_keys=2, not 3) + "same transaction" ≠ serialized (no lock specified); (3) token-present signup branch has no compensating recovery limiter/feed. P2s: RPC grant hygiene (anon-executable resolve_signup_token = oracle), revocation runbook strands owner (attacker keys never cleaned), suspended-team 403-vs-422, 402-clause contradiction. P4s: param count (15 not 16), phantom check-migration-order.cjs reference, registry-lane revocation line, ratification tracking, created_by caller-supplied.
@@ -270,6 +284,7 @@ VALIDATED by #1708's gates (2 fresh-context verifiers) — not re-run per the ta
 ## Review Cycle Log
 
 ### solution-verify — Cycle 1 (2026-08-14)
+
 - Verifier A: P0=0, P1=6, P2=2, P3=3, P4=2. Verifier B: P0=0, P1=3 (P1-1=P1-X, P1-2=P1-Y dup of A, P1-3=P1-Z dup), P2=5, P3=4, P4=1.
 - Controller merge: 6 distinct P1s (deduped across verifiers) — all fixed in the doc (see Verification Gates). P2+ incorporated. Both verifiers confirmed divergence genuine, convergence quality-driven, zero new deps, no better approach rejected for convenience.
 - **Re-dispatch (Cycle 2) in progress.**
@@ -277,11 +292,13 @@ VALIDATED by #1708's gates (2 fresh-context verifiers) — not re-run per the ta
 ## External Research (Phase 1.5 artifact)
 
 ### Axis Research
+
 - **Architecture (high) — idempotency patterns:** Stripe Idempotency-Key = client-chosen key, server stores key→stored-response, retry replays the SAME response (canonical; bytebytego, algomaster, dzone). Pitfalls confirmed: reusing a user ID as an idempotency key, short TTLs, non-atomic reservation. Postgres insert-or-fetch: `ON CONFLICT DO UPDATE + RETURNING` is the atomic form; plain `DO NOTHING + RETURNING` returns nothing for the conflict row (postgres docs; dba.stackexchange concurrency caveat) — our design avoids the pre-check-then-mint entirely (token-path never creates a team). [canonical + pitfalls]
 - **Ontology (medium) — one-anchor-per-resource:** in-repo precedent `tenant-provision/index.ts:335-352` (deterministic org_id = SHA-256(user_id)[:26] + upsert = idempotent re-invocation) and `uq_teams_name`/`uq_teams_email`/`uq_member_owner` partial unique indexes with pre-check-as-fast-path + constraint-as-authoritative (POST /v1/organizations at hosted_api.py:5170). [precedent]
 - **UX (low) — keyless recovery:** industry mitigants for anonymous recovery: backup/recovery codes + registered multiple auth methods (Twilio MFA recovery), device-bound tokens + trusted-device management (Keyless), FIDO2 recovery evaluation (arXiv 2105.12477); honest finding: no-multifactor anon recovery is impossible without a second credential or runbook — our single saved token + support runbook floor matches the standard posture. [competitor-precedent + pitfalls]
 
 ### Integration Docs
+
 - **New deps: NONE.** `tortoise/auth.py` already imports `hmac`, `secrets`, `hashlib`; token hash reuses the `lookup_hash` construction (SHA-256(PEPPER + token)) — no new package, no TS mirror (server-side-only derivation; `supabase/functions/_shared/lookup.ts` + `lookup_parity.test.mjs` untouched).
 - **Supabase:** NEW `provision_team_with_token` wrapper (15 named args + p_signup_token_hash) in the new migration — 0010 untouched; `api_keys.created_via` CHECK enum (0007) already admits `'recovery'`; new table + all three RPCs granted service_role-only with `public.`-qualified refs + `SET search_path=''` (mirror 0010:185-186).
 - **Migration plumbing:** timestamp-style filename (`check-migration-append-only` prefix/diff gate in ci.yml + `check-migration-drift` #1095 deploy gate — the strict-increasing/prefix-uniqueness enforcement; no `check-migration-order.cjs` exists); must add the file to `supabase/tests/pglite/validate.mjs` files list (currently stale — missing 20260813000006).

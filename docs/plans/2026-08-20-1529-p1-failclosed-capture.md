@@ -32,7 +32,9 @@
 ## Design Decisions
 
 ### D1 — The P1 gap is the CAPTURE assembly; the issue's "_extract_session_v2 discards out[errors]" is literal
+
 On the current origin/main (worktree `1509-plans`), `capture_session`/hosted dispatch extraction: `TORTOISE_SESSION_EXTRACTOR == "m2"` → `_extract_session_llm` (M2, two-stage), **else → `_extract_session_v2` (the `#1350` 5-stage pipeline — the DEFAULT, locked by `test_capture_session_v2_default_routes_and_writes`)**. Both return `[{id, kind, text}]`; both are silent on failure:
+
 - **v2 (default):** sdk.py `_extract_session_v2` (L1957) does `payload = out.get("payload") or {}` and never reads `out["errors"]`/`out["warnings"]` — a dead key makes `extractor_v2.extract_session_v2` return `errors=["S1 chunk failed: …"]` + `payload=None`, the wrapper writes nothing, returns `[]`, and `capture_session` reports `{"extracted": 0, "extraction_mode": "llm"}` — **the exact silent-`extracted: 0` / lying-`extraction_mode` hole** the issue targets. Its point-write loop also swallows per-point failures with `except Exception: pass` (invisible partial writes).
 - **M2 (behind env var):** `_extract_session_llm` RAISES `RuntimeError` on `extractor.run` failure after turn points landed — SDK callers get a raw exception, hosted an uncaught 500, no structured surface.
 - **Both:** empty conversation → `extracted: 0` with hardcoded `mode="llm"`.
@@ -40,10 +42,12 @@ On the current origin/main (worktree `1509-plans`), `capture_session`/hosted dis
 The v2 COMMIT path (`_commit_session_v2`) is a SEPARATE surface that already fails closed (consulted `out["errors"]`, `ok=False`, empty → "no payload") — locked by existing tests; this issue verifies it, no change.
 
 ### D2 — Capture response contract: add `ok` / `errors` / `warnings`; `extraction_mode` becomes a truthful 4-state enum
+
 SDK `capture_session` response becomes:
 `{"session_id", "turns", "extracted", "points", "extraction_mode", "ok", "errors", "warnings"}` (backward-compatible superset).
 
 `extraction_mode` semantics (truthful per branch — what ACTUALLY ran):
+
 - `"v2"` — the v2 5-stage extractor ran and **completed** (points may be 0 only when nothing was extractable; that case carries an additive warning, never a silent 0).
 - `"llm"` — the M2 extractor ran and completed (same zero-point rule).
 - `"empty"` — the conversation has no extractable content (empty or blank — transcript empty after the same normalization the extractors use); **always** co-occurs with `ok=False` and a non-empty `errors` entry — on every path, including both internal defense-in-depth guards (which return their own error entries; callers additionally map `mode == "empty"` → `ok=False` as belt-and-braces).
@@ -54,12 +58,14 @@ The `"error"` value kills the surface-26 "lying extraction_mode" pattern: a cons
 Hosted: `ok` is the HTTP status (hosted convention — no body `ok` field; the one status-only consumer, the CLI, is fixed explicitly in Task 3 Step 5b). Flagged in Open Questions for review.
 
 ### D3 — Empty/blank conversation: one gate on whole-conversation transcript emptiness, pre-mutation
+
 The gate uses the **same signal the extractors use** — `_session_llm_transcript(conversation)` returning an empty string — so the gate and the extractors cannot disagree. **The gate is WHOLE-conversation** (one transcript per conversation, verified by executing `_session_llm_transcript`): "blank" means no turn contributes a ≥3-char sentence (`_SENT` per-sentence floor, sdk.py ~L189) — e.g. `[]`, `[{"content": "ok"}]`, `[{"content": None}]`, a whitespace-only 5000-char turn, single-turn `[{"content": 0}]` (coerces to `"0"`, below floor), `[{"role":"user"}]` (missing content key). A MIXED conversation containing any non-blank sentence (e.g. `"False"` → 5 chars) stays non-blank and stores every coerced turn exactly as today (`test_capture_session_falsy_non_string_content_not_swallowed` stays green — verified).
 
 - **Hosted:** after the provider 503 gate and the turn-cap 400, before the quota estimate and any write → `HTTPException(422, "conversation has no extractable content (empty or blank)")`. (422 over 400: same family as the existing Pydantic 422 for >5000-char content; a handler-level check because blankness is transcript-derived, not a simple `min_length`.)
 - **SDK:** early return before the Session MERGE and turn loop → `{"session_id": <generated>, "turns": 0, "extracted": 0, "points": [], "extraction_mode": "empty", "ok": False, "errors": ["no extractable content — empty or blank conversation"], "warnings": []}` — **nothing committed**, not even a Session stub. `turns` reports the **committed** state (0), never the input length. The `session_id` returned is the id a retry would use.
 
 ### D4 — Extraction failure: turn points land, errors surface, `mode="error"` — the fail-closed surface covers the WHOLE extraction stage, branch-independently
+
 Both `_extract_session_v2` and `_extract_session_llm` return `{"points", "errors", "warnings", "mode"}` (D5). No extraction-stage exception escapes; the assembly consumes whichever branch ran:
 
 - **v2 (default):** read `out["errors"]` + `out["warnings"]` from `extractor_v2.extract_session_v2`; `mode="error"` when `out["errors"]` non-empty; the point-write loop's `except: pass` becomes **counted** — per-point write failures append a `warnings` entry (e.g. `"N extracted points failed to write"`), never silent. Partial payload writes (some points landed before a failure) are reported (extracted == len(points) ≥ 0 with `ok=False`).
@@ -70,23 +76,30 @@ Both `_extract_session_v2` and `_extract_session_llm` return `{"points", "errors
 - **Post-extraction bookkeeping failures are non-fatal and surfaced, not thrown:** the Event write failure, the eventId-stamping failure, and `_materialize_session_source` failure ALL append an additive `warnings` entry (in addition to the existing log line) and continue — never indistinguishable from a clean capture, never a raw exception after partial writes. Hosted's `_async_audit` gets the same log-only treatment: a committed capture must never 500 over audit bookkeeping.
 
 ### D5 — Both extractors return ONE structured contract; the assembly is branch-independent
+
 `_extract_session_v2` and `_extract_session_llm` return identical dicts: `{"points": [...], "errors": [...], "warnings": [...], "mode": "v2"|"llm"|"error"|"empty"}`. The dispatch in `capture_session`/hosted is unchanged (`TORTOISE_SESSION_EXTRACTOR`); only the consume-site changes — one assembly reads whichever result. The no-extractor `ValueError` (SDK) / 503 (hosted gate) stay pre-extraction, unchanged. Kept unchanged: `extractor.version` agent_id stamping (M2), the v2 mock seam (`_V2SessionMock`), and the v2 provider gate (`_extract_session_v2`'s own key check).
 
 ### D6 — Zero-extraction on a non-empty transcript is an additive warning, not a failure
+
 If extraction completes with no exception/errors but emits 0 points (LLM returning malformed/empty output), append `"LLM extraction produced no points"` to `warnings`; `ok=True`, `mode` = the branch (`v2`/`llm`). This closes the last silent-`extracted: 0` window after the empty gate. Locked at BOTH surfaces.
 
 ### D7 — Warnings are additive; never clobbered
+
 The capture response's `warnings` list is additive-by-contract: any future layer (hosted domain rules, P2 route notes, Event/Source failures, v2 skipped-points) concatenates, never overwrites — the discipline already enforced on the commit path. A clobbering `warnings = [...]` reassignment must fail a two-source test (Task 2).
 
 ### D8 — E3 `source_turn_id` is never clobbered by capture (owner note)
+
 Two invariants, guarded by tests (Task 1):
+
 1. **Passthrough (WHITELISTED, both carriers):** extracted point dicts carry a `props` superset built from `_CAPTURE_PASSTHROUGH_PROPS = frozenset({"source_turn_id"})` (extended when E3 lands `search_keys`/`when`/`quote`). v2 carrier: the payload point dict `pt` (E3's fields arrive on payload points); M2 carrier: the folded statement dict (E3 writes via the projection). A whitelist (not a blacklist) is deliberate: the folded statement dict also carries internal projection state (`provenance` run_id/source, status, createdAt, operator, speaker) that must never leak into the public capture response. (M2 test injects via `add_point(**fields)` — the real carrier; a synthetic `PointUpdated` event does NOT fold — `projection._apply_one` drops it.)
 2. **Re-capture:** the turn-point `MERGE … SET` list (content, pointKind, is_operator, speaker, is_episodic, status, createdAt, updatedAt, content_hash) does **not** include `source_turn_id`, so re-capturing a session leaves an existing `source_turn_id` intact. **Idempotency is scoped to the turn stream**: extracted points are fresh per capture and a new `sessionCaptured` Event is created per capture — existing intended behavior (locked by the worktree's M2 `test_capture_session_llm_points_fresh_per_capture` and the v2-default tests).
 
 ### D9 — No graph or ontology change
+
 All new fields are response-contract only: SDK dict keys, HTTP body keys, `HTTPException.detail`, CLI exit codes. `extraction_mode` is **not** persisted to the Session node. If a later issue needs extraction status queryable in the graph, that is an additive Session property (permitted by the epic's ontology invariant — no new kinds/edges) and must be proposed separately (see ⛔ Conditional gates).
 
 ### D10 — Non-string turn content fails closed at the hosted layer (validator guard + turn-loop coercion, #721 parity)
+
 `SessionRequest.conversation` is `list[dict]` with an **untyped inner dict**, and `valid_conversation` runs `len(content)` with no isinstance guard — **verified live**: `{"content": None}` / `12345` / `0` / `False` / `3.14` raise `TypeError` INSIDE the Pydantic validator (Pydantic v2 propagates non-ValueError exceptions) → raw 500 before the handler runs; dict content passes (`len(dict)` = key count ≤ 5000) and then `content[:5000]` raises `TypeError` AFTER the Session MERGE → raw 500 with a partial write. Two-layer fix (SDK's #721 pattern, aligned): (1) **validator guard** — `valid_conversation` skips the length check for non-str content (`if not isinstance(content, str): continue`); (2) **turn-loop content coercion** — the handler coerces `content` with the same `isinstance`-first expression as the SDK. **`role` is NOT coerced here** (hosted stores non-str roles raw today; `role` parity is P4's `speaker` lane, not a crash risk) — D10's scope is crash-prevention + blank-gate consistency only. Note: the validator `continue` means the ≤5000 length check no longer rejects non-str content (dicts previously capped via `len(dict)`); the stored turn text is still truncated at 5000, so the new contract is "coerce, then store capped" — a documented widening (OQ12).
 
 ---
@@ -99,6 +112,7 @@ All new fields are response-contract only: SDK dict keys, HTTP body keys, `HTTPE
 **Acceptance:** Both `_extract_session_v2` and `_extract_session_llm` return `{"points", "errors", "warnings", "mode"}`; a v2 run with `out["errors"]` → `mode="error"` with the errors surfaced; a raising M2 extractor → `mode="error"` with `TypeName: message` (no raise); M2 fold/wiring failures → structured; v2 per-point write failures → counted warnings; empty-transcript internal guards → `mode="empty"` WITH an error entry; `source_turn_id` injected via either carrier appears in `props`; the no-extractor `ValueError`s are unchanged.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`_extract_session_v2` ~L1957–2067, `_extract_session_llm` ~L1894–1955; module constant `_CAPTURE_PASSTHROUGH_PROPS`)
 - Test: `tests/test_capture_session.py` (new `# ── P1 (#1529) fail-closed capture` section)
 
@@ -464,6 +478,7 @@ Expected: the ten new seam tests PASS. `capture_session`/hosted still consume th
 **Acceptance:** `capture_session([])` and all-blank conversations return `ok=False`, `mode="empty"`, `turns=0`, errors set, and commit **nothing** (no Session node); a failing v2 run (via `extractor_v2` seam) or M2 run (via duck-type + `TORTOISE_SESSION_EXTRACTOR=m2`) returns `ok=False`, `mode="error"`, errors surfaced, turn points + Event + Source still landed; success responses carry `ok=True`, `errors==[]`, `warnings==[]`, exactly one `sessionCaptured` Event, every extracted point stamped with its eventId, and graph turn count == response `turns`; a `create_event` failure (or no-id return) and a stamping-query failure each yield additive warnings with correct graph state; a `_materialize_session_source` failure yields an additive warning; the existing v2-default tests (`test_capture_session_v2_default_routes_and_writes`, `test_capture_session_v2_mock_seam_satisfies_provider_gate`, adapter tests) stay green; the no-key `ValueError` and turn-cap `ValueError` are unchanged.
 
 **Files:**
+
 - Modify: `tortoise/sdk.py` (`capture_session`, ~L1730–1892; wrap `_materialize_session_source` and the Event-write warning append)
 - Test: `tests/test_capture_session.py`
 
@@ -848,6 +863,7 @@ Expected: all PASS (new + updated + pre-existing, including the v2-default lock 
 **Acceptance:** `POST /v1/sessions` with `[]` or all-blank conversations → 422 with no Session node written; failing extraction (v2 seam or M2 duck-type) → 200 body with `errors`, `mode="error"`, `warnings == []`, turn points + Event + agentSession Source in the graph (asserted via `TEST_ORG_ID` namespace); completed-but-empty → 200 + additive warning + truthful mode; dict/int/bool content → coerced (never 500); `create_event` failure → 200 + additive warning; stamping-query failure → 200 + warning (hosted's duplicated Event block); `_materialize_session_source` failure → 200 + additive warning; `_async_audit` failure → 200 (log-only wrap); a blank conversation on an over-quota team → 422 (not 402); `_cmd_session_capture` returns exit 1 on `mode="error"`; the 503 no-key gate and 400 turn-cap gate are unchanged and still ordered first.
 
 **Files:**
+
 - Modify: `tortoise/hosted_api.py` (`capture_session` handler, ~L3369+; `SessionRequest.valid_conversation`, ~L3315; import line 41)
 - Modify: `tortoise/__main__.py` (`_cmd_session_capture`, ~L1394)
 - Test: `tests/test_hosted_api.py` (TestSessionCapture) + `tests/test_session_extraction_modes.py`
@@ -1240,11 +1256,13 @@ Expected: all PASS (including the pre-existing 503/400/402/422 order tests, `tes
 ## Journey Test Map
 
 ### Journey: J1 — Session captured → facts extracted (OP)
+
 1. **Step:** capture a non-empty session (v2 default) → **Acceptance:** turns land, points extracted, `ok=True`, `mode="v2"`, exactly one Event, points eventId-stamped → **Test:** `test_capture_session_shape` + `test_capture_session_success_shape_consistent_with_graph` (+ hosted `TestSessionCapture`)
 2. **Step:** capture an empty/blank session → **Acceptance:** SDK `ok=False`/`mode="empty"`/`turns=0`, nothing committed; hosted 422 → **Test:** empty/blank fail-closed tests (Task 2/3)
 3. **Step:** capture with a dead LLM key → **Acceptance:** turn points land, errors surface, `mode="error"`, never a silent `extracted: 0` (both branches) → **Test:** `test_capture_session_v2_failure_surfaces_errors` + `test_capture_session_m2_failure_surfaces_errors` (+ hosted)
 
 ### Failure Modes
+
 - LLM provider 500 mid-capture (v2 or M2) → **Expected:** turns land; `ok=False` + `mode="error"` + errors; no silent success → **Test:** failure tests above
 - v2 `out["errors"]` non-empty (dead key) → **Expected:** surfaced (the issue's core checklist item) → **Test:** `test_extract_session_v2_consults_out_errors`
 - LLM emits points then fails (partial emission) → **Expected:** partial points reported + wired + eventId-stamped, `ok=False` — `extracted > 0` is never success → **Test:** seam + SDK + hosted partial tests

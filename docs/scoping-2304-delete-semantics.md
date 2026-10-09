@@ -17,6 +17,7 @@
 | P4 "Delete is only a compliance problem" | Rejected — it is also a trust/product problem | Data at rest on a paid developer platform that the UI calls deleted erodes trust and invites a GDPR request that we cannot currently honor cleanly. |
 
 **Root causes (fix roots, not symptoms):**
+
 1. `delete_graph` tombstones (`status='deleted'`) and revokes keys, but **no purge ever runs** — the namespace data stays at rest forever (customs never swept; legacy tombstones predate everything).
 2. **Backup archives of a deleted graph outlive deletion twice over**: pre-delete dumps survive normal retention (hourly/daily/weekly), and the graph's own nested archive pool is never pruned once the graph leaves the sweep enumeration (#2378-documented tombstone-pool accumulation).
 3. UI copy ("removed permanently") describes intent, not behavior.
@@ -39,6 +40,7 @@
 ### Solution-converge
 
 **Recommendation: S1** (owner Option C) as a staged build, with S3 as the recorded future direction:
+
 - **Stage 1 — honest quarantine + restore surfaces:** trash list + read-only query + full-restore (destructive-overwrite-warned when the name was reused), owner-scoped, keys stay dead.
 - **Stage 2 — purge job:** sweep tombstoned customs past grace (incl. pre-existing tombstones); drop namespace via the `_drop_team_graph_impl` GRAPH.DELETE mechanics; drop the graph's nested R2 pool + legacy index entries; reconcile failed key revokes (delete must only 204 when the cascade is confirmed).
 - **Stage 3 — copy/privacy:** delete-confirm wording ("deleted permanently after a short recovery window"), dashboard trash copy, runbook + auth-architecture notes, privacy.html §6/§16 truth check.
@@ -47,6 +49,7 @@
 **Rejected:** S2 (worse undo + no exact-state reconciliation + copy-only honesty doesn't fix the retention hole); S3 now (no key infra; do after #2318).
 
 **Key decisions to record:**
+
 1. Grace window = 7 days (owner). Purge runs daily past grace; boundary race (restore vs purge in the same sweep) resolved by the sweep deleting only graphs still tombstoned ≥ grace at purge time AND restore taking an owner-scoped lock on the tombstone row.
 2. **Purge ownership guard (verifier P1):** purge must NEVER drop a namespace that a LIVE graph now occupies. Custom namespaces embed the server-generated gid (`org_{tid}_{gid}` — gids never reused), but name-based namespaces (supabase-lane custom names / any legacy shape) CAN be re-occupied after delete+recreate. GRAPH.DELETE runs only after confirming the namespace still maps to the tombstoned graph-id row (`namespace → graph_id` ownership check against the registry/supabase row before drop).
 3. Restore target: same graph id/namespace. For customs the namespace IS identity (`org_{tid}_{gid}`) — no cross-graph collision; a display-name reuse maps to a different namespace and full-restore into a LIVE occupant is destructive-overwrite, warned + confirm=true (read-only query never conflicts).
@@ -74,4 +77,5 @@
 standard per issue body, but this spans hosted_api (delete/quarantine/restore endpoints), a new purge sweep (registry + FalkorDB drop), R2 pool/index cleanup, the dashboard (trash UI + copy), and docs — implementation should be treated as a multi-task project plan (writing-plans after owner approval).
 
 ## Fractal Fields
+
 - **Level:** project · **OIT:** see issue #2304 · **E2E:** TBD · **Verification:** TBD · **Wiring:** TBD

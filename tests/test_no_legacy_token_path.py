@@ -115,17 +115,12 @@ _NETWORK_IO = re.compile(
     r"\b(?:fetch|XMLHttpRequest|axios|sendBeacon)\s*[(.]|\bcredentials\s*:|\bnavigator\.sendBeacon"
 )
 
-# Client-surface migration is tracked in #3559. TWO invariants still fail because the
-# remaining browser surfaces have not migrated; they are xfail — NOT deleted and NOT
-# skipped — so the obligation stays visible and the gate keeps naming the offenders.
-#
-# The other three checks in this file whose surfaces DID migrate carry NO marker:
-# a non-strict xfail cannot fail, so it is not a gate — the moment a regression
-# appears it flips XFAIL and CI stays green. Removing the marker is the only state in
-# which the check can actually redden. Do the same for each remaining marker when its
-# invariant passes; do NOT "flip to strict" — a strict xfail still reports a passing
-# test as XPASS and still cannot gate a regression.
-CLIENT_MIGRATION = "client-surface migration outstanding — see #3559"
+# #3559: the client-surface migration is COMPLETE. Both invariants that used to carry
+# `xfail(strict=False)` markers now carry NONE, so each can actually redden on a
+# regression — a non-strict xfail cannot fail (the moment a regression appears it flips
+# XFAIL and CI stays green), and a strict xfail still reports a passing test as XPASS.
+# Removing the marker is the only state in which a check gates. Do NOT reintroduce a
+# marker here: fix the code, or add the surface to MIGRATED_SURFACES.
 
 
 def _browser_sources():
@@ -180,7 +175,6 @@ def _code(p: Path) -> str:
     return _strip_comments(_read(p), p.suffix)
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_no_legacy_js_readable_token_anywhere(sources):
     """(A) The legacy JS-readable session cookie must be gone from every browser surface.
 
@@ -253,12 +247,12 @@ def test_copy_only_exemptions_perform_no_network_io(sources):
     copy-only file gaining a network call made it fail *as expected* and the suite stayed
     green. A non-strict xfail turns the guard's failure into XFAIL, and a guard that cannot
     fail is not a guard (the exact class this PR exists to close). Keeping this guard in a
-    test that carries no marker means it can redden even while the two remaining #3559
-    invariants are still xfail.
+    test that carries no marker means it can redden independently of the invariants that
+    used to be xfail (all of which are now unmarked too — #3559).
 
     Taking `sources` here also pins the module-level non-vacuity assertion (the
     browser-source scan found >40 files) to a test that cannot be xfailed, so a broken glob
-    can no longer hide behind the two remaining xfail markers either.
+    can no longer hide behind a marker.
     """
     scanned = {str(p.relative_to(REPO)) for p in sources}
     for rel in COPY_ONLY_SOURCES:
@@ -326,7 +320,6 @@ def test_the_proxy_has_a_caller(sources):
     )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_client_data_layer_does_not_import_the_legacy_supabase_client():
     """(B) The blog-admin data layer must not reach for the legacy client.
 
@@ -1393,6 +1386,94 @@ def test_architecture_docs_do_not_restate_the_rejected_parent_domain_session():
             "without an `OVERRIDES` line there — so the departure reads as an accident of history "
             "and the next reader re-derives the parent-domain cookie."
         )
+
+        # …and the CONSENT PAGE's live acceptance of the legacy cookie must stay stated
+        # (#3559 P1-1). The assertions above forbid the cookie as the SESSION; they are
+        # silent on WHO still accepts it, and they passed against the old, false "no longer
+        # accepted" wording. Pin the corrected claim here.
+        acceptance_violations = _consent_page_acceptance_violations(rel, text)
+        assert not acceptance_violations, "\n\n".join(acceptance_violations)
+
+
+# ── The docs must keep the consent page as the legacy cookie's ONLY acceptor ────────
+#
+# #3559 narrowed the docs to "no surface OTHER than the consent page that issues it
+# accepts" the legacy `sb-tortoise-auth-token` cookie, because that page re-reads the
+# cookie it issues as its own session (`tortoise/oauth.py::cookieStorage`). The docs
+# gate above is silent on this: it forbids the parent-domain cookie as the SESSION, and
+# it passed unchanged against the OLD "no longer accepted" wording. A restore of that
+# wording would therefore ship a false claim with the gate green (proved by running the
+# docs gate against the pre-fix docs at `245f42128^`).
+#
+# A POSITIVE + NEGATIVE pair, because either alone is gameable:
+#   - NEGATIVE: the current region must not carry the OLD global denial;
+#   - POSITIVE: it must AFFIRM that the consent page accepts the cookie — the sentence
+#     that disappears when the denial is restored.
+# The NEGATIVE set is deliberately the UNAMBIGUOUS global claims, and a denial is
+# excused by an "other"/"except" qualifier. A bare `no longer accepted` is NOT a
+# trigger on its own: website_architecture.md's host table correctly says the cookie is
+# "no longer accepted BY THEM" (scoped to that host), and matching it would redden a
+# correct doc.
+_NO_SURFACE_ACCEPTS = re.compile(
+    r"no longer accepted\s*[:(]"
+    r"|\bno longer accepted by any surface\b"
+    r"|\bno\s+(?:[\w-]+\s+){0,2}(?:surface|consumer)s?\s+(?:accepts?|reads?|authenticat\w*)\s+it\b"
+    r"|\bauthenticat\w*\s+nothing\b"
+    r"|\bNO\s+surface\b"
+    r"|\bnot accepted\b(?!\s+by\b)",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_EXCEPTION = re.compile(r"\bother\b|\bexcept\b", re.IGNORECASE)
+# The corrected affirmation: the consent page is (still) an accepting surface, and it
+# is the ONLY one. Matched on the corrected phrasings, so restoring the old wording
+# removes it.
+_CONSENT_PAGE_ACCEPTS = re.compile(
+    r"accepted\s+by\s+the\s+(?:one\s+)?page\s+that\s+issues\s+it"
+    r"|consent[- ]page\b[^.\n]{0,80}\b(?:re-?reads?|accepts?|authenticat(?:es|e|ing))\b"
+    r"|no\s+surface\s+other\s+than[^.\n]{0,80}accepts?\b"
+    r"|no\s+other\b[^.\n]{0,80}\baccepts?\b"
+    r"|by\s+no\s+other\s+surface\b",
+    re.IGNORECASE,
+)
+
+
+def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
+    """Violations of #3559's corrected acceptance claim in one doc's CURRENT region.
+
+    Empty means: the region carries neither the OLD global denial ("no longer accepted" /
+    "no Tortoise surface accepts it any more") nor a missing affirmation that the
+    consent page which issues the cookie accepts it. Called from the docs gate above.
+    """
+    pairs = _current_lines(rel, text)
+    scanned = "\n".join(ln for _, ln in pairs)
+
+    violations: list[str] = []
+    denials: list[tuple[int, str]] = []
+    for item in _items(pairs):
+        joined = " ".join(ln for _, ln in item)
+        for m in _NO_SURFACE_ACCEPTS.finditer(joined):
+            if _ACCEPTANCE_EXCEPTION.search(_sentence_around(joined, m.start())):
+                continue
+            denials.append((item[0][0], item[0][1].strip()))
+            break
+    if denials:
+        violations.append(
+            f"{rel} asserts, in its CURRENT-architecture region, that NO surface accepts "
+            "the legacy `sb-tortoise-auth-token` cookie:\n"
+            + "\n".join(f"  line {n}: {ln}" for n, ln in denials)
+            + "\n\nThat is false: the MCP consent page re-reads the cookie it issues as its "
+            "own session and uses its access token as a bearer for `/oauth/consent` and "
+            "`/oauth/consent/preview` (`tortoise/oauth.py`; see §2.1 'Legacy cohort'). The "
+            "claim is 'no surface OTHER than the consent page that issues it accepts it'."
+        )
+    if not _CONSENT_PAGE_ACCEPTS.search(scanned):
+        violations.append(
+            f"{rel} does not AFFIRM, in its CURRENT-architecture region, that the consent "
+            "page which issues the legacy cookie accepts it. The corrected claim names "
+            "that page as the live (and only) acceptor; restoring the old 'no longer "
+            "accepted' wording removes this affirmation."
+        )
+    return violations
 
 
 def test_auth_architecture_doc_keeps_the_rendered_welcome_case():

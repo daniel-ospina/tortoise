@@ -200,9 +200,12 @@ test('#4054: main.jsx uses NO supabase client — every auth action is BFF-only'
   assert.equal(uses.length, 0,
     `the supabase client must be gone from main.jsx; found ${uses.length}: ` +
     JSON.stringify(uses.map((m) => mainJsx.slice(m.index, m.index + 40).split('\n')[0])))
-  // The legacy JS-readable session cookie path and the token it carried.
-  assert.doesNotMatch(mainJsx, /sb-tortoise-auth-token|createTortoiseSupabaseClient/,
-    'the legacy JS-readable session cookie path must not reappear in the dashboard')
+  // The legacy JS-readable session cookie path and its window-global factory are
+  // asserted ABSENT repo-wide by the Python static gate
+  // tests/test_no_legacy_token_path.py::test_no_legacy_js_readable_token_anywhere,
+  // which scans main.jsx and every other browser source under website/. That check
+  // is deliberately NOT repeated here: this file is itself scanned, and a test must
+  // not be the last holder of the string it forbids.
   assert.doesNotMatch(mainJsx, /session\.access_token/,
     'the browser must never reference an access token')
   // Positive control: the ACTION routes ARE wired, so the assertions above are

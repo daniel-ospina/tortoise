@@ -7,7 +7,10 @@ services:
     image: falkordb/falkordb:latest
     container_name: tortoise-falkordb
     ports:
-      - "16379:6379"
+      # Loopback only (#7637): the server (`python3 server/main.py`) dials
+      # localhost:16379 from this host. A bare "16379:6379" publishes
+      # 0.0.0.0:16379 — an unauthenticated FalkorDB on the LAN.
+      - "127.0.0.1:16379:6379"
     environment:
       - FALKORDB_ARGS=MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE 10000
     volumes:

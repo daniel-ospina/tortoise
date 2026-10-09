@@ -138,6 +138,7 @@ outcome cannot borrow the FAIL verdict.
 the sabotage legs.
 
 **Files:**
+
 - Create: `tests/_verdict.py`
 - Create: `tests/test_verdict_contract.py`
 - Modify: `tools/ci_selection.py` (add `tests/_verdict.py` to `SHARED_MODULES`)
@@ -169,6 +170,7 @@ production). Both must be reset per test so an order-dependent outcome is imposs
 proves the reset, including the `monkeypatch.setattr` leg.
 
 **Files:**
+
 - Modify: `tests/conftest.py` (fixture + module-level `from tests._verdict import ...`)
 - Test: `tests/test_verdict_contract.py`
 
@@ -197,6 +199,7 @@ FAIL guard** (the parent has already exited there, so "server still alive" is a 
 FAIL leg is preserved).
 
 **Files:**
+
 - Modify: `tests/test_fork_safety_3845.py`
 - Modify: `tests/test_embedded_lifecycle.py`
 - Test: `tests/test_verdict_contract.py::test_inconclusive_on_timeout_*`
@@ -218,6 +221,7 @@ blog-delete guard keeps `absent="fail"` while a too-old Node SKIPs; a wiring pin
 converted site gates (probe patched too-old → `Skipped`; host version → driver still invoked).
 
 **Files:**
+
 - Modify: `tests/test_admin_origin_redirect.py`, `tests/test_provisioning_edge_function.py`,
   `tests/test_blog_agent_delete_guard.py`
 - Test: `tests/test_verdict_contract.py::test_node_floor_*`

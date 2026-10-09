@@ -6,13 +6,13 @@ exact restore procedure so we can recover if the REMOVE migration goes wrong.
 
 Usage:
   TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
-    python3 graph-scripts/pre_migration_snapshot.py
+    uv run python graph-scripts/pre_migration_snapshot.py
 
   # Dry-run (no side effects):
-  python3 graph-scripts/pre_migration_snapshot.py --dry-run
+  uv run python graph-scripts/pre_migration_snapshot.py --dry-run
 
   # Custom container/port:
-  python3 graph-scripts/pre_migration_snapshot.py \\
+  uv run python graph-scripts/pre_migration_snapshot.py \\
     --container falkordb-personal --port 6379
 """
 from __future__ import annotations

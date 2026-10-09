@@ -153,6 +153,7 @@ class SourceConnector(Protocol):
 ```
 
 **Key design decisions:**
+
 - **Metadata is eager** (extracted at ingestion), **body is lazy** (fetched on demand). The graph stores metadata + locator; the agent fetches the body when it needs to extract Points.
 - **`watch()` is optional.** Batch connectors (GitHub, Google Docs) don't implement it. Streaming connectors (Slack, meetings) do.
 - **One connector per source type.** GitHub connector handles issues, PRs, READMEs, and commits — different locator formats, same API.

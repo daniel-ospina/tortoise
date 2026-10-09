@@ -21,7 +21,7 @@ observation and the new statement). Observations with NO statement twin are
 reported but left untouched (best-effort).
 
 Usage:
-    python3 graph-scripts/1714_dedup_observation.py [--dry-run] [--merge]
+    uv run python graph-scripts/1714_dedup_observation.py [--dry-run] [--merge]
         [--uri URI] [--graph GRAPH] [--yes]
 
     --dry-run  report only (DEFAULT — no writes)

@@ -51,7 +51,7 @@ full-matrix runs count (the workflow gates the canary-streak job on
 push/schedule; PR runs never reach this script).
 
 Usage:
-  python3 tools/testdb_canary_classify.py --run-id <id> \
+  uv run python tools/testdb_canary_classify.py --run-id <id> \
       --junitxml <path> --manifest <path> --step-wall <path> \
       [--divergence-log <path>] [--prev-streak <path>] [--out <path>]
 
