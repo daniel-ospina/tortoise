@@ -28,10 +28,10 @@ from tortoise import graph_storage
 from tortoise.graph_storage import (
     EXCLUDED_OVERHEAD,
     PRECISION_NOTE,
-    VECTOR_INDEX_EXCLUDED,
     REPEATS_MAX,
     SAMPLES_DEFAULT,
     SAMPLES_MAX,
+    VECTOR_INDEX_EXCLUDED,
     measure_graph_storage,
     measure_projection_storage,
     parse_memory_usage,
