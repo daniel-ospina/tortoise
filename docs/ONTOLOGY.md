@@ -595,8 +595,8 @@ Each layer answers a different question. All four are live mechanisms.
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `IMPL` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction comes from the connection's semantics and is recorded on the write. |
-| `NAND` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction comes from the semantics and is recorded on the write. |
+| `IMPL` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is recorded on the write. |
+| `NAND` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction is recorded on the write. |
 | `hasPart` | Point → Point | `<->` (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4765) / `invalidate_point` (sdk.py:4654). |
 
@@ -610,7 +610,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative. Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code keys off `op_type` instead** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -1132,7 +1132,9 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
 >
-> Confidence propagates across Subject, Object, Event and Point.
+> Confidence propagates across Events and Points. Object-level confidence is **derived** from the
+> Points attached to the Object — structural edges to Subjects and Objects carry a confidence
+> *attribute*, not EP (see §3.1 and §6).
 >
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
@@ -1360,7 +1362,8 @@ edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative.
+  recorded direction is authoritative. *(Model: today's shipped code resolves by `op_type` — see the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1404,6 +1407,9 @@ semantics `addresses`; the predicate distinguishes them.
 
 **The both-ways semantics name their mutuality** (`mutuallySupportive`, `mutuallyExclusive`); the
 one-way ones do not (`supports`, `refutes`).
+
+**This table is the core set.** Packs declare additional semantics values — `funds`, `managedBy`
+and `produces` (`packs/venture/manifest.yaml`) — which align onto these core values (#7852).
 
 ### Pack Relation Declarations
 
@@ -1528,7 +1534,8 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
-(`->`, `<-`, `<->` or `-`), which the connection's semantics supplies.
+(`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
+code resolves by `op_type` — see the *Transition state* note in the changelog).*
 
 ---
 
