@@ -41,9 +41,7 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
-    SHAPE_OBJECT_SUPERSEDED_MISS,
     SHAPE_POINT_BELIEF_MISS,
-    SHAPE_POINT_RETRACTED_MISS,
     SHAPE_STATE_OP_MISS,
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
@@ -4848,14 +4846,24 @@ def hard_deleted_pairs(events) -> dict[tuple[str | None, str], int]:
     :func:`_hard_deleted_any`: ``{(kind_or_None, id): seq}`` of the ids the
     journal hard-DELETES and does NOT re-create afterwards.
 
-    ``rebuild_all`` builds this shape inline (its pass-1a ``PointsMerged`` tag
-    and its pass-1b ``EntityMutated`` op=delete tag) and asks
-    ``_hard_deleted_any`` whether a deferred terminalizer's target is gone.
-    The apply()-based engines (``rebuild`` / ``recover_from_log`` /
-    ``backup.restore``) and the reference fold need the SAME answer, so the
-    build lives here once and they all read one map.
+    ``rebuild_all`` used to build this shape inline (its pass-1a
+    ``PointsMerged`` tag and its pass-1b ``EntityMutated`` op=delete tag) and
+    ask :func:`_hard_deleted_any` whether a deferred terminalizer's target was
+    gone. The apply()-based engines (``rebuild`` / ``recover_from_log`` /
+    ``backup.restore``) and the reference fold needed the SAME answer, so #7719
+    moved the build HERE and every surface — ``rebuild_all`` included — now
+    reads one map. (#3585 had left ``rebuild_all`` the only inline builder,
+    which is how its exemption came apart from the reference fold's.)
 
-    It reproduces ``rebuild_all``'s inline build exactly:
+    ⚠️ ``events`` is iterated THREE times (re-creation anchors,
+    ``PointsMerged`` tags, then the anchor-gated delete tags), so it must be a
+    full, re-iterable sequence — the requirement
+    :func:`journal_hard_delete_seqs` states. A one-shot generator would be
+    consumed by its first pass and return an exemption-less map, silently
+    dropping EVERY ``supersede-target-deleted`` exemption and turning
+    recoverable journals into refusals on the recovery path.
+
+    It reproduces that pre-#7719 ``rebuild_all`` inline build exactly:
 
     * the re-creation anchors are seeded ONLY from ``PointAdded`` /
       ``OperatorAdded`` records whose ``point`` is a dict with a WRITABLE id
@@ -5876,7 +5884,7 @@ class FalkorProjection(
                         journal_first_materialized, journal_seq,
                         "Point", rid)):
                 record_non_folded(
-                    SHAPE_POINT_RETRACTED_MISS,
+                    classify_terminalizer_miss("PointRetracted"),
                     event_id=ev.get("event_id"),
                     event_type="PointRetracted", id=rid,
                     detail="apply: retract matched no Point",
@@ -6027,7 +6035,8 @@ class FalkorProjection(
                             and _oid in journal_object_deleted)
                 if not _survives and not _deleted:
                     record_non_folded(
-                        SHAPE_OBJECT_SUPERSEDED_MISS,
+                        classify_terminalizer_miss(
+                            "ObjectSuperseded", target_deleted=False),
                         event_id=ev.get("event_id"),
                         event_type="ObjectSuperseded", id=_oid,
                         candidates=((_oname,) if isinstance(_oname, str)
@@ -7571,7 +7580,7 @@ class FalkorProjection(
                         # (the mutation is lost) — the reference fold refuses
                         # the same shape, so both classifiers agree.
                         record_non_folded(
-                            SHAPE_POINT_RETRACTED_MISS,
+                            classify_terminalizer_miss("PointRetracted"),
                             event_id=ev.get("event_id"),
                             event_type="PointRetracted", seq=seq, id=rid,
                             detail="rebuild_all: retract matched no Point",

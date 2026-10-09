@@ -1927,11 +1927,19 @@ class _EntityHandlers:
         The belief half folds here, at the record's own
         position — chronological, so it cannot clobber a later writer.
 
-        A fold that matches NO Point warns (#3299): the apply() one-record
-        branch and ``rebuild_all``'s sweep both emit a fold-miss line, and
-        before this one the whole-journal apply() arm was quieter than both —
-        a ``rebuild(EventLog)`` replay of a terminalizer whose target was never
-        created said nothing, while ``rebuild_all`` warned.
+        A fold that matches NO Point is now RECORDED as a ``NonFoldedEvent``
+        carrying the SHARED classifier's shape (``classify_terminalizer_miss``),
+        so a WHOLE-JOURNAL caller running inside a ``collect_non_folded()``
+        boundary (``rebuild``, ``recover_from_log``, ``backup.restore``) fails
+        closed — ``NonFoldedEventsError`` — on exactly the journal
+        ``rebuild_all`` refuses. R8 makes the fail-closed set ONE set, and #7719
+        closed the gap where this arm was merely loud (#3299). The
+        ``logger.warning`` is KEPT: a caller reached OUTSIDE that boundary —
+        ``apply()``'s one-record live path, or a bare/test call — has no run to
+        fail and still needs the audible line. Before #7719 the whole-journal
+        apply() arm was quieter than both, so a ``rebuild(EventLog)`` replay of
+        a terminalizer whose target was never created said nothing while
+        ``rebuild_all`` refused.
 
         The record is NORMALIZED here (``self._norm``) because the fold body
         reads the flat ``id``/``new_id``, and ``_norm`` tolerates a nested

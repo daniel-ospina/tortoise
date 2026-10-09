@@ -1887,6 +1887,50 @@ class TestApplyPathTerminalizerMissIsRecorded:
         with pytest.raises(TypeError):
             _EntityHandlers.apply_journal_point_restamp(None, {}, 0, {})
 
+    def test_recover_from_log_refuses_a_projection_without_the_context(
+            self, tmp_path):
+        """FAILS IF: `recover_from_log`'s pre-loop signature probe is removed
+        or weakened. A projection whose consumer cannot accept
+        `hard_deleted=` must make the run REFUSE, not count the resulting
+        `TypeError` as crash damage (`torn`) and return `recovered=True` over a
+        journal whose terminalizer was never folded — the false PASS #7719
+        closes. The journal carries a REAL terminalizer, so the probe's
+        non-empty-`restamp_plan` guard is exercised (an empty plan legitimately
+        skips a projection that never gets called).
+
+        Unlike the signature-only guard above, this drives the recovery path
+        end to end: delete the probe and this returns a success-shaped dict."""
+        from tortoise.consistency import _RestampSignatureError, recover_from_log
+
+        events = tmp_path  # recover_from_log reads a DIR of *.jsonl
+        _raw_point(events, "p1")
+        _raw(events, type="PointSuperseded", id="never-created",
+             new_id="also-never-created", event_id="ghost-1")
+
+        class _Result:
+            def __init__(self, node):
+                self.result_set = [[node]]
+
+        class _Pre7719Proj:
+            """The #7719 target: a consumer with no `hard_deleted=` kwarg."""
+
+            def __init__(self):
+                self.count_calls = 0
+
+            def query(self, cypher):
+                self.count_calls += 1
+                return _Result(0 if self.count_calls == 1 else 3)
+
+            def apply(self, ev):
+                return None
+
+            def apply_journal_point_restamp(self, ev, seq, plan):
+                return None
+
+        with pytest.raises(_RestampSignatureError) as ei:
+            recover_from_log(str(events), _Pre7719Proj())
+        assert "hard_deleted" in str(ei.value), str(ei.value)
+
 
 class TestSharedTerminalizerClassifier:
     """ONE classifier decides the shape on every surface."""

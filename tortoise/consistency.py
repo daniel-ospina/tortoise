@@ -83,7 +83,6 @@ from .projection.entities import (
     _writable_journalled_vector,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
-    SHAPE_OBJECT_SUPERSEDED_MISS,
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
     SHAPE_STATE_OP_MISS,
     classify_terminalizer_miss,
@@ -1347,7 +1346,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
         record_non_folded(
-            SHAPE_OBJECT_SUPERSEDED_MISS,
+            classify_terminalizer_miss("ObjectSuperseded",
+                                       target_deleted=False),
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
@@ -2028,7 +2028,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
         removal/terminal one, dropping it would RESURRECT the state it
         removed, so the replay is refused before any event is applied
         (#3316). Mid-file corruption is refused for the same reason
-        (``EventLog.read_all`` raises there).
+        (``EventLog.read_all`` raises there). The ONE deliberate exception is
+        a PROGRAMMING error in this engine's own wiring: if the projection's
+        ``apply_journal_point_restamp`` cannot accept the required
+        ``hard_deleted=`` context, this raises ``_RestampSignatureError``
+        (a ``TypeError``) instead of reporting a ``torn`` skip — the
+        per-record tolerance would otherwise turn a bad call signature into
+        `recovered=True` over a journal whose terminalizers were never folded
+        (#7719).
 
     Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`,
     the trigger flag set whenever a completed replay left the graph's onboarding
