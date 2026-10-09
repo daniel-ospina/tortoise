@@ -43,6 +43,7 @@ _ENV_LEAKS = (
     "TORTOISE_REPO",
     "PYTHON_BIN",
     "CRONTAB_CMD",
+    "GH_BIN",
 )
 
 #: The `gh` stub EMITS TEXT, on purpose. A silent stub made the suite blind to
@@ -128,12 +129,16 @@ def _sandbox(tmp_path: Path, uname: str = "Darwin", *, gh: bool = True,
     for key in _ENV_LEAKS:
         env.pop(key, None)
     env.update({
-        # A CONTROLLED PATH: the stub dir plus the system dirs ONLY. Appending
-        # the ambient PATH would leak the host's own `gh` (observed at
-        # ~/.pi/agent/shims/gh), which silently defeats the gh-absent refusal
-        # test — the sandbox would not be a sandbox for the very command the
-        # guard is about. `bash`, `sed`, `dirname`, `python3` and `dscl` all
-        # resolve under these four dirs, so the installer still runs normally.
+        # A CONTROLLED PATH: the stub dir plus the system dirs ONLY, so the
+        # host's own `gh` (observed at ~/.pi/agent/shims/gh) does not leak in.
+        # ⛔ THE FOUR SYSTEM DIRS ARE NOT GH-FREE: the Ubuntu CI runner installs
+        # gh at /usr/bin/gh, so a test that wanted "no gh" by leaving gh out of
+        # `bindir` was CI-RED at c73656c59 (`assert 0 == 2`, job `test (f)` of
+        # run 37890979949) while passing on macOS, where gh lives alone in a
+        # shim dir. gh-absence is therefore expressed by GH_BIN below, never by
+        # the PATH — the sandbox PATH is a hygiene measure, not a guarantee.
+        # `bash`, `sed`, `dirname`, `python3` and `dscl` all resolve under these
+        # four dirs, so the installer still runs normally.
         "PATH": f"{bindir}:/usr/bin:/bin:/usr/sbin:/sbin",
         "HOME": str(home),
         "STUB_LOG": str(log),
@@ -143,6 +148,9 @@ def _sandbox(tmp_path: Path, uname: str = "Darwin", *, gh: bool = True,
         "PYTHON_BIN": "/usr/bin/true",
         "CRONTAB_CMD": "crontab",
     })
+    if not gh:
+        # gh-absence is expressed HERE, not by the PATH — see the PATH comment.
+        env["GH_BIN"] = str(tmp_path / "no-such-gh")
     return {
         "env": env,
         "bindir": bindir,
@@ -308,7 +316,7 @@ def test_linux_also_passes_the_validated_queue_path(tmp_path):
     sb["env"]["CLAIMS_QUEUE"] = str(custom)
     res = _run(sb)
     assert res.returncode == 0, (res.stdout, res.stderr)
-    assert f"--queue {custom}" in _cron_schedule_line(sb), _cron_schedule_line(sb)
+    assert f"--queue '{custom}'" in _cron_schedule_line(sb), _cron_schedule_line(sb)
 
 
 def test_darwin_rerender_is_idempotent(tmp_path):
@@ -440,19 +448,45 @@ def test_refuses_when_the_queue_is_absent(tmp_path):
     assert not sb["launchctl_log"].exists(), "refusal still called launchctl"
 
 
-def test_refuses_when_gh_is_not_on_path(tmp_path):
-    """With no ``gh``, every identifier resolves to UNKNOWN — the report carries
-    no information and the job is dead weight.
+def test_refuses_when_gh_is_unusable(tmp_path):
+    """With no usable ``gh``, every identifier resolves to UNKNOWN — the report
+    carries no information and the job is dead weight.
 
-    Mutation: drop the ``command -v gh`` check -> rc 0 and a useless schedule
+    ⛔ Host-independent BY CONSTRUCTION. This test used to run with no gh stub
+    in the sandbox PATH and to pass on macOS, where gh lives alone in a shim
+    dir — while on the Ubuntu CI runner gh IS installed at /usr/bin/gh, so the
+    installer found it and INSTALLED: CI-red at c73656c59 (`assert 0 == 2`,
+    job `test (f)` of run 37890979949). The guard is now driven by GH_BIN, which
+    the sandbox sets to a path that exists nowhere, so the answer is the same
+    on every host. A GH_BIN that EXISTS but is not executable is refused by the
+    same guard (a non-executable FILE — a directory is `-x`-true and would not
+    exercise it).
+
+    Mutation: drop the `[ -x "$GH_BIN" ]` check -> rc 0 and a useless schedule
     -> RED.
     """
     sb = _sandbox(tmp_path, gh=False)
     target = tmp_path / "agents"
     res = _install(sb, target)
     assert res.returncode == 2, (res.stdout, res.stderr)
-    assert "gh" in res.stderr, res.stderr
+    assert "no usable 'gh'" in res.stderr, res.stderr
     assert not sb["launchctl_log"].exists(), "refusal still called launchctl"
+
+    # A GH_BIN that EXISTS but is not executable is refused by the same guard.
+    plain = tmp_path / "plain-gh"
+    plain.write_text("# not a binary\n", encoding="utf-8")
+    sb["env"]["GH_BIN"] = str(plain)
+    res2 = _install(sb, target)
+    assert res2.returncode == 2, (res2.stdout, res2.stderr)
+
+    # ⛔ THE CI REGRESSION, REPRODUCED. A gh that IS reachable on PATH must not
+    # rescue the install when GH_BIN names an unusable one — on the Ubuntu
+    # runner gh is at /usr/bin/gh, which is exactly why the pre-fix version of
+    # this test was RED there (`assert 0 == 2`) and green on macOS.
+    sb3 = _sandbox(tmp_path / "ci", gh=False)
+    _write_stub(sb3["bindir"], "gh", _GH_STUB)   # a gh that IS on the PATH
+    res3 = _install(sb3, tmp_path / "ci" / "agents")
+    assert res3.returncode == 2, (res3.stdout, res3.stderr)
 
 
 def test_refuses_when_the_tool_is_absent(tmp_path):
@@ -612,8 +646,52 @@ def test_linux_cron_line_carries_the_gh_directory_on_PATH(tmp_path):
     res = _run(sb)
     assert res.returncode == 0, (res.stdout, res.stderr)
     line = _cron_schedule_line(sb)
-    # JOB_PATH is exactly "<dir holding gh>:<the installer's PATH>".
-    assert f"PATH={sb['bindir']}:/usr/bin:/bin:/usr/sbin:/sbin " in line, line
+    assert f"PATH='{sb['bindir']}:/usr/bin:/bin:/usr/sbin:/sbin' " in line, line
+
+
+def test_cron_line_survives_a_space_in_the_paths(tmp_path):
+    """A SPACE in a path must not break the scheduled command.
+
+    cron runs the line through `/bin/sh -c`, so an unquoted value splits into
+    extra argv words and the job dies with 127 on every fire while the install
+    reported success. This is the likeliest of the quoting defects by far —
+    "~/My Projects/tortoise" needs no special character to be typed by
+    accident — and it is Linux-only (the plist is an XML array and cannot
+    split).
+
+    The assertion is END-TO-END: the emitted line is executed through
+    `/bin/sh -c` exactly as cron would, and the argv the interpreter actually
+    receives is compared — not the text of the line.
+
+    Mutation: drop the shell quoting from `_cron_word` -> the interpreter is
+    invoked with a split path and the recorded argv diverges -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    spaced = tmp_path / "my repo"
+    (spaced / "tools").mkdir(parents=True)
+    (spaced / "tools" / "queue_reconcile.py").write_text("# stub\n", encoding="utf-8")
+    sb["env"]["TORTOISE_REPO"] = str(spaced)
+    argv_file = tmp_path / "argv.txt"
+    (spaced / "bin").mkdir()
+    _write_stub(
+        spaced / "bin", "recorder",
+        f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > {argv_file}\n',
+    )
+    sb["env"]["PYTHON_BIN"] = str(spaced / "bin" / "recorder")
+    res = _run(sb)
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    line = _cron_schedule_line(sb)
+    # Strip cron's five schedule fields; the rest is the command cron's shell
+    # would run.
+    command = line.split(" ", 5)[5]
+    subprocess.run(["/bin/sh", "-c", command], env=sb["env"], check=True,
+                   capture_output=True, timeout=30)
+    assert argv_file.read_text(encoding="utf-8").splitlines() == [
+        str(spaced / "tools" / "queue_reconcile.py"),
+        "--apply",
+        "--queue",
+        str(sb["home"] / ".pi" / "agent" / "state" / "queues" / "CLAIMS.tsv"),
+    ]
 
 
 # ── P2: the numeric guard must fail CLOSED ─────────────────────────────────
@@ -638,7 +716,9 @@ def test_zero_interval_is_refused(tmp_path):
     """``QUEUE_RECONCILE_INTERVAL=0`` is refused rather than arming a
     zero-length interval.
 
-    Mutation: drop the ``>= 1`` guard -> rc 0 and a ``*/0`` cron schedule -> RED.
+    Mutation: drop the ``>= 1`` guard -> rc 0 and an every-minute
+    ``*/1 * * * *`` schedule (the ``< 1 -> 1`` clamp converts the zero, so
+    ``*/0`` is never rendered) -> RED.
     """
     sb = _sandbox(tmp_path, uname="Linux")
     sb["env"]["QUEUE_RECONCILE_INTERVAL"] = "0"
@@ -787,6 +867,29 @@ def test_linux_uninstall_of_only_our_entries_exits_zero(tmp_path):
 
 
 # ── the installer's own contract ───────────────────────────────────────────
+
+def test_help_status_and_uninstall_survive_a_dead_install(tmp_path):
+    """`--help`, `--status` and `--uninstall` must work even when the INSTALL
+    preflight would refuse — the interpreter moved, the queue is gone, gh was
+    uninstalled, the interval override is stale. Those are exactly the
+    conditions under which the schedule has gone dead and must be diagnosed or
+    removed; run at top level the refusals also gated these three, so each
+    exited 2 having printed nothing but "refusing to install" and the only way
+    to remove the job was to hand-edit launchd/crontab.
+
+    Mutation: hoist the refusal block back above the `case "$1"` dispatch ->
+    all three exit 2 (or print an interval error) -> RED.
+    """
+    sb = _sandbox(tmp_path, queue=False, gh=False)
+    sb["env"]["AGENTS_DIR"] = str(tmp_path / "agents")
+    sb["env"]["QUEUE_RECONCILE_ALLOW_NONSTANDARD_AGENTS_DIR"] = "1"
+    sb["env"]["QUEUE_RECONCILE_INTERVAL"] = "bogus"
+    for argv in (["--help"], ["--status"], ["--uninstall"]):
+        res = _run(sb, *argv)
+        assert res.returncode == 0, (argv, res.stdout, res.stderr)
+        assert "refusing to install" not in res.stderr, (argv, res.stderr)
+        assert "must be a whole number" not in res.stderr, (argv, res.stderr)
+
 
 def test_help_documents_the_claim_root_and_exits_zero(tmp_path):
     """``--help`` prints the documented usage (the file header) and exits 0."""

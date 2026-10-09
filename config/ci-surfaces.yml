@@ -892,13 +892,14 @@ surfaces:
   # had merged). Same surface as its queue siblings above.
   - test_queue_reconcile.py
   # #7810: the reconciliation's missing TRIGGER. Hermetic (PATH stubs for
-  # launchctl/crontab/plutil/uname/gh, a throwaway HOME + repo, and a controlled
-  # PATH — the ambient gh must not leak in, or the gh-absent refusal test is
-  # vacuous), so `core` can run it; it pins
-  # tools/install-queue-reconcile-schedule.sh, which schedules
+  # launchctl/crontab/plutil/uname/gh, a throwaway HOME + repo), so `core` can
+  # run it; it pins tools/install-queue-reconcile-schedule.sh, which schedules
   # tools/queue_reconcile.py --apply so the queue stops re-staling whenever no
-  # lane remembers to run the tool (the #7800 defect, one level up). Same
-  # surface as its queue siblings above.
+  # lane remembers to run the tool (the #7800 defect, one level up). gh-absence
+  # is expressed through GH_BIN, NOT through the sandbox PATH: the Ubuntu runner
+  # ships gh in /usr/bin, so a PATH-based gh-absence test is CI-red there and
+  # green on macOS (it was, at c73656c59). Same surface as its queue siblings
+  # above.
   - test_install_queue_reconcile_schedule.py
   - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
@@ -3726,7 +3727,7 @@ durations:
   test_pytest_attribution.py: 0.3
   test_queue_conflict_census.py: 0.5
   test_queue_reconcile.py: 0.6  # unmeasured
-  test_install_queue_reconcile_schedule.py: 60.0  # MEASURED 58.8s — 32 subprocess-level installer tests
+  test_install_queue_reconcile_schedule.py: 60.0  # unmeasured — 58.8s local on a loaded box; refresh from the first post-merge junit
   test_queue_window_observe.py: 0.6
   test_registry_integrity.py: 0.7
   test_salience_labels_4917.py: 0.1

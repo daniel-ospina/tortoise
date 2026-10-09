@@ -72,6 +72,12 @@
 #   QUEUE_RECONCILE_INTERVAL  interval in SECONDS on BOTH platforms (launchd uses
 #                        it directly; cron divides by 60), default 21600 (6h) —
 #                        the same window the fleet's hub-state check uses.
+#   GH_BIN               the `gh` binary the installed job will use (default:
+#                        `command -v gh`). It must be an EXECUTABLE file, or the
+#                        install is refused. Overridable for a machine whose gh
+#                        is not on PATH, and so the refusal is testable without
+#                        depending on whether the host happens to ship a gh in
+#                        /usr/bin (it does on the Ubuntu CI runner).
 #   CLAIMS_QUEUE         queue path (default $HOME/.pi/agent/state/queues/CLAIMS.tsv,
 #                        the tool's own default). It is validated at install time
 #                        and then passed to the job EXPLICITLY (`--queue <path>`):
@@ -94,8 +100,25 @@
 # Idempotent: a byte-identical rendered plist / cron line skips the reload.
 # Safe to re-run on every sync.
 #
+# ⛔ The INSTALL preflight (interpreter >= 3.12, tool present, queue present,
+# usable gh) runs on the INSTALL path only. `--help`, `--status` and
+# `--uninstall` are never subject to it: on the machine where the schedule has
+# gone dead — the interpreter moved, the queue is gone, gh was uninstalled —
+# those are the commands you need, and gating them behind the install's
+# refusals left hand-editing launchd/crontab as the only way to remove a job.
+#
 # Exit codes: 0 = ok (or clean skip), 1 = failure (loud), 2 = usage/refusal.
 set -uo pipefail
+
+# ⛔ bash 5.2 turns `patsub_replacement` ON by default, which gives `&` in a
+# `${var//pattern/replacement}` REPLACEMENT the ksh93 meaning "the text the
+# pattern matched". With it on, `_xml_escape`'s `s="${s//</&lt;}"` yields
+# `<lt;` (the `&` becomes the matched `<`), and every `&`-bearing value
+# substituted in render_plist is re-corrupted the same way — on Linux/bash 5.2+
+# ONLY, which is exactly where the XML-escaping test runs. bash 3.2 (macOS
+# /bin/bash) has no such option, so this `shopt -u` fails there and is
+# swallowed: the behaviour is already what we need.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${TORTOISE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -114,63 +137,78 @@ else
     PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 fi
 
+QUEUE_PATH="${CLAIMS_QUEUE:-$HOME/.pi/agent/state/queues/CLAIMS.tsv}"
+QUEUE_RECONCILE_INTERVAL="${QUEUE_RECONCILE_INTERVAL:-21600}"
+
+# `gh` must be resolvable AND EXECUTABLE at install time: launchd starts the job
+# with a minimal PATH, so the directory holding gh is captured here and carried
+# into the schedule. Without it every identifier resolves to UNKNOWN — a report
+# with no information. The variable is overridable so that a machine whose gh is
+# not on PATH (and a hermetic test) can name it explicitly; the `-x` test in
+# install_preflight is what makes the guard hold for the override too. It is
+# resolved at top level only so `--status` can print it — the REFUSALS below
+# are install-only.
+GH_BIN="${GH_BIN:-$(command -v gh || true)}"
+
 # ── fail-closed refusals: never install a job that can only fail ────────────
 # (#5128 is the class: an unattributed failure reads as "this tool is broken".
 # Here the equivalent is a scheduled job whose interpreter the tool REFUSES, or
 # whose queue path does not exist — it would fail every fire, forever, and the
 # only signal is a log nobody reads.)
-
-if [ -z "${PYTHON_BIN:-}" ] || [ ! -x "$PYTHON_BIN" ]; then
-    echo "ERROR: no usable interpreter (looked for $REPO/.venv/bin/python and python3)." >&2
-    echo "       Queue_reconcile needs Python >= 3.12; set PYTHON_BIN to one." >&2
-    exit 2
-fi
-if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
-    echo "ERROR: refusing to install: $PYTHON_BIN is older than 3.12." >&2
-    echo "       tools/queue_reconcile.py refuses a pre-3.12 interpreter, so the" >&2
-    echo "       scheduled job would fail on every fire with no diagnostic gain." >&2
-    echo "       Point PYTHON_BIN at a >= 3.12 interpreter (e.g. $REPO/.venv/bin/python)." >&2
-    exit 2
-fi
-
-if [ ! -f "$TOOL" ]; then
-    echo "ERROR: refusing to install: tool not found at $TOOL." >&2
-    exit 2
-fi
-
-QUEUE_PATH="${CLAIMS_QUEUE:-$HOME/.pi/agent/state/queues/CLAIMS.tsv}"
-if [ ! -f "$QUEUE_PATH" ]; then
-    echo "ERROR: refusing to install: queue not found at $QUEUE_PATH." >&2
-    echo "       A job pointed at a missing queue fails on every fire (the tool" >&2
-    echo "       exits 3). Set CLAIMS_QUEUE, or install on the machine that holds it." >&2
-    exit 2
-fi
-
-# `gh` must be resolvable at INSTALL time: launchd starts the job with a minimal
-# PATH, so the directory holding gh is captured here and carried in the plist.
-# Without it every identifier resolves to UNKNOWN — a report with no information.
-GH_BIN="$(command -v gh || true)"
-if [ -z "$GH_BIN" ]; then
-    echo "ERROR: refusing to install: no 'gh' on PATH." >&2
-    echo "       The tool resolves every identifier through the GitHub API; with no" >&2
-    echo "       gh, every number is UNKNOWN and the report carries no information." >&2
-    exit 2
-fi
-
-# The job's PATH: the directory holding the resolved gh, AHEAD of the ambient
-# PATH. Carried into BOTH the plist and the cron line, because launchd's PATH is
-# minimal and cron's default is `/usr/bin:/bin` — neither can find a gh installed
-# under ~/.pi/agent/shims, ~/bin or /usr/local/bin. Without it every identifier
-# resolves to UNKNOWN at fire time (the tool swallows the spawn failure into a
-# per-number UNKNOWN), the report carries no information, and the install-time
-# gh guard above would be giving false confidence about a job that can never
-# work.
-JOB_PATH="$(dirname "$GH_BIN")"
-if [ "${PATH#"$JOB_PATH":}" != "$PATH" ]; then
-    JOB_PATH="$PATH"          # gh's directory is already first — do not duplicate it
-else
-    JOB_PATH="$JOB_PATH:$PATH"
-fi
+#
+# ⛔ INSTALL-ONLY — DO NOT HOIST THESE BACK TO TOP LEVEL. Run at top level they
+# also gate `--help`, `--status` and `--uninstall`: on a machine where the
+# interpreter had moved, the queue was gone, or gh was uninstalled — i.e.
+# exactly when the schedule has gone DEAD and must be removed — all three exited
+# 2 having printed nothing but "refusing to install", so the only way to remove
+# the job was to hand-edit launchd/crontab. A removal or diagnostic request is
+# never subject to the install's preflight.
+install_preflight() {
+    if [ -z "${PYTHON_BIN:-}" ] || [ ! -x "$PYTHON_BIN" ]; then
+        echo "ERROR: no usable interpreter (looked for $REPO/.venv/bin/python and python3)." >&2
+        echo "       queue_reconcile.py needs Python >= 3.12; set PYTHON_BIN to one." >&2
+        return 2
+    fi
+    if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+        echo "ERROR: refusing to install: $PYTHON_BIN is older than 3.12." >&2
+        echo "       tools/queue_reconcile.py refuses a pre-3.12 interpreter, so the" >&2
+        echo "       scheduled job would fail on every fire with no diagnostic gain." >&2
+        echo "       Point PYTHON_BIN at a >= 3.12 interpreter (e.g. $REPO/.venv/bin/python)." >&2
+        return 2
+    fi
+    if [ ! -f "$TOOL" ]; then
+        echo "ERROR: refusing to install: tool not found at $TOOL." >&2
+        return 2
+    fi
+    if [ ! -f "$QUEUE_PATH" ]; then
+        echo "ERROR: refusing to install: queue not found at $QUEUE_PATH." >&2
+        echo "       A job pointed at a missing queue fails on every fire (the tool" >&2
+        echo "       exits 3). Set CLAIMS_QUEUE, or install on the machine that holds it." >&2
+        return 2
+    fi
+    if [ -z "$GH_BIN" ] || [ ! -x "$GH_BIN" ]; then
+        echo "ERROR: refusing to install: no usable 'gh'." >&2
+        echo "       The tool resolves every identifier through the GitHub API; with no" >&2
+        echo "       gh, every number is UNKNOWN and the report carries no information." >&2
+        echo "       Set GH_BIN to the binary to use (current: '${GH_BIN:-<none on PATH>}')." >&2
+        return 2
+    fi
+    # The job's PATH: the directory holding the resolved gh, AHEAD of the ambient
+    # PATH. Carried into BOTH the plist and the cron line, because launchd's PATH
+    # is minimal and cron's default is `/usr/bin:/bin` — neither can find a gh
+    # installed under ~/.pi/agent/shims, ~/bin or /usr/local/bin. Without it every
+    # identifier resolves to UNKNOWN at fire time (the tool swallows the spawn
+    # failure into a per-number UNKNOWN), the report carries no information, and
+    # the gh guard above would be giving false confidence about a job that can
+    # never work.
+    JOB_PATH="$(dirname "$GH_BIN")"
+    if [ "${PATH#"$JOB_PATH":}" = "$PATH" ]; then
+        JOB_PATH="$JOB_PATH:$PATH"
+    else
+        JOB_PATH="$PATH"      # gh's directory is already first — do not duplicate it
+    fi
+    return 0
+}
 
 # ── escaping ──────────────────────────────────────────────────────────────
 # XML-escape a value before it is substituted into the plist template. Without
@@ -186,14 +224,22 @@ _xml_escape() {
     printf '%s' "$s"
 }
 
-# crontab treats `%` as a command separator (everything after it becomes the
-# command's stdin) and `\` as its escape, so a literal `%` in a path must be
-# backslash-escaped or the rest of the schedule line is silently dropped.
-_cron_escape() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//%/\\%}"
-    printf '%s' "$s"
+# Quote ONE value for the crontab line. cron runs that line through
+# `/bin/sh -c`, so every value needs SHELL quoting as well as escaping for
+# crontab's own parser — a space in a checkout path ("~/My Projects/tortoise")
+# otherwise splits into extra argv words and the job dies with 127 on every
+# fire while the install reported success. That is the same "installed but can
+# never run" class the preflight refusals exist to prevent, and a space is far
+# more likely than the `&`/`<`/`%` cases: it needs no special character at all.
+#
+# `%` is backslash-escaped because crontab parses it BEFORE the shell: an
+# unescaped one becomes a newline and the remainder of the line is fed to the
+# command as stdin. That pre-shell parse is why quoting alone is not enough.
+# `%` is escaped on the RAW value; the result is then single-quoted (sed turns
+# an embedded `'` into `'\''`), so cron's unescaping restores a literal `%`
+# INSIDE the quotes, where the shell passes it straight through.
+_cron_word() {
+    printf "'%s'" "$(printf '%s' "${1//%/\\%}" | sed "s/'/'\\\\''/g")"
 }
 
 # ── knobs (fail-closed numeric parsing) ────────────────────────────────────
@@ -220,27 +266,35 @@ _require_positive_int() { # $1 = value, $2 = var name
     return 0
 }
 
-QUEUE_RECONCILE_INTERVAL="${QUEUE_RECONCILE_INTERVAL:-21600}"
-_require_positive_int "$QUEUE_RECONCILE_INTERVAL" "QUEUE_RECONCILE_INTERVAL" || exit 2
+# Validated on the INSTALL path only (see install_preflight): a malformed
+# override left in the operator's shell must not block `--status` or
+# `--uninstall`.
+validate_interval() {
+    _require_positive_int "$QUEUE_RECONCILE_INTERVAL" "QUEUE_RECONCILE_INTERVAL"
+}
 
 # cron's minute step is only 0-59, so `*/N` with N >= 60 is evaluated over the
 # minute range and matches minute 0 only — SILENTLY hourly, while launchd still
 # gets N seconds. Render whole-hour intervals in the hour field; warn when cron
-# cannot express the interval exactly. Computed once so the warning and the
-# emitted field cannot drift.
-CRON_MINUTES=$(( 10#$QUEUE_RECONCILE_INTERVAL / 60 ))
-[ "$CRON_MINUTES" -lt 1 ] && CRON_MINUTES=1
-if [ "$CRON_MINUTES" -lt 60 ]; then
-    CRON_SCHEDULE="*/$CRON_MINUTES * * * *"
-    if [ $(( 10#$QUEUE_RECONCILE_INTERVAL % 60 )) -ne 0 ]; then
-        echo "WARNING: cron takes QUEUE_RECONCILE_INTERVAL in whole minutes; ${QUEUE_RECONCILE_INTERVAL}s floors to ${CRON_MINUTES} min" >&2
+# cannot express the interval exactly. Computed HERE rather than at top level so
+# the cron-only warnings fire on the platform that HAS cron, and Darwin never
+# complains about a scheduler it does not use.
+cron_schedule_field() {
+    local interval="$QUEUE_RECONCILE_INTERVAL" minutes
+    minutes=$(( 10#$interval / 60 ))
+    [ "$minutes" -lt 1 ] && minutes=1
+    if [ "$minutes" -lt 60 ]; then
+        if [ $(( 10#$interval % 60 )) -ne 0 ]; then
+            echo "WARNING: cron takes QUEUE_RECONCILE_INTERVAL in whole minutes; ${interval}s floors to ${minutes} min" >&2
+        fi
+        printf '*/%s * * * *' "$minutes"
+    elif [ $(( minutes % 60 )) -eq 0 ] && [ $(( minutes / 60 )) -le 23 ]; then
+        printf '0 */%s * * *' "$(( minutes / 60 ))"
+    else
+        echo "WARNING: cron cannot express QUEUE_RECONCILE_INTERVAL ${interval}s exactly (${minutes} min); scheduling hourly at minute 0" >&2
+        printf '0 * * * *'
     fi
-elif [ $(( CRON_MINUTES % 60 )) -eq 0 ] && [ $(( CRON_MINUTES / 60 )) -le 23 ]; then
-    CRON_SCHEDULE="0 */$(( CRON_MINUTES / 60 )) * * *"
-else
-    CRON_SCHEDULE="0 * * * *"
-    echo "WARNING: cron cannot express QUEUE_RECONCILE_INTERVAL ${QUEUE_RECONCILE_INTERVAL}s exactly (${CRON_MINUTES} min); scheduling hourly at minute 0" >&2
-fi
+}
 
 usage() {
     sed -n '2,/^# Exit codes:/p' "$0" | sed 's/^# \{0,1\}//'
@@ -379,7 +433,7 @@ cron_line() {
     # runs the command through `/bin/sh -c`, so the assignment applies to THIS
     # command only. Same JOB_PATH as the plist, for the same reason.
     echo "$CRON_MARKER"
-    echo "$CRON_SCHEDULE PATH=$(_cron_escape "$JOB_PATH") $(_cron_escape "$PYTHON_BIN") $(_cron_escape "$TOOL")${mode_arg} --queue $(_cron_escape "$QUEUE_PATH") >> $(_cron_escape "$LOG_PATH") 2>&1"
+    echo "$(cron_schedule_field) PATH=$(_cron_word "$JOB_PATH") $(_cron_word "$PYTHON_BIN") $(_cron_word "$TOOL")${mode_arg} --queue $(_cron_word "$QUEUE_PATH") >> $(_cron_word "$LOG_PATH") 2>&1"
 }
 
 job_loaded() {
@@ -388,6 +442,8 @@ job_loaded() {
 
 install_darwin() {
     require_standard_agents_dir || return $?
+    install_preflight || return $?
+    validate_interval || return $?
     mkdir -p "$AGENTS_DIR"
     local tmp
     tmp="$(mktemp)" || return 1
@@ -428,6 +484,8 @@ install_darwin() {
 }
 
 install_linux() {
+    install_preflight || return $?
+    validate_interval || return $?
     local current new_line
     current="$($CRONTAB_CMD -l 2>/dev/null || true)"
     new_line="$(cron_line | tail -1)"
@@ -459,6 +517,7 @@ status() {
     echo "tool       : $TOOL"
     echo "interpreter: $PYTHON_BIN ($("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo '?'))"
     echo "queue      : $QUEUE_PATH"
+    echo "gh         : ${GH_BIN:-<not found>}"
     echo "interval   : ${QUEUE_RECONCILE_INTERVAL}s"
     echo "log        : $LOG_PATH"
     case "$(uname -s)" in

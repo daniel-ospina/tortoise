@@ -767,14 +767,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
              # SOURCE_PATTERNS entry matches an installer path — so an
-             # INSTALLER-ONLY change (the shape of most follow-up fixes to a
-             # schedule, and exactly the shape of this PR's first fix round)
-             # selected NO surface and took the docs-only early return: the 30
-             # hermetic cases pinning that the scheduled run is the SAFE run
-             # (armed with `--apply`, the validated queue passed EXPLICITLY,
-             # gh's directory on the job's PATH, XML/cron escaping) would not
-             # have run on the PR editing the installer. Same #1349/#3332/#3616
-             # silent-drop class as tools/queue_resweep.py above. Pinned by
+             # INSTALLER-ONLY change selected NO surface and took the docs-only
+             # early return: the hermetic cases pinning that the scheduled run
+             # is the SAFE run (armed with `--apply`, the validated queue passed
+             # EXPLICITLY, gh's directory on the job's PATH, XML/cron escaping,
+             # and the install-only preflight) would not have run on the PR
+             # editing the installer. Same #1349/#3332/#3616 silent-drop class
+             # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
              # #3036: oauth.py is pinned by BOTH api-registered tests
