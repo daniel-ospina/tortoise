@@ -38,10 +38,9 @@ doc_status: live
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
 > direction is **recorded on the write** — `->`, `<-`, `<->`, `-` — and **comes from the connection's
 > semantics**. `-` means the connection exists and no confidence transfers along it. §8 now states
-> **three** layers (mechanism + direction / semantics / predicate + tags). The semantics table gains
-> `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `dependsOn`, `transacts` and a
-> *carries confidence?* column. `produces`: the event→artifact shape is the encouraged pattern, not a
-> restriction.
+> **three** layers (mechanism + direction / semantics / predicate + tags). The §8 semantics table's
+> direction column now states the recorded four values instead of a per-row default, and `produces`
+> reads "the source created" — the event→artifact shape is the encouraged pattern, not a restriction.
 >
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
@@ -1385,26 +1384,16 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
-Same semantics with different predicates is correct: `fixes`, `implements` and `deploysTo` all carry
-semantics `addresses`; the predicate distinguishes them.
-
 ### Semantic Types
 
-| Semantics | Mechanism | Direction | Carries confidence? | Example |
-|-----------|-----------|-----------|---------------------|---------|
-| `hasPart` | IMPL | `<->` | yes — aggregation, parts ↔ whole | Epic hasPart Issue |
-| `addresses` | IMPL | `->` | weakly — relevance, not evidence | Feature addresses Need |
-| `supports` | IMPL | `->` | yes — positive evidence, one way | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| `mutuallySupportive` | IMPL | `<->` | yes — each reinforces the other | — |
-| `mutuallyExclusive` | NAND | `<->` | yes — each rules the other out | Feature competesWith Competitor |
-| `refutes` | NAND | `->` | yes — negative evidence, one way | Claim refutes Claim |
-| `causes` | IMPL | `->` | yes — A brought B about | Bug causes Incident |
-| `dependsOn` | IMPL | `->` | yes — a precondition | Tranche gatedBy Condition |
-| `transacts` | IMPL | `-` | no — a trade; association only | Buyer transacts Seller |
-| `related` | — | `-` | no — evidence-free by construction (§3.9) | neutral association |
+| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
+|------|-----------|------------|-------------------------|---------|
+| hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
+| addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
+| supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
+| opposes | NAND | Bidirectional by default, optional unidirectional (directed attack) | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
 
-**The both-ways semantics name their mutuality** (`mutuallySupportive`, `mutuallyExclusive`); the
-one-way ones do not (`supports`, `refutes`).
+> **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
 
 ### Pack Relation Declarations
 
