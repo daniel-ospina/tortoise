@@ -817,6 +817,9 @@ class TestCertificationRequiresAnExhaustedWalk:
         assert partial is not None and len(partial) == 3, (
             "the rows are still served to a best-effort caller: what the falsy "
             f"id forbids is CERTIFICATION; got {partial!r}")
+        assert [o["org_id"] for o in partial] == ["", "a", "b"], (
+            "a falsy id cannot key a dedupe, and it must not be moved to the "
+            f"end either: the fleet is returned in walk order; got {partial!r}")
         assert _run(monkeypatch, cp, require_complete=True) is None, (
             "a page containing a falsy id must not certify the fleet")
 

@@ -1058,9 +1058,11 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
             # EMPTY page). Without this branch the call raises ``AttributeError``,
             # and the handler below turns an interface mismatch into an EMPTY
             # fleet for the best-effort caller — a silent under-enumeration on
-            # the very path #5388 is about.
+            # the very path #5388 is about. Presence alone is not enough: a
+            # truthy but NON-CALLABLE attribute would raise ``TypeError``, which
+            # that same handler swallows into that same empty fleet.
             _total_aware = getattr(cp, "query_with_total", None)
-            if _total_aware is None:
+            if not callable(_total_aware):
                 def _read_page(table, **kw):
                     kw.pop("count_exact", None)
                     return cp.query(table, **kw), None
@@ -1148,26 +1150,27 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     exhausted = True
                     break
 
-            # Dedupe by id, FIRST occurrence winning. The certificate below
-            # counts DISTINCT ids, so the rows returned must be the same set it
-            # counted: a server whose cursor is INCLUSIVE (or that otherwise
-            # serves an overlapping page) would still report the walk COMPLETE
-            # on the distinct count while publishing one org twice, and the cost
-            # refresh would carry that duplicate into the metric's label set.
+            # Dedupe by id, FIRST occurrence winning, ORDER PRESERVED. The rows
+            # returned must be the same SET the certificate counted: a server
+            # whose cursor is INCLUSIVE (or that otherwise serves an overlapping
+            # page) would still report the walk COMPLETE on the distinct count
+            # while publishing one org twice, and the cost refresh would carry
+            # that duplicate into the metric's label set. Order is preserved
+            # because re-ordering the fleet is a gratuitous change for every
+            # consumer.
             # A FALSY id cannot key a dedupe any more than it can be a cursor,
-            # so such a row passes through unchanged: it is still returned to a
-            # best-effort caller — what it forbids is CERTIFICATION, decided
-            # above.
-            by_id: dict[str, dict] = {}
-            unkeyed: list[dict] = []
+            # so such a row is emitted unchanged, in place: it is still returned
+            # to a best-effort caller — what it forbids is CERTIFICATION,
+            # decided above.
+            emitted: set[str] = set()
+            parsed: list[dict] = []
             for r in rows:
                 rid = r["id"]
                 if rid:
-                    by_id.setdefault(rid, r)
-                else:
-                    unkeyed.append(r)
-            parsed = [{"org_id": r["id"], "name": r.get("name")}
-                      for r in [*by_id.values(), *unkeyed]]
+                    if rid in emitted:
+                        continue
+                    emitted.add(rid)
+                parsed.append({"org_id": rid, "name": r.get("name")})
             # Completeness. The walk above stops only on an EMPTY page (or the
             # page cap, which leaves ``exhausted`` False); only THEN is it asked
             # whether the fleet is complete:

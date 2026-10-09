@@ -198,7 +198,8 @@ declared total is 0 (unconfigured) or no org carries weight.
   one interval after boot **provided the enumeration is confirmable**. A fleet
   larger than the 1000-row page size is fine — the walk pages past it — but when
   the walk cannot CONFIRM the whole fleet (it hit its page cap, or the server
-  never stated a total and the walk never reached an empty page, or the
+  never stated a total and the walk never reached an empty page, or it reached
+  one but the distinct ids it saw fell short of the stated total, or the
   enumeration raised), the cost caller fails closed on every cycle and the metric
   stays last-known-good (or empty if it was never populated), with no on-metric
   evidence that it is not live. It is best-effort: a refresh failure can never
