@@ -671,69 +671,33 @@ def test_resolver_excluded_probe_failure_abstains_fail_safe():
     assert res.unresolved == ("the couch",)
 
 
-def test_resolver_fts_window_grows_past_excluded_rows():
-    """#4061 R2: the FTS leg applies the exclusion BEFORE its own bound.
+def _stub_resolver_port(monkeypatch, hits, name_rows):
+    """Build a resolver port whose FTS leg is a patched
+    ``search_engine.run_fts_query``.
 
-    A window whose first ``limit`` rows are ALL excluded must be grown until
-    the live candidate is reached. Pre-#4061 ``fts_objects`` filtered only
-    the truncated SDK rows and returned [] wholesale.
+    Returns ``(port, captured, hydration)``: ``captured`` records the kwargs
+    the leg passed to the FTS leg; ``hydration`` records the follow-up name
+    read's params (absent when no name read happened).
     """
-    ranking = [{"id": f"obj-r{i}", "content": f"widget variant {i}",
-                "status": "retracted"} for i in range(10)]
-    ranking.append({"id": "obj-live", "content": "widget",
-                    "status": "live"})
+    import tortoise.search_engine as se
 
-    class _EmptyResult:
-        def __init__(self):
-            self.result_set: list = []
+    captured: dict = {}
+    hydration: dict = {}
 
-    class _G:
-        def query(self, *a, **k):
-            return _EmptyResult()
-
-    class _Proj:
-        g = _G()
-
-    class _StubSDK:
-        def _get_proj(self):
-            return _Proj()
-
-        def tortoise_fts_query(self, term, *, entity_type, limit,
-                               include_terminal=False):
-            assert entity_type == "object"
-            # #3301: the resolver reads the terminal-INCLUSIVE view so its
-            # own narrower exclusion stays the only filter on this leg.
-            assert include_terminal is True
-            return ranking[:limit]
-
-    from tortoise.assembly import docker_resolver_port
-    port = docker_resolver_port(_StubSDK())
-    # the raw SDK window at limit=8 is fully consumed by excluded rows
-    assert all(h["status"] == "retracted"
-               for h in _StubSDK().tortoise_fts_query(
-                   "widget", entity_type="object", limit=8,
-                   include_terminal=True))
-    assert port.fts_objects("widget", 8) == [{"id": "obj-live",
-                                               "name": "widget"}]
-
-
-def test_resolver_fts_absent_status_is_not_live():
-    """#4061 R3: an FTS hit carrying NO ``status`` (the SDK batch content-fetch
-    degradation, which is indistinguishable from a status-less Object) must
-    not read as live — the stored status is re-read from the graph and the
-    excluded Object is dropped.
-
-    RED before the fix (the hit is returned), GREEN after.
-    """
-    seen_ids: list[list[str]] = []
+    def fake_run_fts_query(graph, query, **kw):
+        captured["query"] = query
+        captured.update(kw)
+        return list(hits)
 
     class _G:
         def query(self, cypher, params=None, **k):
-            seen_ids.append(list((params or {}).get("ids", [])))
+            hydration.setdefault("calls", []).append(params)
+            hydration["cypher"] = cypher
 
             class _R:
                 def __init__(self):
-                    self.result_set = [["obj-retracted"]]
+                    self.result_set = [list(r) for r in name_rows]
+
             return _R()
 
     class _Proj:
@@ -743,18 +707,90 @@ def test_resolver_fts_absent_status_is_not_live():
         def _get_proj(self):
             return _Proj()
 
-        def tortoise_fts_query(self, term, *, entity_type, limit,
-                               include_terminal=False):
-            # #3301: the resolver reads the terminal-INCLUSIVE view
-            assert include_terminal is True
-            # the degraded payload: no `status` key at all
-            return [{"id": "obj-retracted", "content": "couch", "kind": ""}]
-
+    monkeypatch.setattr(se, "run_fts_query", fake_run_fts_query)
     from tortoise.assembly import docker_resolver_port
-    port = docker_resolver_port(_StubSDK())
-    assert port.fts_objects("couch", 8) == []
-    # the re-read was scoped to exactly the status-less hit
-    assert seen_ids == [["obj-retracted"]]
+    return docker_resolver_port(_StubSDK()), captured, hydration
+
+
+def test_resolver_fts_leg_is_the_name_index_not_the_hybrid(monkeypatch):
+    """#3223: the leg runs THE FTS leg (``search_engine.run_fts_query``)
+    with this port's NARROW exclusion — it does NOT filter hybrid rows.
+
+    Three hybrid-recovery shapes were measured and rejected: unfiltered (the
+    divergence), a re-derived lexical predicate (drops "happiness"/"happy",
+    admits "rating"/"rat"), and an id-filtered index intersection (the
+    vector-weighted top-``limit`` never contains the name match). Making the
+    leg BE the index leg removes all three.
+    """
+    port, captured, hydration = _stub_resolver_port(
+        monkeypatch,
+        hits=[("obj-a", 1.0), ("obj-b", 0.5)],
+        name_rows=[["obj-a", "couch"], ["obj-b", "sofa"]],
+    )
+    assert port.fts_objects("couch", 8) == [
+        {"id": "obj-a", "name": "couch"},
+        {"id": "obj-b", "name": "sofa"},
+    ]
+    assert captured["query"] == "couch"
+    assert captured["entity_type"] == "object"
+    assert captured["limit"] == 8
+    # the port's own NARROW set — not the read surface's wider vocabulary
+    assert captured["excluded_statuses"] == ("retracted",)
+    # the name read is bounded to exactly the ids the index returned
+    assert hydration["calls"] == [{"ids": ["obj-a", "obj-b"]}]
+    assert "o.id IN $ids" in hydration["cypher"]
+
+
+def test_resolver_fts_exclusion_is_pushed_into_the_query(monkeypatch):
+    """#4061 R2: the exclusion is applied BY the FTS query, before its LIMIT
+    — so an excluded Object cannot consume the leg's bound.
+
+    Pre-#4061 the leg filtered rows the SDK had already truncated and
+    returned [] wholesale when excluded Objects filled the window; the old
+    window-growth dance existed only because the SDK's all-or-nothing
+    ``include_terminal`` opt-in could not express this port's narrower set.
+    """
+    port, captured, _ = _stub_resolver_port(
+        monkeypatch,
+        hits=[("obj-live", 0.9)],
+        name_rows=[["obj-live", "widget"]],
+    )
+    assert port.fts_objects("widget", 8) == [{"id": "obj-live",
+                                               "name": "widget"}]
+    # the exclusion travels WITH the query (in-query, pre-LIMIT), never as a
+    # post-hoc filter on already-truncated rows
+    assert captured["excluded_statuses"] == ("retracted",)
+    assert captured["limit"] == 8
+
+
+def test_resolver_fts_status_comes_from_the_query(monkeypatch):
+    """#4061 R3: ``status`` is read by the FTS query itself, so the SDK's
+    batch content-fetch degradation (which could drop ``status`` and let a
+    retracted Object read as live) cannot apply to this leg at all.
+
+    The leg makes no SDK read whose payload could lack a status — the old
+    ``_excluded_object_ids`` re-read existed only because it did.
+    """
+    port, _captured, hydration = _stub_resolver_port(
+        monkeypatch,
+        hits=[("obj-live", 0.9)],
+        name_rows=[["obj-live", "sofa"]],
+    )
+    assert port.fts_objects("sofa", 8) == [{"id": "obj-live",
+                                             "name": "sofa"}]
+    # the ONLY graph read is the name hydration, and it selects id+name — no
+    # status, because the query's WHERE already decided it
+    assert hydration["calls"] == [{"ids": ["obj-live"]}]
+    assert "o.id, o.name" in hydration["cypher"]
+    assert "status" not in hydration["cypher"]
+
+
+def test_resolver_fts_no_index_hit_costs_no_name_read(monkeypatch):
+    """An index miss must not pay a second round trip."""
+    port, _captured, hydration = _stub_resolver_port(
+        monkeypatch, hits=[], name_rows=[])
+    assert port.fts_objects("nothing") == []
+    assert "calls" not in hydration
 
 
 # ── docker-lane resolver legs (fixture substrate; skip when the shared
@@ -821,18 +857,13 @@ def test_resolver_docker_fts_paraphrase(_docker_sdk, force_sparse_tfidf):
     Object whose NAME token-matches via FTS ('the grey comfy couch from
     the store' → couch) resolves source='fts' confidence='med'.
 
-    #3095: the embedder state is PINNED OFF (``force_sparse_tfidf``) because
-    this test asserts the NAME-FTS leg's count contract; with a live embedder
-    the hybrid vector leg matches every Object and the count assertion becomes
-    an embedder-availability flake. This test is ABOUT the name-FTS leg, so it
-    must pin the leg decomposition to stay a real FTS contract (see the
-    ``force_sparse_tfidf`` conftest note).
-
-    NOT a statement about the shipped configuration: with the embedder live
-    this term does NOT stay a single-candidate name-FTS match — the hybrid
-    FTS leg (RRF of name-FTS + vector) resolves it to 3 candidates, all
-    stamped ``source="fts"`` — tracked as the resolver leg-decomposition
-    divergence in #3223."""
+    #3095/#3223: the embedder state is PINNED OFF (``force_sparse_tfidf``)
+    so this stays a SPARSE-leg count contract. #3223 makes leg 2 BE the name
+    index (``search_engine.run_fts_query``), so the vector half never enters
+    it — but pinning keeps THIS test's assertion independent of whichever
+    decomposition the lane happens to run. The shipped-configuration
+    counterpart is ``test_resolver_docker_embedder_on_...`` (see the #3223
+    note in ``docker_resolver_port.fts_objects``)."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -849,14 +880,15 @@ def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk,
     """A term matching NO Object stays unresolved on the live lane — the R1
     fired=False signal (legacy fallback), never an empty/errored fire.
 
-    #3095: embedder state PINNED OFF (``force_sparse_tfidf``). This pins the
-    SPARSE-leg contract only. With the vector leg live the hybrid FTS leg
-    matches every Object for any query, so 'the teleporting exercise bike'
-    RESOLVES through it and this bootstrap signal is unreachable in the
-    shipped configuration — a pre-existing divergence (reproduced identically
-    before and after #3018), tracked in #3223. When #3223 lands, either this
-    test loses its pin (the fallback becomes reachable again) or it is
-    rewritten to state where the fallback can fire."""
+    #3095/#3223: the embedder state is PINNED OFF (``force_sparse_tfidf``) so
+    this remains a SPARSE-leg contract pin. #3223 made the fallback reachable
+    in the SHIPPED (embedder-live) configuration too, by making the resolver's
+    name-FTS leg BE the Object NAME index (``search_engine.run_fts_query``)
+    instead of the hybrid surface;
+    the deterministic shipped-configuration counterpart is
+    ``test_resolver_docker_embedder_on_unresolved_keeps_legacy``. The pin is
+    kept — not because the assertion is now sparse-only, but because it keeps
+    THIS test's leg mix fixed rather than ambient."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -874,11 +906,12 @@ def test_resolver_docker_alias_leg(_docker_sdk, force_sparse_tfidf):
     bought-point search_keys 'couch ikea 800 dollars'). Exact + FTS both
     miss (Object names couch/dog bed/sofa share no ikea token).
 
-    #3095: embedder state PINNED OFF (``force_sparse_tfidf``) so the FTS leg
-    genuinely misses and the term reaches the alias leg — an unpinned vector
-    leg would swallow the term at the FTS step and the alias contract would
-    never be exercised. Sparse-leg contract only; the shipped-configuration
-    divergence is #3223."""
+    #3095/#3223: embedder state PINNED OFF (``force_sparse_tfidf``) so this
+    stays a SPARSE-leg contract pin. Before #3223 an unpinned vector leg
+    swallowed the term at the FTS step and the alias contract was never
+    exercised; #3223 makes leg 2 BE the name index (so the vector half is not
+    in it at all) and the alias leg is reached in the shipped configuration as
+    well — the pin keeps THIS test's leg mix fixed rather than ambient."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -907,9 +940,11 @@ def test_resolver_docker_excludes_retracted_object(_docker_sdk,
     ``test_resolver_docker_alias_leg``, which RED if the read-surface object
     tuple (which contains ``superseded``) is used here instead.
 
-    ``force_sparse_tfidf`` pins the leg decomposition (#3095): with the
-    embedder live the hybrid FTS leg swallows the alias term before the alias
-    leg is reached.
+    ``force_sparse_tfidf`` pins the leg decomposition (#3095): before #3223
+    an embedder-live hybrid FTS leg swallowed the alias term before the alias
+    leg was reached. #3223's NAME gate now rejects semantic-only hits, so
+    that substitution no longer depends on the pin; it is kept so THIS test's
+    leg mix stays fixed rather than ambient.
 
     DECIDED, and SUPERSEDED BY #4061 — the ladder's fall-through WAS not
     short-circuited here (a term whose exact name matched only an
@@ -1046,20 +1081,14 @@ def test_resolver_docker_excluded_exact_match_abstains(_docker_sdk):
 
 
 @_docker_only
-def test_resolver_docker_fts_window_survives_retracted_crowd(
-        _docker_sdk, force_sparse_tfidf):
+def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     """#4061 R2 (integration): more excluded Objects than the leg's ``limit``
     rank ahead of one live Object; the live candidate must still come back.
 
-    ``force_sparse_tfidf`` pins the FTS-owned ranking (#3095/#3223): with the
-    vector leg live the hybrid re-orders the crowd, and this fixture is about
-    the leg's WINDOW, not the leg mix.
-
-    The live Object's name is chosen so its derived id sorts AFTER every
-    retracted variant's (asserted below, not trusted): the FTS leg ties these
-    rows, so under the #3019 ``id ASC`` tie-break the window order IS the id
-    order — with a name that sorts early the live row lands inside the window
-    and the crowd no longer fills it.
+    The exclusion is applied BY the FTS query (pre-LIMIT), so the crowd can
+    never consume the leg's bound — the old window-growth dance existed only
+    because the SDK's all-or-nothing ``include_terminal`` opt-in could not
+    express this port's narrower ``{retracted}`` set.
     """
     proj = _docker_sdk._get_proj()
     qid = "q4061r2"
@@ -1068,60 +1097,45 @@ def test_resolver_docker_fts_window_survives_retracted_crowd(
     live_name = "widget variant zz"
     variant_ids = [_entity_name_id("Object", f"widget variant {i}")
                    for i in range(10)]
+    # Non-vacuity premise: with the live Object sorting BEHIND the crowd
+    # under the ``id ASC`` tie-break, a post-truncation filter (the pre-#4061
+    # shape) would return nothing — so this test cannot pass against the
+    # regression it guards.
     assert _entity_name_id("Object", live_name) > max(variant_ids), (
         "the fixture's premise: the live Object must sort BEHIND the crowd "
-        "under the id tie-break, or it sits inside the window")
+        "under the id tie-break, or the crowd no longer fills the bound")
     for i in range(10):
         name = f"widget variant {i}"
         _docker_sdk.create_entity("object", name, objectKind="core:other",
                                   lme_question_id=qid, is_episodic=True)
         proj.g.query("MATCH (o:Object {name:$n}) SET o.status='retracted'",
                      params={"n": name})
-    # the lone LIVE Object, named so the deterministic id order puts it beyond
-    # the retracted crowd (the defect's precondition, asserted below)
     _docker_sdk.create_entity("object", live_name, objectKind="core:other",
                               lme_question_id=qid, is_episodic=True)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
-
-    # PRECONDITION (fails loudly if the ranking ever stops crowding): the
-    # excluded rows occupy the ENTIRE raw SDK window. #3301: read the SAME
-    # terminal-INCLUSIVE view the resolver's FTS leg reads — the default SDK
-    # view now excludes retracted Objects at the query layer, so the crowd
-    # only exists on the view the resolver actually asks for.
-    raw = _docker_sdk.tortoise_fts_query("widget", entity_type="object",
-                                         limit=8, include_terminal=True)
-    assert raw and all((h.get("status") or "") in {"retracted"}
-                       for h in raw), [h.get("content") for h in raw]
-
     got = port.fts_objects("widget", 8)
     assert [r["name"] for r in got] == [live_name]
 
 
 @_docker_only
-def test_resolver_docker_fts_absent_status_is_not_live(_docker_sdk):
-    """#4061 R3 (integration): the SDK's batch content-fetch degradation drops
-    ``status`` from every hit; a retracted Object must still be excluded — the
-    stored status is re-read from the graph (the pure test pins the decision,
-    this pins the real re-read against a live Object row)."""
+def test_resolver_docker_fts_status_is_read_by_the_query(_docker_sdk):
+    """#4061 R3 (integration): a retracted Object is excluded by the FTS
+    query's own WHERE, and a genuinely status-less (live) Object is still
+    admitted — matching the Cypher legs' ``o.status IS NULL OR …`` admission.
+
+    There is no SDK payload whose ``status`` could go missing, so the old
+    ``_excluded_object_ids`` re-read is gone.
+    """
     _ag.build_base_graph(_docker_sdk)
     proj = _docker_sdk._get_proj()
     proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
-    cid = proj.g.query(
-        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    proj.g.query("MATCH (o:Object {name:'sofa'}) REMOVE o.status")
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
-    # emulate the degradation path: the payload has NO `status` key
-    _docker_sdk.tortoise_fts_query = (  # type: ignore[method-assign]
-        lambda *a, **k: [{"id": cid, "content": "couch", "kind": ""}])
     assert port.fts_objects("couch", 8) == []
-    # and a genuinely status-less (live) Object is still admitted, matching
-    # the Cypher legs' `o.status IS NULL OR …` admission
-    proj.g.query("MATCH (o:Object {name:'sofa'}) REMOVE o.status")
     sid = proj.g.query(
         "MATCH (o:Object {name:'sofa'}) RETURN o.id").result_set[0][0]
-    _docker_sdk.tortoise_fts_query = (  # type: ignore[method-assign]
-        lambda *a, **k: [{"id": sid, "content": "sofa", "kind": ""}])
     assert port.fts_objects("sofa", 8) == [{"id": sid, "name": "sofa"}]
 
 
@@ -1150,40 +1164,94 @@ def test_walker_explicit_id_renders_retracted_status_verbatim(_docker_sdk):
 
 
 @_docker_only
-@pytest.mark.xfail(
-    strict=False,
-    reason="#3223: with the vector leg live the hybrid FTS query matches a "
-           "term that names no Object, so the R1 fired=False legacy "
-           "fallback is unreachable in the shipped configuration. strict="
-           "False on purpose: an unexpected PASS (the divergence fixed) is "
-           "reported as XPASS rather than failing, so this record can never "
-           "itself turn main red. Delete this test when #3223 lands.")
-def test_resolver_docker_shipped_hybrid_leg_leaves_nothing_unresolved(
-        _docker_sdk):
-    """Shipped-configuration record (#3223): asserts the INTENDED contract —
-    a subject term naming no Object stays in ``unresolved`` (the R1
-    ``fired=False`` signal). Expected to FAIL today, because with the
-    embedder live the hybrid FTS leg resolves such a term through its
-    semantic half, making the fallback unreachable in the configuration that
-    actually ships.
+def test_resolver_docker_embedder_on_unresolved_keeps_legacy(
+        _docker_sdk, force_embedder_on):
+    """#3223 (indicator 1): the R1 ``unresolved`` contract asserted with the
+    embedder DETERMINISTICALLY ON — the configuration that actually ships.
 
-    The three ``force_sparse_tfidf``-pinned tests above cover the SPARSE leg
-    decomposition only; this is the one place the shipped configuration is
-    recorded. Skips when the embedder is genuinely unavailable (a lane
-    without it cannot exercise the divergence at all) — see #3223 for making
-    that state deterministic instead of ambient."""
-    from tortoise.embeddings import EmbeddingModel
-    if EmbeddingModel.get() is None:
-        pytest.skip("embedder unavailable — the shipped hybrid leg cannot be "
-                    "exercised in this lane (see #3223)")
+    ``force_embedder_on`` replaces the ambient HF cache with a stand-in
+    embedder, so this test RUNS in every lane instead of silently skipping or
+    XPASSing — the hygiene failure #3275 filed against the
+    ``xfail(strict=False)`` record this replaces. The no-match term must stay
+    in ``unresolved`` even though the hybrid vector half returns the fixture's
+    Objects for any term: leg 2 is the Object NAME-FTS leg and returns the
+    index's rows only, so a semantic-only neighbour is not a name match.
+
+    The ask-lane half is asserted too: the term must drive
+    ``_assemble_connected`` to ``fired=False`` (the R1 legacy fallback)
+    instead of firing an assembly about unrelated Objects.
+    """
     _ag.build_base_graph(_docker_sdk)
-    from tortoise.assembly import docker_resolver_port
+    # PRECONDITION: the hybrid leg is genuinely live — its semantic half DOES
+    # return Objects for a term that names none. Without this the test could
+    # pass vacuously on a lane where leg 2 happens to be sparse.
+    raw = _docker_sdk.tortoise_fts_query(
+        "the teleporting exercise bike", entity_type="object", limit=8,
+        include_terminal=True) or []
+    assert raw, ("embedder-on lane did not exercise the hybrid leg — the "
+                 "precondition of the #3223 divergence")
+    from tortoise.assembly import (
+        _assemble_connected,
+        docker_resolver_port,
+    )
     port = docker_resolver_port(_docker_sdk)
     res = resolve_subjects(port, ["the teleporting exercise bike"],
                            shape=AssemblyShape.CURRENT_STATE)
-    assert res.unresolved == ("the teleporting exercise bike",), \
-        f"#3223 divergence: expected the no-match term to stay unresolved, "\
-        f"got candidates {[(c.name, c.source) for c in res.candidates]}"
+    assert res.candidates == ()
+    assert res.unresolved == ("the teleporting exercise bike",)
+    assert res.both_halves_ok(AssemblyShape.CURRENT_STATE) is False
+
+    block = _assemble_connected(
+        _docker_sdk,
+        "what is the current status of the teleporting exercise bike?")
+    assert block.fired is False
+    assert block.subjects == ()
+
+
+@_docker_only
+def test_resolver_docker_embedder_on_name_match_survives_vector_crowd(
+        _docker_sdk, force_embedder_on):
+    """#3223 (the POSITIVE direction): with the embedder deterministically
+    ON — the configuration that ships — a term whose NAME the Object index
+    matches must still resolve even when the hybrid vector half ranks many
+    unrelated Objects ahead of it.
+
+    This is the direction BOTH gated designs failed: the hybrid's
+    top-``limit`` is vector-weighted, so a name match ranked outside that
+    window was gone before any post-hoc filter could see it (a predicate
+    filter, or an id-filtered index intersection over the returned rows).
+    The leg now queries the NAME index directly, so the crowd cannot
+    displace it.
+
+    The precondition asserts the crowding is real on THIS lane, so the test
+    cannot pass vacuously: the name match must be absent from the hybrid's
+    top-``limit``.
+    """
+    _ag.build_base_graph(_docker_sdk)
+    target = "zorblax4 widgetfoo4"
+    qid = "q3223crowd"
+    _docker_sdk.create_entity("object", target, objectKind="core:other",
+                              lme_question_id=qid, is_episodic=True)
+    for i in range(200):
+        _docker_sdk.create_entity("object", f"filler item {i}",
+                                  objectKind="core:other",
+                                  lme_question_id=qid, is_episodic=True)
+    term = "please locate the zorblax4 widgetfoo4 somewhere near the garage"
+    # PRECONDITION: the hybrid leg is live AND its top-`limit` is entirely
+    # vector crowd — the window that swallowed the name match.
+    raw = _docker_sdk.tortoise_fts_query(
+        term, entity_type="object", limit=8, include_terminal=True) or []
+    assert raw, ("embedder-on lane did not exercise the hybrid leg — the "
+                 "precondition of the #3223 crowding")
+    assert target not in [h.get("content") for h in raw], (
+        "the fixture no longer crowds the name match out of the hybrid "
+        "window, so this test would pass vacuously")
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    got = port.fts_objects(term, 8)
+    assert target in [r["name"] for r in got], (
+        "the NAME index matches this Object, so the leg must return it "
+        "regardless of what the hybrid vector half ranks above it")
 
 
 # ══════════════════════════════════════════════════════════════════════════
