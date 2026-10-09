@@ -944,6 +944,10 @@ async function copyInline(e, text, label) {
 // #2935 (review P2): the sentinel a copy control renders as a failure. Shared
 // so the setter and the label render cannot drift apart.
 const COPY_FAILED = '__copy_failed__'
+// #2935 (review P2): the failure marker is keyed to the PAYLOAD it belongs to.
+// One bare App-level sentinel relabelled EVERY step row "Copy failed" — rows
+// whose payload was never attempted — and carried that onto the next harness.
+const copyFailedKey = (text) => `${COPY_FAILED}|${text}`
 
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
@@ -952,7 +956,7 @@ function WizardPromptCard({ text, label }) {
   // (it renders inside a stable WizardBlock with no `key`), so a refusal on one
   // prompt left 'Copy failed' on the NEXT one — a payload never attempted, the
   // mirror of the defect this PR fixes. `copied` had the same latent staleness.
-  React.useEffect(() => { setCopied(false); setCopyFailed(false) }, [text])
+  React.useLayoutEffect(() => { setCopied(false); setCopyFailed(false) }, [text])
   // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
   // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
   // landmarks, and a shared "Setup prompt" name made them
@@ -1386,7 +1390,7 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setCopiedStep('') }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
   React.useEffect(() => {
@@ -1874,8 +1878,10 @@ function claimIntentInFlight() {
       // #2935 (review P2): a refusal must not be SILENT either — returning
       // early left the button unchanged and nothing to see. It says what
       // happened, and clears on its own.
-      setCopiedStep(COPY_FAILED)
-      setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 4000)
+      setCopiedStep(copyFailedKey(text))
+      // Conditional clear: an unconditional '' would wipe a LATER, sticky
+      // success (see the same fix in wizardCopy).
+      setTimeout(() => { if (mountedRef.current) setCopiedStep((c) => (c === copyFailedKey(text) ? '' : c)) }, 4000)
       return
     }
     setCopiedStep(text)
@@ -3331,7 +3337,11 @@ function claimIntentInFlight() {
       // #2935 (review P2): see wizardCopyStep — the connect step's primary
       // control must not refuse in silence.
       setWizardCopied(COPY_FAILED)
-      setTimeout(() => { if (mountedRef.current) setWizardCopied('') }, 4000)
+      // #2935 (review P1): conditional, NOT an unconditional ''. The 'harness'
+      // success path is deliberately STICKY (it arms no timer, #1691), so a
+      // stale failure timer firing 4s later wiped that success — and with it the
+      // Continue affordance, which is gated on wizardCopied === 'harness'.
+      setTimeout(() => { if (mountedRef.current) setWizardCopied((c) => (c === COPY_FAILED ? '' : c)) }, 4000)
       return
     }
     setWizardCopied(label)
@@ -8038,7 +8048,7 @@ function claimIntentInFlight() {
                                 <button key={f.id} type="button"
                                   className={'harness-family' + (activeFamily.id === f.id ? ' active' : '')}
                                   aria-pressed={activeFamily.id === f.id}
-                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardDurableError('') }}>
+                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setCopiedStep(''); setWizardDurableError('') }}>
                                   {f.name}
                                 </button>
                               ))}
@@ -8049,7 +8059,7 @@ function claimIntentInFlight() {
                                   <button key={s.id} type="button"
                                     className={'harness-surface' + (wizardHarness === s.id ? ' active' : '')}
                                     aria-pressed={wizardHarness === s.id}
-                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardDurableError('') }}>
+                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setCopiedStep(''); setWizardDurableError('') }}>
                                     <span className="harness-surface-name">{s.name}</span>
                                     {s.hint && <span className="harness-surface-hint">{s.hint}</span>}
                                   </button>
@@ -8436,7 +8446,7 @@ function claimIntentInFlight() {
                         {HARNESS_ORDER.map((h) => (
                           <button key={h} type="button"
                             className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
-                            onClick={() => { setWizardHarness(h); setWizardCopied('') }}>
+                            onClick={() => { setWizardHarness(h); setWizardCopied(''); setCopiedStep('') }}>
                             {HARNESS_NAMES[h]}
                           </button>
                         ))}
@@ -8472,7 +8482,7 @@ function claimIntentInFlight() {
                                   <code style={{ padding: '2px 6px', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 5, fontSize: 13 }}>{s.code}</code>{' '}
                                   {s.copy && (
                                     <button type="button" className="ghost small" onClick={() => wizardCopyStep(s.copy)}>
-                                      {copiedStep === s.copy ? 'Copied ✓' : (copiedStep === COPY_FAILED ? 'Copy failed' : 'Copy')}
+                                      {copiedStep === s.copy ? 'Copied ✓' : (copiedStep === copyFailedKey(s.copy) ? 'Copy failed' : 'Copy')}
                                     </button>
                                   )}
                                 </>

@@ -122,7 +122,7 @@ test('#2935: the inline buttons still say "Copied" when the write really lands',
   assert.deepEqual(wrote, ['secret'])
 })
 
-test('#2935: wizardCopyStep says "Copy failed" when the clipboard refuses', async () => {
+test('#2935: wizardCopyStep names the FAILING row only, and says so', async () => {
   const copied = []
   const { wizardCopyStep } = build(
     {
@@ -130,13 +130,42 @@ test('#2935: wizardCopyStep says "Copy failed" when the clipboard refuses', asyn
       setCopiedStep: (v) => copied.push(v),
       mountedRef: { current: true },
       setTimeout: () => 0,
-      COPY_FAILED: '__copy_failed__',
+      copyFailedKey: (t) => `__copy_failed__|${t}`,
     },
     ['async function copyText', 'async function wizardCopyStep'],
   )
   await wizardCopyStep('step payload')
-  assert.deepEqual(copied, ['__copy_failed__'], 'the false-success defect was setCopiedStep(text) here — it must not be set')
+  assert.deepEqual(copied, ['__copy_failed__|step payload'],
+    'the false-success defect was setCopiedStep(text) here — it must not be set')
   assert.ok(!copied.includes('step payload'), 'a refused write must never mark that step as copied')
+  // The key is payload-scoped, so ONE refused row cannot relabel its siblings.
+  assert.notEqual(copied[0], '__copy_failed__', 'a bare sentinel would mark every sibling row as failed')
+})
+
+test('#2935 (review P1): a stale failure timer must not wipe a later STICKY success', async () => {
+  // The 'harness' success path deliberately arms NO timer (it is sticky), so an
+  // unconditional 4s clear from an earlier failure erased it — and with it the
+  // Continue affordance, which is gated on wizardCopied === 'harness'.
+  const timers = []
+  const state = []
+  const { wizardCopy } = build(
+    {
+      navigator: { clipboard: refuse },
+      setWizardCopied: (v) => state.push(typeof v === 'function' ? v(state[state.length - 1]) : v),
+      mountedRef: { current: true },
+      setTimeout: (fn) => { timers.push(fn); return 0 },
+      wizardHarness: 'pi',
+      onboardingTeamQ: () => '',
+      api: () => ({ catch: () => {} }),
+      COPY_FAILED: '__copy_failed__',
+    },
+    ['async function copyText', 'async function wizardCopy'],
+  )
+  await wizardCopy('payload', 'harness')       // refused -> sentinel + a 4s clear
+  state.push('harness')                        // a later successful copy (sticky)
+  timers.forEach((fn) => fn())                 // the stale failure timer fires
+  assert.equal(state[state.length - 1], 'harness',
+    'the failure timer must clear only its own sentinel, never a later success')
 })
 
 test('#2935: wizardCopy claims NOTHING when the clipboard refuses', async () => {
@@ -158,27 +187,70 @@ test('#2935: wizardCopy claims NOTHING when the clipboard refuses', async () => 
   assert.deepEqual(marked, ['__copy_failed__'], 'the button must not flip to Copied ✓ over an unchanged clipboard')
   assert.ok(!marked.includes('harness'), 'a refused write must never set the copied label')
 })
+// #2935 (review P2-1): strip comments and string BODIES while preserving line
+// structure, so the scan sees code only. The first version keyed on the
+// qualified literal `navigator.clipboard?.writeText(` on one line, which a
+// destructured alias, a bracket access, a multi-line call, or an unrelated
+// earlier `await` all defeated — and which a legitimately handled
+// `writeText(x).catch(...)` wrongly flagged.
+function stripNonCode(src) {
+  const out = src.split('')
+  let i = 0
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i)
+      // A trailing line comment has no newline — blank to the end, do not bail
+      // (bailing left the comment body scannable, a false red).
+      const stop = nl < 0 ? src.length : nl
+      for (let j = i; j < stop; j++) out[j] = ' '
+      if (nl < 0) break
+      i = nl
+      continue
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i)
+      if (end < 0) break
+      for (let j = i; j < end + 2; j++) if (out[j] !== '\n') out[j] = ' '
+      i = end + 2
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const end = skipString(src, i)
+      if (end < 0) { i++; continue }
+      for (let j = i + 1; j < end; j++) if (out[j] !== '\n') out[j] = ' '
+      i = end + 1
+      continue
+    }
+    i++
+  }
+  return out.join('')
+}
 
-// #2935 (review P2-1): the ratchet is a FUNCTION so it can be tested against
-// sources that are not main.jsx. The first version keyed on the qualified
-// literal `navigator.clipboard?.writeText(` on one line, which a destructured
-// alias, a bracket access, or a multi-line call all evaded — a guard that only
-// catches the shape it was written against is theatre. Flag the `writeText`
-// IDENTIFIER (plus the other copy primitives), unless the write is awaited or
-// its rejection is handled.
 export function clipboardWriteOffences(src) {
+  const code = stripNonCode(src)
+  const lines = code.split('\n')
+  const raw = src.split('\n')
   const offences = []
-  src.split('\n').forEach((line, i) => {
-    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return
-    const code = line.replace(/\/\/.*$/, '')
-    const isCopy = /\bwriteText\s*\(/.test(code)
-      || /\bexecCommand\s*\(\s*['"]copy['"]/.test(code)
-      || /\bClipboardItem\b/.test(code)
+  lines.forEach((line, i) => {
+    // `writeText` as an IDENTIFIER (catches destructured aliases and bracket
+    // access), plus the other copy primitives. String contents are already
+    // blanked, so `execCommand` is matched by call shape alone.
+    const isCopy = /\bwriteText\s*\(/.test(line)
+      || /\bexecCommand\s*\(/.test(line)
+      || /\bClipboardItem\b/.test(line)
     if (!isCopy) return
-    // `await` must be on the same line; `.then(`/`.catch(` observe the promise.
-    if (/await\s+\.?\s*[A-Za-z_$]/.test(code)) return
-    if (/\.then\s*\(|\.catch\s*\(/.test(code)) return
-    offences.push(`main.jsx:${i + 1}: ${line.trim()}`)
+    const at = line.search(/\bwriteText\s*\(|\bexecCommand\s*\(|\bClipboardItem\b/)
+    const before = line.slice(0, at < 0 ? 0 : at)
+    // `await` must govern THIS call: since the last statement boundary, or as
+    // the trailing token of the previous line. An unrelated earlier
+    // `await foo();` does not count.
+    const awaitedHere = /\bawait\b/.test(before.slice(before.lastIndexOf(';') + 1))
+    const prevLine = i > 0 ? lines[i - 1] : ''
+    const awaitedPrev = /\bawait\b\s*\(?\s*$/.test(prevLine)
+    if (awaitedHere || awaitedPrev) return
+    if (/\.then\s*\(|\.catch\s*\(/.test(line)) return
+    offences.push(`main.jsx:${i + 1}: ${(raw[i] || '').trim()}`)
   })
   return offences
 }
@@ -189,8 +261,6 @@ test('#2935 TRIPWIRE: no clipboard site is left un-awaited (the defect cannot co
 })
 
 test('#2935 TRIPWIRE is real: it catches the shapes that evaded the first version', () => {
-  // Mutation-tested against the forms a reviewer used to defeat the literal
-  // matcher. Each of these reproduces the defect and MUST be flagged.
   const evading = [
     'navigator.clipboard.writeText(x)',
     'const { writeText } = navigator.clipboard; writeText(x)',
@@ -198,6 +268,10 @@ test('#2935 TRIPWIRE is real: it catches the shapes that evaded the first versio
     'const cb = navigator.clipboard; cb.writeText(x)',
     'document.execCommand("copy")',
     'navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })])',
+    // The three the PREVIOUS guard let through:
+    'await foo(); navigator.clipboard.writeText(x)',
+    '/* not a comment anymore */ navigator.clipboard.writeText(x)',
+    'await copyText("https://a"); navigator.clipboard.writeText(x)',
   ]
   evading.forEach((line) => {
     assert.equal(clipboardWriteOffences(line).length, 1, `the ratchet must flag: ${line}`)
@@ -210,6 +284,11 @@ test('#2935 TRIPWIRE does not cry wolf on an observed rejection', () => {
     'await copyText(x)',
     'navigator.clipboard.writeText(x).catch(() => {})',
     '// navigator.clipboard.writeText(x) -- not code',
+    // The four the PREVIOUS guard wrongly flagged:
+    'await (navigator.clipboard.writeText(x))',
+    'await\nnavigator.clipboard.writeText(x)',
+    'const s = `see navigator.clipboard.writeText(x)`',
+    'const s = "navigator.clipboard.writeText(x)"',
   ]
   handled.forEach((line) => {
     assert.deepEqual(clipboardWriteOffences(line), [], `must NOT flag: ${line}`)
