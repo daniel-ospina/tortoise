@@ -505,6 +505,25 @@ jobs:
           # stalling embedding loads up to 30s each).
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+      - name: Tolerated tempdir-cleanup leaks (issue #7735)
+        # #7735: `TemporaryDirectory.__exit__` tolerates ONLY ENOTEMPTY (a
+        # directory a live embedded server still holds); the tolerated leaks
+        # are mirrored to an artifact at session end. The writer MERGES by path
+        # so a future xdist admission cannot truncate a peer's record wholesale
+        # (a same-instant write can still drop one entry) — INERT today: this
+        # suite runs serial, so a single session owns the path. Informational:
+        # the step never fails the job. Every job listed in
+        # _LEAK_SURFACED_JOBS carries this step (pinned by
+        # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak).
+        if: always()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/tempdir-hygiene-end.json"
+          if [ -f "$LOG" ]; then
+            echo "=== tolerated tempdir-cleanup leaks (issue #7735) ==="
+            cat "$LOG"
+          else
+            echo "no tolerated tempdir-cleanup leak recorded at $LOG"
+          fi
       - name: Skip-fail guard (pmv, epic #1647 Task 10 Step 1a)
         # The same junitxml-reconciled coverage manifest as the fast matrix:
         # a vanished nodeid (deselected, vacuous early-return) or a
