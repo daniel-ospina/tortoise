@@ -43,7 +43,7 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
     )
 
 
-# #7924 review P2/round-2: a fallback event that reached NO durable location
+# #7924 review P2: a fallback event that reached NO durable location
 # used to be indistinguishable in-process from a persisted one (the ERROR log
 # was the only evidence). Count the DROPs by cause in the shared monitoring
 # substrate so the loss rides the surface the fleet actually serves, not merely
@@ -137,7 +137,7 @@ class AuditLogger:
         ``TORTOISE_DB_PATH``) normalize the same way.
 
         The RESOLVED base is then required to be ABSOLUTE (#7924 review
-        round 2): a whitespace-only ``$HOME`` still makes ``Path.home()``
+        P2): a whitespace-only ``$HOME`` still makes ``Path.home()``
         relative (``PosixPath('   ')``), which is the same CWD-relative hazard
         one level down, so it is refused here rather than materialized.
 

@@ -3998,7 +3998,7 @@ def _reset_graph_size_worker() -> None:
 
 def metrics(sdk=None, setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
-    errors, uptime}.
+    errors, journal_write_failures, audit_fallback_drops, uptime}.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -4117,7 +4117,7 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # real degradation (the derived graph becomes live-only), so it rides
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
-        # #7924 review round 2: an audit event that reached no durable sink is
+        # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure, and the hosted app serves no `/metrics`
         # route (monitoring says so itself), so it rides the surface that IS
         # read — the health payload — and not only the counter's scrape form.
