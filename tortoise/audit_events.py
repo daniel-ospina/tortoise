@@ -70,7 +70,7 @@ def _note_fallback_drop(reason: str) -> None:
 def _warned_whitespace_override() -> bool:
     """Return True if the whitespace-only-knob warning was ALREADY emitted.
 
-    #7924 round-2 review P2: ``_fallback_file()`` runs on the audit hot path,
+    #7924 review P2: ``_fallback_file()`` runs on the audit hot path,
     so an unconditional warning would emit one line per audit event for the
     whole duration of a Postgres outage. Warn once per process, mirroring
     ``pack_registry``'s warn-once treatment of ``TORTOISE_PACKS_DIR``.
@@ -378,7 +378,7 @@ class AuditLogger:
         try:
             path = self._fallback_file()
         except Exception as e:
-            # #7924 round-2 review P2 — this deliberately does NOT count.
+            # #7924 review P2 — this deliberately does NOT count.
             # The counter's contract is per EVENT that reached no durable sink
             # (``monitoring.record_audit_fallback_drop``); a resolution failure
             # on the READ leg does not establish that. With Postgres healthy
