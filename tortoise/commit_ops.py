@@ -22,7 +22,10 @@ from .entity_identity import (  # #3633 structured non-folded record
     display_holder_ids,
     record_non_folded,
 )
-from .live import is_terminal_status  # #2498 shared terminal vocabulary
+from .live import (
+    epistemic_disjunction,  # #7902 epistemic-label traversal clause
+    is_terminal_status,  # #2498 shared terminal vocabulary
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -423,8 +426,8 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         if op_id is None:
             rows = proj.g.query(
                 "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-                "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
-                "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
+                f"MATCH (o)-[:IMPL {{idx:0}}]->(s) WHERE {epistemic_disjunction('s')} AND s.id = $src "
+                f"MATCH (o)-[:IMPL {{idx:1}}]->(d) WHERE {epistemic_disjunction('d')} AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
                 params={"src": t_src, "dst": t_dst},
             ).result_set

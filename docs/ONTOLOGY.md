@@ -34,12 +34,16 @@ doc_status: live
 > being wrong — which is corrected here and recorded in the changelog.
 >
 > **Changelog v3.22 (2026-10-10 — issue #7902 — the operator-endpoint WRITE path admits the four epistemic labels):**
-> #7853 widened the EP/read surfaces to :Point/:Subject/:Object/:Event but left the WRITE path
-> admitting only Point/Event, so a :Subject/:Object endpoint could not be created at all. #7902
-> widens `create_operator` and the operator-less `create_direct_edge` to the same four labels (one
-> declaration, `tortoise/live.py::EPISTEMIC_LABELS`), and widens the direct-edge reads that become
-> reachable (`_affected_factors` Batch 3, `_load_cache`'s back-message source side). Direct edges
-> therefore connect any two plain epistemic nodes — **not** Point→Point only.
+> The owner ruling #7813 makes confidence propagate across :Point/:Subject/:Object/:Event. (#7853's
+> read-widening branch is unmerged; on `main` the EP reads and the WRITE path are still Point/Event.)
+> #7902 widens `create_operator`, `create_direct_edge` and the operator-dedup id sweep to the four
+> labels (one declaration, `tortoise/live.py::EPISTEMIC_LABELS`), and widens the EP reads the write
+> path depends on — `_affected_factors` Batches 1/2/3, `_affected_claims`/`_live_neighbors`, the
+> `_load_cache`/`_flush_cache` node + message + back-message I/O, `_read_node`/`_write_node`,
+> `invalidate_messages`, the `projection/edges.py` operator fold, and the sdk promotion/partial-absorb
+> joins — so a newly-writable endpoint is not silently EP-inert on write or on replay. Direct edges
+> therefore connect any two plain epistemic nodes — **not** Point→Point only. #7853's branch converges
+> on the same shared declaration.
 >
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it

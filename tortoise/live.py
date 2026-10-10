@@ -223,10 +223,11 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 # epistemic node — do NOT spell the four labels inline at a call site (the
 # codebase already drifted into two notions of "epistemic label" before this).
 #
-# #7853 widened the READ half (ep.py / the sdk read surfaces); #7902 widened
-# the WRITE half (create_operator / create_direct_edge endpoints) — the two
-# halves share THIS declaration so the write path can never admit a label the
-# read path cannot see.
+# #7902 widened BOTH halves on this branch: the WRITE path (create_operator /
+# create_direct_edge / _find_operator / the projection fold) AND the READ path
+# (ep.py, projection/edges.py, the sdk promotion + dedup surfaces), aligning
+# with #7853's read widening. The two halves share THIS declaration so the
+# write path can never admit a label the read path cannot see.
 #
 # Two shapes, because FalkorDB does NOT accept pattern-position label
 # disjunction (`MATCH (a:Point|Event)-…` → ResponseError, measured on

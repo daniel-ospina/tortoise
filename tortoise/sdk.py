@@ -12536,15 +12536,16 @@ class TortoiseSDK:
                         # bare Point instead of the operator. Use the TWO-STEP
                         # pattern: MATCH both endpoints, then edge-only MERGE
                         # (with idx parity for create_operator's edge shape).
-                        # #1919 (P1, review gate): the completion endpoints are
-                        # Point OR Event (A1b #1272) — a Point-only MATCH would
-                        # silently drop the typed edge for an absorbed Event
-                        # input (never converging to the dedup key). The
-                        # reverse INPUT edge mirrors create_operator + the
-                        # replay convention (fold-parity).
+                        # #1919 (P1, review gate): the completion endpoints
+                        # may be any of the four epistemic labels (#7902) — a
+                        # Point-only MATCH would silently drop the typed edge
+                        # for an absorbed Subject/Object/Event input (never
+                        # converging to the dedup key). The reverse INPUT edge
+                        # mirrors create_operator + the replay convention
+                        # (fold-parity).
                         proj.g.query(
                             f"MATCH (o:Point {{id:$oid}}), (t) "
-                            f"WHERE (t:Point OR t:Event) AND t.id = $inp "
+                            f"WHERE {epistemic_disjunction('t')} AND t.id = $inp "
                             f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
                             f"SET r.idx = $idx "
                             f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
@@ -13170,7 +13171,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status LIMIT 1",
@@ -13198,7 +13199,7 @@ class TortoiseSDK:
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets "
             f"WHERE {' AND '.join(pcond)} "
             f"RETURN o.id, o.status, targets",
