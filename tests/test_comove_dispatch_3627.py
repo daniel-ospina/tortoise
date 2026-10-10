@@ -564,18 +564,32 @@ def test_the_class_guard_reads_both_string_flag_spellings() -> None:
         assert (name, value) == ("x", "true"), (spelling, name, value)
 
 
-def test_the_class_guard_scans_every_job_not_only_deploy() -> None:
+def test_the_class_guard_scans_every_job_not_only_deploy(monkeypatch) -> None:
     """The guard claims workflow-wide coverage; `_steps()` is deploy-only.
 
-    Fails when the scan is narrowed back to `jobs.deploy.steps`: the
-    `check-drift` job owns a `run:` block, so a typed `gh api -f` literal there
-    would be invisible to a guard that says it reads the file.
+    Pins the SCAN PATH, not just the helper: the class guard calls
+    `_string_flags()`, so a test that asserted only on `_run_blocks()` would
+    stay green while `_string_flags()` was narrowed back to `_steps()` — and a
+    typed `gh api -f` literal in the `check-drift` job (which owns a `run:`
+    block) would then slip past a guard that says it reads the whole file.
     """
     run_jobs = {job for job, _name, _run in _run_blocks()}
     assert "deploy" in run_jobs
     assert "check-drift" in run_jobs, (
-        "the check-drift job's run block is not scanned — the guard is "
-        f"deploy-only while claiming the whole file: {sorted(run_jobs)}"
+        "the check-drift job has no scanned run block — the assertion below "
+        f"would be vacuous: {sorted(run_jobs)}"
+    )
+
+    # Drive the REAL scan path with a synthetic non-deploy block carrying a
+    # typed literal. A `_string_flags()` narrowed to `jobs.deploy.steps` never
+    # consults `_run_blocks()` and so would not see it.
+    monkeypatch.setattr(
+        f"{__name__}._run_blocks",
+        lambda: [("some-other-job", "synthetic", '-f "x=true"\n')],
+    )
+    assert ("synthetic", "x", "true") in _string_flags(), (
+        "`_string_flags()` no longer consumes `_run_blocks()` — the class "
+        "guard has been narrowed off the workflow-wide scan it advertises"
     )
 
 
