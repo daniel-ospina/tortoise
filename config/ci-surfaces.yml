@@ -55,6 +55,17 @@ carve_shards: 3
 
 surfaces:
   api:
+  # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
+  # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
+  # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
+  # that REPLACES the `core` fallback in `select()` (`core` is added only when
+  # NOTHING named matched). So a `tortoise/hosted_api.py`-only PR — e.g. a
+  # revert of the #7809 `_embedder_warmup_enabled()` gate — selects
+  # `api`+`onboarding` and would never run the registered-in-`core` guard: the
+  # #1349/#2938/#3154 silent-drop class (the surface audit flags exactly this:
+  # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
+  # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
+  - test_7809_hosted_prewarm_warmup_flag.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
@@ -2257,6 +2268,13 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
+  # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
+  # hosted lifespan now calls), and that module is an EXACT
+  # SOURCE_PATTERNS["eval"] match, so an `embeddings.py`-only change selects
+  # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
+  # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
+  - test_7809_hosted_prewarm_warmup_flag.py
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
