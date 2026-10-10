@@ -92,7 +92,7 @@ The relay is the point. A decision that is not recorded on the artifact is not a
 
 ---
 
-## ⛔ SESSION RECAP PROTOCOL: don't recount trivia about what happened, present state and decisions.
+## ⛔ SESSION RECAP PROTOCOL: don't recount trivia about what happened, present state and decisions
 
 If you're going to present a recap at the end of a turn or session, don't say things like "Cycle 3 found the worst bug of the whole lane" or "Two corrections I had to make about my own work" unless they're changing the scope, architecture or UX that was agreed. Instead present the state, key design principles/decisions made, and cleanly present any user decisions needed (see USER QUESTIONS PROTOCOL) or next steps. If the next steps are just to continue, do not stop and just continue (see NEVER PAUSE WITHOUT A REASON)
 
