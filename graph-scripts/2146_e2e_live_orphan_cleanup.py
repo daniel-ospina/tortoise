@@ -78,18 +78,42 @@ REQUIRED ACCESS (operator)
   All are GitHub Actions secrets on daniel-ospina/tortoise (names only:
   SUPABASE_ACCESS_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY).
 
+GUARD D — RESIDUE (#5971). The weekly reconcile detector
+(`graph-scripts/e2e_live_reconcile.py`) counts every row in the namespace
+(`email LIKE 'e2e-live-%@premise-labs.dev'`, all-time), but this script
+enumerates only Guard A's strict shape AND the historical window. A row inside
+the namespace but outside Guard A was therefore DETECTED forever and enumerated
+by NO phase — silently, so the reconcile issue read as "just not cleaned yet"
+while nothing in the repo could clean it. The live example is the #3781
+manual-verification account `e2e-live-3781-<hex>@premise-labs.dev` (created
+2026-09-17; the operator had no SUPABASE_SERVICE_KEY, so the monitor's Admin-API
+teardown could not run — see PR #3790's commit message).
+  * The residue is now ALWAYS enumerated and printed (teams + auth users,
+    all-time, explicitly NOT matching the guard shape; a row that does match is
+    refused as a guard logic error) and recorded in the manifest's `residue` key.
+  * It is NOT in the delete set by default. `--include-residue` promotes it
+    AFTER the operator has read the printed list — an explicit, review-gated
+    inclusion, the same shape as `--all-e2e-live` (never a widened regex: the
+    guard is what keeps a non-test row out).
+
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase enumerate
-  # 2) review the manifest JSON + printed counts
+  # 2) review the manifest JSON + printed counts (incl. the Guard-D residue)
   # 3) dry-run the delete (prints SQL/counts, writes nothing)
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all
   # 4) execute (users then control-plane rows; teams last)
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all --execute
   # 5) drop FalkorDB graphs (separate store; needs FALKORDB_CLOUD_URI)
-  FALKORDB_CLOUD_URI=... uv run python graph-scripts/2146_falkordb_graph_cleanup.py \
+  FALKORDB_CLOUD_URI=... uv run python graph-scripts/2146_falkordb_graph_cleanup.py \\
       --manifest 2146-e2e-live-orphans.manifest.json --execute
   # 6) verify (expect 0 rows) — see runbook docs/runbook/2146-e2e-live-orphan-cleanup.md
+
+Recurrence (the #2189 reconcile case — the rows are NEWER than the window):
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
+      --phase enumerate --all-e2e-live          # review the residue list it prints
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
+      --phase all --all-e2e-live --include-residue --execute
 """
 
 from __future__ import annotations
@@ -143,6 +167,31 @@ USERS_SQL = """
     WHERE u.email LIKE 'e2e-live-%@premise-labs.dev'
       AND u.email ~ '^e2e-live-[0-9a-f]{8}@premise-labs\.dev$'
       __WINDOW__
+    ORDER BY u.created_at;
+"""
+
+# #5971: Guard D — the residue queries. Same namespace scope as the detector's
+# LIKE, explicitly NEGATED against Guard A's shape, and ALL-TIME: a residue row is
+# an anomaly, not a window artifact — the live example was created AFTER
+# WINDOW_END, and the window filter is exactly why the default enumeration never
+# saw it. `~`/`!~` are POSIX regex; the SQL keeps a literal backslash-dot (a
+# doubled backslash in the Python source here, since a single one is the
+# deprecated non-raw escape #3054 tracks).
+RESIDUE_TEAMS_SQL = """
+    SELECT t.id, t.name, t.email, t.graph_name,
+           t.created_at::text AS created_at,
+           t.deleted_at::text AS deleted_at
+    FROM public.organizations t
+    WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
+      AND t.email !~ '^e2e-live-[0-9a-f]{8}@premise-labs\\.dev$'
+    ORDER BY t.created_at;
+"""
+
+RESIDUE_USERS_SQL = """
+    SELECT u.id::text AS id, u.email, u.created_at::text AS created_at
+    FROM auth.users u
+    WHERE u.email LIKE 'e2e-live-%@premise-labs.dev'
+      AND u.email !~ '^e2e-live-[0-9a-f]{8}@premise-labs\\.dev$'
     ORDER BY u.created_at;
 """
 
@@ -287,6 +336,30 @@ def _gotrue_delete_user(base_url: str, service_key: str, user_id: str) -> None:
 
 # ── Phases ───────────────────────────────────────────────────────────────────
 
+def _report_residue(residue_teams: list[dict], residue_users: list[dict], included: bool) -> None:
+    """Print Guard-D residue (#5971) — always, whether or not it is in the delete set.
+
+    The point of the guard is that nothing is SILENT: before #5971 these rows were
+    excluded by a SQL regex and the operator saw neither the row nor the exclusion,
+    so a reconcile issue could never be closed.
+    """
+    if not residue_teams and not residue_users:
+        return
+    print(f"[residue] Guard-A residue — in the e2e-live namespace, OFF the guard shape "
+          f"{EMAIL_RE.pattern}")
+    for row in residue_teams:
+        print(f"[residue]   team {row['id']}  {row['email']}  created {row['created_at']}")
+    for row in residue_users:
+        print(f"[residue]   user {row['id']}  {row['email']}  created {row['created_at']}")
+    n = len(residue_teams) + len(residue_users)
+    if included:
+        print(f"[residue]   {n} row(s) INCLUDED via --include-residue — residue is "
+              f"ALL-TIME, so the window does not apply to it")
+    else:
+        print(f"[residue]   {n} row(s) NOT in the delete set — pass --include-residue to "
+              f"purge them (recorded in the manifest's `residue` key either way)")
+
+
 def phase_enumerate(args: argparse.Namespace, runner) -> dict:
     window_clause = "" if args.all_e2e_live else (
         f"AND t.created_at >= '{args.window_start}' "
@@ -310,6 +383,29 @@ def phase_enumerate(args: argparse.Namespace, runner) -> dict:
             raise OpError(
                 f"GUARD FAIL: team {row.get('id')} email {row.get('email')!r} "
                 "does not match e2e-live shape — aborting")
+
+    # #5971 / Guard D — the residue the detector counts but Guard A excludes
+    # (all-time: the window is a red-window artifact, and a residue row is newer
+    # than it by construction). Fail CLOSED if a "residue" row actually matches
+    # the guard shape: that would mean the negation and the guard disagree, i.e.
+    # the exclusion logic itself is broken — not that the row is safe to skip.
+    residue_teams = _run_sql(runner, RESIDUE_TEAMS_SQL, "enumerate residue teams")
+    residue_users = _run_sql(runner, RESIDUE_USERS_SQL, "enumerate residue users")
+    for row in (*residue_teams, *residue_users):
+        email = row.get("email") or ""
+        if EMAIL_RE.match(email):
+            raise OpError(
+                f"GUARD FAIL: residue row {row.get('id')} email {email!r} DOES match "
+                f"{EMAIL_RE.pattern} — the residue query and Guard A disagree; aborting")
+    _report_residue(residue_teams, residue_users, bool(args.include_residue))
+    if args.include_residue:
+        # Explicit, review-gated inclusion (the --all-e2e-live shape). The two sets
+        # are disjoint by construction (strict shape vs. NOT strict shape), so no
+        # dedupe is needed; residue rows carry the same columns as their scope
+        # query (teams need id/graph_name for phase_db + the FalkorDB manifest).
+        teams = teams + residue_teams
+        users = users + residue_users
+
     ids = [t["id"] for t in teams]
     child_rows = _run_sql(runner, CHILDREN_SQL.format(ids=_qlist(ids)), "enumerate children") if ids else []
     counts = {r["kind"]: int(r["n"]) for r in child_rows} if child_rows else {}
@@ -318,11 +414,16 @@ def phase_enumerate(args: argparse.Namespace, runner) -> dict:
         "generated_at": _now_iso(),
         "scope": {
             "all_e2e_live": bool(args.all_e2e_live),
+            "include_residue": bool(args.include_residue),
             "window_start": None if args.all_e2e_live else args.window_start,
             "window_end": None if args.all_e2e_live else args.window_end,
             "email_regex": EMAIL_RE.pattern,
         },
         "counts": counts,
+        # #5971: ALWAYS the residue as enumerated (never the delete-set view), so
+        # the manifest is the durable record of what the guard excluded even on a
+        # run that did not promote it.
+        "residue": {"teams": residue_teams, "users": residue_users},
         "teams": teams,
         "users": users,
     }
@@ -420,7 +521,12 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true",
                     help="REAL deletions (default is dry-run — nothing is written)")
     ap.add_argument("--all-e2e-live", action="store_true",
-                    help="include the 68 pre-window e2e-live mints (default: window only)")
+                    help="include the 68 pre-window e2e-live mints (default: window only) — "
+                         "REQUIRED for a recurrence, whose rows are newer than the window")
+    ap.add_argument("--include-residue", action="store_true",
+                    help="also purge Guard-A residue (in the e2e-live namespace, off the guard "
+                         "shape). Always enumerated + printed for review; pass this only after "
+                         "reading that list (#5971)")
     ap.add_argument("--window-start", default=WINDOW_START)
     ap.add_argument("--window-end", default=WINDOW_END)
     ap.add_argument("--manifest", default="2146-e2e-live-orphans.manifest.json")
@@ -463,6 +569,10 @@ def main() -> int:
               f"invitations={c.get('invitations', 0)} abuse_events={c.get('abuse_events', 0)} "
               f"analytics_events={c.get('analytics_events', 0)} "
               f"audit_events={c.get('audit_events', 0)}")
+        res = manifest.get("residue") or {}
+        included = bool(manifest["scope"]["include_residue"])
+        print(f"[enumerate] residue (off guard shape, included={included}): "
+              f"teams={len(res.get('teams') or [])} users={len(res.get('users') or [])}")
         print(f"[enumerate] graph names to drop (FalkorDB): {len(manifest['teams'])}")
         if args.dump_csv:
             with open(args.dump_csv, "w", newline="") as fh:
