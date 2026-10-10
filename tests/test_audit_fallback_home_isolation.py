@@ -444,6 +444,35 @@ def test_dotdot_cannot_escape_to_the_root_on_any_leg(tmp_path, monkeypatch):
         pinned._fallback_file()
 
 
+def test_root_resolving_home_spellings_are_refused_and_counted(
+        tmp_path, monkeypatch):
+    """#7924 review round 4: ``$HOME`` is judged by its RESOLVED location.
+
+    ``HOME=""`` was refused because ``Path.home()`` returns ``/``, but the
+    refusal keyed on the literal string. ``HOME=/``, ``//``, ``/..`` and
+    ``/tmp/../..`` are all NON-empty, and the artefact ``$HOME/.tortoise`` is
+    not itself the root, so NEITHER guard saw them: each resolved to the SAME
+    ``/.tortoise/audit_fallback.jsonl`` the empty spelling is refused for,
+    with the mkdir+append succeeding and no drop counted. They are now refused
+    and counted as ``unresolvable_path`` drops.
+
+    Mutation that reds this test: drop the resolved-root branch of
+    ``_refuse_unusable_home`` — ``HOME=/..`` is accepted and no drop counted.
+    """
+    _no_override(monkeypatch)
+    for bad in ("/", "//", "/..", "/tmp/../.."):
+        monkeypatch.setenv("HOME", bad)
+        logger = AuditLogger(dsn=None)
+        with pytest.raises(RuntimeError, match="filesystem root"):
+            logger._fallback_file()
+        before = monitoring.audit_fallback_drop_counts().get(
+            "unresolvable_path", 0)
+        logger.append("org-1", None, "op")  # must NOT raise
+        after = monitoring.audit_fallback_drop_counts().get(
+            "unresolvable_path", 0)
+        assert after == before + 1, f"HOME={bad!r} must be a counted path drop"
+
+
 def test_replay_resolution_failure_warns_once_not_per_successful_append(
         tmp_path, monkeypatch, caplog):
     """#7924 review round 3: the READ leg must not flood the log on the HEALTHY path.

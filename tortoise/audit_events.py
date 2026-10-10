@@ -54,11 +54,11 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
 # ``audit_fallback_drops``.
 #
 # SCOPE, stated honestly (#7924 review round 3): ``metrics()`` reaches an
-# operator through ``monitoring.serve_health`` and the MCP metrics tool. It is
-# NOT the deployed hosted ``/health`` (whose handler returns its own dict) nor
-# the ``/healthz`` listener — neither carries ``audit_fallback_drops`` — so on
-# the hosted app a drop is COUNTED here without being surfaced by either
-# endpoint. That gap is the reason this comment does not claim otherwise.
+# operator through ``monitoring.serve_health`` and the MCP ``tortoise_health``
+# tool. It is NOT the deployed hosted ``/health`` (whose handler returns its own
+# dict) nor the ``/healthz`` listener — neither carries ``audit_fallback_drops``
+# — so on the hosted app a drop is COUNTED here without being surfaced by
+# either endpoint. That gap is the reason this comment does not claim otherwise.
 # Still NON-FATAL by design: audit failure must never break the serving flow
 # (see hosted_api._audit_auth_failure), so neither may this counter.
 def _note_fallback_drop(reason: str) -> None:
@@ -114,23 +114,44 @@ _REPLAY_RESOLUTION_WARNED = False
 
 
 def _refuse_unusable_home() -> None:
-    """Refuse a SET-but-empty/whitespace ``$HOME`` BEFORE it is consulted.
+    """Refuse a ``$HOME`` that cannot anchor the fallback.
 
-    ``Path.home()`` returns ``/`` for ``HOME=""``, and ``Path.expanduser()``
-    expands a bare leading ``~`` to that same filesystem root — both results
-    ARE absolute, so the absolute-path check cannot see them, and the fallback
-    would be written to ``/.tortoise`` (or ``/.audit``), OUTSIDE ``$HOME``. In
-    a root-writable container (the hosted shape) that write SUCCEEDS, so no
-    drop is counted and the loss is silent.
+    Two spellings, one outcome — the fallback would land at the filesystem
+    root, outside any ``$HOME`` a reader would recognise:
 
-    #7924 review round 3: this must gate EVERY leg that consults ``$HOME``,
-    not just the default leg — the ``~``-override leg reached the same root
-    through ``expanduser()`` (``HOME=""`` + ``TORTOISE_AUDIT_FALLBACK_DIR=
-    '~/.audit'`` resolved to ``/.audit/audit_fallback.jsonl``).
+    * SET-but-empty/whitespace: ``Path.home()`` returns ``/`` for
+      ``HOME=""``, and ``Path.expanduser()`` expands a bare leading ``~`` to
+      that same root.
 
+    * A ``$HOME`` whose RESOLVED location IS the filesystem root — ``HOME="/"``,
+      ``"/.."``, ``"//"``, ``"/tmp/../.."``, or a symlink to ``/``. Keying the
+      refusal on the literal string MISSED these (#7924 review round 4): they
+      are non-empty, so the empty check passed, and the resulting
+      ``$HOME/.tortoise`` is not itself the root, so the artifact-location
+      check below could not see it either. Each resolved to
+      ``/.tortoise/audit_fallback.jsonl`` — the SAME file the empty spelling is
+      refused for — with the mkdir+append succeeding and no drop counted.
+
+    Both results ARE absolute, so the absolute-path check cannot see them.
     An UNSET ``$HOME`` is fine: every consumer then falls back to the pwd
     entry, which is an absolute path.
     """
+    home = os.environ.get("HOME")
+    if home is None:
+        return
+    if not home.strip():
+        raise RuntimeError(
+            "$HOME is set but empty/whitespace — refusing to "
+            "resolve the audit fallback against the filesystem "
+            "root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute "
+            "path or fix $HOME")
+    resolved_home = Path(os.path.realpath(home))
+    if resolved_home == Path(resolved_home.anchor):
+        raise RuntimeError(
+            f"$HOME resolves to the filesystem root ({home!r} → "
+            f"{resolved_home!r}) — refusing to write the audit fallback at "
+            "the root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute path "
+            "or fix $HOME")
     home = os.environ.get("HOME")
     if home is not None and not home.strip():
         raise RuntimeError(
@@ -235,21 +256,24 @@ class AuditLogger:
         Postgres outage — the opposite of what a relocation knob is for
         (#7924 review P1/P2).
 
-        A SET-but-empty/whitespace ``$HOME`` is refused UP FRONT (#7924 review
-        round 2): for ``HOME=""`` ``Path.home()`` returns ``/`` — which IS
-        absolute — so the absolute check below would PASS and the fallback
-        would resolve to ``/.tortoise/audit_fallback.jsonl``, i.e. OUTSIDE
-        ``$HOME``, in the filesystem root. In a root-writable container (the
-        hosted shape) ``_write_fallback`` then mkdirs ``/.tortoise`` and the
-        append SUCCEEDS, so the drop counter is never incremented and the loss
-        is silent. ``HOME="   "`` is the same misconfiguration one value over.
-        Both are refused here — counted as an ``unresolvable_path`` drop, never
-        as ``write_failed`` — while an UNSET ``$HOME`` keeps the documented
-        ``Path.home()`` fallback. The refusal gates EVERY leg that consults
-        ``$HOME``, the ``~``-override leg included (#7924 review round 3):
-        ``expanduser()`` reads ``$HOME`` for a bare leading ``~``, so
-        ``HOME=""`` + ``TORTOISE_AUDIT_FALLBACK_DIR='~/.audit'`` reached the
-        same root through the knob.
+        A set-but-empty/whitespace ``$HOME`` — or one that RESOLVES to the
+        filesystem root (``"/"``, ``"/.."``, ``"//"``, a symlink) — is refused
+        UP FRONT (#7924 review rounds 2 and 4): for ``HOME=""``
+        ``Path.home()`` returns ``/`` — which IS absolute — so the absolute
+        check below would PASS and the fallback would resolve to
+        ``/.tortoise/audit_fallback.jsonl``, i.e. OUTSIDE ``$HOME``, in the
+        filesystem root. In a root-writable container (the hosted shape)
+        ``_write_fallback`` then mkdirs ``/.tortoise`` and the append SUCCEEDS,
+        so the drop counter is never incremented and the loss is silent.
+        ``HOME="   "`` and ``HOME="/.."`` are the same misconfiguration one
+        spelling over. All are refused here — counted as an
+        ``unresolvable_path`` drop, never as ``write_failed`` — while an UNSET
+        ``$HOME`` keeps the documented ``Path.home()`` fallback. The refusal
+        gates EVERY leg that consults ``$HOME``, the ``~``-override leg
+        included (#7924 review round 3): ``expanduser()`` reads ``$HOME`` for a
+        bare leading ``~``, so ``HOME=""`` +
+        ``TORTOISE_AUDIT_FALLBACK_DIR='~/.audit'`` reached the same root
+        through the knob.
 
         The RESOLVED path is then required to be ABSOLUTE (#7924 review
         P2) as defense in depth: the two override legs are held to the same
@@ -301,11 +325,17 @@ class AuditLogger:
                 f"audit fallback base is not an absolute path: {base!r} "
                 "(set TORTOISE_AUDIT_FALLBACK_DIR to an absolute path, or fix "
                 "$HOME)")
-        # The root check RESOLVES the directory first (#7924 review round 3):
-        # `base == Path(base.anchor)` is a lexical comparison, and `Path('/..')`
-        # is not equal to `Path('/')` even though the kernel resolves both to
-        # the root — so `TORTOISE_AUDIT_FALLBACK_DIR=/..` (and `HOME=/..`) used
-        # to write `/audit_fallback.jsonl` while the guard saw a non-root path.
+        # The artifact-location guard (#7924 review round 3): `base ==
+        # Path(base.anchor)` is a LEXICAL comparison, and `Path('/..')` is not
+        # equal to `Path('/')` even though the kernel resolves both to the
+        # root — so `TORTOISE_AUDIT_FALLBACK_DIR=/..` used to write
+        # `/audit_fallback.jsonl` while the guard saw a non-root path.
+        #
+        # This cannot fire on the $HOME legs (`<home>/.tortoise` is never the
+        # root, even when `<home>` resolves there); those are protected by
+        # `_refuse_unusable_home()`, which refuses a $HOME that RESOLVES to the
+        # root (#7924 review round 4). Kept uniform across every leg because
+        # it IS load-bearing for the override and explicit-path legs.
         _refuse_a_root_location(base / "audit_fallback.jsonl")
         return base / "audit_fallback.jsonl"
 
