@@ -874,13 +874,24 @@ def _install_missing_dbdir_guard() -> None:
 # B cannot run its release path because that path needs the same guard. The
 # entry's own `rlock` is already held at the mutation, so the guard is only
 # needed to look the entry up.
-# `_CONSTRUCT_LOCKS` is keyed on the canonical path and is never pruned: an
+# `_CONSTRUCT_LOCKS` is keyed on the canonical path (or on `_MEMORY_DB_KEY`
+# for the `:memory:` sentinel, #7943) and is never pruned: an
 # entry is one `RLock` + one int per DISTINCT `<dbdir>/<dbfilename>` for the
 # process lifetime — the same shape and the same accepted bound as
 # `_owner_refcounts` / `_own_start_cache` in this module (bounded in practice by
 # the process's own embedded DBs, i.e. its test fixtures).
 _CONSTRUCT_LOCKS: dict[str, _ConstructLock] = {}
 _CONSTRUCT_LOCKS_GUARD = threading.Lock()
+
+# #7943: the `:memory:` sentinel is a legitimate tortoise DB key but NOT a
+# filesystem path. redislite anchors it to `<cwd>/:memory:` (client.py:435-436),
+# so the lock's `<key>.tortoise-construct.lock` derivation used to create
+# `<cwd>/:memory:.tortoise-construct.lock` — an untracked file in the repo/
+# worktree root after any pytest run. The sentinel therefore gets its own
+# (non-path) `_CONSTRUCT_LOCKS` key for the in-process RLock but no flock
+# sidecar: `_construction_key` returns this value and `_open_construct_lock`
+# refuses to derive a path from it.
+_MEMORY_DB_KEY = ":memory:"
 
 
 class _ConstructLock:
@@ -950,7 +961,10 @@ def _construction_key(args: tuple, kwargs: dict) -> str | None:
 
     None means there is nothing to serialise: `host`/`port` names a server we do
     not start, and a construction naming no db file lets redislite mint its own
-    `mkdtemp()`.
+    `mkdtemp()`. The `:memory:` sentinel is the one non-None key that is NOT a
+    filesystem path: it returns `_MEMORY_DB_KEY` itself so the caller gets the
+    in-process RLock without deriving (and littering) a `<key>.lock` sidecar
+    (#7943).
 
     `realpath` is what makes two spellings of one file SHARE a lock — the
     symlinked temp root this box produces is the realistic case. It is a
@@ -967,16 +981,29 @@ def _construction_key(args: tuple, kwargs: dict) -> str | None:
     db_filename = _requested_db_filename(args, kwargs)
     if not db_filename:
         return None
+    if db_filename == os.path.join(os.getcwd(), _MEMORY_DB_KEY):
+        # #7943: `:memory:` is not a filesystem path. `_requested_db_filename`
+        # anchors it to the cwd to mirror redislite client.py:435-436, but the
+        # lock path is `<key>.tortoise-construct.lock`, so any path-returning
+        # key here litters the process cwd. Return the sentinel itself: the
+        # in-process RLock still serialises, `_open_construct_lock` opens no
+        # lock file for it, and no filesystem path is derived from the key.
+        return _MEMORY_DB_KEY
     return os.path.realpath(db_filename)
 
 
 def _open_construct_lock(key: str) -> int:
     """Open + LOCK_EX the lock file for `key`, or -1 when no lock can be taken.
 
-    Two failures deliberately yield -1 ("no lock", the caller keeps the
+    Three failures deliberately yield -1 ("no lock", the caller keeps the
     in-process RLock) rather than raising, mirroring `_acquire_owner_lock`'s
     #4098/#4577 discipline for a lock file in a shared directory:
 
+    * the `:memory:` sentinel (`_MEMORY_DB_KEY`, #7943) — a non-filesystem DB
+      key: the only path derivable from it is
+      `<cwd>/:memory:.tortoise-construct.lock`, which litters the process cwd.
+      The caller keeps the in-process RLock; cross-process serialisation of
+      `:memory:` is deliberately not performed;
     * a vanished db directory — that refusal belongs to #3653's missing-dbdir
       guard one call later, and two constructions into a directory that does
       not exist cannot both create an RDB;
@@ -999,6 +1026,8 @@ def _open_construct_lock(key: str) -> int:
     A failure to FLOCK closes the just-opened fd before propagating — the fd
     would otherwise leak on every construction of that key.
     """
+    if key == _MEMORY_DB_KEY:
+        return -1
     path = key + ".tortoise-construct.lock"
     try:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)

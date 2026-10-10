@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.embedded_lifecycle import (
     _CONSTRUCT_LOCKS,
+    _MEMORY_DB_KEY,
     _construction_key,
     _construction_lock,
     _open_construct_lock,
@@ -91,6 +92,52 @@ def test_kwarg_wins_over_the_positional(tmp_path):
     """
     a, b = str(tmp_path / "a.rdb"), str(tmp_path / "b.rdb")
     assert _construction_key((a,), {"dbfilename": b}) == os.path.realpath(b)
+
+
+# ── #7943: the `:memory:` sentinel is not a filesystem path ────────────────
+
+
+def test_memory_key_is_not_a_filesystem_path(tmp_path, monkeypatch):
+    """#7943: `:memory:` yields the sentinel key, never a cwd-joined path.
+
+    `_requested_db_filename` anchors a bare name to the cwd to mirror
+    redislite (client.py:435-436), so before the fix the key was
+    `<cwd>/:memory:` and `_open_construct_lock` created
+    `<cwd>/:memory:.tortoise-construct.lock` in the repo root.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert _construction_key((":memory:",), {}) == _MEMORY_DB_KEY
+    assert _construction_key((), {"dbfilename": ":memory:"}) == _MEMORY_DB_KEY
+    assert _MEMORY_DB_KEY == ":memory:"
+    assert not os.path.isabs(_construction_key((":memory:",), {}))
+
+
+def test_memory_key_creates_no_lock_file(tmp_path, monkeypatch):
+    """#7943: holding the `:memory:` lock must leave the cwd free of a sidecar."""
+    monkeypatch.chdir(tmp_path)
+    key = _construction_key((":memory:",), {})
+    sidecar = tmp_path / ":memory:.tortoise-construct.lock"
+    with _construction_lock(key):
+        entry = _CONSTRUCT_LOCKS[key]
+        assert entry.depth == 1
+        assert entry.fd == -1, "no filesystem lock may be taken for `:memory:`"
+        assert _open_construct_lock(key) == -1
+        assert not sidecar.exists()
+    assert entry.depth == 0
+    assert entry.fd == -1
+    assert not sidecar.exists()
+
+
+def test_memory_key_keeps_the_in_process_rlock(tmp_path, monkeypatch):
+    """#7943: skipping the flock must not drop the in-process serialisation."""
+    monkeypatch.chdir(tmp_path)
+    key = _construction_key((":memory:",), {})
+    with _construction_lock(key):
+        assert _CONSTRUCT_LOCKS[key].depth == 1
+        with _construction_lock(key):  # the nesting must not deadlock
+            assert _CONSTRUCT_LOCKS[key].depth == 2
+        assert _CONSTRUCT_LOCKS[key].depth == 1
+    assert _CONSTRUCT_LOCKS[key].depth == 0
 
 
 def test_bytes_filename_yields_no_key():
