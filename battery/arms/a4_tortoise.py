@@ -439,10 +439,13 @@ class A4TortoiseArm:
           engine-honored surfaces (call/idempotency/observability), NEVER on
           claim-EP deltas.
         - kind default (support edge): create_operator IMPL.
-        - Evidence is created STATUS DRAFT; it goes LIVE only when the
-          operator edge succeeds (create_operator promote_source) — an
+        - Evidence is created STATUS DRAFT and is promoted to LIVE by this
+          method, explicitly, only after the operator edge succeeds — an
           operator write failure leaves an INERT draft orphan (never a live
-          orphan in state reads/EP on accumulating graphs).
+          orphan in state reads/EP on accumulating graphs). #1088: the
+          promotion is stated here rather than left to
+          ``create_operator(promote_source=True)``, which now fills in only a
+          NEVER-SET status and will not move an explicit draft.
         - decide_cycles increments per successful NEW record; the
           per-episode cap (DECIDE_CYCLES_CAP, default 8) makes further
           records honest no-ops (cap-hit semantics surface in Task 4's
@@ -529,9 +532,17 @@ class A4TortoiseArm:
                 else:
                     op = sdk.create_operator("IMPL", ev_id, [target])
             except Exception as e:  # noqa: BLE001, RUF100
-                # Evidence stays DRAFT (promote_source fires only on operator
-                # success) ⇒ inert residue, never a live orphan.
+                # Evidence stays DRAFT (the explicit promotion below runs only
+                # after the operator succeeds) ⇒ inert residue, never a live
+                # orphan.
                 raise ArmUnavailable(f"a4 operator write failed: {e}") from e
+            # #1088: create_operator no longer promotes a source that was
+            # EXPLICITLY created draft — it fills in only a never-set status.
+            # This arm files evidence as an explicit draft ON PURPOSE (keep a
+            # failed operator write inert), so the step create_operator used
+            # to do for us is now stated here, AFTER the edge succeeded. Same
+            # invariant as before: born draft, live only on operator success.
+            sdk.promote_point(ev_id)
             filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
             if isinstance(op, dict):

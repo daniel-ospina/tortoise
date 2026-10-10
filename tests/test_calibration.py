@@ -120,12 +120,13 @@ def test_require_calibration_default(sdk):
 def test_require_calibration_ignores_drafts(sdk):
     """Draft evidence points do NOT trip the fail-closed gate (#780, PR #1212).
 
-    create_point defaults to status='draft', and drafts are excluded from
-    factor extraction + EP propagation (include_draft=False). A graph whose
-    only uncalibrated points are drafts must not demand calibration of
-    points EP will never use — the gate guards live evidence only.
+    Draft is EXPLICIT since #1088 — a no-status create_point is LIVE — and
+    drafts are excluded from factor extraction + EP propagation
+    (include_draft=False). A graph whose only uncalibrated points are drafts
+    must not demand calibration of points EP will never use — the gate guards
+    live evidence only.
     """
-    sdk.create_point("statement", "Draft staging claim")  # defaults to draft
+    sdk.create_point("statement", "Draft staging claim", status="draft")
     sdk.create_point("statement", "Another draft", status="draft")
     # Draft-only graph → gate passes (nothing live to calibrate); EP finds
     # no live factors and returns a no-op result instead of raising.
@@ -136,7 +137,7 @@ def test_require_calibration_ignores_drafts(sdk):
     import tempfile
     s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
     try:
-        s2.create_point("statement", "Draft staging claim")
+        s2.create_point("statement", "Draft staging claim", status="draft")
         s2.create_point("statement", "Live uncalibrated", status="live")
         with pytest.raises(CalibrationError, match="uncalibrated"):
             s2.compute_confidence(require_calibration=True)

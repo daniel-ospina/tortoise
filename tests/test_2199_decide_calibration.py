@@ -125,16 +125,48 @@ class TestDecisionPartsBornLive:
         assert sdk.get_point(p["id"])["baseline_source"] == \
             BASELINE_SOURCE_INHERITED
 
-    def test_statement_without_status_unchanged_draft_no_default(self, sdk):
+    def test_statement_without_status_is_live_no_default(self, sdk):
         """#1088 supersedes the #2199 scope statement: the born-live default
         now applies to EVERY kind, not only the decide parts. A plain
         statement created without an explicit status is live; an explicit
         status="draft" is still honoured (see TestExplicitDraftIsHonoured1088
-        in tests/test_sdk.py). The test name predates that and is retained."""
+        in tests/test_sdk.py)."""
         p = sdk.create_point("statement", "Plain claim")
         pt = sdk.get_point(p["id"])
         assert pt["status"] == "live"
         assert pt.get("baseline_set") in (None, False)
+
+
+# ── ingest must not disable the #2199 baseline (#1088) ─────────────
+
+class TestIngestAutoPreservesDecideBaseline:
+    def test_auto_no_status_decide_part_keeps_system_default(self, sdk):
+        """#1088 (review P1): ingest must NOT inject a status into a no-status
+        DECIDE-PART item under auto — an injected status sets explicit_status
+        in create_point and silently disables the #2199 system-default
+        baseline. A non-decide-part no-status item is still stated.
+
+        MUTATION THAT REDS THIS TEST: restore the unconditional
+        ``item["status"] = ...`` injection for every no-status item.
+        """
+        bundle = {
+            "points": [
+                {"ref": "opt", "kind": "option", "content": "Choose A"},
+                {"ref": "plain", "kind": "statement",
+                 "content": "a plain no-status claim"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        opt_id, plain_id = res["ids"]["points"]
+        opt = sdk.get_point(opt_id)
+        assert opt["status"] == "live"
+        assert opt["baseline_set"] is True
+        assert opt["ep_alpha"] == 3
+        assert opt["ep_beta"] == 1
+        assert opt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
+        # The non-decide-part item is still stated draft under auto when it
+        # is not a connection source — the non-decide injection still runs.
+        assert sdk.get_point(plain_id)["status"] == "draft"
 
 
 # ── Custom override → set-by-author (indicator 2) ─────────────────

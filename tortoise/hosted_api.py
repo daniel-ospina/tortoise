@@ -13548,7 +13548,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         def _capture_ep_pass() -> None:
             with _dream_lock(_dk):
                 _apply_capture_ingest_ep(
-                    sdk, ep_ids, warn=extraction_warnings.append)
+                    sdk, ep_ids,
+                    promotion_ids=_capture_minted_ids(extracted),
+                    warn=extraction_warnings.append)
 
         await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write

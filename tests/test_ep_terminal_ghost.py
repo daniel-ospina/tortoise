@@ -257,8 +257,10 @@ def test_supersede_into_draft_successor_no_ghost(sdk, tmp_path):
     live_mean = posterior_mean(sdk, ids["c"])
     assert live_mean > 0.51
 
-    # Supersede A into a draft (never-promoted) successor.
-    succ = sdk.create_point("statement", "draft successor")["id"]  # draft
+    # Supersede A into a draft (never-promoted) successor. Draft is explicit
+    # since #1088 — a no-status create_point is LIVE.
+    succ = sdk.create_point("statement", "draft successor",
+                            status="draft")["id"]  # draft
     assert sdk.get_point(succ)["status"] == "draft"
     sdk.supersede_point(ids["a"], succ)
     run_ep(sdk, [ids["op1"], ids["op2"]])

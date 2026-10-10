@@ -2583,7 +2583,12 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     Runs a diagnostic existence read ONLY when the guarded SET returned no
     rows, so the happy path stays a single round trip. Missing point →
     ValueError matching the historical missing-point behavior; present but
-    not draft → illegal-transition ValueError.
+    not promotable → illegal-transition ValueError.
+
+    #1088: an already-LIVE point is short-circuited in ``update_point``
+    (idempotent no-op), so the only statuses that reach this error are the
+    TERMINAL ones (retracted / superseded / outdated / archived) — a terminal
+    point is never resurrected by update_point.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -3300,6 +3305,8 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     draft/uncalibrated — otherwise the point stays uncalibrated forever
     (a folded re-ingest would never re-run the pass).  A canonical that is
     live + calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    Folded ids are EP/dirty targets ONLY — never promotion targets (the
+    caller passes the MINTED ids to ``_apply_capture_ingest_ep``, #1088).
     Shared by the hosted impl (byte-parity).
     """
     from tortoise.write_verb import DEDUP_NEW
@@ -3322,6 +3329,7 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
 
 @phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
+                             promotion_ids: list[str],
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
 
@@ -3336,10 +3344,15 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
 
     FIX — capture-scoped ONLY (the #780 draft-operator semantics of
     NON-capture extraction paths, EP semantics, and global dream routing are
-    all untouched):
-      1. every extracted (non-episodic) claim of THIS capture is promoted
-         draft->live (the DM-2/§4.4 status branch: draft -> live on the
-         capture write path; the episodic turn stream STAYS draft — it is
+    all untouched). ``promotion_ids`` (REQUIRED) is the set of points this
+    call may PROMOTE; the EP/dirty pass still runs over the full
+    ``claim_ids``. Callers pass the capture's MINTED ids (see
+    ``_capture_minted_ids``) so a FOLDED, pre-existing canonical — which an
+    agent may have explicitly created draft — is calibrated if it needs it
+    but never retro-promoted (#1088):
+      1. every MINTED extracted (non-episodic) claim of THIS capture is
+         promoted draft->live (the DM-2/§4.4 status branch: draft -> live on
+         the capture write path; the episodic turn stream STAYS draft — it is
          the turn stream, not beliefs);
       2. the capture's operator topology (IMPL/NAND operator Points with an
          edge to a captured claim) is promoted with its claims — a live
@@ -3364,6 +3377,12 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
     """
     if not claim_ids:
         return
+    # #1088: only ids MINTED by this capture may be promoted. A folded,
+    # pre-existing id can still be an EP target, but an explicit draft must
+    # never be retro-promoted by a later capture that merely deduped onto it.
+    # ``promotion_ids`` is REQUIRED so a caller cannot silently fall back to
+    # promoting the EP target set.
+    promote_ids = list(promotion_ids)
     try:
         proj = sdk._get_proj()
         # 1. Claims -> live (draft-only guard mirrors create_operator's
@@ -3376,13 +3395,13 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # live state. Capture auto-promotion is NOT reviewer-gated — the
         # snapshot carries the point's own props (no fabricated reviewed).
         # Candidate read FIRST (the SET below destroys the draft evidence):
-        # exact extracted ids, non-operator, draft-or-unset status.
+        # MINTED ids only (#1088), non-operator, draft-or-unset status.
         cand_rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status = 'draft') "
             "RETURN n.id",
-            params={"ids": list(claim_ids)},
+            params={"ids": promote_ids},
         ).result_set
         promoted_claims = [r[0] for r in cand_rows]
         if promoted_claims:
@@ -3402,7 +3421,7 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
             "WHERE c.id IN $ids "
             "AND (o.status IS NULL OR o.status = 'draft') "
             "RETURN DISTINCT o.id",
-            params={"ids": list(claim_ids)},
+            params={"ids": promote_ids},
         ).result_set
         promoted_ops = []
         for (oid,) in op_rows:
@@ -5263,6 +5282,11 @@ class TortoiseSDK:
 
         Set dedup=True for idempotent creation (matches by content hash).
 
+        LIVE is the default (#1088): a point created WITHOUT an explicit
+        ``status`` is live — not draft — whatever its kind. Draft is opt-in:
+        pass ``status="draft"`` and it is honoured (no promotion clause,
+        ingest fold, or operator edge will move it to live).
+
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
         with an explicit, provenance-recorded starting belief: the default
@@ -7068,8 +7092,12 @@ class TortoiseSDK:
         if extracted:
             ep_ids = _capture_ep_target_ids(extracted, proj)
             if ep_ids:
+                # #1088: only ids this capture MINTED may be promoted; a
+                # folded, pre-existing canonical stays as its author left it
+                # (draft included), and is only calibrated if it needs it.
                 _apply_capture_ingest_ep(
                     self, ep_ids,
+                    promotion_ids=_capture_minted_ids(extracted),
                     warn=extraction_warnings.append,
                 )
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
@@ -8226,8 +8254,9 @@ class TortoiseSDK:
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
-            draft→live promote via status (only transition allowed), version
-            increment for :Point:Object nodes, status validation against
+            draft→live promote via status (the only transition allowed; an
+            already-live point is an idempotent no-op), version increment for
+            :Point:Object nodes, status validation against
             POINT_STATUS_VALUES, context rejected.
           - Entity (Subject/Object/Event/Document/Source) → plain property
             update (delegates to update_entity).
@@ -10272,10 +10301,15 @@ class TortoiseSDK:
             Default bidirectional (mutual) for all op types; pass
             "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
-          - promote_source: default True preserves the #131 draft→live lifecycle
-            (source point goes live when its first edge is created). Pass
-            False for extraction paths (#780): the operator node itself is
-            created with status:'draft' AND the source is NOT auto-promoted —
+          - promote_source: default True fills in a source point's NEVER-SET
+            status (``status IS NULL``) to live when its first edge is
+            created. An EXPLICIT or prior ``draft`` is NOT retro-promoted
+            (#1088) — a point an agent deliberately staged stays draft, and a
+            pre-#1088 graph's implicit-draft points are indistinguishable from
+            explicit drafts, so they also stay draft (EP-inert) until
+            explicitly promoted. Pass False for extraction paths (#780): the
+            operator node itself is created with status:'draft' AND the
+            source is NOT auto-promoted —
             a draft must never wire an operator to a live Point. NOTE: there is
             currently NO public promote API for draft operators — they stay
             draft until the reviewer-gated promotion path lands (#785
@@ -10397,10 +10431,12 @@ class TortoiseSDK:
                 f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
-        # Draft → live lifecycle (#131): source point goes live when first edge created.
-        # P1 (code-review): draft → live promote ONLY for draft/null sources —
-        # an unconditional promote resurrected retracted (terminal) sources,
-        # violating the terminal-state contract with no event in the stream.
+        # #1088: the guarded SET below fills in only a NEVER-SET status with
+        # the live default — an explicitly-drafted source is never moved to
+        # live by this command.
+        # P1 (code-review): the guard exists because an unconditional promote
+        # resurrected retracted (terminal) sources, violating the terminal-state
+        # contract with no event in the stream.
         # #780: extraction paths (promote_source=False) skip this entirely —
         # the source stays draft and the draft operator node carries the status.
         if promote_source:
@@ -12178,17 +12214,26 @@ class TortoiseSDK:
           merge by name; operator connections dedup by (op_type, input set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
-        - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle). Under promotion_policy='gated' ANY effective status other
-          than 'draft' on a point item is rejected (INGEST CONTRACT row 9 —
+        - EP-safe: under promotion_policy='gated' every no-status point is
+          born draft and stays draft (the operator wiring passes
+          promote_source=False). Under promotion_policy='auto' a no-status
+          connection-source point is born live and a no-status non-source
+          point draft; a no-status DECIDE-PART item is left to create_point's
+          #2199 system-default baseline. Since #1088 create_point's own
+          default is live, this path states each point's status by intent
+          rather than inheriting that default. Under gated ANY effective
+          status other than 'draft' on a point item is rejected (INGEST
+          CONTRACT row 9 —
           no bypass of the gated contract; the sanctioned routes are
           promotion_policy='auto' or update_point(status='live') after ingest;
           case variants, nested props={...}, and canonical terminal statuses
           are rejected too — EP _live_only excludes 'draft' and terminal
           statuses/flag (#2422)).
           Connection-driven promotion (source → live on first edge) only
-          happens under promotion_policy='auto', and only for draft/null-status sources
-          (retracted/deprecated terminal sources are never resurrected).
+          happens under promotion_policy='auto', and only for null-status
+          sources (retracted/deprecated terminal sources are never
+          resurrected; an explicit or prior draft is never retro-promoted,
+          #1088).
           Under auto the operator node is written WITHOUT a status property
           (live by projection — the #780 asymmetry: gated writes explicit
           draft on the operator, auto writes none).
@@ -12334,7 +12379,14 @@ class TortoiseSDK:
         _auto_sources: set[str] = set()
         if promotion_policy == "auto":
             for _conn in bundle.get("connections") or []:
+                # Only an OPERATOR-requiring connection has a promotion path
+                # (create_operator / create_direct_edge, both keyed on
+                # "operator"). A plain relation connection (extractedFrom /
+                # aboutSubject / …) never promotes, so its source must stay
+                # draft under auto (#1088) — mirror the ``if "operator" in
+                # conn`` write branch below.
                 if (isinstance(_conn, dict)
+                        and "operator" in _conn
                         and isinstance(_conn.get("from"), str)):
                     _auto_sources.add(_conn["from"])
 
@@ -12354,12 +12406,24 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
+            # #1088 / #2199: an explicit per-item status (top-level or nested
+            # props) ALWAYS wins — the defaults below fill only items that
+            # carry no status key anywhere (mirrors _check_gated_status's
+            # has_status). Under gated every no-status point is born draft
+            # (today's Q2 contract). Under auto a NON-decide-part point is
+            # stated (connection source -> live, otherwise draft), but a
+            # DECIDE-PART item is left WITHOUT a status so create_point's
+            # #2199 normalization supplies its system-default baseline — an
+            # injected status would set explicit_status and silently disable
+            # that baseline.
             if not _bundle_item_has_status(item):
-                item["status"] = (
-                    "live" if (promotion_policy == "auto"
-                               and ref in _auto_sources)
-                    else "draft"
-                )
+                _kind = item.get("kind") or "statement"
+                if promotion_policy == "gated":
+                    item["status"] = "draft"
+                elif not (isinstance(_kind, str)
+                          and _kind in DECIDE_PART_KINDS):
+                    item["status"] = (
+                        "live" if ref in _auto_sources else "draft")
             # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
             # the extraction write kind). Legacy kinds are write-compat; the
             # event kind is rejected by the shared _check_kind helper (check 2).

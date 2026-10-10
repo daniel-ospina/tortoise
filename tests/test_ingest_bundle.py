@@ -304,6 +304,34 @@ class TestPromotionPolicy:
         pA, _ = res["ids"]["points"]
         assert sdk.get_point(pA)["status"] == "live"
 
+    def test_auto_relation_only_source_stays_draft(self, sdk):
+        # #1088 (review P1): only an OPERATOR-requiring connection has a
+        # promotion path. A plain relation connection (extractedFrom /
+        # aboutSubject / …) must not put its source in the auto-promote set,
+        # so a relation-only source stays draft under auto.
+        #
+        # MUTATION THAT REDS THIS TEST: build _auto_sources from every
+        # connection's `from` (drop the `"operator" in conn` guard).
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "statement",
+                 "content": "a relation-only source claim"},
+            ],
+            "sources": [
+                {"ref": "src1", "url": "https://example.com/relation-only",
+                 "sourceKind": "report"},
+            ],
+            "connections": [
+                {"ref": "c1", "from": "p1", "to": "src1",
+                 "relation": "extractedFrom"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        p1 = res["ids"]["points"][0]
+        assert sdk.get_point(p1)["status"] == "draft", (
+            "a relation-only source must not be auto-promoted"
+        )
+
     def test_auto_granular_parity(self, sdk):
         # E2E-5 discriminating cell: auto holds in granular mode — the
         # promote flag must not be dropped on the granular code path.

@@ -195,7 +195,7 @@ policy):
 | Policy | Points | Connections |
 |---|---|---|
 | `"gated"` (default — shipped since A0, epic #902) | stay `draft`; ANY effective status other than `"draft"` on a point item is a violation (row 9 — case variants, nested `props={...}`, and terminal statuses included) | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
-| `"auto"` (opt-in parity mode) | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` (draft/null-status sources only; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). Deduped connections never retro-promote — promotion fires on **first edge creation** only. |
+| `"auto"` (opt-in parity mode) | a no-status connection-source point is stated `live` at first write; an explicit/prior `draft` is never retro-promoted (#1088) | source of an operator-requiring connection auto-promotes to `live` on first edge creation — **null-status sources only** (an explicit or prior `draft` is never retro-promoted, #1088; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). Deduped connections never retro-promote — promotion fires on **first edge creation** only. |
 
 `promotion_policy` is orthogonal to granularity — the same bundle via
 `bulk` vs `granular` honors the same policy (E2E-5 proves graph parity).
@@ -458,8 +458,9 @@ Additional posture rules:
 The Q2 gated default applies to the `ingest` surface (SDK + MCP `tortoise_ingest`).
 Direct primitives remain explicit promotion routes and are NOT gated: `tortoise_create_point(
 props={"status":"live"})`, `tortoise_create_operator` (calls `create_operator` with the
-`promote_source=True` default — a silent-promotion surface outside ingest), and the SDK
-promotion/commit primitives (`sdk.promote_point`, `sdk.supersede_point`, `sdk.retract_point`;
+`promote_source=True` default — it fills in a never-set source status on first edge, never an
+explicit draft, #1088), and the SDK promotion/commit primitives (`sdk.promote_point`,
+`sdk.supersede_point`, `sdk.retract_point`;
 MCP-layer promotion routes through `tortoise_update_point(status="live")`). Flipping `create_operator`'s default / exposing `promote_source` on
 the MCP tool is tracked as a follow-up so the system-wide default matches the ingest contract.
 
@@ -487,9 +488,17 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   pending-review draft — §2.5 measured-good; E2E-5). Scope is strictly the
   capture write path: the gated `ingest` surface and non-capture extraction
   (the #780 draft-operator shape) are untouched, and since #1088 the create
-  default is live unless a caller explicitly asks for draft. Promotion is rebuild-durable (PointPromoted /
-  OperatorPromoted events, #548 replay parity) and NOT reviewer-gated — the
-  auto-promoted snapshot never fabricates a `reviewed` flag.
+  default is live unless a caller explicitly asks for draft.
+
+  Promotion is rebuild-durable (PointPromoted / OperatorPromoted events, #548
+  replay parity) and NOT reviewer-gated — the auto-promoted snapshot never
+  fabricates a `reviewed` flag.
+
+  **Pre-#1088 graphs:** points created under the old implicit-`draft` default
+  are now indistinguishable from explicit drafts, so they are no longer
+  retro-promoted — they stay EP-inert until someone promotes them explicitly.
+  Deliberate: nothing marked `draft` is ever silently promoted.
+
   **Interim-route caveat (Track A — no zombie-operator resolution):** the
   interim route promotes a single point; it does NOT resolve draft operator
   nodes whose endpoints are now all live (the "zombie operator" — a draft
@@ -559,7 +568,7 @@ not schema — no version bump.
 
 | # | Break | Pre-release behavior | Post-release | Migration |
 |---|---|---|---|---|
-| 1 | **Gated default flip** | ingest auto-promotes (#131) | default `promotion_policy="gated"` — points stay draft; connections never promote | Pass `promotion_policy="auto"` for parity (identical graph, E2E-8-proven) |
+| 1 | **Gated default flip** | ingest auto-promotes (#131) | default `promotion_policy="gated"` — points stay draft; connections never promote | Pass `promotion_policy="auto"` for the #131 promote-on-first-edge behaviour (null-status sources only — an explicit or prior `draft` is never retro-promoted, #1088; the graph is no longer byte-identical across policies) |
 | 2 | **Multi-item `to` on plain IMPL/NAND rejected** | a multi-input operator was created via fan-out | Phase-1 violation (fail-closed) | Add `reify:true`/`mitigation` (operator route unchanged), or split into singular connections |
 | 3 | **Label conflict on same-pair plain connections** | label-differing same-pair plain connections created two operators | Phase-1 violation | `reify:true` ×2 (operator route keeps both labels), or unify the label |
 | 4 | **Route-scoped attribute rejection** | `confidence`/`weight` on operator-routed connections and `direction`/`confidence`/`weight` on relations were silently dropped | Phase-1 violation | Drop the attributes (confidence/weight belong on the plain direct-edge path only) |

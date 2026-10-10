@@ -1376,9 +1376,11 @@ class TestExplicitDraftIsHonoured1088:
     """
 
     def test_create_point_defaults_to_live_for_non_decide_kind(self, sdk):
-        # 'evidence' deliberately exercises a NON-decide-part kind here, so
-        # the pre-#1088 code would have defaulted it to 'draft'.
-        p = sdk.create_point("evidence", "the sky is blue")
+        # 'statement' is NOT in DECIDE_PART_KINDS ({decision, option,
+        # criterion, evidence}), so the pre-#1088 code defaulted it to
+        # 'draft' — this test is non-vacuous only for a genuine non-decide
+        # kind.
+        p = sdk.create_point("statement", "the sky is blue")
         assert p["status"] == "live"
         assert sdk.get_point(p["id"])["status"] == "live"
 

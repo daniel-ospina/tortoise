@@ -327,8 +327,9 @@ class TestDe2e4FreshnessLifecycle:
         and are re-dreamed after promote."""
         sdk, _db = fresh_sdk(prefix="tortoise_epic903_d4_")
         try:
-            # create_point defaults to draft since #943.
-            draft = sdk.create_point("statement", "draft-only claim", dedup=False)
+            # Draft is explicit since #1088 — a no-status create_point is LIVE.
+            draft = sdk.create_point("statement", "draft-only claim", dedup=False,
+                                     status="draft")
             assert draft["id"] in sdk._dirty_roots
 
             random.seed(FIXED_SEED)

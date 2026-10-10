@@ -502,7 +502,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_update
-  served_from: tortoise/mcp_server.py:a0c382836e3f3886
+  served_from: tortoise/mcp_server.py:3bc8a368244adaa0
   family: memory
   family_rank: 1
   served: http
@@ -512,8 +512,9 @@ rows:
   keyword_rank: 3
   cluster: update
   canonical: true
-  job: Update a Point OR entity by id. Points get point-lifecycle semantics (draft→live promote via status, version
-    increment for Point:Object, status validation); entities get a plain property update.
+  job: Update a Point OR entity by id. Points get point-lifecycle semantics (draft→live promote via status — an
+    already-live point is an idempotent no-op, version increment for Point:Object, status validation); entities get a
+    plain property update.
   dependency: declares TortoiseSDK.update (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -1054,7 +1055,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:1d60c5f03f809d8d
+  served_from: tortoise/mcp_server.py:212e8c7865fe39e7
   family: graph
   family_rank: 2
   served: http
@@ -1074,8 +1075,8 @@ rows:
     (operator path: promote_source=False via #780); under gated ANY effective status other than ''draft'' on a point
     item is REJECTED (INGEST_CONTRACT row 9 — case variants, nested props={...}, and terminal statuses included)
     — use promotion_policy=''auto'' or promote after ingest via update_point(status=''live''). promotion_policy=''auto''
-    preserves the #131 promote-on-wire lifecycle (draft/null-status sources go live on first edge; terminal sources
-    are never resurrected; deduped connections never retro-promote). Idempotent-ish: points dedup by content hash
+    preserves the #131 promote-on-wire lifecycle (null-status sources only — an explicit draft is never retro-promoted,
+    #1088; terminal sources are never resurrected; deduped connections never retro-promote). Idempotent-ish: points dedup by content hash
     + kind, sources by url, operators by input set.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active

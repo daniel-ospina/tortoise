@@ -21,7 +21,9 @@ def test_status_vocabulary():
 
 def test_transition_guards_live_to_draft(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "guarded")
+    # Draft is explicit since #1088 (a no-status create is LIVE) — the guard
+    # under test is the draft→live promote, so start from a real draft.
+    p = sdk.create_point("statement", "guarded", status="draft")
     assert p["status"] == "draft"
     sdk.update_point(p["id"], status="live")  # draft→live promote still allowed
     with pytest.raises(ValueError, match="live"):

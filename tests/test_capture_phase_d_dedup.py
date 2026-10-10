@@ -429,7 +429,8 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     never re-calibrated; minted entries always calibrate."""
     from tortoise.sdk import _capture_ep_target_ids
     proj = sdk._get_proj()
-    draft = sdk.create_point("statement", "draft uncalibrated claim")
+    draft = sdk.create_point("statement", "draft uncalibrated claim",
+                             status="draft")
     live = sdk.create_point("statement", "live calibrated claim")
     sdk.update_point(live["id"], status="live")
     # mark the live node as EP-calibrated (the state a successful ingest EP
@@ -454,6 +455,31 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     ) == [uncal["id"]]
     # minted entries always calibrate
     assert _capture_ep_target_ids([{"id": live["id"]}], proj) == [live["id"]]
+
+
+def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
+    """#1088 (review P1): a capture that merely DEDUPS onto a point an agent
+    explicitly created as draft must NOT promote it. Only ids MINTED by this
+    capture are promotion targets (#2104); the folded canonical may still be
+    an EP/dirty target, but its explicit draft survives.
+
+    MUTATION THAT REDS THIS TEST: drop ``promotion_ids`` so the folded leg's
+    ids are promoted by ``_apply_capture_ingest_ep``.
+    """
+    import tortoise.extractor_v2 as ev2
+    draft = sdk.create_point("statement", "explicitly staged claim",
+                             status="draft")
+    assert sdk.get_point(draft["id"])["status"] == "draft"
+    # A later capture folds onto the explicit draft (no payload points).
+    fold = _stub_extractor([], noops=[
+        {"point_id": draft["id"], "reason": "identical",
+         "overlap": 1.0, "evidence": "exact"}])
+    monkeypatch.setattr(ev2, "extract_session_v2", fold)
+    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert sdk.get_point(draft["id"])["status"] == "draft", (
+        "an explicitly-drafted point a later capture deduped onto was "
+        f"promoted: {res}"
+    )
 
 
 # ── Pure classifier ─────────────────────────────────────────────────────────
