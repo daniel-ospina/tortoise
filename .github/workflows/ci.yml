@@ -1316,10 +1316,14 @@ jobs:
     # SAME guard: a vendored copy would be a second source of truth free to drift from
     # the one that owns the idiom (#863's "guard nobody runs").
     #
-    # ORDERING: `--dirs` ships in agent-infra#1643. Until that lands and is tagged, this
-    # job is red (the guard exits 2 on an unknown argument) — land it first, then pin
-    # `ref:` to the tag here, matching how this file's other agent-infra jobs consume
-    # agent-infra at a semver pin rather than at whatever `main` happens to be.
+    # ORDERING — SATISFIED: `--dirs` shipped in agent-infra#1643, merged to agent-infra
+    # `main` as `ffa8751ac9afbd0acbfeb32d0619d2208b89217a` and PINNED below. Before that
+    # commit existed this job was red (the guard exits 2 on an unknown argument); the pin
+    # is what stops it following agent-infra `main` from here on, the way this file's other
+    # version-consuming agent-infra jobs fix their revision — node-ci and python-ci at a
+    # tag. (`drift-check` stays on `main` on purpose: detecting drift is its whole job, so
+    # it is the one job that must track it.) A commit pin rather than a tag because #1643
+    # carries no tag yet — replace the sha with the next `v0.1.x` when agent-infra cuts one.
     #
     # `--dirs` names THIS repo's layout — the guard's default set is agent-infra's and
     # `scripts/` here points back at it. The list lives in ONE place, `.sigpipe-grep-dirs`,
@@ -1328,10 +1332,8 @@ jobs:
     # ⚠️ THIS JOB IS NOT A REQUIRED CONTEXT YET (tortoise#7778), so a red here does not
     # block a merge: it is visible but unenforced. The sites it covers are already fixed,
     # so the exposure is a FUTURE reintroduction of the idiom, not the current tree.
-    # Making it required is a branch-protection change — the declaration home, the
-    # required-context record, and the required-set enumeration must move together, and it
-    # must land in the SAME change as the wiring: requiring it earlier would block every
-    # merge while the resolving guard still rejects `--dirs`. Measured repro on #7778.
+    # Making it required is a branch-protection change: the declaration home, the
+    # required-context record, and the required-set enumeration must move together.
     # (The declaration home is deliberately not named here: the recut guard reads any
     # workflow naming it as a workflow reading it as an authoritative source, and reds.)
     # `website/` is excluded: it carries a node_modules tree. Its shell files are NOT
@@ -1343,24 +1345,25 @@ jobs:
         with:
           repository: daniel-ospina/agent-infra
           path: .agent-infra-guard
+          # The reviewed guard, pinned: `--dirs` and the repo-under-scan resolution
+          # (agent-infra#1643). Unpinned, this job would track agent-infra `main` and
+          # could go red on a change nobody in this repo reviewed.
+          ref: ffa8751ac9afbd0acbfeb32d0619d2208b89217a
       - name: SIGPIPE false-negative guard (#841)
         run: |
           bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
             --dirs "$(cat .sigpipe-grep-dirs)"
       # The hook's own block is tested HERE, not left as a file nobody runs. This test
-      # stubs the guard, so it needs no agent-infra and no network — it runs even while
-      # the step above is red for the ordering reason. It exists because the hook's block
-      # once discarded the guard's verdict (a glued `else` made `exit` take two arguments
-      # and fail) while `sh -n` stayed green; only an executed assertion catches that.
+      # stubs the guard, so it needs no agent-infra and no network. It exists because the
+      # hook's block once discarded the guard's verdict (a glued `else` made `exit` take
+      # two arguments and fail) while `sh -n` stayed green; only an executed assertion
+      # catches that.
       - name: SIGPIPE hook block self-test
-        # `if: always()` is REQUIRED here, not defensive. Without it a failing
-        # step above (the NORMAL state while `--dirs` is unlanded — see the
-        # ordering note) SKIPS this step, so the test written to catch a
-        # discarded guard verdict would itself never run in the one case it
-        # exists for. Measured on this PR's own CI run: the guard step exited 2
-        # on `unknown argument: --dirs` and the job log contains no record of
-        # this step at all. The comment above claims it "runs even while the
-        # step above is red"; only this line makes that true.
+        # `if: always()` is REQUIRED here, not defensive. Without it a failing step above
+        # skips this one, so the test written to catch a discarded guard verdict would
+        # itself never run in the one case it exists for — and a FAILING guard is exactly
+        # when the hook's own handling needs asserting. Measured on #7772's own CI run:
+        # the guard step exited 2 and the job log held no record of this step at all.
         if: always()
         run: sh .github/scripts/sigpipe-hook.test.sh
 
