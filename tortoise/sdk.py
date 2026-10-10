@@ -3308,9 +3308,10 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     point's ``status`` is deliberately NOT part of the selector.  A folded
     EXPLICIT draft is intentionally left uncalibrated: #1088 never
     retro-promotes a folded id, and the EP pass excludes drafts
-    (``include_draft=False``), so selecting a draft here could not calibrate
-    it — a ``status='draft'`` disjunct would only nominate an EP/dirty
-    target that can never be refreshed.  A canonical that is live +
+    (``include_draft=False``).  An uncalibrated draft (markers null) is
+    already nominated by the markers arm, so a ``status='draft'`` disjunct
+    could add ONLY drafts that already carry EP markers — already
+    calibrated, so nothing to refresh.  A canonical that is live +
     calibrated is NEVER re-calibrated (no EP churn on re-ingest).
     Folded ids are EP/dirty targets ONLY — never promotion targets (the
     caller passes the MINTED ids to ``_apply_capture_ingest_ep``, #1088).
@@ -7099,8 +7100,10 @@ class TortoiseSDK:
         # warning only.  W5 Phase D (#2104): the pass gates over
         # ``_capture_ep_target_ids`` (minted ids — folded entries resolved
         # to nodes already calibrated at their original ingest are never
-        # re-calibrated; a folded canonical still draft/uncalibrated from a
-        # fail-open first ingest gets its FIRST calibration here).
+        # re-calibrated; a folded canonical still UNCALIBRATED from a
+        # fail-open first ingest keeps being nominated for its FIRST
+        # calibration here, whereas a folded EXPLICIT draft is intentionally
+        # left uncalibrated).
         if extracted:
             ep_ids = _capture_ep_target_ids(extracted, proj)
             if ep_ids:
