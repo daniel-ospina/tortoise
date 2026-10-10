@@ -241,3 +241,7 @@ def test_unresolvable_home_is_counted_as_a_drop(tmp_path, monkeypatch):
     after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
     assert after == before + 1, (
         "an audit event that reached no durable sink must be counted as a drop")
+    # #7924 review round 2: the drop must ride the surface the fleet serves
+    # (the hosted app exposes no /metrics route), like journal_write_failures.
+    snap = monitoring.metrics()
+    assert snap["audit_fallback_drops"].get("unresolvable_path", 0) == after

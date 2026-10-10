@@ -4117,6 +4117,11 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # real degradation (the derived graph becomes live-only), so it rides
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
+        # #7924 review round 2: an audit event that reached no durable sink is
+        # the same class of failure, and the hosted app serves no `/metrics`
+        # route (monitoring says so itself), so it rides the surface that IS
+        # read — the health payload — and not only the counter's scrape form.
+        "audit_fallback_drops": audit_fallback_drop_counts(),
         "uptime": round(time.monotonic() - _start, 2),
     }
 
