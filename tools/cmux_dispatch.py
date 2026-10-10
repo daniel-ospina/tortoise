@@ -590,6 +590,33 @@ def _footer_stats_end(screen: str | None) -> int:
     This is the anchor `shell_prompt_below_footer` scans from: a stats-shaped
     line WITHOUT a pwd line above it is not a footer — it is output. See
     `PWD_LINE_RE`.
+
+    ⛔ THE ANCHOR MAY TRUST THE PWD LINE AND NOTHING ELSE. #7875 widened it to
+    also accept ANY bracketed line (`[INFO] starting`, `[tortoise-capture] …`) as
+    a footer row, to survive a footer whose pwd row is clobbered by extension
+    statuses (#7863). That is a FAIL-OPEN: a bracketed line is PROGRAM OUTPUT, so
+    a bare shell printing one directly above a stats-shaped line
+    (`host % cat notes.txt` / `[INFO] starting` / `42.0%/700k (auto)`) moves the
+    anchor PAST the live prompt. `shell_prompt_below_footer` then scans only
+    below the anchor, finds nothing, and `screen_ready` returns True — the brief
+    is typed into a live shell and EXECUTED. That is the #7158 direction this
+    tool exists to prevent, and it is why the widening was reverted (#7918).
+
+    The #7863 false refusal remains REAL and is tracked there: a live footer
+    carrying extension statuses draws the statuses in the pwd line's row and NO
+    pwd line anywhere in the capture, so this returns -1 on a healthy lane and
+    `shell_prompt_below_footer` scans the WHOLE capture — ordinary assistant
+    prose (`### #2935`, `# noqa: E402`, `N > 1`) then matches `SHELL_PROMPT_RE`
+    and the lane is refused. Measured 2026-10-09: 4 of 22 live lanes. Tightening
+    `SHELL_PROMPT_RE` INSTEAD of widening the anchor was tried and is ITSELF a
+    fail-open: this machine's own root prompt (`%n@%m %1~ %# ` →
+    `root@mac /tmp # `) is the same shape as the linter directive `# noqa`, so
+    every rule that recovers the root prompt re-admits the prose and every rule
+    that excludes the prose loses the root prompt. Screen content cannot separate
+    them; the durable signal is process/session liveness (#7159). Until that
+    lands, a wrong "ready" is not a price worth paying for the false refusal: a
+    false refusal merely declines to dispatch, a wrong "ready" executes the
+    brief in a live shell.
     """
     text = screen or ""
     prev_nonempty: str | None = None
@@ -668,8 +695,9 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     alone is bypassable: shell OUTPUT below the prompt which mimics the stats shape
     (`host % ` then a line reading `42.0%/700k (auto)`) would place the prompt ABOVE
     the anchor and hide it. Requiring a real footer block (a pwd line above the
-    stats) rejects that; when no block exists at all the anchor falls back to the
-    last stats-shaped line, which is the conservative (more-scanning) choice.
+    stats — see `_footer_stats_end`) rejects that; accepting a BRACKETED line
+    there does the opposite — it trusts program output to move the anchor past
+    the prompt (#7918).
 
     RESIDUALS — direction stated honestly:
     * FAIL-OPEN (INHERENT to judging liveness from screen content, not fixable by
@@ -695,9 +723,21 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
         # scan sits BELOW the marker, so a loose marker printed by the shell
         # (`host % echo '(auto)'` then `(auto)`) hides the prompt ABOVE it and
         # declares a bare shell READY (#7158 round 8). Without a block, scan the
-        # WHOLE capture — the fail-closed direction. A live pane does not reach
-        # this branch: pi always draws the pwd line above the stats line
-        # (`footer.js` `[pwdLine, statsLine, ...statuses]`).
+        # WHOLE capture — the fail-closed direction. This branch is REACHABLE on
+        # a live pane, despite what earlier notes claimed: a footer carrying
+        # extension statuses draws no pwd line, so `_footer_stats_end` is -1 and
+        # ordinary assistant prose (a `### #2935` markdown heading, a `noqa`
+        # linter directive) that matches `SHELL_PROMPT_RE` refuses the lane.
+        # Measured 2026-10-09: 4 of 22 live lanes (#7863, still open — that
+        # false refusal is real and is NOT fixed here). It is also the shape a
+        # dead pi's stale footer takes when its pwd/status row has scrolled out
+        # of the captured window while the revived shell's prompt sits below it
+        # — the #7158 direction this tool exists to prevent.
+        #
+        # #7918: the branch is KEPT as the fail-closed default. Scanning the
+        # whole capture can only OVER-refuse; the alternative — anchoring on
+        # program output so the scan starts below the prompt — types the brief
+        # into a bare shell. Over-refusal is the direction we choose.
         return any(
             line.strip() and SHELL_PROMPT_RE.search(line)
             for line in text.splitlines()
