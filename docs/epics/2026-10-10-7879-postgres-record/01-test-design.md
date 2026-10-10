@@ -64,8 +64,8 @@ The surfaces are **not the code components — they are the STORE boundaries.** 
 | **S2** | the write surface has no chokepoint | paren-balanced scan of every `.query(` argument under `tortoise/**/*.py`, first mutating Cypher verb in the argument | **420 sites · 34 files · 231 distinct enclosing (file, class, function) scopes** — `SET` 174 · `MERGE` 117 · `CREATE` 52 · `DETACH DELETE` 38 · plain `DELETE` 28 · `REMOVE` 11 · of which **2 callers** route through `_graph_write_with_retry` |
 | **S3** | the projection machinery exists and is reachable | `projection/__init__.py` (`apply`, `rebuild_all`, `_ensure_indexes`) | present — the unit changes its **source** (journal → record), it does not build a fold from nothing |
 | **S6** | the replay keys exist | `projection/edges.py` | `STRUCTURAL_REL_LABELS` at `:51`, `stub_key` at `:66` — the interface `#5086` calls *"one interface that must not be broken"* |
-| **S7** | today's control-plane tenancy coverage | `CREATE TABLE` / `ENABLE ROW LEVEL SECURITY` / `CREATE POLICY` over `supabase/migrations/*.sql` | **30 `CREATE TABLE` statements · 28 distinct tables · 51 files**; **0 table names match the ontology nouns**; 23 of 28 tables have RLS enabled; 47 policies |
-| **S8** | the control plane is control plane | noun scan of the 28 table names and their columns | **no table name** carries an ontology noun. One **column** is named `source`. ⚠️ A **raw text grep** over `supabase/migrations/*.sql` returns **80** hits — every one of them inside a control-plane identifier (`webhook_events`, `audit_events`, `analytics_events`, the column `source`). **The epic's claim "a scan for the ontology nouns returns zero matches" is true of identifiers, not of text**; quote it that way. **`graphs` holds no `Point`** |
+| **S7** | today's control-plane tenancy coverage | `CREATE TABLE` / `ENABLE ROW LEVEL SECURITY` / `CREATE POLICY` over `supabase/migrations/*.sql`, **comments stripped first** | **24 `CREATE TABLE` statements · 24 distinct tables · 51 files**; **0 table names match the ontology nouns**; 23 of 24 tables have RLS enabled; 47 policies. ⚠️ A grep that does **not** strip `--` comments returns **30 statements / 28 tables**: six migration comment lines spell `CREATE TABLE` as prose (`0005`, `0007`, `20260825000001`, `20260827000002`, `20260925000001`, `20261001000006`) |
+| **S8** | the control plane is control plane | noun scan of the 24 table names and their columns | **no table name** carries an ontology noun. One **column** is named `source`. ⚠️ A **raw text grep** over `supabase/migrations/*.sql` returns **80** hits, of which **69 are `--` comment prose**; the remaining **11 are control-plane SQL** — five `storage.objects` (Supabase's own storage schema, named by our `blog_images_*` policies), two the `source` column of `waitlist_subscribers`, four prose inside SQL string literals or a policy name. **The epic's claim "a scan for the ontology nouns returns zero matches" is true of identifiers, not of text**; quote it that way. **`graphs` holds no `Point`** |
 | **S9** | the retry helper the chokepoint can reuse | `grep -n _graph_write_with_retry tortoise/` | `sdk.py:4598` (definition) with **exactly 2 callers** (`sdk.py:5768`, `sdk.py:14750`); `retry.py:14` marks it **PARTIALLY WIRED (#7405)** |
 
 ⚠️ **Not re-measured, and carried with their own method and date:** the **`1,074` Cypher / `57` files / `697` anchored + `377` whole-graph** read-surface split on `#7879` and `#7970` (**method unpublished** — a re-derivation attempt over string literals returns a different population, `1,525` literals across `89` files, so the two are **not the same unit** and must not be compared or summed), the **`9 of 87` property names** placement sample and the **`8,700` + `1,000` + ~`30`** id formats (`#7955`, measured 2026-10-08 against a **live** graph; no live graph is reachable from this lane). **Re-measure both before any unit is sized against them.**
@@ -79,8 +79,8 @@ The issue body's quantities are **not wrong — they are readings of a moving su
 | `387` mutating sites (2026-10-08, §17.1) | **420** | drift **plus** a method gap: neither earlier pass counted `REMOVE`, which is a mutating Cypher verb (`15` sites contain it; `11` have it first). The earlier figures are **lower bounds** |
 | `409` mutating sites (2026-10-10, plan §1) | **420** | same method gap — the plan's own five-verb tally reproduces here exactly (`174+117+52+38+28 = 409`), so the only delta is `REMOVE` |
 | `_graph_write_with_retry` at `sdk.py:4544` (`#7879` body) | **`sdk.py:4598`** | line drift; the plan already corrected this to `:4598`. **Second caller is `sdk.py:14750`, not `:14706`** — the symbol is authoritative, the number is a convenience (the architecture doc's own revision-pin rule) |
-| "All **24** `CREATE TABLE`s across `supabase/migrations/`" (`#7879` body) | **30 statements · 28 distinct tables · 51 files** | the count was of a subset; the conclusion (**no ontology noun in any table name**) is unaffected and was re-verified |
-| "A scan for the ontology nouns … returns **zero matches**" | **zero in table names; 80 in migration text** | ⚠️ **the claim is true of identifiers, not of text.** Quote it as *"no table or table name carries an ontology noun"* or the next reader's grep returns 80 and the finding looks false |
+| "All **24** `CREATE TABLE`s across `supabase/migrations/`" (`#7879` body) | **24 statements · 24 distinct tables · 51 files** — the body was **right** | **correction to the re-measurement, not to the body.** A naive re-measure returned `30 statements · 28 distinct tables` by counting six `--` comment lines that spell `CREATE TABLE` as prose; stripped of comments the count is **24 / 24**. The conclusion (**no ontology noun in any table name**) is unaffected and was re-verified |
+| "A scan for the ontology nouns … returns **zero matches**" | **zero in table names; 80 in raw migration text (11 once `--` comments are stripped)** | ⚠️ **the claim is true of identifiers, not of text.** Quote it as *"no table or table name carries an ontology noun"* or the next reader's grep returns 80 and the finding looks false |
 | the unit table's `W4` / `W5` / `W8` rows carry **no issue number**, and no row exists for the cache projection | **`#7968` / `#7969` / `#7970` / `#7971`** | the table predates the decomposition that created them — see §5 |
 
 ---
@@ -219,14 +219,20 @@ grep -rn "proj\.apply" tortoise/connectors/github.py tortoise/indexer/github_ind
 grep -n "STRUCTURAL_REL_LABELS\|def stub_key" tortoise/projection/edges.py
 
 # S7/S8 — the control plane's tables, its RLS coverage, and its ontology-noun count.
-grep -rhoiE "create table (if not exists )?" supabase/migrations/*.sql | wc -l            # -> 30 statements
-grep -rhoiE "create table (if not exists )?[a-z_\.\"]+" supabase/migrations/*.sql \
-  | sed -E 's/.*create table (if not exists )?//I' | tr -d '"' | sort -u | wc -l         # -> 28 distinct tables
-grep -rhoiE "enable row level security" supabase/migrations/*.sql | wc -l                # -> 23
-grep -rhoiE "create policy" supabase/migrations/*.sql | wc -l                            # -> 47
-# raw TEXT grep -> 80 hits, ALL inside control-plane identifiers. Scan the TABLE NAMES, not the text.
+# ⚠️ STRIP `--` COMMENTS FIRST. Six migration comment lines SPELL `CREATE TABLE` in prose;
+# counting them reports 30 statements / 28 tables. The comment-stripped count is 24 / 24.
+for f in supabase/migrations/*.sql; do sed -E 's/--.*$//' "$f"; done > /tmp/mig-stripped.sql
+grep -rhoiE "create table (if not exists )?" /tmp/mig-stripped.sql | wc -l                 # -> 24 statements
+grep -rhoiE "create table (if not exists )?[a-z_\.\"]+" /tmp/mig-stripped.sql \
+  | sed -E 's/.*create table (if not exists )?//I' | tr -d '"' | sort -u | wc -l          # -> 24 distinct tables
+grep -rhoiE "enable row level security" /tmp/mig-stripped.sql | wc -l                      # -> 23 (of 24 tables)
+grep -rhoiE "create policy" /tmp/mig-stripped.sql | wc -l                                  # -> 47
+# noun grep: 80 over RAW text, 11 once `--` comments are stripped (5 of those `storage.objects`,
+# 2 the `source` column, 4 SQL string literals). Scan the TABLE NAMES, not the text.
 grep -rniE "\b(point|source|event|object|subject|operator|edge|episode|narrative)s?\b" \
-  supabase/migrations/*.sql | wc -l                                                     # -> 80 (not 0)
+  supabase/migrations/*.sql | wc -l                                                       # -> 80 (raw; 69 are comment prose)
+grep -oiE "\b(point|source|event|object|subject|operator|edge|episode|narrative)s?\b" \
+  /tmp/mig-stripped.sql | wc -l                                                           # -> 11
 
 # S9 — the retry helper the chokepoint reuses, and its wiring state.
 grep -rn "_graph_write_with_retry" tortoise/ ; sed -n '14p' tortoise/retry.py
