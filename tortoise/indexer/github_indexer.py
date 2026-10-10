@@ -55,11 +55,13 @@ _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
 
 # #1989 review round 3 (security): upper bound for a plausible issue
-# number in a CLIENT-WRITABLE persisted cursor. The cursor is PATCHable via
-# /v1/onboarding/state, so a hand-patched huge `number` (e.g. 10^100) must
-# fail closed — a heal or skip keyed off it would mask an entire boundary
-# second as "processed" (permanent silent loss). Real GitHub issue numbers
-# are far below this ceiling; anything above is a malformed cursor.
+# number in a persisted cursor. #3552 made the cursor SERVER-OWNED (a client
+# PATCH of `github_index_cursor` is now refused 403), but the PERSISTED value
+# is still UNTRUSTED — a legacy row, a hand-patched DB or a server-side bug
+# can hold anything — so a huge `number` (e.g. 10^100) must still fail closed:
+# a heal or skip keyed off it would mask an entire boundary second as
+# "processed" (permanent silent loss). Real GitHub issue numbers are far below
+# this ceiling; anything above is a malformed cursor.
 _SANE_ISSUE_NUMBER_MAX = 10_000_000
 
 # Object.status → issue-state projection (inverse of the lifecycle fold).
@@ -335,9 +337,11 @@ class GitHubIndexer:
             return False
         n = github_map._norm_issue(issue)
         cur_updated = (cursor.get("updated_at") or "")
-        # #1989 review round 3 (security): the persisted cursor is
-        # CLIENT-WRITABLE (PATCH /v1/onboarding/state) — a non-int `number`
-        # must NOT crash the walk (honest-but-ungraceful job failure).
+        # #1989 review round 3 (security): the persisted cursor is UNTRUSTED
+        # (#3552 made it server-owned, so a client PATCH now 403s — but a
+        # legacy, hand-patched or server-bug-written row is still arbitrary) —
+        # a non-int `number` must NOT crash the walk (honest-but-ungraceful job
+        # failure).
         # Fail open to "process": the item is (idempotently) indexed rather
         # than skipped, so a malformed cursor can never mask a boundary
         # second as processed.
@@ -914,9 +918,9 @@ class GitHubIndexer:
             # .get() guards + falsy updated_at check keep the clear path
             # KeyError-proof against hand-patched cursors — plan-verify
             # cycle 1. #1989 review round 2 (security): the persisted
-            # cursor is CLIENT-WRITABLE (PATCH /v1/onboarding/state accepts
-            # an arbitrary dict), so the clear must also survive a
-            # malformed `number` (non-int) — fail closed by KEEPING
+            # cursor is UNTRUSTED (server-owned since #3552, but a legacy or
+            # hand-patched row is still an arbitrary dict), so the clear must
+            # also survive a malformed `number` (non-int) — fail closed by KEEPING
             # truncated (the next run re-DRAINs; `_inside_cursor` parses
             # the same field on any non-empty walk anyway).
             try:
