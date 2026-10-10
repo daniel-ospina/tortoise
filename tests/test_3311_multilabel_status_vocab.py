@@ -2,8 +2,11 @@
 validated and journaled through the generic entity surface.
 
 A node can carry two canonical labels at once — the `:Point:Object` shape.
-Such a node used to escape the Object status guard because the `:Point` arm of
-``_update_entity`` matched first and its guard is skipped. Measured on
+This surface had no Object status guard to escape: ``_update_entity`` applied
+the caller's props as given, and the ``:Point`` arm matched first. What
+distinguished the arms was JOURNALING, not validation — the ``:Point`` arm
+wrote with a live ``SET n += $p`` and emitted no state record, while the
+``:Object`` arm journaled a ``restatus`` against ITS label. Measured on
 ``origin/main`` via the documented tenant route ``update_entity(id, status=...)``:
 
     status='live'                 ACCEPTED  stored='live'
@@ -161,6 +164,90 @@ def test_reference_fold_agrees_with_the_journaled_point_status(env):
     assert result["ok"], (
         "the reference fold disagrees with the graph on a faithful journal: "
         f"{result.get('divergent_points')}")
+
+
+# ── #3311 review P1: the journal's LAST status writer must survive replay ─
+
+def test_status_write_after_supersede_wins_on_rebuild(env):
+    """A status write the journal places AFTER a supersede must survive.
+
+    ``_fold_point_superseded`` writes ``status='superseded'`` UNCONDITIONALLY
+    from the deferred pass-1b sweep, which ran after the inline ``EntityMutated``
+    ``restatus`` fold — so a later status write was reverted on ``rebuild_all``
+    while live and the chronological ``apply()``/``check_consistency`` arm kept
+    it. The point-side twin of the #4743 Object re-fold: the re-fold must run
+    AFTER the point sweep and be gated on the supersede's journal seq.
+    """
+    from tortoise.consistency import check_consistency
+
+    sdk, events = env
+    old = sdk.create_point("statement", "old claim", dedup=False,
+                           status="live")["id"]
+    new = sdk.create_point("statement", "new claim", dedup=False,
+                           status="live")["id"]
+    sdk.supersede_point(old, new)
+    sdk.update_entity(old, status="archived")
+    assert _status(sdk, old) == "archived"
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _status(sdk, old) == "archived", (
+        "the deferred PointSuperseded sweep clobbered a LATER journaled status "
+        "write — live/replay divergence")
+
+    result = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert result["ok"], result.get("divergent_points")
+
+
+def test_supersede_after_status_write_still_ends_superseded(env):
+    """The reverse order must NOT be inverted by the parity fix.
+
+    A status write journalled BEFORE the supersede is the OLDER writer, so the
+    deferred supersede fold legitimately wins. A fix that re-folded every state
+    op (or that always re-applied the inline value) would flip this to the
+    stale status — this is the guard that the ordering fix is a comparison and
+    not an inversion.
+    """
+    sdk, events = env
+    old = sdk.create_point("statement", "old claim", dedup=False,
+                           status="live")["id"]
+    new = sdk.create_point("statement", "new claim", dedup=False,
+                           status="live")["id"]
+    sdk.update_entity(old, status="draft")   # non-terminal: supersede is legal
+    sdk.supersede_point(old, new)
+    assert _status(sdk, old) == "superseded"
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _status(sdk, old) == "superseded", (
+        "a supersede journalled AFTER the status write must still terminalize "
+        "the point on replay")
+
+
+def test_supersede_status_then_delete_rebuild_does_not_miss(env):
+    """The re-fold must not manufacture a fold-miss for a deleted Point.
+
+    ``create -> supersede -> update(status) -> delete``: the delete folds
+    inline, so by the time the point re-fold runs the node is gone. Re-folding
+    the status op then can only emit a spurious ``state-op-miss`` and fail the
+    run (``NonFoldedEventsError``) for a journal every engine replays
+    correctly — the same round-6 trap the Object re-fold's existence guard
+    exists for. Pins that guard.
+    """
+    sdk, events = env
+    old = sdk.create_point("statement", "old claim", dedup=False,
+                           status="live")["id"]
+    new = sdk.create_point("statement", "new claim", dedup=False,
+                           status="live")["id"]
+    sdk.supersede_point(old, new)
+    sdk.update_entity(old, status="archived")
+    sdk.delete(old)
+
+    # Must not raise: the deleted Point's later status op is legitimately
+    # unfolded (there is no node left), not a reconciliation failure.
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)",
+        params={"id": old}).result_set[0][0] == 0, \
+        "a hard-deleted point must not reappear on replay"
 
 
 # ── The vocabulary values stay writable (owner ruling) ───────────────────

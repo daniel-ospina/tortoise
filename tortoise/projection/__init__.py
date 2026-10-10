@@ -8210,11 +8210,12 @@ class FalkorProjection(
         # double-reported every fold-miss warning).
         for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
             if _ujm_label != "Object":
-                # `_fold_object_superseded` is the only non-Point deferred fold
-                # that writes a property a state op also writes; the point
-                # sweeps below are :Point-scoped and no producer emits an
-                # `EntityMutated` state op for a Point (`_update_entity`'s Point
-                # branch emits PointRevised instead).
+                # The `:Point` half of this re-fold CANNOT live here: the
+                # `:Point` terminalizer sweep runs LATER in this function, so a
+                # point re-fold at this position would be clobbered by it. It
+                # is done after that sweep (below), gated on `supersede_last` —
+                # `_supersede_seq` is populated only in the `ObjectSuperseded`
+                # branch, so it can never name a Point.
                 continue
             _sup = _supersede_seq.get(("id", _ujm_id))
             _rows = self.g.query(
@@ -8390,6 +8391,54 @@ class FalkorProjection(
                         "not re-created by any journaled event (legacy "
                         "journal, unjournaled producer, or delete race)",
                         ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+        # #3311 review P1: the `:Point` analog of the #4743 re-fold above. It
+        # MUST run here, after the `:Point` terminalizer sweep — at the Object
+        # loop's position it would be clobbered by the sweep that follows. The
+        # premise the old `continue` asserted ("no producer emits an
+        # `EntityMutated` state op for a Point") is false: `_update_entity`'s
+        # #3311 arm journals `restatus` against `Point` for a status write on a
+        # `:Point`-carrying node, and `_fold_point_superseded` writes
+        # `status='superseded'` UNCONDITIONALLY — so a status write the journal
+        # places AFTER a supersede was reverted to the supersede's value by
+        # every `rebuild_all`, while live and the chronological `apply()` arm
+        # kept the later write (measured: create(status=live) →
+        # supersede_point → update_entity(status=archived) rebuilt as
+        # `superseded` and failed `check_consistency`). The gate is the id's
+        # SURVIVING supersede (`supersede_last`, the same canonicalized
+        # survivor the sweep just folded), NOT `_supersede_seq` — that map is
+        # populated only in the `ObjectSuperseded` branch and can never govern
+        # a Point. `PointSuperseded` is the only deferred fold that writes
+        # `status` (the invalidate arm deliberately leaves it live) and
+        # `restatus` is the only state op a Point producer emits, so this one
+        # gate covers every such record. Events re-fold in seq order (each
+        # `_state_folds` list is append-ordered), so the LAST journaled writer
+        # wins — exactly as live and `apply()` resolve it.
+        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
+            if _ujm_label != "Point":
+                continue
+            _psup = supersede_last.get(_ujm_id)
+            if _psup is None:
+                continue
+            # Mirror the Object loop's existence guard: a Point the journal
+            # HARD-DELETED by this point in the replay has nothing for the
+            # sweep to have clobbered and nothing to restore, so re-folding
+            # here can only MANUFACTURE a `state-op-miss` for a mutation the
+            # inline fold already applied correctly (the shape
+            # create -> supersede -> update(status) -> delete: the delete is
+            # journalled and folded inline, so the node is gone by now and
+            # the sweep's own 0-row miss is the EXEMPT delete-race shape).
+            if not self.g.query(
+                    "MATCH (p:Point {id:$i}) RETURN p.id LIMIT 1",
+                    params={"i": _ujm_id}).result_set:
+                continue
+            _psup_seq = _psup[0]
+            for _seq, _ev in _ujm_events:
+                if _seq > _psup_seq:
+                    self._fold_entity_mutation(
+                        _ev,
+                        journal_first_materialized=first_materialized,
+                        journal_seq=_seq)
+
         # fold_seq[old_id] = journal seq of the id's surviving supersede fold
         # (pass-2b re-point discriminator; bound to the supersede-kind
         # survivor so a mixed invalidate→supersede never binds the invalidate
