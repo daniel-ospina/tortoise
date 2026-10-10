@@ -36,8 +36,8 @@ SUCCESS). That evidence is pi's own render string, not
 a secret, so a verdict means pi's display showed acceptance, not proof of it (see
 RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
 
-QUEUED IS NOT UNCONSUMED (#5979)
---------------------------------
+QUEUED IS DELIVERED, NOT A LOST SEND (#5979)
+--------------------------------------------
 `latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
 mid-turn — i.e. every lane that is actually working — pi ACCEPTS a submission
 into its queue and consumes it when the current turn ends, so the strict "is it
