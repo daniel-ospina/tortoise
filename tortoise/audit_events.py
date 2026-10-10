@@ -1,7 +1,8 @@
 """Audit event logger — three-tier persistence for control-plane operations.
 
 Tier 1: Postgres INSERT via psycopg2 (sync, optional)
-Tier 2: Local JSONL fallback file (~/.tortoise/audit_fallback.jsonl)
+Tier 2: Local JSONL fallback file ($TORTOISE_AUDIT_FALLBACK_DIR, else
+        ~/.tortoise/audit_fallback.jsonl) — resolved lazily, at write time
 Tier 3: Replay — on next successful connection, replay fallback into Postgres
 
 Postgres is optional. When TORTOISE_AUDIT_DSN is unset or psycopg2 is not
@@ -40,6 +41,34 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
         "will fall back to JSONL. Install the 'postgres' extra "
         "(pip install -e '.[postgres]')."
     )
+
+
+# #7924 review P2: a fallback event that reached NO durable location used to be
+# indistinguishable in-process from a persisted one (the ERROR log was the only
+# evidence). Count the DROPs by cause so a loss is observable and countable —
+# the shape the analytics sink already uses (hosted_api._analytics_sink_dropped,
+# #3820). Still NON-FATAL by design: audit failure must never break the serving
+# flow (see hosted_api._audit_auth_failure).
+_fallback_drops: dict[str, int] = {}
+_fallback_drops_lock = threading.Lock()
+
+
+def audit_fallback_drop_count(reason: str | None = None) -> int:
+    """Count of audit events that reached NO durable sink (#7924 review P2).
+
+    Read-only observability seam. With ``reason`` (``"unresolvable_path"`` —
+    the fallback location could not be resolved — or ``"write_failed"``), the
+    count for that cause; without, the total.
+    """
+    with _fallback_drops_lock:
+        if reason is None:
+            return sum(_fallback_drops.values())
+        return _fallback_drops.get(reason, 0)
+
+
+def _note_fallback_drop(reason: str) -> None:
+    with _fallback_drops_lock:
+        _fallback_drops[reason] = _fallback_drops.get(reason, 0) + 1
 
 
 def _now_iso() -> str:
@@ -105,6 +134,12 @@ class AuditLogger:
         3. ``$TORTOISE_AUDIT_FALLBACK_DIR`` (a relocation knob),
         4. ``$HOME/.tortoise`` (the documented default).
 
+        A whitespace-only override is treated as UNSET (#7924 review P2):
+        ``Path(" ")`` would otherwise be a RELATIVE path, so ``_write_fallback``
+        would mkdir a literal ``" "`` directory in the CWD and drop audit
+        events there. The peer knobs (``TORTOISE_PACKS_DIR``,
+        ``TORTOISE_DB_PATH``) normalize the same way.
+
         Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
         malformed ``$HOME``); callers that must not raise wrap the call.
         """
@@ -112,7 +147,7 @@ class AuditLogger:
             return self._fallback_path
         if self._fallback_dir is not None:
             return self._fallback_dir / "audit_fallback.jsonl"
-        override = os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR")
+        override = (os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR") or "").strip()
         base = Path(override) if override else Path.home() / ".tortoise"
         return base / "audit_fallback.jsonl"
 
@@ -256,19 +291,38 @@ class AuditLogger:
             self._replay_backoff = min(self._replay_backoff * 2, 30)
             return False
 
-    def _write_fallback(self, event: dict) -> None:
+    def _write_fallback(self, event: dict) -> bool:
         """Append event to local JSONL fallback file.
 
-        Ensures the parent directory exists so a reassigned fallback path
-        (or a deleted dir) never silently drops audit events.
+        Resolves the path OUTSIDE the best-effort write guard (#7924 review
+        P2): a location we cannot RESOLVE is a DROP, not a write error, and it
+        is reported and counted as one — never conflated with a successful
+        write. Ensures the parent directory exists so a reassigned fallback
+        path (or a deleted dir) never silently drops audit events.
+
+        Returns True if the event was durably appended. Never raises — audit
+        failure must not break the serving flow; the drop is surfaced through
+        the log and ``audit_fallback_drop_count()`` instead.
         """
         try:
             path = self._fallback_file()
+        except Exception as e:
+            _note_fallback_drop("unresolvable_path")
+            _logger.error(
+                "AuditLogger: fallback path unresolvable — audit event "
+                "DROPPED (not persisted anywhere): %s", e)
+            return False
+        try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a") as f:
                 f.write(json.dumps(event, default=str) + "\n")
+            return True
         except Exception as e:
-            _logger.error("AuditLogger: fallback write failed: %s", e)
+            _note_fallback_drop("write_failed")
+            _logger.error(
+                "AuditLogger: fallback write failed — audit event DROPPED "
+                "(not persisted anywhere): %s", e)
+            return False
 
     def _replay_fallback(self) -> None:
         """Replay accumulated fallback entries into Postgres.
