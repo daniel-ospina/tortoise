@@ -10,7 +10,7 @@ import logging
 import os
 import shutil
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,14 +98,18 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
 
     CONCURRENCY (stated, not fixed): the aside-then-restore protocol assumes
     exclusive ownership of the destination, and `restore` takes no lock of its
-    own — the store's writer flock is not acquired until the projection is
-    constructed, after every rename here. Two restores into the SAME
-    destination can therefore interleave (one rollback discarding another's
-    committed result). That is outside the supported posture rather than a new
-    contract: an embedded store is a single-writer store
-    (docs/durability-posture.md), so callers must not run two restores against
-    one destination concurrently. Closing it needs a destination-wide lock
-    (tracked with the #7928 residual, not widened here).
+    own. There is no store-wide WRITER lock to lean on: the flock taken when a
+    projection is constructed is the per-RDB CONSTRUCTION lock
+    (tortoise/embedded_lifecycle.py), held only for the constructor and released
+    when it returns, and the only lifetime lock is the SHARED owner/reaper lock
+    — two restores can hold it together. Two restores into the SAME destination
+    can therefore interleave across the WHOLE restore (staging, copy, replay,
+    and the success-path aside-drop), not merely the staging renames; one
+    rollback can then discard another's committed result. That is outside the
+    supported posture rather than a new contract: an embedded store is a
+    single-writer store (docs/durability-posture.md), so callers must not run
+    two restores against one destination concurrently. Closing it needs a
+    destination-wide lock (tracked with the #7928 residual, not widened here).
     """
     token = uuid.uuid4().hex[:12]
     staged: list[tuple[Path, Path]] = []
@@ -122,14 +126,25 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
         staged.append((original, side))
 
     def _discard(path: Path) -> None:
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            # OSError, not FileNotFoundError: cleanup is best-effort and must
-            # never raise — a single undeletable entry may not abort the
-            # unwind loop (see the `except` branch below).
-            with suppress(OSError):
+        """Best-effort removal that never raises, but never hides a failure.
+
+        Cleanup is the last thing standing between a failed restore and a lost
+        destination, so a removal that does not happen must be VISIBLE: the
+        caller's original exception says nothing about it, and the bytes it
+        failed to remove can shadow the restored destination. `FileNotFoundError`
+        is the expected no-op; every other `OSError` is logged.
+        """
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
                 os.remove(path)
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning(
+                "restore: could not remove %s — what remains there may shadow "
+                "the restored destination", path, exc_info=True)
 
     # The staging renames live INSIDE the guarded region. `os.replace` is not
     # infallible (a read-only parent dir, ENOSPC, or the exists()->replace
@@ -159,9 +174,15 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
             # The unwind must not itself raise: an un-restorable entry would
             # otherwise abandon every remaining one AND replace the caller's
             # original exception with the rollback's. Each restore is attempted
-            # independently; `_discard` above is likewise non-raising.
-            with suppress(OSError):
+            # independently — but a failure is LOGGED, never silent, because the
+            # caller's exception does not say the destination was left at `side`.
+            try:
                 os.replace(side, original)
+            except OSError:
+                logger.error(
+                    "restore rollback FAILED to put %s back from %s — the "
+                    "destination was NOT restored; the original bytes survive "
+                    "at that aside path", original, side, exc_info=True)
         raise
     else:
         for _original, side in staged:
