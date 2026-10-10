@@ -1605,6 +1605,10 @@ def _disable_embedder_autowarmup(monkeypatch):
     in the background, and a failed load would emit WARNING noise into
     ``caplog`` assertions. Tests that exercise the warm-up call it directly
     (with a stubbed ``EmbeddingModel.get``).
+
+    #7809: the flag now also gates the hosted lifespan pre-warm
+    (``tortoise.hosted_api._lifespan``), which previously ignored it and
+    leaked a real embedder load into the next test.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
     yield

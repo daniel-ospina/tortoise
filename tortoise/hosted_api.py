@@ -1856,6 +1856,11 @@ async def _lifespan(app):
     when the 30s load timeout was exceeded on a cold 2GB VM. Embeddings are
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
+
+    #7809: the pre-warm honours ``TORTOISE_EMBEDDER_WARMUP`` (the same
+    contract ``EmbeddingModel.start_warm_up`` enforces, fail-safe default ON).
+    ``TORTOISE_EMBEDDER_WARMUP=0`` skips the thread entirely, so the test
+    suite's opt-out is not silently bypassed by the hosted lifespan.
     """
     # ── #2850: every app instance starts from a clean health-probe state.
     # A probe worker wedged during a previous app instance (TestClient reuse
@@ -1957,7 +1962,25 @@ async def _lifespan(app):
                 except Exception as exc:
                     _logger.warning("embeddings: background pre-warm failed: %s", exc)
 
-            threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
+            # #7809: honour the SAME ``TORTOISE_EMBEDDER_WARMUP`` contract
+            # ``EmbeddingModel.start_warm_up`` enforces (#4097). Without this
+            # the suite-wide ``TORTOISE_EMBEDDER_WARMUP=0``
+            # (tests/conftest.py::_disable_embedder_autowarmup) was ignored
+            # here, so every ``with TestClient(ha.app)`` started a REAL
+            # embedder load that outlived its test and leaked into the next
+            # one. Fail-safe: an unset env keeps the pre-warm ON.
+            from tortoise.embeddings import _embedder_warmup_enabled
+
+            if _embedder_warmup_enabled():
+                threading.Thread(
+                    target=_prewarm_embeddings, name="embedding-prewarm",
+                    daemon=True,
+                ).start()
+            else:
+                _logger.info(
+                    "embeddings: background pre-warm skipped "
+                    "(TORTOISE_EMBEDDER_WARMUP=0)"
+                )
         except Exception as exc:
             _logger.warning("embeddings: could not start background pre-warm: %s", exc)
 
