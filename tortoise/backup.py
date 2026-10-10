@@ -109,7 +109,7 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
     supported posture rather than a new contract: an embedded store is a
     single-writer store (docs/durability-posture.md), so callers must not run
     two restores against one destination concurrently. Closing it needs a
-    destination-wide lock (tracked with the #7928 residual, not widened here).
+    destination-wide lock, tracked by #7935 — deliberately NOT widened here.
     """
     token = uuid.uuid4().hex[:12]
     staged: list[tuple[Path, Path]] = []
