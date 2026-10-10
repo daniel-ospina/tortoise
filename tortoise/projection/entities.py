@@ -2023,6 +2023,51 @@ class _EntityHandlers:
             params={"sid": session_id, "tid": point_id},
         )
 
+    def _fold_session_deleted(self, ev: dict) -> int:
+        """#7951: the ``:Session`` node's hard-delete carrier.
+
+        ``hosted_api._delete_session_sync`` removes the ``:Session`` with a raw
+        ``DETACH DELETE``. The node is NOT a canonical entity label
+        (``_CANONICAL_ENTITY_ID_PROPS`` has no ``Session``), so no
+        ``EntityMutated`` record can delete it — that fold would fall back to
+        the id-wide canonical delete and leave the Session standing while
+        ``SessionRecorded`` re-materialised it on replay. Without a carrier the
+        whole session deletion is invisible to ``derived = replay(journal)`` and
+        the next rebuild RESURRECTS it (with its ``CONTAINS`` edges re-wired).
+
+        The fold removes the ``:Source`` the session delete removes in the same
+        step — its agentSession stub, ``url = session:{id}`` — because that
+        node is re-materialised by ``rebuild_all``'s pass-2 ``_link_source``
+        from the deleted Points' own payloads, so it must be re-asserted
+        together with the container. Both nodes are keyed off the SAME
+        re-creation anchor (a later ``SessionRecorded`` for the id), so one
+        carrier cannot drift from the other.
+
+        Idempotent: a 0-row delete is the record's END STATE (a retried delete,
+        or a replay onto a graph the record already cleared), so it is NEVER a
+        fold-miss and must not be refused. ``DETACH`` drops the ``CONTAINS``
+        edges; the owned Points and Events themselves are removed by their own
+        ``EntityMutated`` op=delete records, which the same delete site emits.
+
+        Returns the number of Session nodes deleted.
+        """
+        from tortoise.projection import _writable_id
+
+        if not isinstance(ev, dict):
+            return 0
+        sid = ev.get("id")
+        if not _writable_id(sid):
+            return 0
+        self.g.query(
+            "MATCH (src:Source {url:$url}) DETACH DELETE src",
+            params={"url": f"session:{sid}"},
+        )
+        r = self.g.query(
+            "MATCH (s:Session {id:$sid}) DETACH DELETE s RETURN count(s)",
+            params={"sid": sid},
+        )
+        return int(r.result_set[0][0]) if r.result_set else 0
+
     def _upsert(self, p: dict, contains_session: str | None = None) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)

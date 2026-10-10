@@ -3623,6 +3623,10 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     # exception — see the NOTE above).
     "EntityLinked",
     "SessionRecorded",
+    # #7951: the :Session hard-delete carrier. A real fold in
+    # ``apply``/``rebuild_all``, but a Session node is not a Point, so this
+    # ``{id: point}`` index has no representation for it.
+    "SessionDeleted",
 })
 
 
@@ -6678,6 +6682,14 @@ class FalkorProjection(
             # is a raw write, so without this a rebuild lost the node (and
             # made any EntityLinked edge from it unreplayable).
             return self._fold_session_recorded(ev)
+        elif t == "SessionDeleted":
+            # #7951: the :Session hard-delete carrier (JSONL-only). The
+            # session delete is a raw DETACH DELETE and no EntityMutated
+            # record can express it (Session is not a canonical label), so
+            # without this record the delete is invisible to replay and the
+            # rebuild resurrects the Session. Idempotent: a 0-row delete is
+            # the record's end state, never a fold-miss.
+            return self._fold_session_deleted(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectSuperseded":
@@ -7974,6 +7986,21 @@ class FalkorProjection(
         # live (which never removed the node). Both are recorded below.
         hard_deleted_seq: dict[tuple[str | None, str], int] = (
             hard_deleted_pairs(events))
+        # #7951: the `:Session` re-creation anchor — the LAST `SessionRecorded`
+        # seq per session id. A `SessionDeleted` at or before it was superseded
+        # live by that re-capture, so the container (and its agentSession
+        # `:Source`, which `_fold_session_deleted` removes with it) must
+        # survive the deferred re-apply at the end of the replay. `hard_deleted
+        # _pairs` cannot carry this anchor — its re-creation anchors are seeded
+        # from Point/Operator creations only, and `Session` is not a canonical
+        # entity label.
+        last_session_recorded: dict[str, int] = {}
+        for _seq, _raw in enumerate(events):
+            _ev = _norm(_raw) if isinstance(_raw, dict) else None
+            if _ev is not None and _ev.get("type") == "SessionRecorded":
+                _rid = _ev.get("id")
+                if isinstance(_rid, str):
+                    last_session_recorded[_rid] = _seq
         # The map is built ONCE for the whole journal (the same builder the
         # apply()-based engines and the reference fold use), not accumulated
         # in the loops below — a single reader is what keeps the five surfaces
@@ -8210,6 +8237,13 @@ class FalkorProjection(
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
+        # #7951: `SessionDeleted` records, re-applied AFTER every replay pass.
+        # Pass 2 re-derives edges from EVERY `PointAdded` and its `_link_source`
+        # / `_link_session` side effects MERGE the `:Source` / `:Session` back —
+        # undoing the pass-1b `SessionDeleted` fold for the deleted Points'
+        # payloads. Carried WITH the journal seq so the deferred re-apply can
+        # skip a delete a later `SessionRecorded` supersedes.
+        session_delete_folds: list[tuple[int, dict]] = []
         # #2884 A3 (supersede): the supersede family's BELIEF decay folds
         # INLINE at the event's own journal seq, exactly as the invalidate
         # family's does (`_decay_point_belief`). The trailing sweep runs AFTER
@@ -8782,6 +8816,14 @@ class FalkorProjection(
                 # #3664: the :Session node must exist before any deferred
                 # EntityLinked fold FROM it runs (the sweep below).
                 self._fold_session_recorded(ev)
+            elif t == "SessionDeleted":
+                # #7951: replay the :Session hard delete (see
+                # `_fold_session_deleted`). Idempotent — a 0-row match is
+                # the record's end state, so it is never refused. Also
+                # buffered for the post-pass-2 re-assert (pass 2 re-merges
+                # the container from the deleted Points' `_link_session`).
+                session_delete_folds.append((seq, ev))
+                self._fold_session_deleted(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
@@ -10057,6 +10099,24 @@ class FalkorProjection(
                             f"(b:Point {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
+
+        # ── #7951: re-assert the journal's session hard-deletes ───────
+        # AFTER every replay pass. Pass 2 re-derives edges from EVERY
+        # `PointAdded`, and its `_link_source` / `_link_session` side effects
+        # MERGE the deleted session's `:Source` / `:Session` back — undoing the
+        # pass-1b `SessionDeleted` fold for the deleted Points' payloads. The
+        # re-apply is GATED on a later `SessionRecorded` for the same id: a
+        # same-id re-capture supersedes the delete, so its container and Source
+        # must survive. Idempotent — a 0-row `_fold_session_deleted` is the
+        # record's end state, never a fold-miss.
+        for _seq, _ev in session_delete_folds:
+            _sid = _ev.get("id")
+            if (isinstance(_sid, str)
+                    and last_session_recorded.get(_sid, -1) > _seq):
+                # A later same-id `SessionRecorded` re-created the container
+                # live, so this delete was superseded — do not re-apply it.
+                continue
+            self._fold_session_deleted(_ev)
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is

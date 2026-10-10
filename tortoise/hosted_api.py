@@ -12231,7 +12231,8 @@ _SWEEP_EVENT_DELETE_CYPHER = (
     "OPTIONAL MATCH (s:Session {id:$sid}) "
     "WITH count(s) AS present "
     "WHERE present = 0 "
-    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e"
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e "
+    "RETURN count(e)"
 )
 
 
@@ -13436,13 +13437,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # row, so the old shape never filtered (verified by execution: the
             # delete ran with a live Session present).
             with suppress(Exception):
-                proj.g.query(
+                _r = proj.g.query(
                     "OPTIONAL MATCH (s:Session {id:$sid}) "
                     "WITH count(s) AS present "
                     "WHERE present = 0 "
-                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
+                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p "
+                    "RETURN count(p)",
                     params={"sid": session_id, "ids": point_ids},
                 )
+                # #7951: journal the sweep ONLY when the guarded delete
+                # actually removed a node (a live Session makes the query a
+                # no-op, and journaling then would replay a delete live never
+                # made). Idempotent `EntityMutated` op=delete per id — without
+                # it the capture's own PointAdded lines resurrect the orphans.
+                if (_r.result_set and (_r.result_set[0][0] or 0)):
+                    for _pid in point_ids:
+                        sdk._journal_entity_mutation("Point", _pid, "delete")
         if minted_event and event_id:
             # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
             # the minted eventId is now DETERMINISTIC
@@ -13461,10 +13471,37 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # FalkorDB). Shared with tests via _SWEEP_EVENT_DELETE_CYPHER
             # (real-graph pin, both lanes).
             with suppress(Exception):
-                proj.g.query(
+                _r = proj.g.query(
                     _SWEEP_EVENT_DELETE_CYPHER,
                     params={"sid": session_id, "eid": event_id},
                 )
+                # #7951: journal the removed Event only when the guard let it
+                # through (see the Point block above).
+                if (_r.result_set and (_r.result_set[0][0] or 0)):
+                    sdk._journal_entity_mutation("Event", event_id, "delete")
+        # #7951: the agentSession Source stub + the container removal. The
+        # Source (url = session:{id}) is re-materialised by `rebuild_all`'s
+        # pass-2 `_link_source` from the orphaned Points' own payloads, so its
+        # removal must be journaled alongside the container. `Session` is NOT a
+        # canonical entity label, so no `EntityMutated` record can express it —
+        # `SessionDeleted` is the dedicated JSONL-only carrier
+        # (`_fold_session_deleted`), and it removes the Source in the same fold.
+        #
+        # The emit is GATED on the same session-absence check the guarded delete
+        # below performs, read immediately BEFORE it: a same-id re-capture that
+        # MERGEd a fresh Session between the dead-branch check and here must not
+        # be journaled as deleted (the re-capture's own `SessionRecorded` may
+        # sit EARLIER in the journal than this sweep, so the deferred re-apply's
+        # re-creation gate cannot be relied on to undo a false record).
+        session_gone = False
+        with suppress(Exception):
+            _g = proj.g.query(
+                "OPTIONAL MATCH (s:Session {id:$sid}) "
+                "WITH count(s) AS present RETURN present",
+                params={"sid": session_id},
+            )
+            session_gone = bool(_g.result_set) and not (
+                _g.result_set[0][0] or 0)
         with suppress(Exception):
             proj.g.query(
                 "OPTIONAL MATCH (s:Session {id:$sid}) "
@@ -13473,6 +13510,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (src:Source {url:$url}) DETACH DELETE src",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
+        if session_gone:
+            sdk._emit_event("SessionDeleted", id=session_id)
 
     receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
@@ -15967,6 +16006,15 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
         #    the Source's own eventId is the fallback leg for the Source-absent
         #    materialization path). A missing Event-write leaves no eventId —
         #    nothing to match, no dangling.
+        #    #7951: the owned Point ids are gathered here too. The JSONL
+        #    hard-delete records emitted below need them and after step 3 the
+        #    nodes no longer exist to enumerate; without a record per removed
+        #    node the deletion is invisible to `derived = replay(journal)` and
+        #    the next rebuild RESURRECTS the session subgraph.
+        point_ids = [r[0] for r in proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
+            params={"sid": session_id},
+        ).result_set if r[0]]
         ev_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
@@ -15989,6 +16037,11 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
             params={"sid": session_id},
         )
+        # #7951: journal each removed Point. `EntityMutated` op=delete is the
+        # established hard-delete record (#3299) whose fold removes the node;
+        # without it the PointAdded lines replay and the Points resurrect.
+        for _pid in point_ids:
+            sdk._journal_entity_mutation("Point", _pid, "delete")
 
         # 4) the sessionCaptured provenance Event(s) by the collected ids.
         if event_ids:
@@ -15996,6 +16049,9 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
                 "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
                 params={"ids": event_ids},
             )
+            # #7951: journal each removed Event (fold keys on `eventId`).
+            for _eid in event_ids:
+                sdk._journal_entity_mutation("Event", _eid, "delete")
 
         # 5) the agentSession Source stub (url = session:{id}) + the Session.
         proj.g.query(
@@ -16006,6 +16062,14 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
             "MATCH (s:Session {id:$sid}) DETACH DELETE s",
             params={"sid": session_id},
         )
+        # #7951: journal the container removal. `Session` is NOT a canonical
+        # entity label, so no `EntityMutated` record can express it —
+        # `SessionDeleted` is the dedicated JSONL-only carrier
+        # (`_fold_session_deleted`), and it removes the agentSession Source in
+        # the same fold (that node is re-materialised by rebuild_all's pass-2
+        # `_link_source` from the deleted Points, so it must be re-asserted
+        # with the container).
+        sdk._emit_event("SessionDeleted", id=session_id)
 
         # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
         #    steps above are individually atomic but the SEQUENCE is not — a

@@ -154,6 +154,24 @@ that the payload does not name:
   opening record is emitted before any result is known and cannot carry them; a
   null `capture_ok` would otherwise read as the legacy "presumed captured"
   case at the #2335 retry gate).
+- **`SessionDeleted`** (#7951) — the `:Session` node's hard-delete carrier,
+  emitted by `hosted_api`'s `DELETE /v1/sessions/{id}`
+  (`_delete_session_sync`). JSONL-only (NOT in `_GRAPH_EVENT_TYPES`): fields
+  are `id` (the session id). The session delete is a raw `DETACH DELETE` and
+  `Session` is not a canonical entity label (`_CANONICAL_ENTITY_ID_PROPS`),
+  so no `EntityMutated` record can express the removal — that fold would fall
+  back to the id-wide canonical delete and leave the Session standing while
+  `SessionRecorded` re-materialised it. Folded idempotently by
+  `FalkorProjection._fold_session_deleted` (a 0-row `DETACH DELETE` is the
+  record's END STATE, never a fold-miss). The fold removes the session's
+  agentSession `:Source` stub (`url = session:{id}`) in the SAME step — that
+  node is re-materialised by `rebuild_all`'s pass-2 `_link_source` from the
+  deleted Points' own payloads, and both nodes are keyed off the same
+  re-creation anchor (a later `SessionRecorded`), so one carrier cannot
+  drift from the other. The session's `CONTAINS` Points and its
+  `sessionCaptured` Event(s) are journaled separately as `EntityMutated`
+  op=delete records by the same delete site and by the delete-during-capture
+  sweep (`_sweep_orphaned_writes`).
 
 **Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
 four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
@@ -165,7 +183,14 @@ carries no `seq`; each engine pairs it with its journal position — the
 boundary is compared against that position), so a same-id re-creation does
 not resurrect the deleted link. On `rebuild_all` the
 sweep runs AFTER pass 2, so a `:Session` source recreated from a
-`contains_session` turn link exists before the fold.
+`contains_session` turn link exists before the fold. `SessionDeleted` is
+carried with its journal seq into a deferred list and re-applied AFTER every
+replay pass, gated on a later same-id `SessionRecorded` (a re-capture
+supersedes the delete, so its container and Source must survive): pass 2
+re-derives edges from every `PointAdded`, and its `_link_source` /
+`_link_session` side effects MERGE the deleted session's `:Source` /
+`:Session` back — undoing pass 1b's `SessionDeleted` fold for the deleted
+Points' payloads (#7951).
 
 **No down-version guarantee for new folded record types.** A binary that
 predates #3585, rebuilding a journal written by a newer one, warns that the
