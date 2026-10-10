@@ -6596,6 +6596,23 @@ class CreatePointRequest(BaseModel):
                 raise ValueError("tags cannot contain newlines or tabs")
         return v
 
+    @field_validator("credibility")
+    @classmethod
+    def valid_credibility(cls, v):
+        # #1088: the ladder word/scale is resolved by the SDK itself
+        # (`source_credibility.credibility_prior`). Validating HERE turns a
+        # typo into the 422 this model's other author fields promise instead
+        # of a 500 raised from deep inside `create_point` (the route's bare
+        # `except Exception` maps anything unanticipated to 500).
+        if v is None:
+            return v
+        from tortoise.source_credibility import credibility_prior
+        if credibility_prior(v) is None:
+            raise ValueError(
+                f"Unknown credibility {v!r}. Ladder words: gold / high / "
+                "medium / low / unverified (or the T0-T4 / numeric forms).")
+        return v
+
 
 class PointResponse(BaseModel):
     id: str

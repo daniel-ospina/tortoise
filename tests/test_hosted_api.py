@@ -1562,6 +1562,33 @@ class TestPointsCreateConfidenceAndAuthor:
         assert "confidence" not in props, props
         assert "authoredBy" not in props, props
 
+    def test_credibility_calibrates_the_point(self, client):
+        # #1088: the REST write surface can AUTHOR a baseline — the same
+        # capability the MCP `tortoise_create_point` tool has. Without it a
+        # live write can never be made EP-able through this endpoint (the
+        # fail-closed calibration gate makes `/v1/dream` refuse it).
+        r = client.post(
+            "/v1/points",
+            json={"content": "credibility round trip", "kind": "statement",
+                  "credibility": "gold"},
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("baseline_set") is True, props
+        # An author-stated baseline is the source — never the system default.
+        assert props.get("baseline_source") != "system-default", props
+
+    def test_bad_credibility_is_rejected_not_500(self, client):
+        # A ladder word the store cannot resolve must be ANSWERED with a 4xx
+        # (like the sibling confidence bound), never mapped to the route's
+        # catch-all 500 — the value is a client error, not a server fault.
+        r = client.post(
+            "/v1/points",
+            json={"content": "bad credibility", "kind": "statement",
+                  "credibility": "platinum"},
+        )
+        assert r.status_code == 422, r.text
+
 
 class TestPointsList:
     """GET /v1/points — list Points."""

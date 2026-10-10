@@ -465,18 +465,37 @@ def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
 
     MUTATION THAT REDS THIS TEST: drop ``promotion_ids`` so the folded leg's
     ids are promoted by ``_apply_capture_ingest_ep``.
+
+    The folded canonical MUST be CAPTURE-MINTED (``pt_`` id + ``eventId``):
+    the consolidation surface refuses to fold onto anything else
+    (``sdk.py`` — ``reason != "identical" or not nid.startswith("pt_") or
+    row is None or not row[1]``), so a directly-created draft never reaches
+    the pass and the assertions below hold vacuously.
     """
     import tortoise.extractor_v2 as ev2
-    draft = sdk.create_point("statement", "explicitly staged claim",
-                             status="draft")
-    assert sdk.get_point(draft["id"])["status"] == "draft"
-    # A later capture folds onto the explicit draft (no payload points).
+    proj = sdk._get_proj()
+    # 1. Mint a canonical through a capture, so it carries the ``pt_`` id
+    #    and provenance the fold surface requires.
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor(["explicitly staged claim"]))
+    first = sdk.capture_session([{"role": "user", "content": "seed"}])
+    canonical_id = first["points"][0]["id"]
+    assert canonical_id.startswith("pt_"), canonical_id
+    # 2. The agent stages it draft and it carries NO EP calibration (its own
+    #    ingest pass failed fail-open / never ran) — the folded selector keys
+    #    on the EP markers, so it IS a target.
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='draft' "
+        "REMOVE n.posterior_alpha, n.posterior_beta, n.ep_alpha, n.ep_beta",
+        params={"id": canonical_id})
+    assert sdk.get_point(canonical_id)["status"] == "draft"
+    # 3. A later capture folds onto the explicit draft (no payload points).
     fold = _stub_extractor([], noops=[
-        {"point_id": draft["id"], "reason": "identical",
+        {"point_id": canonical_id, "reason": "identical",
          "overlap": 1.0, "evidence": "exact"}])
     monkeypatch.setattr(ev2, "extract_session_v2", fold)
     res = sdk.capture_session([{"role": "user", "content": "hello"}])
-    after = sdk.get_point(draft["id"])
+    after = sdk.get_point(canonical_id)
     assert after["status"] == "draft", (
         "an explicitly-drafted point a later capture deduped onto was "
         f"promoted: {res}"
