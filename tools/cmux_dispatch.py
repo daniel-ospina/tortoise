@@ -57,7 +57,7 @@ lane's scrollback legitimately contains arbitrary such text. A pending entry tha
 is NEW (a higher COUNT of matching entries) relative to the pre-send screen and
 carries THIS message — exactly, or as a truncated head whose raw text ends in the
 renderer's `...` — is direct evidence the message entered pi's queue -> `queued`,
-exit 0. `Dispatcher.send_message` flattens newlines up front (as `_read_message`
+DELIVERED but not CONSUMED (exit 4 — see EXIT CODES; #7743). `Dispatcher.send_message` flattens newlines up front (as `_read_message`
 does), because pi renders a submission as a single line and a first line is not
 message-unique.
 
