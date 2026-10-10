@@ -4392,9 +4392,11 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 points.pop(mid, None)
     elif t == "EntityMutated":
         # #3299/#3860: the write-surface mutation record. In-memory points are
-        # keyed by id, so `op=delete` drops the point; other ops (rename/
-        # restatus) are no-ops on this pure-point index until a sibling
-        # extends them. #3860: identity is (kind, id) — a delete naming a
+        # keyed by id, so `op=delete` drops the point. A STATE op
+        # (rename/restatus/revise) is folded onto a `:Point` below (#3311);
+        # for the non-Point canonical labels it stays the deliberate no-op
+        # named in the arm's own paragraph (`_fold_journal_entities` owns
+        # those). #3860: identity is (kind, id) — a delete naming a
         # DIFFERENT canonical kind does not own a Point and must not pop it;
         # a missing/unknown label keeps the legacy id-wide delete (parity
         # with the graph fold's fallback).
@@ -4450,6 +4452,25 @@ def _apply_one(points: dict[str, dict], ev: dict,
                     id=_srid, op=ev.get("op"),
                     detail="in-memory fold: state op matched no Point",
                 )
+            elif (isinstance(_srid, str) and _slabel == "Point"
+                  and isinstance(ev.get("state"), dict) and _srid in points):
+                # #3311: the generic entity surface now journals a `status`
+                # write on a `:Point` as an `EntityMutated restatus` (the ONE
+                # builder, `_journal_entity_mutation`). This reference index
+                # must FOLD that record or it silently disagrees with the graph
+                # fold (`_fold_entity_mutation`) and `check_consistency`
+                # reports a content divergence on a faithful journal — the #330
+                # parity contract / #5048's rule that every write the graph
+                # folds must also ride `_apply_one`. Presence-conditional,
+                # exactly like the graph's `SET n += $s`: a null value REMOVES
+                # the key, a present one writes it. Reached only for a
+                # well-formed `label="Point"` state op whose target this index
+                # HOLDS — every malformed/absent case is the `if` above.
+                for _k, _v in ev["state"].items():
+                    if _v is None:
+                        points[_srid].pop(_k, None)
+                    else:
+                        points[_srid][_k] = _v
         elif ev.get("op") in _ENTITY_MUTATION_PENDING_OPS:
             # #3585 (R8): the GRAPH fold records this as a non-folded event
             # (`SHAPE_UNIMPLEMENTED_OP`) and fails the run, so this reference
