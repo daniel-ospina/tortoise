@@ -29,9 +29,10 @@ is a read of whether the message became a conversation message
 PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
-confirmed exits non-zero with `sent-but-not-consumed`; it reports success only on
-POSITIVE artifact evidence — the message as the latest submitted message, or a
-NEW pending-turn entry carrying it. That evidence is pi's own render string, not
+confirmed exits non-zero with `sent-but-not-consumed`; it reports SUCCESS (exit 0)
+only when the message became the latest submitted message. A NEW pending-turn entry
+carrying it is POSITIVE evidence of DELIVERY — exit 4, not 0 (see QUEUED IS NOT
+SUCCESS). That evidence is pi's own render string, not
 a secret, so a verdict means pi's display showed acceptance, not proof of it (see
 RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
 
