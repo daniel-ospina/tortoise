@@ -80,6 +80,15 @@ class TortoiseEP:
         # (per-hop cap or affected≈full) during the most recent run.
         self._last_affected: set[str] = set()
         self._last_truncated: bool = False
+        # #6105: run-set diagnostics for factors DROPPED before EP could use
+        # them — one dict per skipped factor (operator id, reason, and every
+        # input's status). Stashed by run() (reset at entry, appended by
+        # `_affected_factors`) so a caller can SEE that a wired operator
+        # contributed nothing: a degenerate skip is otherwise a log line
+        # while the run still reports `converged=True`, and a whole arm of
+        # the graph (a causality map's goal, wired only as a TARGET) is
+        # discarded silently.
+        self._last_skipped_factors: list[dict] = []
         # #1163 (multi-process EP): the graph-wide EP epoch snapshot for THIS
         # run — captured at load (``_load_cache``), re-read by the flush guard
         # so a stale run (a concurrent ``_mark_dirty`` advanced the epoch
@@ -982,7 +991,8 @@ class TortoiseEP:
         return [r[0] for r in rows]
 
     def _affected_factors(self, affected_claims: set[str],
-                          include_draft: bool = False
+                          include_draft: bool = False,
+                          skipped: list[dict] | None = None
                           ) -> list[tuple[str, str, list[str], float, str | None, str]]:
         """Extract EP factors from the affected claims subgraph.
 
@@ -999,6 +1009,14 @@ class TortoiseEP:
         factors, draft ids are stripped from input_ids, and draft endpoints
         never form direct-edge factors. An operator whose live inputs drop
         below 2 becomes degenerate and is skipped — the SVBP-path convention.
+
+        ``skipped`` (#6105) is an optional SINK: every factor this call drops
+        (degenerate, or a directional operator whose idx-0 source was
+        stripped) appends one structured record to it — ``operator_id``,
+        ``op_type``, ``reason``, ``participating_inputs`` and every input with
+        its status. ``run()`` passes ``self._last_skipped_factors`` so the run
+        carries the diagnostic; the read-only scope callers pass nothing and
+        stay side-effect free.
         """
         live_o = _live_only("o.status", include_draft)
         live_c = _live_only("c.status", include_draft)
@@ -1147,6 +1165,7 @@ class TortoiseEP:
             ]
             stripped = len(full_inputs) - len(input_ids)
             if stripped:
+                skip_reason = None
                 if (direction != "bidirectional"
                         and op_idx_known[op_id]
                         and full_inputs
@@ -1161,8 +1180,8 @@ class TortoiseEP:
                         "(non-bidirectional with stripped source, #780/#2422)",
                         op_id,
                     )
-                    continue
-                if len(input_ids) < 2 <= len(full_inputs):
+                    skip_reason = "source_stripped"
+                elif len(input_ids) < 2 <= len(full_inputs):
                     # Degradation below 2 participating inputs — the factor
                     # must change NO live posterior (#780); matches the SVBP-
                     # path convention. Name every input's status so the
@@ -1176,6 +1195,22 @@ class TortoiseEP:
                             for cid, s in zip(full_inputs, op_input_status[op_id])  # noqa: B905
                         ),
                     )
+                    skip_reason = "degenerate"
+                if skip_reason is not None:
+                    # #6105: the run's dropped factors are reported, not just
+                    # logged — see _last_skipped_factors.
+                    if skipped is not None:
+                        skipped.append({
+                            "operator_id": op_id,
+                            "op_type": op_type,
+                            "reason": skip_reason,
+                            "participating_inputs": len(input_ids),
+                            "inputs": [
+                                {"id": cid, "status": st}
+                                for cid, st in zip(
+                                    full_inputs, op_input_status[op_id], strict=True)
+                            ],
+                        })
                     continue
             weight = compute_operator_weight(self.proj, op_id)
             factors.append((op_id, op_type, input_ids, weight, label, direction))
@@ -1357,13 +1392,24 @@ class TortoiseEP:
         four destructuring callers). The run's affected-claim set is stashed
         on ``self._last_affected`` (assigned before the early returns so a
         vacuous run never leaves stale write-back state, #395 delta C); the
-        degeneration guard's firing is stashed on ``self._last_truncated``.
+        degeneration guard's firing is stashed on ``self._last_truncated``;
+        and every factor the run DROPPED (degenerate — a draft/terminal
+        endpoint stripped it below 2 participating inputs — or a directional
+        operator whose idx-0 source was stripped) is stashed on
+        ``self._last_skipped_factors`` (#6105). A 2-tuple of (iterations,
+        converged) cannot say "an arm of the graph contributed nothing", so a
+        caller that must not read a healthy-looking run as evidence of
+        coverage reads that list too.
         """
         # #395 (delta C): run-set diagnostics reset at entry, alongside the
         # cache lifecycle — a run that exits early must not report a previous
         # run's affected set / guard state.
         self._last_affected = set()
         self._last_truncated = False
+        # #6105: dropped-factor diagnostics reset at entry, with the rest of
+        # the run-set state — a vacuous run must never report a previous run's
+        # skipped factors.
+        self._last_skipped_factors = []
         # #1163: flush-guard diagnostics reset at entry (a vacuous run that
         # never loads a cache must not carry a previous run's skip flag).
         self._flush_skipped = False
@@ -1463,7 +1509,9 @@ class TortoiseEP:
                 )
             return 0, True
 
-        factors = self._affected_factors(affected, include_draft=include_draft)
+        factors = self._affected_factors(
+            affected, include_draft=include_draft,
+            skipped=self._last_skipped_factors)
         if not factors:
             return 0, True
 

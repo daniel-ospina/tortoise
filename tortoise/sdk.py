@@ -15518,6 +15518,17 @@ class TortoiseSDK:
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
+        Two diagnostics can accompany the result, both ABSENT when they do not
+        apply (so the key-set above is the ordinary shape): ``diagnostic`` —
+        one of ``truncated`` (#395 degeneration guard), ``no_factors`` /
+        ``no_dirty_roots`` (nothing to run), ``factors_skipped``; and
+        ``skipped_factors`` — one structured record per factor EP DROPPED
+        before it could be consumed (#6105: a draft/terminal endpoint stripped
+        the operator below 2 participating inputs, or a directional operator
+        lost its idx-0 source). ``converged`` speaks only for the factors the
+        run CONSUMED: read ``skipped_factors`` before treating a run as
+        evidence that every wired operator voted.
+
         #780: draft Points/operators are EXCLUDED by default (EP only runs
         over live claims); there is no include_draft escape hatch on this
         surface — call TortoiseEP.run(include_draft=True) directly for
@@ -15695,6 +15706,22 @@ class TortoiseSDK:
         # proceeds with the capped set and reports the diagnostic.
         if ep._last_truncated:
             result["diagnostic"] = "truncated"
+        # #6105: a factor EP DROPPED is REPORTED, not just logged. `converged`
+        # is a statement about the factors the run consumed — it cannot say
+        # that an operator was never consumed at all, so a run whose arm was
+        # discarded (the causality-map goal: a point wired in as a TARGET only,
+        # left draft, every operator into it degenerate) would otherwise read
+        # as healthy. The structured list is additive and lossless; the
+        # single-valued ``diagnostic`` is only claimed when no earlier
+        # diagnostic already owns it (``truncated`` stays truthful).
+        if ep._last_skipped_factors:
+            # Fresh records (and fresh nested input dicts) so a caller cannot
+            # mutate the EP object's run-set stash through the response.
+            result["skipped_factors"] = [
+                {**s, "inputs": [dict(i) for i in s["inputs"]]}
+                for s in ep._last_skipped_factors
+            ]
+            result.setdefault("diagnostic", "factors_skipped")
         return result
 
     def _hydrate_evidence(self) -> None:
