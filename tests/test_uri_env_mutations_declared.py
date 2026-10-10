@@ -291,6 +291,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # where the URI literal sits on the following line.
     "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
+    # #7767: the restore-rollback suite forces the EMBEDDED lane for the same
+    # reason #2944's wipe guard does — the behaviour under test is FILESYSTEM
+    # rollback (the destination journal, DB and AOF dirs are renamed aside and
+    # put back on a refusal), so under a URI the `FalkorProjection(path)`
+    # redirect touches no file and every file assertion in the suite would be
+    # vacuous. The delenv IS the point; the autouse fixture-param monkeypatch
+    # auto-restores at teardown (no lane leak).
+    "test_7767_restore_rollback.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #5222/#5188 + #5222's hygiene gate: both files are HERMETIC (the SDK / the
     # reaper is faked, no server is contacted), and both force the embedded or a
     # test-pinned lane on purpose — the delenv/setenv IS the input, so the site

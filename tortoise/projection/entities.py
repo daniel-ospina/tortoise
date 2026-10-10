@@ -33,6 +33,92 @@ from tortoise.source_identity import normalize_source_url, resolve_source_key
 logger = logging.getLogger(__name__)
 
 
+def is_non_operator_payload(payload: dict) -> bool:
+    """True when a journal Point payload states its OWN non-operator identity.
+
+    ONE home for that identity, because the record's replay is split across two
+    modules: ``_upsert_point_props`` (here) decides what the node IS, and
+    ``edges._create_edges`` decides whether to rebuild the canonical reverse
+    ``(op)-[:mitigated_by]->(m)``. Two hand-spelled copies of it would drift —
+    and did. ``consistency._canonical_point_fields`` spells the same one-line
+    rule on the journal side and must keep matching it.
+
+    The polarity is load-bearing. ``not payload.get("is_operator")`` is ALSO
+    true when the key is ABSENT, and the EventAPI / extractor / ingest producer
+    (``api.py::_point``) emits an ``OperatorAdded`` with no flag at all — that
+    form would re-type every generic IMPL operator on the main write path.
+
+    This is the IDENTITY half only. Whether the record also authorises the
+    canonical reverse edge is a separate question — see
+    ``has_usable_mitigation_strength``.
+    """
+    return payload.get("is_operator") is False
+
+
+def has_usable_mitigation_strength(payload: dict) -> bool:
+    """True when the payload carries a strength ``mitigate_operator`` could write.
+
+    A mitigation is a NON-operator Point that carries the mitigation's own
+    ``mitigation_strength`` and an ``operator`` EDGE descriptor (``#4937``)
+    solely so the rebuild fold can restore its ``(m)-[:IMPL]->(op)`` half. The
+    descriptor alone does NOT make one: ``EventAPI.add_point(content, prov,
+    **fields)`` forwards arbitrary fields, and ``_create_edges`` is the SHARED
+    live+replay edge writer, so a low-level producer can attach a descriptor to
+    a non-operator point. Minting ``(op)-[:mitigated_by]->(m)`` for such a
+    payload dampens that operator by the fallback strength (measured ``w_eff``
+    1.0 -> 0.7) — a belief change the producer never asked for.
+
+    Nor is mere PRESENCE enough. The writer's own accepted domain is what the
+    fold must mirror, and ``_persist_extra_props`` decides what actually
+    reaches the node:
+
+    * a map/list/``None`` strength is dropped by that passthrough (the Point
+      layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
+      strength and a fabricated edge dampens at the fallback anyway;
+    * a non-numeric value is persisted, and then makes
+      ``weights.compute_operator_weight`` RAISE on every read of that operator.
+    * an out-of-band value (``-0.5``, ``5.0``, ``2**62``) is refused by the
+      writer's own band check (``sdk.mitigate_operator``: ``if not 0 <=
+      strength <= 1: raise ValueError``), so admitting it would authorise a
+      dampening at the read-clamped band edge that no record ever asked for —
+      a belief change with no writer behind it.
+
+    That band IS the writer's own accepted domain, and the fold mirrors it
+    exactly. A ``bool`` is accepted on purpose, because the writer accepts one:
+    ``mitigate_operator``'s range check passes for ``False``/``True``,
+    ``weights.mitigation_dampening_factor`` clamps it to the band edge, and the
+    node stores it — so refusing it here would silently drop a REAL
+    mitigation's edge (measured ``w_eff`` 0.9 live -> 1.0 rebuilt for ``False``).
+    Rejecting it belongs at the writer, as its own decision.
+
+    A rejection must also be safe for a corrupt/hand-edited journal, which is
+    the input this whole fold exists to tolerate: refusing never raises, so one
+    hand-edited record can never abort the rebuild after the wipe. Refusal is
+    TOTAL — any exception out of the band comparison is a refusal, not an
+    abort, because ``isinstance`` also admits a hostile ``int``/``float``
+    SUBCLASS whose comparison methods raise, and ``_create_edges`` is the live
+    writer too (``EventAPI.add_point(**fields)`` forwards caller objects).
+    Refusal is fail-safe — no edge, no fabricated dampening — so a hand-edited
+    record keeps the PRE-#5048 behaviour (no reconstructed edge) rather than
+    acquiring a dampening no writer asked for.
+    """
+    value = payload.get("mitigation_strength")
+    if not isinstance(value, (int, float)):
+        return False
+    # The band check IS the finiteness check, and it must come FIRST. A
+    # comparison on an ``int``/``float`` does not convert, so a value past
+    # float range (``10**400``) is refused by the comparison itself — no
+    # ``OverflowError`` — and ``nan``/``inf`` fail it too. ``math.isfinite``
+    # here would be a second, unreachable opinion.
+    try:
+        # ``bool(...)``: a numpy scalar (``np.True_``) or an ``int`` subclass
+        # with a truthy comparison would otherwise leak through this ``-> bool``
+        # annotation, and the predicate is used as a value by ``consistency``.
+        return bool(0 <= value <= 1)
+    except Exception:  # total refusal — see the docstring
+        return False
+
+
 def _terminal_object_statuses() -> list:
     """The canonical Object TERMINAL status list, for a Cypher ``excluded``
     parameter (#3309).
@@ -874,6 +960,12 @@ class _EntityHandlers:
         # drift warning on every rebuild.
         "annotator_bias", "annotator_precision",
         "annotator_consistency", "annotator_directness",
+        # #7856: the goal ACHIEVEMENT state (a validated closed vocabulary,
+        # `sdk.GOAL_STATE_VALUES` — separate from the `status` lifecycle). A
+        # legacy goal POINT carries it via the Point write path; declaring it
+        # keeps the replay open-set passthrough from logging a FALSE
+        # `"Point prop %r is not declared"` drift warning on every rebuild.
+        "goalState",
     })
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
@@ -938,21 +1030,31 @@ class _EntityHandlers:
             )
         return extra
 
-    def _upsert_point_props(self, p: dict) -> tuple[bool, bool]:
+    def _upsert_point_props(self, p: dict) -> tuple[bool, bool, frozenset]:
         """Write all Point node properties (no edges).
 
         Single source of truth for Point property parity between apply() and
         rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
         never drift from the incrementally-applied graph on node properties.
 
-        Returns ``(embedding_written, content_hash_written)`` — the two
-        CONDITIONAL derived writes. The fixed SET list writes them as
+        Returns ``(embedding_written, content_hash_written,
+        persisted_extra_keys)``. The first two are the CONDITIONAL derived
+        writes. The fixed SET list writes them as
         ``n.embedding = CASE WHEN $embedding IS NOT NULL … ELSE n.embedding
         END`` and ``n.content_hash = coalesce($ch, …)``, and computes neither
         for an operator, falsy content, an unavailable embedder, or a raising
         ``_content_hash`` — so in those cases the existing value is PRESERVED.
         #4042's pass-1b content boundary needs that outcome exactly, never a
-        ``bool(content)`` guess. Every other caller ignores the return.
+        ``bool(content)`` guess.
+
+        ``persisted_extra_keys`` is the key set ``_persist_extra_props``
+        actually handed to the engine (a ``None``, a non-persistable value, and
+        an undeclared list/tuple — ``_POINT_LIST_PROPS`` is EMPTY — are all
+        dropped). #5048's open-set boundary needs it for the same reason as the
+        two flags above: whether a creation WROTE ``mitigation_strength`` is
+        the writer's own outcome, and a second hand-spelled copy of the
+        writer's condition drifts from it. Every other caller ignores the
+        return.
 
         #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
         clause rides in the SAME query ahead of the SET list. On the embedded
@@ -1115,9 +1217,27 @@ class _EntityHandlers:
             "n.validTo=coalesce($vt, n.validTo)",
             "n.updatedAt=$now",
         ]
+        # #5048: the payload's OWN ``is_operator`` wins when it explicitly says
+        # FALSE. A mitigation Point is a NON-operator that carries an
+        # ``operator`` EDGE descriptor (`#4937`), so deriving identity from
+        # ``bool(op)`` re-typed it as an operator on replay — live
+        # ``is_operator=false/op_type=NULL``, rebuild ``true/'IMPL'`` on every
+        # mitigation: a systematic ``derived = replay(journal)`` divergence, and
+        # the identity half of the record this PR's edge fold repairs. Scoped to
+        # the explicit-False case, so every operator record (and every legacy
+        # record that omits the flag) is byte-for-byte unchanged. The
+        # IDENTITY rule is shared with ``edges._create_edges`` AND with
+        # ``consistency._canonical_point_fields`` (``is_non_operator_payload``)
+        # so the node's identity cannot disagree with the checker's view of it.
+        # Whether the record ALSO authorises the reverse edge is the separate,
+        # stricter ``has_usable_mitigation_strength`` — identity is not gated on
+        # the strength, because re-typing a non-operator as an operator is a
+        # divergence whether or not that record can rebuild an edge.
+        _mitigation_record = is_non_operator_payload(p) and bool(op)
         params = {
             "id": p["id"], "content": p.get("content", ""),
-            "isop": bool(op), "opt": op.get("op_type") if op else None,
+            "isop": bool(op) and not _mitigation_record,
+            "opt": None if _mitigation_record else (op.get("op_type") if op else None),
             "pk": p.get("pointKind"),
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
@@ -1288,8 +1408,10 @@ class _EntityHandlers:
                 "written raw (#2795); not restorable from the payload", key)
         # #4042: report which conditional derived writes actually landed (see
         # the docstring). `embedding`/`point_content_hash` are exactly the
-        # values the `CASE`/`coalesce` clauses above gate on.
-        return embedding is not None, point_content_hash is not None
+        # values the `CASE`/`coalesce` clauses above gate on, plus the open-set
+        # key set the passthrough ACTUALLY persisted (#5048).
+        return (embedding is not None, point_content_hash is not None,
+                frozenset(extras))
 
     def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
         """Wire all Point edges (provenance + about + operator + session).

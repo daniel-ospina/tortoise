@@ -258,6 +258,10 @@ def _resume_fingerprint() -> dict:
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it.
         aggregative_flag=False,
+        # #2886: the deterministic temporal-aggregation resolution arm —
+        # run_evaluation fingerprints the RESOLVED bool (always present on
+        # the run path), so a hand-written resume checkpoint must carry it.
+        temporal_aggregate=False,
         # C3-1 (#2519, #2567): the coverage-completeness loop arm —
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it
