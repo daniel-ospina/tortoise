@@ -1120,6 +1120,23 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_source_currency_tool_change_selects_core_not_tier1():
+    # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
+    # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated
+    # reporting of both on the search row. Without the CORE_ALSO entry the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a helper-only
+    # change selected NO surface and fell back to tier-1 smoke: the cases
+    # pinning that an EMPTY link set reads `unknown` rather than the vacuously
+    # `current` a literal §4.6 reading produces would not have run on the PR
+    # that edits the aggregation. Same silent-drop class as #5084/#6138/#4174
+    # above.
+    r = _sel(["tools/source_currency.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_source_currency_5581.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_test_lane_tool_change_selects_core_not_tier1():
     # #5084 review P1: tools/test_lane.py owns tests/test_test_lane_tool.py
     # (`core`). Without the CORE_ALSO entry the flat "tools/"
