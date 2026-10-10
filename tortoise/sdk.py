@@ -3399,16 +3399,24 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # projection/__init__.py:1082 restores live on replay). Mirror
         # promote_point's _promote_incident_operators event exactly.
         op_rows: list = []
+        _seen_op_ids: set = set()
         # #7853: c is id-anchored — sweep the epistemic labels so an operator
-        # whose live endpoint is an Event/Subject/Object is promoted too.
+        # whose live endpoint is an Event/Subject/Object is promoted too. A
+        # multi-labelled endpoint (``:Point:Object``) matches MORE than one
+        # sweep, so collapse on ``o.id`` before the emit loop: the promoted
+        # set must equal the journalled set (#395), and the loop below emits
+        # one ``OperatorPromoted`` per row.
         for _q in epistemic_label_queries(
             "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:{label}) "
             "WHERE c.id IN $ids "
             "AND (o.status IS NULL OR o.status = 'draft') "
             "RETURN DISTINCT o.id"
         ):
-            op_rows.extend(proj.g.query(
-                _q, params={"ids": list(claim_ids)}).result_set)
+            for row in proj.g.query(
+                    _q, params={"ids": list(claim_ids)}).result_set:
+                if row[0] not in _seen_op_ids:
+                    _seen_op_ids.add(row[0])
+                    op_rows.append(row)
         promoted_ops = []
         for (oid,) in op_rows:
             proj.g.query(
@@ -26039,7 +26047,8 @@ class TortoiseSDK:
         match_clause = "s.id = $sid"
 
         # Direct: Event connects directly to claim Points via IMPL/NAND
-        # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
+        # (operators connect only epistemic targets per ONTOLOGY.md §8 —
+        # :Point/:Subject/:Object/:Event)
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "

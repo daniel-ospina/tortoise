@@ -4126,9 +4126,53 @@ def _journal_forward_reference(first_materialized, seq, label, rid) -> bool:
     return first is not None and first > seq
 
 
-def _reference_fold_non_point_target(first_materialized, rid) -> bool:
+def _hard_delete_precedes(hard_deleted: dict, kind: str, rid, seq) -> bool:
+    """Did the journal hard-delete ``(kind, rid)`` BEFORE ``seq``?
+
+    The ORDERED half of :func:`_hard_deleted_any`. That predicate answers
+    MEMBERSHIP only, which cannot separate two journals the graph fold treats
+    differently: a delete the belief write FOLLOWS (the node is gone at the
+    write, ``_fold_confidence_changed`` matches 0 rows, and the record is a
+    genuine miss) from one the belief write PRECEDES (the node exists when the
+    write folds; the delete lands after it). Both are ``in`` the map, so a
+    caller that reads membership alone is fail-OPEN in the first case (#7936
+    review) — the exemption below must ask the ORDER.
+
+    Kind-scoped with the id-wide ``(None, rid)`` fallback, exactly as
+    :func:`_hard_deleted_any`: an unknown/missing-label ``EntityMutated``
+    delete replays through ``_delete_entity_by_id(label=None)`` and removes the
+    node whatever its label, so it can bury this one too.
+
+    ``hard_deleted`` is the shared anchor-gated map (:func:`hard_deleted_pairs`),
+    whose value is the delete's journal seq. A missing map (a bare
+    ``_apply_one`` / ``InMemoryProjection.apply`` with no journal to consult)
+    cannot decide an order and returns False, matching the
+    ``journal_first_materialized is None`` contract those paths already have.
+
+    ⚠️ The map keeps the LAST delete per key, exactly as the ordered readers the
+    engines already use (``journal_hard_delete_seqs`` / ``_fold_journal``'s
+    terminalizer ``_del_seq``), so a journal that hard-deletes the SAME id both
+    BEFORE and AFTER the write exposes only the later seq here. That
+    double-delete shape (two ``EntityMutated op=delete`` records for one
+    non-Point id around a belief write) is a documented bound, not a silent
+    one — it is outside the single-delete shape the diagnostic missed and no
+    producer emits it.
+    """
+    if (not isinstance(hard_deleted, dict) or not isinstance(rid, str)
+            or not isinstance(seq, int)):
+        return False
+    for key in ((kind, rid), (None, rid)):
+        del_seq = hard_deleted.get(key)
+        if isinstance(del_seq, int) and del_seq < seq:
+            return True
+    return False
+
+
+def _reference_fold_non_point_target(first_materialized, rid,
+                                     hard_deleted=None,
+                                     journal_seq=None) -> bool:
     """True when the journal materializes ``rid`` as a REFERENCE-FOLD entity
-    (``:Subject`` / ``:Object`` / ``:Event``).
+    (``:Subject`` / ``:Object`` / ``:Event``) that still EXISTS at this record.
 
     #7936 interim. The #7813 widening makes EP journal a ``ConfidenceChanged``
     for any of the four epistemic labels, but ``_apply_one``'s index is the
@@ -4148,14 +4192,33 @@ def _reference_fold_non_point_target(first_materialized, rid) -> bool:
     ``Object`` takes the exemption, which is also right — the point-only index
     cannot represent it either way.
 
+    ⛔ Existence is NOT membership: a journal that CREATED this non-Point and
+    then HARD-DELETED it BEFORE this record has a ``first_materialized`` entry
+    too, yet the node is gone at the write, the graph fold matches 0 rows and
+    ``rebuild_all`` refuses (``point-belief-miss``). Exempting on membership
+    alone would return ``ok=True, exit 0`` on a journal the graph cannot
+    reproduce — the fail-OPEN direction, worse than the false red this
+    replaced. The delete must therefore be ORDERED against the record: a delete
+    at ``del_seq > journal_seq`` lands AFTER the write and is still folded
+    (pass-1a creates, pass-1b folds the belief, THEN the delete), so it stays
+    exempt; only ``del_seq < journal_seq`` refuses. Order matters in BOTH
+    directions and both are pinned by tests.
+
     NOTE the index itself is still point-only: the exemption suppresses the
     false miss, it does not fold the belief into ``fold()`` /
     ``InMemoryProjection`` (that needs the ``(label, id)`` re-key in #7936).
     """
     if not isinstance(first_materialized, dict) or not isinstance(rid, str):
         return False
-    return any((label, rid) in first_materialized
-               for label in _REFERENCE_FOLD_ENTITY_LABELS)
+    for label in _REFERENCE_FOLD_ENTITY_LABELS:
+        if (label, rid) not in first_materialized:
+            continue
+        if _hard_delete_precedes(hard_deleted, label, rid, journal_seq):
+            # Buried before the write — the graph fold matches 0 rows here, so
+            # this is the genuine miss the exemption must not swallow.
+            continue
+        return True
+    return False
 
 
 def journal_object_surviving_keys(
@@ -4271,7 +4334,8 @@ def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_first_materialized: dict[tuple[str, str], int]
                | None = None,
-               journal_seq: int | None = None) -> None:
+               journal_seq: int | None = None,
+               journal_hard_deleted: dict | None = None) -> None:
     """Fold ONE normalized journal record into the pure point index.
 
     ``journal_first_materialized`` / ``journal_seq`` are the whole-journal
@@ -4279,9 +4343,16 @@ def _apply_one(points: dict[str, dict], ev: dict,
     Together they let the order-dependent arms DISTINGUISH a genuine fold-miss
     from a record that PRECEDES its target's materialization: a forward
     reference is a no-op on the live system too, so it is neither folded onto a
-    later incarnation nor recorded as non-folded. Both default to ``None`` for
-    a bare ``_apply_one(points, ev)`` (no journal to consult), which preserves
-    the pre-existing behaviour.
+    later incarnation nor recorded as non-folded.
+
+    ``journal_hard_deleted`` is the shared hard-delete seq map
+    (:func:`hard_deleted_pairs`). The confidence arm uses it to ORDER a
+    non-Point belief write against that entity's deletion (see
+    :func:`_reference_fold_non_point_target`) — membership alone is fail-OPEN
+    there.
+
+    All three default to ``None`` for a bare ``_apply_one(points, ev)`` (no
+    journal to consult), which preserves the pre-existing behaviour.
     """
     ev = _norm(ev)
     t = ev.get("type")
@@ -4546,7 +4617,9 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 p[key] = value
         elif (_writable_id(rid) and _has_prop
                 and _reference_fold_non_point_target(
-                    journal_first_materialized, rid)):
+                    journal_first_materialized, rid,
+                    hard_deleted=journal_hard_deleted,
+                    journal_seq=journal_seq)):
             # #7936 interim: the id IS materialized by the journal — as a
             # `:Subject`/`:Object`/`:Event`. `points` cannot represent it, so
             # this point-only fold DROPS the belief (the graph fold does not).
@@ -4625,10 +4698,15 @@ def _apply_one(points: dict[str, dict], ev: dict,
 def fold(events: list[dict]) -> dict[str, dict]:
     points: dict[str, dict] = {}
     first_materialized = journal_first_materialization(events)
+    # #7936 review: hoisted ONCE beside the existence map — the non-Point
+    # belief exemption orders the write against this, and rebuilding it per
+    # record is the O(N²) class this module already fixed.
+    hard_deleted = hard_deleted_pairs(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
                    journal_first_materialized=first_materialized,
-                   journal_seq=seq)
+                   journal_seq=seq,
+                   journal_hard_deleted=hard_deleted)
     return points
 
 

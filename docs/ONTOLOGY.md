@@ -42,9 +42,17 @@ doc_status: live
 >   reification rule and its table row are widened from `Point↔Point` to the four
 >   labels. The operator node itself stays `:Point {is_operator:true}`; only its
 >   children/targets may carry any of the four labels.
-> - §2/§3.8: the pre-#7813 statements that a Point→Event operator is **write-only in
->   v1 with no EP propagation** are reconciled — under #7813 an Event target is
->   epistemic and propagates. The departure is marked `OVERRIDES` at §8.
+> - §2/§3.1: the epistemic-target enumerations are widened to the four labels.
+>   §2's Epistemic-layer row (BOTH its Entity and "How it works" cells) and the
+>   Structural-vs-Epistemic table + Principle, and §3.1's heading and its
+>   `IMPL`/`NAND` From→To cells.
+> - §3.8: the `op: IMPL/NAND` row is widened to the four labels in BOTH its
+>   From→To cell and its Meaning cell (the pre-#7813 Meaning said Point→Event was
+>   **write-only in v1 with no EP propagation** — under #7813 an Event target is
+>   epistemic and propagates). The departure is marked `OVERRIDES` at §8.
+> - Spec-only markers accompany each declaration of `:Subject`/`:Object` operator
+>   endpoints: the write path admits `:Point`/`:Event` only until #7902 lands, so
+>   the model must not read as a live end-to-end shape.
 >
 > **Changelog v3.22 (2026-10-09 — issue #7856 — a goal's achievement state is a separate axis):**
 >
@@ -577,7 +585,7 @@ Each layer answers a different question. All four are live mechanisms.
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
 | **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (ownedBy, memberOf, hasPart) via plain edges. |
-| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (`:Point`, `:Subject`, `:Object`, `:Event`). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators propagate EP under the #7813 ruling — confidence crosses all four labels, so an Event target is epistemic (§8 OVERRIDES); decision semantics remain on the Event timeline, and decisions stay non-first-class Points.** |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence), and the epistemic targets `:Subject`/`:Object`/`:Event` (§5 — objects ARE in the epistemic layer) | Operators connect epistemic targets (`:Point`, `:Subject`, `:Object`, `:Event`) — ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands; the write path admits `:Point`/`:Event` only (the read/EP path already admits all four). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators propagate EP under the #7813 ruling — confidence crosses all four labels, so an Event target is epistemic (§8 OVERRIDES); decision semantics remain on the Event timeline, and decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
 
@@ -621,6 +629,8 @@ Each layer answers a different question. All four are live mechanisms.
 ## §3. Edge Topology
 
 ### §3.1 Epistemic ↔ Epistemic (Operators — `:Point`/`:Subject`/`:Object`/`:Event`)
+
+⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only.
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
@@ -732,7 +742,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531). Event→artifact is the encouraged pattern |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point, Point → Event | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event propagates EP under #7813 (an Event target is epistemic — §8 OVERRIDES) |
+| `op: IMPL/NAND` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event propagates EP under #7813 (an Event target is epistemic — §8 OVERRIDES). ⚠️ `:Subject`/`:Object` endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -1394,7 +1404,9 @@ support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
 `:Object`, `:Event` — see §5 on the point↔object/point↔event overlap;
 #7813/#7853).** The operator node itself is always a
 `:Point {is_operator:true}`; its children/targets may carry any of the four
-labels. All other edges stay plain and carry confidence as an
+labels. ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902
+lands — the write path admits `:Point`/`:Event` only (the #7853 READ widening
+already admits all four). All other edges stay plain and carry confidence as an
 edge attribute.
 
 > **OVERRIDES:** the pre-#7813 "Point→Event operators are write-only in v1, no

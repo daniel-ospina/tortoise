@@ -715,6 +715,51 @@ def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):
         sdk.close()
 
     
+def test_capture_promotes_a_multi_labelled_endpoint_operator_once(
+        tmp_path, monkeypatch):
+    """#7853 review P2-1: the per-label sweep must journal ONE promotion per
+    operator.
+
+    A multi-labelled endpoint (``:Point:Object`` — the shape ``sdk.py``'s
+    entity write and ``mcp_server`` model) matches the ``Point`` AND the
+    ``Object`` sweep, so an un-deduped row list promotes the SAME operator
+    twice and journals ``OperatorPromoted`` twice for one id — breaking the
+    invariant ``compute_confidence``'s write-back asserts (the journal set
+    equals the committed set, #395).
+    """
+    from tortoise.log import EventLog
+    from tortoise.sdk import _apply_capture_ingest_ep
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "multi.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        # ONE endpoint carrying BOTH labels, wired to a draft IMPL operator.
+        proj.g.query(
+            "CREATE (n:Point:Object {id:'multi-1', name:'m', "
+            "status:'draft'})")
+        proj.g.query(
+            "CREATE (o:Point {id:'op-multi-1', is_operator:true, "
+            "op_type:'IMPL', status:'draft'})")
+        proj.g.query(
+            "MATCH (o:Point {id:'op-multi-1'}), (c {id:'multi-1'}) "
+            "CREATE (o)-[:IMPL {idx:0}]->(c) "
+            "CREATE (c)-[:INPUT {idx:0}]->(o)")
+        # The promotion happens before the ingest EP pass; stub the pass so
+        # the test measures the SWEEP, not EP cost.
+        monkeypatch.setattr(sdk, "dream", lambda **kw: {})
+        _apply_capture_ingest_ep(sdk, ["multi-1"])
+    finally:
+        sdk.close()
+
+    promos = [e for e in EventLog(events / "events.jsonl").read_all()
+              if e.get("type") == "OperatorPromoted"]
+    assert [e["id"] for e in promos] == ["op-multi-1"], (
+        f"exactly one OperatorPromoted for the operator, got {promos}")
+
+
 def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
     """W5 Phase C (#2104): promotion makes the W2 runner's post-capture full
     dream EFFECTIVE — pre-fix a capture-then-dream(full=True) sequence was

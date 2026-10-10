@@ -492,6 +492,168 @@ def test_reference_fold_still_flags_a_buried_point_belief():
         str(e) for e in entries]
 
 
+# The non-Point creation record the replay MATERIALIZES each label from — the
+# same one ``journal_first_materialization`` reads (#7936 review).
+_NON_POINT_CREATIONS = [
+    ("Object", {"type": "ObjectRegistered", "id": "n-7936", "name": "n"}),
+    ("Subject", {"type": "SubjectAdded", "id": "n-7936", "name": "n"}),
+    ("Event", {"type": "EventRecorded", "id": "n-7936", "name": "n",
+               "eventKind": "test",
+               "startedAt": "2026-01-01T00:00:00Z"}),
+]
+
+
+@pytest.mark.parametrize("label,creation", _NON_POINT_CREATIONS,
+                         ids=[c[0] for c in _NON_POINT_CREATIONS])
+def test_reference_fold_refuses_a_non_point_belief_buried_before_it(
+        label, creation):
+    """Direction 3 (#7936 review): the exemption tests EXISTENCE at the write,
+    not membership in the materialization map.
+
+    A journal that CREATED this non-Point and then HARD-DELETED it BEFORE the
+    belief write is a genuine miss: the graph fold (``_fold_confidence_changed``)
+    matches 0 rows at that position and ``rebuild_all`` raises
+    ``NonFoldedEventsError [point-belief-miss]``. A membership-only exemption
+    would return ``ok=True, exit 0`` here — the fail-OPEN direction, worse than
+    the false red it replaced.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    nid = creation["id"]
+    events = [
+        dict(creation),
+        {"type": "EntityMutated", "op": "delete", "label": label,
+         "id": nid},
+        {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
+    ]
+    with collect_non_folded() as entries:
+        fold(events)
+    refused = refused_events(entries)
+    assert any(nid in str(e) for e in refused), [str(e) for e in entries]
+
+
+@pytest.mark.parametrize("label,creation", _NON_POINT_CREATIONS,
+                         ids=[c[0] for c in _NON_POINT_CREATIONS])
+def test_reference_fold_exempts_a_non_point_belief_a_later_delete_follows(
+        label, creation):
+    """The SAME label, the other ORDER: a delete that arrives AFTER the belief
+    write is FOLDED by the graph fold (pass-1a creates, pass-1b folds the
+    belief, THEN the delete), so the exemption must still apply.
+
+    This is why plain ``_hard_deleted_any`` membership is not enough: it cannot
+    tell the two orders apart, so it would refuse this record and reintroduce
+    the false red #7936 removes. Both directions are pinned.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    nid = creation["id"]
+    events = [
+        dict(creation),
+        {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
+        {"type": "EntityMutated", "op": "delete", "label": label,
+         "id": nid},
+    ]
+    with collect_non_folded() as entries:
+        fold(events)
+    assert list(refused_events(entries)) == [], [str(e) for e in entries]
+
+
+def test_reference_fold_refuses_a_belief_an_id_wide_delete_buried():
+    """The unknown/missing-label delete is id-wide: ``_delete_entity_by_id``
+    removes the node whatever its label, so it can bury a non-Point too.
+
+    The exemption must consult the ``(None, id)`` fallback key the way
+    ``_hard_deleted_any`` does — a per-label lookup alone would fail OPEN on
+    this shape.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    events = [
+        {"type": "SubjectAdded", "id": "n-7936", "name": "n"},
+        {"type": "EntityMutated", "op": "delete", "id": "n-7936"},
+        {"type": "ConfidenceChanged", "id": "n-7936", "confidence": 0.77},
+    ]
+    with collect_non_folded() as entries:
+        fold(events)
+    refused = refused_events(entries)
+    assert any("n-7936" in str(e) for e in refused), [str(e) for e in entries]
+
+
+def test_consistency_reference_fold_refuses_a_buried_non_point_belief():
+    """The REPORTED symptom: ``check-consistency``'s reference fold
+    (``consistency._fold_journal``) must refuse what ``rebuild_all`` refuses.
+
+    Before this fix the exemption ran there too, so the diagnostic returned
+    ``ok=True`` on a journal the graph cannot reproduce — the false-all-good
+    direction. ``_fold_journal`` is the reference side of ``check_consistency``,
+    so pinning it here is pinning the verdict.
+    """
+    from tortoise.consistency import _fold_journal
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    events = [
+        {"type": "ObjectRegistered", "id": "obj-7936", "name": "o"},
+        {"type": "EntityMutated", "op": "delete", "label": "Object",
+         "id": "obj-7936"},
+        {"type": "ConfidenceChanged", "id": "obj-7936", "confidence": 0.77},
+    ]
+    with collect_non_folded() as entries:
+        _fold_journal(events)
+    refused = refused_events(entries)
+    assert any("obj-7936" in str(e) for e in refused), [
+        str(e) for e in entries]
+
+
+def test_reference_and_graph_folds_agree_on_a_buried_non_point_belief(
+        tmp_path):
+    """Ground truth for the refusal: ``rebuild_all`` itself refuses this
+    journal, and the reference fold must reach the SAME verdict.
+
+    Without the order test the diagnostic calls a journal the graph cannot
+    reproduce healthy (``ok=True``); without the graph arm this test would
+    prove nothing. Both sides are asserted in ONE test so a mutation of either
+    reds it. ONE label is enough here: ``_fold_confidence_changed`` sweeps all
+    four labels with one label-agnostic arm, and the per-label unit tests above
+    pin Object/Subject/Event. (A ``rebuild_all`` per label buys a second model
+    load for no additional coverage.)
+    """
+    import json
+
+    from tortoise.projection import FalkorProjection, fold
+    from tortoise.projection.nonfolded import (
+        NonFoldedEventsError,
+        collect_non_folded,
+        refused_events,
+    )
+
+    label, creation = _NON_POINT_CREATIONS[0]
+    nid = creation["id"]
+    events = [
+        dict(creation),
+        {"type": "EntityMutated", "op": "delete", "label": label,
+         "id": nid},
+        {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
+    ]
+    # Reference side.
+    with collect_non_folded() as entries:
+        fold(list(events))
+    assert any(nid in str(e) for e in refused_events(entries)), [
+        str(e) for e in entries]
+    # Graph side: the SAME journal, replayed by the production engine. Built
+    # directly (not via TortoiseSDK) — the SDK's embedding init costs minutes
+    # for a journal that carries no Point content.
+    with open(tmp_path / "events.jsonl", "w") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev) + "\n")
+    proj = FalkorProjection(path=str(tmp_path / "agree.db"),
+                            skip_health_check=True)
+    with pytest.raises(NonFoldedEventsError, match="point-belief-miss"):
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+
+
 def test_consistency_healthy_non_point_belief_is_not_non_folded(tmp_path):
     """End-to-end: the check must call a graph ``rebuild_all`` itself
     produced healthy, not ``non-folded``.

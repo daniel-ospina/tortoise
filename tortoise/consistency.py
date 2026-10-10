@@ -1073,7 +1073,8 @@ def _fold_journal(events: list[dict]) -> dict:
             continue
         _apply_one(by_id, ev,
                    journal_first_materialized=_first_materialized,
-                   journal_seq=seq)
+                   journal_seq=seq,
+                   journal_hard_deleted=hard_deleted)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
