@@ -63,6 +63,41 @@ Avoid bureaucratic bloat (epxnesive/long tests, too many guards, etc.), and inst
 
 ---
 
+## ⛔ USER QUESTIONS PROTOCOL: research and ask without jargon
+
+**⛔ ASK THE CONTRADICTION TEST FIRST — BEFORE YOUR OTHER TESTS.** Before adopting anything a research pass returns (a convergent standard, a SOTA pattern, a comparable's practice), ask **"is there a decision this would contradict?"** — and ask it *first*, ahead of cost, quality, convergence strength, or fit. A convergent answer that contradicts a decision **is not a candidate for adoption at all**: not "adopt with a caveat", not "escalate and adopt", not a footnote, and not something to park with the owner as an option. **Convergence describes what the field does. It does not describe what we have decided to be.** An owner decision outranks it — and **if you believe the standard should win, the route is to reopen the decision**: reopen it in its own home (its issue, plan doc, or Tortoise point), **put the evidence in front of the owner, and argue it.** Adopting over a decision is *never* the route — it silently reverses a deliberate choice, and nothing in the change will say so. **Why the edge is sharp:** if a standard could override a decision, the next lane to read a vendor's documentation holds the pen on our product's promises, and the decision survives only until someone else does research — which is not a decision, it is a default that holds until the next pass. **Refusing an adoption is not a verdict on the finding.** A contradicting finding is **accurate and valuable, and it is the evidence for that reopen** — the refusal tests the decision's *authority over the matter*, never the research's *accuracy*. Discarding it is how a reopen loses its case. Not adopting over a decision, and not dropping a decision-free candidate, are the two halves of this contradiction test: a convergent answer that no decision reaches is a live question to be **argued with the owner**, not a candidate to be killed by analogy.
+
+A **recorded decision** means an owner ruling, a decision section in a plan doc, a decision comment on an issue, or a Tortoise point carrying one — not merely an existing practice, and not a thing the code happens to do today.
+
+**⛔ MARK A DELIBERATE DEPARTURE WITH AN `OVERRIDES:` LINE — ON THE ISSUE.** The contradiction test only bites if an adopter can tell a **deliberate ruling against the grain** from **an accident of history** — and a record that states the choice but not *what it overrides* reads identically either way, so the ruling survives only until a helpful reader holding a vendor's page treats it as legacy and tidies it away. Every decision that goes against the common/industry default therefore carries one line:
+
+> **OVERRIDES:** <the default, named concretely — the window, the pattern, the vendor practice> — <one sentence of reason>.
+
+The marker belongs **on the artifact a lane actually reads: the ISSUE** (a comment on the decision issue), with the decision ledger carrying the same line as the index. A marker that lives only in a ledger is invisible to the lane holding the vendor page — and that is exactly the lane that overwrites the ruling. Cost: one line. Effect: the ruling reads as **intentional at the point where adoption happens**, instead of as an accident waiting to be tidied.
+
+**The hard stop is the decision, not the marker — the `OVERRIDES` line only makes the contradiction findable.** A convergent standard that contradicts **any recorded decision, marked or not**, is **not a candidate for adoption at all**; the route is a **reopen** — evidence in front of the owner, argued — never a quiet adoption, never "adopt with a caveat", and never an inference that convergence has made the default right. The marker's job is to make an against-the-grain ruling **visible to the adopter before the research has to rediscover it** — not to decide whether the decision blocks, which it does either way.
+
+When you need to ask the user a question, first research it to ensure it indeed needs the user. If a SOTA solution exists where competitors/comparable implementations converge, **and it contradicts no recorded decision (run the contradiction test above FIRST)**, and is aligned with the rest of our work, use it and don't bother the user. If you need to ask the user, ensure you present: context, options, analysis, and recommendation, all without jargon (specific terms should be canonical, e.g. as per ontology document)
+
+### DECISION RELAY: the answer is recorded where the work is gated
+
+When the owner answers a question, the answer is **relayed to the artifact the next lane reads** — never left in a conversation. An answer that survives only in a chat is invisible to the lane that must obey it, which is the same failure the `OVERRIDES:` marker above exists to prevent. Relay it into one of the recorded homes, and say which one:
+
+- **a comment on the decision issue** — the default; the issue is what a lane actually reads;
+- **the decision section of the plan doc** that governs the work;
+- **a Tortoise point** carrying the decision, when it outlives the issue;
+- **the gate's own record**, where the work is gated by a manifest: the MCP/SDK surface rule records the owner's approval on the row's `approval` field (a PR number and Daniel's handle) in `config/surface-manifest.yml` — `CONTRIBUTING.md` → "The MCP tool surface and public SDK methods cannot grow by accident" is the procedure this rule is cited from.
+
+The relay is the point. A decision that is not recorded on the artifact is not a decision — it is a default that holds until the next lane re-decides it.
+
+---
+
+## ⛔ SESSION RECAP PROTOCOL: don't recount trivia about what happened, present state and decisions.
+
+If you're going to present a recap at the end of a turn or session, don't say things like "Cycle 3 found the worst bug of the whole lane" or "Two corrections I had to make about my own work" unless they're changing the scope, architecture or UX that was agreed. Instead present the state, key design principles/decisions made, and cleanly present any user decisions needed (see USER QUESTIONS PROTOCOL) or next steps. If the next steps are just to continue, do not stop and just continue (see NEVER PAUSE WITHOUT A REASON)
+
+---
+
 ## ⛔ HARD RULE: Skill Compliance
 
 **Skills are NON-NEGOTIABLE. No shortcuts, no "I know this one," no skipping because you're in a hurry.**
@@ -328,6 +363,34 @@ uv run python tools/collision_preflight.py <N> --repo owner/name
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed
 (#2985 vs PR #3005, #2952 vs PR #3018 — the incident in #3061). A truncated or partial check is
 worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a completeness check.
+
+### Shared capability — JEV
+
+**JEV is a shared, decision-only capability** — a third-party model (`https://jevtypesafeai.com/docs#apis`)
+used by fleet tooling wherever a decision is about **meaning** rather than identity. *Decision-only*
+is the property that makes it a shared capability rather than a model call: it can only return a
+value inside the schema the caller supplies (`Choice` / `Score` / `Noul` — a calibrated 0–1
+probability, mixable in one call), so it cannot invent a name or a label that was not offered.
+
+**The division of labour is the contract: the MODEL labels; the calling code does only
+mechanics** — pre-filter, batching, thresholds, caching, and fail-closed degradation. A caller may
+not let the model's probability *be* the verdict: the threshold band, the cache identity, and the
+failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
+
+- **In-repo use:** `tools/collision_preflight.py` (#5070) — the claim-ownership `Noul` question
+  ("is this comment a lane taking ownership of the issue's work?"), with the model pinned to
+  `jev-1.13.0` and prompt version `claim-ownership-v1`. CLEAN requires p < 0.50; the band
+  `[0.50, 0.70)` is a HIT, never a silent CLEAN; a `model` field that is not exactly the pin is
+  rejected. No key, no network, or any JEV error/parse failure degrades to the offline verdict and
+  exit code (`COLLISION_PREFLIGHT_JEV=off` forces that path exactly) — a JEV outage can never
+  become a false CLEAN.
+- **The request shape is pinned by the caller and verified against the live endpoint — it is
+  deliberately NOT restated here.** A shape copied out of prose is how the next caller gets a 400
+  that blames its own code; copy the working construction in the caller instead (#7866 is the open
+  finding on that shape).
+- **Rationale and JEV's decision-only properties:** `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
+  (§"✅ Jev for classification is cheap, and the seam already exists"; the extraction journey's
+  S2.2/S2.3 consumes the same capability) — not this file.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
