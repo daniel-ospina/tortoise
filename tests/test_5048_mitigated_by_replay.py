@@ -73,6 +73,12 @@ MUTATIONS THAT MUST RED:
 - re-anchor that fold on ``skip_content`` → the superseded-bare-creation case
   reverts to the first strength (the write, not the supersession, is the
   boundary — see ``test_strength_boundary_is_the_write``);
+- disable the ``mitigation_strength`` arm in ``_apply_one`` (the PURE fold
+  ``consistency`` compares the graph against) → the fold keeps the FIRST
+  strength while the graph holds the revised one, so ``check_consistency``
+  false-reds a faithful re-mitigation rebuild; the create-path sibling never
+  reaches that arm, which is why
+  ``test_check_consistency_agrees_on_a_remitigation`` exists;
 - replace the ``"mitigation_strength" in persisted_extra_keys`` anchor with a
   hand-spelled ``p.get("mitigation_strength") is not None`` → a creation the
   writer DROPPED (an undeclared list) counts as a write, over-suppresses the
@@ -325,6 +331,38 @@ class TestMitigatedBySurvivesRebuild:
             assert result["ok"], (
                 "check_consistency flagged a faithful rebuild as diverged: "
                 f"divergence={result.get('divergence')!r}, "
+                f"points={result.get('divergent_points')!r}"
+            )
+        finally:
+            sdk.close()
+
+    def test_check_consistency_agrees_on_a_remitigation(self, tmp_path):
+        """The durability GATE must agree on the RE-MITIGATION shape too.
+
+        ``consistency`` compares the graph against the PURE ``fold()`` of the
+        journal, so every write this PR folds must also ride
+        ``_apply_one`` — or the fold keeps the FIRST strength while the graph
+        holds the revised one and ``check_consistency`` falsely reports a
+        content divergence on a faithful rebuild and advises a repair loop that
+        cannot converge. The create-path sibling above never reaches the
+        ``PointRevised`` arm, so this shape is the one that covers it.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            mid = sdk.mitigate_operator(op_id, "gate parity", 0.10)["id"]
+            sdk.mitigate_operator(op_id, "gate parity", 0.50)  # PointRevised
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            assert rebuilt == pytest.approx(0.50), (
+                f"the revision half of the fixture did not land: {rebuilt!r}"
+            )
+            result = check_consistency(str(events / "events.jsonl"),
+                                       sdk._get_proj())
+            assert result["ok"], (
+                "check_consistency flagged a faithful re-mitigation rebuild as "
+                f"diverged: divergence={result.get('divergence')!r}, "
                 f"points={result.get('divergent_points')!r}"
             )
         finally:

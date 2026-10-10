@@ -111,7 +111,10 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
     # ``OverflowError`` — and ``nan``/``inf`` fail it too. ``math.isfinite``
     # here would be a second, unreachable opinion.
     try:
-        return 0 <= value <= 1
+        # ``bool(...)``: a numpy scalar (``np.True_``) or an ``int`` subclass
+        # with a truthy comparison would otherwise leak through this ``-> bool``
+        # annotation, and the predicate is used as a value by ``consistency``.
+        return bool(0 <= value <= 1)
     except Exception:  # total refusal — see the docstring
         return False
 
