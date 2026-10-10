@@ -220,12 +220,13 @@ def test_whitespace_only_env_override_is_treated_as_unset(tmp_path, monkeypatch)
 
 
 def test_whitespace_only_home_is_refused_as_a_drop(tmp_path, monkeypatch):
-    """#7924 review P2: the RESOLVED base must be absolute.
+    """#7924 review P2: a set-but-whitespace ``$HOME`` must be refused.
 
     ``$HOME`` is not normalized, so ``HOME="   "`` makes ``Path.home()``
-    relative (``PosixPath('   ')``) — the same CWD hazard one level down from
-    the override leg. It must be refused (and counted as a drop), never
-    materialized under the CWD.
+    relative (``PosixPath('   ')``) — a CWD hazard one level down from the
+    override leg. Since #7924 review round 3 it is refused UP FRONT, before
+    ``Path.home()`` is consulted (``_refuse_unusable_home``); it must still be
+    refused (and counted as a drop), never materialized under the CWD.
     """
     _no_override(monkeypatch)
     monkeypatch.setenv("HOME", "   ")
@@ -349,3 +350,82 @@ def test_unresolvable_home_is_counted_as_a_drop(tmp_path, monkeypatch):
     # (the hosted app exposes no /metrics route), like journal_write_failures.
     snap = monitoring.metrics()
     assert snap["audit_fallback_drops"].get("unresolvable_path", 0) == after
+
+
+# ── #7924 review round 3: the empty-$HOME escape is reachable TWICE ──────
+
+def test_tilde_override_with_empty_home_is_refused(tmp_path, monkeypatch):
+    """#7924 review round 3: the ADMISSION the round-2 guard left open.
+
+    ``Path("~/.audit").expanduser()`` reads ``$HOME`` for a BARE leading
+    ``~``; with ``HOME=""`` it expands to ``/.audit`` — an ABSOLUTE path — so
+    the empty-``$HOME`` guard on the *default* leg and the absolute-path check
+    BOTH pass, and in a root-writable container the mkdir+append then
+    SUCCEEDS with no drop counted. The override leg must refuse it too, and
+    count it as a PATH drop (never ``write_failed``).
+
+    Mutations that red this test: (a) drop the ``_refuse_unusable_home()``
+    call on the ``~``-override leg — no refusal, no drop; (b) count the
+    refusal as ``write_failed`` — the third assertion reds.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", "")
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "~/.audit")
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match=r"\$HOME is set but empty"):
+        logger._fallback_file()
+    counts = monitoring.audit_fallback_drop_counts()
+    before_path = counts.get("unresolvable_path", 0)
+    before_write = counts.get("write_failed", 0)
+    logger.append("org-1", None, "op")  # must NOT raise
+    counts = monitoring.audit_fallback_drop_counts()
+    assert counts.get("unresolvable_path", 0) == before_path + 1, (
+        "a `~` override under an empty $HOME must be counted as a PATH drop")
+    assert counts.get("write_failed", 0) == before_write, (
+        "refusal is a path-resolution failure, not a write failure")
+
+
+def test_filesystem_root_override_is_refused(tmp_path, monkeypatch):
+    """#7924 review round 3: the resolved base must not BE the filesystem root.
+
+    Defense in depth over every leg: an explicit
+    ``TORTOISE_AUDIT_FALLBACK_DIR=/`` would otherwise write
+    ``/audit_fallback.jsonl``. Refused (and counted), not materialized.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "/")
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match="filesystem root"):
+        logger._fallback_file()
+    before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    logger.append("org-1", None, "op")  # must NOT raise
+    after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    assert after == before + 1, "a root base must be counted as a path drop"
+
+
+def test_replay_resolution_failure_warns_once_not_per_successful_append(
+        tmp_path, monkeypatch, caplog):
+    """#7924 review round 3: the READ leg must not flood the log on the HEALTHY path.
+
+    ``_replay_fallback()`` runs on every SUCCESSFUL Postgres write, so an
+    unconditional ERROR there emits one line per audit event whenever the
+    fallback path cannot be resolved — even though every one of those events
+    WAS durably persisted, which makes the message read as a loss that did not
+    happen. Warn once per process, like the whitespace-only-knob warning.
+
+    Mutation that reds this test: drop the ``_REPLAY_RESOLUTION_WARNED`` gate
+    — five successful appends then emit five ERROR records instead of one.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", "")
+    from tortoise import audit_events as _ae
+    monkeypatch.setattr(_ae, "_REPLAY_RESOLUTION_WARNED", False)
+    logger = AuditLogger(dsn=None)
+    logger._conn = _FakeConn()  # a healthy "Postgres" — every append succeeds
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            logger.append("org-1", None, "op")
+    hits = [r.getMessage() for r in caplog.records
+            if "could not inspect the audit fallback" in r.getMessage()]
+    assert len(hits) == 1, f"expected exactly one warning, got {len(hits)}"

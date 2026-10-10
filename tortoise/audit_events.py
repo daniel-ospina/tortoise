@@ -85,6 +85,54 @@ def _warned_whitespace_override() -> bool:
 _WHITESPACE_OVERRIDE_WARNED = False
 
 
+def _warned_replay_resolution_failure() -> bool:
+    """Return True if the read-leg resolution failure was ALREADY reported.
+
+    #7924 review round 3: ``_replay_fallback()`` runs on every SUCCESSFUL
+    Postgres write (``append``'s else-branch), so an unconditional ERROR
+    there emits one line per audit event whenever the fallback path cannot be
+    resolved — even though every one of those events WAS durably persisted,
+    which makes the message read as a loss that did not happen. Warn once per
+    process, exactly as the whitespace-only-knob warning above does, so a
+    malformed ``$HOME`` cannot flood the log from the healthy path.
+    """
+    global _REPLAY_RESOLUTION_WARNED
+    if _REPLAY_RESOLUTION_WARNED:
+        return True
+    _REPLAY_RESOLUTION_WARNED = True
+    return False
+
+
+_REPLAY_RESOLUTION_WARNED = False
+
+
+def _refuse_unusable_home() -> None:
+    """Refuse a SET-but-empty/whitespace ``$HOME`` BEFORE it is consulted.
+
+    ``Path.home()`` returns ``/`` for ``HOME=""``, and ``Path.expanduser()``
+    expands a bare leading ``~`` to that same filesystem root — both results
+    ARE absolute, so the absolute-path check cannot see them, and the fallback
+    would be written to ``/.tortoise`` (or ``/.audit``), OUTSIDE ``$HOME``. In
+    a root-writable container (the hosted shape) that write SUCCEEDS, so no
+    drop is counted and the loss is silent.
+
+    #7924 review round 3: this must gate EVERY leg that consults ``$HOME``,
+    not just the default leg — the ``~``-override leg reached the same root
+    through ``expanduser()`` (``HOME=""`` + ``TORTOISE_AUDIT_FALLBACK_DIR=
+    '~/.audit'`` resolved to ``/.audit/audit_fallback.jsonl``).
+
+    An UNSET ``$HOME`` is fine: every consumer then falls back to the pwd
+    entry, which is an absolute path.
+    """
+    home = os.environ.get("HOME")
+    if home is not None and not home.strip():
+        raise RuntimeError(
+            "$HOME is set but empty/whitespace — refusing to "
+            "resolve the audit fallback against the filesystem "
+            "root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute "
+            "path or fix $HOME")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -171,13 +219,19 @@ class AuditLogger:
         is silent. ``HOME="   "`` is the same misconfiguration one value over.
         Both are refused here — counted as an ``unresolvable_path`` drop, never
         as ``write_failed`` — while an UNSET ``$HOME`` keeps the documented
-        ``Path.home()`` fallback.
+        ``Path.home()`` fallback. The refusal gates EVERY leg that consults
+        ``$HOME``, the ``~``-override leg included (#7924 review round 3):
+        ``expanduser()`` reads ``$HOME`` for a bare leading ``~``, so
+        ``HOME=""`` + ``TORTOISE_AUDIT_FALLBACK_DIR='~/.audit'`` reached the
+        same root through the knob.
 
         The RESOLVED path is then required to be ABSOLUTE (#7924 review
         P2) as defense in depth: the two override legs are held to the same
         invariant — returning them unchecked would make a post-construction
         relative ``_fallback_dir`` (inert in the eager version, where only
         ``_fallback_path`` was read) the winning path and mkdir it in the CWD.
+        A resolved base that IS the filesystem root is refused outright
+        (#7924 review round 3), so no leg can reach ``/audit_fallback.jsonl``.
 
         Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
         malformed ``$HOME``), and ``RuntimeError`` for a path that is not
@@ -200,21 +254,33 @@ class AuditLogger:
                     "AuditLogger: TORTOISE_AUDIT_FALLBACK_DIR is whitespace-only — "
                     "treating it as unset and using the $HOME default")
             if override:
+                if override == "~" or override.startswith("~/"):
+                    # #7924 review round 3: a BARE leading `~` is expanded from
+                    # `$HOME` by `expanduser()`, so with `HOME=""` it expands
+                    # to `/` — the same root escape the default leg refuses,
+                    # reached through the relocation knob. (`~user` expands
+                    # from the password database and never consults `$HOME`,
+                    # so it is deliberately left alone.)
+                    _refuse_unusable_home()
                 base = Path(override).expanduser()
             else:
-                home = os.environ.get("HOME")
-                if home is not None and not home.strip():
-                    raise RuntimeError(
-                        "$HOME is set but empty/whitespace — refusing to "
-                        "resolve the audit fallback against the filesystem "
-                        "root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute "
-                        "path or fix $HOME")
+                _refuse_unusable_home()
                 base = Path.home() / ".tortoise"
         if not base.is_absolute():
             raise RuntimeError(
                 f"audit fallback base is not an absolute path: {base!r} "
                 "(set TORTOISE_AUDIT_FALLBACK_DIR to an absolute path, or fix "
                 "$HOME)")
+        if base == Path(base.anchor):
+            # Defense in depth (#7924 review round 3): the resolved base must
+            # never BE the filesystem root, however it got there — an explicit
+            # `TORTOISE_AUDIT_FALLBACK_DIR=/`, or any future leg that expands
+            # to it. (`base.anchor` is `""` for a relative path, but the
+            # absolute check above has already refused those.)
+            raise RuntimeError(
+                f"audit fallback base resolves to the filesystem root: "
+                f"{base!r} — refusing (the fallback must live under $HOME or "
+                "an explicit absolute directory)")
         return base / "audit_fallback.jsonl"
 
     # ── Public API ──────────────────────────────────────────────────
@@ -404,7 +470,18 @@ class AuditLogger:
             # phantom drops on a fully-persisted path. The failure is still
             # surfaced loudly — an ERROR is the right signal for "could not
             # look", and the write leg still counts the drops that ARE events.
-            _logger.error("AuditLogger: fallback path resolution failed: %s", e)
+            #
+            # #7924 review round 3 — and it is WARN-ONCE: this method runs on
+            # every SUCCESSFUL Postgres write, so an unconditional ERROR here
+            # emitted one line per audit event while `$HOME` was malformed,
+            # reading as a loss even though every one of those events was
+            # durably persisted. The loss signal is the drop counter on the
+            # WRITE leg; this message only says "could not look".
+            if not _warned_replay_resolution_failure():
+                _logger.error(
+                    "AuditLogger: could not inspect the audit fallback for "
+                    "replay (%s) — no fallback was read this call; nothing is "
+                    "reported lost (the write leg counts drops)", e)
             return
         if not path.exists():
             return
