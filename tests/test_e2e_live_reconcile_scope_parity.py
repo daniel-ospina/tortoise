@@ -80,10 +80,11 @@ RESIDUE_TEAM_ID = "436168ff58d4c1e9a4b2f3d5a1"
 def test_guard_shape_is_identical_in_detector_and_remediator() -> None:
     """The detector's shape oracle and the remediator's Guard A are ONE rule.
 
-    This is the assertion that would have caught #5971's root cause: the two
-    scripts are free to spell the regex separately (no import coupling), but they
-    must never *differ* — a divergence is exactly how a row becomes
-    detected-but-unremediable.
+    The two scripts are free to spell the regex separately (no import coupling),
+    but they must never *differ*: a divergence between the shape oracle and the
+    guard would let a row be classified one way and acted on another. (#5971's
+    own root cause was not a divergent shape — both regexes were already
+    identical — but the SCOPE mismatch the residue tests below pin.)
     """
     assert detector.EMAIL_RE.pattern == remediator.EMAIL_RE.pattern
     # And the shape is the strict one (not an accidental wildcard): the guard is

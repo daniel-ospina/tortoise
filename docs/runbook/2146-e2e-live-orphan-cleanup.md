@@ -157,8 +157,9 @@ UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
 
 ```sql
 SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
-WHERE conrelid IN ('public.organizations','public.api_keys','public.org_memberships',
-                   'public.invitations','public.abuse_events')::regclass
+WHERE conrelid IN ('public.organizations'::regclass, 'public.api_keys'::regclass,
+                   'public.org_memberships'::regclass, 'public.invitations'::regclass,
+                   'public.abuse_events'::regclass)
   AND contype = 'f';
 ```
 
@@ -296,7 +297,8 @@ product purge): **auth users** (GoTrue) → **org_memberships** →
 **teams** (last). FalkorDB graphs may run before or after the teams-row delete
 (manifest-driven; a graph left behind is a benign orphan with no DB row).
 
-Guards (in code): email/name must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$`;
+Guards (in code): email must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$` (the
+`name` column is not pattern-checked);
 teams are limited to the window unless `--all-e2e-live`; every delete is
 enumerated up-front; graphs must match `<org|team>_[0-9a-f]{26}` exactly (#3543:
 pre-rename `team_`, post-rename `org_`); nothing
@@ -318,9 +320,9 @@ instead:
    Guard D below. Without it those rows are **reported but never deleted**, and
 the reconcile check can never go green.
 
-The live instance: the weekly reconcile (#2189) has been RED since 2026-09-21 on
-one row, `e2e-live-3781-e2a26d39@premise-labs.dev`, filed first as #4445 and then
-as #5971. It is **not** a monitor mint and **not** a legacy survivor of the red
+The live instance: the weekly reconcile (#2189) has been RED since 2026-09-21 —
+the deviant row below was filed first as #4445 and then as #5971. It is
+**not** a monitor mint and **not** a legacy survivor of the red
 window: it is the #3781 manual-verification account that PR #3790's own commit
 message hands to the operator ("the live verification created one account … the
 environment has no `SUPABASE_SERVICE_KEY`, so the Admin-API teardown the repo's
@@ -367,17 +369,20 @@ uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
 #    prints e.g.: [residue] Guard-A residue — in the e2e-live namespace, OFF the
 #    guard shape …  [residue]   user <id>  e2e-live-3781-…@premise-labs.dev  created …
 #    [residue]   1 row(s) NOT in the delete set — pass --include-residue …
-# 2. dry-run
+# 2. dry-run — write it to a SCRATCH manifest: a dry-run re-enumerates and writes
+#    $RECUR, and for a residue TEAM that write makes prior_n>0 with Guard-A=0, so
+#    the execute step below would refuse. The scratch keeps $RECUR team-empty.
 uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
-    --phase all --all-e2e-live --include-residue --manifest "$RECUR"
-# 3. execute
+    --phase all --all-e2e-live --include-residue --manifest "$RECUR.dryrun"
+# 3. execute (writes $RECUR, so its residue team's graph_name reaches the
+#    FalkorDB companion)
 uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
     --phase all --all-e2e-live --include-residue --manifest "$RECUR" --execute
 # 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
 #    reconcile run is green (that check is the end-to-end proof, not this list).
-#    For a residue TEAM this re-run refuses by design ($RECUR now holds that
-#    team, but Guard-A found none) — remove $RECUR (its graphs are now dropped)
-#    or re-enumerate to a fresh --manifest.
+#    For a residue TEAM that re-run refuses by design ($RECUR now holds the
+#    promoted team, but Guard-A found none) — remove $RECUR once its graph has
+#    been dropped, or re-enumerate to a fresh --manifest.
 ```
 
 For a residue **team** (none today: every `teams` row in the namespace matched

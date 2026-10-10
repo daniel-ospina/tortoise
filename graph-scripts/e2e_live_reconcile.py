@@ -43,8 +43,9 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     test namespace is a signal. Rows deviating from the strict guard shape
     `^e2e-live-[0-9a-f]{8}@premise-labs.dev$` still fail the check (they are
     inside the test namespace) and are surfaced as shape_clean=false in the
-    --json output — the 2146 cleanup script needs the strict shape, so an
-    operator reviews before running it.
+    --json output — the 2146 cleanup script's DEFAULT delete set is the strict
+    shape only, so an operator reviews before running it (Guard-D residue needs
+    its explicit --include-residue).
   * Scope parity (#5971): this detector's scope (the LIKE namespace, all-time)
     is DELIBERATELY broader than the remediator's DELETE scope
     (`graph-scripts/2146_e2e_live_orphan_cleanup.py` deleted only the strict
