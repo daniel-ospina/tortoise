@@ -612,20 +612,20 @@ Each layer answers a different question. All four are live mechanisms.
 | Edge | Type | Confidence | Example |
 |------|------|-----------|---------|
 | performs / produces / uses / authoredBy / ownedBy / memberOf / managedBy | **Structural** (plain) | None (factual) | (:Subject "Daniel")-[performs]->(:Event), (:Object "Customer Profile")-[ownedBy]->(:Subject "Daniel") |
-| Event→Point, Point→Event, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — both propagate EP under #7813 (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES) |
+| Any of `:Point`/`:Subject`/`:Object`/`:Event` ↔ same (e.g. Event↔Point, Point↔Point) | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — both propagate EP under #7813 (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES) |
 
-**Principle:** Operators connect only epistemic targets (Event→Point, Point→Event, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
+**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
 
 ---
 
 ## §3. Edge Topology
 
-### §3.1 Point ↔ Point (Epistemic — Operators)
+### §3.1 Epistemic ↔ Epistemic (Operators — `:Point`/`:Subject`/`:Object`/`:Event`)
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `IMPL` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is recorded on the write. |
-| `NAND` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction is recorded on the write. |
+| `IMPL` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is recorded on the write. |
+| `NAND` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction is recorded on the write. |
 | `hasPart` | Point → Point | `<->` (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4765) / `invalidate_point` (sdk.py:4654). |
 

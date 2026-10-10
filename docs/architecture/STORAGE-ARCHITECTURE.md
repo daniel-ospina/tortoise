@@ -489,7 +489,7 @@ State values are personal/entity attribute values that must survive verbatim —
 
 **This bounds how far volume reduction may go.** The Epistemic layer's operators (`IMPL`, `NAND`) act on **individual claims** — and the mitigation mechanism is the **`mitigated_by` edge on an operator Point**, graded by `mitigation_strength` (`ONTOLOGY.md` §3.9, `#2315`). ⚠️ *`MITIGATES` is **not** a registered predicate* — an earlier draft of this line listed it as one, which invites a lane to implement a type that does not exist. A Point containing several fused claims cannot be argued about:
 
-- Operators connect only epistemic targets (`Point↔Point`, `Event↔Point`) — you cannot `NAND` a paragraph.
+- Operators connect only epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event`) — you cannot `NAND` a paragraph.
 - EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
 - Relevance modulation (a mitigation reducing one claim's weight) requires the claims be separable.
 

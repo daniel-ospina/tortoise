@@ -19,6 +19,8 @@ inputs, and the node's posterior stays null (never written).
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from tortoise.ep import TortoiseEP
@@ -387,3 +389,202 @@ def test_non_point_belief_write_survives_rebuild(tmp_path):
             f"{before} -> {_belief(sdk, event)}")
     finally:
         sdk.close()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. Round-2 review fixes — index anchor, the reference fold, write-back
+# ═══════════════════════════════════════════════════════════════════
+
+# ── P2 — the widened belief fold must stay index-anchored ──────────
+
+def test_fold_confidence_changed_keeps_a_label_index_anchor(sdk, monkeypatch):
+    """The widened belief fold must NOT drop the label.
+
+    FalkorDB cannot use a per-(label, property) range index through a label
+    predicate, so ``MATCH (n) WHERE n:Point OR … AND n.id = $id`` full-scans
+    every fold (and regresses the common ``:Point`` case the ``Point(id)``
+    index served). The fix sweeps ``epistemic_label_queries`` — one query per
+    label, each keeping the label on the node pattern (the rule
+    ``tortoise/live.py`` states).
+    """
+    from tortoise.projection import _GuardedGraph
+
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (e:Event {id:'evt-7853-idx', eventId:'evt-7853-idx', "
+        "name:'anchored'})")
+
+    seen: list[str] = []
+    original = _GuardedGraph.query
+
+    def spy(self, cypher, *args, **kwargs):
+        text = " ".join(str(cypher).split())
+        if "SET n.confidence" in text:
+            seen.append(text)
+        return original(self, cypher, *args, **kwargs)
+
+    monkeypatch.setattr(_GuardedGraph, "query", spy)
+    matched = proj._fold_confidence_changed(
+        {"id": "evt-7853-idx", "confidence": 0.42})
+
+    assert matched == 1
+    assert seen, "the fold issued no belief SET"
+    for q in seen:
+        assert "MATCH (n:" in q, (
+            f"an id-anchored fold dropped its label and full-scans: {q!r}")
+        assert "MATCH (n) WHERE" not in q, q
+    assert len(seen) == len(EPISTEMIC_LABELS), (
+        f"the fold must sweep one query per label; saw {len(seen)}")
+
+
+# ── P2-2 (#7936) — the reference fold, BOTH directions ─────────────
+
+_NON_POINT_BELIEF_JOURNAL = [
+    {"type": "PointAdded", "point": {"id": "src-7936", "content": "s"}},
+    {"type": "EventRecorded", "id": "evt-7936", "name": "e",
+     "eventKind": "test", "startedAt": "2026-01-01T00:00:00Z"},
+    {"type": "ConfidenceChanged", "id": "evt-7936", "confidence": 0.5},
+]
+
+
+def test_reference_fold_exempts_a_materialized_non_point_belief(caplog):
+    """Direction 1: a belief write to a journal-materialized non-Point node
+    is a BOUND of the point-only index, NOT a fold-miss.
+
+    #7936: recording it reds a healthy graph and, because ``non-folded`` is
+    tested first, also masks a genuine content divergence on it.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        with collect_non_folded() as entries:
+            keys = fold(list(_NON_POINT_BELIEF_JOURNAL))
+
+    assert list(refused_events(entries)) == [], [str(e) for e in entries]
+    assert "evt-7936" not in keys, keys
+    # ...and the drop is surfaced, not silent (#7936).
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "#7936" in joined, [r.getMessage() for r in caplog.records]
+
+
+def test_reference_fold_still_flags_a_buried_point_belief():
+    """Direction 2: the exemption must NOT swallow a genuine ``:Point`` miss
+    (created → hard-deleted → belief write).
+
+    A false ``0`` (the missed exemption) is worse than the false ``1`` this
+    fixes — a silent success here would hide a belief write the replay
+    genuinely cannot reproduce.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    events = [
+        {"type": "PointAdded", "point": {"id": "pt-7936", "content": "c"}},
+        {"type": "EntityMutated", "op": "delete", "label": "Point",
+         "id": "pt-7936"},
+        {"type": "ConfidenceChanged", "id": "pt-7936", "confidence": 0.5},
+    ]
+    with collect_non_folded() as entries:
+        fold(events)
+    refused = refused_events(entries)
+    assert any("pt-7936" in str(e) for e in refused), [
+        str(e) for e in entries]
+
+
+def test_consistency_healthy_non_point_belief_is_not_non_folded(tmp_path):
+    """End-to-end: the check must call a graph ``rebuild_all`` itself
+    produced healthy, not ``non-folded``.
+
+    Before the fix, the reference fold missed the Event belief and
+    ``non-folded`` outranked the content classes, so this exact graph — the
+    one the DB fold reproduces — reported ``ok=False`` with an ``action``
+    telling the operator to repair a journal that is not broken (#7936).
+    """
+    from tortoise.consistency import check_consistency
+
+    db = str(tmp_path / "consistency-7936.db")
+    events = tmp_path / "events-7936"
+    events.mkdir()
+    log_path = str(events / "events.jsonl")
+    sdk = TortoiseSDK(db, event_log_path=log_path)
+    try:
+        proj = sdk._get_proj()
+        src = sdk.create_point("statement", "strong source",
+                               status="live")["id"]
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
+            "n.baseline_set=true", params={"id": src})
+        event = sdk.create_entity("event", "an event",
+                                  eventKind="test")["node"]["id"]
+        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._get_ep().run([src, event], max_hops=2,
+                          evidence={src: (12.0, 1.0)})
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        verdict = check_consistency(log_path, proj, record_state=False)
+    finally:
+        sdk.close()
+
+    assert verdict["non_folded_refused_count"] == 0, \
+        verdict["non_folded_events"]
+    assert verdict["divergence"] != "non-folded", verdict
+    assert verdict["hash_match"] is True, verdict
+    assert verdict["ok"] is True, verdict
+
+
+# ── P2-3 — the full-precision write-back spans the four labels ─────
+
+def test_compute_confidence_writeback_persists_full_precision_for_non_point(sdk):
+    """The write-back set == the run set (``sdk.py``).
+
+    The EP flush persists the 4-dp mirror (``_flush_cache``); the trailing
+    full-precision mean is the write-back's unique write. A ``:Point``-only
+    UNWIND leaves a non-Point target holding the 4-dp mirror — the API result
+    is not what the graph holds.
+    """
+    proj = sdk._get_proj()
+    src = make_point(sdk, "strong source")
+    event = make_labeled_node(sdk, "Event", "evt-7853-wb", "an event")
+    set_evidence(sdk, src, 12.0, 1.0)
+    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+
+    res = sdk.compute_confidence(evidence={src: (12.0, 1.0)},
+                                 require_calibration=False)
+    mean = res["confidences"].get(event, {}).get("mean")
+    assert mean is not None, res
+
+    conf = confidence_of(sdk, event)
+    assert conf is not None
+    assert conf != round(conf, 4), (
+        f"the Event kept the 4-dp `_flush_cache` mirror ({conf}) — the "
+        f"full-precision write-back matched no non-Point node")
+    assert conf == pytest.approx(mean, rel=1e-12), (conf, mean)
+
+
+def test_dream_writeback_persists_full_precision_for_non_point(sdk):
+    """The dream write-back (#1240) is the other half of the invariant.
+
+    Direct ``_ep_run_batch`` because the dream BFS selector is ``:Point``-only
+    today (#7927), so the public ``dream()`` cannot yet reach a non-Point
+    endpoint — but the widened EP read puts it in the run set the write-back
+    must honour, and this pins that.
+    """
+    proj = sdk._get_proj()
+    src = make_point(sdk, "strong source")
+    event = make_labeled_node(sdk, "Event", "evt-7853-dream", "an event")
+    set_evidence(sdk, src, 12.0, 1.0)
+    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+
+    dreamer = sdk._get_dreamer()
+    dreamer._ep_run_batch(proj, [src, event], 2, stamp=True,
+                          warm_start=False)
+
+    conf = confidence_of(sdk, event)
+    assert conf is not None
+    assert conf != round(conf, 4), (
+        f"the dream write-back left the 4-dp mirror ({conf}) on the Event")
+    stamp = proj.g.query(
+        "MATCH (n:Event {id:$id}) RETURN n.lastDreamedAt",
+        params={"id": event}).result_set
+    assert stamp and stamp[0][0] is not None, (
+        "the dream write-back did not stamp lastDreamedAt on the Event")

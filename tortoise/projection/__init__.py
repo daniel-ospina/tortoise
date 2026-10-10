@@ -4126,6 +4126,38 @@ def _journal_forward_reference(first_materialized, seq, label, rid) -> bool:
     return first is not None and first > seq
 
 
+def _reference_fold_non_point_target(first_materialized, rid) -> bool:
+    """True when the journal materializes ``rid`` as a REFERENCE-FOLD entity
+    (``:Subject`` / ``:Object`` / ``:Event``).
+
+    #7936 interim. The #7813 widening makes EP journal a ``ConfidenceChanged``
+    for any of the four epistemic labels, but ``_apply_one``'s index is the
+    point-only ``{id: point}`` dict — it has no representation for a non-Point
+    target. That is a BOUND of this index, NOT a fold-miss: the graph fold
+    (``_fold_confidence_changed``) resolves the id and ``rebuild`` /
+    ``rebuild_all`` / ``recover_from_log`` reproduce the belief. Recording a
+    miss here reds a HEALTHY graph and — because ``non-folded`` is tested first
+    (``consistency.py``) — also masks any genuine content divergence on it, so
+    the exemption is what keeps the diagnostic honest.
+
+    Keyed on the SAME ordered existence map the miss test reads, so it cannot
+    widen to an id the journal never materialized: a create → hard-delete of a
+    ``:Point`` stays under ``Point`` and still refuses. A multi-labelled
+    ``:Point:Object`` id materialized by a ``PointAdded`` has a ``points``
+    entry and folds before this is consulted; one materialized only as an
+    ``Object`` takes the exemption, which is also right — the point-only index
+    cannot represent it either way.
+
+    NOTE the index itself is still point-only: the exemption suppresses the
+    false miss, it does not fold the belief into ``fold()`` /
+    ``InMemoryProjection`` (that needs the ``(label, id)`` re-key in #7936).
+    """
+    if not isinstance(first_materialized, dict) or not isinstance(rid, str):
+        return False
+    return any((label, rid) in first_materialized
+               for label in _REFERENCE_FOLD_ENTITY_LABELS)
+
+
 def journal_object_surviving_keys(
         events: list[dict]) -> tuple[frozenset[str], frozenset[str]]:
     """``(ids, names)`` of every Object that EXISTS after the journal replays.
@@ -4491,6 +4523,7 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # also uses, so the pure fold and the graph fold cannot disagree on a
         # corrupt line (#330 parity).
         rid = ev.get("id")
+        _has_prop = any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
         p = points.get(rid) if _writable_id(rid) else None
         if p:
             for key in BELIEF_PROPS:
@@ -4511,9 +4544,22 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
+        elif (_writable_id(rid) and _has_prop
+                and _reference_fold_non_point_target(
+                    journal_first_materialized, rid)):
+            # #7936 interim: the id IS materialized by the journal — as a
+            # `:Subject`/`:Object`/`:Event`. `points` cannot represent it, so
+            # this point-only fold DROPS the belief (the graph fold does not).
+            # Say so instead of dropping it silently, and do NOT record a miss:
+            # a false `non-folded` reds a healthy graph and, tested first,
+            # masks a genuine content divergence on it (#7936).
+            logger.warning(
+                "reference fold: ConfidenceChanged targets the non-Point "
+                "epistemic node %r; the in-memory {id: point} index cannot "
+                "hold it (the graph fold resolves it) — #7936", rid)
         elif (journal_first_materialized is not None and journal_seq is not None
                 and _writable_id(rid)
-                and any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
+                and _has_prop
                 and not _journal_forward_reference(
                     journal_first_materialized, journal_seq, "Point", rid)):
             # #3585: as in the OperatorAnnotated arm — the refusal is mirrored
@@ -4523,25 +4569,27 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # wrongly exempted (the trap). A write whose Point exists but whose
             # every carried value fails the value gate is `rebuild_all`-only
             # (it folds 0 rows there); mirroring THAT would need the value gate
-            # re-run here, and it remains a documented bound.
-            #
-            # KNOWN BOUND (#7853): ``points`` is the point-only `{id: point}`
-            # index, so it has no representation for a `:Subject`/`:Object`/
-            # `:Event` node. The #7813 widening makes EP journal a
-            # ConfidenceChanged for any of the four labels and the FALKOR fold
-            # (`_fold_confidence_changed`) now resolves it — but this reference
-            # fold still reads it as a miss, so `check_consistency` reports
-            # `point-belief-miss` for a belief write the graph engines
-            # (`rebuild` / `rebuild_all` / `recover_from_log`) fold correctly.
-            # Closing it means widening THIS index (and then the point-only
-            # count / `_compare_views` / `_graph_fingerprint` comparison) to the
-            # four labels — a much larger change than a wider MATCH here, so it
-            # is stated rather than half-done.
+            # re-run here, and it remains a documented bound. A non-Point
+            # target is exempted ABOVE (and never reaches here), so this stays
+            # the genuine `:Point` miss it was: the exemption keys on the
+            # journal's own materialization, not on the id being absent.
             record_non_folded(
                 SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
                 event_type="ConfidenceChanged", id=rid,
                 detail="reference fold: belief write matched no Point",
             )
+        elif (_writable_id(rid) and _has_prop
+                and (journal_first_materialized is None
+                     or journal_seq is None)):
+            # The one-record LIVE path (`InMemoryProjection.apply`, or a bare
+            # `_apply_one`) — no journal to distinguish a non-Point target from
+            # a genuinely buried `:Point`. Surface the drop; do NOT manufacture
+            # a `non-folded` record the batch path would not (that is the #7936
+            # divergence class).
+            logger.warning(
+                "reference fold: ConfidenceChanged for %r did not fold — the "
+                "point-only index holds no Point with that id (a non-Point "
+                "epistemic target is resolved by the graph fold) — #7936", rid)
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,

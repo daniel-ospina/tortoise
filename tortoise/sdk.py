@@ -15642,12 +15642,23 @@ class TortoiseSDK:
         if confidences:
             params_list = [{"id": cid, "c": conf["mean"]}
                            for cid, conf in confidences.items()]
-            written = proj.g.query(
-                "UNWIND $params AS p "
-                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c "
-                "RETURN n.id",
-                params={"params": params_list},
-            ).result_set
+            # #7853: the run set spans all four epistemic labels, so sweep ONE
+            # query per label to keep the id index-anchored (a label predicate
+            # over the UNWIND drops the per-(label, property) anchor —
+            # ``tortoise/live.py``). A multi-labelled node (``:Point:Object``)
+            # is returned by more than one sweep, so collapse on id: the
+            # journal set must equal the committed set (#395).
+            written: list = []
+            seen_ids: set = set()
+            for _q in epistemic_label_queries(
+                    "UNWIND $params AS p "
+                    "MATCH (n:{label} {id: p.id}) SET n.confidence = p.c "
+                    "RETURN n.id"):
+                for row in proj.g.query(
+                        _q, params={"params": params_list}).result_set:
+                    if row[0] not in seen_ids:
+                        seen_ids.add(row[0])
+                        written.append(row)
             # #2884 D3: this full-precision mean is the last confidence
             # writer on the fast path (the EP flush already journaled its
             # 4-dp rounded mirror) — journal it too, or a rebuild loses the

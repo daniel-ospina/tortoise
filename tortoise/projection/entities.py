@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
-    epistemic_disjunction,  # #7853: belief writes land on any epistemic label
+    epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
 )
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
@@ -2484,7 +2484,13 @@ class _EntityHandlers:
         that any of the four epistemic labels — so a ``:Point``-only MATCH left
         a non-Point belief write permanently unreplayable (``rebuild`` /
         ``recover_from_log`` refused the journal with ``point-belief-miss``).
-        The id anchor is kept; the label is a disjunction.
+        The id is index-anchored by keeping ONE label per query and sweeping
+        the four labels (``epistemic_label_queries``) — the same shape
+        ``tortoise/ep.py`` uses for its id-anchored reads, and the rule stated
+        at ``tortoise/live.py``: a label predicate over a bare ``MATCH (n)``
+        has no per-(label, property) index anchor, so it full-scans EVERY
+        ``ConfidenceChanged`` fold (and regresses the common ``:Point`` case
+        that ``origin/main`` served from the ``Point(id)`` index).
         """
         oid = ev.get("id")
         # #2884 review P1: the SAME id gate the sibling folds use. A bare
@@ -2526,14 +2532,18 @@ class _EntityHandlers:
             params[key] = value
         if not set_parts:
             return 0
-        result = self.g.query(
-            "MATCH (n) WHERE " + epistemic_disjunction("n") +
-            " AND n.id = $id "
-            "SET " + ", ".join(set_parts) +
-            " RETURN n.id LIMIT 1",
-            params=params,
-        )
-        return len(result.result_set)
+        # The SET is idempotent, so a multi-labelled id matching twice is
+        # harmless; stop at the first non-empty result to keep the hot
+        # ``:Point`` lookup first.
+        matched = 0
+        for _q in epistemic_label_queries(
+                "MATCH (n:{label} {id:$id}) SET " + ", ".join(set_parts) +
+                " RETURN n.id LIMIT 1"):
+            r = self.g.query(_q, params=params)
+            if r.result_set:
+                matched = len(r.result_set)
+                break
+        return matched
 
     # ── Entity nodes ───────────────────────────────────────────────
 
