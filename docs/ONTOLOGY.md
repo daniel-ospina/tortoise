@@ -1307,8 +1307,8 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 
 | Status | Kind | Write path | Transitions to | Notes |
 |--------|------|------------|----------------|-------|
-| `draft` | initial | `create_point`, `EventAPI._point` | `live` | Inert for EP computation; promoted on first operator edge |
-| `live` | active | `create_operator` (auto-promote source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
+| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point` | `live` | Inert for EP computation; promoted only by `promote_point` / `update_point(status='live')` — an EXPLICIT draft is never auto-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
+| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
 | `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
@@ -1322,7 +1322,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 >
 > **Tombstone contract:** Retracted points stay in the graph (`get_point` returns them with `status='retracted'`). Default query surfaces (`query`, `paginated_query`) exclude them; pass `include_retracted=True` or an explicit `status='retracted'` filter to surface them. Deletion via `delete_point` hard-deletes (no tombstone).
 >
-> **Parity decision (#690):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). EventAPI births `draft` (same as SDK); CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
+> **Parity decision (#690, amended #1088):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). A no-status `create_point` is `live` and an explicit `draft` is honoured and never auto-promoted; EventAPI births `draft` as its own journal-composer posture — deliberately NOT SDK parity since #1088; CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 
 ---
 

@@ -80,8 +80,9 @@ def test_require_calibration_raises(sdk):
 def test_require_calibration_partial(sdk):
     """One calibrated, one live-uncalibrated → still raises."""
     p1 = sdk.create_point("statement", "Calibrated", credibility="gold")
-    # Live uncalibrated point — the draft default would be excluded from the
-    # gate (#780/PR #1212), so the fail-closed assertion needs explicit live.
+    # Live uncalibrated point — a DRAFT would be excluded from the gate
+    # (#780/PR #1212); since #1088 a no-status create is LIVE, so the live
+    # status is stated explicitly here.
     sdk.create_point("statement", "Not calibrated", status="live")
     
     sdk.create_operator("IMPL", p1["id"], [sdk.create_point("statement", "target")["id"]])

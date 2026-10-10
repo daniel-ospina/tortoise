@@ -1575,8 +1575,10 @@ class TestPointsCreateConfidenceAndAuthor:
         assert r.status_code == 200, r.text
         props = self._read_point(client, r.json()["id"])
         assert props.get("baseline_set") is True, props
-        # An author-stated baseline is the source — never the system default.
-        assert props.get("baseline_source") != "system-default", props
+        # An author-stated baseline carries the CONTRACT source token — a
+        # mere `!= "system-default"` would pass for a null or garbage value.
+        from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
+        assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
 
     def test_bad_credibility_is_rejected_not_500(self, client):
         # A ladder word the store cannot resolve must be ANSWERED with a 4xx
