@@ -638,6 +638,27 @@ class _EdgeHandlers:
                     f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
+                # #5048: a MITIGATION point's edge is BIDIRECTIONAL live —
+                # ``mitigate_operator`` writes ``(m)-[:IMPL]->(op)`` AND the
+                # canonical reverse ``(op)-[:mitigated_by]->(m)`` — but the
+                # ``OperatorAdded`` payload only names the IMPL direction, so
+                # the reverse edge rode no record and the fold above rebuilt
+                # only one half. ``compute_operator_weight`` reads
+                # ``mitigated_by``, so a rebuild silently reverted w_eff to the
+                # undecayed base (measured 0.5 -> 1.0, 1 -> 0 edges). The
+                # marker is the point's OWN journaled ``mitigation_strength``
+                # (open-set passthrough, #2795): a generic IMPL operator carries
+                # none, and ``mitigated_by`` is canonical ONLY from a mitigation
+                # Point (commit_schema.Operator; #4937), so this cannot widen
+                # the predicate to every IMPL. `o` is the mitigation Point, `s`
+                # the operator it damps — matching the live writer's direction.
+                if rel_type == "IMPL" and p.get("mitigation_strength") is not None:
+                    self.g.query(
+                        "MATCH (o:Point {id:$oid}), (s) "
+                        "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                        "MERGE (s)-[:mitigated_by]->(o)",
+                        params={"oid": p["id"], "sid": src},
+                    )
             else:
                 # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
