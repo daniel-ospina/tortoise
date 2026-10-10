@@ -68,25 +68,33 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
     payload dampens that operator by the fallback strength (measured ``w_eff``
     1.0 -> 0.7) — a belief change the producer never asked for.
 
-    Nor is mere PRESENCE enough. ``mitigate_operator`` writes a finite real in
-    the sanctioned band (``weights.py`` clamps on read), and:
+    Nor is mere PRESENCE enough. The writer's own accepted domain is what the
+    fold must mirror, and ``_persist_extra_props`` decides what actually
+    reaches the node:
 
-    * a map/list/``None`` strength is dropped by ``_persist_extra_props`` (the
-      Point layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
+    * a map/list/``None`` strength is dropped by that passthrough (the Point
+      layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
       strength and a fabricated edge dampens at the fallback anyway;
     * a non-numeric value is persisted, and then makes
       ``weights.compute_operator_weight`` RAISE on every read of that operator.
+
+    A ``bool`` IS accepted on purpose: ``mitigate_operator`` takes one (the
+    range check ``0 <= strength <= 1`` passes for ``False``/``True``),
+    ``weights.mitigation_dampening_factor`` clamps it to the band edge, and the
+    node stores it — so refusing it here would silently drop a REAL
+    mitigation's edge (measured ``w_eff`` 0.9 live -> 1.0 rebuilt for ``False``).
+    Rejecting it belongs at the writer, as its own decision.
 
     Both a rejection and an acceptance must therefore be safe for a
     corrupt/hand-edited journal, which is the input this whole fold exists to
     tolerate: a value ``math.isfinite`` cannot even CONVERT (an int past float
     range raises ``OverflowError``) is refused, never allowed to abort the
-    rebuild after the wipe. No live writer produced any of those shapes; a
+    rebuild after the wipe. No live writer produced the refused shapes; a
     legacy strength-less mitigation keeps the pre-#5048 behaviour (no
     reconstructed edge) rather than acquiring a fabricated one.
     """
     value = payload.get("mitigation_strength")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not isinstance(value, (int, float)):
         return False
     try:
         return math.isfinite(value)

@@ -409,6 +409,41 @@ class TestMitigatedBySurvivesRebuild:
         finally:
             sdk.close()
 
+    @pytest.mark.parametrize("strength", [True, False])
+    def test_bool_strength_still_rebuilds_the_edge(self, tmp_path, strength):
+        """A ``bool`` strength is REAL to the writer, so it must not be refused.
+
+        ``mitigate_operator`` accepts one (the range check passes for
+        ``False``/``True``), ``weights.mitigation_dampening_factor`` clamps it
+        to the band edge, and the node stores it. Refusing it in the gate would
+        silently drop a real mitigation's edge — measured ``w_eff`` 0.9 live ->
+        1.0 rebuilt for ``False``. Rejecting a bool belongs at the WRITER, as
+        its own decision; the fold mirrors what the writer accepted.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            sdk.mitigate_operator(op_id, f"bool {strength}", strength)
+
+            before = compute_operator_weight(sdk._get_proj(), op_id)
+            assert before != pytest.approx(BASE_WEIGHT), (
+                "the live bool strength was a no-op; the test cannot measure it"
+            )
+            assert _all_mitigated_by(sdk), "live write lost the edge"
+
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            assert _all_mitigated_by(sdk), (
+                "a bool strength lost its mitigated_by edge on rebuild"
+            )
+            assert compute_operator_weight(
+                sdk._get_proj(), op_id) == pytest.approx(before), (
+                f"a bool strength moved w_eff: before={before}, "
+                f"after={compute_operator_weight(sdk._get_proj(), op_id)}"
+            )
+        finally:
+            sdk.close()
+
     def test_generic_impl_operator_gains_no_mitigated_by(self, tmp_path):
         """The gate holds: only a mitigation Point may own the edge.
 
