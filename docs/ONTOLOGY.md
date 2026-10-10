@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.20"
+title: "Tortoise — Canonical Ontology v3.21"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.20
+# Tortoise — Canonical Ontology v3.21
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,23 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.21 (2026-10-09 — issue #7856 — a goal's achievement state is a separate axis):**
+>
+> - New field `goalState` (§4.1 Point props, §4.3 Object props): a goal's
+>   **achievement** state, a CLOSED vocabulary (`met`, `active`, `blocked`,
+>   `unmet`, `superseded`, `abandoned`, `guideline`) validated at the SDK write
+>   boundary (`GOAL_STATE_VALUES`, `_sanitize_props`). It is **separate from
+>   `status`** — the draft/live claim lifecycle; `status` says whether a node is
+>   promoted for use, `goalState` says whether the goal is met. `None` clears.
+> - A `goal`-kind **Point** created without an explicit status is now **born
+>   live** (§5): a draft Point that is only ever a TARGET is EP-inert
+>   (`create_operator` promotes only the SOURCE, #131) while `converged=True` is
+>   still reported, so a goal that can never influence a verdict is no longer
+>   creatable by default. The canonical representation of a goal remains an
+>   **Object** (born live already); the born-live rule is the legacy-Point-leg
+>   safety net. Under `promotion_policy='gated'` ingest still writes every
+>   point — goal included — as `draft`.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -1163,7 +1180,7 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 > (product-strategy: useCase, userJourney, jobToBeDone, valueProposition) are
 > OPTION/STATE kinds — pack-mapping item: promote to objectKinds (near-miss
 > convention until the pack amendment).
-
+>
 > **Goal state (`goalState`) — achievement is a SEPARATE axis (#7856).** The
 > commitment-state kinds (`goal`/`target`/`strategy`/`plan`) carry two
 > orthogonal fields. `status` is the claim **lifecycle** (draft/live/…, §4.1) —

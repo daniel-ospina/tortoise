@@ -2836,9 +2836,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # string. Before this `goalState` accepted any value (the objective map's
     # state was written by a throwaway script), so "what is active?" could not
     # be answered from the graph. This is the fail-closed boundary shared by
-    # every write surface (`create_point`, `create_object`, `create_entity`,
-    # `update_point`, `update_entity`); an invalid word is refused BEFORE any
-    # graph write. `None` is allowed (explicit clear).
+    # every SDK write surface (`create_point`, `create_object`,
+    # `create_entity`, `update_point`, `update_entity`); an invalid word is
+    # refused BEFORE any graph write. `None` is allowed (explicit clear).
+    # The lower-level `EventAPI`/journal producer seam does NOT pass through
+    # here — it is the documented no-SDK-guarantee path (see `api.py`
+    # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
+    # at the projection choke point that live writes and replay share.
     if "goalState" in props and props["goalState"] is not None:
         _goal_state = props["goalState"]
         if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
@@ -2846,7 +2850,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
                 f"Invalid goalState {_goal_state!r}. A goal's achievement "
                 f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
                 "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/superseded/retracted/archived.)"
+                "draft/live/retracted/archived.)"
             )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
@@ -12285,6 +12289,19 @@ class TortoiseSDK:
             # carries the same non-operator predicate the writer uses, so the
             # counter matches the writer exactly.
             existed = self._find_point_by_content(content, pointKind=kind)
+            # #7856: under the gated contract EVERY ingest point stays draft.
+            # A born-live kind (`goal`, and the #2199 decide parts) would
+            # otherwise be written LIVE when the item carries no explicit
+            # status — `_check_gated_status` only inspects an EXPLICIT status,
+            # so the born-live default was a silent bypass of the gate. Name
+            # `draft` explicitly so the effective status is the one the
+            # contract promises; `promotion_policy='auto'` stays the sanctioned
+            # route to a live goal.
+            if promotion_policy == "gated" and "status" not in item and not (
+                isinstance(item.get("props"), dict)
+                and "status" in item["props"]
+            ):
+                item["status"] = "draft"
             point = self.create_point(kind, content, dedup=True, **item)
             pid = point["id"]
             if ref:

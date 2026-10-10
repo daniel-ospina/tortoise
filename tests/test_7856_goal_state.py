@@ -138,6 +138,22 @@ def test_objective_map_top_node_survives_being_only_a_target(sdk):
     assert sdk.get_point(leaf["id"])["status"] == "live"
 
 
+def test_gated_ingest_keeps_a_goal_item_draft(sdk):
+    """#7856 regression: a `goal`-kind Point is born live, but under
+    `promotion_policy='gated'` (the SDK default) EVERY ingest point stays
+    draft. `_check_gated_status` only inspects an EXPLICIT status, so without
+    an explicit draft on the write the born-live default would silently
+    bypass the gate and land the goal live."""
+    gated = sdk.ingest({"points": [{"kind": "goal",
+                                     "content": "become profitable"}]},
+                       promotion_policy="gated")
+    assert sdk.get_point(gated["ids"]["points"][0])["status"] == "draft"
+    # `auto` is the sanctioned route to a live goal.
+    auto = sdk.ingest({"points": [{"kind": "goal", "content": "grow revenue"}]},
+                      promotion_policy="auto")
+    assert sdk.get_point(auto["ids"]["points"][0])["status"] == "live"
+
+
 def test_non_goal_points_still_born_draft(sdk):
     """The born-live default is scoped to `goal` — ordinary claims keep the
     #131 draft→live lifecycle."""
@@ -147,10 +163,21 @@ def test_non_goal_points_still_born_draft(sdk):
 
 # ── Durability — the map is rebuilt from the journal ─────────────────────
 
+def test_goal_state_declared_for_point_replay():
+    """The Point leg's `goalState` is declared in `_POINT_DECLARED_PROPS` so
+    the replay open-set passthrough does NOT log a false `"Point prop %r is
+    not declared"` drift warning on every rebuild. Declaration is
+    WARNING-SUPPRESSION only — the passthrough persists the prop either way —
+    so this test pins the declaration, not the persistence (which
+    `test_goal_state_survives_rebuild` covers)."""
+    from tortoise.projection.entities import _EntityHandlers
+    assert "goalState" in _EntityHandlers._POINT_DECLARED_PROPS
+
+
 def test_goal_state_survives_rebuild(tmp_path):
     """A graph-backed goal map is only useful if it survives `rebuild_all`.
-    The Point leg needs `goalState` declared in `_POINT_DECLARED_PROPS` or the
-    replay open-set passthrough drops it; the Object leg rides the journal."""
+    This pins the CREATE-time value on both legs: the Object rides the journal
+    and the Point's `goalState` rides the open-set passthrough."""
     events = tmp_path / "events"
     events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "t.db"),
