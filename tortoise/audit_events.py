@@ -46,12 +46,19 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
 # #7924 review P2: a fallback event that reached NO durable location
 # used to be indistinguishable in-process from a persisted one (the ERROR log
 # was the only evidence). Count the DROPs by cause in the shared monitoring
-# substrate so the loss rides the surface the fleet actually serves, not merely
-# a log line — the same shape as that substrate's journal-write-failure counter
+# substrate, so the loss is a COUNTER and not only a log line — the same shape
+# as that substrate's journal-write-failure counter
 # (monitoring.JOURNAL_WRITE_FAILURE_COUNT, #4240: "a log line nothing
 # watches"), which is carried by ``monitoring.metrics()`` as
 # ``journal_write_failures``; this family likewise rides it as
-# ``audit_fallback_drops`` (the hosted app serves no ``/metrics`` route).
+# ``audit_fallback_drops``.
+#
+# SCOPE, stated honestly (#7924 review round 3): ``metrics()`` reaches an
+# operator through ``monitoring.serve_health`` and the MCP metrics tool. It is
+# NOT the deployed hosted ``/health`` (whose handler returns its own dict) nor
+# the ``/healthz`` listener — neither carries ``audit_fallback_drops`` — so on
+# the hosted app a drop is COUNTED here without being surfaced by either
+# endpoint. That gap is the reason this comment does not claim otherwise.
 # Still NON-FATAL by design: audit failure must never break the serving flow
 # (see hosted_api._audit_auth_failure), so neither may this counter.
 def _note_fallback_drop(reason: str) -> None:
