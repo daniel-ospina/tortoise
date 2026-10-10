@@ -142,9 +142,11 @@ who checks out the repository, and the lychee half above can only see it through
 the FILESYSTEM — which lies about this repo in exactly the two ways that make
 the finding unrecordable and therefore permanently red on somebody else's PR:
 
-  * ``skills/`` and ``scripts/`` are UNTRACKED SYMLINKS into ``agent-infra``
-    (they are in the working tree here and in no checkout CI builds), so a
-    relative link through one RESOLVES for ``update`` and 404s in CI. Measured
+  * ``skills/`` and ``scripts/`` are SYMLINKS into ``agent-infra``. The symlink
+    blob IS in the tracked tree (mode 120000), but its TARGET lives outside it,
+    so the symlinked directory's CONTENTS are present in no checkout CI builds:
+    a relative link through one RESOLVES here (the target exists on the author's
+    disk) and 404s in CI. Measured
     on #7876: a docs-only PR was failed for a pre-existing
     ``skills/how-to-use-tortoise/SKILL.md`` link in ``docs/INGEST_CONTRACT.md``,
     a file it never touched — and ``update`` could not have recorded it, because
@@ -653,9 +655,10 @@ def _tracked_tree(repo_root: Path) -> tuple[set[str], set[str]]:
     """The TRACKED files, plus every ancestor directory they imply.
 
     The tracked set, never the working tree: `skills/` and `scripts/` are
-    UNTRACKED symlinks here, so `Path.exists()` answers yes for a target that is
-    absent from the tree CI builds — the #7876 misreport, and the reason a
-    filesystem-based detector could not record it. The directory set makes a link
+    tracked symlinks whose targets live outside the tree, so `Path.exists()`
+    answers yes for a target that is absent from the tree CI builds — the #7876
+    misreport, and the reason a filesystem-based detector could not record it.
+    The directory set makes a link
     to a tracked DIRECTORY (`tests/`, `graph-scripts/`) resolve: the prefix test
     a naive membership check would need is precomputed once per run.
     """
@@ -743,7 +746,8 @@ def run_sweep(args: argparse.Namespace) -> int:
 
     Takes NO changed-set input on purpose. A link can go stale in a file a change
     never touched (the file it pointed at was deleted), and it can point through
-    an untracked symlink that resolves locally — the two shapes the
+    a tracked symlink whose target lives outside the tree and so resolves
+    locally — the two shapes the
     filesystem-based lychee half structurally cannot adjudicate. Wiring it to a
     changes list would make the class invisible exactly when it matters, which is
     why a caller should run it ungated.
@@ -1421,8 +1425,9 @@ def run_update(args: argparse.Namespace) -> int:
     # The tracked-tree half needs NEITHER linter: it is `git ls-files` and a path
     # resolution, so it is the one half of this snapshot that is fully
     # reproducible on any host — and the one the lychee-only producer above
-    # cannot write, because a target behind an UNTRACKED SYMLINK resolves for
-    # lychee here and is absent from every checkout CI builds (#7876).
+    # cannot write, because a target behind a TRACKED SYMLINK whose target lives
+    # outside the tree resolves for lychee here and is absent from every
+    # checkout CI builds (#7876).
     # Deduplicated and sorted: a link is either dead or it is not.
     relative_links = sorted(
         relative_link_key(f) for f in relative_link_findings(repo_root, files)

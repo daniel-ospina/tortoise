@@ -1753,11 +1753,13 @@ def test_every_mapped_generator_exists_and_its_doc_is_tracked():
 
 
 def _link_repo(tmp_path: Path, documents: dict[str, str], untracked: dict[str, str] | None = None) -> Path:
-    """A real git repo holding `documents`, with optional UNTRACKED files on disk.
+    """A real git repo holding `documents`, plus optional GENUINELY UNTRACKED files.
 
-    A real repository, not a stub: the property under test is that the sweep
-    reads `git ls-files` rather than the working tree, and only real git state
-    can distinguish the two.
+    `untracked` files are written AFTER the commit, so they are on disk and in
+    no `git ls-files` — the only shape that can tell a tracked-set reader from a
+    working-tree one. A real repository, not a stub: the property under test is
+    that the sweep reads `git ls-files` rather than the working tree, and only
+    real git state can distinguish the two.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1765,13 +1767,13 @@ def _link_repo(tmp_path: Path, documents: dict[str, str], untracked: dict[str, s
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    for args in (("init", "-q"), ("config", "user.email", "t@example.invalid"),
+                 ("config", "user.name", "t"), ("add", "-A"), ("commit", "-qm", "base")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     for name, text in (untracked or {}).items():
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    for args in (("init", "-q"), ("config", "user.email", "t@example.invalid"),
-                 ("config", "user.name", "t"), ("add", "-A"), ("commit", "-qm", "base")):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     return repo
 
 
@@ -1814,18 +1816,27 @@ def test_sweep_is_green_when_the_finding_is_in_the_baseline(tmp_path: Path, caps
 def test_sweep_reads_the_tracked_set_not_the_working_tree(tmp_path: Path, capsys):
     """The defect the whole step exists for (#7876).
 
-    `skills/` and `scripts/` are UNTRACKED symlinks into `agent-infra`, so a
-    target behind one is present for anything that asks the filesystem — which
-    is how a filesystem-based detector both fails to record the finding and
-    lets it red an unrelated PR in CI. The file below is on disk and NOT in
-    `git ls-files`, which is exactly the shape.
+    `skills/` and `scripts/` are tracked symlinks whose TARGETS live outside the
+    tree, so a target behind one is present for anything that asks the
+    filesystem — which is how a filesystem-based detector both fails to record
+    the finding and lets it red an unrelated PR in CI. The fixture writes the
+    file at the link's RESOLVED target (docs/skills/thing.md) AFTER the commit,
+    so it is on disk and in no `git ls-files`: a `Path.exists()` implementation
+    sees it and stays silent, the sweep must still report it. This is the
+    discriminator the pre-review fixture lacked (its "untracked" file was
+    written before `git add -A`, so it was tracked).
     """
     repo = _link_repo(
         tmp_path,
         {"docs/a.md": "[skill](skills/thing.md)\n"},
-        untracked={"skills/thing.md": "# present locally, absent from the tree\n"},
+        untracked={"docs/skills/thing.md": "# present locally, absent from the tree\n"},
     )
-    assert (repo / "skills" / "thing.md").is_file(), "the working tree really does resolve it"
+    resolved = repo / "docs" / "skills" / "thing.md"
+    assert resolved.is_file(), "the working tree really does resolve it"
+    tracked = subprocess.run(
+        ["git", "ls-files", "docs/skills/thing.md"], cwd=repo,
+        capture_output=True, text=True, check=True).stdout
+    assert tracked.strip() == "", "the fixture's file must NOT be tracked"
     assert _sweep(tmp_path, repo, ["docs/a.md"]) == 1
     assert "docs/skills/thing.md" in capsys.readouterr().out
 
