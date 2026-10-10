@@ -642,6 +642,7 @@ def orphan_report(
     owner_of_pr: Mapping[int, str | None],
     lane_live: Mapping[str, bool],
     over_claimed: Collection[int] = (),
+    lane_terminal: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Open PRs with no live owner — the class that left #7746 unnoticed.
 
@@ -667,13 +668,26 @@ def orphan_report(
                 "reason": "no lane claims it (no worktree/branch, no session names it)",
             })
         elif not lane_live.get(owner, False):
+            # Say what is actually TRUE. `lane_live` collapses "terminal" and
+            # "measured dead" into one False, but they are different facts: a
+            # terminal lane's cmux workspace is GONE, which says nothing about
+            # whether a pi process outlived it — a terminal lane CAN still carry
+            # `pid_alive: true`. Asserting "has no live pi process" there is an
+            # unmeasured claim of exactly the #7750 class this module exists to
+            # stamp out, so the terminal case names the workspace instead.
+            term = (lane_terminal or {}).get(owner)
+            reason = (
+                f"owner lane `{owner}` is terminal ({term}): its cmux workspace no longer exists"
+                if term
+                else f"owner lane `{owner}` has no live pi process"
+            )
             out.append({
                 "kind": "PR",
                 "number": num,
                 "title": pr.get("title"),
                 "branch": pr.get("headRefName"),
                 "lane": owner,
-                "reason": f"owner lane `{owner}` has no live pi process",
+                "reason": reason,
             })
     return out
 
@@ -711,8 +725,27 @@ def resolve_conflicts(
             lane_["claim"]["prs"] = [n for n in lane_["claim"]["prs"] if n not in conflicts]
         for n in conflicts:
             owner_of_pr.pop(n, None)
-    orphans = orphan_report(prs, owner_of_pr, lane_live, over_claimed=conflicts)
+    orphans = orphan_report(
+        prs, owner_of_pr, lane_live, over_claimed=conflicts, lane_terminal=_terminal_map(lanes)
+    )
     return conflicts, claimant_of, orphans
+
+
+def _terminal_map(lanes: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """lane label -> terminal state, for the lanes the reconciliation retired.
+
+    Derived here rather than passed in so the orphan reason stays truthful for
+    EVERY caller, not only the one that remembers to thread the extra argument.
+    """
+    out: dict[str, str] = {}
+    for lane_ in lanes:
+        try:
+            state = (lane_.get("terminal") or {}).get("state")
+            if state:
+                out[lane_["identity"]["lane"]] = str(state)
+        except Exception:
+            continue
+    return out
 
 
 # ===========================================================================
@@ -721,12 +754,20 @@ def resolve_conflicts(
 
 
 def _run(cmd: Sequence[str], timeout: int = 60) -> str:
+    """Run ``cmd``, returning stdout — or the EMPTY STRING if it did not SUCCEED.
+
+    #7883: a non-zero exit degrades to empty, like every other failure in this
+    section ("thin, cached, degrade to empty — never crash"). Without it, a
+    FAILED-but-chatty command read as a successful answer, which for
+    ``cmux_workspaces`` means a partial or stale list treated as the whole fleet.
+    """
     try:
-        return subprocess.run(
+        p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False
-        ).stdout
+        )
     except Exception:
         return ""
+    return p.stdout if p.returncode == 0 else ""
 
 
 def load_registry(path: Path = REGISTRY) -> list[tuple[str, str, str]]:
@@ -752,6 +793,10 @@ class WorkspaceMap(dict):
     latter (an unreadable list retires NOTHING). ``measured`` records which of the
     two happened, so the caller can SAY it failed open instead of silently
     filtering nothing. ``error`` names the failure when ``measured`` is False.
+
+    ``measured`` means the read was COMPLETE — the command SUCCEEDED and the
+    answer covers the whole fleet — not merely that the payload parsed. See
+    ``cmux_workspaces`` for why a single-window answer is not the fleet.
     """
 
     measured: bool
@@ -765,6 +810,22 @@ class WorkspaceMap(dict):
 
 def cmux_workspaces() -> dict[str, dict[str, Any]]:
     out = _run(["cmux", "list-workspaces", "--json"], timeout=45)
+    # SCOPE — this command lists ONE window. Its own help says "List workspaces in
+    # a window", defaulting to the caller's. With more than one window open, every
+    # lane in the others is simply ABSENT — and absence is exactly what makes a
+    # lane terminal — so a multi-window fleet is UNMEASURABLE here. Fail open and
+    # say why, rather than retiring lanes that are alive in another window. The
+    # fleet is single-window today (the canonical publisher makes the same
+    # assumption); this guard is what stops that assumption being load-bearing.
+    windows = _run(["cmux", "list-windows"], timeout=30)
+    open_windows = [ln for ln in windows.splitlines() if ln.strip()]
+    if len(open_windows) != 1:
+        return WorkspaceMap(
+            error=(
+                f"could not confirm a single cmux window (saw {len(open_windows)}); the "
+                "workspace list is per-window, so absence is not evidence"
+            )
+        )
     try:
         data = json.loads(out)
     except Exception:
@@ -1544,11 +1605,18 @@ def cmd_who(args: argparse.Namespace) -> int:
     for kind, label in (("prs", "PR"), ("issues", "issue")):
         entry = state["index"][kind].get(key)
         if entry:
-            out = {"number": args.number, "kind": label, "lanes": entry["lanes"], "evidence": entry["evidence"]}
+            # Liveness must survive this branch too: an index entry outlives the
+            # lane that wrote it, and "held by X (live)" vs "(terminal)" is the
+            # whole question `who` is asked.
+            live = lane_live_map(state)
+            out = {"number": args.number, "kind": label, "lanes": entry["lanes"],
+                   "live": {lbl: live.get(lbl) for lbl in entry["lanes"]},
+                   "evidence": entry["evidence"]}
             if args.json:
                 print(json.dumps(out, indent=2))
             else:
-                print(f"#{args.number} ({label}) held by: {', '.join(entry['lanes'])}")
+                print(f"#{args.number} ({label}) held by: "
+                      + ", ".join(f"{lbl}{_live_tag(live.get(lbl))}" for lbl in entry["lanes"]))
                 for lane, why in entry["evidence"].items():
                     print(f"  - {lane}: {why}")
             return 0
@@ -1717,6 +1785,10 @@ def cmd_bind(args: argparse.Namespace) -> int:
         for lane_ in state["lanes"]:
             s = lane_["session"]
             if not s["binding_missing"]:
+                continue
+            if (lane_.get("terminal") or {}).get("state"):
+                # #7738: a terminal lane cannot be resumed. Binding it would
+                # resurrect a ghost, so `--all` spends no cmux call on it.
                 continue
             sid = s.get("live_session_id") or s.get("sid")
             # ⛔ Validate the file of the sid we will ACTUALLY bind — not the resolved

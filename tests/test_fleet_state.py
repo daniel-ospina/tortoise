@@ -637,7 +637,7 @@ def test_ghost_with_a_surviving_session_is_recoverable(monkeypatch) -> None:
 
 def test_a_terminal_ghost_owning_a_pr_is_reported_as_an_orphan(monkeypatch, tmp_path) -> None:
     """#7738: a terminal lane that OWNS an open PR must surface that PR as an
-    orphan owned by a lane with NO live pi process.
+    orphan owned by a lane whose cmux workspace is GONE (terminal).
 
     The build-time ``lane_live`` map (the terminal special-case) is the only thing
     that turns a ghost-owned PR into an orphan: ``orphan_report`` reads
@@ -664,7 +664,13 @@ def test_a_terminal_ghost_owning_a_pr_is_reported_as_an_orphan(monkeypatch, tmp_
     assert len(owns) == 1, st["orphans"]
     assert owns[0]["kind"] == "PR"
     assert owns[0]["lane"] == "GHOST"
-    assert "no live pi process" in owns[0]["reason"]
+    # The reason must state the fact that was ACTUALLY measured — the workspace is
+    # gone. `lane_live` collapses "terminal" and "measured dead" into one False, so
+    # "has no live pi process" here would assert a pid fact nobody read: a terminal
+    # lane can carry `pid_alive: true` (that is the #7750 class this module exists to
+    # stamp out). Pinning the positive AND the negative makes a revert fail.
+    assert "terminal" in owns[0]["reason"] and "RECOVERABLE" in owns[0]["reason"]
+    assert "no live pi process" not in owns[0]["reason"]
 
 
 def test_an_unreadable_workspace_list_retires_nothing(monkeypatch) -> None:
@@ -740,3 +746,84 @@ def test_cmd_build_says_when_the_reconciliation_failed_open(monkeypatch, capsys,
     out = str(tmp_path / "fleet-state.json")
     assert fs.cmd_build(argparse.Namespace(out=out, state=out, json=False)) == 0
     assert "INERT (fail-open)" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #7883 review P2s — the read must COMPLETE, and every channel must say WHY
+# ---------------------------------------------------------------------------
+
+def test_a_failed_command_degrades_to_empty_not_to_a_confident_answer(monkeypatch) -> None:
+    """`_run` discarded the exit code, so a FAILED-but-chatty command read as a
+    successful answer — and for the workspace map that means a partial or stale
+    list treated as the whole fleet, which retires live lanes.
+
+    The mutation this pins: return `p.stdout` unconditionally.
+    """
+    class _P:
+        returncode = 3
+        stdout = json.dumps({"workspaces": [{"id": "ab", "current_directory": "/x"}]})
+
+    monkeypatch.setattr(fs.subprocess, "run", lambda *a, **k: _P())
+    assert fs._run(["cmux", "list-workspaces", "--json"]) == ""
+    # and the caller must read that as UNMEASURED, never as "no workspaces"
+    assert fs.cmux_workspaces().measured is False
+
+
+def test_workspace_map_fails_open_when_more_than_one_window_is_open(monkeypatch) -> None:
+    """`cmux list-workspaces` lists ONE window. With a second window open every lane
+    in it is merely ABSENT — and absence is exactly what makes a lane terminal — so
+    a multi-window fleet is unmeasurable here, NOT an empty fleet.
+    """
+    payload = json.dumps({"workspaces": [{"id": "ab", "current_directory": "/x"}]})
+
+    def two_windows(cmd, timeout=60):
+        if cmd[:2] == ["cmux", "list-windows"]:
+            return "  0: AAA selected_workspace=x workspaces=2\n  1: BBB selected_workspace=y workspaces=1\n"
+        return payload
+
+    monkeypatch.setattr(fs, "_run", two_windows)
+    ws = fs.cmux_workspaces()
+    assert ws.measured is False and ws.error, "a per-window answer is not the fleet"
+    assert len(ws) == 0 and ws == {}, "it must retire nothing, not everything"
+
+    # non-vacuous: the SAME payload measures when exactly one window is open
+    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: (
+        "  0: AAA selected_workspace=x workspaces=2\n"
+        if cmd[:2] == ["cmux", "list-windows"] else payload))
+    assert fs.cmux_workspaces().measured is True
+
+
+def test_who_index_branch_carries_liveness(monkeypatch, capsys) -> None:
+    """An index entry outlives the lane that wrote it, so the index branch must say
+    which holder is TERMINAL. The conflict branch already did; this one did not.
+    """
+    fake = {"index": {"prs": {"7": {"lanes": ["A", "B"], "evidence": {}}}, "issues": {}},
+            "lanes": [
+                {"identity": {"lane": "A"}, "terminal": {"state": "RETIRED"},
+                 "liveness": {"liveness_measured": False}, "session": {}},
+                {"identity": {"lane": "B"}, "liveness": {"liveness_measured": True},
+                 "session": {"pi_pid": 1, "pid_alive": True}},
+            ]}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    assert fs.cmd_who(argparse.Namespace(number=7, json=True)) == 0
+    assert json.loads(capsys.readouterr().out)["live"] == {"A": False, "B": True}
+
+    assert fs.cmd_who(argparse.Namespace(number=7, json=False)) == 0
+    text = capsys.readouterr().out
+    assert "B (live)" in text, text
+    assert "A (live)" not in text, "a RETIRED lane must not be presented as a live holder"
+
+
+def test_cmd_bind_all_skips_terminal_lanes(tmp_path, monkeypatch, capsys) -> None:
+    """A terminal lane cannot be resumed: binding it would resurrect a ghost AND
+    spend a cmux round trip doing it."""
+    live = "a" * 36
+    lane = {"identity": {"lane": "GHOST", "workspace": "WS", "worktree": "/wt"},
+            "terminal": {"state": "RETIRED"},
+            "session": {"binding_missing": True, "live_session_id": live, "sid": live,
+                        "file": "/s.jsonl"}}
+    state = _state_file(tmp_path, lane)
+    monkeypatch.setattr(fs, "session_file_for", lambda sid: Path(f"/s/{sid}.jsonl"))
+    rc = fs.main(["--state", state, "bind", "--all", "--dry-run", "--json"])
+    assert rc == 0
+    assert live not in capsys.readouterr().out, "a terminal lane must not be a bind target"
