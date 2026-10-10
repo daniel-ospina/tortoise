@@ -81,6 +81,7 @@ from .projection.entities import (
     _is_persistable_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    is_non_operator_payload,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
@@ -443,7 +444,10 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     # Read the identity from the RAW payload, not from ``out``: ``skip`` may
     # legitimately exclude ``is_operator``, and reading it back out of ``out``
     # would then re-derive it from the descriptor (True) and undo this fix.
-    explicit_non_operator = props.get("is_operator") is False
+    # The rule is IMPORTED from the graph writer, not re-spelled: the checker's
+    # view of a point must match what the writer makes of it, or the two
+    # disagree only on the journal side — which is a false divergence.
+    explicit_non_operator = is_non_operator_payload(props)
     if "is_operator" not in out:
         # A flat operator snapshot (OperatorPromoted) already carries the key;
         # never clobber it — only the nested payload needs the derivation.

@@ -33,53 +33,65 @@ from tortoise.source_identity import normalize_source_url, resolve_source_key
 logger = logging.getLogger(__name__)
 
 
-def is_mitigation_payload(payload: dict) -> bool:
-    """True when a journal Point payload is a MITIGATION record (#5048).
-
-    A mitigation is a NON-operator Point that carries the mitigation's own
-    ``mitigation_strength`` and an ``operator`` EDGE descriptor (``#4937``)
-    solely so the replay fold can rebuild its ``(m)-[:IMPL]->(op)`` half. Both
-    conditions are read from what the live writer (``sdk.py::mitigate_operator``)
-    actually wrote, and BOTH are needed:
-
-    * ``is_operator is False`` — explicitly, not merely falsy. ``not
-      payload.get("is_operator")`` is ALSO true when the key is ABSENT, and the
-      EventAPI / extractor / ingest producer (``api.py::_point``) emits an
-      ``OperatorAdded`` with no flag at all — that form would treat every
-      generic IMPL operator on the main write path as a mitigation and dampen
-      each of its inputs.
-    * ``mitigation_strength`` is a USABLE strength — a finite real, which is the
-      only thing ``sdk.py::mitigate_operator`` can write (``weights.py`` clamps
-      on read). The descriptor is NOT enough on its own:
-      ``EventAPI.add_point(content, prov, **fields)`` forwards arbitrary
-      fields, so a low-level producer can attach an ``operator`` descriptor to
-      a non-operator point. Treating that as a mitigation would mint
-      ``(op)-[:mitigated_by]->(m)`` for every input and silently dampen that
-      operator by the fallback strength (measured ``w_eff`` 1.0 -> 0.7) — a
-      belief change the producer never asked for. Nor is mere PRESENCE enough:
-      a map/list/``None`` strength is dropped by ``_persist_extra_props`` (so
-      the node ends up with no strength and the fabricated edge dampens at the
-      fallback anyway), and a non-numeric one is stored and then makes
-      ``weights.compute_operator_weight`` RAISE on every read. The predicate
-      therefore matches what the writer can actually store, exactly as the
-      pass-1b anchor is keyed on the writer's reported outcome rather than a
-      re-spelling of its condition. No live writer ever produced a non-operator
-      point with a descriptor and no usable strength; a legacy mitigation that
-      predates ``mitigation_strength`` keeps the pre-#5048 behaviour (no
-      reconstructed edge) rather than acquiring a fabricated one.
+def is_non_operator_payload(payload: dict) -> bool:
+    """True when a journal Point payload states its OWN non-operator identity.
 
     ONE home for that identity, because the record's replay is split across two
     modules: ``_upsert_point_props`` (here) decides what the node IS, and
     ``edges._create_edges`` decides whether to rebuild the canonical reverse
     ``(op)-[:mitigated_by]->(m)``. Two hand-spelled copies of it would drift —
-    and did: the two halves of this one record's replay must agree by
-    construction, not by review.
+    and did. ``consistency._canonical_point_fields`` spells the same one-line
+    rule on the journal side and must keep matching it.
+
+    The polarity is load-bearing. ``not payload.get("is_operator")`` is ALSO
+    true when the key is ABSENT, and the EventAPI / extractor / ingest producer
+    (``api.py::_point``) emits an ``OperatorAdded`` with no flag at all — that
+    form would re-type every generic IMPL operator on the main write path.
+
+    This is the IDENTITY half only. Whether the record also authorises the
+    canonical reverse edge is a separate question — see
+    ``has_usable_mitigation_strength``.
     """
-    strength = payload.get("mitigation_strength")
-    return (payload.get("is_operator") is False
-            and isinstance(strength, (int, float))
-            and not isinstance(strength, bool)
-            and math.isfinite(strength))
+    return payload.get("is_operator") is False
+
+
+def has_usable_mitigation_strength(payload: dict) -> bool:
+    """True when the payload carries a strength ``mitigate_operator`` could write.
+
+    A mitigation is a NON-operator Point that carries the mitigation's own
+    ``mitigation_strength`` and an ``operator`` EDGE descriptor (``#4937``)
+    solely so the rebuild fold can restore its ``(m)-[:IMPL]->(op)`` half. The
+    descriptor alone does NOT make one: ``EventAPI.add_point(content, prov,
+    **fields)`` forwards arbitrary fields, and ``_create_edges`` is the SHARED
+    live+replay edge writer, so a low-level producer can attach a descriptor to
+    a non-operator point. Minting ``(op)-[:mitigated_by]->(m)`` for such a
+    payload dampens that operator by the fallback strength (measured ``w_eff``
+    1.0 -> 0.7) — a belief change the producer never asked for.
+
+    Nor is mere PRESENCE enough. ``mitigate_operator`` writes a finite real in
+    the sanctioned band (``weights.py`` clamps on read), and:
+
+    * a map/list/``None`` strength is dropped by ``_persist_extra_props`` (the
+      Point layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
+      strength and a fabricated edge dampens at the fallback anyway;
+    * a non-numeric value is persisted, and then makes
+      ``weights.compute_operator_weight`` RAISE on every read of that operator.
+
+    Both a rejection and an acceptance must therefore be safe for a
+    corrupt/hand-edited journal, which is the input this whole fold exists to
+    tolerate: a value ``math.isfinite`` cannot even CONVERT (an int past float
+    range raises ``OverflowError``) is refused, never allowed to abort the
+    rebuild after the wipe. No live writer produced any of those shapes; a
+    legacy strength-less mitigation keeps the pre-#5048 behaviour (no
+    reconstructed edge) rather than acquiring a fabricated one.
+    """
+    value = payload.get("mitigation_strength")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _terminal_object_statuses() -> list:
@@ -1182,11 +1194,15 @@ class _EntityHandlers:
         # mitigation: a systematic ``derived = replay(journal)`` divergence, and
         # the identity half of the record this PR's edge fold repairs. Scoped to
         # the explicit-False case, so every operator record (and every legacy
-        # record that omits the flag) is byte-for-byte unchanged. The predicate
-        # is shared with ``edges._create_edges`` (``is_mitigation_payload``), so
-        # the identity half and the edge half of this record's replay agree by
-        # construction.
-        _mitigation_record = is_mitigation_payload(p) and bool(op)
+        # record that omits the flag) is byte-for-byte unchanged. The
+        # IDENTITY rule is shared with ``edges._create_edges`` AND with
+        # ``consistency._canonical_point_fields`` (``is_non_operator_payload``)
+        # so the node's identity cannot disagree with the checker's view of it.
+        # Whether the record ALSO authorises the reverse edge is the separate,
+        # stricter ``has_usable_mitigation_strength`` — identity is not gated on
+        # the strength, because re-typing a non-operator as an operator is a
+        # divergence whether or not that record can rebuild an edge.
+        _mitigation_record = is_non_operator_payload(p) and bool(op)
         params = {
             "id": p["id"], "content": p.get("content", ""),
             "isop": bool(op) and not _mitigation_record,
