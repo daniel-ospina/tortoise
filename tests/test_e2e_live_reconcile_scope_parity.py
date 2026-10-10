@@ -320,7 +320,8 @@ def _write_manifest(path: Path, manifest: dict) -> None:
 def test_residue_only_recurrence_uses_its_own_manifest_and_keeps_the_old_one(
     tmp_path, monkeypatch
 ) -> None:
-    """A residue-only recurrence must NOT discard the prior FalkorDB drop list.
+    """A recurrence with no Guard-A (strict-shape) teams must NOT discard the prior
+    FalkorDB drop list.
 
     The live #5971 case is `users=4 teams=0`, so a recurrence enumerates an
     EMPTY team list. The prior manifest's `teams` is the FalkorDB companion's

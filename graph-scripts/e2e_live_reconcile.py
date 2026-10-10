@@ -254,8 +254,9 @@ def _counts(
         EMAIL_RE.match(email) for kind_emails in emails.values() for email in kind_emails
     )
     # #5971: the guard-shape residue, reported separately from `offenders` so the
-    # auto-filed issue distinguishes "the runbook sweeps this" from "the runbook
-    # needs --include-residue, after review".
+    # `--json` payload the auto-file step consumes carries it apart from the
+    # actionable strict-shape rows. The auto-filed issue BODY does not read this
+    # key yet (it still prints the generic "some rows deviate" note) — #7998.
     residue = {
         kind: sorted(e for e in emails.get(kind, []) if not EMAIL_RE.match(e))
         for kind in ("teams", "users")

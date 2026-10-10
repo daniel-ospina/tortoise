@@ -17,7 +17,7 @@ Mint path (verified in repo, 2026-09-02):
     index.ts) → `provision_team` SECURITY DEFINER RPC (migration 0010) which
     writes teams + org_memberships + api_keys atomically, then FastAPI
     `/internal/demo` seeds the FalkorDB graph `team_{org_id}` (the red-window
-    convention; #3543 later generalized the prefix to `org_`) where
+    convention; #3543/#3622 later renamed the prefix to `org_`) where
     org_id = sha256(user_id).hexdigest()[:26] (deterministic per user).
 
 This script cleans the SUPABASE side (auth users + teams + api_keys +
@@ -102,7 +102,8 @@ teardown could not run — see PR #3790's commit message).
     AFTER the operator has read the printed list — an explicit, review-gated
     inclusion, the same shape as `--all-e2e-live` (never a widened regex: the
     guard is what keeps a non-test row out).
-  * Recurrences use a SEPARATE --manifest (below): a residue-only recurrence
+  * Recurrences use a SEPARATE --manifest (below): an enumeration with no
+    Guard-A (strict-shape) teams
     enumerates no Guard-A (strict-shape) teams, and the clobber guard refuses to
     overwrite a manifest that holds team graph names when the new enumeration
     has no Guard-A rows — that list is the FalkorDB companion's only drop record.
@@ -123,8 +124,10 @@ Usage (dry-run first, then execute):
 Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
 usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
 --manifest: the historical #2146 manifest is the FalkorDB companion's only
-record of 154 graph targets, and a residue-only enumeration has no Guard-A
-(strict-shape) teams, so
+record of 154 graph targets, and an enumeration with no Guard-A
+(strict-shape) teams (a recurrence's rows are usually all users — residue or
+not)
+so
 writing it over that file would silently discard them (the clobber guard
 refuses exactly that, by design).
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
@@ -590,8 +593,9 @@ def main() -> int:
         # of what to drop. Delete the manifest manually to force a fresh empty
         # enumeration.
         #
-        # #5971: a residue-only recurrence also enumerates 0 Guard-A teams (the
-        # live case is `users=4 teams=0`), so this refusal fires for it too —
+        # #5971: a recurrence whose rows are all users (residue OR strict-shape;
+        # the live case is `users=4 teams=0`) also enumerates 0 Guard-A teams, so
+        # this refusal fires for it too —
         # deliberately. The test is against the PRE-promotion count
         # (`scope.guard_a_teams`), never the promoted `teams`: promoting a residue
         # team must not route around it. The prior `teams` list is the FalkorDB
@@ -614,8 +618,8 @@ def main() -> int:
             if prior_n > 0 and not guard_a_teams:
                 print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
                       f"{prior_n} teams but the new enumeration found no Guard-A "
-                      f"(strict-shape) teams (post-success re-run, or a residue-only "
-                      f"recurrence?). Those teams are the "
+                      f"(strict-shape) teams (post-success re-run, or a recurrence "
+                      f"whose rows are all users, such as #5971's)? Those teams are the "
                       f"FalkorDB companion's drop list; re-enumerate a recurrence to a "
                       f"separate --manifest (2146-recurrence.manifest.json — runbook "
                       f"§6.1), or remove this file once those graphs are already dropped.")
