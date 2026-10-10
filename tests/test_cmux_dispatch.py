@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -49,6 +50,7 @@ import cmux_dispatch as cd  # noqa: E402
 INBOX_PATH: Path | None = None
 _INBOX_DIR: Path | None = None
 _INBOX_ENV_SAVED: str | None = None
+_MODULE_SESSIONS: dict[str, object] = {}
 
 
 def setUpModule() -> None:
@@ -57,6 +59,14 @@ def setUpModule() -> None:
     _INBOX_DIR = Path(tempfile.mkdtemp(prefix="cmux-dispatch-inbox-"))
     INBOX_PATH = _INBOX_DIR / "orchestrator-inbox.log"
     os.environ[cd.INBOX_ENV] = str(INBOX_PATH)
+    # #7913: the same hermeticity for the SESSION STORE. `session_file_for` globs
+    # `~/.pi/agent/sessions` whenever the probe runs and no override is set, so
+    # without this the refusal tests would read the REAL store (157 buckets,
+    # measured) — a live dependency in a suite that claims to be hermetic, and a
+    # way for the result to depend on which lanes happen to be running.
+    _MODULE_SESSIONS["saved"] = os.environ.get(cd.SESSIONS_ROOT_ENV)
+    _MODULE_SESSIONS["dir"] = tempfile.mkdtemp(prefix="cmux-module-sessions-")
+    os.environ[cd.SESSIONS_ROOT_ENV] = str(_MODULE_SESSIONS["dir"])
 
 
 def tearDownModule() -> None:
@@ -69,6 +79,13 @@ def tearDownModule() -> None:
         shutil.rmtree(_INBOX_DIR, ignore_errors=True)
     INBOX_PATH = None
     _INBOX_DIR = None
+    sessions_saved = _MODULE_SESSIONS.get("saved")
+    if sessions_saved is None:
+        os.environ.pop(cd.SESSIONS_ROOT_ENV, None)
+    else:
+        os.environ[cd.SESSIONS_ROOT_ENV] = str(sessions_saved)
+    shutil.rmtree(str(_MODULE_SESSIONS.get("dir") or ""), ignore_errors=True)
+    _MODULE_SESSIONS.clear()
 #: The dispatch probe used throughout. Defined before the fixtures because the
 #: derived queued-turn fixture substitutes it.
 PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
@@ -1001,9 +1018,96 @@ class TestCmuxTransport(unittest.TestCase):
         self.assertIsNone(cd.workspace_entry("not json", "workspace:70"))
 
 
+class TestPaneSessionIdTransport(unittest.TestCase):
+    """The authoritative-field rule, pinned at the transport.
+
+    `Cmux.pane_session_id` is the only code that reads cmux's binding and every
+    dispatcher test overrides it — so without these the rule that `resume_binding`
+    is authoritative and `restore_record` is NOT had no test at all: replacing the
+    whole method with `return None` left all 188 tests green (#7913 review).
+    """
+
+    @staticmethod
+    def _stub(payload: str, rc: int = 0) -> cd.Cmux:
+        return RecordingCmux(payload=payload, rc=rc)
+
+    def test_reads_the_resume_binding_checkpoint_id(self):
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        self.assertEqual(cmux.pane_session_id("workspace:79"), "aaaa-bbbb")
+        argv = cmux.argv[-1]
+        self.assertEqual(argv[:3], ["surface", "resume", "show"])
+        self.assertIn("--workspace", argv)
+
+    def test_the_probe_names_the_TARGET_surface(self):
+        # A workspace can hold several surfaces bound to DIFFERENT sessions, and
+        # `surface resume show` with no `--surface` answers for the SELECTED one —
+        # so omitting the flag lets a sibling surface's live pi certify a blind
+        # write into the target pane (#7913 review, P1). This is the only place
+        # the argv is observable: the dispatcher-level fake receives the surface
+        # as an argument whether or not the real implementation forwards it.
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        self.assertEqual(cmux.pane_session_id("workspace:79", "surface:16"), "aaaa-bbbb")
+        argv = cmux.argv[-1]
+        self.assertIn("--surface", argv)
+        self.assertEqual(argv[argv.index("--surface") + 1], "surface:16")
+
+    def test_the_probe_omits_the_flag_when_no_surface_is_named(self):
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        cmux.pane_session_id("workspace:79")
+        self.assertNotIn("--surface", cmux.argv[-1])
+
+    def test_a_stale_restore_record_is_never_used(self):
+        # Measured 2026-10-08: a workspace printed "No resume binding" from the
+        # text form while `restore_record` still carried an old id. Reading that
+        # field attributes ANOTHER session's transcript to this pane.
+        cmux = self._stub('{"restore_record": {"checkpoint_id": "stale-1111"}}')
+        self.assertIsNone(cmux.pane_session_id("workspace:79"))
+
+    def test_a_plain_string_binding_is_not_an_answer(self):
+        # Strict on purpose: cmux does not emit a bare string, and accepting extra
+        # shapes here would let this tool and `fleet_state.pane_bindings` — which
+        # reads `checkpoint_id` only — disagree about whether a pane is bound
+        # (#7913 review). An unrecognised shape is not an answer.
+        cmux = self._stub('{"resume_binding": "cccc-dddd"}')
+        self.assertIsNone(cmux.pane_session_id("workspace:79"))
+
+    def test_a_reply_that_is_an_answer_but_carries_no_id_is_None(self):
+        # cmux ANSWERED and the pane has no binding — a definitive fact, and the
+        # only negative outcome that is safe to memoize for the dispatch.
+        for payload in ('{"resume_binding": null}', '{"resume_binding": {}}', "{}"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self._stub(payload).pane_session_id("workspace:79"))
+
+    def test_an_unaskable_probe_is_NOT_the_same_as_no_binding(self):
+        # Distinct because they mean opposite things downstream: one is a fact,
+        # the other is a transient failure that must be re-asked (#7913 review).
+        for payload in ("not json", "[]"):
+            with self.subTest(payload=payload):
+                self.assertIs(
+                    self._stub(payload).pane_session_id("workspace:79"),
+                    cd.PROBE_UNAVAILABLE,
+                )
+
+    def test_a_nonzero_exit_is_unaskable_not_a_guess(self):
+        # The payload is deliberately PARSEABLE: with an empty one the JSON guard
+        # would return the same value, and the rc check would have no guard at all
+        # (#7913 review — this test used to pass with the rc check deleted).
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}', rc=1)
+        self.assertIs(cmux.pane_session_id("workspace:79"), cd.PROBE_UNAVAILABLE)
+
+
 # --------------------------------------------------------------------------- #
 # Hermetic dispatcher tests — the failure physics, end to end
 # --------------------------------------------------------------------------- #
+
+
+#: The session id the #7913 fixture files are named after, and the id the fake
+#: panes are resume-bound to. A transcript is evidence only for the pane whose OWN
+#: session id matches (`tools/cmux_dispatch.py::session_file_for`).
+SESSION_7913 = "00000000-0000-4000-8000-000000000000"
+
+
+_MODULE_SESSIONS: dict[str, object] = {}
 
 
 class FakeCmux:
@@ -1030,6 +1134,12 @@ class FakeCmux:
         fail_read_indices: frozenset[int] | set[int] = frozenset(),
         shallow_screen_without_queue: bool = False,
         narrow_unparsed_queue: bool = False,
+        menu_open: bool = False,
+        pre_typed: str = "",
+        cwd: str = "",
+        session_id: str = SESSION_7913,
+        bindings_by_surface: dict | None = None,
+        selected_surface: str = "surface:15",
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -1072,11 +1182,31 @@ class FakeCmux:
         #: right-truncated on a narrow pane, so no container parses. Recovery must
         #: not treat the empty composer as licence to re-send.
         self.narrow_unparsed_queue = narrow_unparsed_queue
+        #: AN OPEN COMPLETION MENU (#7913, second root). While it is open the menu
+        #: renders a `→ ` selected row below the composer's bottom rule and a bare
+        #: Enter is consumed by the menu (accepts the highlighted completion) — it
+        #: NEVER submits. Escape dismisses it; Ctrl-U clears the line but does NOT
+        #: close the menu (verified against the installed pi-tui editor).
+        self.menu_open = menu_open
+        #: The workspace cwd `cmux list-workspaces --json` reports. It is the FAST
+        #: path the non-pane session-mtime probe (#7913) searches, but it is never a
+        #: substitute for the pane's own session id: a transcript is evidence only
+        #: when its filename carries THIS pane's binding.
+        self.cwd = cwd
+        #: The id `cmux surface resume show` reports as the pane's
+        #: `resume_binding.checkpoint_id`; `""` models an unbindable pane.
+        self.session_id = session_id
+        #: Optional `{surface: session_id}` — models a workspace whose surfaces
+        #: are bound to DIFFERENT sessions, which is how a workspace-scoped probe
+        #: certified a send into the wrong pane (#7913 review, P1).
+        self.bindings_by_surface = bindings_by_surface or {}
+        #: The surface cmux reports for this workspace when the caller names none.
+        self.selected_surface = selected_surface
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
 
-        self.pending = ""          # text in the composer, unsent
+        self.pending = pre_typed    # text in the composer, unsent
         self.submitted: list[str] = []
         self.sends: list[str] = repr
         self.sent_log: list[str] = []
@@ -1093,6 +1223,14 @@ class FakeCmux:
 
     # -- cmux surface ------------------------------------------------------- #
 
+    def pane_session_id(self, workspace: str, surface: str | None = None):
+        # SURFACE-SCOPED, like the real cmux: with no `--surface` cmux answers for
+        # the workspace's SELECTED surface, and a workspace can hold several
+        # surfaces bound to DIFFERENT sessions (#7913 review, P1).
+        if self.bindings_by_surface:
+            return self.bindings_by_surface.get(surface or self.selected_surface)
+        return self.session_id or None
+
     def list_workspaces_json(self) -> cd.CmuxResult:
         self.list_calls += 1
         self._tick()
@@ -1103,6 +1241,7 @@ class FakeCmux:
         entry = {
             "ref": "workspace:99",
             "id": "FAKE-0000",
+            "current_directory": self.cwd,
             "latest_submitted_message": self.visible,
             "latest_submitted_at": (
                 f"2026-09-20T19:48:{len(self.submitted):02d}.000Z"
@@ -1153,6 +1292,12 @@ class FakeCmux:
                     "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292",
                     self.pending,
                 )
+        if self.menu_open:
+            # The autocomplete list renders below the composer's bottom rule, with
+            # the selected candidate marked `→ ` (`SelectList.renderItem`).
+            screen = screen.replace(
+                "\n0.0%/700k", "\n \u2192 ci-checks/\n0.0%/700k", 1
+            )
         return cd.CmuxResult(0, screen)
 
     def send_text(self, workspace: str, text: str, surface: str | None = None) -> cd.CmuxResult:
@@ -1189,6 +1334,10 @@ class FakeCmux:
     def send_enter(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
         self.sent_log.append("\\n")
         self._tick()
+        if self.menu_open:
+            # Enter ACCEPTS the highlighted completion — it never submits. This is
+            # the exact keystroke the menu eats (#7913).
+            return cd.CmuxResult(0, "OK")
         if self.enter_is_noop > 0:
             self.enter_is_noop -= 1
             return cd.CmuxResult(0, "OK")  # rc=0, but nothing is submitted
@@ -1203,6 +1352,17 @@ class FakeCmux:
             self.submitted.append(self.pending)
             self.pending = ""
             self.lag_remaining = self.submit_lag_polls
+        return cd.CmuxResult(0, "OK")
+
+
+    def send_ctrl_u(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
+        self.sent_log.append("\x15")
+        self.pending = ""   # deleteToLineStart — does NOT close the menu
+        return cd.CmuxResult(0, "OK")
+
+    def send_escape(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
+        self.sent_log.append("\x1b")
+        self.menu_open = False   # tui.select.cancel — dismiss the menu
         return cd.CmuxResult(0, "OK")
 
 
@@ -1279,6 +1439,22 @@ class BareShellAtTheGateThenReadyCmux(FakeCmux):
         if self.read_calls <= 1:
             return cd.CmuxResult(0, SCREEN_BARE_SHELL)
         return cd.CmuxResult(0, SCREEN_IDLE_READY)
+
+
+class MenuOpensOnOurTextCmux(FakeCmux):
+    """A pane where typing OUR brief OPENS a completion menu (#7913, 2nd root).
+
+    Models the real trigger: the brief carries a completion trigger character (or
+    a Tab-like completion), so the autocomplete list appears AFTER the text is
+    typed and the subsequent Enter is consumed by the menu. The pre-send hygiene
+    cannot see this menu (it did not exist at read time); the RECOVERY must.
+    """
+
+    def send_text(self, workspace, text, surface=None):
+        result = super().send_text(workspace, text, surface)
+        if text == PROBE:
+            self.menu_open = True
+        return result
 
 
 class FakeClock:
@@ -1693,6 +1869,11 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = self._send(fake, consume_timeout=0.0, retries=2)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "never-became-ready")
+        # A recovery refusal is a REFUSAL, not a lost transport: an empty
+        # `condition` would read as a transport failure to any consumer of the
+        # field (#7913 review).
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("session", result.detail, "the refusal must carry the diagnosis")
         self.assertEqual(
             fake.sent_log.count(PROBE), 1, "the brief must never be written blind"
         )
@@ -2846,6 +3027,599 @@ class TestBracketedProgramOutputIsNotAFooterRow(unittest.TestCase):
             "a bracketed program-output line was accepted as a footer row — "
             "this is the #7918 fail-open")
         self.assertFalse(cd._is_pwd_line("[INFO] starting"))
+
+
+class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
+    """#7913: an EMPTY read must not be a statement about the lane.
+
+    A lane whose session transcript advanced recently has a live pi whatever the
+    pane read returned, so it must stay DISPATCHABLE; a lane with no fresh
+    transcript must still be REFUSED (the #7158 fail-closed direction).
+    """
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp(prefix="cmux-7913-sessions-"))
+        self._saved = os.environ.get(cd.SESSIONS_ROOT_ENV)
+        os.environ[cd.SESSIONS_ROOT_ENV] = str(self._dir)
+        self._clock = FakeClock()
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop(cd.SESSIONS_ROOT_ENV, None)
+        else:
+            os.environ[cd.SESSIONS_ROOT_ENV] = self._saved
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _session(self, cwd: str, age_s: float, sid: str = SESSION_7913) -> Path:
+        session_dir = self._dir / cd.mangle_cwd(cwd)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        path = session_dir / f"2026-10-10T00-00-00-000Z_{sid}.jsonl"
+        path.write_text('{"type":"user","message":"x"}\n')
+        stamp = time.time() - age_s
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def _send(self, fake, **kwargs):
+        logs: list[str] = []
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now, log=logs.append
+        )
+        result = dispatcher.send_message("workspace:99", PROBE, label="B4", **kwargs)
+        return result, logs
+
+    def test_empty_read_with_a_fresh_session_file_is_NOT_refused(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, logs = self._send(fake, ready_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertIn(PROBE, fake.sent_log, "the brief must be sent")
+        self.assertIn(
+            "session-mtime", "\n".join(logs), "the evidence used must be logged"
+        )
+
+    def test_an_EMPTY_capture_is_treated_like_a_failed_read(self):
+        # rc==0 with zero lines is the same instrument failure as rc!=0.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class EmptyCaptureCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, "")
+
+        fake = EmptyCaptureCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+
+    def test_a_fresh_transcript_for_ANOTHER_pane_is_not_evidence_for_this_one(self):
+        # #7913 review P1: the transcript must be attributable to the PANE. Lanes
+        # sharing one cwd is the measured norm (13 of 22 workspaces, 245
+        # transcripts in that bucket), so a SIBLING lane's fresh transcript must
+        # not green-light a write into a dead lane's bare shell — that is exactly
+        # how #7158's harm returns through a new door.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0, sid="11111111-1111-4111-8111-111111111111")
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a sibling lane's transcript is not evidence")
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_an_unbindable_pane_is_refused_even_with_a_fresh_transcript(self):
+        # No resume binding -> the transcript cannot be attributed -> UNKNOWN.
+        # fleet_state.refresh refuses an ambiguous candidate set for the same
+        # reason: a guess here writes into whatever pane happens to share the cwd.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd, session_id="")
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+        self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_zero_byte_session_file_is_not_a_liveness_signal(self):
+        # A transcript created but never written is a pi with no turn, and an
+        # EMPTY file cannot have “advanced”: it must not certify liveness.
+        cwd = "/private/tmp"
+        path = self._session(cwd, age_s=5.0)
+        path.write_text("")
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [])
+        self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_future_mtime_is_unmeasurable_and_fails_closed(self):
+        # Clamping a future mtime to age 0 made a lane look maximally fresh
+        # forever. An age that cannot be measured must refuse.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=-3600.0)  # an hour AHEAD of the clock
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [])
+        self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_binding_that_is_not_an_id_shape_is_refused(self):
+        # `session_id` is interpolated into a glob. A `*` binding would widen it
+        # to the store's NEWEST transcript and re-attribute a sibling lane's
+        # liveness to this dead pane — the exact #7913 defect (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        entry = {"current_directory": cwd}
+        for bad in ("*", "?", "[a-z]", "a*b", "../x", "a b", ""):
+            with self.subTest(sid=bad):
+                self.assertIsNone(cd.session_file_for(bad, entry))
+        self.assertIsNotNone(cd.session_file_for(SESSION_7913, entry))
+
+    def test_a_blind_RE_READ_is_not_rescued_by_the_gate_it_follows(self):
+        # The gate accepted on a READABLE footer; the PRE-SEND read then came
+        # back empty. A fresh transcript must not smuggle the send past a gate
+        # that could actually see the pane — the two reads disagree, and on a
+        # fail-closed path disagreement means REFUSE (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class ReadyThenBlindCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.blind_after = 1
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.read_calls += 1
+                if self.read_calls <= self.blind_after:
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                return cd.CmuxResult(0, "")
+
+        fake = ReadyThenBlindCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a blind re-read must not be rescued")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_the_refusal_names_WHY_not_just_unreadable(self):
+        # Six causes, six remediations, one indistinguishable message before the
+        # #7913 review: the probe's own diagnosis must reach the operator.
+        fake = FakeCmux(screen_unreadable=True, session_id="")
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("no resume binding for this pane", result.detail)
+
+    def test_the_pane_binding_is_resolved_once_per_dispatch_not_once_per_poll(self):
+        # The gate re-probes on EVERY poll, and each resolution is a `cmux surface
+        # resume show` subprocess — measured 91 spawns for one dispatch at the
+        # 180s/2s defaults (#7913 review, load).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 60)
+
+        class CountingCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.binding_calls = 0
+
+            def pane_session_id(self, workspace, surface=None):
+                self.binding_calls += 1
+                return super().pane_session_id(workspace, surface)
+
+        fake = CountingCmux(screen_unreadable=True, cwd=cwd)
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", ready_timeout=10.0
+        )
+        self.assertFalse(result.ok)
+        self.assertGreater(
+            self._clock.now(), 0.0, "the fake clock must have polled at all"
+        )
+        self.assertEqual(
+            fake.binding_calls,
+            1,
+            "the binding is a per-dispatch fact, not a per-poll subprocess",
+        )
+
+    def test_a_transient_probe_failure_does_not_disable_the_fallback(self):
+        # A cmux call DOES time out under load (#4842). Memoizing "probe failed"
+        # as "no binding" let one flaky poll refuse the lane for the whole
+        # dispatch AND report the wrong cause (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class FlakyProbeCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.probe_calls = 0
+
+            def pane_session_id(self, workspace, surface=None):
+                self.probe_calls += 1
+                if self.probe_calls == 1:
+                    return cd.PROBE_UNAVAILABLE
+                return super().pane_session_id(workspace, surface)
+
+        fake = FlakyProbeCmux(screen_unreadable=True, cwd=cwd)
+        result, logs = self._send(fake, ready_timeout=10.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertGreaterEqual(fake.probe_calls, 2, "a failed probe must be re-asked")
+        self.assertIn("session-mtime", "\n".join(logs))
+
+    def test_the_memo_is_keyed_per_SURFACE_not_per_workspace(self):
+        # Keyed on the workspace alone, the FIRST surface's answer would be served
+        # for the SECOND — the #7913 P1 in cache form. (A fresh Dispatcher per
+        # operation hides this today, which is exactly why it needs a test.)
+        a = "33333333-3333-4333-8333-333333333333"
+        b = "44444444-4444-4444-8444-444444444444"
+        fake = FakeCmux(
+            bindings_by_surface={"surface:1": a, "surface:2": b},
+        )
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:1"), (True, a)
+        )
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:2"), (True, b)
+        )
+
+    def test_a_definitive_absence_is_resolved_once_per_dispatch(self):
+        # `None` IS an answer, so it is memoized: resolution stays at one cmux
+        # call even though the gate polls (the load the memo exists for).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class CountingCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.binding_calls = 0
+
+            def pane_session_id(self, workspace, surface=None):
+                self.binding_calls += 1
+                return super().pane_session_id(workspace, surface)
+
+        fake = CountingCmux(screen_unreadable=True, cwd=cwd, session_id="")
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", ready_timeout=10.0
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("no resume binding for this pane", result.detail)
+        self.assertEqual(fake.binding_calls, 1)
+
+    def test_a_pane_stuck_on_the_boot_block_prompt_reports_boot_blocked(self):
+        # The `boot-blocked` value had NO test at all: mutating it to `not-ready`
+        # (or `""`) left the whole file green, so the diagnosis could regress
+        # silently (#7913 review).
+        fake = FakeCmux(boot_block=True)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "boot-blocked")
+        self.assertNotIn(
+            PROBE, fake.sent_log, "the brief must never be typed at that prompt"
+        )
+
+    def test_a_boot_blocked_RE_READ_is_reported_as_boot_blocked(self):
+        # The two re-assert sites used to hand-roll this mapping, so a window that
+        # was READABLE but sitting on the boot-block prompt was labelled
+        # `not-ready` — a different remedy, and the exact disagreement
+        # `condition_for` exists to prevent (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class EmptyGateThenBlockedCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads == 1:
+                    # The gate: UNREADABLE, rescued by this pane's transcript.
+                    return cd.CmuxResult(0, "")
+                # The pre-send re-assert: READABLE, but blocked.
+                return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
+
+        fake = EmptyGateThenBlockedCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a blocked re-read must not be rescued")
+        self.assertEqual(
+            result.condition,
+            cd.condition_for(SCREEN_BOOT_BLOCK),
+            "the condition must agree with the classification it came from",
+        )
+        self.assertEqual(result.condition, "boot-blocked")
+
+    def test_a_sibling_SURFACE_cannot_certify_this_pane(self):
+        # #7913 review P1: `cmux surface resume show` with no `--surface` answers
+        # for the workspace's SELECTED surface, but one workspace can hold several
+        # surfaces bound to DIFFERENT sessions (measured 2026-10-10: `workspace:14`
+        # bound `surface:15` and `surface:16` to two distinct checkpoint ids).
+        # Probing the workspace would let surface:15's live pi certify a blind
+        # write into surface:16 — #7158's harm one granularity narrower than the
+        # cwd scoping already fixed.
+        cwd = "/private/tmp"
+        live = "22222222-2222-4222-8222-222222222222"
+        self._session(cwd, age_s=5.0, sid=live)
+        fake = FakeCmux(
+            screen_unreadable=True,
+            cwd=cwd,
+            bindings_by_surface={"surface:15": live, "surface:16": None},
+        )
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        result = dispatcher.send_message(
+            "workspace:14", PROBE, surface="surface:16", label="B4", ready_timeout=0.0
+        )
+        self.assertFalse(
+            result.ok, "a sibling surface's live pi is not evidence about this pane"
+        )
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_a_legacy_seam_cannot_answer_for_a_NAMED_surface(self):
+        # A `pane_session_id(workspace)` seam predating surface-scoping answers for
+        # the workspace's SELECTED surface. Accepting that answer for a NAMED
+        # target surface is the P1 in cache form (#7913 review).
+        class LegacyCmux(FakeCmux):
+            def pane_session_id(self, workspace):  # no surface parameter
+                return "99999999-9999-4999-8999-999999999999"
+
+        dispatcher = cd.Dispatcher(LegacyCmux(), sleep=self._clock.sleep)
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:16"),
+            (False, None),
+            "a one-arg seam must not answer for a named surface",
+        )
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", None)[1],
+            "99999999-9999-4999-8999-999999999999",
+            "with no surface named, the one-arg answer names the same pane",
+        )
+
+    def test_the_refusal_names_a_MALFORMED_binding(self):
+        # A binding that is not an id shape is refused AND said to be malformed:
+        # reporting it as "no transcript for this pane" sends the operator after
+        # the session store instead of after the binding (#7913 review).
+        fake = FakeCmux(screen_unreadable=True, session_id="not an id")
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        fresh, detail = dispatcher.session_liveness(
+            "workspace:99", {"current_directory": "/private/tmp"}
+        )
+        self.assertFalse(fresh)
+        self.assertIn("not a session id", detail)
+
+    def test_the_refusal_distinguishes_an_UNASKABLE_probe(self):
+        # "The probe could not be asked" must not read as "this pane has no
+        # binding": the remedies are opposite (fix cmux vs re-bind the lane).
+        class UnaskableCmux(FakeCmux):
+            def pane_session_id(self, workspace, surface=None):
+                return cd.PROBE_UNAVAILABLE
+
+        dispatcher = cd.Dispatcher(
+            UnaskableCmux(screen_unreadable=True), sleep=self._clock.sleep
+        )
+        fresh, detail = dispatcher.session_liveness("workspace:99", None)
+        self.assertFalse(fresh)
+        self.assertIn("could not be asked", detail)
+
+    def test_empty_read_with_a_STALE_session_is_still_refused(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 60)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_empty_read_with_NO_resolvable_session_is_refused(self):
+        fake = FakeCmux(screen_unreadable=True)   # no cwd -> no session
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [])
+
+    def test_a_READABLE_pane_with_no_footer_is_never_rescued_by_session_evidence(self):
+        # #7158 must stay fail-closed: a bare shell is a real claim about the lane,
+        # so a fresh sibling transcript must NOT green-light a write.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = BareShellCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "not-ready")
+        self.assertEqual(
+            fake.sent_log, [],
+            "session-mtime must not override a readable bare shell",
+        )
+
+    def test_stale_session_mtime_is_reported_not_asserted(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 1)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        fresh, detail = dispatcher.session_liveness(
+            "workspace:99", {"current_directory": cwd}
+        )
+        self.assertFalse(fresh)
+        self.assertIn("advanced", detail)
+
+
+class TestIssue7913ReadinessClassification(unittest.TestCase):
+    def test_readiness_state_classifies_the_instrument_not_the_lane(self):
+        self.assertEqual(cd.readiness_state(None), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state("   \n"), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(SCREEN_BOOT_BLOCK), cd.ST_BLOCKED)
+        self.assertEqual(cd.readiness_state(SCREEN_IDLE_READY), cd.ST_READY)
+        self.assertEqual(cd.readiness_state(SCREEN_BARE_SHELL), cd.ST_NOT_READY)
+
+    def test_unreadable_cannot_be_read_as_a_lane_state(self):
+        # The vocabulary is load-bearing: it is what the beat branches on. Drive
+        # the CLASSIFIER on the real renders rather than asserting a constant
+        # against a literal, so a collision introduced in `readiness_state` is
+        # caught here (#7913 review).
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(None), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(SCREEN_BARE_SHELL), cd.ST_NOT_READY)
+        self.assertEqual(cd.readiness_state(SCREEN_IDLE_READY), cd.ST_READY)
+        for lane_state in ("WEDGED", "STALL", "IDLE", "WIP"):
+            self.assertNotIn(
+                lane_state,
+                {
+                    cd.readiness_state(""),
+                    cd.readiness_state(None),
+                    cd.readiness_state(SCREEN_BOOT_BLOCK),
+                    cd.readiness_state(SCREEN_IDLE_READY),
+                    cd.readiness_state(SCREEN_BARE_SHELL),
+                },
+                "an instrument state must never collide with a lane state",
+            )
+
+    def test_completion_menu_is_detected_from_the_renderer_shape(self):
+        screen = SCREEN_IDLE_READY.replace(
+            "\n0.0%/700k", "\n \u2192 ci-checks/\n0.0%/700k", 1
+        )
+        self.assertTrue(cd.completion_menu_open(screen))
+
+    def test_an_arrow_ABOVE_the_rule_is_not_a_menu(self):
+        screen = "\u2192 not a menu\n" + SCREEN_IDLE_READY
+        self.assertFalse(cd.completion_menu_open(screen))
+
+    def test_a_plain_ready_screen_has_no_menu(self):
+        self.assertFalse(cd.completion_menu_open(SCREEN_IDLE_READY))
+
+
+class TestIssue7913ComposerHygiene(unittest.TestCase):
+    def _send(self, fake, **kwargs):
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        return dispatcher.send_message("workspace:99", PROBE, label="B4", **kwargs)
+
+    def test_dismiss_keystroke_precedes_the_text_when_a_menu_is_open(self):
+        fake = FakeCmux(menu_open=True)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("\x1b", fake.sent_log, "a dismiss keystroke must be sent")
+        self.assertLess(
+            fake.sent_log.index("\x1b"),
+            fake.sent_log.index(PROBE),
+            "Escape must be sent BEFORE the brief is typed",
+        )
+
+    def test_leftover_composer_text_is_cleared_before_the_brief(self):
+        fake = FakeCmux(pre_typed="leftover text from a previous dispatch ")
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(
+            fake.submitted, [PROBE],
+            "the brief must not concatenate onto leftover text",
+        )
+        self.assertIn("\x15", fake.sent_log, "Ctrl-U must clear the line")
+
+    def test_clear_composer_dismisses_a_menu_that_is_the_last_line(self):
+        # Literal #7913 acceptance shape: a screen whose LAST LINE is a completion
+        # menu. The pre-send sequence must include the dismiss keystroke BEFORE
+        # anything else so the menu cannot eat the submit Enter.
+        fake = FakeCmux()
+        sent: list[str] = []
+        fake.send_escape = lambda ws, surface=None: (
+            sent.append("escape") or cd.CmuxResult(0, "OK")
+        )
+        fake.send_ctrl_u = lambda ws, surface=None: (
+            sent.append("ctrl-u") or cd.CmuxResult(0, "OK")
+        )
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        screen = (
+            "\u2500" * 36 + "\n" + PROBE + "\n\n" + "\u2500" * 36
+            + "\n \u2192 ci-checks/\n"
+        )
+        self.assertTrue(cd.completion_menu_open(screen))
+        returned = dispatcher.clear_composer("workspace:99", screen)
+        self.assertEqual(returned, ["escape", "ctrl-u"])
+        self.assertEqual(sent, ["escape", "ctrl-u"])
+
+    def test_no_escape_when_no_menu_is_open(self):
+        fake = FakeCmux()
+        result = self._send(fake)
+        self.assertTrue(result.ok)
+        self.assertNotIn(
+            "\x1b", fake.sent_log,
+            "Escape with no menu open would ABORT the live turn",
+        )
+
+    def test_menu_that_our_own_text_opens_is_dismissed_then_released(self):
+        fake = MenuOpensOnOurTextCmux()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertIn(cd.R_DISMISS_RELEASE, result.recoveries)
+        self.assertEqual(
+            fake.sent_log.count(PROBE), 1, "the brief must not be re-sent"
+        )
+        self.assertEqual(fake.submitted, [PROBE])
+
+
+class TestIssue7913FailureCondition(unittest.TestCase):
+    def test_recovery_action_dismisses_a_menu_instead_of_a_bare_enter(self):
+        screen = (
+            "\u2500" * 36 + "\n" + PROBE + "\n\n" + "\u2500" * 36
+            + "\n \u2192 ci-checks/\n"
+        )
+        self.assertEqual(
+            cd.recovery_action(screen, cd.fingerprint(PROBE), PROBE),
+            cd.R_DISMISS_RELEASE,
+        )
+
+    def test_unreadable_confirmation_reports_unreadable_pane(self):
+        class DiesAtConfirmation(FakeCmux):
+            """Ready through gate + pre-send; every read after that fails."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.my_reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.my_reads += 1
+                if self.my_reads <= 2:
+                    return super().read_screen(workspace, lines, surface)
+                return cd.CmuxResult(1, "", "cmux read-screen: timed out")
+
+        fake = DiesAtConfirmation(never_consumes=True)
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("condition: unreadable-pane", result.detail)
+
+    def test_unsent_composer_reports_composer_not_submitted(self):
+        fake = FakeCmux(never_consumes=True, no_rules=True)
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "composer-not-submitted")
+        self.assertIn("condition: composer-not-submitted", result.detail)
 
 
 if __name__ == "__main__":
