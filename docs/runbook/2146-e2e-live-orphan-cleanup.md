@@ -29,8 +29,8 @@ aboutObjects: tortoise
 > the default procedure below finds nothing in its DELETE set — see **§6.1** for
 > `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 remain the record of the
 > original red window; §2's table, Q1, Q4 and the §6 verify query carry the #3543
-> `teams` → `organizations` rename, while §1/§4/§6 keep the 2026-09-02 `teams`
-> spelling as the historical record.
+> `teams` → `organizations` rename, while §1, §2's sample minted row, §4 and §6's
+> delete-order prose keep the 2026-09-02 `teams` spelling as the historical record.
 
 ---
 
@@ -200,7 +200,7 @@ There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
 /v1/organizations/{org_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
 (soft delete → 24 h grace → purge) and the orphan users are gone — an
 operator cannot act as an owner. The sanctioned **purge machinery** is
-`purge_team_control_plane` (`supabase_control.py` — deletes
+`purge_org_control_plane` (`supabase_control.py` — deletes
 api_keys → org_memberships → invitations, teams row **last** as retry anchor)
 
 + the in-repo mint-failure compensation graph calls
@@ -213,11 +213,13 @@ purged team (`operation='e2e_live_orphan_purged'`, per-run uuid in the id so
 re-runs after a partial failure never collide) written **before** the
 teams-row delete.
 
-NOTE on the sweep's graph drop: `_drop_team_graph_impl` (`hosted_api.py`)
-branches on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
-has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skips
-on FalkorDB Cloud (tracked as daniel-ospina/tortoise#2163; the sweep helper
-`_drop_team_graph` / `_drop_team_graph_strict` is the #2163-broken path).
+NOTE on the sweep's graph drop: `_drop_org_graph_impl` (`hosted_api.py`)
+branched on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
+has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skipped
+on FalkorDB Cloud, deleting the orgs row and orphaning the graph with no retry
+(daniel-ospina/tortoise#2163, **since fixed**: it now calls
+`select_graph(target).delete()` on both lanes — the same call THIS cleanup's
+graph drop uses — and treats an already-absent graph as success).
 THIS cleanup's
 graph drop uses `select_graph(...).delete()` (GRAPH.DELETE) which works on
 both clients.
@@ -294,9 +296,10 @@ uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-l
 ```
 
 Delete order (children first, teams last — retry-anchor semantics of the
-product purge): **auth users** (GoTrue) → **org_memberships** →
-**api_keys** → **invitations** → **abuse_events** → `audit_events` append →
-**teams** (last). FalkorDB graphs may run before or after the teams-row delete
+product purge): **auth users** (GoTrue) → **api_keys** →
+**org_memberships** → **invitations** → **abuse_events** → `audit_events` append →
+**teams** (last). (`api_keys` and `org_memberships` are independent children of
+the teams row; their relative order is immaterial and matches §4 + `phase_db`.) FalkorDB graphs may run before or after the teams-row delete
 (manifest-driven; a graph left behind is a benign orphan with no DB row).
 
 Guards (in code): email must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$` (the
@@ -356,9 +359,9 @@ while the detector kept filing. The script now:
 
 Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
-separate `--manifest`**: a recurrence that enumerates no Guard-A
-(strict-shape) teams — e.g. one whose rows are all users, residue or not —
-and the clobber guard refuses to overwrite the historical
+separate `--manifest`**: a recurrence enumerates no Guard-A
+(strict-shape) teams (its rows are usually all users, residue or not), so the
+clobber guard refuses to overwrite the historical
 `2146-e2e-live-orphans.manifest.json` (154 team rows) when the new enumeration
 has no Guard-A rows — that list is the FalkorDB companion's only drop record, and
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
@@ -424,7 +427,7 @@ The #2144 tripwire stops new mints (deployed). To also stop future
 accumulation of test-minted state from ANY e2e path, recommend a follow-up
 issue for a **service-role purge endpoint** (e.g. `POST /v1/internal/teams/
 purge-e2e`, gated by `FASTAPI_INTERNAL_KEY`) that runs the existing
-`purge_team_control_plane` + `_drop_team_graph_strict` machinery for teams
+`purge_org_control_plane` + `_drop_org_graph_strict` machinery for teams
 whose `email` matches the test domain — rather than a SQL-only reaper. Also
 consider teaching the monitor teardown to call it, so a red-window recurrence
 self-heals.

@@ -41,7 +41,7 @@ SAFETY MODEL
   * Idempotent: every delete is enumerated up-front (manifest) and re-runs
     after a successful cleanup find nothing.
   * The teams row is deleted LAST (children first) — the product's retry-anchor
-    ordering (purge_team_control_plane, tortoise/supabase_control.py).
+    ordering (purge_org_control_plane, tortoise/supabase_control.py).
   * An append-only audit_events row is written per purged team BEFORE the teams
     delete (audit_events has no FK to teams — the delete trail survives).
 
@@ -49,10 +49,12 @@ DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; live FK catalog):
   1. auth.users (remaining e2e-live accounts) via GoTrue Admin API — FK
      `user_teams_user_id_fkey` (org_memberships.user_id → auth.users) ON
      DELETE CASCADE removes their memberships; auth-internal tables cascade.
-  2. org_memberships WHERE org_id IN (...) — org_id has NO FK (explicit
-     delete required; also covers any row whose user is already gone).
-  3. api_keys WHERE org_id IN (...) — has FK ON DELETE CASCADE, deleted
+  2. api_keys WHERE org_id IN (...) — has FK ON DELETE CASCADE, deleted
      explicitly for an auditable, non-cascade-dependent sequence.
+  3. org_memberships WHERE org_id IN (...) — org_id has NO FK (explicit
+     delete required; also covers any row whose user is already gone).
+     (2 and 3 are independent children of the organizations row; their
+     relative order is immaterial, and this matches phase_db + §4.)
   4. invitations WHERE org_id IN (...) — FK CASCADE, explicit anyway.
   5. abuse_events WHERE org_id IN (...) — FK CASCADE (0015 key_create rows
      minted by provision_team), explicit anyway.
@@ -102,11 +104,11 @@ teardown could not run — see PR #3790's commit message).
     AFTER the operator has read the printed list — an explicit, review-gated
     inclusion, the same shape as `--all-e2e-live` (never a widened regex: the
     guard is what keeps a non-test row out).
-  * Recurrences use a SEPARATE --manifest (below): an enumeration with no
-    Guard-A (strict-shape) teams
-    enumerates no Guard-A (strict-shape) teams, and the clobber guard refuses to
-    overwrite a manifest that holds team graph names when the new enumeration
-    has no Guard-A rows — that list is the FalkorDB companion's only drop record.
+  * Recurrences use a SEPARATE --manifest (below): their rows are usually all
+    users, so the enumeration has no Guard-A (strict-shape) teams, and the
+    clobber guard refuses to overwrite a manifest that holds team graph names
+    when the new enumeration has no Guard-A rows — that list is the FalkorDB
+    companion's only drop record.
 
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
@@ -124,12 +126,9 @@ Usage (dry-run first, then execute):
 Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
 usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
 --manifest: the historical #2146 manifest is the FalkorDB companion's only
-record of 154 graph targets, and an enumeration with no Guard-A
-(strict-shape) teams (a recurrence's rows are usually all users — residue or
-not)
-so
-writing it over that file would silently discard them (the clobber guard
-refuses exactly that, by design).
+record of 154 graph targets, and an enumeration with no Guard-A (strict-shape)
+teams would write an empty team list over it, silently discarding them (the
+clobber guard refuses exactly that, by design).
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
       --phase enumerate --all-e2e-live \\
       --manifest 2146-recurrence.manifest.json   # review BOTH printed lists
