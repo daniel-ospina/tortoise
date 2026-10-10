@@ -33,6 +33,14 @@ doc_status: live
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
 >
+> **Changelog v3.22 (2026-10-10 — issue #7902 — the operator-endpoint WRITE path admits the four epistemic labels):**
+> #7853 widened the EP/read surfaces to :Point/:Subject/:Object/:Event but left the WRITE path
+> admitting only Point/Event, so a :Subject/:Object endpoint could not be created at all. #7902
+> widens `create_operator` and the operator-less `create_direct_edge` to the same four labels (one
+> declaration, `tortoise/live.py::EPISTEMIC_LABELS`), and widens the direct-edge reads that become
+> reachable (`_affected_factors` Batch 3, `_load_cache`'s back-message source side). Direct edges
+> therefore connect any two plain epistemic nodes — **not** Point→Point only.
+>
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
 > as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,
@@ -58,6 +66,7 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
@@ -1375,13 +1384,16 @@ optional free data). It carries an operator **only when it needs one**.
 ### Reification rule — when an edge gets an operator
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
-support/contradict between Points and/or Events (Point↔Point, Event→Point,
-Point→Event).** All other edges stay plain and carry confidence as an
+support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
+`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap;
+#7813/#7853).** The operator node itself is always a
+`:Point {is_operator:true}`; its children/targets may carry any of the four
+labels. All other edges stay plain and carry confidence as an
 edge attribute.
 
 | Edge | Operator? | Confidence |
 |---|---|---|
-| Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
+| Support / contradict (IMPL/NAND) between epistemic nodes (:Point/:Subject/:Object/:Event) | **Yes** | EP over the IMPL/NAND edge |
 | Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
 | Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
 | `related` — the neutral association edge (§3.9) | **No** — plain edge | **none** — evidence-free by construction; no belief path may read it |
@@ -1397,8 +1409,9 @@ edge attribute.
   closed by **#5566** (the affected-set traversal is now `IMPL`/`NAND`-filtered **and**
   directed, so only operator inputs are admitted).
 
-- **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
-  (no operator); EP propagates over it the same way.
+- **Operator-less propagation:** an IMPL/NAND edge may be direct between any two plain epistemic
+  nodes (`:Point`/`:Subject`/`:Object`/`:Event` — #7902; no operator); EP propagates over it the
+  same way.
 - **Direction:** four values, **recorded on the write**: `->` (source → target), `<-` (target →
   source), `<->` (both ways), `-` (none). Lives on the operator node when present, else on the
   edge. EP reads the operator node first, falls back to the edge.

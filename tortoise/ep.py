@@ -13,7 +13,13 @@ import math
 import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
-from .live import _live_only, _terminal_excluded, TERMINAL_EXCLUDED_STATUSES
+from .live import (
+    _live_only,
+    _terminal_excluded,
+    epistemic_disjunction,
+    epistemic_label_queries,
+    TERMINAL_EXCLUDED_STATUSES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,14 +155,25 @@ class TortoiseEP:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
 
         if affected_claims:
-            back_rows = self.g.query(
-                "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-                "WHERE coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+            # #7853/#7902: back-messages live on DIRECT edges
+            # (a)-[:IMPL|NAND]->(b). Both endpoints are id-anchored, so sweep
+            # the epistemic labels on the TARGET side (keep the per-(label,id)
+            # index). #7853 widened the operator-path reads; #7902 widened the
+            # direct-edge WRITE path, so the direct-edge endpoints may now be
+            # any of the four labels on the SOURCE side too — the disjunction
+            # on `a` is the traversal-position widening
+            # (live.epistemic_disjunction).
+            back_rows: list = []
+            for _q in epistemic_label_queries(
+                "MATCH (a)-[r:IMPL|NAND]->(b:{label}) "
+                f"WHERE {epistemic_disjunction('a')} "
+                "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
                 "AND (a.id IN $ids OR b.id IN $ids) "
                 "RETURN a.id, b.id, type(r), "
-                "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)",
-                params={"ids": list(affected_claims)},
-            ).result_set
+                "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
+            ):
+                back_rows.extend(self.g.query(
+                    _q, params={"ids": list(affected_claims)}).result_set)
             for src, tgt, rel, ma, mb in back_rows:
                 self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
@@ -1049,11 +1066,17 @@ class TortoiseEP:
         # edges between the same pair share one message slot (last-writer
         # wins) — unsupported; creation paths must not duplicate edges.
         dir_rows = self.g.query(
-            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "MATCH (a)-[r:IMPL|NAND]->(b) "
+            # #7902: both endpoints of a direct edge may carry any of the four
+            # epistemic labels (the write path was widened with the same
+            # helper). Traversal positions — the label disjunction goes in the
+            # WHERE clause (FalkorDB rejects pattern-position disjunction).
+            f"WHERE {epistemic_disjunction('a')} "
+            f"AND {epistemic_disjunction('b')} "
             # #3139/#3154: index-independent non-operator form — a bare
             # `= false` drops every direct-edge factor on a GRAPH.COPY'd
             # graph (Batch 3 silently returns ∅).
-            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "AND (a.is_operator IS NULL OR a.is_operator = false) "
             "AND a.op_type IS NULL "
             "AND (b.is_operator IS NULL OR b.is_operator = false) "
             "AND b.op_type IS NULL "

@@ -214,3 +214,66 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
     if include_draft:
         return terminal
     return f"(({clause} IS NULL OR {clause} <> 'draft') AND {terminal})"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #7853/#7902 — THE canonical epistemic-label set. Confidence (EP) propagates
+# across :Point, :Subject, :Object and :Event (owner ruling, #7813). ONE
+# declaration, imported by every reader AND writer that must admit an
+# epistemic node — do NOT spell the four labels inline at a call site (the
+# codebase already drifted into two notions of "epistemic label" before this).
+#
+# #7853 widened the READ half (ep.py / the sdk read surfaces); #7902 widened
+# the WRITE half (create_operator / create_direct_edge endpoints) — the two
+# halves share THIS declaration so the write path can never admit a label the
+# read path cannot see.
+#
+# Two shapes, because FalkorDB does NOT accept pattern-position label
+# disjunction (`MATCH (a:Point|Event)-…` → ResponseError, measured on
+# FalkorDB 6.0.1 and on the embedded engine):
+#
+#   * TRAVERSAL positions (the node is reached from an anchored operand):
+#     drop the node's own label and add ``epistemic_disjunction(alias)`` to
+#     the WHERE clause. No index is lost — the traversal is anchored
+#     elsewhere (the operator, or the other endpoint).
+#
+#   * ID-ANCHORED positions (``{id:$x}`` / ``WHERE n.id IN $ids``): keep a
+#     label on the node and iterate ``epistemic_label_queries`` ONCE PER
+#     LABEL. Dropping the label is the obvious widening and is a straight
+#     regression: the indexes are per-(label, property), so a bare
+#     ``MATCH (n {id:$id})`` has NO index anchor and full-scans on every EP
+#     read (#7853 owner measurement). Point/Subject/Object each carry an
+#     ``id`` RANGE index; Event carries one on ``eventId`` only, so an
+#     Event addressed by ``id`` is unindexed today under EITHER shape.
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The four labels on which confidence propagates (#7813 ruling). Ordered
+#: Point-first: the Point query is the hot path and stays the first, indexed
+#: lookup in every id-anchored sweep.
+EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+
+
+def epistemic_disjunction(alias: str) -> str:
+    """WHERE fragment: ``alias`` holds one of the epistemic labels.
+
+    For TRAVERSAL positions only (the node is reached from an anchored
+    operand). FalkorDB rejects pattern-position label disjunction, so the
+    disjunction has to be a predicate. Example:
+
+        MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c)
+        WHERE {epistemic_disjunction('c')}
+    """
+    return "(" + " OR ".join(
+        f"{alias}:{label}" for label in EPISTEMIC_LABELS) + ")"
+
+
+def epistemic_label_queries(template: str) -> list[str]:
+    """Expand an ID-ANCHORED query template once per epistemic label.
+
+    ``template`` must contain the literal token ``{label}`` in the node
+    pattern's label position; only that token is substituted (the rest of
+    the Cypher — including ``{id:$id}`` property maps — is untouched, which
+    is why this uses ``str.replace`` and not ``str.format``). Keep the label
+    on an id-anchored node so the per-(label, property) range index is used.
+    """
+    return [template.replace("{label}", label) for label in EPISTEMIC_LABELS]
