@@ -342,6 +342,50 @@ class TestPromotionPolicy:
         assert sdk.get_point(pB)["status"] == "live"   # dual-role: source wins
         assert sdk.get_point(pC)["status"] == "draft"  # pure target
 
+    def test_auto_goal_target_is_born_live(self, sdk):
+        """#7856 on the INGEST surface: a `goal` that is only ever an
+        operator-connection TARGET must still be born live.
+
+        A draft Point that is only ever a TARGET is EP-inert while the graph
+        still reports it, and a goal additionally reports converged=True
+        (docs/ONTOLOGY.md §5) — so the target-draft injection must not apply
+        to `goal`, for the same reason it does not apply to the #2199 decide
+        parts. Mutation that reds this test: dropping `| GOAL_KINDS` from the
+        exclusion, which injects status="draft" on `top`; `top` is never a
+        source and the promotion clauses fill only a never-set status, so it
+        would stay draft — and EP-inert — forever.
+        """
+        bundle = {
+            "points": [
+                {"ref": "top", "kind": "goal", "content": "become profitable"},
+                {"ref": "mid", "kind": "goal", "content": "grow revenue"},
+            ],
+            "connections": [
+                {"from": "mid", "to": "top", "operator": "IMPL"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        top, mid = res["ids"]["points"]
+        assert sdk.get_point(top)["status"] == "live"   # pure target, goal
+        assert sdk.get_point(mid)["status"] == "live"   # pure source
+
+        # Under gated the same shape is draft for both — the gate is the
+        # explicit draft request and it applies to goals too. A SEPARATE
+        # bundle: re-ingesting the one above dedups onto those (now live)
+        # points, and a dedup hit never rewrites an existing status.
+        gated = sdk.ingest({
+            "points": [
+                {"ref": "top", "kind": "goal", "content": "ship v4"},
+                {"ref": "mid", "kind": "goal", "content": "measure first"},
+            ],
+            "connections": [
+                {"from": "mid", "to": "top", "operator": "IMPL"},
+            ],
+        }, promotion_policy="gated")
+        g_top, g_mid = gated["ids"]["points"]
+        assert sdk.get_point(g_top)["status"] == "draft"
+        assert sdk.get_point(g_mid)["status"] == "draft"
+
     def test_auto_relation_only_source_is_born_live(self, sdk):
         # #1088 owner ruling: a relation-only source is NEITHER an
         # operator-connection source nor an operator-connection TARGET, so

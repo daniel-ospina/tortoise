@@ -12503,7 +12503,8 @@ class TortoiseSDK:
                     # ingest point is born draft and stays draft.
                     write_item = {**item, "status": "draft"}
                 elif (ref in _auto_targets and not (
-                        isinstance(kind, str) and kind in DECIDE_PART_KINDS)):
+                        isinstance(kind, str)
+                        and kind in DECIDE_PART_KINDS | GOAL_KINDS)):
                     # #131 "source-only": an operator-connection TARGET keeps
                     # the draft→live lifecycle. Everything else under auto is
                     # left with NO status, so create_point's default supplies
@@ -12511,6 +12512,12 @@ class TortoiseSDK:
                     # already subtracted from _auto_targets (SOURCE WINS), so
                     # nothing is injected for it and it is born live; no
                     # `live` branch is injected anywhere — the default is it.
+                    # #2199 and #7856: the decide parts and `goal` are
+                    # exempt because a draft Point that is only ever a TARGET
+                    # is EP-inert while the graph still reports it (a goal
+                    # additionally reports converged=True — docs/ONTOLOGY.md
+                    # §5). Those kinds keep their born-live contract; only
+                    # `promotion_policy='gated'` writes them draft.
                     write_item = {**item, "status": "draft"}
             # #7856: a COPY, never a mutation of `item`. Granular
             # `results[].item` echoes the item's remaining props
