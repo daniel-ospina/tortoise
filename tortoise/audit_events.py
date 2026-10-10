@@ -161,14 +161,23 @@ class AuditLogger:
         Postgres outage — the opposite of what a relocation knob is for
         (#7924 review P1/P2).
 
+        A SET-but-empty/whitespace ``$HOME`` is refused UP FRONT (#7924 review
+        round 2): for ``HOME=""`` ``Path.home()`` returns ``/`` — which IS
+        absolute — so the absolute check below would PASS and the fallback
+        would resolve to ``/.tortoise/audit_fallback.jsonl``, i.e. OUTSIDE
+        ``$HOME``, in the filesystem root. In a root-writable container (the
+        hosted shape) ``_write_fallback`` then mkdirs ``/.tortoise`` and the
+        append SUCCEEDS, so the drop counter is never incremented and the loss
+        is silent. ``HOME="   "`` is the same misconfiguration one value over.
+        Both are refused here — counted as an ``unresolvable_path`` drop, never
+        as ``write_failed`` — while an UNSET ``$HOME`` keeps the documented
+        ``Path.home()`` fallback.
+
         The RESOLVED path is then required to be ABSOLUTE (#7924 review
-        P2): a whitespace-only ``$HOME`` still makes ``Path.home()``
-        relative (``PosixPath('   ')``), which is the same CWD-relative hazard
-        one level down, so it is refused here rather than materialized. The
-        two override legs are held to the same invariant — returning them
-        unchecked would make a post-construction relative ``_fallback_dir``
-        (inert in the eager version, where only ``_fallback_path`` was read)
-        the winning path and mkdir it in the CWD.
+        P2) as defense in depth: the two override legs are held to the same
+        invariant — returning them unchecked would make a post-construction
+        relative ``_fallback_dir`` (inert in the eager version, where only
+        ``_fallback_path`` was read) the winning path and mkdir it in the CWD.
 
         Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
         malformed ``$HOME``), and ``RuntimeError`` for a path that is not
@@ -190,8 +199,17 @@ class AuditLogger:
                 _logger.warning(
                     "AuditLogger: TORTOISE_AUDIT_FALLBACK_DIR is whitespace-only — "
                     "treating it as unset and using the $HOME default")
-            base = (Path(override).expanduser() if override
-                    else Path.home() / ".tortoise")
+            if override:
+                base = Path(override).expanduser()
+            else:
+                home = os.environ.get("HOME")
+                if home is not None and not home.strip():
+                    raise RuntimeError(
+                        "$HOME is set but empty/whitespace — refusing to "
+                        "resolve the audit fallback against the filesystem "
+                        "root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute "
+                        "path or fix $HOME")
+                base = Path.home() / ".tortoise"
         if not base.is_absolute():
             raise RuntimeError(
                 f"audit fallback base is not an absolute path: {base!r} "
