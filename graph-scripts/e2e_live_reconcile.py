@@ -63,7 +63,8 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
   * Counts ABOVE --threshold (default 0) = exit 1 with the offenders listed.
     Offender emails are FULL in the --json doc (the operator's input to the
     cleanup script — a truncated address is not actionable; #5971) and
-    truncated on stderr only. Post-#2146 baseline (0 rows) = green.
+    truncated in the human log only (stderr under --json, stdout otherwise).
+    Post-#2146 baseline (0 rows) = green.
 
 Exit codes: 0 = clean (every count <= threshold) | 1 = bleed detected
 (offenders listed) | 2 = could-not-determine (guard/transport failure).
@@ -201,7 +202,11 @@ def _qlist(ids: list[str]) -> str:
 
 
 def _short_email(email: str, limit: int = 28) -> str:
-    """Truncate an offender email for logs/issue bodies (they are synthetic)."""
+    """Truncate an offender email for the HUMAN log (they are synthetic).
+
+    The --json doc — and therefore the auto-filed issue body, which renders the
+    offender emails verbatim — carries the FULL address (#5971).
+    """
     return email if len(email) <= limit else email[: limit - 1] + "…"
 
 

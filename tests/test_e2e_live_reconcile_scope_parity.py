@@ -292,6 +292,14 @@ def test_residue_queries_are_all_time_and_negate_the_guard() -> None:
     for sql in (remediator.RESIDUE_TEAMS_SQL, remediator.RESIDUE_USERS_SQL):
         assert NAMESPACE_LIKE in sql
         assert "!~" in sql, "the residue predicate must NEGATE the guard, never widen it"
+        # Pin the PREDICATE, not just the operator: a widened literal such as
+        # `!~ '^e2e-live-.*@premise-labs\.dev$'` still contains `!~` yet shrinks
+        # the residue back to empty and re-opens #5971 — and the fail-closed
+        # check above cannot catch it (a too-wide residue regex yields FEWER
+        # rows). The SQL literal must be the guard pattern verbatim.
+        assert remediator.EMAIL_RE.pattern in sql, (
+            "the residue SQL must negate the SAME literal the guard matches"
+        )
         assert "created_at >=" not in sql, (
             "residue is all-time — the live example (#3781) postdates WINDOW_END"
         )
@@ -305,19 +313,21 @@ def _write_manifest(path: Path, manifest: dict) -> None:
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def test_residue_only_enumeration_is_not_refused_as_a_post_success_rerun(
+def test_residue_only_recurrence_uses_its_own_manifest_and_keeps_the_old_one(
     tmp_path, monkeypatch
 ) -> None:
-    """A residue-only recurrence is NOT an empty enumeration (#5971).
+    """A residue-only recurrence must NOT discard the prior FalkorDB drop list.
 
-    The pre-#5971 clobber guard tested `teams == []`, so the live case
-    (`users=4 teams=0`) was refused as a post-success re-run whenever a prior
-    manifest was kept — i.e. the documented §6.1 procedure could not run at all
-    against the default manifest path. "Empty" must mean the WHOLE enumeration
-    found nothing.
+    The live #5971 case is `users=4 teams=0`, so a recurrence enumerates an
+    EMPTY team list. The prior manifest's `teams` is the FalkorDB companion's
+    only drop record (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]`
+    and returns 0 on an empty list), so the clobber guard refuses — by design.
+    The recurrence reaches its rows by enumerating to its OWN --manifest, which
+    is the runbook §6.1 procedure.
     """
-    manifest_path = tmp_path / "2146.manifest.json"
-    _write_manifest(manifest_path, {"teams": [{"id": "old"}] * 154})
+    prior_path = tmp_path / "2146-e2e-live-orphans.manifest.json"
+    prior_teams = [{"id": f"old-{i}", "graph_name": f"team_{i:026x}"} for i in range(154)]
+    _write_manifest(prior_path, {"teams": prior_teams})
 
     runner = _remediator_runner(
         residue_users=[{"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}]
@@ -326,15 +336,34 @@ def test_residue_only_enumeration_is_not_refused_as_a_post_success_rerun(
     monkeypatch.setattr(
         sys, "argv",
         ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
-         "--all-e2e-live", "--manifest", str(manifest_path)],
+         "--all-e2e-live", "--manifest", str(prior_path)],
     )
     out = StringIO()
     with redirect_stdout(out):
         rc = remediator.main()
-    assert rc == 0, "a residue-bearing enumeration is not empty — it must not be refused"
-    rewritten = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert rewritten["residue"]["users"][0]["email"] == RESIDUE_USER
+    assert rc == 2 and "REFUSING" in out.getvalue(), (
+        "a 0-team enumeration must not overwrite a manifest holding graph targets"
+    )
+    assert json.loads(prior_path.read_text(encoding="utf-8"))["teams"] == prior_teams, (
+        "the FalkorDB drop list must survive the refusal"
+    )
+
+    # The recurrence path: its own manifest, same residue, and it proceeds.
+    recurrence_path = tmp_path / "2146-recurrence.manifest.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
+         "--all-e2e-live", "--manifest", str(recurrence_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0, "a separate manifest is the documented recurrence path"
+    written = json.loads(recurrence_path.read_text(encoding="utf-8"))
+    assert written["residue"]["users"][0]["email"] == RESIDUE_USER
     assert RESIDUE_USER in out.getvalue()
+    # And the historical list is still intact afterwards.
+    assert json.loads(prior_path.read_text(encoding="utf-8"))["teams"] == prior_teams
 
 
 def test_genuinely_empty_reenumeration_still_refuses(tmp_path, monkeypatch) -> None:
@@ -406,3 +435,38 @@ def test_include_residue_is_never_silently_inert_on_a_manifest_phase(
         rc = remediator.main()
     assert rc == 0
     assert "no effect on --phase db" in out.getvalue()
+    assert "NOT in the delete set" in out.getvalue()
+
+
+def test_the_inert_note_does_not_fire_when_the_manifest_already_promoted(
+    tmp_path, monkeypatch
+) -> None:
+    """The redundant-flag case: the manifest already promoted the residue.
+
+    The note must not contradict the `INCLUDED via --include-residue` line
+    printed for the same rows in the same run.
+    """
+    manifest_path = tmp_path / "2146.manifest.json"
+    _write_manifest(manifest_path, {
+        "scope": {"all_e2e_live": True, "include_residue": True},
+        "counts": {},
+        "residue": {"teams": [], "users": [
+            {"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}]},
+        "teams": [],
+        "users": [{"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}],
+    })
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: _remediator_runner())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "users",
+         "--include-residue", "--manifest", str(manifest_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0
+    printed = out.getvalue()
+    assert "INCLUDED via --include-residue" in printed
+    assert "no effect on --phase" not in printed, (
+        "the note must not contradict the INCLUDED line about the same rows"
+    )

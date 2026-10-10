@@ -93,13 +93,18 @@ while nothing in the repo could clean it. The live example is the #3781
 manual-verification account `e2e-live-3781-<hex>@premise-labs.dev` (created
 2026-09-17; the operator had no SUPABASE_SERVICE_KEY, so the monitor's Admin-API
 teardown could not run — see PR #3790's commit message).
-  * The residue is now ALWAYS enumerated and printed (teams + auth users,
-    all-time, explicitly NOT matching the guard shape; a row that does match is
-    refused as a guard logic error) and recorded in the manifest's `residue` key.
+  * The residue is ALWAYS enumerated (on the phases that enumerate: --phase
+    enumerate|all), ALL-TIME, explicitly NOT matching the guard shape — a row
+    that does match is refused as a guard logic error — and always PRINTED, on
+    every phase, plus recorded in the manifest's `residue` key.
   * It is NOT in the delete set by default. `--include-residue` promotes it
     AFTER the operator has read the printed list — an explicit, review-gated
     inclusion, the same shape as `--all-e2e-live` (never a widened regex: the
     guard is what keeps a non-test row out).
+  * Recurrences use a SEPARATE --manifest (below): a residue-only recurrence
+    enumerates 0 teams, and the clobber guard refuses to overwrite a manifest
+    that holds team graph names with an empty team list — that list is the
+    FalkorDB companion's only drop record.
 
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
@@ -114,11 +119,18 @@ Usage (dry-run first, then execute):
       --manifest 2146-e2e-live-orphans.manifest.json --execute
   # 6) verify (expect 0 rows) — see runbook docs/runbook/2146-e2e-live-orphan-cleanup.md
 
-Recurrence (the #2189 reconcile case — the rows are NEWER than the window):
+Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
+usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
+--manifest: the historical #2146 manifest is the FalkorDB companion's only
+record of 154 graph targets, and a residue-only enumeration has 0 teams, so
+writing it over that file would silently discard them (the clobber guard
+refuses exactly that, by design).
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
-      --phase enumerate --all-e2e-live          # review the residue list it prints
+      --phase enumerate --all-e2e-live \\
+      --manifest 2146-recurrence.manifest.json   # review BOTH printed lists
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
-      --phase all --all-e2e-live --include-residue --execute
+      --phase all --all-e2e-live --include-residue \\
+      --manifest 2146-recurrence.manifest.json --execute
 """
 
 from __future__ import annotations
@@ -548,19 +560,21 @@ def main() -> int:
     if args.phase in ("enumerate", "all"):
         manifest = phase_enumerate(args, runner)
         # #2146 review P2-1: refuse to clobber a non-empty manifest with an
-        # empty re-enumeration. A post-success re-run enumerates 0 teams; if it
+        # empty team list. A post-success re-run enumerates 0 teams; if it
         # overwrote the manifest in place, the FalkorDB companion would read an
         # empty list and silently skip all ~154 graphs with no row-level record
         # of what to drop. Delete the manifest manually to force a fresh empty
         # enumeration.
         #
-        # #5971: "empty" means the whole enumeration found nothing — NOT merely
-        # `teams == []`. A residue-only recurrence (the live #5971 case is
-        # `users=4 teams=0`) legitimately enumerates no teams while having Guard-D
-        # residue to act on, and the pre-#5971 test refused it as a post-success
-        # re-run — so the documented §6.1 procedure could not run at all against
-        # the default manifest path whenever a prior manifest was kept (the
-        # runbook's own rollback advice says to keep it).
+        # #5971: a residue-only recurrence also enumerates 0 teams (the live case
+        # is `users=4 teams=0`), so this refusal fires for it too — deliberately.
+        # The prior `teams` list is the FalkorDB companion's ONLY drop record
+        # (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns 0
+        # on an empty list), so relaxing the guard to "residue counts as
+        # non-empty" would discard that list silently — which is the very failure
+        # the guard prevents. A recurrence therefore enumerates to its OWN
+        # --manifest (the runbook §6.1 path): the historical list survives, and
+        # the residue is still reachable.
         if os.path.exists(args.manifest):
             try:
                 with open(args.manifest) as fh:
@@ -568,13 +582,13 @@ def main() -> int:
                 prior_n = len(prior.get("teams") or [])
             except (OSError, json.JSONDecodeError):
                 prior_n = 0
-            new_residue = manifest.get("residue") or {}
-            new_residue_n = (len(new_residue.get("teams") or [])
-                             + len(new_residue.get("users") or []))
-            if prior_n > 0 and not manifest.get("teams") and not new_residue_n:
+            if prior_n > 0 and not manifest.get("teams"):
                 print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
                       f"{prior_n} teams but the new enumeration found none (post-success "
-                      f"re-run?). Remove the file to force a fresh empty enumeration.")
+                      f"re-run, or a residue-only recurrence?). Those teams are the "
+                      f"FalkorDB companion's drop list; re-enumerate a recurrence to a "
+                      f"separate --manifest (2146-recurrence.manifest.json — runbook "
+                      f"§6.1), or remove this file once those graphs are already dropped.")
                 return 2
         with open(args.manifest, "w") as fh:
             json.dump(manifest, fh, indent=2, default=str)
@@ -615,9 +629,13 @@ def main() -> int:
         _report_residue(_res.get("teams") or [], _res.get("users") or [],
                         bool((manifest.get("scope") or {}).get("include_residue")))
 
-    if args.include_residue and args.phase not in ("enumerate", "all"):
+    if args.include_residue and args.phase not in ("enumerate", "all") \
+            and not (manifest.get("scope") or {}).get("include_residue"):
         # The delete set is the MANIFEST's, and these phases do not re-enumerate
-        # — so the flag cannot promote anything here. Never silently inert.
+        # — so the flag cannot promote anything here. Never silently inert. Only
+        # warn when it genuinely cannot act: if the manifest already recorded
+        # include_residue=true, the residue IS in its delete set and the note
+        # would contradict the `INCLUDED via --include-residue` line above it.
         print(f"[residue] NOTE: --include-residue has no effect on --phase "
               f"{args.phase} — the delete set is read from {args.manifest}. "
               f"Re-enumerate (--phase enumerate|all --include-residue) to promote "
