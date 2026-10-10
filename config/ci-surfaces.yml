@@ -764,6 +764,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_7767_restore_rollback.py
   # #7856: half this file's subject is the `goalState` declaration in
   # `tortoise/projection/entities.py` (`_POINT_DECLARED_PROPS` — it suppresses
   # the replay passthrough's false drift warning). An `entities.py`-only change
