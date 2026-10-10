@@ -3326,16 +3326,17 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
 
     ROOT CAUSE (verified): capture wrote the extracted claims via the #131
-    draft default and wired their IMPL/NAND operator topology as draft
+    draft default (pre-#1088, when a no-status create defaulted to draft)
+    and wired their IMPL/NAND operator topology as draft
     (#780 extraction operators, ``promote_source=False``); EP's BFS
     expansion excludes draft subgraphs (``include_draft=False`` default), so
     the ingest EP pass could never calibrate the captured claims
     (``dream()`` total_affected 0 / coverage 0.0 / ``has_ep`` False —
     structurally, until the claims are EP-able).
 
-    FIX — capture-scoped ONLY (create_point's global draft default, the
-    #780 draft-operator semantics of NON-capture extraction paths, EP
-    semantics, and global dream routing are all untouched):
+    FIX — capture-scoped ONLY (the #780 draft-operator semantics of
+    NON-capture extraction paths, EP semantics, and global dream routing are
+    all untouched):
       1. every extracted (non-episodic) claim of THIS capture is promoted
          draft->live (the DM-2/§4.4 status branch: draft -> live on the
          capture write path; the episodic turn stream STAYS draft — it is
