@@ -807,6 +807,15 @@ surfaces:
   # under `ep` (below): the test drives `tortoise/ranking.py`'s confidence sort
   # key, and an `ep`-only ranking.py change must not skip it (#2938 convention).
   - test_2500_terminal_ep_backfill.py
+  # #7853: this file's subject includes the epistemic-label declarations in
+  # `tortoise/live.py` (EPISTEMIC_LABELS / epistemic_disjunction /
+  # epistemic_label_queries), and a `tortoise/live.py`-only change matches no
+  # SOURCE_PATTERNS rule and falls through to `core` — so without this entry
+  # the declaration's guard never runs on the change that can delete it.
+  # Dual-registered under `ep` (below) because the rest of its subject is
+  # `tortoise/ep.py` (#2938 convention, as test_lifecycle_guards.py and
+  # test_2500_terminal_ep_backfill.py above).
+  - test_7853_confidence_label_propagation.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
@@ -2013,6 +2022,7 @@ surfaces:
   - test_2500_terminal_ep_backfill.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
+  - test_7853_confidence_label_propagation.py  # #7853: EP confidence propagates across :Point/:Subject/:Object/:Event children
   - test_ep_projections.py
   - test_ep_quadrature.py
   - test_ep_selector.py

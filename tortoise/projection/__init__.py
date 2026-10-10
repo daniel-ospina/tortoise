@@ -13,6 +13,7 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations  # noqa: I001
 
+import bisect
 import contextlib
 import hashlib
 import json
@@ -2556,6 +2557,7 @@ from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
 from tortoise.graph_ops import record_graph_op  # noqa: E402  #3359: per-capture graph-op accounting
 from tortoise.live import (  # noqa: E402
+    EPISTEMIC_LABELS,
     VACUITY_BELIEF,
     _live_only,
     _terminal_excluded,
@@ -4126,6 +4128,181 @@ def _journal_forward_reference(first_materialized, seq, label, rid) -> bool:
     return first is not None and first > seq
 
 
+#: The four states the ordered ``(label, id)`` existence boundary can report
+#: at a record seq. They are DISTINCT because the belief arms act differently
+#: on each: ``EXISTS`` is a non-Point bound (exempt), ``FUTURE`` is a forward
+#: reference the live write no-op'd (skip, record nothing), and
+#: ``BURIED``/``NEVER`` are genuine misses (refuse). Collapsing BURIED into
+#: NEVER or FUTURE is the fail-OPEN regression #7936 review found.
+_EXISTENCE_EXISTS = "exists"
+_EXISTENCE_FUTURE = "future"
+_EXISTENCE_BURIED = "buried"
+_EXISTENCE_NEVER = "never"
+
+
+def journal_epistemic_existence(events) -> dict:
+    """The ORDERED creation/hard-delete boundary for the four epistemic labels.
+
+    ``{(label, id): (creation_seqs, delete_seqs)}`` — both lists ascending
+    because ``events`` is walked once in journal order. This is the reader
+    :func:`_reference_fold_non_point_target` asks "did the node EXIST at this
+    record?". The anchor-gated last-delete-wins map (:func:`hard_deleted_pairs`)
+    cannot answer it (#7936 review): it exposes only the LAST delete per key, so
+    a ``create → delete → RE-CREATE → belief`` journal is called a miss (the
+    re-creation is invisible), and an id deleted both BEFORE and AFTER the
+    write exposes only the later delete (the burial is invisible). Both shapes
+    are reproduced in the boundary matrix test.
+
+    Creations are read through the SAME arms :func:`journal_first_materialization`
+    uses (``_JOURNAL_POINT_MATERIALIZATION_TYPES`` for Point/Operator, the
+    ``_ENTITY_CREATION_EVENT_LABEL`` records for Object/Subject/Event), so the
+    two maps cannot read one record differently. Deletes are the hard deletes
+    the replay folds: an ``EntityMutated`` op=delete removes its own canonical
+    label only (``_delete_entity_by_id(label=...)``, #3860; a missing/unknown
+    label falls back id-wide across ``_HARD_DELETE_LABELS``), and a
+    ``PointsMerged`` removes the merged-away ``:Point`` ids. A
+    ``PointRetracted`` is a tombstone, not a hard delete, and is deliberately
+    absent.
+
+    ⚠️ Unlike :func:`hard_deleted_pairs` this reader is UNGATED by re-creation
+    anchors: a delete is recorded at its own seq whatever follows it. That is
+    the point — the caller reconstructs the ordered boundary.
+    """
+    creates: dict[tuple[str, str], list[int]] = {}
+    deletes: dict[tuple[str, str], list[int]] = {}
+    for seq, raw in enumerate(events):
+        ev = _norm(raw) if isinstance(raw, dict) else {}
+        t = ev.get("type")
+        if t in _JOURNAL_POINT_MATERIALIZATION_TYPES:
+            p = ev.get("point")
+            if isinstance(p, dict) and isinstance(p.get("id"), str):
+                creates.setdefault(("Point", p["id"]), []).append(seq)
+        elif t in _ENTITY_CREATION_EVENT_LABEL:
+            eid = _creation_entity_id_from_record(t, ev)
+            if isinstance(eid, str) and eid:
+                creates.setdefault(
+                    (_ENTITY_CREATION_EVENT_LABEL[t], eid), []).append(seq)
+        elif t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if not isinstance(rid, str):
+                continue
+            label = ev.get("label")
+            labels = ({label} if isinstance(label, str)
+                      and label in _CANONICAL_ENTITY_LABELS
+                      else _HARD_DELETE_LABELS)
+            for lbl in labels:
+                deletes.setdefault((lbl, rid), []).append(seq)
+        elif t == "PointsMerged":
+            # #331: `or []` also covers an explicit "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    deletes.setdefault(("Point", mid), []).append(seq)
+    return {key: (creates.get(key, []), deletes.get(key, []))
+            for key in set(creates) | set(deletes)}
+
+
+def _existence_state(creates, deletes, seq) -> str:
+    """Did ``(label, id)`` EXIST at ``seq``? One of the four states above.
+
+    ``creates``/``deletes`` are the boundary lists for ONE ``(label, id)``. The
+    latest creation at or before ``seq`` opens an incarnation; it still exists
+    unless a hard delete that can remove this label lands after that creation
+    and at or before ``seq``. When it does NOT exist at ``seq``, a creation
+    AFTER ``seq`` makes it a forward reference — even if an EARLIER incarnation
+    was hard-deleted before ``seq`` (live no-op'd at the record, then the id
+    was re-created); only a target that neither exists nor is re-created later
+    is ``BURIED``/``NEVER``.
+    """
+    i = bisect.bisect_right(creates, seq)
+    if i > 0:
+        j = bisect.bisect_right(deletes, creates[i - 1])
+        if not (j < len(deletes) and deletes[j] <= seq):
+            return _EXISTENCE_EXISTS
+    if i < len(creates):
+        return _EXISTENCE_FUTURE
+    return _EXISTENCE_BURIED if i > 0 else _EXISTENCE_NEVER
+
+
+def _epistemic_forward_reference(existence, rid, seq) -> bool:
+    """True when a belief write at ``seq`` is a FORWARD REFERENCE: ``rid``
+    exists under NO epistemic label at ``seq`` and IS materialized under one
+    only AFTER it.
+
+    The label-agnostic sibling of :func:`_journal_forward_reference`, and the
+    delete-aware one: it reads the ordered boundary
+    (:func:`journal_epistemic_existence`), not first-materialization, so a
+    target that existed and was BURIED before a later re-creation counts as
+    absent (the live write no-op'd it). It never skips a target that DOES
+    exist at ``seq`` merely because an unrelated label sharing the id
+    materializes later — the first-materialization form would, and
+    ``rebuild_all``'s pass-1a Point hoist makes that reachable.
+
+    #7936 P2-2: the belief-write gate was ``"Point"``-only, so a non-Point
+    belief write that PRECEDES its own materialization was not recognized as a
+    forward reference — ``rebuild_all`` refused it (``point-belief-miss``)
+    while the reference exemption called it healthy. #7853 makes the belief
+    target any of the four labels (``epistemic_label_queries``), so the gate
+    must ask the same set.
+
+    ``None`` for the boundary or a non-int ``seq`` means "cannot decide" (the
+    one-record LIVE path), matching :func:`_journal_forward_reference`.
+    """
+    if (not isinstance(existence, dict) or not isinstance(rid, str)
+            or not isinstance(seq, int)):
+        return False
+    future = False
+    for label in EPISTEMIC_LABELS:
+        creates, deletes = existence.get((label, rid), ((), ()))
+        state = _existence_state(creates, deletes, seq)
+        if state == _EXISTENCE_EXISTS:
+            return False
+        if state == _EXISTENCE_FUTURE:
+            future = True
+    return future
+
+
+def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
+    """True when the journal materializes ``rid`` as a REFERENCE-FOLD entity
+    (``:Subject`` / ``:Object`` / ``:Event``) that EXISTS at ``journal_seq``.
+
+    #7936 interim. The #7813 widening makes EP journal a ``ConfidenceChanged``
+    for any of the four epistemic labels, but ``_apply_one``'s index is the
+    point-only ``{id: point}`` dict — it has no representation for a non-Point
+    target. That is a BOUND of this index, NOT a fold-miss: the graph fold
+    (``_fold_confidence_changed``) resolves the id and ``rebuild`` /
+    ``rebuild_all`` / ``recover_from_log`` reproduce the belief. Recording a
+    miss here reds a HEALTHY graph and — because ``non-folded`` is tested first
+    (``consistency.py``) — also masks any genuine content divergence on it, so
+    the exemption is what keeps the diagnostic honest.
+
+    ⛔ EXISTENCE AT THE RECORD, not membership in a first-materialization map.
+    ``existence`` is the ordered boundary (:func:`journal_epistemic_existence`),
+    so the predicate tracks the LAST creation and every hard delete at or
+    before the record. A membership test plus a last-delete-wins map would
+    call ``create → delete → RE-CREATE (same id) → belief`` a miss (the
+    re-creation is invisible to the first-materialization map) and would miss
+    an id deleted both before and after the write (only the later delete is
+    exposed) — two false verdicts, both in opposite directions. The boundary
+    makes the reference verdict equal ``rebuild_all`` on every ordering.
+
+    A creation that arrives ONLY LATER is a forward reference the live write
+    no-op'd; the caller's next arm (:func:`_epistemic_forward_reference`)
+    skips it, so this predicate answers EXISTENCE alone.
+
+    NOTE the index itself is still point-only: the exemption suppresses the
+    false miss, it does not fold the belief into ``fold()`` /
+    ``InMemoryProjection`` (that needs the ``(label, id)`` re-key in #7936).
+    """
+    if (not isinstance(existence, dict) or not isinstance(rid, str)
+            or not isinstance(journal_seq, int)):
+        return False
+    for label in _REFERENCE_FOLD_ENTITY_LABELS:
+        creates, deletes = existence.get((label, rid), ((), ()))
+        if _existence_state(creates, deletes, journal_seq) == _EXISTENCE_EXISTS:
+            return True
+    return False
+
+
 def journal_object_surviving_keys(
         events: list[dict]) -> tuple[frozenset[str], frozenset[str]]:
     """``(ids, names)`` of every Object that EXISTS after the journal replays.
@@ -4239,7 +4416,8 @@ def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_first_materialized: dict[tuple[str, str], int]
                | None = None,
-               journal_seq: int | None = None) -> None:
+               journal_seq: int | None = None,
+               journal_existence: dict | None = None) -> None:
     """Fold ONE normalized journal record into the pure point index.
 
     ``journal_first_materialized`` / ``journal_seq`` are the whole-journal
@@ -4247,9 +4425,16 @@ def _apply_one(points: dict[str, dict], ev: dict,
     Together they let the order-dependent arms DISTINGUISH a genuine fold-miss
     from a record that PRECEDES its target's materialization: a forward
     reference is a no-op on the live system too, so it is neither folded onto a
-    later incarnation nor recorded as non-folded. Both default to ``None`` for
-    a bare ``_apply_one(points, ev)`` (no journal to consult), which preserves
-    the pre-existing behaviour.
+    later incarnation nor recorded as non-folded.
+
+    ``journal_existence`` is the ORDERED creation/hard-delete boundary
+    (:func:`journal_epistemic_existence`). The confidence arm uses it to ask
+    whether a non-Point belief target EXISTS at this record (see
+    :func:`_reference_fold_non_point_target`) — a last-delete-wins membership
+    map cannot express re-creation or a delete on either side of the write.
+
+    All three default to ``None`` for a bare ``_apply_one(points, ev)`` (no
+    journal to consult), which preserves the pre-existing behaviour.
     """
     ev = _norm(ev)
     t = ev.get("type")
@@ -4491,6 +4676,7 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # also uses, so the pure fold and the graph fold cannot disagree on a
         # corrupt line (#330 parity).
         rid = ev.get("id")
+        _has_prop = any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
         p = points.get(rid) if _writable_id(rid) else None
         if p:
             for key in BELIEF_PROPS:
@@ -4511,11 +4697,24 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
-        elif (journal_first_materialized is not None and journal_seq is not None
+        elif (_writable_id(rid) and _has_prop
+                and _reference_fold_non_point_target(
+                    journal_existence, rid, journal_seq)):
+            # #7936 interim: the id IS materialized by the journal — as a
+            # `:Subject`/`:Object`/`:Event`. `points` cannot represent it, so
+            # this point-only fold DROPS the belief (the graph fold does not).
+            # Say so instead of dropping it silently, and do NOT record a miss:
+            # a false `non-folded` reds a healthy graph and, tested first,
+            # masks a genuine content divergence on it (#7936).
+            logger.warning(
+                "reference fold: ConfidenceChanged targets the non-Point "
+                "epistemic node %r; the in-memory {id: point} index cannot "
+                "hold it (the graph fold resolves it) — #7936", rid)
+        elif (journal_existence is not None and journal_seq is not None
                 and _writable_id(rid)
-                and any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
-                and not _journal_forward_reference(
-                    journal_first_materialized, journal_seq, "Point", rid)):
+                and _has_prop
+                and not _epistemic_forward_reference(
+                    journal_existence, rid, journal_seq)):
             # #3585: as in the OperatorAnnotated arm — the refusal is mirrored
             # for an id that is NOT a forward reference. That covers BOTH the
             # never-created id AND the create → hard-delete → belief-write
@@ -4523,12 +4722,30 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # wrongly exempted (the trap). A write whose Point exists but whose
             # every carried value fails the value gate is `rebuild_all`-only
             # (it folds 0 rows there); mirroring THAT would need the value gate
-            # re-run here, and it remains a documented bound.
+            # re-run here, and it remains a documented bound. A non-Point
+            # target is exempted ABOVE (and never reaches here). #7936 P2-2:
+            # the forward-reference gate is LABEL-AGNOSTIC
+            # (``_epistemic_forward_reference``) — a non-Point write that
+            # precedes its own materialization was live no-op'd and
+            # `rebuild_all` skips it, so refusing it here (`"Point"`-only) red
+            # a journal the graph accepts.
             record_non_folded(
                 SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
                 event_type="ConfidenceChanged", id=rid,
                 detail="reference fold: belief write matched no Point",
             )
+        elif (_writable_id(rid) and _has_prop
+                and (journal_existence is None
+                     or journal_seq is None)):
+            # The one-record LIVE path (`InMemoryProjection.apply`, or a bare
+            # `_apply_one`) — no journal to distinguish a non-Point target from
+            # a genuinely buried `:Point`. Surface the drop; do NOT manufacture
+            # a `non-folded` record the batch path would not (that is the #7936
+            # divergence class).
+            logger.warning(
+                "reference fold: ConfidenceChanged for %r did not fold — the "
+                "point-only index holds no Point with that id (a non-Point "
+                "epistemic target is resolved by the graph fold) — #7936", rid)
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -4564,10 +4781,16 @@ def _apply_one(points: dict[str, dict], ev: dict,
 def fold(events: list[dict]) -> dict[str, dict]:
     points: dict[str, dict] = {}
     first_materialized = journal_first_materialization(events)
+    # #7936 review: the ORDERED boundary, hoisted ONCE — the non-Point belief
+    # exemption asks whether the target EXISTS at each record (re-creation and
+    # deletes on either side of the write), and rebuilding it per record is the
+    # O(N²) class this module already fixed.
+    existence = journal_epistemic_existence(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
                    journal_first_materialized=first_materialized,
-                   journal_seq=seq)
+                   journal_seq=seq,
+                   journal_existence=existence)
     return points
 
 
@@ -5772,7 +5995,8 @@ class FalkorProjection(
     @tolerates_altered_numbers
     def apply(self, event: dict, *, journal_object_surviving=None,
               journal_object_deleted=None, journal_first_materialized=None,
-              journal_seq: int | None = None) -> None:
+              journal_seq: int | None = None,
+              journal_existence=None) -> None:
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are
@@ -5794,6 +6018,13 @@ class FalkorProjection(
         # op folds distinguish a forward reference — a target the replay
         # materializes LATER, which the live write no-op'd — from a genuine
         # miss. Both default to None for the one-record LIVE path.
+        #
+        # #7936 review: `journal_existence` is the ORDERED creation/hard-delete
+        # boundary (`journal_epistemic_existence`), threaded for the BELIEF
+        # gate only. The write can target any of the four epistemic labels, so
+        # its forward-reference test must be label-agnostic AND delete-aware
+        # (a target buried before a later re-creation is absent, not present) —
+        # the first-materialization map alone cannot express that.
         #
         # #3947 review: read the capture's structural directive from the RAW
         # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
@@ -6104,9 +6335,8 @@ class FalkorProjection(
                 _cc_has_prop = any(
                     k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
                 if (_writable_id(_cc_rid) and _cc_has_prop
-                        and not _journal_forward_reference(
-                            journal_first_materialized, journal_seq,
-                            "Point", _cc_rid)):
+                        and not _epistemic_forward_reference(
+                            journal_existence, _cc_rid, journal_seq)):
                     record_non_folded(
                         SHAPE_POINT_BELIEF_MISS,
                         event_id=ev.get("event_id"),
@@ -6390,6 +6620,11 @@ class FalkorProjection(
         # refused on this chronological path while a create→hard-delete→fold
         # journal (first <= seq) still is.
         first_materialized = journal_first_materialization(events)
+        # #7936 review: the ORDERED creation/hard-delete boundary for the
+        # belief gate — the sibling of `first_materialized`, hoisted once so
+        # the label-agnostic, delete-aware forward-reference test does not
+        # rebuild it per record.
+        epistemic_existence = journal_epistemic_existence(events)
         # #3305: compute the shared terminalizer SELECTION once for the whole
         # journal. This engine replays one record at a time, so it cannot use
         # ``apply()``'s inline branch for these two types — that branch folds
@@ -6422,6 +6657,7 @@ class FalkorProjection(
             self.apply(ev, journal_object_surviving=journal_object_surviving,
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
+                       journal_existence=epistemic_existence,
                        journal_seq=seq)
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
@@ -7568,6 +7804,14 @@ class FalkorProjection(
         # nothing) for a forward reference, while a target that was created and
         # then HARD-DELETED (first <= seq) still attempts the fold and refuses.
         first_materialized = journal_first_materialization(events)
+        # #7936 review: the ORDERED creation/hard-delete boundary for the
+        # BELIEF gate. Pass 1a hoists every Point/Operator creation, so a
+        # non-Point target created LATER is absent at the record while pass-1b
+        # folds the record — the boundary is what tells a forward reference
+        # (skip) from a burial (refuse) and never skips a target that DOES
+        # exist at the record because an unrelated label sharing the id lands
+        # later.
+        epistemic_existence = journal_epistemic_existence(events)
         # The hard-delete map is needed TWICE below (the supersede/invalidate
         # sweep's edge staleness rule and the EntityLinked tail) — compute it
         # once, here.
@@ -7961,10 +8205,15 @@ class FalkorProjection(
                 _cc_rid = ev.get("id")
                 # #3585 (P1-1): a belief write the journal materializes only
                 # LATER is a forward reference — the live write no-op'd it, so
-                # skip the fold and the record.
+                # skip the fold and the record. #7936 P2-2: the gate is
+                # LABEL-AGNOSTIC (``_epistemic_forward_reference``) because the
+                # write can target any of the four epistemic labels; a
+                # ``"Point"``-only gate refused a non-Point write that
+                # PRECEDES its ``ObjectRegistered``/``SubjectAdded``/
+                # ``EventRecorded`` while the reference fold called it healthy.
                 if (isinstance(_cc_rid, str)
-                        and _journal_forward_reference(
-                            first_materialized, seq, "Point", _cc_rid)):
+                        and _epistemic_forward_reference(
+                            epistemic_existence, _cc_rid, seq)):
                     continue
                 _cc_anchor = (
                     last_ann_drop_seq.get(("Point", _cc_rid))

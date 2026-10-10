@@ -824,7 +824,7 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 **Owner, 2026-09-23:** *"we need to have the right granularity for Points to be logical. If we have many arguments mixed together, it's not possible to NAND/IMPL nor modulate relevance."*
 
-**Operators connect only epistemic targets** (`Point↔Point`, `Event↔Point`) — you cannot `NAND` a paragraph. EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
+**Operators connect only epistemic targets** (any of `:Point`/`:Subject`/`:Object`/`:Event`; see `ONTOLOGY.md` §8 `OVERRIDES`) — you cannot `NAND` a paragraph. EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
 
 **⇒ Volume reduction must come from *not writing* claims — never from *fusing* them.** v3's move to atomic Points (`E3`) is a **requirement of the epistemic layer**.
 

@@ -454,6 +454,7 @@ def restore(backup_dir: str, db_path: str,
                 FalkorProjection,
                 _object_hard_deleted_ids,
                 hard_deleted_pairs,
+                journal_epistemic_existence,
                 journal_first_materialization,
                 journal_hard_delete_seqs,
                 journal_object_surviving_keys,
@@ -530,6 +531,9 @@ def restore(backup_dir: str, db_path: str,
                 # retract/state-op that precedes its own creation (folded by
                 # `rebuild_all`'s hoist) is not refused on this chronological path.
                 first_materialized = journal_first_materialization(records)
+                # #7936 review: the ORDERED creation/hard-delete boundary for
+                # the belief gate — label-agnostic and delete-aware.
+                epistemic_existence = journal_epistemic_existence(records)
                 apply_kwargs: dict = {}
                 _pass_seq = False
                 try:
@@ -542,6 +546,8 @@ def restore(backup_dir: str, db_path: str,
                 if "journal_first_materialized" in _apply_params:
                     apply_kwargs["journal_first_materialized"] = first_materialized
                     _pass_seq = "journal_seq" in _apply_params
+                if "journal_existence" in _apply_params:
+                    apply_kwargs["journal_existence"] = epistemic_existence
                 # The refusal is a RUN BOUNDARY, exactly as on the other three
                 # engines: without the collector `record_non_folded` is a no-op
                 # and the context would change nothing. `assert_no_non_folded`

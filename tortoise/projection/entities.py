@@ -20,7 +20,10 @@ from datetime import datetime, timezone
 # projection at module top, so the sdk-private `_content_hash` is NOT
 # importable here.
 from tortoise.ids import content_hash as _content_hash
-from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.live import (
+    decay_clause,  # #2490: rebuild folds decay terminal posteriors
+    epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
+)
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
 # ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
@@ -2470,10 +2473,24 @@ class _EntityHandlers:
         with null writes null (removes the property), mirroring the live SET.
 
         Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
-        signal): 1 = the target Point was found and folded, 0 = no Point
-        matched (hard-deleted / never re-created) or the record carries no
-        foldable value. Idempotent — a replayed/duplicate event re-applies the
-        same SET.
+        signal): 1 = the target epistemic node (:Point, :Subject, :Object or
+        :Event — #7853) was found and folded, 0 = no such node matched
+        (hard-deleted / never re-created) or the record carries no foldable
+        value. Idempotent — a replayed/duplicate event re-applies the same
+        SET.
+
+        #7853: the target is NOT always a Point. The EP write-back journals a
+        ``ConfidenceChanged`` for every node it writes, and the widening makes
+        that any of the four epistemic labels — so a ``:Point``-only MATCH left
+        a non-Point belief write permanently unreplayable (``rebuild`` /
+        ``recover_from_log`` refused the journal with ``point-belief-miss``).
+        The id is index-anchored by keeping ONE label per query and sweeping
+        the four labels (``epistemic_label_queries``) — the same shape
+        ``tortoise/ep.py`` uses for its id-anchored reads, and the rule stated
+        at ``tortoise/live.py``: a label predicate over a bare ``MATCH (n)``
+        has no per-(label, property) index anchor, so it full-scans EVERY
+        ``ConfidenceChanged`` fold (and regresses the common ``:Point`` case
+        that ``origin/main`` served from the ``Point(id)`` index).
         """
         oid = ev.get("id")
         # #2884 review P1: the SAME id gate the sibling folds use. A bare
@@ -2515,12 +2532,18 @@ class _EntityHandlers:
             params[key] = value
         if not set_parts:
             return 0
-        result = self.g.query(
-            "MATCH (n:Point {id:$id}) SET " + ", ".join(set_parts) +
-            " RETURN n.id LIMIT 1",
-            params=params,
-        )
-        return len(result.result_set)
+        # The SET is idempotent, so a multi-labelled id matching twice is
+        # harmless; stop at the first non-empty result to keep the hot
+        # ``:Point`` lookup first.
+        matched = 0
+        for _q in epistemic_label_queries(
+                "MATCH (n:{label} {id:$id}) SET " + ", ".join(set_parts) +
+                " RETURN n.id LIMIT 1"):
+            r = self.g.query(_q, params=params)
+            if r.result_set:
+                matched = len(r.result_set)
+                break
+        return matched
 
     # ── Entity nodes ───────────────────────────────────────────────
 
