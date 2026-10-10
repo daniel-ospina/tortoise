@@ -1236,6 +1236,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **Why folding the owner's middle tier in is correct:** the owner's tiers 2 and 3 (*"TLDR epistemic/events related to an entity"* vs *"fuller data around an entity"*) are **the same tier at two depths**, and depth is exactly what a **sufficiency router** already controls — see §12.4. **A third tier adds a routing decision and a failure mode, not a capability.**
 
+**⚠️ And this table assumes each tier is COMPLETE — under §2.0's hybrid the cache is not.** The sufficiency router below routes on **answer depth inside a tier that holds the node at all**; a node the cache does not hold is a **different event with a different repair** (§17.3), and the two routers must not be merged.
+
 ### 12.4 Escalate on SUFFICIENCY, not on query type — the load-bearing rule
 
 **The obvious design is to classify the query ("simple → summary, complex → raw") and route on that. It is the design that fails.**
@@ -1293,6 +1295,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 3. **Build the sufficiency router, not a complexity classifier** (§12.4) — and check it against `#2354`'s "never auto-resolve" discipline.
 4. **Build the write-back** (§12.5) — otherwise escalation is a permanent tax rather than an investment.
 
+**⚠️ Two more items §17 adds, and they are NOT part of items 3 and 4.** §17.3's **residency router** (*a cache miss → fetch from the truth store*) is a **second, distinct router** from item 3's **sufficiency router** (*short evidence → escalate a tier*), and it is decidable **only** against §17.2's **completeness marker**. **Do not extend item 3's router to cover residency** — the two route on different facts, and collapsing them is the §17.3 defect. See `#7952` (the marker) → `#7953` (the router).
+
 **⚠️ And the discipline that keeps this honest: our own numbers for the cost TIERS still do not exist.** Every tier figure above is **published third-party** and must be re-measured on our data before any lever is committed. ✅ **What IS now measured is our own retrieval latency (§12.1d) and our own memory composition (§12.1) — those are no longer borrowed.** *(⚠️ The former "our 95.6 MB measurement", cited here, has been **withdrawn as wrong** — §12.1.)*
 
 ## 13. Issue map — what this document informs
@@ -1321,7 +1325,10 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
 | §9.6 source versioning | — | **the version must be recorded on the extraction link as `sourceVersion`**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 | §12.1a index shape | `#5090` · `#5331` | **the decision is the size-earned conditional index (C)** — not per-tenant partitioning, not a shared filtered index. The partition comparison is a measured *alternative*: `PARTITION BY` flat to T=500 (96.6 ms at T=2,100, unexplained), the partial-index form degrading to 83 ms at T=500 |
-| §17 the five gaps | **`#5089`** (17.1) · `#5090` (17.5) | what the record/cache split still needs: a write-path chokepoint, cache coherence + a completeness marker, partial-cache semantics, a two-store cost model, and a field-level placement table. **None is a new decision** — each follows from §2.0 |
+| §17.2 the completeness marker | **`#7952`** | a read for a node outside the known-hot set returns explicit **`not-hot`** — **never empty** — and coherence is reconciled as a **number**, not a boolean. This is the input §17.3's router reads |
+| §17.3 the residency router | **`#7953`** | a residency miss is not an insufficiency: **fetch from the truth store**, never escalate a tier, never surface an absence. Decidable only against §17.2's marker (**hard edge**) |
+| §17.4 the two-store cost model | **`#7954`** | price **both** stores (Postgres compute + disk **and** FalkorDB RAM) plus the blended total §5–§6 omit |
+| §17 the five gaps | **`#7951`** (17.1 routing half) · **`#7952`** (17.2) · **`#7953`** (17.3) · **`#7954`** (17.4) · **`#7955`** (17.5) | what the record/cache split still needs: a write-path chokepoint, cache coherence + a completeness marker, partial-cache semantics, a two-store cost model, and a field-level placement table. **None is a new decision** — each follows from §2.0. ⚠️ **Issues corrected 2026-10-10 against the epic decomposition (`#7879`):** the former *"`#5089` (17.1) · `#5090` (17.5)"* conflated two halves — §17.1's **journal half stays `#5089`** while its **routing half is `#7951`**, and §17.5's **placement enumeration is `#7955`** while `#5090` is a *consumer* of the vector-layer interest. **No issue lost work.** |
 
 **Not yet filed from this document (candidates, not decisions):**
 
@@ -1499,9 +1506,41 @@ For the record, since two members of the design rest on it:
 
 ### 17.3 Partial-cache semantics — a residency miss is not an insufficiency
 
-**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router.
+**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router. **⚠️ The rule and the router's contract below were stated 2026-10-10 (`#7953`); the gap itself was identified 2026-10-08 (`#7869`).**
 
 **The two events are different and need different responses:** *"the evidence I hold does not answer this"* (escalate a tier) versus *"this node is not in the cache"* (fetch from the truth store). **Collapsing them either escalates unnecessarily or — worse — treats a cache miss as a negative finding.**
+
+#### ⭐ THE RULE — a residency miss never surfaces as an absence
+
+> **A node the cache cannot see is a MISS ON RESIDENCY, not a finding of absence. It is never reported as *"no such node"*, never as `empty`, and never as an insufficiency that escalates a tier.**
+
+1. **Never an absence.** The cache is partial **by design** (§2.0). A node outside the known-hot set is *unknown to this store*, not missing from the record — and an absence is the one wrong answer that is **indistinguishable from a right one** (§17.2, seen from the read side).
+2. **Never an escalation.** A residency miss is repaired by **fetching from the truth store** (Postgres). Walking to a colder graph tier is the **sufficiency** router's repair, for a different fact (§12.4).
+3. **Never a silent drop.** If the truth fetch cannot be made, the read is **impaired** and must say so — the read path already classifies a leg that did not run as the recorded status vocabulary's `degraded` (`tortoise/read_status.py`), and an impaired read must never be re-read as *"nothing matched"*.
+
+#### The two routers are TWO artifacts — do not merge them
+
+| | **sufficiency router** (§12.4 · §12.8 item 3) | **residency router** (this section) |
+|---|---|---|
+| the fact it reads | *does the evidence I already hold answer this?* | *is this node in the known-hot set at all?* |
+| its input | the assembled evidence, already in hand | **the completeness marker** (§17.2) |
+| its repair | **escalate a tier** — go deeper | **fetch from the truth store** — go to the record |
+| it fires when | the node IS resident and the evidence is short | the node is NOT resident |
+| a wrong answer looks like | an unnecessary escalation — expensive, still correct | **a cache miss reported as a negative finding — wrong, and invisible** |
+
+**Both route on a measured property of the RESULT, never a predicted property of the question** — that is §12.4's discipline, and it holds for both. A residency router that classifies the *query* instead re-introduces the write-before-query barrier §12.4 rejects.
+
+#### ⛔ THE HARD EDGE: marker → router
+
+**Without §17.2's marker the router cannot exist.** `not-hot` is the *only* signal that separates the two events; an empty result set carries no signal at all — which is exactly why an empty result is *"indistinguishable from no such node"*. **The marker is the router's INPUT, not its sibling:** a router built first would have to invent the marker's contract. That is the §17.3 ordering edge — `#7952` → `#7953`.
+
+#### The marker is NOT a fifth status term
+
+⚠️ **`not-hot` must not be minted as a fifth term of the read-status vocabulary.** That vocabulary is **RECORDED** — `available | empty | degraded | unconfigured`, **ONE** home, `tortoise/status_vocabulary.py` (`:82`), consumed by the read path (`tortoise/read_status.py`) and the client boundary, and its own text forbids a fifth term (`:27`). A residency verdict is a **directive about where to look**, not a status of the read — so it must not be *named* as a term. **How it is exposed is `#7952`'s call** (its own field, the `response_fields` pattern the status field itself uses, #3863, is the available precedent); what this section fixes is the **constraint**: the four terms keep naming what they name, and `not-hot` is not one of them.
+
+**The consequence, stated against the code that could break it:** under the hybrid, **`hits == 0` alone no longer establishes `empty`**. A zero-hit read is `empty` only when **the record was consulted** and held nothing; a node that was never hot must **not** be reported as `empty` (it is `degraded` when the truth fetch could not be made). That assumption is exactly what `tortoise/read_status.py::classify_read_status` encodes today — which is why the marker needs a field, not a term.
+
+**Owner and verification.** `#7953` — interface **D**, part 2; test-design `#7967` surfaces **S4** (e2e: a non-resident read returns `not-hot`, never empty) and **S5** (unit + integration: a miss is never a negative finding, and no unnecessary tier escalation). **Depends on `#7952`** (the marker); **blocks `#7970`** (serving reads from the record). **Deferred, not absent:** with a **complete** cache the marker cannot fire and this router is unreachable — which is why §2.0 holds the limit high, and why this work is *design now, build at the partiality trigger*.
 
 ### 17.4 A two-store cost model — the existing tables price ONE store
 
