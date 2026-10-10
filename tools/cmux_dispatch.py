@@ -1397,8 +1397,19 @@ class Cmux:
         # `both` emits ref AND id so either form resolves.
         return self.run(["list-workspaces", "--json", "--id-format", "both"])
 
-    def pane_session_id(self, workspace: str) -> str | object | None:
-        """The pane's resume-bound session id, `None`, or `PROBE_UNAVAILABLE`.
+    def pane_session_id(
+        self, workspace: str, surface: str | None = None
+    ) -> str | object | None:
+        """The PANE's resume-bound session id, `None`, or `PROBE_UNAVAILABLE`.
+
+        ⚠ SURFACE-SCOPED, and that is load-bearing. `cmux surface resume show`
+        with no `--surface` answers for the workspace's SELECTED surface, but a
+        workspace can hold several surfaces with DIFFERENT sessions (measured
+        2026-10-10: `workspace:14` bound `surface:15` and `surface:16` to two
+        distinct checkpoint ids). Probing without the target surface would let a
+        sibling surface's live pi certify a blind write into the target one —
+        #7158's harm one granularity narrower than the cwd scoping already fixed
+        (#7913 review, P1).
 
         `resume_binding` is the AUTHORITATIVE field — NOT
         `restore_record.checkpoint_id`. Measured 2026-10-08: a workspace printed
@@ -1417,7 +1428,15 @@ class Cmux:
           #7913 fallback for the whole dispatch while reporting the wrong cause.
         """
         result = self.run(
-            ["surface", "resume", "show", "--workspace", workspace, "--json"],
+            [
+                "surface",
+                "resume",
+                "show",
+                "--workspace",
+                workspace,
+                *(["--surface", surface] if surface else []),
+                "--json",
+            ],
             timeout=min(self.timeout, 15.0),
         )
         if result.rc != 0:
@@ -1568,7 +1587,7 @@ class Dispatcher:
         #: EVERY poll: without this, an unreadable pane cost one
         #: `cmux surface resume show` subprocess per poll — measured 91 spawns for
         #: a single dispatch at the 180s/2s defaults (#7913 review, load).
-        self._session_ids: dict[str, str | None] = {}
+        self._session_ids: dict[tuple[str, str | None], str | None] = {}
         self.session_fresh_s = session_fresh_s
         #: Wall clock (NOT the monotonic deadline clock): freshness is a property
         #: of a file's mtime, which is wall-clock. Injected so tests are
@@ -1581,36 +1600,51 @@ class Dispatcher:
 
     # -- non-pane liveness (#7913) ------------------------------------------- #
 
-    def pane_binding(self, workspace: str) -> tuple[bool, str | None]:
+    def pane_binding(
+        self, workspace: str, surface: str | None = None
+    ) -> tuple[bool, str | None]:
         """`(probe_answered, session_id)` for a pane — see `self._session_ids`.
 
+        Keyed by `(workspace, surface)`: the two together name a PANE. Keying on
+        the workspace alone would answer for whichever surface cmux has selected,
+        certifying a send into a different one (#7913 review, P1).
+
         `probe_answered=False` means the binding could not be determined (cmux
-        unreachable, timed out, or an unparseable reply); it is NOT memoized, so
-        the next poll re-asks. `None` with `probe_answered=True` is a definitive
-        "this pane has no binding" and IS memoized — one dispatch must not spawn
-        a `cmux surface resume show` per poll (measured 91 at the 180 s/2 s
-        defaults), and a definitive absence cannot change mid-dispatch.
+        unreachable, timed out, no such method, or an unparseable reply); it is
+        NOT memoized, so the next poll re-asks. `None` with
+        `probe_answered=True` is a definitive "this pane has no binding" and IS
+        memoized — one dispatch must not spawn a `cmux surface resume show` per
+        poll (measured 91 at the 180 s/2 s defaults).
         """
-        if workspace in self._session_ids:
-            return True, self._session_ids[workspace]
+        key = (workspace, surface)
+        if key in self._session_ids:
+            return True, self._session_ids[key]
         getter = getattr(self.cmux, "pane_session_id", None)
-        raw: object = None
+        # A cmux with no such method has NOT answered, and must not be memoized as
+        # a definitive absence — that would let a duck-typed cmux poison the whole
+        # dispatch with the wrong cause.
+        raw: object = PROBE_UNAVAILABLE
         if getter is not None:
             try:
-                raw = getter(workspace)
+                raw = getter(workspace, surface)
+            except TypeError:
+                # A seam predating surface-scoping: ask it the old way rather than
+                # silently degrading to "no binding".
+                try:
+                    raw = getter(workspace)
+                except Exception:  # broad by design: a probe is best-effort
+                    raw = PROBE_UNAVAILABLE
             except Exception:  # broad by design: a probe is best-effort
                 raw = PROBE_UNAVAILABLE
         if raw is PROBE_UNAVAILABLE:
             return False, None
         session_id = raw if isinstance(raw, str) and raw else None
-        self._session_ids[workspace] = session_id
+        self._session_ids[key] = session_id
         return True, session_id
 
-    def pane_session_id(self, workspace: str) -> str | None:
-        """The pane's session id, or None when it is absent OR not determinable."""
-        return self.pane_binding(workspace)[1]
-
-    def session_liveness(self, workspace: str, entry: dict | None) -> tuple[bool, str]:
+    def session_liveness(
+        self, workspace: str, entry: dict | None, surface: str | None = None
+    ) -> tuple[bool, str]:
         """Is a live pi advancing THIS pane's session transcript?
 
         Returns `(fresh, detail)`; `detail` is always a human sentence suitable
@@ -1634,7 +1668,7 @@ class Dispatcher:
         """
         session_id: str | None = None
         try:
-            answered, session_id = self.pane_binding(workspace)
+            answered, session_id = self.pane_binding(workspace, surface)
             if not answered:
                 return False, (
                     "the binding probe could not be asked (cmux unreachable, timed "
@@ -1706,6 +1740,7 @@ class Dispatcher:
         entry: dict | None,
         screen: str | None,
         gate_evidence: str,
+        surface: str | None = None,
     ) -> tuple[bool, str, str]:
         """May the bytes be written, given the pre-send read? (#7913)
 
@@ -1721,7 +1756,7 @@ class Dispatcher:
         if screen_ready(screen):
             return True, "screen", ""
         if not (screen or "").strip():
-            fresh, detail = self.session_liveness(workspace, entry)
+            fresh, detail = self.session_liveness(workspace, entry, surface)
             if gate_evidence == "session-mtime" and fresh:
                 return True, f"session-mtime ({detail})", ""
             return False, "", f"{unreadable_reason(screen)}, and {detail}"
@@ -1947,7 +1982,7 @@ class Dispatcher:
                 # signal: a transcript advancing within the freshness window is
                 # EVIDENCE of a live pi (#7913) — evidence, not proof, since a pi
                 # that exited seconds ago leaves a fresh mtime behind.
-                fresh, detail = self.session_liveness(workspace, entry)
+                fresh, detail = self.session_liveness(workspace, entry, surface)
                 refusal = detail
                 if fresh:
                     self.log(
@@ -2127,7 +2162,7 @@ class Dispatcher:
             (before_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
         )
         allowed, evidence_note, refusal = self._send_allowed(
-            workspace, before, gate_window, gate_evidence
+            workspace, before, gate_window, gate_evidence, surface
         )
         if not allowed:
             # `condition_for`, not a hand-rolled if/else: a window that is READABLE
@@ -2402,7 +2437,7 @@ class Dispatcher:
                     # UNREADABLE re-read with a fresh transcript is accepted only
                     # when the gate itself admitted the pane on that signal.
                     allowed, _note, refusal = self._send_allowed(
-                        workspace, before, fresh_window, gate_evidence
+                        workspace, before, fresh_window, gate_evidence, surface
                     )
                     if not allowed:
                         result.ok = False

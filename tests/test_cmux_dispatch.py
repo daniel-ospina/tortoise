@@ -1038,6 +1038,24 @@ class TestPaneSessionIdTransport(unittest.TestCase):
         self.assertEqual(argv[:3], ["surface", "resume", "show"])
         self.assertIn("--workspace", argv)
 
+    def test_the_probe_names_the_TARGET_surface(self):
+        # A workspace can hold several surfaces bound to DIFFERENT sessions, and
+        # `surface resume show` with no `--surface` answers for the SELECTED one —
+        # so omitting the flag lets a sibling surface's live pi certify a blind
+        # write into the target pane (#7913 review, P1). This is the only place
+        # the argv is observable: the dispatcher-level fake receives the surface
+        # as an argument whether or not the real implementation forwards it.
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        self.assertEqual(cmux.pane_session_id("workspace:79", "surface:16"), "aaaa-bbbb")
+        argv = cmux.argv[-1]
+        self.assertIn("--surface", argv)
+        self.assertEqual(argv[argv.index("--surface") + 1], "surface:16")
+
+    def test_the_probe_omits_the_flag_when_no_surface_is_named(self):
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        cmux.pane_session_id("workspace:79")
+        self.assertNotIn("--surface", cmux.argv[-1])
+
     def test_a_stale_restore_record_is_never_used(self):
         # Measured 2026-10-08: a workspace printed "No resume binding" from the
         # text form while `restore_record` still carried an old id. Reading that
@@ -1120,6 +1138,8 @@ class FakeCmux:
         pre_typed: str = "",
         cwd: str = "",
         session_id: str = SESSION_7913,
+        bindings_by_surface: dict | None = None,
+        selected_surface: str = "surface:15",
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -1176,6 +1196,12 @@ class FakeCmux:
         #: The id `cmux surface resume show` reports as the pane's
         #: `resume_binding.checkpoint_id`; `""` models an unbindable pane.
         self.session_id = session_id
+        #: Optional `{surface: session_id}` — models a workspace whose surfaces
+        #: are bound to DIFFERENT sessions, which is how a workspace-scoped probe
+        #: certified a send into the wrong pane (#7913 review, P1).
+        self.bindings_by_surface = bindings_by_surface or {}
+        #: The surface cmux reports for this workspace when the caller names none.
+        self.selected_surface = selected_surface
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
@@ -1197,7 +1223,12 @@ class FakeCmux:
 
     # -- cmux surface ------------------------------------------------------- #
 
-    def pane_session_id(self, workspace: str) -> str | None:
+    def pane_session_id(self, workspace: str, surface: str | None = None):
+        # SURFACE-SCOPED, like the real cmux: with no `--surface` cmux answers for
+        # the workspace's SELECTED surface, and a workspace can hold several
+        # surfaces bound to DIFFERENT sessions (#7913 review, P1).
+        if self.bindings_by_surface:
+            return self.bindings_by_surface.get(surface or self.selected_surface)
         return self.session_id or None
 
     def list_workspaces_json(self) -> cd.CmuxResult:
@@ -3170,9 +3201,9 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
                 super().__init__(**kwargs)
                 self.binding_calls = 0
 
-            def pane_session_id(self, workspace):
+            def pane_session_id(self, workspace, surface=None):
                 self.binding_calls += 1
-                return super().pane_session_id(workspace)
+                return super().pane_session_id(workspace, surface)
 
         fake = CountingCmux(screen_unreadable=True, cwd=cwd)
         dispatcher = cd.Dispatcher(
@@ -3203,11 +3234,11 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
                 super().__init__(**kwargs)
                 self.probe_calls = 0
 
-            def pane_session_id(self, workspace):
+            def pane_session_id(self, workspace, surface=None):
                 self.probe_calls += 1
                 if self.probe_calls == 1:
                     return cd.PROBE_UNAVAILABLE
-                return super().pane_session_id(workspace)
+                return super().pane_session_id(workspace, surface)
 
         fake = FlakyProbeCmux(screen_unreadable=True, cwd=cwd)
         result, logs = self._send(fake, ready_timeout=10.0)
@@ -3215,6 +3246,23 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
         self.assertEqual(result.status, "consumed")
         self.assertGreaterEqual(fake.probe_calls, 2, "a failed probe must be re-asked")
         self.assertIn("session-mtime", "\n".join(logs))
+
+    def test_the_memo_is_keyed_per_SURFACE_not_per_workspace(self):
+        # Keyed on the workspace alone, the FIRST surface's answer would be served
+        # for the SECOND — the #7913 P1 in cache form. (A fresh Dispatcher per
+        # operation hides this today, which is exactly why it needs a test.)
+        a = "33333333-3333-4333-8333-333333333333"
+        b = "44444444-4444-4444-8444-444444444444"
+        fake = FakeCmux(
+            bindings_by_surface={"surface:1": a, "surface:2": b},
+        )
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:1"), (True, a)
+        )
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:2"), (True, b)
+        )
 
     def test_a_definitive_absence_is_resolved_once_per_dispatch(self):
         # `None` IS an answer, so it is memoized: resolution stays at one cmux
@@ -3227,9 +3275,9 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
                 super().__init__(**kwargs)
                 self.binding_calls = 0
 
-            def pane_session_id(self, workspace):
+            def pane_session_id(self, workspace, surface=None):
                 self.binding_calls += 1
-                return super().pane_session_id(workspace)
+                return super().pane_session_id(workspace, surface)
 
         fake = CountingCmux(screen_unreadable=True, cwd=cwd, session_id="")
         dispatcher = cd.Dispatcher(
@@ -3285,6 +3333,57 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
             "the condition must agree with the classification it came from",
         )
         self.assertEqual(result.condition, "boot-blocked")
+
+    def test_a_sibling_SURFACE_cannot_certify_this_pane(self):
+        # #7913 review P1: `cmux surface resume show` with no `--surface` answers
+        # for the workspace's SELECTED surface, but one workspace can hold several
+        # surfaces bound to DIFFERENT sessions (measured 2026-10-10: `workspace:14`
+        # bound `surface:15` and `surface:16` to two distinct checkpoint ids).
+        # Probing the workspace would let surface:15's live pi certify a blind
+        # write into surface:16 — #7158's harm one granularity narrower than the
+        # cwd scoping already fixed.
+        cwd = "/private/tmp"
+        live = "22222222-2222-4222-8222-222222222222"
+        self._session(cwd, age_s=5.0, sid=live)
+        fake = FakeCmux(
+            screen_unreadable=True,
+            cwd=cwd,
+            bindings_by_surface={"surface:15": live, "surface:16": None},
+        )
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        result = dispatcher.send_message(
+            "workspace:14", PROBE, surface="surface:16", label="B4", ready_timeout=0.0
+        )
+        self.assertFalse(
+            result.ok, "a sibling surface's live pi is not evidence about this pane"
+        )
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_the_refusal_names_a_MALFORMED_binding(self):
+        # A binding that is not an id shape is refused AND said to be malformed:
+        # reporting it as "no transcript for this pane" sends the operator after
+        # the session store instead of after the binding (#7913 review).
+        fake = FakeCmux(screen_unreadable=True, session_id="not an id")
+        dispatcher = cd.Dispatcher(fake, sleep=self._clock.sleep, now=self._clock.now)
+        fresh, detail = dispatcher.session_liveness(
+            "workspace:99", {"current_directory": "/private/tmp"}
+        )
+        self.assertFalse(fresh)
+        self.assertIn("not a session id", detail)
+
+    def test_the_refusal_distinguishes_an_UNASKABLE_probe(self):
+        # "The probe could not be asked" must not read as "this pane has no
+        # binding": the remedies are opposite (fix cmux vs re-bind the lane).
+        class UnaskableCmux(FakeCmux):
+            def pane_session_id(self, workspace, surface=None):
+                return cd.PROBE_UNAVAILABLE
+
+        dispatcher = cd.Dispatcher(
+            UnaskableCmux(screen_unreadable=True), sleep=self._clock.sleep
+        )
+        fresh, detail = dispatcher.session_liveness("workspace:99", None)
+        self.assertFalse(fresh)
+        self.assertIn("could not be asked", detail)
 
     def test_empty_read_with_a_STALE_session_is_still_refused(self):
         cwd = "/private/tmp"
