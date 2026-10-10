@@ -10834,6 +10834,18 @@ class TortoiseSDK:
         interpolated into the query STRUCTURE (``-[:TYPE]->``) where
         parameterization is impossible; an unvalidated value is a Cypher
         injection primitive. direction is validated to outgoing/incoming.
+
+        #6101: each result carries the matched edge's ``idx`` property.
+        ``create_operator`` writes one IMPL/NAND/hasPart edge per input with
+        ``idx`` 0 on the SOURCE and ``idx >= 1`` on each TARGET (mirrored by
+        ``(input)-[:INPUT {idx}]->(operator)``). Dropping that property made a
+        returned endpoint pair unordered, so an operator read identically to
+        its own reverse. ``idx`` is the position of the OPERATOR-INPUT end of
+        the edge: with ``direction="outgoing"`` that is the RETURNED node
+        (traverse from an operator names each input's role); with
+        ``direction="incoming"`` it is the QUERIED ``id`` (the returned node
+        is the operator, which holds no position). Non-operator edges carry no
+        ``idx``, so it is ``None`` there.
         """
         proj = self._get_proj()
         # #329: validate before building any Cypher
@@ -10841,15 +10853,16 @@ class TortoiseSDK:
         validate_rel_type(relationship_type)
         if direction not in ("outgoing", "incoming"):
             raise ValueError(f"Invalid direction: {direction!r}. Use 'outgoing' or 'incoming'.")
-        pat = (f"(n:Point {{id:$id}})-[:{relationship_type}]->(m:Point)"
+        pat = (f"(n:Point {{id:$id}})-[r:{relationship_type}]->(m:Point)"
                if direction == "outgoing" else
-               f"(n:Point {{id:$id}})<-[:{relationship_type}]-(m:Point)")
+               f"(n:Point {{id:$id}})<-[r:{relationship_type}]-(m:Point)")
         rows = proj.g.query(
-            f"MATCH {pat} RETURN m.id, m.content, m.pointKind",
+            f"MATCH {pat} RETURN m.id, m.content, m.pointKind, r.idx",
             params={"id": id},
         ).result_set
         return [
-            {"id": r[0], "content": r[1], "pointKind": r[2]}
+            {"id": r[0], "content": r[1], "pointKind": r[2],
+             "idx": r[3] if len(r) > 3 else None}
             for r in rows
         ]
 

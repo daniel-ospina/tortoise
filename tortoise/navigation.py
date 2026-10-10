@@ -70,9 +70,9 @@ def _hop_query(label: str) -> str | None:
         return None
     return (
         f"MATCH (n:{label} {{id:$eid}})-[r]->(m) "
-        f"WHERE NOT m.id IN $visited RETURN m, type(r) UNION "
+        f"WHERE NOT m.id IN $visited RETURN m, type(r), r.idx UNION "
         f"MATCH (n:{label} {{id:$eid}})<-[r]-(m) "
-        f"WHERE NOT m.id IN $visited RETURN m, type(r)"
+        f"WHERE NOT m.id IN $visited RETURN m, type(r), r.idx"
     )
 
 
@@ -88,6 +88,8 @@ def entityProfile(
 
     Returns {entity: {...}, connected: {points, documents, events, subjects, objects}}.
     Categorizes connected nodes by label, optionally filtering by pointKind and confidenceMin.
+    Each connected node carries ``_relationship`` (edge type) and ``_idx`` (#6101 —
+    the traversed edge's idx: 0 = the operator's SOURCE, >= 1 = a TARGET).
     """
     g = db.select_graph(graph_name)
 
@@ -113,10 +115,14 @@ def entityProfile(
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
+                # #6101: same edge metadata as tortoise_traverse — idx 0 = the
+                # operator's SOURCE, >= 1 = a TARGET, None on non-operator edges.
+                edge_idx = row[2] if len(row) > 2 else None
                 nid = node.get("id")
                 nlabel = node.get("type")
                 if nid and nid not in visited:
                     node["_relationship"] = rel_type
+                    node["_idx"] = edge_idx
                     connected.append(node)
                     visited.add(nid)
                     next_frontier.append((nid, nlabel))
@@ -169,8 +175,13 @@ def tortoise_traverse(
 ) -> dict:
     """Multi-hop graph traversal from an entity following ALL relationship types.
 
-    Returns {entity: {...}, nodes: [{"node": {...}, "relationship": "...", "depth": N}, ...]}.
-    Each connected node includes the relationship type and BFS depth.
+    Returns {entity: {...}, nodes: [{"node": {...}, "relationship": "...",
+    "idx": N, "depth": N}, ...]}. Each connected node includes the relationship
+    type, BFS depth, and the traversed edge's ``idx`` (#6101) — the position of
+    the OPERATOR-INPUT end of the edge (0 = the operator's SOURCE, >= 1 = a
+    TARGET). Without ``idx`` an operator's two endpoints are an unordered pair,
+    so a cycle reads as its reverse. Non-operator edges carry no ``idx``
+    (``None``).
     """
     g = db.select_graph(graph_name)
 
@@ -193,12 +204,17 @@ def tortoise_traverse(
             for row in rows:
                 node = _parse_node(row[0])
                 rel_type = row[1] if len(row) > 1 else None
+                # #6101: the hop's edge idx rides along (0 = operator SOURCE,
+                # >= 1 = TARGET). Absent on non-operator edges and on legacy
+                # edges written before idx existed.
+                edge_idx = row[2] if len(row) > 2 else None
                 nid = node.get("id")
                 nlabel = node.get("type")
                 if nid and nid not in visited:
                     nodes.append({
                         "node": node,
                         "relationship": rel_type,
+                        "idx": edge_idx,
                         "depth": depth + 1,
                     })
                     visited.add(nid)
