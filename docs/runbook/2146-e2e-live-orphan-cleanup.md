@@ -26,7 +26,7 @@ aboutObjects: tortoise
 >
 > **#5971 (2026-10-10): the recurrence path.** A recurrence is NEWER than this
 > runbook's historical window and may sit off the strict email guard shape, so
-> the default procedure below finds nothing for it — see **§6.1** for
+> the default procedure below finds nothing in its DELETE set — see **§6.1** for
 > `--all-e2e-live` + `--include-residue` (Guard D). Everything in §1–§6 is
 > unchanged and still correct for the original red window.
 
@@ -305,8 +305,9 @@ runs without `--execute`.
 The default scope above is a **one-shot artifact of the #2140 red window**
 (2026-08-19 → 2026-09-03). A *recurrence* — the whole point of the weekly
 reconcile — is by definition NEWER than that window, so a plain
-`--phase enumerate` finds **nothing** for a reconcile issue and an operator can
-wrongly conclude the detection was stale. Two things are needed instead:
+`--phase enumerate` finds **nothing in its delete set** for a reconcile issue and
+an operator can wrongly conclude the detection was stale. Two things are needed
+instead:
 
 1. **`--all-e2e-live`** drops the window entirely (the flag predates this and
    exists for exactly this reason; its help text used to read as "the 68
@@ -327,10 +328,12 @@ postdates the window and was created 2026-09-17. Its email deliberately names
 the issue (`e2e-live-3781-<hex>`), which is why it does **not** match the
 `<8 hex>` guard shape — the manual probe chose a readable local part.
 
-**Guard D — residue.** `graph-scripts/2146_e2e_live_orphan_cleanup.py`
-enumerates with the strict shape AND the window, while the detector counts the
-whole namespace all-time. A row inside the namespace but outside either bound
-was excluded **silently** by a SQL regex, so nothing in-repo could remove it
+**Guard D — residue.** `graph-scripts/2146_e2e_live_orphan_cleanup.py`'s DELETE
+scope was only the strict shape AND the historical window, while the detector
+counts the whole namespace all-time; its residue ENUMERATION is separate and
+all-time (the `RESIDUE_*_SQL` predicates carry no window clause). A row inside
+the namespace but OFF the guard shape was therefore excluded **silently** by a
+SQL regex, so nothing in-repo could DELETE it
 while the detector kept filing. The script now:
 
 + **always** enumerates and prints the residue (teams + auth users, ALL-TIME,

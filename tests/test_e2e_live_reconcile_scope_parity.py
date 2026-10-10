@@ -5,11 +5,11 @@ The defect these tests pin is a scope mismatch, not a missing delete:
 * the detector (``graph-scripts/e2e_live_reconcile.py``) counts every row in the
   namespace — ``email LIKE 'e2e-live-%@premise-labs.dev'``, ALL-TIME;
 * the remediator (``graph-scripts/2146_e2e_live_orphan_cleanup.py``) enumerated
-  only Guard A's strict shape ``^e2e-live-[0-9a-f]{8}@premise-labs\\.dev$``
+  for deletion only Guard A's strict shape ``^e2e-live-[0-9a-f]{8}@premise-labs\\.dev$``
   **and** the historical red window (2026-08-19 → 2026-09-03).
 
 So a row inside the namespace but outside either remediator bound was DETECTED
-forever and enumerated by NO cleanup phase — and silently, so the weekly
+forever and deleted by NO phase by default — and silently, so the weekly
 auto-filed issue read as "just not cleaned yet" while nothing in the repo could
 clean it. The live instance is the #3781 manual-verification account
 ``e2e-live-3781-<hex>@premise-labs.dev`` (PR #3790's commit message says the
