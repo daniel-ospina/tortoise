@@ -1728,6 +1728,7 @@ surfaces:
   - test_retrieval.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
+  - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
@@ -2249,6 +2250,7 @@ surfaces:
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
   - test_3844_annotation_injection.py  # #3844: annotation-prefix newline forging; dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"] — a core-only entry would never run on a retrieval.py-only change
+  - test_6252_body_fence.py  # #6252: BODY-side line-forging fence (retrieval._fence_body); dual core+sdk for the same reason as #3844 above
   # #4509: the S3 link-before-create prior lookup excludes the capture's own
   # turn echoes BEFORE the callee's [:limit] cut — the retrieval-layer opt-in
   # `exclude_turn_echo_session` seam (tortoise/retrieval.py predicate +
@@ -3736,6 +3738,7 @@ durations:
   test_3026_oauth_boundaries.py: 0.7
   test_3660_session_upload_identity.py: 0.1
   test_3844_annotation_injection.py: 0.1
+  test_6252_body_fence.py: 0.1
   test_3982_date_only_utc.py: 0.1
   test_4041_breadcrumb_reader.py: 2.4
   test_4199_dense_scope_coverage.py: 0.6
