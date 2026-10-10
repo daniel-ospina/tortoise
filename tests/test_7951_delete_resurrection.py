@@ -98,6 +98,55 @@ def _source_count(proj, sid: str) -> int:
                 url=f"session:{sid}")
 
 
+def _nodes_edges(proj) -> tuple[set, set]:
+    """Full node + edge identity sets (no properties/ids that a replay may
+    legitimately re-derive). An engine-agreement check must compare EDGES as
+    well as nodes — a count-only check is blind to which edges exist, which is
+    how the R2-P2 defect shipped."""
+    nodes = proj.g.query(
+        "MATCH (n) RETURN labels(n), "
+        "coalesce(n.id, n.eventId, n.url, n.name)"
+    ).result_set
+    edges = proj.g.query(
+        "MATCH (a)-[r]->(b) RETURN labels(a), "
+        "coalesce(a.id, a.eventId, a.url, a.name), type(r), labels(b), "
+        "coalesce(b.id, b.eventId, b.url, b.name)"
+    ).result_set
+    return ({(tuple(r[0]), r[1]) for r in nodes},
+            {(tuple(r[0]), r[1], r[2], tuple(r[3]), r[4]) for r in edges})
+
+
+def _session_nodes_edges(proj, sid: str) -> tuple[set, set]:
+    """Node + edge identity for the journal's OWN session subgraph.
+
+    Scoped because the live graph also holds control-plane nodes (``EpMeta``,
+    ``OnboardingState``, ...) that are deliberately outside the journal, so a
+    whole-graph live-vs-replay equality would be false for reasons unrelated
+    to the defect under test.
+    """
+    url = f"session:{sid}"
+    params = {"url": url, "sid": sid}
+    nodes = proj.g.query(
+        "MATCH (n) WHERE n.url=$url OR n.session_id=$sid OR n.id=$sid "
+        "RETURN labels(n), coalesce(n.id, n.eventId, n.url, n.name)",
+        params=params,
+    ).result_set
+    edges = proj.g.query(
+        "MATCH (a)-[r]->(b) WHERE a.url=$url OR a.session_id=$sid "
+        "OR a.id=$sid OR b.url=$url OR b.session_id=$sid OR b.id=$sid "
+        "RETURN labels(a), coalesce(a.id, a.eventId, a.url, a.name), "
+        "type(r), labels(b), coalesce(b.id, b.eventId, b.url, b.name)",
+        params=params,
+    ).result_set
+    return ({(tuple(r[0]), r[1]) for r in nodes},
+            {(tuple(r[0]), r[1], r[2], tuple(r[3]), r[4]) for r in edges})
+
+
+def _fmt(only_live, only_replay) -> str:
+    return (f"  only live:   {sorted(only_live)}\n"
+            f"  only replay: {sorted(only_replay)}")
+
+
 def _close_anchors() -> None:
     """Deterministically close every keepalive anchor (tempdir teardown)."""
     for ns in list(_ha._FALLBACK_KEEPALIVE):
@@ -280,23 +329,173 @@ class TestPostDeleteWriteReMaterialisesSource:
             "session:<id>) (#7951 P1-a)")
 
     def test_both_replay_engines_agree_on_the_post_delete_write(self, hosted):
-        """The two replay engines must not disagree on one journal."""
+        """The two replay engines must not disagree on one journal — on the
+        NODE set AND the EDGE set. The round-1 form compared only
+        ``_source_count`` and so was blind to the resurrected pre-delete edge
+        (R2-P2)."""
+        tc, sdk = hosted
+        proj = sdk._get_proj()
+        _capture(tc, SID)
+        sdk.create_point("fact", "pre-delete", session_id=SID)
+        _delete(tc, SID)
+        sdk.create_point("fact", "post-delete", session_id=SID)
+
+        live_sn = _session_nodes_edges(proj, SID)
+
+        proj.rebuild(EventLog(sdk._get_event_log().path),
+                     confirm_destructive=True)
+        via_rebuild = _session_nodes_edges(proj, SID)
+        rebuild_full = _nodes_edges(proj)
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        via_rebuild_all = _session_nodes_edges(proj, SID)
+        rebuild_all_full = _nodes_edges(proj)
+
+        assert (via_rebuild == via_rebuild_all == live_sn), (
+            "the two replay engines DISAGREE on one journal (node/edge set):\n"
+            f"  rebuild vs rebuild_all: {via_rebuild != via_rebuild_all}\n"
+            f"  rebuild vs live:        {via_rebuild != live_sn}\n"
+            f"  rebuild_all vs live:    {via_rebuild_all != live_sn} "
+            "(#7951 R2-P1/R2-P2)")
+        # Both are journal replays: whole-graph node AND edge identity must
+        # agree between them (the session-scoped check above covers live).
+        assert rebuild_full == rebuild_all_full, (
+            "rebuild() and rebuild_all() disagree on the whole graph's node "
+            "or edge set (#7951 R2-P2)")
+
+
+class TestReplaySourceMintAnchorIsDerived:
+    """R2-P1 acceptance: the anchor observes the MINT itself (the Cypher write
+    through the projection's graph handle), not an enumerated list of event
+    types or Python functions — so a newly added mint path cannot silently
+    escape the anchor. This is the structural property the fix is FOR; the
+    EventRecorded test above is the concrete instance the round-1 list missed."""
+
+    def test_observer_records_any_source_minting_statement(self):
+        from tortoise.projection import FalkorProjection
+
+        proj = object.__new__(FalkorProjection)  # no DB needed for the observer
+        proj._replay_mint_seq = {}
+        proj._replay_seq = 7
+        # Two mint spellings from paths that are in NO round-1 type list — the
+        # observer keys off the write, so both are recorded anyway.
+        proj._observe_replay_source_mint(
+            "MERGE (s:Source {url:$url}) ON CREATE SET s.title=$url",
+            {"url": "session:some-new-path"})
+        proj._observe_replay_source_mint(
+            "CREATE (big:Source {url: $u, sourceKind: 'x'})",
+            {"u": "session:created-not-merged"})
+        assert proj._replay_mint_seq == {
+            "session:some-new-path": 7,
+            "session:created-not-merged": 7,
+        }, "the mint observer is not structurally tied to the write"
+
+    def test_observer_is_inert_outside_a_replay_and_ignores_non_mints(self):
+        from tortoise.projection import FalkorProjection
+
+        proj = object.__new__(FalkorProjection)
+        # `None` (not replaying) → a no-op even for a mint statement.
+        proj._observe_replay_source_mint(
+            "MERGE (s:Source {url:$url})", {"url": "session:x"})
+        assert proj._replay_mint_seq is None
+        # A read and a non-Source MERGE are not mints.
+        proj._replay_mint_seq = {}
+        proj._replay_seq = 1
+        proj._observe_replay_source_mint(
+            "MATCH (s:Source {url:$url}) RETURN s", {"url": "session:x"})
+        proj._observe_replay_source_mint(
+            "MERGE (p:Point {id:$id})", {"id": "p1"})
+        assert proj._replay_mint_seq == {}
+
+
+class TestPostDeleteEventReMaterialisesSource:
+    """P1-a round 2: the Source has a THIRD re-creation path the anchor must
+    see — ``EventRecorded`` with an explicit ``sourceUrl``.
+
+    ``_upsert_event`` → ``_materialize_connector_source`` mints
+    ``Source{url:session:<id>}`` from an explicit ``sourceUrl``. The round-1
+    anchor enumerated mint TYPES (`PointAdded`/`OperatorAdded` extractedFrom,
+    `SourceCreated`/`SourceVersioned`) and so missed this fold entirely, so
+    the deferred ``SessionDeleted`` re-apply deleted the live-re-minted Source
+    again: ``rebuild_all`` = 0 while live / ``rebuild`` = 1. Reproduced
+    through the public SDK, with no crafted journal."""
+
+    def test_event_with_session_source_url_survives_rebuild(self, hosted):
         tc, sdk = hosted
         proj = sdk._get_proj()
         _capture(tc, SID)
         _delete(tc, SID)
+        assert _source_count(proj, SID) == 0
+
+        # Live re-mint through the Event fold's connector-source gate: an
+        # explicit `sourceUrl` naming the deleted session's Source.
+        sdk.create_event(
+            "evt-src-7951", "github.issue.open",
+            sourceUrl=f"session:{SID}", sourceKind="github_issue")
+        assert _source_count(proj, SID) == 1, "live re-mint did not happen"
+
+        # Engine 1: the inline, chronology-ordered engine keeps it.
+        proj.rebuild(EventLog(sdk._get_event_log().path),
+                     confirm_destructive=True)
+        assert _source_count(proj, SID) == 1, (
+            "rebuild() lost the Source an EventRecorded re-materialised "
+            "(#7951 R2-P1)")
+
+        # Engine 2: rebuild_all's deferred re-apply must reach the SAME
+        # verdict — the anchor must observe the Event fold's own mint.
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        assert _source_count(proj, SID) == 1, (
+            "rebuild_all() deleted a Source that a later EventRecorded "
+            "re-materialised — the deferred SessionDeleted re-apply's anchor "
+            "enumerates mint types and misses `_materialize_connector_source` "
+            "(#7951 R2-P1)")
+
+
+class TestPreDeleteEdgesDoNotSurviveRebuild:
+    """R2-P2: the per-node skip keeps the NODE but drops the EDGE.
+
+    Pass 2 re-derives edges from EVERY ``PointAdded`` — including records
+    that PRECEDE the ``SessionDeleted``. The deferred re-apply then keeps the
+    Source (a later record re-materialised it) but never removes the
+    pre-delete edges pass 2 just re-derived, so ``rebuild_all`` resurrects a
+    ``p1 -> Source`` edge that live's ``DETACH DELETE`` removed. The round-1
+    test compared only ``_source_count`` and was blind to it."""
+
+    def test_node_and_edge_sets_match_live(self, hosted):
+        tc, sdk = hosted
+        proj = sdk._get_proj()
+        _capture(tc, SID)
+        # A point the delete does NOT remove (not a CONTAINS turn point), but
+        # whose `extractedFrom` edge to the agentSession Source the delete's
+        # DETACH DELETE DOES sever.
+        sdk.create_point("fact", "pre-delete", session_id=SID)
+        _delete(tc, SID)
+        # Re-mint the Source, so the deferred re-apply KEEPS it and pass 2's
+        # re-derived pre-delete edge is not swept away with the node.
         sdk.create_point("fact", "post-delete", session_id=SID)
+
+        live_sn = _session_nodes_edges(proj, SID)
+        live_edges = live_sn[1]
+        assert any(e[2] == "extractedFrom" and e[1] != e[4]
+                   for e in live_edges), "vacuous: no live extractedFrom edge"
 
         proj.rebuild(EventLog(sdk._get_event_log().path),
                      confirm_destructive=True)
-        via_rebuild = _source_count(proj, SID)
-        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
-        via_rebuild_all = _source_count(proj, SID)
+        r_sn = _session_nodes_edges(proj, SID)
+        assert r_sn == live_sn, (
+            "rebuild() disagreed with live on the post-delete write:\n"
+            + _fmt(live_sn[0] - r_sn[0], r_sn[0] - live_sn[0]) + "\n"
+            + _fmt(live_sn[1] - r_sn[1], r_sn[1] - live_sn[1]) + " (#7951 R2-P2)")
 
-        assert via_rebuild == via_rebuild_all == 1, (
-            f"the two replay engines disagree on one journal: "
-            f"rebuild={via_rebuild} vs rebuild_all={via_rebuild_all} "
-            f"(#7951 P1-a)")
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        ra_sn = _session_nodes_edges(proj, SID)
+        assert ra_sn == live_sn, (
+            "rebuild_all() resurrected an edge that live's DETACH DELETE "
+            "severed — pass 2 re-derived it from a PointAdded that PRECEDES "
+            "the SessionDeleted, and the deferred re-apply then kept the "
+            "node Source:\n"
+            + _fmt(live_sn[0] - ra_sn[0], ra_sn[0] - live_sn[0]) + "\n"
+            + _fmt(live_sn[1] - ra_sn[1], ra_sn[1] - live_sn[1]) + " (#7951 R2-P2)")
+
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -549,3 +748,4 @@ class TestOrphanedWriteSweepIsJournaled:
             "the sweep journaled a SessionDeleted although the guarded delete "
             "was a NO-OP (the same-id re-capture won the race) — a replay "
             "would delete the live re-capture (#7951 P2-d)")
+

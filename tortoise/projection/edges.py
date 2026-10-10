@@ -896,6 +896,19 @@ class _EdgeHandlers:
         for raw_ref in refs:
             if not raw_ref:
                 continue
+            # #7951 R2-P2: a `session:<id>` edge whose ORIGINATING record
+            # precedes a later `SessionDeleted` belongs to the incarnation the
+            # delete `DETACH DELETE`d. Live, that delete severed the edge, and
+            # a later record re-materialising a FRESH Source does not restore
+            # it. Pass 2 re-derives from every `PointAdded`, so the gate lives
+            # here: skip both the mint and the edge for a pre-delete ref.
+            # `_replay_session_deleted_seq` is set only for the duration of
+            # `rebuild_all`'s pass 2, so live/`rebuild()` are untouched.
+            _replay_del = self._replay_session_deleted_seq
+            if (_replay_del is not None and isinstance(raw_ref, str)
+                    and raw_ref.startswith("session:")
+                    and _replay_del.get(raw_ref[8:], -1) > self._replay_seq):
+                continue
             # #2489: Source stub creation routed through the SHARED resolver helper
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic
             # clause) so live wiring and rebuild replay mint byte-identical stubs

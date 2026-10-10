@@ -160,6 +160,29 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
 # reset by the context manager and the exception propagates unchanged — the
 # fail-closed assertion is about a run that COMPLETED, never a mask over a
 # different failure.
+def _clears_replay_anchors(fn):
+    """#7951: a failed replay must never leave the replay-only anchors armed.
+
+    `rebuild_all` turns on the Source-mint observer and the pass-2 pre-delete
+    edge gate for the duration of a replay. If the replay raises (a corrupt
+    journal line, a DB error) the anchors must be disarmed even so — a leaked
+    `_replay_session_deleted_seq` would silently gate LIVE `_link_source` /
+    `_link_session` calls, dropping edges on ordinary writes. `finally`, not
+    the normal-path clear at the end of the deferred re-apply, is what makes
+    that guarantee independent of the failure point.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            self._replay_mint_seq = None
+            self._replay_session_deleted_seq = None
+    return wrapper
+
+
 def _fail_closed(engine: str):
     """Wrap a replay engine so a non-folded event fails the run (R8)."""
     def decorator(fn):
@@ -2492,6 +2515,15 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        # #7951 R2-P1: observe the fold's OWN Source mint at the write
+        # chokepoint. Every replay path that materialises a `:Source` writes
+        # through this handle, so the anchor is derived from what was actually
+        # minted rather than from a list of event types that would silently
+        # drift whenever another fold learns to mint. `getattr` guards the
+        # lightweight projection stubs some tests wrap in this handle.
+        _observe = getattr(self._proj, "_observe_replay_source_mint", None)
+        if _observe is not None:
+            _observe(cypher, params)
         # #7174: the same shared refusal the guarded handles apply — the numeric
         # domain travels in PARAMS, and this wrapper must stay complete rather
         # than rely on the inner handle's class (the #3595 precedent above).
@@ -5670,6 +5702,19 @@ def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
     return entry > seq and label in _HARD_DELETE_LABELS
 
 
+# #7951 R2-P1: the Source-mint detector. Matches a Cypher statement that
+# MERGEs (or CREATEs) a `:Source` and captures its property map, so the url
+# key the mint addresses can be read out of `params`. Deliberately matches the
+# STATEMENT, not the Python function that issued it: any new fold that mints a
+# Source through the projection's graph handle is observed without a code
+# change. (`ON CREATE SET` cannot match — the regex requires the node pattern
+# immediately after MERGE/CREATE.)
+_SOURCE_MINT_RE = re.compile(
+    r"(?:MERGE|CREATE)\s*\(\s*[A-Za-z_]\w*\s*:\s*Source\s*\{([^{}]*)\}\s*\)",
+    re.I)
+_SOURCE_MINT_URL_KEY_RE = re.compile(r"\burl\s*:\s*\$([A-Za-z_]\w*)")
+
+
 class FalkorProjection(
     _EntityHandlers,
     _EdgeHandlers,
@@ -5687,6 +5732,14 @@ class FalkorProjection(
     explicit per-call `confirm_destructive=True` (#2944) and is refused on a
     non-disposable server graph.
     """
+
+    # #7951: the replay anchors are CLASS defaults as well as per-instance
+    # state, because the guard tests build a projection with
+    # ``object.__new__(FalkorProjection)`` (no ``__init__``) and then drive
+    # `_GuardedGraph.query`; the observer must be an inert no-op there.
+    _replay_mint_seq: dict[str, int] | None = None
+    _replay_seq: int = -1
+    _replay_session_deleted_seq: dict[str, int] | None = None
 
     def __init__(self, path: str | None = None, *,
                  host: str | None = None,
@@ -6013,6 +6066,25 @@ class FalkorProjection(
         # two-layer guard comment above _GuardedGraph and its KNOWN GAPS note.
         self._is_embedded = (path is not None)
         self._path = path
+        # #7951 R2-P1: the `rebuild_all` replay's OWN mint report. During a
+        # replay each `:Source` materialisation is observed at the graph-write
+        # chokepoint (`_GuardedGraph.query` -> `_observe_replay_source_mint`)
+        # and recorded here as ``{source_url: seq}`` — the journal seq of the
+        # record whose fold issued the mint. ``None`` outside a replay, so a
+        # LIVE writer never records and the anchor can never be built from
+        # live traffic. The deferred `SessionDeleted` re-apply consumes this
+        # instead of enumerating the event types that can mint a Source, so a
+        # newly added mint path is observed without anyone updating a list.
+        self._replay_mint_seq: dict[str, int] | None = None
+        self._replay_seq: int = -1
+        # #7951 R2-P2: during a `rebuild_all` replay, the seq of the LAST
+        # `SessionDeleted` per session id. Pass 2 derives `extractedFrom` /
+        # `CONTAINS` edges from EVERY `PointAdded`, including records that
+        # precede the delete; those edges were severed live by the delete's
+        # `DETACH DELETE` and must not be re-derived — not even when a later
+        # record re-materialises the node (a fresh incarnation has no edge to
+        # the pre-delete point). ``None`` outside a replay.
+        self._replay_session_deleted_seq: dict[str, int] | None = None
         # #5119: `_vector_index_api` MUST exist before the health check below.
         # Recovery replays the journal through `apply()` -> `_upsert_point_props`,
         # which reads `self.required_embedding_dim` to guard a journalled
@@ -7160,6 +7232,45 @@ class FalkorProjection(
             "db_path": _prewipe_db_path_identity(self._path),
         }
 
+    def _observe_replay_source_mint(self, cypher, params) -> None:
+        """#7951 R2-P1: report a `:Source` materialisation to the replay anchor.
+
+        Called on EVERY projection write, but acts only inside a `rebuild_all`
+        replay (`self._replay_mint_seq is not None`) — so the anchor is built
+        from the fold's OWN mint, never from live traffic. It records the
+        CURRENT journal seq under the url the mint addresses; the deferred
+        `SessionDeleted` re-apply then asks "did any record AFTER the delete
+        mint `session:<id>`?" and keeps the Source iff so.
+
+        This replaces an enumerated list of minting event types
+        (`PointAdded`/`OperatorAdded` extractedFrom, `SourceCreated`/
+        `SourceVersioned`) that had already gone stale once — `EventRecorded`
+        (via `_materialize_connector_source`) mints from any explicit
+        `sourceUrl` too, and the list missed it, so a post-delete
+        `EventRecorded` was minted live, re-created by pass 2, then deleted
+        again by the deferred re-apply. Deriving from the write means a future
+        mint path cannot silently escape the anchor.
+        """
+        mints = self._replay_mint_seq
+        if mints is None or not isinstance(cypher, str):
+            return
+        m = _SOURCE_MINT_RE.search(cypher)
+        if m is None:
+            return
+        km = _SOURCE_MINT_URL_KEY_RE.search(m.group(1))
+        if km is None or not isinstance(params, dict):
+            return
+        url = params.get(km.group(1))
+        if not isinstance(url, str) or not url:
+            return
+        # Keep the LATEST seq per url. `max` (not assignment) so a mint issued
+        # outside a numbered replay loop can never lower an already-observed
+        # anchor, and so pass 2's re-derivation ordering cannot regress it.
+        prior = mints.get(url)
+        if prior is None or self._replay_seq > prior:
+            mints[url] = self._replay_seq
+
+    @_clears_replay_anchors
     @_fail_closed("rebuild_all")
     @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
@@ -7999,11 +8110,17 @@ class FalkorProjection(
         #     `_upsert_point_edges` — the pass-2 side effect the deferral
         #     exists to undo).
         #   * `source_rematerialise_seq` — the LAST record that mints the
-        #     agentSession `:Source`: a `PointAdded` / `OperatorAdded` whose
-        #     `extractedFrom` names `session:<id>` (`_link_source` →
-        #     `_mint_source_stub` — the SECOND re-creation path the container
-        #     anchor cannot see), or a `SourceCreated` / `SourceVersioned` for
-        #     that url.
+        #     agentSession `:Source`. Unlike the container anchor this is NOT a
+        #     pre-scan type list: it is DERIVED from the replay's own mints
+        #     (`_observe_replay_source_mint`, hooked at the graph-write
+        #     chokepoint), so a mint path added later — a
+        #     `PointAdded`/`OperatorAdded` `extractedFrom` ref (`_link_source`
+        #     → `_mint_source_stub`), a `SourceCreated`/`SourceVersioned`
+        #     (`_upsert_source`), an `EventRecorded` explicit `sourceUrl`
+        #     (`_materialize_connector_source`), `_upsert_document`,
+        #     `_event_plain_merge`'s document arm, `link_source_to_entity` — is
+        #     observed without editing this file. The round-1 form enumerated
+        #     the first two and missed the Event fold entirely (R2-P1).
         #
         # Before P1-a the deferred re-apply was gated on `SessionRecorded`
         # alone and removed the Source unconditionally, so a post-delete write
@@ -8015,7 +8132,12 @@ class FalkorProjection(
         # Point/Operator creations only, and neither `Session` nor an
         # url-only Source stub is a canonical entity id.
         session_rematerialise_seq: dict[str, int] = {}
-        source_rematerialise_seq: dict[str, int] = {}
+        # Turn ON the derived anchor's collection for the duration of the
+        # replay (cleared after the deferred re-apply below). `_replay_seq`
+        # is set per record by the pass loops; every Source mint those loops
+        # trigger is recorded against it.
+        self._replay_mint_seq = {}
+        self._replay_seq = -1
         for _seq, _raw in enumerate(events):
             if not isinstance(_raw, dict):
                 continue
@@ -8028,26 +8150,12 @@ class FalkorProjection(
                     session_rematerialise_seq[_rid] = _seq
             elif _t in ("PointAdded", "OperatorAdded"):
                 _p = _ev.get("point")
-                if isinstance(_p, dict):
-                    if isinstance(_cs, str) and _cs:
-                        session_rematerialise_seq[_cs] = _seq
-                    _ef = _p.get("extractedFrom")
-                    _refs = ([_ef] if isinstance(_ef, str)
-                             else list(_ef) if isinstance(_ef, (list, tuple))
-                             else [])
-                    for _ref in _refs:
-                        if (isinstance(_ref, str)
-                                and _ref.startswith("session:") and _ref[8:]):
-                            source_rematerialise_seq[_ref[8:]] = _seq
-            elif _t in ("SourceCreated", "SourceVersioned"):
-                _u = _ev.get("url") or _ev.get("id")
-                if (isinstance(_u, str)
-                        and _u.startswith("session:") and _u[8:]):
-                    source_rematerialise_seq[_u[8:]] = _seq
-        # The map is built ONCE for the whole journal (the same builder the
-        # apply()-based engines and the reference fold use), not accumulated
-        # in the loops below — a single reader is what keeps the five surfaces
-        # on one verdict.
+                if isinstance(_p, dict) and isinstance(_cs, str) and _cs:
+                    session_rematerialise_seq[_cs] = _seq
+        # `session_rematerialise_seq` is built ONCE for the whole journal, not
+        # accumulated in the loops below — a single reader keeps the surfaces
+        # on one verdict. (`source_rematerialise_seq` is NOT a pre-scan: it is
+        # derived from the replay's own mints, see above.)
         # (kind, id) pairs hard-deleted since their last creation — a
         # following creation of the SAME kind is a RE-creation (new
         # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
@@ -8338,6 +8446,9 @@ class FalkorProjection(
         hard_delete_seqs = journal_hard_delete_seqs(events)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
+            # #7951 R2-P1: the Source-mint observer records the seq of the
+            # record whose fold is running now.
+            self._replay_seq = seq
             ev = self._norm(ev)
             t = ev.get("type")
             if t in ("PointAdded", "OperatorAdded"):
@@ -9743,8 +9854,21 @@ class FalkorProjection(
         # (probe: None), and rebuild stamps createdAt = rebuild-time via
         # _upsert_point_props, so timestamp comparison is unreliable — the
         # journal SEQUENCE is the faithful discriminator.
+        # #7951 R2-P2: the last `SessionDeleted` seq per session id, for the
+        # pass-2 pre-delete edge gate (`_link_source` / `_link_session`).
+        # `session_delete_folds` was built during pass 1b, so it is complete
+        # here.
+        self._replay_session_deleted_seq = {}
+        for _dseq, _dev in session_delete_folds:
+            _dsid = _dev.get("id") if isinstance(_dev, dict) else None
+            if isinstance(_dsid, str):
+                self._replay_session_deleted_seq[_dsid] = max(
+                    self._replay_session_deleted_seq.get(_dsid, -1), _dseq)
         operator_created_seq: dict[str, int] = {}
         for seq, raw_ev in enumerate(events):
+            # #7951 R2-P1: the Source-mint observer records the seq of the
+            # record whose edges are being re-derived now.
+            self._replay_seq = seq
             # #3947 review: the capture directive lives on the RAW envelope —
             # `_norm` splices `ev["point"]` over it, so a point prop named
             # `contains_session` could shadow (and forge on replay) the link.
@@ -10158,6 +10282,22 @@ class FalkorProjection(
         # neither drift from each other nor be clobbered by a post-delete
         # write. Idempotent — a 0-row `_fold_session_deleted` is the record's
         # end state, never a fold-miss.
+        #
+        # #7951 R2-P1: the Source anchor is the replay's OWN mint report (every
+        # `:Source` MERGE observed at the graph-write chokepoint during the
+        # passes above), projected to `{session_id: last_mint_seq}`. Nothing
+        # here enumerates the event types that can mint, so a new mint path is
+        # observed automatically; `session_rematerialise_seq` stays a pre-scan
+        # (the container is minted only by `_link_session`/`SessionRecorded`,
+        # which the reviewer did not flag as drifting).
+        _mints = self._replay_mint_seq or {}
+        source_rematerialise_seq: dict[str, int] = {
+            _url[8:]: _s for _url, _s in _mints.items()
+            if isinstance(_url, str) and _url.startswith("session:") and _url[8:]
+        }
+        # Collection is over — a LIVE writer after this replay must not record.
+        self._replay_mint_seq = None
+        self._replay_session_deleted_seq = None
         for _seq, _ev in session_delete_folds:
             _sid = _ev.get("id")
             if not isinstance(_sid, str):

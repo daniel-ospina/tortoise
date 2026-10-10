@@ -2013,6 +2013,15 @@ class _EntityHandlers:
         if not _writable_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
+        # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`
+        # edge derived from a `PointAdded` that precedes a later
+        # `SessionDeleted` was severed live by the delete's `DETACH DELETE`;
+        # a re-capture's fresh Session must not inherit the old incarnation's
+        # edge. Only active during `rebuild_all` pass 2.
+        _replay_del = self._replay_session_deleted_seq
+        if (_replay_del is not None
+                and _replay_del.get(session_id, -1) > self._replay_seq):
+            return
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
             params={"sid": session_id},
