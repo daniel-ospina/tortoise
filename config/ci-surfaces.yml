@@ -1040,6 +1040,7 @@ surfaces:
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
+  - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
@@ -2014,6 +2015,7 @@ surfaces:
   - test_2500_terminal_ep_backfill.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
+  - test_7902_write_path_label_widening.py  # #7902: operator/direct-edge WRITE path admits :Point/:Subject/:Object/:Event endpoints (write half of #7853)
   - test_ep_projections.py
   - test_ep_quadrature.py
   - test_ep_selector.py

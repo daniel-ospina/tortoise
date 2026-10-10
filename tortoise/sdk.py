@@ -56,6 +56,8 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import (  # #7902 epistemic-label write widening (shared with #7853 read widening)
+    EPISTEMIC_LABELS, epistemic_disjunction, epistemic_label_queries)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
     RAW_PRESENT,
@@ -10448,11 +10450,19 @@ class TortoiseSDK:
         # silently) — then emit, then mutate. P1 (code-review): emitting
         # before validation produced phantom OperatorAdded events on missing
         # inputs, visible to subscription poll consumers.
-        existing = proj.g.query(
-            "MATCH (n) WHERE (n:Point OR n:Event) AND n.id IN $ids RETURN n.id",
-            params={"ids": inputs},
-        ).result_set
-        existing_ids = {row[0] for row in existing}
+        #
+        # #7902: an operator endpoint may carry ANY of :Point/:Subject/
+        # :Object/:Event (owner ruling, #7813 — the WRITE half of #7853's
+        # read widening). The probe is id-anchored, so it sweeps the labels
+        # once each to keep the per-(label, property) index rather than
+        # full-scanning (live.epistemic_label_queries).
+        existing_ids: set[str] = set()
+        for _q in epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"
+        ):
+            existing_ids.update(
+                row[0] for row in
+                proj.g.query(_q, params={"ids": inputs}).result_set)
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
@@ -10476,6 +10486,9 @@ class TortoiseSDK:
         )
         # Ontology v2.1: map part/whole ops to hasPart.
         # A1b (#1272): operator endpoints may be Point OR Event nodes.
+        # #7902: widened to every epistemic label (:Point/:Subject/:Object/
+        # :Event) — the endpoint is a traversal position, so the label
+        # disjunction goes in the WHERE clause (see live.epistemic_disjunction).
         # #1919 (P2-10): the typed edge is mirrored by a reverse
         # (s)-[:INPUT]->(o) edge — the same shape the OperatorAdded replay
         # MERGEs (projection/edges.py), so live graphs and rebuilt graphs
@@ -10483,8 +10496,8 @@ class TortoiseSDK:
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s) WHERE (s:Point OR s:Event) "
-                f"AND s.id = $sid "
+                f"MATCH (o:Point {{id:$oid}}), (s) "
+                f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
                 f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
                 params={"oid": pid, "sid": inp_id, "i": i},
@@ -12736,15 +12749,16 @@ class TortoiseSDK:
                         # bare Point instead of the operator. Use the TWO-STEP
                         # pattern: MATCH both endpoints, then edge-only MERGE
                         # (with idx parity for create_operator's edge shape).
-                        # #1919 (P1, review gate): the completion endpoints are
-                        # Point OR Event (A1b #1272) — a Point-only MATCH would
-                        # silently drop the typed edge for an absorbed Event
-                        # input (never converging to the dedup key). The
-                        # reverse INPUT edge mirrors create_operator + the
-                        # replay convention (fold-parity).
+                        # #1919 (P1, review gate): the completion endpoints
+                        # may be any of the four epistemic labels (#7902) — a
+                        # Point-only MATCH would silently drop the typed edge
+                        # for an absorbed Subject/Object/Event input (never
+                        # converging to the dedup key). The reverse INPUT edge
+                        # mirrors create_operator + the replay convention
+                        # (fold-parity).
                         proj.g.query(
                             f"MATCH (o:Point {{id:$oid}}), (t) "
-                            f"WHERE (t:Point OR t:Event) AND t.id = $inp "
+                            f"WHERE {epistemic_disjunction('t')} AND t.id = $inp "
                             f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
                             f"SET r.idx = $idx "
                             f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
@@ -13126,7 +13140,7 @@ class TortoiseSDK:
                            label: str | None = None,
                            batch_id: str | None = None,
                            promote_source: bool = True) -> dict:
-        """Create an OPERATOR-LESS direct IMPL/NAND Point→Point edge (plan §5.3).
+        """Create an OPERATOR-LESS direct IMPL/NAND epistemic edge (plan §5.3).
 
         Ontology v3.5 §8 / v3.8: plain IMPL/NAND connections are direct edges
         (edge-carried direction/confidence/weight/label/batch_id; NO operator
@@ -13135,8 +13149,14 @@ class TortoiseSDK:
         (MERGE-with-attributes would create a parallel edge on attribute
         change, violating EP's no-parallel-direct-edges contract).
 
+        #7902: endpoints may carry ANY of the four epistemic labels —
+        :Point/:Subject/:Object/:Event (owner ruling #7813; direct edges are
+        the operator-less half of the same epistemic layer the operator path
+        bridges, so the label set is identical). The resolved label anchors
+        each id-filtered query so the per-(label, id) index is kept.
+
         Guards (shared with #901, E2E-11.7):
-          - endpoints exist AND are plain Points (a Source/Subject/event/
+          - endpoints exist AND are plain epistemic nodes (a Source or an
             operator endpoint is a typed error);
           - terminal-endpoint guard: `status NOT IN {superseded, retracted}`
             (a direct edge incident to a terminal point would recreate the
@@ -13184,29 +13204,40 @@ class TortoiseSDK:
         _reject_unrepresentable_number("weight", weight)
 
         proj = self._get_proj()
-        # Endpoint validation: exist, plain Points, non-terminal.
+        # Endpoint validation: exist, plain epistemic nodes, non-terminal.
         # #2422 (second-model gate): the terminal set derives from the shared
         # EP/read vocabulary AND the legacy outdated=true flag is rejected —
         # a flag-outdated point (status untouched by invalidate_point) must
         # equally refuse new direct edges.
-        rows = proj.g.query(
-            "MATCH (p:Point) WHERE p.id IN $ids "
-            "RETURN p.id, coalesce(p.is_operator, false), p.status, "
-            "coalesce(p.outdated, false)",
-            params={"ids": [source_id, target_id]},
-        ).result_set
-        found = {r[0]: (bool(r[1]), r[2], bool(r[3])) for r in rows}
+        #
+        # #7902: the endpoint may carry ANY of :Point/:Subject/:Object/:Event
+        # (owner ruling #7813 — direct edges are the operator-less epistemic
+        # edge shape, so the same four labels apply). The probe is id-anchored:
+        # sweep the labels once each (index-preserving) and remember WHICH
+        # label resolved each id so the MERGE below can anchor on it.
+        found: dict[str, tuple[str, bool, str | None, bool]] = {}
+        for _label in EPISTEMIC_LABELS:
+            rows = proj.g.query(
+                f"MATCH (p:{_label}) WHERE p.id IN $ids "
+                "RETURN p.id, coalesce(p.is_operator, false), p.status, "
+                "coalesce(p.outdated, false)",
+                params={"ids": [source_id, target_id]},
+            ).result_set
+            for r in rows:
+                # First label wins for a (hypothetical) multi-labelled node;
+                # the terminal/operator guards below are label-independent.
+                found.setdefault(r[0], (_label, bool(r[1]), r[2], bool(r[3])))
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} does not exist or "
-                    f"is not a Point"
+                    f"is not an epistemic node (Point/Subject/Object/Event)"
                 )
-            is_op, status, outdated = found[pid]
+            _label, is_op, status, outdated = found[pid]
             if is_op:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is an operator — "
-                    f"direct edges connect plain Points only"
+                    f"direct edges connect plain epistemic nodes only"
                 )
             if status in TERMINAL_EXCLUDED_STATUSES or outdated:
                 marker = "outdated" if outdated and (
@@ -13217,6 +13248,11 @@ class TortoiseSDK:
                     f"point is rejected (terminal-point propagation hazard, "
                     f"#2422)"
                 )
+        # The resolved labels anchor the id-filtered edge queries (#7902) so
+        # the per-(label, id) index is kept — a bare `MATCH (a {id:$x})` would
+        # full-scan. See live.epistemic_label_queries.
+        label_src = found[source_id][0]
+        label_tgt = found[target_id][0]
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
         # edge per (src,tgt,type)). `created` is detected by a pre-count
@@ -13224,7 +13260,8 @@ class TortoiseSDK:
         # post-MERGE count always sees 1).
         rel_type = op_type  # IMPL / NAND
         pre = proj.g.query(
-            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}})-[r:{rel_type}]->"
+            f"(b:{label_tgt} {{id:$tgt}}) "
             f"RETURN count(r)",
             params={"src": source_id, "tgt": target_id},
         ).result_set
@@ -13235,7 +13272,7 @@ class TortoiseSDK:
         # existing nodes first, then MERGE the edge BETWEEN them — exactly one
         # edge per (src,tgt,type), no duplicate nodes.
         proj.g.query(
-            f"MATCH (a:Point {{id:$src}}), (b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}}), (b:{label_tgt} {{id:$tgt}}) "
             f"MERGE (a)-[r:{rel_type}]->(b)",
             params={"src": source_id, "tgt": target_id},
         )
@@ -13250,7 +13287,8 @@ class TortoiseSDK:
             attrs["batch_id"] = batch_id
         # SET r += $attrs (additive — never clobbers EP-managed msg_* fields)
         proj.g.query(
-            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}})-[r:{rel_type}]->"
+            f"(b:{label_tgt} {{id:$tgt}}) "
             f"SET r += $attrs",
             params={"src": source_id, "tgt": target_id, "attrs": attrs},
         )
@@ -13349,7 +13387,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status LIMIT 1",
@@ -13377,7 +13415,7 @@ class TortoiseSDK:
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets "
             f"WHERE {' AND '.join(pcond)} "
             f"RETURN o.id, o.status, targets",
