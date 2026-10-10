@@ -1981,8 +1981,11 @@ surfaces:
   # #5971: the e2e-live DETECTOR (graph-scripts/e2e_live_reconcile.py) and its
   # REMEDIATOR (graph-scripts/2146_e2e_live_orphan_cleanup.py) must scope the same
   # namespace — the guard shape, plus the residue the guard excludes. `core` owns
-  # it: `graph-scripts/` is a CORE fallback tree with no named SOURCE_PATTERN (the
-  # same placement argument as the test_2500_* pinner). Measured on this diff:
+  # it: neither file matches a SOURCE_PATTERNS entry, so both select `core` via
+  # the `graph-scripts/` fallback (the same placement argument as the test_2500_*
+  # pinner; `graph-scripts/` itself is a fallback tree, though individual files in
+  # it are named — e.g. `graph-scripts/backfill_embeddings.py` selects `eval`).
+  # Measured on this diff:
   # `select(["graph-scripts/2146_e2e_live_orphan_cleanup.py"])` returns the `core`
   # surface (431 files), which includes this file — the registration is what keeps
   # the guard CLASSIFIED (manifest-integrity) and selected on any `core`-matched

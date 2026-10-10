@@ -45,9 +45,11 @@ SAFETY MODEL
   * An append-only audit_events row is written per purged team BEFORE the teams
     delete (audit_events has no FK to teams — the delete trail survives).
 
-DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; live FK catalog):
+DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; FK catalog as of the
+2026-09-02 red window — #3543 later renamed `user_teams_user_id_fkey` to
+`org_memberships_user_id_fkey`):
   1. auth.users (remaining e2e-live accounts) via GoTrue Admin API — FK
-     `user_teams_user_id_fkey` (org_memberships.user_id → auth.users) ON
+     `org_memberships_user_id_fkey` (org_memberships.user_id → auth.users) ON
      DELETE CASCADE removes their memberships; auth-internal tables cascade.
   2. api_keys WHERE org_id IN (...) — has FK ON DELETE CASCADE, deleted
      explicitly for an auditable, non-cascade-dependent sequence.

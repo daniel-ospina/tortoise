@@ -10,7 +10,7 @@ tenant-provision/index.ts). The Supabase side is cleaned by
 the manifest.
 
 It resolves FALKORDB_CLOUD_URI → TORTOISE_DB_URI exactly like entrypoint.sh
-lines 89-93, and drops graphs with `select_graph(name).delete()` — the same
+lines 289-293, and drops graphs with `select_graph(name).delete()` — the same
 call the in-repo rollback paths use (tortoise/hosted_api.py — the
 mint-failure compensation calls).
 (NOTE: the production purge helper `_drop_org_graph_impl` in hosted_api.py

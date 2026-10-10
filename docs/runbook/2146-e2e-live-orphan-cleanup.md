@@ -183,14 +183,17 @@ legitimate prod teams (create_team/register_user mints).
 
 ## 4. Deletion semantics (evidence)
 
-Live FK catalog (`pg_constraint`, 2026-09-02):
+Live FK catalog (`pg_constraint`, 2026-09-02 — #3543 later renamed
+`user_teams_user_id_fkey` → `org_memberships_user_id_fkey` and
+`abuse_events_team_id_fkey` → `abuse_events_org_id_fkey`; the constraint names
+below are the ones live on that date):
 
 | Constraint | Def | Effect of deleting the parent |
 |---|---|---|
 | `user_teams_user_id_fkey` (on `org_memberships`) | `user_id → auth.users(id) ON DELETE CASCADE` | Deleting an auth user removes their membership rows (this is the ONLY cascade the monitor teardown relies on) |
 | `api_keys` FK | `org_id → teams(id) ON DELETE CASCADE` | Deleting the teams row removes its api_keys rows |
 | `invitations` FK | `org_id → teams(id) ON DELETE CASCADE` | same |
-| `abuse_events_org_id_fkey` | `org_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
+| `abuse_events_team_id_fkey` | `org_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
 | `org_memberships.org_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
 | `analytics_events` (0004) | **no FK + `analytics_events_immutable` trigger** | append-only (BEFORE UPDATE OR DELETE, statement-level, not role-gated) — survives by design; check-only in the script (a bare DELETE would fire the trigger and strand the purge). Operator decision required if rows are ever deleted |
 | `audit_events` | **no FK + immutable trigger** | the append-only trail — survives by design; never deleted |
@@ -243,7 +246,7 @@ these teams — only the per-team `team_<id>` knowledge graphs.
 **NOT reachable from this machine (the gap):**
 
 - **`FALKORDB_CLOUD_URI` value** (prod FalkorDB Cloud). Exists only as a gh
-  secret + Fly app secret (entrypoint.sh:91-93 resolves it to
+  secret + Fly app secret (entrypoint.sh:289-293 resolves it to
   `TORTOISE_DB_URI`). No cloud creds in any local `.env`; `redis-cli` not
   installed; `fly` CLI not installed. → **FalkorDB graph enumeration/deletion
   must run where the secret is injectable** (GH Actions `workflow_dispatch`,
@@ -359,11 +362,12 @@ while the detector kept filing. The script now:
 
 Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
-separate `--manifest`**: a recurrence enumerates no Guard-A
-(strict-shape) teams (its rows are usually all users, residue or not), so the
-clobber guard refuses to overwrite the historical
-`2146-e2e-live-orphans.manifest.json` (154 team rows) when the new enumeration
-has no Guard-A rows — that list is the FalkorDB companion's only drop record, and
+separate `--manifest`** in every case: the historical
+`2146-e2e-live-orphans.manifest.json` (154 team rows) is the FalkorDB companion's
+only drop record, and a recurrence whose rows are all users (residue or
+strict-shape) enumerates no Guard-A teams — the clobber guard refuses to
+overwrite the list with an empty one, but a recurrence that DOES mint teams
+would overwrite it. Enumerating to a separate manifest avoids both outcomes —
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
 do" on an empty list. The separate path keeps both:
 
@@ -395,7 +399,8 @@ uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
 #    rm -f "$RECUR" "$RECUR.dryrun"
 ```
 
-For a residue **team** (none today: every `teams` row in the namespace matched
+For a residue **team** (none today: every `organizations` row in the namespace
+matched
 the strict shape in the 2026-09-02 inventory), `--include-residue` also puts its
 `graph_name` in the manifest, so run the FalkorDB companion the same way. A
 residue **auth user** has no control-plane rows of its own (`users=4 teams=0` in

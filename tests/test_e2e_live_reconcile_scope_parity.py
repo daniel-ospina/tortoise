@@ -323,8 +323,9 @@ def test_residue_only_recurrence_uses_its_own_manifest_and_keeps_the_old_one(
     """A recurrence with no Guard-A (strict-shape) teams must NOT discard the prior
     FalkorDB drop list.
 
-    The live #5971 case is `users=4 teams=0`, so a recurrence enumerates an
-    EMPTY team list. The prior manifest's `teams` is the FalkorDB companion's
+    The live #5971 case is `users=4 teams=0`, so a recurrence whose rows are all
+    users enumerates an EMPTY team list. The prior manifest's `teams` is the
+    FalkorDB companion's
     only drop record (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]`
     and returns 0 on an empty list), so the clobber guard refuses — by design.
     The recurrence reaches its rows by enumerating to its OWN --manifest, which
