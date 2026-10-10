@@ -67,6 +67,24 @@ def _note_fallback_drop(reason: str) -> None:
         _logger.warning("AuditLogger: drop counter failed (%s): %s", reason, e)
 
 
+def _warned_whitespace_override() -> bool:
+    """Return True if the whitespace-only-knob warning was ALREADY emitted.
+
+    #7924 round-2 review P2: ``_fallback_file()`` runs on the audit hot path,
+    so an unconditional warning would emit one line per audit event for the
+    whole duration of a Postgres outage. Warn once per process, mirroring
+    ``pack_registry``'s warn-once treatment of ``TORTOISE_PACKS_DIR``.
+    """
+    global _WHITESPACE_OVERRIDE_WARNED
+    if _WHITESPACE_OVERRIDE_WARNED:
+        return True
+    _WHITESPACE_OVERRIDE_WARNED = True
+    return False
+
+
+_WHITESPACE_OVERRIDE_WARNED = False
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -166,7 +184,9 @@ class AuditLogger:
             base = self._fallback_dir
         else:
             override = (os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR") or "").strip()
-            if not override and os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR"):
+            if (not override
+                    and os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR")
+                    and not _warned_whitespace_override()):
                 _logger.warning(
                     "AuditLogger: TORTOISE_AUDIT_FALLBACK_DIR is whitespace-only — "
                     "treating it as unset and using the $HOME default")
@@ -358,11 +378,14 @@ class AuditLogger:
         try:
             path = self._fallback_file()
         except Exception as e:
-            # #7924 review P2: the READ leg counts the same root failure the
-            # write leg does — otherwise an unresolvable location keeps
-            # stranding already-pending events with no counter movement (the
-            # "log line nothing watches" gap this counter exists to close).
-            _note_fallback_drop("unresolvable_path")
+            # #7924 round-2 review P2 — this deliberately does NOT count.
+            # The counter's contract is per EVENT that reached no durable sink
+            # (``monitoring.record_audit_fallback_drop``); a resolution failure
+            # on the READ leg does not establish that. With Postgres healthy
+            # there may be nothing stranded at all, so counting here reports
+            # phantom drops on a fully-persisted path. The failure is still
+            # surfaced loudly — an ERROR is the right signal for "could not
+            # look", and the write leg still counts the drops that ARE events.
             _logger.error("AuditLogger: fallback path resolution failed: %s", e)
             return
         if not path.exists():
