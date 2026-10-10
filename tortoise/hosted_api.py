@@ -30047,7 +30047,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         if not state.get("github_legacy_backfill_done"):
             try:
                 totals["backfill_minted"] = indexer.backfill_legacy_closed(
-                    org_sdk._get_proj())
+                    org_sdk._get_proj(), sdk=org_sdk)
             except Exception as e:
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)

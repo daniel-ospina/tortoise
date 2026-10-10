@@ -30,6 +30,7 @@ from tests._embedded import _wipe_or
 from tests._github_mock import MockGitHubTransport, gh_issue, gh_pr
 from tortoise import github_map
 from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+from tortoise.log import EventLog
 
 
 @pytest.fixture(autouse=True)
@@ -1330,3 +1331,162 @@ def test_resolve_repos_404_raises_without_fallback(sdk):
     finally:
         loop.run_until_complete(indexer._close())
         loop.close()
+
+
+# ── #7951: the HIDDEN ``proj.apply`` door — indexer writes must journal ──────
+#
+# The sizing measurement on #7951 found a class the ``.query(``-based metric
+# cannot see: this indexer wrote Object/Subject/Event nodes through
+# ``proj.apply(...)`` — the projection's REPLAY fold — with ZERO journal calls.
+# ``proj.apply`` is what ``rebuild_all``/``recover_from_log`` drive once per
+# journal record, so the write left no truth carrier and a replay LOST every
+# node the indexer wrote.
+#
+# RED before the fix (this test only, on origin/main):
+#   AssertionError: the indexer's Object write did not reach the journal — a
+#   replay of the journal LOST it (hidden proj.apply door, #7951)
+#   assert 0 == 1
+#   … while the journal was literally ``[]``.
+#
+# GREEN after: the write goes through ``TortoiseSDK._apply_and_journal`` — the
+# live twin of the replay fold (apply, then journal the same record) — and a
+# POLL RE-RUN does not grow the journal (the first-registration gate
+# ``_create_entity`` uses).
+
+_JDOOR_OID = "github-issue-acme/repo1-1"
+_JDOOR_EID = "github-issue-acme/repo1-1-created"
+_JDOOR_SID = "github-user:user1"
+
+
+def _jdoor_sdk(tmp_path):
+    """A real embedded SDK whose JSONL truth journal is configured."""
+    from tortoise.sdk import TortoiseSDK
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "hidden-door.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    return sdk, events
+
+
+def _jdoor_one(proj, cypher: str, **params):
+    rows = proj.g.query(cypher, params=params or None).result_set
+    return rows[0][0] if rows else 0
+
+
+def _jdoor_object_count(proj, oid: str) -> int:
+    return _jdoor_one(proj, "MATCH (o:Object {id:$id}) RETURN count(o)", id=oid)
+
+
+def _jdoor_event_count(proj, eid: str) -> int:
+    return _jdoor_one(proj, "MATCH (e:Event {eventId:$id}) RETURN count(e)", id=eid)
+
+
+def _jdoor_journal(events) -> list[dict]:
+    return EventLog(str(events / "events.jsonl")).read_all()
+
+
+def _jdoor_count(records, type_: str) -> int:
+    return sum(1 for e in records if e.get("type") == type_)
+
+
+def test_7951_indexer_writes_reach_journal_and_survive_replay(tmp_path):
+    """DELIVERABLE — a write through the hidden door lands in the journal and
+    survives ``rebuild_all`` (``derived = replay(journal)`` holds again)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+
+        # (1) the door wrote the live graph …
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1
+        assert _jdoor_event_count(proj, _JDOOR_EID) == 1
+        assert _jdoor_one(proj, "MATCH (s:Subject {id:$id}) RETURN count(s)",
+                          id=_JDOOR_SID) == 1
+
+        # (2) … and the journal now carries the record of it (the fix).
+        journal = _jdoor_journal(events)
+        assert _jdoor_count(journal, "ObjectRegistered") == 1, (
+            "the indexer's Object write did not reach the journal — a replay "
+            "of the journal would LOSE it (hidden proj.apply door, #7951)"
+        )
+        assert _jdoor_count(journal, "SubjectAdded") == 1
+        assert _jdoor_count(journal, "EventRecorded") == 1
+
+        # (3) replay reproduces every door-written node + its folded kind.
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the indexer's Object write did not survive replay (#7951)")
+        assert _jdoor_event_count(proj, _JDOOR_EID) == 1, (
+            "the indexer's Event write did not survive replay (#7951)")
+        assert _jdoor_one(proj, "MATCH (s:Subject {id:$id}) RETURN count(s)",
+                          id=_JDOOR_SID) == 1, (
+            "the indexer's Subject write did not survive replay (#7951)")
+        assert _jdoor_one(
+            proj, "MATCH (e:Event {eventId:$id}) RETURN e.eventKind",
+            id=_JDOOR_EID) == "github.issue.open"
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_poll_rerun_does_not_grow_the_journal(tmp_path):
+    """The first-registration gate: a re-run of an already-indexed issue
+    refreshes the live graph without appending the journal again."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        first = _jdoor_journal(events)
+        counts = {t: _jdoor_count(first, t)
+                  for t in ("ObjectRegistered", "SubjectAdded", "EventRecorded")}
+
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        second = _jdoor_journal(events)
+        for type_, n in counts.items():
+            assert _jdoor_count(second, type_) == n, (
+                f"a poll re-run appended a duplicate {type_} (#7951: the "
+                f"journal must not grow once per run)")
+        assert _jdoor_object_count(sdk._get_proj(), _JDOOR_OID) == 1
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_pr_event_reaches_the_journal(tmp_path):
+    """The PR arm of the same door: a genuinely-minted PR Event is journaled;
+    a re-run that merely refreshes it is not."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        pr = gh_pr(7)
+        _run(_indexer(MockGitHubTransport(issues=[pr])), sdk)
+        pid = "github-pr-acme/repo1-7"
+        assert _jdoor_event_count(sdk._get_proj(), pid) == 1
+        journal = _jdoor_journal(events)
+        assert any(e.get("type") == "EventRecorded"
+                   and e.get("eventId") == pid for e in journal), (
+            "the PR Event write bypassed the journal (#7951)")
+        n = _jdoor_count(journal, "EventRecorded")
+        _run(_indexer(MockGitHubTransport(issues=[pr])), sdk)  # refresh only
+        assert _jdoor_count(_jdoor_journal(events), "EventRecorded") == n
+        assert _jdoor_event_count(sdk._get_proj(), pid) == 1
+    finally:
+        sdk.close()
+
+
+def test_7951_sdk_create_entity_survives_replay(tmp_path):
+    """CONTROL — the replay machinery preserves an SDK-door write, so a red
+    delivery test is the DOOR and not a ``rebuild_all`` artifact."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        sdk.create_entity("object", "control-object",
+                          objectKind="core:strategy", is_episodic=False)
+        assert _jdoor_one(proj,
+                          "MATCH (o:Object {name:$n}) RETURN count(o)",
+                          n="control-object") == 1
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_one(proj,
+                          "MATCH (o:Object {name:$n}) RETURN count(o)",
+                          n="control-object") == 1, (
+            "the control write through the SDK door did not survive replay — "
+            "rebuild_all itself is broken here, not the hidden door"
+        )
+    finally:
+        sdk.close()

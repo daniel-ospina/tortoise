@@ -2559,6 +2559,32 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
 
+# #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
+# from an already-built event dict must not carry its own copy of these — a
+# caller prop of the same name would shadow the envelope on replay (see
+# ``_emit_event``'s ``event.update(extra)``). Kept as one tuple so the live
+# entity doors cannot drift from each other.
+_JOURNAL_ENVELOPE_KEYS = (
+    "type", "id", "point", "payload",
+    "event_id", "ts", "initiated_by", "projection_version",
+)
+
+#: The canonical record types a live entity door may journal.
+_JOURNALED_ENTITY_EVENT_TYPES = (
+    "ObjectRegistered", "SubjectAdded", "EventRecorded",
+)
+
+
+def _journal_record_payload(event: dict) -> dict:
+    """``event``'s payload minus the keys ``_emit_event`` owns.
+
+    THE single source of the rule every entity-door journal call uses
+    (``_create_entity`` and ``_journal_entity_event``), so live and replay
+    fold a byte-identical record — ``derived = replay(journal)``.
+    """
+    return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
+
+
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
 # _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
 # NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
@@ -5330,6 +5356,53 @@ class TortoiseSDK:
                 "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
+
+    def _journal_entity_event(self, event: dict) -> None:
+        """Journal an ALREADY-APPLIED canonical entity record (#7951).
+
+        The emission half of :meth:`_apply_and_journal`; split out so a
+        caller that must apply through a different path (or that has already
+        applied) can still record. No-ops for a non-entity record type, a
+        missing id, or an unconfigured journal — ``_emit_event`` owns the
+        last case.
+
+        ⛔ This is for a LIVE write. A REPLAY engine must never call it: the
+        record being folded came FROM the journal, so journalling it again
+        would grow the log on every rebuild and (worse) make replay
+        non-idempotent at the log level.
+        """
+        type_ = event.get("type")
+        if type_ not in _JOURNALED_ENTITY_EVENT_TYPES:
+            return
+        id_ = event.get("id") or event.get("eventId")
+        if id_ is None:
+            return
+        self._emit_event(type_, id=id_, **_journal_record_payload(event))
+
+    def _apply_and_journal(self, proj, event: dict, *,
+                           journal: bool = True) -> None:
+        """THE live-write door for a pre-built Object/Subject/Event record.
+
+        ``proj.apply`` is the fold the REPLAY engines drive — ``rebuild_all``
+        and ``recover_from_log`` call it once per journal record — so it must
+        NEVER journal: a replayed record would journal itself and double-apply
+        (the constraint the hidden-door class on #7951 exposes). This is that
+        fold's LIVE twin. A caller that holds a record it means to PERSIST
+        comes through here instead of calling ``proj.apply`` directly.
+
+        Apply FIRST, then journal — the ``_create_entity`` ordering. The
+        reverse (journal-first, the ``EventAPI._emit`` ordering) leaves a
+        journal line whose live write never happened, i.e. a PHANTOM node a
+        replay would materialise; a failed append instead stays visible via
+        ``_emit_event``'s ERROR log + ``monitoring.record_journal_write_failure``.
+
+        ``journal=False`` applies WITHOUT journalling: for a replay-safe
+        RE-application of an already-registered record (the GitHub indexer's
+        poll re-runs), which must not grow the journal once per run.
+        """
+        proj.apply(event)
+        if journal:
+            self._journal_entity_event(event)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -22314,10 +22387,7 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -22340,10 +22410,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Subject" and _journal_subject_registration:
             # (#2295) Subject mirror of the ObjectRegistered block above —
@@ -22361,10 +22428,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the

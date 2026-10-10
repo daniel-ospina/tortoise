@@ -627,6 +627,23 @@ class GitHubIndexer:
             params={"eid": event_id}).result_set
         return bool(rows)
 
+    @staticmethod
+    def _entity_registered(proj, label: str, id_val: str) -> bool:
+        """True when a canonical entity node (Object/Subject) with this id
+        already exists (#7951).
+
+        Mirrors the existence probe ``TortoiseSDK._create_entity`` uses for
+        its probe-gated first registration: the journal carries ONE
+        ``ObjectRegistered``/``SubjectAdded`` per MINT, not one per poll. The
+        label is interpolated because Cypher cannot parameterise a node
+        label; it is a module-local literal at every call site (never caller
+        input), so there is no injection surface.
+        """
+        rows = proj.g.query(
+            f"MATCH (n:{label} {{id:$id}}) RETURN n.id",
+            params={"id": id_val}).result_set
+        return bool(rows)
+
     def _next_transition_id(self, proj, base_id: str) -> str:
         """Monotonic transition eventId (P1-3, PR #1792).
 
@@ -679,11 +696,21 @@ class GitHubIndexer:
         # status='live', which would otherwise be misread as a prior open
         # state and mint a spurious `-closed` on first ingest).
         prev_state = self._object_state_to_issue_state(proj, obj_id)
-        proj.apply(obj)
+        # #7951: this Object is written through the SDK's live entity door —
+        # it journals on FIRST registration and applies the same record on
+        # every re-run (journal=False), so a poll never grows the log and a
+        # replay can still reproduce the node. Before this, the write went
+        # straight through ``proj.apply`` with ZERO journal calls, so
+        # ``derived = replay(journal)`` LOST it.
+        sdk._apply_and_journal(
+            proj, obj,
+            journal=not self._entity_registered(proj, "Object", obj_id))
 
         subjects, about_ids = github_map.issue_to_subjects(issue)
         for subj in subjects:
-            proj.apply(subj)
+            sdk._apply_and_journal(
+                proj, subj,
+                journal=not self._entity_registered(proj, "Subject", subj["id"]))
         for sid in about_ids:
             proj.g.query(
                 "MATCH (o:Object {id:$oid}) "
@@ -703,7 +730,7 @@ class GitHubIndexer:
         created = github_map.issue_to_event(issue, repo, previous_state=None)
         if (created is not None
                 and not self._event_exists(proj, created["eventId"])):
-            proj.apply(created)
+            sdk._apply_and_journal(proj, created)
             stats["events_minted"] += 1  # genuine mint only (P2)
         # Transition events — ONLY on a real state change (diff against the
         # persisted Object.status projection, never the fetch window).
@@ -715,7 +742,7 @@ class GitHubIndexer:
             if trans is not None:
                 trans["eventId"] = self._next_transition_id(
                     proj, trans["eventId"])
-                proj.apply(trans)
+                sdk._apply_and_journal(proj, trans)
                 stats["events_minted"] += 1
 
         # #1844 OBJECT-ONLY: NO statement write. The 1:1 issue↔statement
@@ -821,20 +848,23 @@ class GitHubIndexer:
                     "oid": f"github-issue-{repo}-{number}"},
         )
 
-    def _project_pr(self, proj, repo: str, pr: dict) -> dict:
+    def _project_pr(self, sdk, proj, repo: str, pr: dict) -> dict:
         ev = github_map.pr_to_event(pr, repo)
         if ev is None:
             return {"events_minted": 0}
         # PR events share one deterministic id — the MERGE updates the node
         # in place (state changes keep it current), but the count must be
         # honest: events_minted counts GENUINE mints only (P2, PR #1792).
+        # #7951: the node write goes through the SDK's live entity door, but
+        # only a GENUINE mint is journaled — a re-run that merely refreshes
+        # an existing PR Event must not grow the journal on every poll.
         minted = 0 if self._event_exists(proj, ev["eventId"]) else 1
-        proj.apply(ev)
+        sdk._apply_and_journal(proj, ev, journal=bool(minted))
         return {"events_minted": minted}
 
     # ── Backfill (T1-P1 + T2-P3) ────────────────────────────────────
 
-    def backfill_legacy_closed(self, proj) -> int:
+    def backfill_legacy_closed(self, proj, *, sdk=None) -> int:
         """ONE-TIME legacy `-closed` backfill.
 
         Scans PRE-EXISTING ``-created`` Events that carry a closed kind
@@ -843,6 +873,12 @@ class GitHubIndexer:
         The caller gates this on the ``github_legacy_backfill_done`` marker
         (absent ⇒ run once, then set) and must call it BEFORE minting fresh
         events (no double-mint on fresh first-runs — T2-P3).
+
+        ``sdk``: the #7951 live entity door. When given, each minted
+        ``-closed`` Event is journaled (a GENUINE one-time mint, so nothing is
+        gated); without it the write falls back to the bare ``proj.apply`` the
+        pre-#7951 signature exposed, preserving that call shape for existing
+        callers.
         """
         # NOTE: no `NOT EXISTS { MATCH ... }` subquery — FalkorDBLite
         # (embedded) rejects EXISTS blocks; the sibling check runs in
@@ -865,7 +901,7 @@ class GitHubIndexer:
             closed_id = str(event_id).replace("-created", "-closed")
             if closed_id in existing:
                 continue  # sibling already minted (idempotent)
-            proj.apply({
+            record = {
                 "type": "EventRecorded",
                 "eventId": closed_id,
                 "eventKind": "github.issue.closed",
@@ -876,7 +912,13 @@ class GitHubIndexer:
                 "source": source or "",
                 "sourceKind": "github_issue",
                 "participants": [],
-            })
+            }
+            # #7951: a mint here is genuine (sibling-gated), so it always
+            # journals when the live door is available.
+            if sdk is not None:
+                sdk._apply_and_journal(proj, record)
+            else:
+                proj.apply(record)
             minted += 1
         return minted
 
@@ -948,7 +990,7 @@ class GitHubIndexer:
                     raise
             n = github_map._norm_issue(item)
             if "pull_request" in item:
-                stats["events_minted"] += self._project_pr(proj, repo, item)["events_minted"]
+                stats["events_minted"] += self._project_pr(sdk, proj, repo, item)["events_minted"]
             else:
                 try:
                     s_stats = self._project_issue(sdk, proj, repo, item)
