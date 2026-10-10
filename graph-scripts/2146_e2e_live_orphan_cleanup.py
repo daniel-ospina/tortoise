@@ -127,8 +127,10 @@ Usage (dry-run first, then execute):
 
 Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
 usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
---manifest: the historical #2146 manifest is the FalkorDB companion's only
-record of 154 graph targets. The clobber guard refuses to overwrite a manifest
+--manifest: the default #2146 manifest (154 window teams) is the FalkorDB
+companion's drop record for them — the executed red-window run's own record is
+the committed graph-scripts/2146-orphan-manifest.json (222 graph entries). The
+clobber guard refuses to overwrite a manifest
 that holds team graph names when the new enumeration found no Guard-A
 (strict-shape) teams — so a users-only recurrence, and a residue team promoted
 via --include-residue, are refused rather than silently discarding the list.

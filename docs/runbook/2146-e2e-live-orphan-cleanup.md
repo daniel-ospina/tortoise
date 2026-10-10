@@ -28,9 +28,11 @@ aboutObjects: tortoise
 > runbook's historical window and may sit off the strict email guard shape, so
 > the default procedure below finds nothing in its DELETE set — see **§6.1** for
 > `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 remain the record of the
-> original red window; §2's table, Q1, Q4 and the §6 verify query carry the #3543
-> `teams` → `organizations` rename, while §1, §2's sample minted row, §4 and §6's
-> delete-order prose keep the 2026-09-02 `teams` spelling as the historical record.
+> original red window, and their identifiers mix the two eras: §2's table, Q1, Q3,
+> Q4 and the §6 verify query carry the #3543 `teams` → `organizations` /
+> `team_id` → `org_id` rename, while §1, §2's sample minted row and §6's
+> delete-order prose keep the 2026-09-02 `teams` spelling, and §4 declares its
+> own mix in its label.
 
 ---
 
@@ -365,12 +367,14 @@ while the detector kept filing. The script now:
 
 Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
-separate `--manifest`** in every case: the historical
+separate `--manifest`** in every case: the default
 `2146-e2e-live-orphans.manifest.json` (154 team rows) is the FalkorDB companion's
-only drop record. The clobber guard refuses to overwrite it whenever the new
-enumeration found no Guard-A (strict-shape) teams — a promoted residue team
-still refuses; only a recurrence that mints Guard-A teams would overwrite it.
-Using a separate manifest is therefore unconditional —
+only drop record for those teams (the 2026-09-03 red-window run's own record is
+the committed `graph-scripts/2146-orphan-manifest.json`, 222 graph entries). The
+clobber guard refuses to overwrite a manifest whenever the new enumeration found
+no Guard-A (strict-shape) teams — a promoted residue team still refuses; only a
+recurrence that mints Guard-A teams would overwrite it. Using a separate manifest
+is therefore unconditional —
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
 do" on an empty list. The separate path keeps both:
 
