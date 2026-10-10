@@ -189,3 +189,49 @@ def test_build_rows_is_deterministic():
     census = fcd.load_census()
     outcomes = fcd.load_outcomes()
     assert fcd.build_rows(census, outcomes) == fcd.build_rows(census, outcomes)
+
+
+def test_resolution_readout_from_arm_verdict():
+    """The #2886 wiring read-out: a committed outcome carrying the arm's
+    verdict reports ``resolved`` when a value was published and
+    ``abstained:<reason>`` when the owner declined — never guessing. An
+    outcome without a verdict is ``unmeasured`` (the arm was OFF)."""
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {"value": 30,
+                                                    "reason": None}}) \
+        == "resolved"
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "value": None, "reason": "no_anchors"}}) == "abstained:no_anchors"
+    assert fcd.resolution_for({"qid": "x"}) == "unmeasured"
+    # A malformed verdict (not a mapping) is not a resolution.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": "garbage"}) == "unmeasured"
+    # A span-less TOTAL publishes the module's documented zero-span sum
+    # (value 0, reason None) — the adapter's "span honesty" contract says that
+    # is NOT a measured sum, so the read-out must not credit it as resolved.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": 0, "reason": None,
+            "span_days": 0}}) == "abstained:no_span_bounds"
+    # ... but a TOTAL that rode real spans IS a measured resolution.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": 5, "reason": None,
+            "span_days": 14}}) == "resolved"
+    # A TOTAL that abstained for an unrelated cause keeps the owner's reason —
+    # the span-less-TOTAL arm must not overwrite it.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": None, "reason": "no_events",
+            "span_days": 0}}) == "abstained:no_events"
+
+
+def test_summary_counts_deterministic_resolution():
+    """The summary surfaces the arm read-out; the committed (arm-OFF) rows
+    are all ``unmeasured`` and the split is not invented."""
+    rows = fcd.build_rows(fcd.load_census(), fcd.load_outcomes())
+    summary = fcd.summarize(rows)
+    assert summary["deterministic_resolution"] == {
+        "resolved": 0, "abstained": 0, "unmeasured": 12}
+    assert all(r["deterministic_resolution"] == "unmeasured" for r in rows)
