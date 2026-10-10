@@ -530,25 +530,50 @@ class TestClosedVocab:
         # the payload, which is what the calibration loop consumes.)
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
-        sdk = object.__new__(TortoiseSDK)
+
         # #6869: base_url/api_key govern the POST only — they do NOT stop the
         # ambient BYOK model from being built and called. Passing them WITHOUT
         # extractor_model (as this test originally did) let extraction reach
         # the real vendor on whatever key the shell held; an explicit
-        # extractor_model is what makes the call hermetic.
-        out = sdk.commit_session(
-            summary={"session": {"summary": "S"},
-                     "state": [{"name": "artifact", "objectKind": "design-artifact"}],
-                     "decisions": [], "logic": [], "issues": []},
-            extractor_model=MockModel(),
-            mode="warn", base_url="http://unused", api_key="k")
-        # warn mode does NOT block the payload on the vocab (fail-closed
-        # would return ok=False with an objectKind error). The POST is
-        # unmocked here, so the result may carry a network error — the
-        # payload must still be Layer-1-valid (what the loop consumes).
-        assert "payload" in out
+        # extractor_model is what makes the call hermetic. Its stream carries
+        # the non-vocab `design-artifact` entity so the PAYLOAD actually
+        # exercises the kind this test is about — the default MockModel stream
+        # (`core:goal`) would silently drop it from the payload.
+        non_vocab_stream = {
+            "entities": [{"name": "artifact", "kind": "design-artifact"}],
+            "events": [{"id": "ev_1", "eventKind": "decision",
+                        "content": "artifact decision",
+                        "about_entities": ["artifact"]}],
+            "points": [], "operators": [],
+        }
+
+        def _commit(mode):
+            sdk = object.__new__(TortoiseSDK)
+            return sdk.commit_session(
+                summary={"session": {"summary": "S"},
+                         "state": [{"name": "artifact",
+                                    "objectKind": "design-artifact"}],
+                         "decisions": [], "logic": [], "issues": []},
+                extractor_model=MockModel(stream=dict(non_vocab_stream)),
+                mode=mode, base_url="http://unused", api_key="k")
+
+        # warn mode: the non-vocab kind does NOT set an objectKind error, so
+        # the payload is produced and the kind survives into it. Asserting the
+        # ABSENT error is what discriminates warn from fail-closed: `assert
+        # "payload" in out` + `res.ok` alone pass in BOTH modes (the vacuity
+        # this test carried — the POST error path returns a payload too).
+        out = _commit("warn")
+        assert not any("objectKind" in e for e in out.get("errors") or []), out
+        assert "payload" in out, out
+        assert any(e.get("kind") == "design-artifact"
+                   for e in out["payload"]["entities"]), out
         res, _ = validate_payload_dict(out["payload"])
         assert res.ok, res.errors
+
+        # The SAME window under fail-closed IS refused with the objectKind
+        # error — the discriminator above has power only because this differs.
+        closed = _commit("fail-closed")
+        assert any("objectKind" in e for e in closed.get("errors") or []), closed
 
 
 class TestModelAdapterBounds:

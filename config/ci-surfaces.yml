@@ -2206,6 +2206,10 @@ surfaces:
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
   - test_client_surface.py
+  # #6869: `commit_session(base_url=..., api_key=...)` configures the Tortoise
+  # API POST only — this pins that it does NOT select the extraction provider
+  # (warning matrix + docstring contract); sdk surface owns tortoise/sdk.py.
+  - test_commit_session_extraction_provider_6869.py
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
