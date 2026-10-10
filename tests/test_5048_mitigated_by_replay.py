@@ -52,6 +52,16 @@ MUTATIONS THAT MUST RED:
 - let the strength test raise instead of refusing → one hand-edited record
   aborts ``rebuild_all`` after the wipe and leaves the graph with NO edges (see
   the ``out-of-float-range`` parameter);
+- drop the BAND from the strength test (keep only a type check) → a payload
+  outside the writer's own ``0 <= strength <= 1`` band mints the edge and
+  dampens at the read-clamped band edge nobody asked for (see the
+  ``above-band`` / ``below-band`` / ``nan`` parameters);
+- drop ``AND s.is_operator = true`` from the MERGE → a payload naming a
+  NON-operator origin mints ``mitigated_by`` and violates ONTOLOGY §3.9's hard
+  rule (#2315) — the violation ``mitigate_operator`` refuses on the SDK path
+  and this fold, as the predicate's only other writer, must refuse too (see
+  ``test_non_operator_origin_gains_no_mitigated_by``, whose sibling
+  ``…from_an_operator_origin_mints_the_edge`` is its non-vacuity control);
 - drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
   identity parity assertion fails;
 - drop the ``mitigation_strength`` fold in ``_revise_point`` → the
@@ -365,6 +375,12 @@ class TestMitigatedBySurvivesRebuild:
         # letting the conversion raise) turned one hand-edited record into an
         # abort of the whole rebuild AFTER the wipe
         pytest.param(10 ** 400, id="out-of-float-range"),
+        # out of the writer's band — ``mitigate_operator`` raises on these, so
+        # admitting one would authorise a dampening at the read-clamped band
+        # edge that no record ever asked for
+        pytest.param(5.0, id="above-band"),
+        pytest.param(-0.5, id="below-band"),
+        pytest.param(float("nan"), id="nan"),
     ])
     def test_payload_without_a_usable_strength_gains_no_edge(self, tmp_path,
                                                              strength):
@@ -375,8 +391,9 @@ class TestMitigatedBySurvivesRebuild:
         a low-level producer can attach an ``operator`` descriptor to a
         non-operator point. That is not a record any live writer produced — and
         neither is one whose ``mitigation_strength`` is merely PRESENT but
-        unusable (``mitigate_operator`` writes a finite real; the passthrough
-        drops a map/list, a non-numeric value poisons every weight read, and a
+        unusable (``mitigate_operator`` writes a finite real IN ITS BAND; the
+        passthrough drops a map/list, a non-numeric value poisons every weight
+        read, an out-of-band value is one the writer itself rejects, and a
         value past float range must not be allowed to abort the rebuild).
         Minting ``mitigated_by`` for any of them dampens the operator by the
         fallback strength (measured 1.0 -> 0.7) — a silent belief change.
@@ -405,6 +422,86 @@ class TestMitigatedBySurvivesRebuild:
             assert compute_operator_weight(
                 sdk._get_proj(), op_id) == pytest.approx(before), (
                 "a non-mitigation payload moved the operator's resolved weight"
+            )
+        finally:
+            sdk.close()
+
+    def test_non_operator_origin_gains_no_mitigated_by(self, tmp_path):
+        """ONTOLOGY §3.9's hard rule: the edge originates from an OPERATOR.
+
+        ``(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`` — a
+        mitigation's ``operator`` descriptor names the operator it damps, and
+        ``mitigate_operator`` validates that side too (``Point … is not an
+        operator``). ``_create_edges`` is the predicate's only OTHER writer, so
+        a payload naming a non-operator ``src`` must be refused there or the
+        violation the SDK guards against walks in through the low-level
+        ``EventAPI.add_point(**fields)`` door — an edge ONTOLOGY itself calls
+        dead structure (no EP factor addresses a non-operator).
+
+        The sibling ``…from_an_operator_origin_mints_the_edge`` is the
+        non-vacuity control: the SAME payload with an operator ``src`` does
+        mint the edge, so its absence here is the origin predicate's doing.
+        """
+        sdk, _events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            mitigation = sdk.create_point("statement", "the mitigation",
+                                          status="live", dedup=False)["id"]
+            bystander = sdk.create_point("statement", "not an operator",
+                                         status="live", dedup=False)["id"]
+            assert _point_identity(sdk, bystander) == (False, None), (
+                "the fixture must name a NON-operator as the origin"
+            )
+
+            sdk._get_proj()._upsert_point_edges({
+                "id": mitigation, "content": "the mitigation",
+                "is_operator": False, "mitigation_strength": 0.5,
+                "operator": {"op_type": "IMPL", "inputs": [bystander]},
+            })
+            assert _all_mitigated_by(sdk) == [], (
+                "a non-operator origin minted a mitigated_by edge"
+            )
+            assert compute_operator_weight(
+                sdk._get_proj(), op_id) == pytest.approx(BASE_WEIGHT), (
+                "a payload naming a non-operator origin dampened an operator"
+            )
+        finally:
+            sdk.close()
+
+    def test_mitigation_payload_from_an_operator_origin_mints_the_edge(
+            self, tmp_path):
+        """Non-vacuity control for the origin predicate: an operator ``src``.
+
+        A hand-built payload (the same shape as the refused one, with an
+        ``is_operator:true`` origin) MUST still mint the edge — otherwise the
+        predicate would be refusing the honest record rather than the
+        malformed one, and ``test_non_operator_origin_gains_no_mitigated_by``
+        would pass for the wrong reason.
+        """
+        sdk, _events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            mitigation = sdk.create_point("statement", "the mitigation",
+                                          status="live", dedup=False)["id"]
+            assert _point_identity(sdk, op_id) == (True, "IMPL"), (
+                "the fixture's origin must be an operator"
+            )
+
+            sdk._get_proj()._upsert_point_edges({
+                "id": mitigation, "content": "the mitigation",
+                "is_operator": False, "mitigation_strength": 0.5,
+                "operator": {"op_type": "IMPL", "inputs": [op_id]},
+            })
+            assert _all_mitigated_by(sdk) == [(op_id, mitigation)], (
+                "an operator origin must still mint the mitigated_by edge"
+            )
+            # The weight MOVES (the minted edge is read) even though the node
+            # itself never received ``mitigation_strength`` here — this call
+            # writes only the EDGES, so the read uses the documented fallback.
+            # The exact per-strength value is pinned by the rebuild tests.
+            assert compute_operator_weight(
+                sdk._get_proj(), op_id) < BASE_WEIGHT, (
+                "the minted edge did not dampen the operator it names"
             )
         finally:
             sdk.close()

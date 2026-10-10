@@ -684,12 +684,29 @@ class _EdgeHandlers:
                 # (the live writer hardcodes IMPL); the identity pins whether
                 # its source is a mitigation. `o` is the mitigation Point, `s`
                 # the operator it damps — matching the live writer's
-                # direction.
+                # direction, and ONTOLOGY §3.9's ``(op)-[:mitigated_by]->(m)``.
+                #
+                # ``s.is_operator = true`` is that section's HARD RULE (#2315,
+                # pinned 2026-09-07): the edge originates ONLY from an
+                # ``is_operator:true`` Point, and ``mitigate_operator`` was its
+                # only writer until this fold became the second one — so the
+                # fold must uphold what its co-writer enforces, or
+                # ``EventAPI.add_point(**fields)`` could name any ``src``.
+                # Measured safe rather than assumed: the origin's flag survives
+                # the rebuild on BOTH the SDK path and the generic
+                # ``api.py::_point`` ingest path (which journals no
+                # ``is_operator`` at all — the promotion restores it), so no
+                # real mitigation edge is dropped. The refusal only ever fires
+                # on the same paths it fires for live: a hand-crafted ``src``
+                # that is not an operator, or a `#329` stub (``SET
+                # s.is_operator=false``) for an operator absent from the graph
+                # — both of which ``mitigate_operator`` itself refuses.
                 if (rel_type == "IMPL" and is_non_operator_payload(p)
                         and has_usable_mitigation_strength(p)):
                     self.g.query(
                         "MATCH (o:Point {id:$oid}), (s) "
                         "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                        "AND s.is_operator = true "
                         "MERGE (s)-[:mitigated_by]->(o)",
                         params={"oid": p["id"], "sid": src},
                     )

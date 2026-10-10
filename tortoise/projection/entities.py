@@ -77,29 +77,36 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
       strength and a fabricated edge dampens at the fallback anyway;
     * a non-numeric value is persisted, and then makes
       ``weights.compute_operator_weight`` RAISE on every read of that operator.
+    * an out-of-band value (``-0.5``, ``5.0``, ``2**62``) is refused by the
+      writer's own band check (``sdk.mitigate_operator``: ``if not 0 <=
+      strength <= 1: raise ValueError``), so admitting it would authorise a
+      dampening at the read-clamped band edge that no record ever asked for —
+      a belief change with no writer behind it.
 
-    A ``bool`` IS accepted on purpose: ``mitigate_operator`` takes one (the
-    range check ``0 <= strength <= 1`` passes for ``False``/``True``),
+    That band IS the writer's own accepted domain, and the fold mirrors it
+    exactly. A ``bool`` is accepted on purpose, because the writer accepts one:
+    ``mitigate_operator``'s range check passes for ``False``/``True``,
     ``weights.mitigation_dampening_factor`` clamps it to the band edge, and the
     node stores it — so refusing it here would silently drop a REAL
     mitigation's edge (measured ``w_eff`` 0.9 live -> 1.0 rebuilt for ``False``).
     Rejecting it belongs at the writer, as its own decision.
 
-    Both a rejection and an acceptance must therefore be safe for a
-    corrupt/hand-edited journal, which is the input this whole fold exists to
-    tolerate: a value ``math.isfinite`` cannot even CONVERT (an int past float
-    range raises ``OverflowError``) is refused, never allowed to abort the
-    rebuild after the wipe. No live writer produced the refused shapes; a
-    legacy strength-less mitigation keeps the pre-#5048 behaviour (no
-    reconstructed edge) rather than acquiring a fabricated one.
+    A rejection must also be safe for a corrupt/hand-edited journal, which is
+    the input this whole fold exists to tolerate: refusing never raises, so one
+    hand-edited record can never abort the rebuild after the wipe. Refusal is
+    fail-safe — no edge, no fabricated dampening — so a hand-edited record
+    keeps the PRE-#5048 behaviour (no reconstructed edge) rather than acquiring
+    a dampening no writer asked for.
     """
     value = payload.get("mitigation_strength")
     if not isinstance(value, (int, float)):
         return False
-    try:
-        return math.isfinite(value)
-    except (OverflowError, TypeError, ValueError):
-        return False
+    # The band check IS the finiteness check, and it must come FIRST. A
+    # comparison on an ``int``/``float`` never raises and never converts: a
+    # value past float range (``10**400``) is refused by the comparison itself
+    # — no ``OverflowError`` — and ``nan``/``inf`` fail it too. Calling
+    # ``math.isfinite`` here would be a second, unreachable opinion.
+    return 0 <= value <= 1
 
 
 def _terminal_object_statuses() -> list:
