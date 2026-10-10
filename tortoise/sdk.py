@@ -5194,12 +5194,16 @@ class TortoiseSDK:
             if stamp_journal_embedding is not None:
                 clean = stamp_journal_embedding(
                     clean, creating=type_ in ("PointAdded", "OperatorAdded"))
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # #5089: NO content synthesis here. Operators store no 'content' as
+            # a node property, so synthesizing the `IMPL(inputs)` label put a
+            # value in the record that NO writer ever stored — and the replay
+            # persisted it, so a rebuilt operator carried a label live never had.
+            # What the live SDK door actually produces is an omitted key; the
+            # replay writer's `_WRITER_DEFAULTS` empty string is the journal-side
+            # asymmetry `consistency` already models for operators, and this no
+            # longer fabricates a label on top of it. (The display label is
+            # derived at the point of display, `api._point`; nothing reads an
+            # operator's content back off the node.)
             # Similarly, operators may lack 'pointKind' — default to empty.
             if "pointKind" not in clean:
                 clean["pointKind"] = ""
