@@ -183,10 +183,13 @@ legitimate prod teams (create_team/register_user mints).
 
 ## 4. Deletion semantics (evidence)
 
-Live FK catalog (`pg_constraint`, 2026-09-02 — #3543 later renamed
-`user_teams_user_id_fkey` → `org_memberships_user_id_fkey` and
-`abuse_events_team_id_fkey` → `abuse_events_org_id_fkey`; the constraint names
-below are the ones live on that date):
+Live FK catalog (`pg_constraint`). Constraint **names** are the ones live on
+2026-09-02 (#3543 later renamed `user_teams_user_id_fkey` →
+`org_memberships_user_id_fkey` and `abuse_events_team_id_fkey` →
+`abuse_events_org_id_fkey`). The **Def** column mixes eras deliberately: the
+referenced tables keep the red-window `teams` spelling (today's
+`public.organizations`), while the referencing columns use the current `org_id`
+(#3543 renamed `team_id` → `org_id`):
 
 | Constraint | Def | Effect of deleting the parent |
 |---|---|---|
@@ -364,10 +367,10 @@ Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
 separate `--manifest`** in every case: the historical
 `2146-e2e-live-orphans.manifest.json` (154 team rows) is the FalkorDB companion's
-only drop record, and a recurrence whose rows are all users (residue or
-strict-shape) enumerates no Guard-A teams — the clobber guard refuses to
-overwrite the list with an empty one, but a recurrence that DOES mint teams
-would overwrite it. Enumerating to a separate manifest avoids both outcomes —
+only drop record. The clobber guard refuses to overwrite it whenever the new
+enumeration found no Guard-A (strict-shape) teams — a promoted residue team
+still refuses; only a recurrence that mints Guard-A teams would overwrite it.
+Using a separate manifest is therefore unconditional —
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
 do" on an empty list. The separate path keeps both:
 

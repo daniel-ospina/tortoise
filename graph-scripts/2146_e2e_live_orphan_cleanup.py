@@ -128,9 +128,12 @@ Usage (dry-run first, then execute):
 Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
 usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
 --manifest: the historical #2146 manifest is the FalkorDB companion's only
-record of 154 graph targets, and an enumeration with no Guard-A (strict-shape)
-teams would write an empty team list over it, silently discarding them (the
-clobber guard refuses exactly that, by design).
+record of 154 graph targets. The clobber guard refuses to overwrite a manifest
+that holds team graph names when the new enumeration found no Guard-A
+(strict-shape) teams — so a users-only recurrence, and a residue team promoted
+via --include-residue, are refused rather than silently discarding the list.
+Only a recurrence that mints Guard-A teams would overwrite it, which is why
+using a separate --manifest is unconditional.
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
       --phase enumerate --all-e2e-live \\
       --manifest 2146-recurrence.manifest.json   # review BOTH printed lists
@@ -204,9 +207,9 @@ USERS_SQL = """
 
 # #5971: Guard D — the residue queries. Same namespace scope as the detector's
 # LIKE, explicitly NEGATED against Guard A's shape, and ALL-TIME: a residue row is
-# an anomaly, not a window artifact — the live example was created AFTER
-# WINDOW_END, and the window filter is exactly why the default enumeration never
-# saw it. `~`/`!~` are POSIX regex; the SQL keeps a literal backslash-dot (a
+# an anomaly, not a window artifact — the live example is off the guard shape as
+# well as after WINDOW_END, so only a shape-negated, all-time enumeration can see
+# it. `~`/`!~` are POSIX regex; the SQL keeps a literal backslash-dot (a
 # doubled backslash in the Python source here, since a single one is the
 # deprecated non-raw escape #3054 tracks).
 RESIDUE_TEAMS_SQL = """
