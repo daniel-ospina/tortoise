@@ -50,6 +50,7 @@ import cmux_dispatch as cd  # noqa: E402
 INBOX_PATH: Path | None = None
 _INBOX_DIR: Path | None = None
 _INBOX_ENV_SAVED: str | None = None
+_MODULE_SESSIONS: dict[str, object] = {}
 
 
 def setUpModule() -> None:
@@ -58,6 +59,14 @@ def setUpModule() -> None:
     _INBOX_DIR = Path(tempfile.mkdtemp(prefix="cmux-dispatch-inbox-"))
     INBOX_PATH = _INBOX_DIR / "orchestrator-inbox.log"
     os.environ[cd.INBOX_ENV] = str(INBOX_PATH)
+    # #7913: the same hermeticity for the SESSION STORE. `session_file_for` globs
+    # `~/.pi/agent/sessions` whenever the probe runs and no override is set, so
+    # without this the refusal tests would read the REAL store (157 buckets,
+    # measured) — a live dependency in a suite that claims to be hermetic, and a
+    # way for the result to depend on which lanes happen to be running.
+    _MODULE_SESSIONS["saved"] = os.environ.get(cd.SESSIONS_ROOT_ENV)
+    _MODULE_SESSIONS["dir"] = tempfile.mkdtemp(prefix="cmux-module-sessions-")
+    os.environ[cd.SESSIONS_ROOT_ENV] = str(_MODULE_SESSIONS["dir"])
 
 
 def tearDownModule() -> None:
@@ -70,6 +79,13 @@ def tearDownModule() -> None:
         shutil.rmtree(_INBOX_DIR, ignore_errors=True)
     INBOX_PATH = None
     _INBOX_DIR = None
+    sessions_saved = _MODULE_SESSIONS.get("saved")
+    if sessions_saved is None:
+        os.environ.pop(cd.SESSIONS_ROOT_ENV, None)
+    else:
+        os.environ[cd.SESSIONS_ROOT_ENV] = str(sessions_saved)
+    shutil.rmtree(str(_MODULE_SESSIONS.get("dir") or ""), ignore_errors=True)
+    _MODULE_SESSIONS.clear()
 #: The dispatch probe used throughout. Defined before the fixtures because the
 #: derived queued-turn fixture substitutes it.
 PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
@@ -1002,6 +1018,52 @@ class TestCmuxTransport(unittest.TestCase):
         self.assertIsNone(cd.workspace_entry("not json", "workspace:70"))
 
 
+class TestPaneSessionIdTransport(unittest.TestCase):
+    """The authoritative-field rule, pinned at the transport.
+
+    `Cmux.pane_session_id` is the only code that reads cmux's binding and every
+    dispatcher test overrides it — so without these the rule that `resume_binding`
+    is authoritative and `restore_record` is NOT had no test at all: replacing the
+    whole method with `return None` left all 188 tests green (#7913 review).
+    """
+
+    @staticmethod
+    def _stub(payload: str, rc: int = 0) -> cd.Cmux:
+        return RecordingCmux(payload=payload, rc=rc)
+
+    def test_reads_the_resume_binding_checkpoint_id(self):
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}')
+        self.assertEqual(cmux.pane_session_id("workspace:79"), "aaaa-bbbb")
+        argv = cmux.argv[-1]
+        self.assertEqual(argv[:3], ["surface", "resume", "show"])
+        self.assertIn("--workspace", argv)
+
+    def test_a_stale_restore_record_is_never_used(self):
+        # Measured 2026-10-08: a workspace printed "No resume binding" from the
+        # text form while `restore_record` still carried an old id. Reading that
+        # field attributes ANOTHER session's transcript to this pane.
+        cmux = self._stub('{"restore_record": {"checkpoint_id": "stale-1111"}}')
+        self.assertIsNone(cmux.pane_session_id("workspace:79"))
+
+    def test_a_plain_string_binding_is_accepted(self):
+        cmux = self._stub('{"resume_binding": "cccc-dddd"}')
+        self.assertEqual(cmux.pane_session_id("workspace:79"), "cccc-dddd")
+
+    def test_every_unresolvable_reply_is_none(self):
+        for payload in (
+            '{"resume_binding": null}',
+            '{"resume_binding": {}}',
+            "{}",
+            "not json",
+            "[]",
+        ):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self._stub(payload).pane_session_id("workspace:79"))
+
+    def test_a_nonzero_exit_is_none_not_a_guess(self):
+        self.assertIsNone(self._stub("", rc=1).pane_session_id("workspace:79"))
+
+
 # --------------------------------------------------------------------------- #
 # Hermetic dispatcher tests — the failure physics, end to end
 # --------------------------------------------------------------------------- #
@@ -1011,6 +1073,9 @@ class TestCmuxTransport(unittest.TestCase):
 #: panes are resume-bound to. A transcript is evidence only for the pane whose OWN
 #: session id matches (`tools/cmux_dispatch.py::session_file_for`).
 SESSION_7913 = "00000000-0000-4000-8000-000000000000"
+
+
+_MODULE_SESSIONS: dict[str, object] = {}
 
 
 class FakeCmux:
@@ -1729,6 +1794,11 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = self._send(fake, consume_timeout=0.0, retries=2)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "never-became-ready")
+        # A recovery refusal is a REFUSAL, not a lost transport: an empty
+        # `condition` would read as a transport failure to any consumer of the
+        # field (#7913 review).
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("session", result.detail, "the refusal must carry the diagnosis")
         self.assertEqual(
             fake.sent_log.count(PROBE), 1, "the brief must never be written blind"
         )
@@ -2946,6 +3016,85 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(fake.sent_log, [])
         self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_binding_that_is_not_an_id_shape_is_refused(self):
+        # `session_id` is interpolated into a glob. A `*` binding would widen it
+        # to the store's NEWEST transcript and re-attribute a sibling lane's
+        # liveness to this dead pane — the exact #7913 defect (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        entry = {"current_directory": cwd}
+        for bad in ("*", "?", "[a-z]", "a*b", "../x", "a b", ""):
+            with self.subTest(sid=bad):
+                self.assertIsNone(cd.session_file_for(bad, entry))
+        self.assertIsNotNone(cd.session_file_for(SESSION_7913, entry))
+
+    def test_a_blind_RE_READ_is_not_rescued_by_the_gate_it_follows(self):
+        # The gate accepted on a READABLE footer; the PRE-SEND read then came
+        # back empty. A fresh transcript must not smuggle the send past a gate
+        # that could actually see the pane — the two reads disagree, and on a
+        # fail-closed path disagreement means REFUSE (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class ReadyThenBlindCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.blind_after = 1
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.read_calls += 1
+                if self.read_calls <= self.blind_after:
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)
+                return cd.CmuxResult(0, "")
+
+        fake = ReadyThenBlindCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a blind re-read must not be rescued")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_the_refusal_names_WHY_not_just_unreadable(self):
+        # Six causes, six remediations, one indistinguishable message before the
+        # #7913 review: the probe's own diagnosis must reach the operator.
+        fake = FakeCmux(screen_unreadable=True, session_id="")
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("no resume binding for this pane", result.detail)
+
+    def test_the_pane_binding_is_resolved_once_per_dispatch_not_once_per_poll(self):
+        # The gate re-probes on EVERY poll, and each resolution is a `cmux surface
+        # resume show` subprocess — measured 91 spawns for one dispatch at the
+        # 180s/2s defaults (#7913 review, load).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 60)
+
+        class CountingCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.binding_calls = 0
+
+            def pane_session_id(self, workspace):
+                self.binding_calls += 1
+                return super().pane_session_id(workspace)
+
+        fake = CountingCmux(screen_unreadable=True, cwd=cwd)
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", ready_timeout=10.0
+        )
+        self.assertFalse(result.ok)
+        self.assertGreater(
+            self._clock.now(), 0.0, "the fake clock must have polled at all"
+        )
+        self.assertEqual(
+            fake.binding_calls,
+            1,
+            "the binding is a per-dispatch fact, not a per-poll subprocess",
+        )
 
     def test_empty_read_with_a_STALE_session_is_still_refused(self):
         cwd = "/private/tmp"
