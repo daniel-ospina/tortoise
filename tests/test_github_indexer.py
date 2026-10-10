@@ -1449,6 +1449,35 @@ def test_7951_indexer_poll_rerun_does_not_grow_the_journal(tmp_path):
         sdk.close()
 
 
+def test_7951_intra_run_shared_subject_is_journaled_once(tmp_path):
+    """R2 coverage gap: the ``journal_ids`` threading is LOAD-BEARING.
+
+    Two issues in ONE ``index_repo`` run that share a Subject read the journal
+    ONCE at run start (``_journal_registered_entities``); the per-issue
+    registration gate must then see the subject the FIRST issue just journaled
+    via the run-scoped set. Without the ``journal_ids.add(...)`` in lockstep,
+    the second issue re-appends an identical ``SubjectAdded`` — a journal that
+    grows once per issue instead of once per subject. No committed test
+    covered the intra-run case before."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        a, b = gh_issue(1), gh_issue(2)
+        a["user"] = {"login": "shared-user"}
+        b["user"] = {"login": "shared-user"}
+        _run(_indexer(MockGitHubTransport(issues=[a, b])), sdk)
+
+        sid = "github-user:shared-user"
+        records = _jdoor_journal(events)
+        n = sum(1 for e in records
+                if e.get("type") == "SubjectAdded" and e.get("id") == sid)
+        assert n == 1, (
+            f"a Subject shared by two issues in ONE run was journaled {n} "
+            "times — `journal_ids` is not threaded in lockstep, so the "
+            "journal grows once per issue (#7951 R2)")
+    finally:
+        sdk.close()
+
+
 def test_7951_indexer_pr_event_reaches_the_journal(tmp_path):
     """The PR arm of the same door: a genuinely-minted PR Event is journaled;
     a re-run that merely refreshes it is not."""
@@ -1620,6 +1649,49 @@ def test_7951_prefix_object_in_graph_is_backfilled_to_the_journal(tmp_path):
         assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
             "the backfilled ObjectRegistered did not reproduce the node on "
             "rebuild_all (#7951 P2-a)")
+    finally:
+        sdk.close()
+
+
+def test_7951_prefix_event_in_graph_is_backfilled_to_the_journal(tmp_path):
+    """R2: the EVENT arm of the pre-fix backfill.
+
+    ``_entity_registered`` backfills an Object/Subject a pre-#7951 binary wrote
+    straight through ``proj.apply`` (graph, no journal), but the creation mint
+    gate probed ``_event_exists`` — the LIVE GRAPH only. So an Event the same
+    binary wrote read as "already minted" and stayed ``journal=False`` for
+    ever: the journal gained ObjectRegistered + SubjectAdded but NO
+    EventRecorded, and ``rebuild_all`` yielded event count 0."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
+                                       previous_state=None)
+        eid = ev["eventId"]
+        proj.apply(ev)  # the PRE-FIX door: live graph, no journal append
+        assert _jdoor_event_count(proj, eid) == 1
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+
+        stats = _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        records = _jdoor_journal(events)
+        assert any(e.get("type") == "EventRecorded" and e.get("eventId") == eid
+                   for e in records), (
+            "an Event the PRE-FIX binary wrote (graph only) was never "
+            "backfilled into the journal — `derived = replay(journal)` stays "
+            "false for it on every later poll; the creation mint gate probed "
+            "the GRAPH only (#7951 R2)")
+        # `_event_exists` still feeds `events_minted` (a GENUINE graph mint
+        # only) — the journal backfill must not inflate it.
+        assert stats["events_minted"] == 0, (
+            "the Event arm's journal backfill inflated `events_minted` — that "
+            "counter is a graph-mint count, not a journal-append count "
+            "(#7951 R2)")
+        # and the backfilled record reproduces the node on replay
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_event_count(proj, eid) == 1, (
+            "the backfilled EventRecorded did not reproduce the Event on "
+            "rebuild_all (#7951 R2)")
     finally:
         sdk.close()
 

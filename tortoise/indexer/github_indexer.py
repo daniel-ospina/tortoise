@@ -688,6 +688,62 @@ class GitHubIndexer:
             return False
 
     @staticmethod
+    def _event_recorded(event_id: str, journal_ids: set | None = None) -> bool:
+        """True when the journal already carries this Event's ``EventRecorded``.
+
+        The EVENT arm of the pre-fix backfill (#7951 R2). ``_event_exists``
+        probes the LIVE GRAPH only, so an Event a pre-#7951 binary wrote
+        straight through ``proj.apply`` (graph, no journal) read as "already
+        minted" and stayed ``journal=False`` for ever — the journal gained
+        its ObjectRegistered + SubjectAdded but never an EventRecorded, and
+        ``rebuild_all`` yielded event count 0.
+
+        ``_event_exists`` is deliberately KEPT for the ``events_minted``
+        counter and ``_next_transition_id``'s monotonic suffixing (those are
+        graph-correctness semantics, not journal-presence); this probe answers
+        only "would appending be a duplicate?".
+
+        FAIL-OPEN: any probe failure returns False (= journal it), exactly
+        like ``_entity_registered`` and ``_create_entity``. A duplicate
+        ``EventRecorded`` is replay-safe (idempotent MERGE with the same
+        payload); skipping the journal is the node-loss bug.
+        """
+        try:
+            return ("EventRecorded", event_id) in (journal_ids or ())
+        except Exception:
+            logger.warning(
+                "Event journal-registration probe failed for %s — journaling "
+                "optimistically (fail-open, #7951 R2)", event_id)
+            return False
+
+    @staticmethod
+    def _frozen_created_payload(proj, created: dict) -> dict:
+        """``created`` re-stamped with the FROZEN ``-created`` node's state.
+
+        The backfill appends a journal record for an Event a pre-#7951 binary
+        wrote. The node is frozen at first observation (its ``eventKind`` /
+        ``endedAt`` reflect the issue state THEN), while ``created`` is rebuilt
+        from the issue state NOW. Journaling ``created`` verbatim would make a
+        replay reproduce the CURRENT state and diverge from the live node —
+        the opposite of the fix's purpose. So the node's own ``eventKind`` /
+        ``endedAt`` are read and overlaid. A read failure returns ``created``
+        unchanged (best-effort backfill; the other fields are state-stable).
+        """
+        payload = dict(created)
+        try:
+            rows = proj.g.query(
+                "MATCH (e:Event {eventId:$eid}) "
+                "RETURN e.eventKind, e.endedAt",
+                params={"eid": created["eventId"]}).result_set
+        except Exception:
+            return payload
+        if rows:
+            if rows[0][0] is not None:
+                payload["eventKind"] = rows[0][0]
+            payload["endedAt"] = rows[0][1]
+        return payload
+
+    @staticmethod
     def _journal_registered_entities(sdk) -> set:
         """The ``(record type, id)`` pairs the journal already carries for the
         indexer's entities — read ONCE per ``index_repo`` run.
@@ -707,9 +763,10 @@ class GitHubIndexer:
                 if not isinstance(ev, dict):
                     continue
                 t = ev.get("type")
-                if t not in ("ObjectRegistered", "SubjectAdded"):
+                if t not in ("ObjectRegistered", "SubjectAdded",
+                             "EventRecorded"):
                     continue
-                rid = ev.get("id")
+                rid = ev.get("id") or ev.get("eventId")
                 if isinstance(rid, str):
                     out.add((t, rid))
         except Exception:
@@ -813,10 +870,34 @@ class GitHubIndexer:
         # Events-as-truth; a closed-kind `-created` must only ever come from
         # a first ingest of an already-closed issue.
         created = github_map.issue_to_event(issue, repo, previous_state=None)
-        if (created is not None
-                and not self._event_exists(proj, created["eventId"])):
-            sdk._apply_and_journal(proj, created)
-            stats["events_minted"] += 1  # genuine mint only (P2)
+        if created is not None:
+            # #7951 R2: `_event_exists` is the GRAPH probe and still decides
+            # whether this is a GENUINE mint (`events_minted`, P2) and feeds
+            # `_next_transition_id`'s suffixing. The JOURNAL probe decides
+            # whether to APPEND: an Event a pre-#7951 binary wrote straight
+            # through `proj.apply` is in the graph but NOT the journal, so
+            # probing the graph alone read it as "already minted" and left
+            # `journal=False` for ever — `derived = replay(journal)` stayed
+            # false for it and `rebuild_all` yielded event count 0.
+            #
+            # The node is FROZEN at first observation, so an already-present
+            # Event is NEVER re-folded from the freshly-built `created` (whose
+            # kind tracks the CURRENT issue state); the backfill APPENDS a
+            # payload carrying the frozen node's kind/endedAt, so replay
+            # reproduces the node rather than the current issue state.
+            _event_in_graph = self._event_exists(proj, created["eventId"])
+            _event_in_journal = self._event_recorded(
+                created["eventId"], journal_ids)
+            if not _event_in_graph:
+                sdk._apply_and_journal(
+                    proj, created, journal=not _event_in_journal)
+            elif not _event_in_journal:
+                sdk._journal_entity_event(
+                    self._frozen_created_payload(proj, created))
+            if not _event_in_journal and journal_ids is not None:
+                journal_ids.add(("EventRecorded", created["eventId"]))
+            if not _event_in_graph:
+                stats["events_minted"] += 1  # genuine mint only (P2)
         # Transition events — ONLY on a real state change (diff against the
         # persisted Object.status projection, never the fetch window).
         # Repeated transitions mint monotonic ids (P1-3) so the timeline
