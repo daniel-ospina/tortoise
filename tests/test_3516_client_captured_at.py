@@ -971,3 +971,111 @@ def test_floor_keeps_the_pass_for_a_small_positive_install_time():
     verdict, reason = client_capture_floor_verdict(
         0.0, "cli_observed", FLOOR_SKEW_TOLERANCE_S / 2)
     assert verdict == VERDICT_PASSED, reason
+
+
+# ── #3516 §D: `source` was ACCEPTED at the boundary and DROPPED ───────────
+#
+# The field's own comment in `hosted_api.py` claimed it "carries the transcript
+# stem (forwarded by _cmd_session_capture)" — but `body.source` had no reader
+# anywhere and `_write_session_and_turns` had no parameter for it. Both
+# producers really send it (the Pi seam declares it REQUIRED; the claude CLI
+# fills `transcript_path.stem`; the spool forwards `meta["source"]`), so real
+# provenance was being discarded on every hosted capture, silently, with no
+# round-trip test. §D forbids exactly that: "either persisted (with a
+# round-trip test) or deleted along with its acceptance claim".
+
+
+def test_source_round_trips_through_the_http_boundary(tmp_path):
+    """The drop was at the CALL SITE, not in the store — so a test that calls
+    `_write_session_and_turns` directly CANNOT see it and passes on the broken
+    code. Only a real POST pins it.
+
+    MUTATION THAT REDS THIS: delete `source=body.source` from the
+    `_write_session_and_turns` call in `hosted_api` (the exact defect).
+    """
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha_mod
+    from tests.test_hosted_api import (
+        _patch_tortoise_sdk_init,
+        _restore_tortoise_sdk_init,
+        _seed_team_graphs,
+    )
+
+    org = "team-3516-src"
+    db_path = os.path.join(str(tmp_path), "src.db")
+    orig = _patch_tortoise_sdk_init(db_path)
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    sdk = ha_mod._make_sdk(namespace="registry")
+    _seed_team_graphs(sdk, org, "pro", None)
+    try:
+        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        h = {"Authorization": f"Bearer {key['api_key']}"}
+        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/sessions", headers=h, json={
+                "conversation": [{"role": "user", "content": "hello"}],
+                "session_id": "s-3516-src-http",
+                "harness": "claude",
+                "source": "9c1f7a-transcript-stem",
+            })
+            assert r.status_code == 200, r.text[:300]
+        stored = _stamp(ha_mod._make_sdk(namespace=org), "s-3516-src-http",
+                        "source")
+        assert stored == "9c1f7a-transcript-stem", (
+            "the boundary accepted `source` and the store never saw it — the "
+            "silent-drop class #3516 §D forbids")
+    finally:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+        _restore_tortoise_sdk_init(orig)
+
+
+def test_the_boundary_caps_source_like_its_siblings():
+    """`source` is client-controlled and, once persisted, is as durable as
+    `session_id` — which is capped at 256 for the same N x len amplification
+    reason. An unbounded caller string must 422 at the boundary, not silently
+    persist without limit.
+
+    MUTATION THAT REDS THIS: drop `max_length=256` from the `source` field.
+    """
+    from pydantic import ValidationError
+
+    from tortoise.hosted_api import SessionRequest
+
+    ok = SessionRequest(conversation=[{"role": "user", "content": "x"}],
+                        source="a" * 256)
+    assert ok.source == "a" * 256
+    with pytest.raises(ValidationError):
+        SessionRequest(conversation=[{"role": "user", "content": "x"}],
+                       source="a" * 257)
+
+
+def test_source_is_never_erased_or_overwritten_by_a_later_writer():
+    """Set-only-when-present AND set-if-absent, the `machine_id`/`model` rule.
+    The store-sync backstop ships the SAME session after the hook, so a plain
+    SET would let the later, weaker producer relabel the record — and an absent
+    value must not erase what the hook observed.
+
+    MUTATION THAT REDS THIS: `s.source=$src` (a plain SET) in the write
+    primitive.
+    """
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    sid = "3516-src-firstwriter"
+    turns = [{"role": "user", "content": "hi"}]
+    _write_session_and_turns(sdk._get_proj(), sdk, sid, turns,
+                             now="2026-10-08T00:00:00Z", harness="claude",
+                             source="hook-stem")
+    # a lane-less re-capture (backfill/import) carries no source
+    _write_session_and_turns(sdk._get_proj(), sdk, sid, turns,
+                             now="2026-10-08T00:00:01Z", harness="claude")
+    assert _stamp(sdk, sid, "source") == "hook-stem", (
+        "an absent source erased a stored one")
+    # the store-sync backstop ships the same session with its own stem
+    _write_session_and_turns(sdk._get_proj(), sdk, sid, turns,
+                             now="2026-10-08T00:00:02Z", harness="claude",
+                             source="backstop-stem")
+    assert _stamp(sdk, sid, "source") == "hook-stem", (
+        "the later producer relabelled the record")
