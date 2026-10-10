@@ -10545,12 +10545,14 @@ class TortoiseSDK:
         # #548: emit events for rebuild parity
         self._emit_event("PointAdded", point=self.get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
-        # recreated on replay. The reverse mitigated_by edge is NOT: nothing in
-        # tortoise/projection/ mentions mitigation, so the operator's edge
-        # replay drops it and rebuild_all silently reverts w_eff to the
-        # undecayed base (measured 1 → 0 edges, 0.5 → 1.0) while the mitigation
-        # Point survives. Do not read this pair as replay parity — that missing
-        # substrate fold is the defect owned by #5048.
+        # recreated on replay. The payload's `operator` descriptor is ALSO the
+        # carrier `projection/edges.py::_create_edges` keys on to rebuild the
+        # canonical reverse `(op)-[:mitigated_by]->(m)` (#5048): a mitigation is
+        # the NON-operator Point carrying that descriptor, so this ONE record
+        # reconstructs both halves. The mitigation Point's live identity
+        # (`is_operator` false / no `op_type`) survives replay through
+        # `_upsert_point_props`'s explicit-False arm, and a revised strength
+        # folds through `_revise_point` / `_apply_one`.
         mit_point = self.get_point(mid)
         mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
         self._emit_event("OperatorAdded", point=mit_point)

@@ -4300,6 +4300,14 @@ def _apply_one(points: dict[str, dict], ev: dict,
             for _bk in BELIEF_PROPS:
                 if _bk in ev and _belief_prop_value_ok(_bk, ev[_bk]):
                     p[_bk] = ev[_bk]
+            # #5048: fold a revised mitigation strength — parity with
+            # ``_revise_point`` (the graph fold). ``update_point(mid,
+            # mitigation_strength=…)`` is the idempotent re-mitigation write;
+            # without this the pure fold keeps the FIRST strength and disagrees
+            # with ``rebuild_all`` on the same journal (#330 parity).
+            _ms = ev.get("mitigation_strength")
+            if "mitigation_strength" in ev and _annotator_value_ok(_ms):
+                p["mitigation_strength"] = _ms
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -11110,6 +11118,23 @@ class FalkorProjection(
                 if key in ev and _belief_prop_value_ok(key, ev[key]):
                     set_clauses.append(f"n.{key} = ${key}")
                     params[key] = ev[key]
+            # #5048: fold a REVISED mitigation strength. The idempotent
+            # re-mitigation branch of ``mitigate_operator`` calls
+            # ``update_point(mid, mitigation_strength=…)`` and the PointRevised
+            # payload carries the value — but this fold built clauses only from
+            # content/embedding/hash/annotator/belief props, so a rebuild
+            # reverted the node to its FIRST strength while the (now
+            # reconstructed) ``mitigated_by`` edge survived, silently moving
+            # ``w_eff`` on a durability operation. Presence-conditional and
+            # under the SAME hard-delete anchor as the belief props: a revision
+            # predating a real delete→recreate died with the deleted
+            # incarnation live. ``_annotator_value_ok`` is the shared
+            # writability gate and keeps ``None`` (a live clear).
+            if ("mitigation_strength" in ev
+                    and _annotator_value_ok(ev["mitigation_strength"])):
+                set_clauses.append(
+                    "n.mitigation_strength = $mitigation_strength")
+                params["mitigation_strength"] = ev["mitigation_strength"]
 
         # #4042: every clause can now be suppressed at once (a superseded
         # props-only revision carrying no dims). FalkorDB rejects a `SET` with

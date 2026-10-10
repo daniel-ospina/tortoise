@@ -1115,9 +1115,20 @@ class _EntityHandlers:
             "n.validTo=coalesce($vt, n.validTo)",
             "n.updatedAt=$now",
         ]
+        # #5048: the payload's OWN ``is_operator`` wins when it explicitly says
+        # FALSE. A mitigation Point is a NON-operator that carries an
+        # ``operator`` EDGE descriptor (`#4937`), so deriving identity from
+        # ``bool(op)`` re-typed it as an operator on replay — live
+        # ``is_operator=false/op_type=NULL``, rebuild ``true/'IMPL'`` on every
+        # mitigation: a systematic ``derived = replay(journal)`` divergence, and
+        # the identity half of the record this PR's edge fold repairs. Scoped to
+        # the explicit-False case, so every operator record (and every legacy
+        # record that omits the flag) is byte-for-byte unchanged.
+        _mitigation_record = p.get("is_operator") is False and bool(op)
         params = {
             "id": p["id"], "content": p.get("content", ""),
-            "isop": bool(op), "opt": op.get("op_type") if op else None,
+            "isop": bool(op) and not _mitigation_record,
+            "opt": None if _mitigation_record else (op.get("op_type") if op else None),
             "pk": p.get("pointKind"),
             "st": p.get("status"),
             "ab": p.get("authoredBy"),

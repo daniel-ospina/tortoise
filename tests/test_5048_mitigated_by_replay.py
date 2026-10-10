@@ -1,27 +1,47 @@
-"""#5048 — a mitigation's ``mitigated_by`` edge must survive ``rebuild_all``.
+"""#5048 — a mitigation's ``mitigated_by`` edge, identity and strength must survive ``rebuild_all``.
 
 Root: ``derived = replay(journal)`` (#5048, the consolidation parent; #5089 the
-epic). ``mitigate_operator`` writes a BIDIRECTIONAL pair **live**:
+epic). ``mitigate_operator`` writes a mitigation **live** as a NON-operator
+Point:
 
-    (m)-[:IMPL]->(op)                and   (op)-[:mitigated_by]->(m)
+    CREATE (m:Point {is_operator: false, mitigation_strength: s, …})
+    CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)
 
-(ONTOLOGY §3.9; ``commit_schema.Operator`` — the reverse edge is canonical ONLY
-from a mitigation Point, #4937). The ``OperatorAdded`` payload names only the
-IMPL direction, and ``projection/edges.py::_create_edges`` rebuilt only that
-half, so a ``rebuild_all`` silently reverted ``w_eff = w * (1 - strength)`` to
-the undecayed base — the mitigation Point survived, the operator stayed an
-operator, and the belief effect was gone with no error.
+It journals ONE ``OperatorAdded`` whose payload carries ``mitigation_strength``
+and an ``operator`` EDGE-descriptor ``{op_type: "IMPL", inputs: [op]}`` (the
+descriptor exists so the fold can rebuild the IMPL half; a mitigation is never
+an operator — commit_schema.Operator, #4937).
+
+Three replay gaps on that one record, all ``derived = replay(journal)``:
+
+1. **the edge** — ``mitigation_strength`` alone (a property) does not rebuild the
+   reverse edge. ``compute_operator_weight`` reads ONLY ``mitigated_by``, so a
+   rebuild silently reverted ``w_eff = w * (1 - strength)`` to the undecayed
+   base.
+2. **the identity** — deriving ``is_operator`` from the descriptor's presence
+   re-typed the mitigation as an operator on replay (live ``false`` / no
+   ``op_type``; rebuild ``true`` / ``'IMPL'``).
+3. **the strength** — the idempotent re-mitigation branch calls
+   ``update_point(mid, mitigation_strength=…)``, whose ``PointRevised`` carries
+   the value; the revise fold ignored it, so a rebuild reverted to the FIRST
+   strength while the edge was present.
 
 The OBSERVABLE asserted here is the resolved operator weight
-(``compute_operator_weight``), not the edge. #3815 established why: an
+(``compute_operator_weight``), not edge existence. #3815 established why: an
 edge-existence assertion stays green for a mitigation whose strength is never
-applied. The edge is asserted too, but only as the MECHANISM the weight reads —
-the weight parity is the contract.
+applied. Edge counts are asserted too, as the MECHANISM, and are counted
+GRAPH-WIDE — an outgoing-only count cannot see the wrong-direction edges a
+widened predicate would create.
 
-MUTATION THAT MUST RED: delete the ``mitigated_by`` MERGE added to
-``_create_edges`` (or drop its ``mitigation_strength`` marker gate) — the
-post-rebuild weight then reads the undecayed base (1.0) against the
-pre-rebuild ``base * (1 - strength)`` (0.5 at the strongest sanctioned band).
+MUTATIONS THAT MUST RED:
+- drop the ``mitigated_by`` MERGE in ``edges.py::_create_edges`` → post-rebuild
+  weight reads the undecayed base;
+- drop its ``not p.get("is_operator")`` gate → the graph-wide edge count rises
+  for a generic operator payload;
+- drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
+  identity parity assertion fails;
+- drop the ``mitigation_strength`` fold in ``_revise_point`` → the
+  re-mitigation weight reverts to the first strength.
 
 Runs on the ambient ``TORTOISE_DB_URI`` when set (the docker lane) and falls
 back to an embedded db, so both the default and the carve-out lane cover it.
@@ -71,12 +91,25 @@ def _impl_chain(sdk):
     return src, claim, op_id
 
 
-def _mitigated_by_ids(sdk, op_id):
+def _all_mitigated_by(sdk):
+    """Every ``mitigated_by`` edge in the graph, by direction.
+
+    Graph-wide on purpose: an outgoing-only read from the operator cannot see a
+    wrong-direction edge a widened predicate would create.
+    """
     rows = sdk._get_proj().g.query(
-        "MATCH (o:Point {id:$o})-[:mitigated_by]->(m:Point) RETURN m.id",
-        params={"o": op_id},
+        "MATCH (a:Point)-[:mitigated_by]->(b:Point) RETURN a.id, b.id"
     ).result_set
-    return sorted(r[0] for r in rows) if rows else []
+    return sorted(tuple(r) for r in rows) if rows else []
+
+
+def _mitigation_row(sdk):
+    """``(is_operator, op_type, mitigation_strength)`` of the mitigation Point."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (m:Point) WHERE m.mitigation_strength IS NOT NULL "
+        "RETURN m.is_operator, m.op_type, m.mitigation_strength"
+    ).result_set
+    return rows[0] if rows else None
 
 
 class TestMitigatedBySurvivesRebuild:
@@ -98,7 +131,7 @@ class TestMitigatedBySurvivesRebuild:
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(
                 BASE_WEIGHT * mitigation_dampening_factor(strength))
-            assert _mitigated_by_ids(sdk, op_id), "live write lost the edge"
+            assert _all_mitigated_by(sdk), "live write lost the edge"
 
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
@@ -109,36 +142,117 @@ class TestMitigatedBySurvivesRebuild:
             )
             # The edge is the MECHANISM the weight above reads; assert it is
             # the thing that came back, not merely that the number matched.
-            assert _mitigated_by_ids(sdk, op_id), (
+            assert _all_mitigated_by(sdk), (
                 "rebuild dropped the (op)-[:mitigated_by]->(m) edge — the "
                 "mitigation Point survived but its belief effect did not"
             )
         finally:
             sdk.close()
 
-    def test_generic_impl_operator_gains_no_mitigated_by(self, tmp_path):
-        """The marker gate holds: only a mitigation Point may own the edge.
+    def test_mitigation_identity_is_stable_across_rebuild(self, tmp_path):
+        """The mitigation Point keeps its live identity on replay.
 
-        ``mitigated_by`` is canonical ONLY from a mitigation Point (#4937);
-        ``compute_operator_weight`` reads any ``(op)-[:mitigated_by]->(m)`` and
-        applies ``m.mitigation_strength``. A fix that reconstructed the reverse
-        edge for EVERY IMPL operator would silently dampen unrelated operators,
-        so this pins the gate: a plain IMPL operator keeps zero such edges both
-        live and after a rebuild.
+        A mitigation is a NON-operator Point (``is_operator: false``, no
+        ``op_type``). Deriving identity from the payload's ``operator``
+        descriptor re-typed it as an operator on every rebuild — a
+        ``derived = replay(journal)`` divergence, and the reason the descriptor
+        and the identity must be told apart.
         """
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            assert _mitigated_by_ids(sdk, op_id) == []
+            sdk.mitigate_operator(op_id, "identity parity", 0.50)
+
+            live = _mitigation_row(sdk)
+            assert live is not None, "no mitigation Point found"
+            assert live[0] is False, f"live is_operator must be false, got {live!r}"
+            assert live[1] is None, f"live op_type must be NULL, got {live!r}"
+
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            rebuilt = _mitigation_row(sdk)
+            assert rebuilt == live, (
+                "replay re-typed the mitigation Point: "
+                f"live={live!r}, rebuilt={rebuilt!r}"
+            )
+        finally:
+            sdk.close()
+
+    def test_remitigation_strength_survives_rebuild(self, tmp_path):
+        """A second ``mitigate_operator`` on the same operator folds its strength.
+
+        Failing state (without the ``_revise_point`` fold): the ``PointRevised``
+        payload carries the new strength but replay ignores it, so post-rebuild
+        ``w_eff`` reverts to the FIRST strength — 0.9 instead of 0.5.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            sdk.mitigate_operator(op_id, "first", 0.10)
+            sdk.mitigate_operator(op_id, "first", 0.50)  # idempotent update path
+
+            before = compute_operator_weight(sdk._get_proj(), op_id)
+            assert before == pytest.approx(
+                BASE_WEIGHT * mitigation_dampening_factor(0.50)), (
+                "live re-mitigation did not take; the test cannot measure replay"
+            )
+
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            after = compute_operator_weight(sdk._get_proj(), op_id)
+            assert after == pytest.approx(before), (
+                "a rebuild reverted the revised mitigation strength: "
+                f"before={before}, after={after}"
+            )
+        finally:
+            sdk.close()
+
+    def test_generic_impl_operator_gains_no_mitigated_by(self, tmp_path):
+        """The gate holds: only a mitigation Point may own the edge.
+
+        ``mitigated_by`` is canonical ONLY from a mitigation Point (#4937);
+        ``compute_operator_weight`` reads any such edge. A fix that
+        reconstructed the reverse edge for EVERY IMPL operator would silently
+        dampen unrelated operators, so the graph-wide edge count is pinned at
+        zero both live and after a rebuild.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            assert _all_mitigated_by(sdk) == []
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(BASE_WEIGHT)
 
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
-            assert _mitigated_by_ids(sdk, op_id) == [], (
+            assert _all_mitigated_by(sdk) == [], (
                 "a generic IMPL operator must never acquire mitigated_by"
             )
             assert compute_operator_weight(sdk._get_proj(), op_id) == pytest.approx(
                 before)
+        finally:
+            sdk.close()
+
+    def test_operator_payload_carrying_the_property_gains_no_edge(self, tmp_path):
+        """An OPERATOR payload that carries the property is still not a mitigation.
+
+        ``rebuild_all``'s #548 graph-only path synthesizes an ``OperatorAdded``
+        for an operator that carries ``mitigation_strength`` as an open-set
+        passthrough property (``update_point(op, mitigation_strength=…)``). A
+        gate keyed on the property would fire and dampen the operator's inputs —
+        points that were never mitigated.
+        """
+        sdk, _events = _fresh_sdk(tmp_path)
+        try:
+            src, _claim, op_id = _impl_chain(sdk)
+            payload = {
+                "id": op_id, "content": "operator", "is_operator": True,
+                "op_type": "IMPL", "mitigation_strength": 0.5,
+                "operator": {"op_type": "IMPL", "inputs": [src]},
+            }
+            sdk._get_proj()._upsert_point_edges(payload)
+            assert _all_mitigated_by(sdk) == [], (
+                "an operator payload must not create mitigated_by edges"
+            )
         finally:
             sdk.close()
