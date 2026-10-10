@@ -1668,9 +1668,10 @@ class Dispatcher:
             # (#5979): a mid-turn pane accepts the submission and only surfaces it
             # as a turn when the current turn ends — later than any bounded wait.
             # ⛔ DELIVERED, not CONSUMED (#7743): pi holds the text and drains it
-            # at the turn boundary. That is success only if the turn CAN end; on a
-            # lane wedged on an orphaned in-flight `task`/`subagent` tool it never
-            # does, so `queued` must NOT report the dispatch as complete. `delivered`
+            # at the turn boundary — so it becomes real only if the turn CAN end.
+            # On a lane wedged on an orphaned in-flight `task`/`subagent` tool it
+            # never does, and which case we are in cannot be known here, so
+            # `queued` must NOT report the dispatch as complete. `delivered`
             # carries #5979's finding (do not re-send — that would duplicate); `ok`
             # stays False so the exit code is 4, never 0. The screen read is reused
             # by `recovery_action`, so the confirmation itself adds no cmux call;

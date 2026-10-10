@@ -1047,7 +1047,8 @@ class FakeCmux:
         self.drops_message = drops_message
         #: Render the composer WITHOUT its enclosing horizontal rules, so
         #: `composer_region` returns None ("cannot tell"). A pane in that state
-        #: must never be read as a queued success.
+        #: must never be read as a CONFIRMED DELIVERY (a false `queued` here would
+        #: set `delivered=True` and suppress the re-send of a lost message).
         self.no_rules = no_rules
         #: A MID-TURN pane that ACCEPTED the message into pi's pending queue: the
         #: `Steering: <text>` display is up, the composer is EMPTY, and the turn
