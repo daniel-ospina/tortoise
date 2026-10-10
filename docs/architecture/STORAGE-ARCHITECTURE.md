@@ -1334,7 +1334,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
   | # | site | what it reads for | reach |
   |---|---|---|---|
   | 1 | `sdk.py:6411` — SDK **`belief_timeline`** (MCP `tortoise_belief_timeline`, `tool_registry.py:391`) | walks decision → Object named by topic | **customer-callable** |
-  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (MCP `tortoise_topic_summarize`) | finds seed claims via Object | **customer-callable** |
+  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (`sdk.py:7516`; hosted REST `hosted_api.py:6294`) | finds seed claims via Object | **customer-callable** (⚠️ the MCP handler `tortoise_topic_summarize` is registered nowhere and never served — `#7988`) |
   | 3 | `ranking.py:1195`/`:1206` — SDK **`recall_subgraph`** (`ranking.SubgraphExpander._neighbors`) | its default `completeness="full"` walks **every** relationship type (`MATCH (n)-[r]->(m)`) — so it reads the edge **without naming it** and no grep can find it | **customer-callable** |
   | 4 | `ranking.py:461` / `:714` — **`search(order_by="graph")`** (MCP `tortoise_search`) | event and point degree centrality | **customer-callable** |
   | 5 | `extractor_v2.py:1934` (`_enrich_point_priors`) | the classifier's "same entity?" gate | default-ON, write path |
