@@ -26,9 +26,25 @@ from tortoise.audit_events import AuditLogger
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_audit_dsn(monkeypatch):
+    """Neutralize an ambient ``TORTOISE_AUDIT_DSN`` for every test in the file.
+
+    ``AuditLogger(dsn=None)`` reads ``TORTOISE_AUDIT_DSN`` from the
+    environment and ``append()`` tries Postgres FIRST, so with that variable
+    exported the JSONL fallback is never written and the tests assert on a
+    file the code never touches — and a malformed DSN makes ``_connect``
+    raise ``ValueError``. The sibling ``tests/test_audit_events.py`` clears
+    the variable for the same reason. Function-scoped via ``monkeypatch``
+    (never session-scoped), so it cannot perturb any other test.
+    """
+    monkeypatch.delenv("TORTOISE_AUDIT_DSN", raising=False)
+
+
 def _no_override(monkeypatch) -> None:
     """Drop the suite's fallback-dir pin so ``$HOME`` is the resolved default."""
     monkeypatch.delenv("TORTOISE_AUDIT_FALLBACK_DIR", raising=False)
+    monkeypatch.delenv("TORTOISE_AUDIT_DSN", raising=False)
 
 
 def test_audit_logger_construction_creates_no_fallback_dir(tmp_path, monkeypatch):
@@ -166,7 +182,7 @@ def test_importing_hosted_api_creates_no_home_tortoise(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     env = {k: v for k, v in os.environ.items()
-           if k != "TORTOISE_AUDIT_FALLBACK_DIR"}
+           if k not in ("TORTOISE_AUDIT_FALLBACK_DIR", "TORTOISE_AUDIT_DSN")}
     env["HOME"] = str(home)
     env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
@@ -220,6 +236,39 @@ def test_whitespace_only_home_is_refused_as_a_drop(tmp_path, monkeypatch):
     assert after == before + 1, "a non-absolute resolved base must be counted"
     assert not (tmp_path / "   ").exists(), (
         "a relative base must never be materialized under the CWD")
+
+
+def test_empty_home_is_refused_as_a_drop(tmp_path, monkeypatch):
+    """#7924 review round 2 P2-1: a SET-but-EMPTY ``$HOME`` must be refused.
+
+    ``Path.home()`` returns ``/`` for ``HOME=""`` — which IS absolute — so
+    the absolute-path guard passes and the fallback resolves to
+    ``/.tortoise/audit_fallback.jsonl``, OUTSIDE ``$HOME``, in the filesystem
+    root. In a root-writable container (the hosted shape) the mkdir+append
+    then SUCCEEDS, so the drop counter is never incremented and the loss is
+    silent. It is the whitespace-only override's misconfiguration one value
+    over: it must be refused and counted in the PATH class, never misreported
+    as ``write_failed``.
+
+    Mutations that red this test: (a) drop the ``home.strip()`` guard — the
+    resolved ``/…`` path is no longer refused, so no drop is counted; (b) count
+    the refusal as ``write_failed`` — the second assertion reds.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", "")
+    monkeypatch.chdir(tmp_path)
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match=r"\$HOME is set but empty"):
+        logger._fallback_file()
+    counts = monitoring.audit_fallback_drop_counts()
+    before_path = counts.get("unresolvable_path", 0)
+    before_write = counts.get("write_failed", 0)
+    logger.append("org-1", None, "op")  # must NOT raise
+    counts = monitoring.audit_fallback_drop_counts()
+    assert counts.get("unresolvable_path", 0) == before_path + 1, (
+        "a set-but-empty $HOME must be counted as an unresolvable PATH drop")
+    assert counts.get("write_failed", 0) == before_write, (
+        "refusal is a path-resolution failure, not a write failure")
 
 
 def test_replay_resolves_env_and_does_not_create_the_dir(tmp_path, monkeypatch):
