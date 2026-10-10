@@ -11023,6 +11023,30 @@ class FalkorProjection(
         if not skip_content:
             params["c"] = new_content
             set_clauses.append("n.content = coalesce($c, n.content)")
+            # #5048: fold a REVISED mitigation strength. The idempotent
+            # re-mitigation branch of ``mitigate_operator`` calls
+            # ``update_point(mid, mitigation_strength=…)`` and the PointRevised
+            # payload carries the value — but this fold built clauses only from
+            # content/embedding/hash/annotator/belief props, so a rebuild
+            # reverted the node to its FIRST strength while the (now
+            # reconstructed) ``mitigated_by`` edge survived, silently moving
+            # ``w_eff`` on a durability operation.
+            #
+            # Anchored on ``skip_content``, NOT ``skip_belief_props``: the
+            # creation path writes ``mitigation_strength`` UNCONDITIONALLY (the
+            # open-set passthrough, same class as ``content``), so its correct
+            # boundary is the same-file later-creation supersession — a hard
+            # delete→recreate is a SUBSET of that. Gating on the delete anchor
+            # missed ``superseded && !hard-deleted`` and broke ``fold()`` vs
+            # ``rebuild_all`` parity (#330; see
+            # ``test_rebuild_recreate_content_parity.py``).
+            # Presence-conditional; ``_annotator_value_ok`` is the shared
+            # writability gate and keeps ``None`` (a live clear).
+            if ("mitigation_strength" in ev
+                    and _annotator_value_ok(ev["mitigation_strength"])):
+                set_clauses.append(
+                    "n.mitigation_strength = $mitigation_strength")
+                params["mitigation_strength"] = ev["mitigation_strength"]
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe
@@ -11118,23 +11142,6 @@ class FalkorProjection(
                 if key in ev and _belief_prop_value_ok(key, ev[key]):
                     set_clauses.append(f"n.{key} = ${key}")
                     params[key] = ev[key]
-            # #5048: fold a REVISED mitigation strength. The idempotent
-            # re-mitigation branch of ``mitigate_operator`` calls
-            # ``update_point(mid, mitigation_strength=…)`` and the PointRevised
-            # payload carries the value — but this fold built clauses only from
-            # content/embedding/hash/annotator/belief props, so a rebuild
-            # reverted the node to its FIRST strength while the (now
-            # reconstructed) ``mitigated_by`` edge survived, silently moving
-            # ``w_eff`` on a durability operation. Presence-conditional and
-            # under the SAME hard-delete anchor as the belief props: a revision
-            # predating a real delete→recreate died with the deleted
-            # incarnation live. ``_annotator_value_ok`` is the shared
-            # writability gate and keeps ``None`` (a live clear).
-            if ("mitigation_strength" in ev
-                    and _annotator_value_ok(ev["mitigation_strength"])):
-                set_clauses.append(
-                    "n.mitigation_strength = $mitigation_strength")
-                params["mitigation_strength"] = ev["mitigation_strength"]
 
         # #4042: every clause can now be suppressed at once (a superseded
         # props-only revision carrying no dims). FalkorDB rejects a `SET` with

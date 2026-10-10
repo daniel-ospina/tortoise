@@ -36,8 +36,9 @@ widened predicate would create.
 MUTATIONS THAT MUST RED:
 - drop the ``mitigated_by`` MERGE in ``edges.py::_create_edges`` → post-rebuild
   weight reads the undecayed base;
-- drop its ``not p.get("is_operator")`` gate → the graph-wide edge count rises
-  for a generic operator payload;
+- weaken its gate to ``not p.get("is_operator")`` (true on an ABSENT key) →
+  every EventAPI / extractor IMPL operator gains edges, reding the graph-wide
+  count in both the EventAPI and generic-operator cases;
 - drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
   identity parity assertion fails;
 - drop the ``mitigation_strength`` fold in ``_revise_point`` → the
@@ -53,6 +54,8 @@ import uuid
 
 import pytest
 
+from tortoise.api import EventAPI, provenance
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 from tortoise.weights import (
     compute_operator_weight,
@@ -230,6 +233,35 @@ class TestMitigatedBySurvivesRebuild:
             )
             assert compute_operator_weight(sdk._get_proj(), op_id) == pytest.approx(
                 before)
+        finally:
+            sdk.close()
+
+    def test_eventapi_impl_operator_gains_no_mitigated_by(self, tmp_path):
+        """The MAIN ingest producer's operator must not gain the edge.
+
+        ``EventAPI._point`` builds the ``OperatorAdded`` payload WITHOUT an
+        ``is_operator`` key, so a gate on the key's ABSENCE (`not p.get(...)`)
+        fires for every IMPL operator the extractor/ingest path creates and
+        dampens each of its inputs. The gate must require the explicit-False
+        identity a mitigation carries.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            proj = sdk._get_proj()
+            api = EventAPI(EventLog(str(events / "events.jsonl")),
+                           initiated_by="extractor", projection=proj)
+            prov = provenance("doc.txt", [0, 10], "quote", extracted_by="t@0")
+            a = api.add_point("T0 source", prov)
+            b = api.add_point("downstream claim", prov)
+            api.add_operator("IMPL", [a, b], prov)
+
+            assert _all_mitigated_by(sdk) == [], (
+                "a live EventAPI IMPL operator gained mitigated_by edges"
+            )
+            proj.rebuild_all(events, confirm_destructive=True)
+            assert _all_mitigated_by(sdk) == [], (
+                "a replayed EventAPI IMPL operator gained mitigated_by edges"
+            )
         finally:
             sdk.close()
 
