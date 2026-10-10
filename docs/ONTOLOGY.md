@@ -881,7 +881,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
-| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated on every write surface (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
+| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
 
 ### §4.2 Subject
 
@@ -916,7 +916,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2194) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
-| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated on every write surface (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the lifecycle cache, above): `status` says whether the Object is current, `goalState` says whether the goal is met. `None` clears |
+| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the lifecycle cache, above): `status` says whether the Object is current, `goalState` says whether the goal is met. `None` clears |
 
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 >
@@ -1185,8 +1185,8 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 > commitment-state kinds (`goal`/`target`/`strategy`/`plan`) carry two
 > orthogonal fields. `status` is the claim **lifecycle** (draft/live/…, §4.1) —
 > whether the node is promoted for use. `goalState` is the goal's
-> **achievement** state — a CLOSED vocabulary validated on every write surface
-> (`GOAL_STATE_VALUES` in `sdk.py`): `met`, `active`, `blocked`, `unmet`,
+> **achievement** state — a CLOSED vocabulary validated at the SDK write
+> boundary (`GOAL_STATE_VALUES` in `sdk.py`): `met`, `active`, `blocked`, `unmet`,
 > `superseded`, `abandoned`, and `guideline` (directional, no pass/fail — the
 > owner's #6792 form ruling, which is why `<10 min of CI` is a guideline and
 > not an absolute target). The two must not be conflated: a goal that reads

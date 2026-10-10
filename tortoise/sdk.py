@@ -12297,12 +12297,18 @@ class TortoiseSDK:
             # `draft` explicitly so the effective status is the one the
             # contract promises; `promotion_policy='auto'` stays the sanctioned
             # route to a live goal.
+            write_item = item
             if promotion_policy == "gated" and "status" not in item and not (
                 isinstance(item.get("props"), dict)
                 and "status" in item["props"]
             ):
-                item["status"] = "draft"
-            point = self.create_point(kind, content, dedup=True, **item)
+                # #7856: a COPY, not a mutation of `item`. Granular
+                # `results[].item` echoes the item's remaining props
+                # (docs/INGEST_CONTRACT.md — empty for a bare statement
+                # point), so forcing the draft in place would report a
+                # status the caller never passed.
+                write_item = {**item, "status": "draft"}
+            point = self.create_point(kind, content, dedup=True, **write_item)
             pid = point["id"]
             if ref:
                 _register_ref(ref, pid, "points")

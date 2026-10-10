@@ -154,6 +154,17 @@ def test_gated_ingest_keeps_a_goal_item_draft(sdk):
     assert sdk.get_point(auto["ids"]["points"][0])["status"] == "live"
 
 
+def test_gated_ingest_does_not_echo_a_synthetic_status(sdk):
+    """The forced `draft` is a WRITE-side default, not a caller-supplied prop:
+    granular `results[].item` must stay empty for a bare statement point
+    (docs/INGEST_CONTRACT.md), so the injection must not mutate the echoed
+    item."""
+    r = sdk.ingest({"points": [{"kind": "statement",
+                                 "content": "A implies B"}]},
+                   granularity="granular", promotion_policy="gated")
+    assert r["results"][0]["item"] == {}
+
+
 def test_non_goal_points_still_born_draft(sdk):
     """The born-live default is scoped to `goal` — ordinary claims keep the
     #131 draft→live lifecycle."""
