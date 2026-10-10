@@ -130,8 +130,11 @@ class TortoiseEP:
         if affected_claims:
             rows: list = []
             # #7853: id-anchored read — keep the label and sweep the four
-            # epistemic labels so the per-(label, property) id index anchors
-            # each probe (a bare `MATCH (n) WHERE n.id IN $ids` full-scans).
+            # epistemic labels. Point/Subject/Object each carry an ``id``
+            # RANGE index, so those probes are index-anchored; Event carries
+            # one on ``eventId`` only, so its ``id`` probe scans (the same
+            # bound ``tortoise/live.py`` states — a bare `MATCH (n)` drops the
+            # anchor on EVERY label).
             for _q in epistemic_label_queries(
                 "MATCH (n:{label}) WHERE n.id IN $ids "
                 "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
@@ -218,9 +221,10 @@ class TortoiseEP:
             ]
             result = None
             written: set = set()
-            # #7853: id-anchored batch write — sweep the epistemic labels so
-            # each node is written through its own label's id index (the
-            # Point arm stays the hot, indexed first probe).
+            # #7853: id-anchored batch write — sweep the epistemic labels
+            # (Point first, the hot indexed probe). Point/Subject/Object are
+            # index-anchored on ``id``; Event has no ``Event(id)`` range index
+            # (its index is on ``eventId``), so that arm scans.
             for _q in epistemic_label_queries(
                 "UNWIND $params AS p "
                 "MATCH (n:{label} {id: p.id}) "
@@ -808,14 +812,14 @@ class TortoiseEP:
                 # _neighbors so a seed whose only connections are
                 # operator-mediated still runs its incident factors. Draft
                 # endpoints are excluded (#780) — a draft seed runs nothing.
-                conds = ["b.id <> $id", epistemic_disjunction("b")]
+                conds = ["b.id <> $id"]
                 if live_b:
                     conds.append(live_b)
                 if live_a:
                     conds.append(live_a)
                 where = " WHERE " + " AND ".join(conds)
                 rows = self.g.query(
-                    "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b) "
+                    "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
                     f"{where} "
                     # #3139/#3154: index-independent non-operator predicate
                     # (a bare `= false` is emptied by a GRAPH.COPY'd index).
@@ -909,27 +913,30 @@ class TortoiseEP:
                     # Operator-less hops (#888 W5): direct IMPL/NAND edges
                     # between plain Points (operator-mediated hops above).
                     # Draft endpoints never propagate (#780).
-                    conds = ["a.id IN $ids", "b.id <> a.id",
-                             epistemic_disjunction("b")]
+                    conds = ["a.id IN $ids", "b.id <> a.id"]
                     if live_a:
                         conds.append(live_a)
                     if live_b:
                         conds.append(live_b)
-                    dir_rows: list = []
-                    # #7853: a is the id-anchored frontier — sweep its labels;
-                    # b is widened by traversal.
-                    for _qa in epistemic_label_queries(
-                        "MATCH (a:{label})-[r:IMPL|NAND]-(b) "
+                    # #7853: NOT widened. The operator-less direct-edge write
+                    # path only ever creates `:Point`→`:Point` edges, and
+                    # `_affected_factors` Batch 3 reads this factor as
+                    # `(a:Point)-[r:IMPL|NAND]->(b:Point)` — so admitting a
+                    # non-Point endpoint here would put the two sides out of
+                    # lockstep and let `_update_claim_posterior` recompute the
+                    # node from empty natural parameters, overwriting its
+                    # persisted prior with Beta(1,1). Widen BOTH or neither.
+                    dir_rows = self.g.query(
+                        "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
                         "WHERE " + " AND ".join(conds) + " "
                         # #3139/#3154: index-independent non-operator form.
                         "AND (a.is_operator IS NULL OR a.is_operator = false) "
                         "AND a.op_type IS NULL "
                         "AND (b.is_operator IS NULL OR b.is_operator = false) "
                         "AND b.op_type IS NULL "
-                        "RETURN DISTINCT a.id, b.id"
-                    ):
-                        dir_rows.extend(self.g.query(
-                            _qa, params={"ids": list(frontier)}).result_set)
+                        "RETURN DISTINCT a.id, b.id",
+                        params={"ids": list(frontier)},
+                    ).result_set
                     for _aid, bid in dir_rows:
                         if bid not in affected:
                             affected.add(bid)
@@ -965,13 +972,14 @@ class TortoiseEP:
     def _graph_claim_count(self) -> int:
         """Claim count in the graph (degeneration-guard sizing, #395).
 
-        Counts CLAIMS only — Points with is_operator != true AND op_type IS
+        Counts CLAIMS only — epistemic nodes (:Point, :Subject, :Object,
+        :Event — #7853) with is_operator != true AND op_type IS
         NULL (the projection layer's canonical operator test is
         bool(is_operator or op_type), projection/__init__.py). The guards
         compare this against ``len(affected)``, which holds CLAIM ids, so
-        counting all Points (claims + operators) made guard A fire at 50% of
-        Points on operator-sparse graphs while the component was far from
-        fully collected, truncating a genuine closure mid-BFS (#395 code
+        counting all epistemic nodes (claims + operators) made guard A fire at
+        50% of nodes on operator-sparse graphs while the component was far
+        from fully collected, truncating a genuine closure mid-BFS (#395 code
         review, PR #1273).
 
         The bound is graph-size-relative: it only gates once the graph has

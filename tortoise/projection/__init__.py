@@ -4524,6 +4524,19 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # every carried value fails the value gate is `rebuild_all`-only
             # (it folds 0 rows there); mirroring THAT would need the value gate
             # re-run here, and it remains a documented bound.
+            #
+            # KNOWN BOUND (#7853): ``points`` is the point-only `{id: point}`
+            # index, so it has no representation for a `:Subject`/`:Object`/
+            # `:Event` node. The #7813 widening makes EP journal a
+            # ConfidenceChanged for any of the four labels and the FALKOR fold
+            # (`_fold_confidence_changed`) now resolves it — but this reference
+            # fold still reads it as a miss, so `check_consistency` reports
+            # `point-belief-miss` for a belief write the graph engines
+            # (`rebuild` / `rebuild_all` / `recover_from_log`) fold correctly.
+            # Closing it means widening THIS index (and then the point-only
+            # count / `_compare_views` / `_graph_fingerprint` comparison) to the
+            # four labels — a much larger change than a wider MATCH here, so it
+            # is stated rather than half-done.
             record_non_folded(
                 SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
                 event_type="ConfidenceChanged", id=rid,

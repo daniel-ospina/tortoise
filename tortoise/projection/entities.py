@@ -20,7 +20,10 @@ from datetime import datetime, timezone
 # projection at module top, so the sdk-private `_content_hash` is NOT
 # importable here.
 from tortoise.ids import content_hash as _content_hash
-from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.live import (
+    decay_clause,  # #2490: rebuild folds decay terminal posteriors
+    epistemic_disjunction,  # #7853: belief writes land on any epistemic label
+)
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
 # ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
@@ -2470,10 +2473,18 @@ class _EntityHandlers:
         with null writes null (removes the property), mirroring the live SET.
 
         Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
-        signal): 1 = the target Point was found and folded, 0 = no Point
-        matched (hard-deleted / never re-created) or the record carries no
-        foldable value. Idempotent — a replayed/duplicate event re-applies the
-        same SET.
+        signal): 1 = the target epistemic node (:Point, :Subject, :Object or
+        :Event — #7853) was found and folded, 0 = no such node matched
+        (hard-deleted / never re-created) or the record carries no foldable
+        value. Idempotent — a replayed/duplicate event re-applies the same
+        SET.
+
+        #7853: the target is NOT always a Point. The EP write-back journals a
+        ``ConfidenceChanged`` for every node it writes, and the widening makes
+        that any of the four epistemic labels — so a ``:Point``-only MATCH left
+        a non-Point belief write permanently unreplayable (``rebuild`` /
+        ``recover_from_log`` refused the journal with ``point-belief-miss``).
+        The id anchor is kept; the label is a disjunction.
         """
         oid = ev.get("id")
         # #2884 review P1: the SAME id gate the sibling folds use. A bare
@@ -2516,7 +2527,9 @@ class _EntityHandlers:
         if not set_parts:
             return 0
         result = self.g.query(
-            "MATCH (n:Point {id:$id}) SET " + ", ".join(set_parts) +
+            "MATCH (n) WHERE " + epistemic_disjunction("n") +
+            " AND n.id = $id "
+            "SET " + ", ".join(set_parts) +
             " RETURN n.id LIMIT 1",
             params=params,
         )

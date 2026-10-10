@@ -238,3 +238,152 @@ def test_nand_object_input_lowers_target(sdk):
     conf = confidence_of(sdk, obj)
     assert conf is not None, "Object target of NAND was never written"
     assert conf < 0.5, f"NAND did not lower the Object target: {conf}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. The direct-edge (operator-less) path stays :Point-only
+# ═══════════════════════════════════════════════════════════════════
+#
+# The operator-mediated read widening (the ruling's substance) must NOT be
+# extended to the operator-less DIRECT edge. The direct-edge WRITE path only
+# ever creates `:Point`→`:Point` edges and `_affected_factors` Batch 3 reads
+# the factor as `(a:Point)-[r:IMPL|NAND]->(b:Point)` — so admitting a non-Point
+# endpoint to the affected set puts the two sides out of lockstep: it forms no
+# factor, and `_update_claim_posterior` then recomputes the node from empty
+# natural parameters, `_flush_cache` overwriting its persisted prior with
+# Beta(1,1). Widen BOTH or neither.
+
+def test_operatorless_direct_edge_to_non_point_does_not_clobber_prior(sdk):
+    """#7853 P1-A: a direct IMPL edge to an :Event must not admit it.
+
+    A separate operator factor keeps `factors` non-empty (an empty factor set
+    early-returns before the write-back, masking the defect), so the admitted
+    Event is reached by `_update_claim_posterior` and would be reset.
+    """
+    proj = sdk._get_proj()
+    src = make_point(sdk, "direct source")
+    tgt = make_point(sdk, "operator target")
+    event = make_labeled_node(sdk, "Event", "evt-7853-direct", "direct target")
+    # A real factor, so the run does not early-return before write-back.
+    sdk.create_operator("IMPL", src, [tgt], direction="bidirectional")
+    set_evidence(sdk, src, 12.0, 1.0)
+    # A PERSISTED PRIOR on the Event — NOT baseline_set (a baseline is
+    # immutable and would mask the clobber this test exists to catch).
+    proj.g.query(
+        "MATCH (n:Event {id:$id}) SET n.ep_alpha=7.0, n.ep_beta=2.0",
+        params={"id": event})
+    # Operator-less direct edge — the #888 W5 shape, non-Point target.
+    proj.g.query(
+        "MATCH (a:Point {id:$a}), (b:Event {id:$b}) "
+        "CREATE (a)-[:IMPL {direction:'bidirectional'}]->(b)",
+        params={"a": src, "b": event})
+
+    run_ep(sdk, [src])
+
+    rows = proj.g.query(
+        "MATCH (n:Event {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+        params={"id": event}).result_set
+    assert rows == [[7.0, 2.0]], (
+        f"the operator-less direct edge admitted the Event and reset its prior "
+        f"to Beta(1,1): {rows}")
+
+
+def test_operatorless_direct_edge_to_non_point_not_widened_at_bfs_hop(sdk):
+    """#7853 P1-A: the BFS direct hop must stay `:Point`-only too.
+
+    The non-Point node sits two hops from the seed (seed —direct— pivot
+    —direct— Event), so it is reached by the BFS direct-edge expansion rather
+    than the seed's own admission. The seed↔pivot direct edge is itself a
+    factor, so the run does not early-return before write-back.
+    """
+    proj = sdk._get_proj()
+    src = make_point(sdk, "bfs source")
+    pivot = make_point(sdk, "bfs pivot")
+    event = make_labeled_node(sdk, "Event", "evt-7853-bfs", "bfs target")
+    set_evidence(sdk, src, 12.0, 1.0)
+    proj.g.query(
+        "MATCH (n:Event {id:$id}) SET n.ep_alpha=7.0, n.ep_beta=2.0",
+        params={"id": event})
+    for a, b in ((src, pivot), (pivot, event)):
+        proj.g.query(
+            "MATCH (x:Point {id:$a}), (y {id:$b}) "
+            "CREATE (x)-[:IMPL {direction:'bidirectional'}]->(y)",
+            params={"a": a, "b": b})
+
+    run_ep(sdk, [src])
+
+    rows = proj.g.query(
+        "MATCH (n:Event {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+        params={"id": event}).result_set
+    assert rows == [[7.0, 2.0]], (
+        f"the BFS direct hop admitted the Event and reset its prior to "
+        f"Beta(1,1): {rows}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 7. Durability — a non-Point belief write must replay (P1-B)
+# ═══════════════════════════════════════════════════════════════════
+#
+# The widening makes EP journal a `ConfidenceChanged` for a non-Point target.
+# Every replay consumer resolves a belief write by id, and the #2884 fold used
+# `MATCH (n:Point {id:$id})` — so a lost DB could not be rebuilt: the fold
+# matched nothing and `rebuild_all` raised `NonFoldedEventsError`
+# `[point-belief-miss]` for the non-Point id.
+
+EVENT_BELIEF_PROPS = ("posterior_alpha", "posterior_beta", "confidence")
+
+
+def _belief(sdk: TortoiseSDK, node_id: str) -> dict:
+    rows = sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.id = $id "
+        "RETURN n.posterior_alpha, n.posterior_beta, n.confidence",
+        params={"id": node_id}).result_set
+    assert rows, f"no node for {node_id}"
+    return dict(zip(EVENT_BELIEF_PROPS, rows[0]))  # noqa: B905
+
+
+def test_non_point_belief_write_survives_rebuild(tmp_path):
+    """#7853 P1-B: an :Event operator target's journaled belief round-trips.
+
+    `create_operator` admits an `:Event` endpoint today, so this is the
+    reachable half. The journal is wiped and replayed; `rebuild_all` must
+    succeed (before the fix it raised `NonFoldedEventsError`) and reproduce the
+    same belief on the Event. `rebuild` (the EventLog apply engine) shares the
+    same `_fold_confidence_changed`, so it is checked on the same journal.
+    """
+    from tortoise.log import EventLog
+
+    db = str(tmp_path / "p1b.db")
+    events = tmp_path / "events"
+    events.mkdir()
+    log_path = str(events / "events.jsonl")
+    sdk = TortoiseSDK(db, event_log_path=log_path)
+    try:
+        proj = sdk._get_proj()
+        src = sdk.create_point("statement", "strong source",
+                               status="live")["id"]
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
+            "n.baseline_set=true", params={"id": src})
+        # A journaled Event (the entity path emits EventRecorded, so replay
+        # can re-materialise the node the belief write targets).
+        event = sdk.create_entity("event", "an event",
+                                  eventKind="test")["node"]["id"]
+        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._get_ep().run([src, event], max_hops=2,
+                          evidence={src: (12.0, 1.0)})
+
+        before = _belief(sdk, event)
+        assert before["posterior_alpha"] is not None, before
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _belief(sdk, event) == before, (
+            f"the Event belief did not round-trip through rebuild_all: "
+            f"{before} -> {_belief(sdk, event)}")
+
+        proj.rebuild(EventLog(log_path), confirm_destructive=True)
+        assert _belief(sdk, event) == before, (
+            f"the Event belief did not round-trip through rebuild: "
+            f"{before} -> {_belief(sdk, event)}")
+    finally:
+        sdk.close()
