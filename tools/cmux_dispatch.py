@@ -29,14 +29,15 @@ is a read of whether the message became a conversation message
 PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
-confirmed exits non-zero with `sent-but-not-consumed`; it reports success only on
-POSITIVE artifact evidence — the message as the latest submitted message, or a
-NEW pending-turn entry carrying it. That evidence is pi's own render string, not
+confirmed exits non-zero with `sent-but-not-consumed`; it reports SUCCESS (exit 0)
+only when the message became the latest submitted message. A NEW pending-turn entry
+carrying it is POSITIVE evidence of DELIVERY — exit 4, not 0 (see QUEUED IS NOT
+SUCCESS). That evidence is pi's own render string, not
 a secret, so a verdict means pi's display showed acceptance, not proof of it (see
 RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
 
-QUEUED IS NOT UNCONSUMED (#5979)
---------------------------------
+QUEUED IS DELIVERED, NOT A LOST SEND (#5979)
+--------------------------------------------
 `latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
 mid-turn — i.e. every lane that is actually working — pi ACCEPTS a submission
 into its queue and consumes it when the current turn ends, so the strict "is it
@@ -57,7 +58,7 @@ lane's scrollback legitimately contains arbitrary such text. A pending entry tha
 is NEW (a higher COUNT of matching entries) relative to the pre-send screen and
 carries THIS message — exactly, or as a truncated head whose raw text ends in the
 renderer's `...` — is direct evidence the message entered pi's queue -> `queued`,
-exit 0. `Dispatcher.send_message` flattens newlines up front (as `_read_message`
+DELIVERED but not CONSUMED (exit 4 — see EXIT CODES; #7743). `Dispatcher.send_message` flattens newlines up front (as `_read_message`
 does), because pi renders a submission as a single line and a first line is not
 message-unique.
 
@@ -106,6 +107,22 @@ a pane whose `read-screen` failed (`screen` -> None) is never a queue. An
 unreadable COMPOSER is not a fail-closed condition for the queue verdict (the
 pending display is independent evidence); it only constrains the recovery.
 
+QUEUED IS NOT SUCCESS (#7743)
+-----------------------------
+`queued` is DELIVERED, not CONSUMED: pi holds the text in its pending queue and
+only turns it into a conversation message when the CURRENT turn ends. That is
+correct on a healthy mid-turn lane and WRONG on a lane that cannot end its turn —
+the #7743 wedge, where the in-flight `task`/`subagent` tool's child is gone and a
+queued message can never be drained. There, exit 0 told the caller a wedged lane
+had accepted a message it in fact can never read.
+
+The two states are therefore DISTINGUISHED in the exit code, not collapsed:
+`consumed` is exit 0, and `queued` is exit 4 — DELIVERED (the JSON `delivered`
+field is true, so a caller can choose not to re-send and duplicate — this is
+#5979's finding, preserved exactly) but NOT success (the agent has not acted on
+it, so a caller that needs the turn to have STARTED must treat it as failure).
+`queued` is still never re-sent, for the same no-duplicate reason as before.
+
 PREVENTION, then DETECTION
 --------------------------
 The confirmation check is a BACKSTOP. The boot-block case has already run a
@@ -130,6 +147,59 @@ with no shell prompt below it, on the initial attempt AND on the dismiss-and-
 resend recovery. A genuinely slow boot is raised via `--ready-timeout`; a refusal
 is recoverable, an executed brief is not.
 
+UNREADABLE IS NOT A LANE STATE (#7913)
+--------------------------------------
+`cmux read-screen` can return NOTHING for a pane whose pi is running (measured:
+22 of 24 live workspaces read empty in one minute; a `0`-line read from a pane
+whose transcript was written 20 seconds earlier). Treating that as "the pane is
+not ready" is a category error: a failed read is an assertion about the
+INSTRUMENT, not about the lane, and it made the classifier flap lanes through
+WIP/IDLE/STALL/WEDGED at the bidding of the read.
+
+Two things change. First, the read is CLASSIFIED: `readiness_state` returns
+`UNREADABLE` for a failed or empty capture, and only `READY`/`NOT_READY` are
+assertions about the lane. `UNREADABLE` must never feed the beat's
+dispatch advice (`wait-ready --json` exposes it as `state`).
+
+Second, an `UNREADABLE` read is no longer the end of the decision: before
+refusing, the tool consults a NON-PANE signal — the pi session transcript of the
+PANE'S OWN session, resolved from the workspace's resume binding
+(`cmux surface resume show`, the authoritative binding `fleet_state.py` also
+uses). A transcript whose mtime advanced within `DEFAULT_SESSION_FRESH_S` is EVIDENCE that a live pi owns THIS pane (it is not
+proof — a pi that exited seconds ago still carries a fresh mtime, and #7913
+accepts that window deliberately), so the send proceeds and the log line names the evidence
+used (`session-mtime` vs `screen`).
+
+⚠ The transcript must be attributable to the pane, NEVER to its cwd. A
+cwd-scoped glob is not evidence about a pane: measured 2026-10-10, 13 of 22 live
+workspaces shared one `current_directory` and its session bucket held 245
+transcripts, so a sibling lane kept a dead lane reading “live” — and an empty
+read over a bare shell would have been executed. A workspace whose resume
+binding does not resolve is UNKNOWN and the tool REFUSES, exactly as
+`fleet_state.resolve_sessions` refuses an ambiguous candidate set rather than
+guessing.
+
+The fallback fires ONLY for `UNREADABLE`: a READABLE pane that lacks a footer is
+still refused (#7158), because that is a real claim about the lane.
+
+COMPOSER HYGIENE, AND THE MENU THAT EATS ENTER (#7913)
+------------------------------------------------------
+A second, independent failure produced the same `sent-but-not-consumed` verdict:
+an OPEN COMPLETION MENU over the composer. While it is open, `Enter` accepts the
+highlighted completion instead of submitting, so the dispatcher's chained Enter
+is swallowed and the brief never becomes a turn — and the chosen recovery
+(`release-only`, a bare Enter) is the exact keystroke the menu eats.
+
+The pre-send sequence therefore clears the composer BEFORE typing: always
+Ctrl-U (`deleteToLineStart`, which cannot interrupt), plus Escape when a menu is
+OBSERVED. Escape is sent ONLY when the menu is observed because `Escape` with no
+menu showing is `app.interrupt` and ABORTS the lane's live turn (verified in the
+installed `CustomEditor.handleInput`); with a menu showing it is `tui.select.cancel`
+and merely dismisses it. The menu is detected from the renderer's own selected-row
+marker (`→ `) below the composer's bottom rule. If the brief's own text opens a
+menu, the confirmation read sees it and the recovery becomes `dismiss-release`
+(dismiss, then release) rather than a bare Enter or a duplicate re-send.
+
 USAGE
 -----
     uv run python tools/cmux_dispatch.py send --workspace workspace:12 \
@@ -140,12 +210,15 @@ USAGE
 
 EXIT CODES
 ----------
-    0  consumed — the message became a conversation message, or
-       queued — pi accepted it into its pending queue (the pane's
-       `Steering:`/`Follow-up:` display carries this message) for the next turn
+    0  consumed — the message became a conversation message
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
+    4  queued — pi accepted the message into its pending queue (the pane's
+       `Steering:`/`Follow-up:` display carries this message) for the next turn,
+       but it has NOT become a conversation message. DELIVERED but not consumed;
+       a caller that needs the turn to have STARTED must treat this as NOT
+       success (see QUEUED IS NOT SUCCESS)
 
 A transport failure (exit 3) is NOT a consumption failure (exit 1), and the two
 stay distinguishable. But a failure to REACH cmux — a non-zero rc on any
@@ -216,7 +289,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -323,6 +396,51 @@ R_NONE = "none"
 R_RELEASE = "release-only"
 R_RESEND = "resend"
 R_DISMISS_RESEND = "dismiss-and-resend"
+#: A COMPLETION MENU swallowed the submit Enter (#7913, second root). Distinct
+#: from `R_DISMISS_RESEND`: the brief is ALREADY in the composer (the menu is what
+#: ate the Enter, not the transport), so re-sending would duplicate it. The
+#: recovery is dismiss-the-menu THEN release the composer with a bare Enter.
+R_DISMISS_RELEASE = "dismiss-release"
+
+# --- non-pane liveness: the pi session file (#7913) ------------------------ #
+#: pi writes each session's transcript to `~/.pi/agent/sessions/<mangled-cwd>/`
+#: as `<ts>_<session-id>.jsonl`. A transcript whose mtime advanced recently can
+#: only be advancing because a live pi owns the workspace — a liveness signal
+#: INDEPENDENT of `cmux read-screen`, which is what this tool needs when the pane
+#: read returns nothing for a pane that is in fact running (#7913).
+#:
+#: Overridable via the environment so every test is hermetic and never touches
+#: the live store (the #4883 env-isolation class).
+SESSIONS_ROOT_ENV = "CMUX_DISPATCH_SESSIONS_DIR"
+DEFAULT_SESSIONS_ROOT = "~/.pi/agent/sessions"
+#: How recently a session transcript must have advanced to count as a live pi.
+#: The finding measured lanes alive with transcript writes seconds old; the
+#: fleet's own beat used a 15-minute window. Five minutes sits inside both and is
+#: short enough that a genuinely dead lane's frozen transcript is not mistaken for
+#: a live one. Deliberately conservative: this signal only ever GATES a send that
+#: the screen could not, so a too-strict window costs a re-dispatch.
+DEFAULT_SESSION_FRESH_S = 300.0
+
+# --- readiness classification (#7913) -------------------------------------- #
+#: A FAILED READ is a statement about the INSTRUMENT, never about the lane.
+#: `UNREADABLE` is therefore first-class and must never be fed to the beat's
+#: WEDGED/STALL/IDLE dispatch advice: `STALL`/`WEDGED` are assertions about the
+#: lane, and an intermittent read must not be able to move a lane between states
+#: (that flapping is the audit trail of the instrument failing). Only `READY` and
+#: `NOT_READY` are assertions about the lane; `BLOCKED` is pi's own boot prompt.
+ST_READY = "READY"
+ST_UNREADABLE = "UNREADABLE"
+ST_BLOCKED = "BLOCKED"
+ST_NOT_READY = "NOT_READY"
+
+#: pi's autocomplete list (`SelectList.renderItem` in the installed pi-tui)
+#: marks the SELECTED candidate with a `→ ` prefix and renders the whole list in
+#: the editor's own output, just below the composer's bottom rule. Used for the
+#: CONDITIONAL pre-send dismiss: Escape is routed to `tui.select.cancel` while
+#: autocomplete is showing (SAFE), but to `app.interrupt` — which ABORTS the live
+#: turn — when it is not (`CustomEditor.handleInput`). So this predicate must be
+#: specific, and it is only ever used to ADD a safe keystroke.
+SELECTED_COMPLETION_RE = re.compile("^\\s*\u2192\\s+\\S")
 
 #: pi's input box is delimited by long horizontal rules; the composer is the
 #: region between the LAST TWO of them. A mid-turn editor draws its TOP border with
@@ -627,6 +745,170 @@ def screen_ready(screen: str | None) -> bool:
         and not boot_blocked(screen)
         and not shell_prompt_below_footer(screen)
     )
+
+
+def readiness_state(screen: str | None) -> str:
+    """Classify a pane read into one of `READY` / `UNREADABLE` / `BLOCKED` / `NOT_READY`.
+
+    The one rule that matters (#7913): a read that returned NOTHING — a failed
+    `read-screen` (`None`) or an empty capture — is `UNREADABLE`. It is a fact
+    about the instrument, not about the lane, and it must never be collapsed into
+    `STALL`/`WEDGED`/`IDLE` advice. A READABLE pane that merely shows no live
+    footer stays `NOT_READY` (the #7158 bare-shell shape), which is a real claim
+    about the lane and MUST keep refusing a blind send.
+    """
+    if not (screen or "").strip():
+        return ST_UNREADABLE
+    if boot_blocked(screen):
+        return ST_BLOCKED
+    if screen_ready(screen):
+        return ST_READY
+    return ST_NOT_READY
+
+
+def condition_for(screen: str | None) -> str:
+    """The operator-facing `condition` for a refusal, from the READ's shape.
+
+    Lives beside `readiness_state` so a refusal's `condition` cannot disagree with
+    the classification it came from. Two recovery refusals once shipped
+    `condition == ""`, which the field's own docstring reads as a transport
+    failure — a consumer branching on it misclassified a refusal as a lost
+    transport (#7913 review).
+    """
+    state = readiness_state(screen)
+    if state == ST_UNREADABLE:
+        return "unreadable-pane"
+    if state == ST_BLOCKED:
+        return "boot-blocked"
+    return "not-ready"
+
+
+def unreadable_reason(screen: str | None) -> str:
+    """Operator-facing reason for an `UNREADABLE` verdict."""
+    if screen is None:
+        return "`cmux read-screen` failed (no capture at all)"
+    return "`cmux read-screen` returned an EMPTY capture"
+
+
+def completion_menu_open(screen: str | None) -> bool:
+    """True when pi's autocomplete/completion menu is open on the pane.
+
+    The list is rendered by the editor component just BELOW its bottom rule, and
+    the selected candidate carries a `→ ` prefix (`SelectList.renderItem` in the
+    installed pi-tui). Requiring an arrow-prefixed line AFTER the last horizontal
+    rule bounds the match to that region: `→ ` in a lane's transcript or bash
+    output is scrollback, above the rule, and does not count.
+
+    Conservative BY DIRECTION. A false NEGATIVE costs one recovery round-trip
+    (the `R_DISMISS_RELEASE` path is reached from the confirmation read instead);
+    a false POSITIVE would send Escape at a pane with no menu, which pi routes to
+    `app.interrupt` and ABORTS the lane's live turn. So the predicate demands the
+    renderer's own selected-row marker, its position after the last rule, and its
+    place BEFORE the footer stats line (the editor region ends at the footer), and
+    it is bounded to the autocomplete maximum-plus-scroll-indicator.
+    """
+    if not screen:
+        return False
+    rows = screen.splitlines()
+    rule_at = -1
+    for index, row in enumerate(rows):
+        if RULE_RE.match(row):
+            rule_at = index
+    if rule_at < 0:
+        return False
+    # Scan only the editor region below the last rule: the autocomplete list can
+    # hold up to `autocompleteMaxVisible` (max 20) entries plus a scroll line, and
+    # it ends where the footer stats line begins.
+    for row in rows[rule_at + 1 : rule_at + 1 + 25]:
+        if READY_RE.search(row):
+            break
+        if SELECTED_COMPLETION_RE.match(row):
+            return True
+    return False
+
+
+def sessions_root() -> Path:
+    """The pi session store root (env-overridable for hermetic tests)."""
+    return Path(os.environ.get(SESSIONS_ROOT_ENV) or DEFAULT_SESSIONS_ROOT).expanduser()
+
+
+def mangle_cwd(cwd: str) -> str:
+    """cwd -> session directory name: `/a/b.c` -> `--a-b-c--` (see fleet_state)."""
+    return "--" + re.sub(r"[/.]", "-", cwd.strip("/")) + "--"
+
+
+def _newest(paths: Iterable[Path]) -> Path | None:
+    """The most recently modified regular file among `paths`, or None."""
+    newest: Path | None = None
+    newest_mtime = -1.0
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+    return newest
+
+
+#: A session id is a UUID (measured 2026-10-10: 21/21 live bindings). The shape is
+#: checked BEFORE the id is interpolated into a glob, so a malformed binding can
+#: never WIDEN the pattern: `sid="*"` would otherwise match the store's newest
+#: transcript and re-attribute a sibling lane's liveness to this pane — the exact
+#: #7913 defect this function exists to fix.
+_SESSION_ID_RE = re.compile(r"[0-9A-Za-z_-]+")
+
+
+class _ProbeUnavailable:
+    """Sentinel: the binding probe could not be ASKED — distinct from "no binding".
+
+    `None` is cmux's answer that the pane has no binding; this is the absence of
+    an answer. Only the first is safe to memoize for a dispatch (#7913 review).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "PROBE_UNAVAILABLE"
+
+
+PROBE_UNAVAILABLE = _ProbeUnavailable()
+
+
+def session_file_for(session_id: str | None, entry: dict | None) -> Path | None:
+    """The transcript belonging to `session_id`, or None — NEVER a guess.
+
+    A pane's own transcript is named `<timestamp>_<session-id>.jsonl`, so the
+    session id — not the cwd — is what attributes a file to a pane (#7913: a
+    cwd-scoped glob let a sibling lane's fresh transcript stand in for a dead
+    lane's, measured 13-of-22 workspaces sharing one cwd and 245 transcripts in
+    its bucket).
+
+    The mangled-`current_directory` bucket is the fast path; the whole store is
+    the fallback, for a pane whose cwd changed after its session started. The
+    session id is unique, so the fallback cannot pick up a sibling's file.
+
+    A missing `session_id` is UNKNOWN, never “no evidence against”: the caller
+    must refuse.
+    """
+    sid = (session_id or "").strip()
+    if not sid or not _SESSION_ID_RE.fullmatch(sid):
+        return None
+    cwd = str((entry or {}).get("current_directory") or "").strip()
+    lookups: list[tuple[Path, str]] = []
+    if cwd:
+        lookups.append((sessions_root() / mangle_cwd(cwd), f"*_{sid}.jsonl"))
+    lookups.append((sessions_root(), f"**/*_{sid}.jsonl"))
+    for root, pattern in lookups:
+        try:
+            best = _newest(root.glob(pattern))
+        except OSError:
+            continue
+        if best is not None:
+            return best
+    return None
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -998,6 +1280,14 @@ def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
         return R_RELEASE
     if boot_blocked(screen):
         return R_DISMISS_RESEND
+    if completion_menu_open(screen) and text_on_screen(screen, fp):
+        # A completion menu is open ABOVE a composer that already holds our brief:
+        # a bare Enter is consumed by the menu (it accepts the highlighted
+        # completion) and never submits — which is exactly why `release-only`
+        # cannot recover this condition, and why the recovery must depend on the
+        # observed condition rather than on the umbrella `sent-but-not-consumed`.
+        # Dismiss the menu, THEN release; never re-send (the brief is present).
+        return R_DISMISS_RELEASE
     if text_on_screen(screen, fp):
         return R_RELEASE
     if pending_turn_identity(screen, message or fp) is not None or (
@@ -1107,6 +1397,65 @@ class Cmux:
         # `both` emits ref AND id so either form resolves.
         return self.run(["list-workspaces", "--json", "--id-format", "both"])
 
+    def pane_session_id(
+        self, workspace: str, surface: str | None = None
+    ) -> str | object | None:
+        """The PANE's resume-bound session id, `None`, or `PROBE_UNAVAILABLE`.
+
+        ⚠ SURFACE-SCOPED, and that is load-bearing. `cmux surface resume show`
+        with no `--surface` answers for the workspace's SELECTED surface, but a
+        workspace can hold several surfaces with DIFFERENT sessions (measured
+        2026-10-10: `workspace:14` bound `surface:15` and `surface:16` to two
+        distinct checkpoint ids). Probing without the target surface would let a
+        sibling surface's live pi certify a blind write into the target one —
+        #7158's harm one granularity narrower than the cwd scoping already fixed
+        (#7913 review, P1).
+
+        `resume_binding` is the AUTHORITATIVE field — NOT
+        `restore_record.checkpoint_id`. Measured 2026-10-08: a workspace printed
+        “No resume binding” from the text form while `restore_record` still
+        carried a STALE id, so reading the stale field is exactly the class of
+        defect this tool exists to remove (see `fleet_state.pane_bindings`).
+
+        The two negative outcomes are DELIBERATELY distinct, because they mean
+        opposite things downstream (#7913 review):
+
+        - `None` — cmux ANSWERED, and this pane has no binding. A definitive
+          fact, safe to memoize for the dispatch, and the caller refuses.
+        - `PROBE_UNAVAILABLE` — the probe could not be ASKED (non-zero exit, a
+          timeout, a malformed reply). TRANSIENT: under fleet load a cmux call
+          does time out, and caching this would let one flaky poll disable the
+          #7913 fallback for the whole dispatch while reporting the wrong cause.
+        """
+        result = self.run(
+            [
+                "surface",
+                "resume",
+                "show",
+                "--workspace",
+                workspace,
+                *(["--surface", surface] if surface else []),
+                "--json",
+            ],
+            timeout=min(self.timeout, 15.0),
+        )
+        if result.rc != 0:
+            return PROBE_UNAVAILABLE
+        try:
+            data = json.loads(result.out)
+        except Exception:  # a malformed reply is not an answer about the pane
+            return PROBE_UNAVAILABLE
+        if not isinstance(data, dict):
+            return PROBE_UNAVAILABLE
+        rb = data.get("resume_binding")
+        # ONLY the dict form's `checkpoint_id`: a bare string is not a shape cmux
+        # emits, and accepting extra shapes here would let this tool and
+        # `fleet_state.pane_bindings` — which reads `checkpoint_id` only —
+        # disagree about whether a pane is bound at all (#7913 review).
+        sid = rb.get("checkpoint_id") if isinstance(rb, dict) else None
+        sid = str(sid).strip() if sid else ""
+        return sid or None
+
     def read_screen(
         self, workspace: str, lines: int = 80, surface: str | None = None
     ) -> CmuxResult:
@@ -1129,6 +1478,24 @@ class Cmux:
         # submit (reproduced by the Decision relay 2026-09-17).
         return self.send_text(workspace, "\\n", surface)
 
+    def send_escape(self, workspace: str, surface: str | None = None) -> CmuxResult:
+        """Send a lone ESC key (0x1b).
+
+        ONLY safe while pi's autocomplete menu is open: `CustomEditor.handleInput`
+        then routes Escape to `tui.select.cancel` (dismiss the menu), whereas with
+        no menu showing it routes to `app.interrupt`, which ABORTS the live turn.
+        Callers MUST gate this on `completion_menu_open(screen)`.
+        """
+        return self.send_text(workspace, "\x1b", surface)
+
+    def send_ctrl_u(self, workspace: str, surface: str | None = None) -> CmuxResult:
+        """Send Ctrl-U (`tui.editor.deleteToLineStart`) to clear the composer line.
+
+        This is the UNSAFE-free half of composer hygiene: it cannot interrupt a
+        turn, and it is what stops two briefs concatenating into one turn.
+        """
+        return self.send_text(workspace, "\x15", surface)
+
 
 # --------------------------------------------------------------------------- #
 # Dispatcher
@@ -1144,22 +1511,52 @@ class DispatchResult:
     recoveries: list[str] = field(default_factory=list)
     fingerprint: str = ""
     reason: str = ""
+    #: The OBSERVED delivery condition behind a failure (#7913). The full value
+    #: set is `unreadable-pane` (the instrument failed), `composer-not-submitted`
+    #: (our text is visibly still in the composer), `unparsed-queue` (a queue
+    #: marker we could not parse), `not-observed` (we could not confirm the
+    #: turn), `boot-blocked` (the pane sat on a boot-block prompt past the
+    #: budget) and `not-ready` (the pane never reached READY).
+    #:
+    #: `condition` and `status` are INDEPENDENT, but the mapping is NOT
+    #: symmetric: only `unreadable-pane` rides BOTH `never-became-ready` (the
+    #: pre-send and recovery re-asserts refuse a read that went blind) and
+    #: `sent-but-not-consumed` (the bytes went and the pane went unreadable
+    #: after). `boot-blocked` and `not-ready` ride `never-became-ready` only;
+    #: `composer-not-submitted`/`unparsed-queue`/`not-observed` ride
+    #: `sent-but-not-consumed` only. So a consumer must read `condition` as
+    #: "why", never as "when". `""` means NO delivery condition was observed: a
+    #: transport failure, an unknown workspace, a refusal raised before any read
+    #: happened, or the submit-Enter leg failing after a text send that was
+    #: confirmed in no other way. Reported so a log names WHICH failure was seen
+    #: rather than only the umbrella status — the dispatcher's recovery is chosen
+    #: from this condition.
+    condition: str = ""
     #: Which channel carried the bytes — the question a transport failure makes
     #: ambiguous (#4842). `transport` = the text send reached cmux, `inbox` = the
     #: durable orchestrator-inbox fallback, `none` = NEITHER (the notice is not
     #: recorded anywhere), `""` = nothing was transmitted (usage/readiness refusal).
     #: Orthogonal to `status`, which carries whether the notification CONSUMED.
     channel: str = ""
+    #: The bytes were CONFIRMED in pi's hands — consumed OR queued. True means
+    #: never re-send (a re-send would DUPLICATE): that is #5979's finding. False is
+    #: NOT a licence to re-send either — a transport failure can leave the bytes in
+    #: pi's composer, so no non-success outcome is blindly retryable; read `status`.
+    #: `ok` is the STRONGER claim — `consumed` only: a caller that must know the
+    #: turn STARTED keys on `ok`/exit 0 (#7743). Invariant: `ok` ⇒ `delivered`.
+    delivered: bool = False
 
     def as_json(self) -> dict:
         return {
             "ok": self.ok,
+            "delivered": self.delivered,
             "status": self.status,
             "detail": self.detail,
             "attempts": self.attempts,
             "recoveries": self.recoveries,
             "fingerprint": self.fingerprint,
             "reason": self.reason,
+            "condition": self.condition,
             "channel": self.channel,
         }
 
@@ -1172,15 +1569,214 @@ class Dispatcher:
         now: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] | None = None,
         poll: float = DEFAULT_POLL,
+        session_probe: Callable[[str | None, dict | None], Path | None] | None = None,
+        session_fresh_s: float = DEFAULT_SESSION_FRESH_S,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.cmux = cmux
         self.sleep = sleep
         self.now = now
         self.poll = poll
+        #: `(session_id, entry) -> Path | None`. The PROBE is pane-attributable:
+        #: it receives the pane's resume-bound session id, never a bare cwd
+        #: (#7913). An unresolvable id reaches it as None and it must return
+        #: None — the caller then refuses.
+        self._session_probe = session_probe or session_file_for
+        #: workspace -> resume-bound session id, `None` meaning "resolved absent".
+        #: A pane's binding cannot change mid-dispatch, and the gate re-probes on
+        #: EVERY poll: without this, an unreadable pane cost one
+        #: `cmux surface resume show` subprocess per poll — measured 91 spawns for
+        #: a single dispatch at the 180s/2s defaults (#7913 review, load).
+        self._session_ids: dict[tuple[str, str | None], str | None] = {}
+        self.session_fresh_s = session_fresh_s
+        #: Wall clock (NOT the monotonic deadline clock): freshness is a property
+        #: of a file's mtime, which is wall-clock. Injected so tests are
+        #: deterministic instead of racing `time.time()`.
+        self.wall_clock = wall_clock
         self._log = log or (lambda message: print(message, file=sys.stderr))
 
     def log(self, message: str) -> None:
         self._log(message)
+
+    # -- non-pane liveness (#7913) ------------------------------------------- #
+
+    def pane_binding(
+        self, workspace: str, surface: str | None = None
+    ) -> tuple[bool, str | None]:
+        """`(probe_answered, session_id)` for a pane — see `self._session_ids`.
+
+        Keyed by `(workspace, surface)`: the two together name a PANE. Keying on
+        the workspace alone would answer for whichever surface cmux has selected,
+        certifying a send into a different one (#7913 review, P1).
+
+        `probe_answered=False` means the binding could not be determined (cmux
+        unreachable, timed out, no such method, or an unparseable reply); it is
+        NOT memoized, so the next poll re-asks. `None` with
+        `probe_answered=True` is a definitive "this pane has no binding" and IS
+        memoized — one dispatch must not spawn a `cmux surface resume show` per
+        poll (measured 91 at the 180 s/2 s defaults).
+        """
+        key = (workspace, surface)
+        if key in self._session_ids:
+            return True, self._session_ids[key]
+        getter = getattr(self.cmux, "pane_session_id", None)
+        # A cmux with no such method has NOT answered, and must not be memoized as
+        # a definitive absence — that would let a duck-typed cmux poison the whole
+        # dispatch with the wrong cause.
+        raw: object = PROBE_UNAVAILABLE
+        if getter is not None:
+            try:
+                raw = getter(workspace, surface)
+            except TypeError:
+                # A seam predating surface-scoping. Ask it the OLD one-arg way only
+                # when no surface is named — there the one-arg answer names the same
+                # pane. For a NAMED surface a one-arg answer is the SELECTED
+                # surface's binding, i.e. the very P1 this function exists to
+                # prevent, cached under the target's key (#7913 review).
+                if surface is not None:
+                    raw = PROBE_UNAVAILABLE
+                else:
+                    try:
+                        raw = getter(workspace)
+                    except Exception:  # broad by design: a probe is best-effort
+                        raw = PROBE_UNAVAILABLE
+            except Exception:  # broad by design: a probe is best-effort
+                raw = PROBE_UNAVAILABLE
+        if raw is PROBE_UNAVAILABLE:
+            return False, None
+        session_id = raw if isinstance(raw, str) and raw else None
+        self._session_ids[key] = session_id
+        return True, session_id
+
+    def session_liveness(
+        self, workspace: str, entry: dict | None, surface: str | None = None
+    ) -> tuple[bool, str]:
+        """Is a live pi advancing THIS pane's session transcript?
+
+        Returns `(fresh, detail)`; `detail` is always a human sentence suitable
+        for the evidence log line, whether or not the signal fired. NEVER raises:
+        a probe failure is a diagnostic and degrades to `(False, ...)` so the
+        caller can refuse (fail-closed) rather than crash.
+
+        The signal is PANE-attributable by construction: the transcript is
+        selected by the pane's resume-bound session id, so a sibling lane
+        sharing the cwd cannot stand in for this one (#7913). Three states are
+        refusal, not evidence: no binding, no matching transcript, and an age
+        that cannot be measured (an empty file, or a mtime ahead of the clock) —
+        an unmeasurable age fails CLOSED.
+
+        The signal is EVIDENCE of a live pi, not PROOF: a pi that wrote 200s ago
+        and then exited still carries a mtime inside the window, so it can
+        certify a pane that has since become a bare shell. That window is
+        deliberate — #7913's own acceptance criterion — and it is why the window
+        must stay short and the pane attribution must stay strict. The
+        over-refusal direction is the safe one; do not widen this to close it.
+        """
+        session_id: str | None = None
+        try:
+            answered, session_id = self.pane_binding(workspace, surface)
+            if not answered:
+                return False, (
+                    "the binding probe could not be asked (cmux unreachable, timed "
+                    "out, or an unparseable reply) — it is re-probed on the next "
+                    "poll, and this refusal is a refusal to GUESS"
+                )
+            resolved = self._session_probe(session_id, entry)
+        except Exception as exc:  # broad by design: a probe is best-effort
+            return False, f"session probe failed: {exc}"
+        if resolved is None:
+            if not session_id:
+                return False, (
+                    "no resume binding for this pane — its transcript cannot be "
+                    "attributed, so it is UNKNOWN and the send is refused"
+                )
+            if not _SESSION_ID_RE.fullmatch(session_id):
+                return False, (
+                    f"this pane's binding is not a session id ({session_id[:24]!r}) "
+                    "— refusing rather than widening the search to its cwd"
+                )
+            return False, (
+                f"no transcript for this pane's session {session_id[:8]} — "
+                "refusing rather than guessing from the cwd"
+            )
+        path = Path(resolved)
+        try:
+            st = path.stat()
+        except OSError as exc:
+            return False, f"session file unreadable: {exc}"
+        if st.st_size <= 0:
+            # A freshly-created, still-empty transcript is a pi that has written
+            # no turn: it is not evidence that a live pi owns the lane.
+            return False, f"session {path.name} is empty — not a liveness signal"
+        age = self.wall_clock() - st.st_mtime
+        if age < 0:
+            # A mtime AHEAD of the clock cannot be measured (clock step, a
+            # restored/copied file). Clamping it to 0 would make the lane look
+            # maximally fresh forever, so an unmeasurable age refuses.
+            return False, (
+                f"session {path.name} has a mtime {-age:.0f}s ahead of the clock "
+                "— age unmeasurable, refusing"
+            )
+        fresh = age <= self.session_fresh_s
+        return fresh, f"session {path.name} advanced {age:.0f}s ago"
+
+    def clear_composer(
+        self, workspace: str, screen: str | None, surface: str | None = None
+    ) -> list[str]:
+        """Pre-send composer hygiene; returns the keystrokes actually sent.
+
+        ALWAYS Ctrl-U (`deleteToLineStart`, cannot interrupt) so a half-typed line
+        or a previous brief cannot concatenate onto ours. ADDITIONALLY Escape when
+        a completion menu is OBSERVED — the one context where Escape dismisses
+        rather than interrupts (`completion_menu_open`). Clearing happens BEFORE
+        the brief is typed, not after a failure, so a menu can never eat the
+        submit Enter in the first place.
+        """
+        sent: list[str] = []
+        if completion_menu_open(screen):
+            self.cmux.send_escape(workspace, surface)
+            sent.append("escape")
+        self.cmux.send_ctrl_u(workspace, surface)
+        sent.append("ctrl-u")
+        return sent
+
+    def _send_allowed(
+        self,
+        workspace: str,
+        entry: dict | None,
+        screen: str | None,
+        gate_evidence: str,
+        surface: str | None = None,
+    ) -> tuple[bool, str, str]:
+        """May the bytes be written, given the pre-send read? (#7913)
+
+        Returns `(allowed, evidence_note, refusal_reason)`. A live footer passes on
+        `screen`. The ONE non-ready case that passes is UNREADABLE (a failed or
+        empty read) *with* a fresh transcript OF THIS PANE'S OWN SESSION — and only
+        when the gate also accepted the pane on that same signal, so a transiently
+        blind read cannot smuggle a send past a gate that itself refused. A
+        READABLE pane with no footer is still refused: session-mtime is weaker
+        evidence than a screen that explicitly shows no pi, and this pane's own
+        transcript advancing does not say the pane is at a pi prompt (#7158).
+        """
+        if screen_ready(screen):
+            return True, "screen", ""
+        if not (screen or "").strip():
+            fresh, detail = self.session_liveness(workspace, entry, surface)
+            if gate_evidence == "session-mtime" and fresh:
+                return True, f"session-mtime ({detail})", ""
+            return False, "", f"{unreadable_reason(screen)}, and {detail}"
+        return False, "", not_ready_reason(screen)
+
+    def failure_condition(self, screen: str | None, fp: str, message: str) -> str:
+        """Name the OBSERVED failure condition from the last confirmation read."""
+        if not (screen or "").strip():
+            return "unreadable-pane"
+        if pending_queue_unparsed(screen):
+            return "unparsed-queue"
+        if text_on_screen(screen, fp):
+            return "composer-not-submitted"
+        return "not-observed"
 
     def _deliver_via_inbox(self, tag: str, text: str, label: str) -> tuple[str, str]:
         """Append the notice to the durable inbox; return `(channel, note)`.
@@ -1328,17 +1924,35 @@ class Dispatcher:
     # -- readiness (Defect 2 / send-during-boot race) ------------------------ #
 
     def wait_until_safe_to_send(
-        self, workspace: str, timeout: float, surface: str | None = None
-    ) -> tuple[bool, bool, str]:
+        self,
+        workspace: str,
+        timeout: float,
+        surface: str | None = None,
+        entry: dict | None = None,
+    ) -> tuple[bool, bool, str | None, str, str]:
         """Poll until sending cannot be eaten by a boot-block prompt.
 
-        Returns `(ready, blocked_now, last_screen)`.
+        Returns `(ready, blocked_now, last_screen, evidence, refusal)`. `evidence`
+        is `"screen"` when a LIVE pi footer was read, `"session-mtime"` when the
+        pane read returned nothing but a fresh transcript of the PANE'S OWN
+        session is evidence of a live pi (#7913), and `""` on refusal. `refusal`
+        is the PROBE'S OWN diagnosis on a refusal and `""` otherwise — six
+        distinct causes (no binding, no transcript, stale, empty, future mtime,
+        probe error) otherwise render as one indistinguishable message, and each
+        has a different remedy (#7913 review).
 
         `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
         is PROVABLY not accepting input, so the caller must refuse. `ready=False`
-        means no pi footer was drawn by the deadline; the caller must ALSO refuse
-        — there is no "best-effort proceed" (removed in #7158): a readable pane
-        with no live pi is a bare shell, and bytes written there are executed.
+        means no pi footer was drawn by the deadline AND no non-pane liveness
+        signal was available; the caller must ALSO refuse — there is no
+        "best-effort proceed" (removed in #7158): a readable pane with no live pi
+        is a bare shell, and bytes written there are executed.
+
+        The non-pane fallback fires ONLY for `UNREADABLE` (a failed or empty
+        read). A READABLE pane that lacks a footer stays a refusal: session-mtime
+        is weaker evidence about the LANE than a readable screen that explicitly
+        shows no pi, and a live transcript says the lane's pi is working — not
+        that this pane is at a prompt that can accept input.
         """
         deadline = self.now() + timeout
         screen: str | None = ""
@@ -1346,8 +1960,10 @@ class Dispatcher:
         dismissals = 0
         logged_failure = False
         while True:
+            refusal = ""
             screen = self.screen(workspace, surface)
-            if boot_blocked(screen):
+            state = readiness_state(screen)
+            if state == ST_BLOCKED:
                 if not announced:
                     self.log(
                         "  boot-block prompt detected — dismissing with a bare Enter "
@@ -1364,8 +1980,23 @@ class Dispatcher:
                         f"  WARN: boot-block dismissal REJECTED rc={dismissal.rc}: "
                         f"{dismissal.err.strip() or 'no stderr'}"
                     )
-            elif screen_ready(screen):
-                return True, False, screen
+            elif state == ST_READY:
+                return True, False, screen, "screen", ""
+            elif state == ST_UNREADABLE:
+                # The instrument failed. Before refusing (or waiting out the
+                # timeout on a deterministic empty read), consult the non-pane
+                # signal: a transcript advancing within the freshness window is
+                # EVIDENCE of a live pi (#7913) — evidence, not proof, since a pi
+                # that exited seconds ago leaves a fresh mtime behind.
+                fresh, detail = self.session_liveness(workspace, entry, surface)
+                refusal = detail
+                if fresh:
+                    self.log(
+                        f"  read-screen returned nothing ({unreadable_reason(screen)}) "
+                        f"but {detail} — accepting the pane as LIVE (evidence: "
+                        f"session-mtime)"
+                    )
+                    return True, False, screen, "session-mtime", ""
             # Deadline is checked AFTER the dismissal attempt and BEFORE the
             # sleep, so a zero timeout still gets one probe + one dismissal.
             if self.now() >= deadline:
@@ -1379,7 +2010,7 @@ class Dispatcher:
                         f"  still boot-blocked after {dismissals} dismissal attempt(s); "
                         f"last rc={dismissal.rc if dismissals else 'n/a'}"
                     )
-                return False, boot_blocked(screen), screen
+                return False, boot_blocked(screen), screen, "", refusal
             self.sleep(self.poll)
 
     # -- confirmation (Defect 1) --------------------------------------------- #
@@ -1458,8 +2089,8 @@ class Dispatcher:
         # --- gate: never send into a boot-blocked prompt -------------------- #
         self.log(f"{tag}waiting for {workspace} to be safe to send…")
         try:
-            ready, blocked_now, gate_screen = self.wait_until_safe_to_send(
-                workspace, ready_timeout, surface
+            ready, blocked_now, gate_screen, gate_evidence, gate_refusal = (
+                self.wait_until_safe_to_send(workspace, ready_timeout, surface, entry=before)
             )
         except CmuxTransportError as exc:
             return self._transport_failure(
@@ -1474,38 +2105,42 @@ class Dispatcher:
                 f"(bytes sent at that prompt are eaten, and a partial eat submits "
                 f"a truncated turn)",
                 fingerprint=fp,
-            )
-        if not ready and gate_screen is None:
-            # We could not read the pane AND never saw a ready signal. Sending
-            # blind here is how a brief gets fed to a prompt we cannot see.
-            return DispatchResult(
-                False,
-                "never-became-ready",
-                f"{tag}{workspace} could not be read (`cmux read-screen` failed) "
-                f"and no ready signal was seen in {ready_timeout:g}s — refusing to "
-                f"send blind",
-                fingerprint=fp,
+                condition="boot-blocked",
             )
         if not ready:
-            # ⛔ NO FOOTER, NO SEND (#7158). The pane is READABLE but pi does not
-            # own stdin: either no footer was ever drawn, or a stale footer sits
-            # above a live shell prompt. In both cases the pane may be a bare
-            # login shell (a dead lane), which EXECUTES the bytes as a command.
-            # The old fail-open ("sending anyway — confirmation will decide")
-            # wrote the brief first and observed afterwards; confirmation cannot
-            # undo an executed command. A genuinely slow boot is a caller concern
-            # (--ready-timeout); a refusal is recoverable, an executed brief is
-            # not.
-            reason = not_ready_reason(gate_screen)
+            # ⛔ NO FOOTER, NO SEND (#7158) / NO NON-PANE LIVENESS (#7913). The
+            # gate refuses unless it read a live pi footer OR a fresh session
+            # transcript proved a live pi. A READABLE pane with no footer may be a
+            # bare login shell (a dead lane), which EXECUTES the bytes as a
+            # command; an UNREADABLE pane with no session signal is invisible, so
+            # writing would be blind. Both are refusals: a refusal is recoverable,
+            # an executed brief is not.
+            state = readiness_state(gate_screen)
+            condition = condition_for(gate_screen)
+            if state == ST_UNREADABLE:
+                reason = (
+                    f"{unreadable_reason(gate_screen)}, and no fresh session "
+                    f"transcript proves a live pi"
+                )
+            else:
+                reason = not_ready_reason(gate_screen)
+            if gate_refusal:
+                # The probe's OWN diagnosis, not a generic paraphrase: "no resume
+                # binding" (re-bind), "no transcript for this pane" (wrong store),
+                # "stale" (restart the lane), "empty"/"future mtime" (store
+                # anomaly) and "probe failed" (cmux broken) each have a different
+                # remedy (#7913 review).
+                reason = f"{reason} ({gate_refusal})"
             return DispatchResult(
                 False,
                 "never-became-ready",
                 f"{tag}{workspace}: {reason} within {ready_timeout:g}s — "
-                f"refusing to send into a pane with no live pi: the bytes would "
-                f"be typed into a bare shell and EXECUTED. Confirm the lane has "
-                f"a live pi (or raise --ready-timeout for a slow boot), then "
+                f"refusing to send (condition: {condition}): the bytes would be "
+                f"typed blind or into a bare shell and EXECUTED. Confirm the lane "
+                f"has a live pi (or raise --ready-timeout for a slow boot), then "
                 f"re-dispatch.",
                 fingerprint=fp,
+                condition=condition,
             )
 
         # --- pre-send baseline (novelty for the pending-turn check) --------- #
@@ -1522,57 +2157,49 @@ class Dispatcher:
             # A transient `read-screen` failure is recoverable — retry once.
             before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
 
-        # ⛔ RE-ASSERT READINESS ON THE FRESH READ (#7158, TOCTOU). The gate
-        # (`wait_until_safe_to_send`) was ready, but the pane can die in the gap
-        # before this read — the window is one `read-screen`, which is not bounded
-        # under fleet load. Writing on a stale `ready` is how the brief lands in a
-        # bare shell; judge the read we already hold instead. An UNREADABLE read is
-        # a refusal too, not a licence to write blind: with the pane state unknown,
-        # a dead pane would EXECUTE the brief, and a refusal is recoverable while an
-        # executed brief is not. This mirrors the resend path, which already
-        # refuses when its fresh read is unreadable (`screen_ready(None)` is False).
-        if before_screen is None:
-            return DispatchResult(
-                False,
-                "never-became-ready",
-                f"{tag}{workspace}: the pre-send read failed twice, so readiness "
-                f"could not be re-checked — refusing to write blind: had the pane "
-                f"died after the gate passed, the bytes would be typed into a bare "
-                f"shell and EXECUTED. Re-dispatch once the pane is readable.",
-                fingerprint=fp,
-            )
-        # Judge readiness on the SAME window depth the gate used. `before_screen`
-        # is deliberately read deeper (`RECOVERY_SCREEN_LINES`) because the
-        # pending-turn baseline below must share the CONFIRMATION read's scope —
-        # but `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
-        # capture, so a 300-line window can carry an older shell prompt line that
-        # the gate's 80-line window does not. Without this slice the two judgements
-        # disagree about the same pane: the gate declares READY, the deeper
-        # re-assert refuses, and the refusal is reported as "a shell prompt is drawn
-        # BELOW pi's footer" when the truth is that no footer BLOCK was found at all
-        # (the shape `SCREEN_LIVE_WITH_TORN_FOOTER` models). The last
-        # `DEFAULT_SCREEN_LINES` lines are exactly what a `read-screen --lines 80`
-        # returns, so this is the gate's own window. A pane that genuinely died
-        # still draws its prompt in those last lines, so the fail-closed direction
-        # is intact — only the lines BELOW the gate's view stop being able to
-        # over-refuse.
+        # ⛔ RE-ASSERT READINESS ON THE FRESH READ (#7158, TOCTOU), now with the
+        # non-pane fallback (#7913). `gate_window` is deliberately the SAME window
+        # depth the gate used: `before_screen` is read deeper, and
+        # `shell_prompt_below_footer`'s no-footer-block fallback scans the WHOLE
+        # capture, so an unsliced deep read can carry an older shell prompt line the
+        # gate never saw and refuse a pane the gate just approved. The fallback is
+        # allowed ONLY on an UNREADABLE read (see `_send_allowed`).
         gate_window = "\n".join(
-            before_screen.splitlines()[-DEFAULT_SCREEN_LINES:]
+            (before_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
         )
-        if not screen_ready(gate_window):
-            reason = not_ready_reason(gate_window)
+        allowed, evidence_note, refusal = self._send_allowed(
+            workspace, before, gate_window, gate_evidence, surface
+        )
+        if not allowed:
+            # `condition_for`, not a hand-rolled if/else: a window that is READABLE
+            # but sitting on the boot-block prompt (`BLOCKED`) is not `not-ready`,
+            # and the two have different remedies (#7913 review).
+            condition = condition_for(gate_window)
             return DispatchResult(
                 False,
                 "never-became-ready",
-                f"{tag}{workspace}: {reason} on the pre-send read — refusing to "
-                f"send into a pane with no live pi: the bytes would be typed "
-                f"into a bare shell and EXECUTED. Re-dispatch once the pane is "
-                f"idle.",
+                f"{tag}{workspace}: {refusal} on the pre-send read — refusing to "
+                f"write blind (condition: {condition}): had the pane died after the "
+                f"gate passed, the bytes would be typed into a bare shell and "
+                f"EXECUTED. Re-dispatch once the pane is readable and idle.",
                 fingerprint=fp,
+                condition=condition,
             )
+        if evidence_note != "screen":
+            self.log(f"{tag}pre-send read not ready — accepted on {evidence_note}")
+
+        # --- composer hygiene, BEFORE the brief is typed (#7913, 2nd root) --- #
+        # Escape only when a completion menu is OBSERVED (safe there), always
+        # Ctrl-U. This is what stops a menu eating the submit Enter and stops two
+        # briefs concatenating into one turn.
+        hygiene = self.clear_composer(workspace, before_screen, surface)
+        self.log(f"{tag}pre-send composer hygiene: {'+'.join(hygiene)}")
 
         # --- transmit ------------------------------------------------------- #
-        self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
+        self.log(
+            f"{tag}sending {len(text.encode())} bytes to {workspace}… "
+            f"(readiness evidence: {gate_evidence or 'screen'})"
+        )
         text_result = self.cmux.send_text(workspace, text, surface)
         if text_result.rc != 0:
             return self._transport_failure(
@@ -1627,6 +2254,7 @@ class Dispatcher:
             result.reason = reason
             if consumed:
                 result.ok = True
+                result.delivered = True
                 result.status = "consumed"
                 result.detail = (
                     f"{tag}{workspace} confirmed: message became a conversation "
@@ -1638,20 +2266,30 @@ class Dispatcher:
             # pi's pending-turn display has been QUEUED for the next turn
             # (#5979): a mid-turn pane accepts the submission and only surfaces it
             # as a turn when the current turn ends — later than any bounded wait.
-            # `queued` is a DELIVERED message (exit 0), not a failure. The screen
-            # read is reused by `recovery_action`, so the confirmation itself adds
-            # no cmux call; novelty needs the one pre-send read taken above.
+            # ⛔ DELIVERED, not CONSUMED (#7743): pi holds the text and drains it
+            # at the turn boundary — so it becomes real only if the turn CAN end.
+            # On a lane wedged on an orphaned in-flight `task`/`subagent` tool it
+            # never does, and which case we are in cannot be known here, so
+            # `queued` must NOT report the dispatch as complete. `delivered`
+            # carries #5979's finding (do not re-send — that would duplicate); `ok`
+            # stays False so the exit code is 4, never 0. The screen read is reused
+            # by `recovery_action`, so the confirmation itself adds no cmux call;
+            # novelty needs the one pre-send read taken above.
             screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
             if pending_turn_matches(screen, text, before_screen):
-                result.ok = True
+                result.ok = False
+                result.delivered = True
                 result.status = "queued"
                 result.detail = (
-                    f"{tag}{workspace} confirmed: pi accepted the message into its "
-                    f"pending queue for the next turn (attempt {attempt}, {reason})"
+                    f"{tag}{workspace} DELIVERED but NOT consumed: pi accepted the "
+                    f"message into its pending queue for the next turn (attempt "
+                    f"{attempt}, {reason}) — it is NOT yet a conversation message, so "
+                    f"the lane has not acted on it. Not re-sent (a re-send would "
+                    f"duplicate)."
                 )
                 self.log(
-                    f"{tag}queued ({reason}) — the lane is mid-turn; the message is "
-                    f"in pi's pending queue"
+                    f"{tag}queued ({reason}) — delivered to pi's pending queue; NOT "
+                    f"yet a conversation message"
                 )
                 return result
 
@@ -1684,6 +2322,7 @@ class Dispatcher:
                     )
                 if late_consumed:
                     result.ok = True
+                    result.delivered = True
                     result.status = "consumed"
                     result.detail = (
                         f"{tag}{workspace} confirmed: message became a conversation "
@@ -1696,6 +2335,13 @@ class Dispatcher:
                 # The message is visibly sitting in the composer unsent: a bare
                 # Enter releases it. Re-sending the text here would DUPLICATE it.
                 self.cmux.send_enter(workspace, surface)
+            elif action == R_DISMISS_RELEASE:
+                # A COMPLETION MENU is open over a composer that already holds our
+                # brief; a bare Enter would be eaten by the menu (it accepts the
+                # highlighted completion). Dismiss the menu, THEN release. No
+                # re-send — the brief is present.
+                self.cmux.send_escape(workspace, surface)
+                self.cmux.send_enter(workspace, surface)
             elif action == R_DISMISS_RESEND:
                 # The text was eaten by the boot-block prompt (possibly its
                 # prefix, leaving a corrupted turn). Dismiss, wait for the TUI,
@@ -1705,10 +2351,14 @@ class Dispatcher:
                 # the very corruption this tool prevents.
                 dismissal = self.cmux.send_enter(workspace, surface)
                 try:
-                    recovery_ready, recovery_blocked, recovery_screen = (
-                        self.wait_until_safe_to_send(
-                            workspace, RECOVERY_READY_TIMEOUT, surface
-                        )
+                    (
+                        recovery_ready,
+                        recovery_blocked,
+                        recovery_screen,
+                        _recovery_evidence,
+                        recovery_refusal,
+                    ) = self.wait_until_safe_to_send(
+                        workspace, RECOVERY_READY_TIMEOUT, surface, entry=before
                     )
                 except CmuxTransportError as exc:
                     # The RECOVERY-site gate, wrapped exactly like its sibling at
@@ -1730,6 +2380,10 @@ class Dispatcher:
                 if recovery_blocked or (not recovery_ready and recovery_screen is None):
                     result.ok = False
                     result.status = "never-became-ready"
+                    # NOT a transport failure: the read said something and we
+                    # refused on it, so `condition` must say WHICH refusal — an
+                    # empty `condition` reads as a lost transport (#7913 review).
+                    result.condition = condition_for(recovery_screen)
                     result.detail = (
                         f"{tag}{workspace} could not be recovered into a safe, "
                         f"READABLE state (blocked={recovery_blocked}, "
@@ -1737,6 +2391,7 @@ class Dispatcher:
                         f"rc={dismissal.rc}) — the message was eaten and the "
                         f"re-send was REFUSED rather than written blind. "
                         f"Re-dispatch once the pane is idle."
+                        + (f" ({recovery_refusal})" if recovery_refusal else "")
                     )
                     return result
                 if not recovery_ready:
@@ -1748,11 +2403,13 @@ class Dispatcher:
                     # "re-sending anyway (confirmation will decide)".
                     result.ok = False
                     result.status = "never-became-ready"
+                    result.condition = condition_for(recovery_screen)
                     result.detail = (
                         f"{tag}{workspace} was dismissed but never presented "
                         f"pi's footer within {RECOVERY_READY_TIMEOUT:g}s — the "
                         f"re-send was REFUSED rather than written into a pane "
                         f"with no live pi. Re-dispatch once the pane is idle."
+                        + (f" ({recovery_refusal})" if recovery_refusal else "")
                     )
                     return result
                 self.cmux.send_text(workspace, text, surface)
@@ -1782,23 +2439,39 @@ class Dispatcher:
                     (fresh_screen or "").splitlines()[-DEFAULT_SCREEN_LINES:]
                 )
                 if not screen_ready(fresh_window):
-                    result.ok = False
-                    result.status = "never-became-ready"
-                    result.detail = (
-                        f"{tag}{workspace} was not ready immediately before the "
-                        f"recovery re-send ({not_ready_reason(fresh_window)}) — the "
-                        f"re-send was REFUSED rather than written into a pane with "
-                        f"no live pi. Re-dispatch once the pane is idle."
+                    # Same non-pane fallback as the first send (#7913): an
+                    # UNREADABLE re-read with a fresh transcript is accepted only
+                    # when the gate itself admitted the pane on that signal.
+                    allowed, _note, refusal = self._send_allowed(
+                        workspace, before, fresh_window, gate_evidence, surface
                     )
-                    return result
+                    if not allowed:
+                        result.ok = False
+                        result.status = "never-became-ready"
+                        result.condition = condition_for(fresh_window)
+                        result.detail = (
+                            f"{tag}{workspace} was not ready immediately before the "
+                            f"recovery re-send ({refusal}) — the re-send was REFUSED "
+                            f"rather than written into a pane with no live pi "
+                            f"(condition: {result.condition}). Re-dispatch once the "
+                            f"pane is idle."
+                        )
+                        return result
                 self.cmux.send_text(workspace, text, surface)
                 self.cmux.send_enter(workspace, surface)
 
         result.ok = False
         result.status = "sent-but-not-consumed"
+        # Name the CONDITION observed, not just the umbrella status (#7913): an
+        # `unreadable-pane` failure is an instrument fault and must never be fed to
+        # the beat's WEDGED/STALL/IDLE advice, while `composer-not-submitted` is a
+        # delivery fault with a different recovery. `screen` is the last
+        # confirmation read taken inside the loop.
+        result.condition = self.failure_condition(screen, fp, text)
         result.detail = (
             f"{tag}{workspace} sent-but-not-consumed after {result.attempts} "
-            f"attempt(s) — last reason: {result.reason or 'no-confirmation-poll'}. "
+            f"attempt(s) — last reason: {result.reason or 'no-confirmation-poll'} "
+            f"(condition: {result.condition}). "
             f"The bytes were transmitted but never became a conversation message. "
             f"Recoveries tried: {', '.join(result.recoveries) or 'none'}. "
             f"Inspect: cmux read-screen --workspace {workspace} --lines 40"
@@ -1827,6 +2500,10 @@ def _read_message(args: argparse.Namespace) -> str | None:
 _EXIT_FOR_STATUS = {
     "transport-error": 3,
     "unknown-workspace": 2,
+    # DELIVERED but NOT consumed (#7743): distinct from 0 (consumed) and 1 (not
+    # consumed). Exit 4 so a shell caller never reads a queued-only send as a
+    # completed dispatch.
+    "queued": 4,
 }
 
 
@@ -1856,6 +2533,9 @@ def _cmd_send(args: argparse.Namespace) -> int:
     )
     if args.json:
         print(json.dumps(result.as_json(), indent=2))
+    elif result.status == "queued":
+        # DELIVERED but NOT consumed: neither "OK" nor "FAIL".
+        print("QUEUED " + result.detail)
     else:
         print(("OK " if result.ok else "FAIL ") + result.detail)
     if result.ok:
@@ -1866,16 +2546,35 @@ def _cmd_send(args: argparse.Namespace) -> int:
 def _cmd_wait_ready(args: argparse.Namespace) -> int:
     dispatcher = Dispatcher(Cmux(args.cmux))
     try:
-        ready, blocked_now, screen = dispatcher.wait_until_safe_to_send(
-            args.workspace, args.timeout, args.surface
+        entry = dispatcher.workspace_state(args.workspace)
+        ready, blocked_now, screen, evidence, refusal = dispatcher.wait_until_safe_to_send(
+            args.workspace, args.timeout, args.surface, entry=entry
         )
     except CmuxTransportError as exc:
         print(f"cmux unreachable: {exc}", file=sys.stderr)
         return 3
     payload = {
         "ready": ready,
+        # #7913: the CLASSIFICATION, first-class. `UNREADABLE` is a fact about the
+        # instrument (the read returned nothing), NOT about the lane — a beat that
+        # consumes this must never INTERPRET it as a lane state (WEDGED/STALL/
+        # IDLE/WIP). `ready` may still be true on `UNREADABLE` via the pane's
+        # session-mtime evidence; the two answer different questions ("may I
+        # dispatch?" vs "what did this read show?").
+        #
+        # `screen_readable` is the READ's success — `screen is not None` before
+        # #7913; it is now "the capture carried text", so a whitespace-only
+        # rc==0 read is `false`, like a failed one. `state` is the classification
+        # to branch on; `screen_readable` is retained for read diagnostics only.
+        "state": readiness_state(screen),
+        "readiness_evidence": evidence,
+        # The PROBE'S OWN diagnosis on a refusal, so a beat can tell "no resume
+        # binding" from "stale transcript" from "the probe could not be asked"
+        # without re-deriving it (#7913 review). Empty when
+        # `ready` is true, or when the refusal had no probe to diagnose.
+        "readiness_refusal": refusal,
         "boot_blocked_now": blocked_now,
-        "screen_readable": screen is not None,
+        "screen_readable": bool((screen or "").strip()),
         "workspace": args.workspace,
         "screen_tail": "\n".join((screen or "").splitlines()[-6:]),
     }
@@ -1894,7 +2593,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     ⛔ SUBMITTED-ONLY — do NOT use `verify` to audit a `send` verdict. `send` also
     accepts a message pi queued for the next turn (the pending-turn display, which
     needs a pre-send baseline), so on a mid-turn lane a message `send` correctly
-    reported as `queued`/exit 0 will print `NOT-CONSUMED` here and exit 1. This is
+    reports as `queued`/exit 4 will print `NOT-CONSUMED` here and exit 1. This is
     a deliberate contract difference, not a bug: `verify` is a "is it a turn yet?"
     probe and has no dispatch to be novel against.
     """

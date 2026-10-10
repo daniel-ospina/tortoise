@@ -461,6 +461,12 @@ def test_outcomes_to_report_golden_shape():
         # render).
         "aggregative_flag": None,
         "aggregative_verdict": None,
+        # #2886: the deterministic temporal-aggregation arm marker + verdict
+        # — o.get-based projection, None on golden outcomes (absent until
+        # the outcome carries them under the arm; pre-feature checkpoints
+        # render).
+        "temporal_aggregate": None,
+        "temporal_aggregate_verdict": None,
         # #1948: the reader-surface metric (points+chunks in the FULL
         # reader context) rides the projection parallel to
         # reader_evidence@k — o.get-based, None on golden outcomes.

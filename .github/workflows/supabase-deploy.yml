@@ -242,6 +242,15 @@ jobs:
       # when it is set, and `204` with no body when it is not. This step used to
       # send only `ref`, so the run id could never be learned and nothing could
       # observe the flip — the co-move reported a closed window on a POST alone.
+      #
+      # `-F`, NOT `-f`, for `return_run_details` (#7907). `gh api -f` ALWAYS
+      # sends a STRING, so `-f "return_run_details=true"` posts `"true"` and the
+      # endpoint rejects the body with HTTP 422 (`For 'properties/
+      # return_run_details', "true" is not a boolean`) BEFORE a dispatch exists.
+      # The flip is then never requested, and the step's own fail-closed error
+      # misdirects the operator to the credential grant. `-F` coerces a bare
+      # `true`/`false`/integer to the typed JSON value the schema requires;
+      # `ref` above stays `-f` because it is genuinely a string.
       - name: Dispatch deploy-hosted (the app flip)
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         env:
@@ -255,7 +264,7 @@ jobs:
                 -H "Accept: application/vnd.github+json" \
                 "repos/${REPO_SLUG}/actions/workflows/deploy-hosted.yml/dispatches" \
                 -f "ref=${APP_REF}" \
-                -f "return_run_details=true")"; then
+                -F "return_run_details=true")"; then
             echo "::error::Could not dispatch deploy-hosted. The schema HAS been applied and the app has NOT flipped: every tenant-scoped read now returns 0 rows and provisioning fails closed (#3627). Fix the credential (the workflow-level 'permissions: actions: write' grant) and re-run, or flip the app by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
             exit 1
           fi

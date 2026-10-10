@@ -336,7 +336,7 @@ only dispatch path that confirms the ARTIFACT rather than the send:
 
 ```bash
 uv run python tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
-    --label <lane> --file <brief.txt>        # exit 0 only on positive evidence pi got it
+    --label <lane> --file <brief.txt>        # 0 consumed · 4 queued (delivered) · 1 not consumed · 2 usage · 3 transport
 ```
 
 `cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
@@ -358,6 +358,14 @@ mid-turn submission into). It recovers automatically (release the composer with 
 dismiss-and-re-send when the text was eaten). It exits non-zero with `sent-but-not-consumed` when
 the message appears in neither — **text still sitting in the composer is the UNSENT state, never a
 success** (pi clears the editor before it queues).
+
+A message pi ACCEPTS into its pending queue (`Steering:` / `Follow-up:`) is **delivered but not
+consumed**: it exits **4**, not 0 (#7743). pi only drains the queue at the end of the current turn,
+so on a lane wedged inside a turn — the pane `Working` with no descendant child and a frozen
+transcript, surfaced as `pane_stalled_turn` by `tools/fleet_state.py` — a queued message is never
+read. `--json` carries both `delivered` (true — do not re-send, that would duplicate) and `ok`
+(false — the turn has not started), so a caller that must not duplicate keys on `delivered` and a
+caller that needs the turn to have started keys on `ok` / exit 0.
 
 **One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
 `Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane
