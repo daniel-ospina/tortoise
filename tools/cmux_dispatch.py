@@ -29,14 +29,15 @@ is a read of whether the message became a conversation message
 PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
-confirmed exits non-zero with `sent-but-not-consumed`; it reports success only on
-POSITIVE artifact evidence — the message as the latest submitted message, or a
-NEW pending-turn entry carrying it. That evidence is pi's own render string, not
+confirmed exits non-zero with `sent-but-not-consumed`; it reports SUCCESS (exit 0)
+only when the message became the latest submitted message. A NEW pending-turn entry
+carrying it is POSITIVE evidence of DELIVERY — exit 4, not 0 (see QUEUED IS NOT
+SUCCESS). That evidence is pi's own render string, not
 a secret, so a verdict means pi's display showed acceptance, not proof of it (see
 RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
 
-QUEUED IS NOT UNCONSUMED (#5979)
---------------------------------
+QUEUED IS DELIVERED, NOT A LOST SEND (#5979)
+--------------------------------------------
 `latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
 mid-turn — i.e. every lane that is actually working — pi ACCEPTS a submission
 into its queue and consumes it when the current turn ends, so the strict "is it
@@ -57,7 +58,7 @@ lane's scrollback legitimately contains arbitrary such text. A pending entry tha
 is NEW (a higher COUNT of matching entries) relative to the pre-send screen and
 carries THIS message — exactly, or as a truncated head whose raw text ends in the
 renderer's `...` — is direct evidence the message entered pi's queue -> `queued`,
-exit 0. `Dispatcher.send_message` flattens newlines up front (as `_read_message`
+DELIVERED but not CONSUMED (exit 4 — see EXIT CODES; #7743). `Dispatcher.send_message` flattens newlines up front (as `_read_message`
 does), because pi renders a submission as a single line and a first line is not
 message-unique.
 
@@ -106,6 +107,22 @@ a pane whose `read-screen` failed (`screen` -> None) is never a queue. An
 unreadable COMPOSER is not a fail-closed condition for the queue verdict (the
 pending display is independent evidence); it only constrains the recovery.
 
+QUEUED IS NOT SUCCESS (#7743)
+-----------------------------
+`queued` is DELIVERED, not CONSUMED: pi holds the text in its pending queue and
+only turns it into a conversation message when the CURRENT turn ends. That is
+correct on a healthy mid-turn lane and WRONG on a lane that cannot end its turn —
+the #7743 wedge, where the in-flight `task`/`subagent` tool's child is gone and a
+queued message can never be drained. There, exit 0 told the caller a wedged lane
+had accepted a message it in fact can never read.
+
+The two states are therefore DISTINGUISHED in the exit code, not collapsed:
+`consumed` is exit 0, and `queued` is exit 4 — DELIVERED (the JSON `delivered`
+field is true, so a caller can choose not to re-send and duplicate — this is
+#5979's finding, preserved exactly) but NOT success (the agent has not acted on
+it, so a caller that needs the turn to have STARTED must treat it as failure).
+`queued` is still never re-sent, for the same no-duplicate reason as before.
+
 PREVENTION, then DETECTION
 --------------------------
 The confirmation check is a BACKSTOP. The boot-block case has already run a
@@ -140,12 +157,15 @@ USAGE
 
 EXIT CODES
 ----------
-    0  consumed — the message became a conversation message, or
-       queued — pi accepted it into its pending queue (the pane's
-       `Steering:`/`Follow-up:` display carries this message) for the next turn
+    0  consumed — the message became a conversation message
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
+    4  queued — pi accepted the message into its pending queue (the pane's
+       `Steering:`/`Follow-up:` display carries this message) for the next turn,
+       but it has NOT become a conversation message. DELIVERED but not consumed;
+       a caller that needs the turn to have STARTED must treat this as NOT
+       success (see QUEUED IS NOT SUCCESS)
 
 A transport failure (exit 3) is NOT a consumption failure (exit 1), and the two
 stay distinguishable. But a failure to REACH cmux — a non-zero rc on any
@@ -1150,10 +1170,18 @@ class DispatchResult:
     #: recorded anywhere), `""` = nothing was transmitted (usage/readiness refusal).
     #: Orthogonal to `status`, which carries whether the notification CONSUMED.
     channel: str = ""
+    #: The bytes were CONFIRMED in pi's hands — consumed OR queued. True means
+    #: never re-send (a re-send would DUPLICATE): that is #5979's finding. False is
+    #: NOT a licence to re-send either — a transport failure can leave the bytes in
+    #: pi's composer, so no non-success outcome is blindly retryable; read `status`.
+    #: `ok` is the STRONGER claim — `consumed` only: a caller that must know the
+    #: turn STARTED keys on `ok`/exit 0 (#7743). Invariant: `ok` ⇒ `delivered`.
+    delivered: bool = False
 
     def as_json(self) -> dict:
         return {
             "ok": self.ok,
+            "delivered": self.delivered,
             "status": self.status,
             "detail": self.detail,
             "attempts": self.attempts,
@@ -1627,6 +1655,7 @@ class Dispatcher:
             result.reason = reason
             if consumed:
                 result.ok = True
+                result.delivered = True
                 result.status = "consumed"
                 result.detail = (
                     f"{tag}{workspace} confirmed: message became a conversation "
@@ -1638,20 +1667,30 @@ class Dispatcher:
             # pi's pending-turn display has been QUEUED for the next turn
             # (#5979): a mid-turn pane accepts the submission and only surfaces it
             # as a turn when the current turn ends — later than any bounded wait.
-            # `queued` is a DELIVERED message (exit 0), not a failure. The screen
-            # read is reused by `recovery_action`, so the confirmation itself adds
-            # no cmux call; novelty needs the one pre-send read taken above.
+            # ⛔ DELIVERED, not CONSUMED (#7743): pi holds the text and drains it
+            # at the turn boundary — so it becomes real only if the turn CAN end.
+            # On a lane wedged on an orphaned in-flight `task`/`subagent` tool it
+            # never does, and which case we are in cannot be known here, so
+            # `queued` must NOT report the dispatch as complete. `delivered`
+            # carries #5979's finding (do not re-send — that would duplicate); `ok`
+            # stays False so the exit code is 4, never 0. The screen read is reused
+            # by `recovery_action`, so the confirmation itself adds no cmux call;
+            # novelty needs the one pre-send read taken above.
             screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
             if pending_turn_matches(screen, text, before_screen):
-                result.ok = True
+                result.ok = False
+                result.delivered = True
                 result.status = "queued"
                 result.detail = (
-                    f"{tag}{workspace} confirmed: pi accepted the message into its "
-                    f"pending queue for the next turn (attempt {attempt}, {reason})"
+                    f"{tag}{workspace} DELIVERED but NOT consumed: pi accepted the "
+                    f"message into its pending queue for the next turn (attempt "
+                    f"{attempt}, {reason}) — it is NOT yet a conversation message, so "
+                    f"the lane has not acted on it. Not re-sent (a re-send would "
+                    f"duplicate)."
                 )
                 self.log(
-                    f"{tag}queued ({reason}) — the lane is mid-turn; the message is "
-                    f"in pi's pending queue"
+                    f"{tag}queued ({reason}) — delivered to pi's pending queue; NOT "
+                    f"yet a conversation message"
                 )
                 return result
 
@@ -1684,6 +1723,7 @@ class Dispatcher:
                     )
                 if late_consumed:
                     result.ok = True
+                    result.delivered = True
                     result.status = "consumed"
                     result.detail = (
                         f"{tag}{workspace} confirmed: message became a conversation "
@@ -1827,6 +1867,10 @@ def _read_message(args: argparse.Namespace) -> str | None:
 _EXIT_FOR_STATUS = {
     "transport-error": 3,
     "unknown-workspace": 2,
+    # DELIVERED but NOT consumed (#7743): distinct from 0 (consumed) and 1 (not
+    # consumed). Exit 4 so a shell caller never reads a queued-only send as a
+    # completed dispatch.
+    "queued": 4,
 }
 
 
@@ -1856,6 +1900,9 @@ def _cmd_send(args: argparse.Namespace) -> int:
     )
     if args.json:
         print(json.dumps(result.as_json(), indent=2))
+    elif result.status == "queued":
+        # DELIVERED but NOT consumed: neither "OK" nor "FAIL".
+        print("QUEUED " + result.detail)
     else:
         print(("OK " if result.ok else "FAIL ") + result.detail)
     if result.ok:
@@ -1894,7 +1941,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     ⛔ SUBMITTED-ONLY — do NOT use `verify` to audit a `send` verdict. `send` also
     accepts a message pi queued for the next turn (the pending-turn display, which
     needs a pre-send baseline), so on a mid-turn lane a message `send` correctly
-    reported as `queued`/exit 0 will print `NOT-CONSUMED` here and exit 1. This is
+    reports as `queued`/exit 4 will print `NOT-CONSUMED` here and exit 1. This is
     a deliberate contract difference, not a bug: `verify` is a "is it a turn yet?"
     probe and has no dispatch to be novel against.
     """

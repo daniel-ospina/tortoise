@@ -31,7 +31,7 @@ Related docs:
 - [Hosted quickstart](quickstart-cloud.md) — sign up, API key, MCP registration.
 - [Self-hosted quickstart](quickstart-selfhosted.md) — Docker, `TORTOISE_DB_URI`, transport modes. (Embedded is the eval substrate, not a deployment path.)
 - [Ontology](ONTOLOGY.md) — point kinds, operator semantics, the edge vocabulary.
-- [Tortoise skill — how to use Tortoise](../skills/how-to-use-tortoise/SKILL.md) — agent-facing ingest guidance.
+- [Tortoise skill — how to use Tortoise](https://github.com/daniel-ospina/agent-infra/blob/main/skills/how-to-use-tortoise/SKILL.md) — agent-facing ingest guidance.
 
 ---
 
@@ -86,6 +86,9 @@ with identical contracts.
   ]
 }
 ```
+
+The `direction` values accepted today are `bidirectional` and `unidirectional` — see the direction
+model and its *Transition state* note in `docs/ONTOLOGY.md` (§8).
 
 Rules that hold regardless of granularity or policy:
 
