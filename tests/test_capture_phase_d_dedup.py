@@ -424,24 +424,21 @@ def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
 
 def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     """Review fix (P2): a folded canonical that never got calibrated (its
-    own ingest's EP pass failed fail-open — still draft) must receive its
-    FIRST calibration on a folded re-ingest; a live/calibrated canonical is
-    never re-calibrated; minted entries always calibrate."""
+    own ingest's EP pass failed fail-open) must receive its FIRST calibration
+    on a folded re-ingest; a live/calibrated canonical is never re-calibrated;
+    minted entries always calibrate. The selector keys on the EP MARKERS, not
+    on status (#1088 review P2) — the explicit-draft case is covered
+    end-to-end by test_capture_never_promotes_a_folded_explicit_draft."""
     from tortoise.sdk import _capture_ep_target_ids
     proj = sdk._get_proj()
-    draft = sdk.create_point("statement", "draft uncalibrated claim",
-                             status="draft")
     live = sdk.create_point("statement", "live calibrated claim")
-    sdk.update_point(live["id"], status="live")
-    # mark the live node as EP-calibrated (the state a successful ingest EP
+    # No promotion call: create_point's implicit status is live since #1088
+    # (the old update_point(status="live") here was a redundant no-op).
+    # Mark the live node as EP-calibrated (the state a successful ingest EP
     # pass leaves behind — the has_ep read the enrichment uses)
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.ep_alpha=1.0, n.ep_beta=1.0",
         params={"id": live["id"]})
-    # folded + still draft → first-time calibration target
-    assert _capture_ep_target_ids(
-        [{"id": draft["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
-    ) == [draft["id"]]
     # folded + live + calibrated → never re-calibrated (no EP churn)
     assert _capture_ep_target_ids(
         [{"id": live["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
@@ -449,7 +446,6 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     # a live node WITHOUT EP (its ingest EP pass failed fail-open) gets its
     # FIRST calibration on a folded re-ingest
     uncal = sdk.create_point("statement", "live but uncalibrated claim")
-    sdk.update_point(uncal["id"], status="live")
     assert _capture_ep_target_ids(
         [{"id": uncal["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
     ) == [uncal["id"]]
@@ -458,10 +454,13 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
 
 
 def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
-    """#1088 (review P1): a capture that merely DEDUPS onto a point an agent
-    explicitly created as draft must NOT promote it. Only ids MINTED by this
-    capture are promotion targets (#2104); the folded canonical may still be
-    an EP/dirty target, but its explicit draft survives.
+    """#1088 review P2: a capture that merely DEDUPS onto a point an agent
+    explicitly created as draft must NOT promote it AND must leave it
+    UNCALIBRATED. Only ids MINTED by this capture are promotion targets
+    (#2104); the folded canonical may still be an EP/dirty target (the folded
+    selector keys on the EP markers), but its explicit draft survives and the
+    EP pass excludes drafts (``include_draft=False``), so it never receives a
+    calibration. That is the folded explicit draft's intentional end state.
 
     MUTATION THAT REDS THIS TEST: drop ``promotion_ids`` so the folded leg's
     ids are promoted by ``_apply_capture_ingest_ep``.
@@ -476,10 +475,16 @@ def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
          "overlap": 1.0, "evidence": "exact"}])
     monkeypatch.setattr(ev2, "extract_session_v2", fold)
     res = sdk.capture_session([{"role": "user", "content": "hello"}])
-    assert sdk.get_point(draft["id"])["status"] == "draft", (
+    after = sdk.get_point(draft["id"])
+    assert after["status"] == "draft", (
         "an explicitly-drafted point a later capture deduped onto was "
         f"promoted: {res}"
     )
+    assert after.get("posterior_alpha") is None \
+        and after.get("ep_alpha") is None, (
+            "a folded explicit draft must stay uncalibrated: it is never "
+            f"promoted, so the draft-excluding EP pass cannot reach it: {after}"
+        )
 
 
 # ── Pure classifier ─────────────────────────────────────────────────────────

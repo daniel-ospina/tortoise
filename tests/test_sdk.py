@@ -1441,6 +1441,19 @@ class TestExplicitDraftIsHonoured1088:
         sdk.update_point(p["id"], status="live")
         assert sdk.get_point(p["id"])["status"] == "live"
 
+    def test_1088_update_point_live_plus_props_still_applies_props(self, sdk):
+        """#1088: when status="live" rides along with other props on an
+        ALREADY-live point, only the status is dropped as already-satisfied —
+        the remaining props are still the caller's and must be applied (the
+        `len(props) > 1` branch), never silently discarded."""
+        p = sdk.create_point("statement", "already live with props")
+        assert sdk.get_point(p["id"])["status"] == "live"
+        out = sdk.update_point(p["id"], status="live", confidence=0.42)
+        assert out["confidence"] == 0.42
+        after = sdk.get_point(p["id"])
+        assert after["status"] == "live"
+        assert after["confidence"] == 0.42
+
     def test_1088_update_point_still_refuses_terminal_resurrection(self, sdk):
         """The narrowing is only for the already-live case: a terminal point
         cannot be resurrected through the promote guard."""

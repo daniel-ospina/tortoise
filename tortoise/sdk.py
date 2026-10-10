@@ -3302,9 +3302,16 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     its own ingest pass).  A FOLDED-ONLY ingest (every claim resolved to an
     existing node) still needs a FIRST-TIME calibration when the canonical
     never got one — its own ingest's EP pass failed fail-open and left it
-    draft/uncalibrated — otherwise the point stays uncalibrated forever
-    (a folded re-ingest would never re-run the pass).  A canonical that is
-    live + calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    UNCALIBRATED — otherwise the point stays uncalibrated forever (a folded
+    re-ingest would never re-run the pass).  Calibration is decided by the
+    EP MARKERS alone (``posterior_alpha IS NULL AND ep_alpha IS NULL``); the
+    point's ``status`` is deliberately NOT part of the selector.  A folded
+    EXPLICIT draft is intentionally left uncalibrated: #1088 never
+    retro-promotes a folded id, and the EP pass excludes drafts
+    (``include_draft=False``), so selecting a draft here could not calibrate
+    it — a ``status='draft'`` disjunct would only nominate an EP/dirty
+    target that can never be refreshed.  A canonical that is live +
+    calibrated is NEVER re-calibrated (no EP churn on re-ingest).
     Folded ids are EP/dirty targets ONLY — never promotion targets (the
     caller passes the MINTED ids to ``_apply_capture_ingest_ep``, #1088).
     Shared by the hosted impl (byte-parity).
@@ -3317,10 +3324,14 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
               if p.get("id") and p.get("dedup", DEDUP_NEW) != DEDUP_NEW]
     if not folded:
         return []
+    # #1088 review P2: the selector keys on the EP MARKERS, never on status.
+    # A folded explicit draft is never promoted (only minted ids are, above)
+    # and the EP pass excludes drafts (``include_draft=False``), so a
+    # ``status='draft'`` disjunct could only nominate a target that can
+    # never be refreshed — dead weight, not a rescue.
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND "
-        "(coalesce(n.status, '') = 'draft' OR "
-        "(n.posterior_alpha IS NULL AND n.ep_alpha IS NULL)) "
+        "n.posterior_alpha IS NULL AND n.ep_alpha IS NULL "
         "RETURN n.id",
         params={"ids": folded},
     ).result_set

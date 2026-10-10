@@ -539,10 +539,26 @@ class A4TortoiseArm:
             # #1088: create_operator no longer promotes a source that was
             # EXPLICITLY created draft — it fills in only a never-set status.
             # This arm files evidence as an explicit draft ON PURPOSE (keep a
-            # failed operator write inert), so the step create_operator used
-            # to do for us is now stated here, AFTER the edge succeeded. Same
-            # invariant as before: born draft, live only on operator success.
-            sdk.promote_point(ev_id)
+            # failed operator write inert), so the promotion is stated here,
+            # AFTER the edge succeeded: born draft, live only on operator
+            # success. The verb is update_point, NOT promote_point — the
+            # evidence is mechanical battery output, not a reviewed
+            # extraction, and promote_point is the REVIEWER-gated path: it
+            # stamps `reviewed: true` + `promotedAt` (fabricating review that
+            # never happened), and a quarantined batch returns `blocked`
+            # WITHOUT raising, which would let this arm count a cycle over
+            # inert evidence. update_point promotes draft→live through the
+            # guarded WHERE with neither flag and no quarantine/R16 gate.
+            promoted = sdk.update_point(ev_id, status="live")
+            # No silent cycle over inert evidence: update_point raises on a
+            # refused/terminal transition, and a non-live result here must
+            # abort BEFORE filed.add/decide_cycles so an unpromoted point is
+            # never recorded as decided.
+            if (not isinstance(promoted, dict)
+                    or promoted.get("status") != "live"):
+                raise ArmUnavailable(
+                    "a4 evidence promotion did not reach live: "
+                    f"{promoted!r}")
             filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
             if isinstance(op, dict):

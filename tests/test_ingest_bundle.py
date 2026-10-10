@@ -433,8 +433,9 @@ class TestPromotionPolicy:
 
     def test_gated_accepts_items_without_status_key(self, sdk):
         # Items with NO status key anywhere (top-level or nested props) are
-        # accepted under gated and default to draft — the has_status flag in
-        # the shared helper must not false-reject them.
+        # accepted under gated and get the gated policy's draft default (NOT
+        # create_point's implicit status, which is live since #1088) — the
+        # has_status flag in the shared helper must not false-reject them.
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A"},
