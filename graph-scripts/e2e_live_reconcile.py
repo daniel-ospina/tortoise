@@ -51,11 +51,13 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     EMAIL_RE **and** the historical window). A row inside the namespace but
     outside the guard shape is therefore DETECTED forever and enumerated by NO
     cleanup phase — it is reported separately (the `residue` key, with FULL
-    emails) so the auto-filed issue names it as a guard-scope decision instead
-    of implying the runbook will sweep it. The remediator now reports the same
-    residue and accepts it behind its explicit `--include-residue` flag; the
-    two scopes are pinned in agreement by
-    `tests/test_e2e_live_reconcile_scope_parity.py`. The live example is the
+    emails) so it is named as a guard-scope decision instead of reading as a row
+    the runbook will sweep. The remediator now reports the same residue on every
+    phase and accepts it behind its explicit `--include-residue` flag; the two
+    scopes are pinned in agreement by
+    `tests/test_e2e_live_reconcile_scope_parity.py`. (The auto-filed issue BODY
+    still names no flag — it carries the full offender emails today; the wording
+    fix is tracked in #7998.) The live example is the
     #3781 manual-verification account `e2e-live-3781-<hex>@premise-labs.dev`
     (created 2026-09-17, in prod since, un-deletable by the pre-#5971 tooling).
   * Counts ABOVE --threshold (default 0) = exit 1 with the offenders listed.

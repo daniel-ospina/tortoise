@@ -296,3 +296,113 @@ def test_residue_queries_are_all_time_and_negate_the_guard() -> None:
             "residue is all-time — the live example (#3781) postdates WINDOW_END"
         )
         assert "__WINDOW__" not in sql
+
+
+# ── 4. the destructive manifest-driven phases must not go silent ────────────
+
+
+def _write_manifest(path: Path, manifest: dict) -> None:
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_residue_only_enumeration_is_not_refused_as_a_post_success_rerun(
+    tmp_path, monkeypatch
+) -> None:
+    """A residue-only recurrence is NOT an empty enumeration (#5971).
+
+    The pre-#5971 clobber guard tested `teams == []`, so the live case
+    (`users=4 teams=0`) was refused as a post-success re-run whenever a prior
+    manifest was kept — i.e. the documented §6.1 procedure could not run at all
+    against the default manifest path. "Empty" must mean the WHOLE enumeration
+    found nothing.
+    """
+    manifest_path = tmp_path / "2146.manifest.json"
+    _write_manifest(manifest_path, {"teams": [{"id": "old"}] * 154})
+
+    runner = _remediator_runner(
+        residue_users=[{"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}]
+    )
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: runner)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
+         "--all-e2e-live", "--manifest", str(manifest_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0, "a residue-bearing enumeration is not empty — it must not be refused"
+    rewritten = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rewritten["residue"]["users"][0]["email"] == RESIDUE_USER
+    assert RESIDUE_USER in out.getvalue()
+
+
+def test_genuinely_empty_reenumeration_still_refuses(tmp_path, monkeypatch) -> None:
+    """The #2146 protection survives: a truly empty re-enumeration still refuses."""
+    manifest_path = tmp_path / "2146.manifest.json"
+    _write_manifest(manifest_path, {"teams": [{"id": "old"}] * 154})
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: _remediator_runner())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
+         "--all-e2e-live", "--manifest", str(manifest_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 2 and "REFUSING" in out.getvalue()
+
+
+def test_manifest_driven_delete_phase_reports_the_residue(tmp_path, monkeypatch) -> None:
+    """`--phase users|db` delete from the manifest and must not be silent about it."""
+    manifest_path = tmp_path / "2146.manifest.json"
+    _write_manifest(manifest_path, {
+        "scope": {"all_e2e_live": True, "include_residue": False,
+                  "window_start": None, "window_end": None,
+                  "email_regex": remediator.EMAIL_RE.pattern},
+        "counts": {"teams": 0, "users": 1},
+        "residue": {"teams": [], "users": [
+            {"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}]},
+        "teams": [],
+        "users": [{"id": "u-1", "email": STRICT_USER, "created_at": "2026-09-28"}],
+    })
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: _remediator_runner())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "users",
+         "--manifest", str(manifest_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0
+    printed = out.getvalue()
+    assert "[residue]" in printed and RESIDUE_USER in printed, (
+        "the destructive phases must state the residue they are NOT touching"
+    )
+    assert "NOT in the delete set" in printed
+
+
+def test_include_residue_is_never_silently_inert_on_a_manifest_phase(
+    tmp_path, monkeypatch
+) -> None:
+    """`--include-residue` on a manifest-driven phase cannot promote anything."""
+    manifest_path = tmp_path / "2146.manifest.json"
+    _write_manifest(manifest_path, {
+        "scope": {"all_e2e_live": True, "include_residue": False},
+        "counts": {},
+        "residue": {"teams": [], "users": [
+            {"id": "u-2", "email": RESIDUE_USER, "created_at": "2026-09-17"}]},
+        "teams": [], "users": [],
+    })
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: _remediator_runner())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "db",
+         "--include-residue", "--manifest", str(manifest_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0
+    assert "no effect on --phase db" in out.getvalue()

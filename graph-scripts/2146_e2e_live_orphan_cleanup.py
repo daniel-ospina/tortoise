@@ -26,12 +26,17 @@ FALKORDB_CLOUD_URI).
 
 SAFETY MODEL
   * DRY-RUN by default. Every destructive phase requires --execute.
-  * Guard A — email shape: only rows matching
+  * Guard A — email shape: rows matching
       ^e2e-live-[0-9a-f]{8}@premise-labs\.dev$
-    are ever touched (all 222 live rows matched on 2026-09-02).
+    are the DEFAULT delete scope (all 222 live rows matched on 2026-09-02).
+    The outer bound is the e2e-live NAMESPACE
+    (`email LIKE 'e2e-live-%@premise-labs.dev'`): a row inside the namespace
+    but OFF the Guard-A shape is Guard-D residue (#5971) and enters the delete
+    set ONLY behind the explicit, review-gated --include-residue (below).
   * Guard B — window: default scope is teams created in the red window
     2026-08-19T22:20:00Z → 2026-09-03T00:00:00Z (154 rows). Pass --all-e2e-live
     to include the 68 pre-window monitor mints (same mint path — review first).
+    Guard-D residue is ALL-TIME — the window never applies to it.
   * Idempotent: every delete is enumerated up-front (manifest) and re-runs
     after a successful cleanup find nothing.
   * The teams row is deleted LAST (children first) — the product's retry-anchor
@@ -548,6 +553,14 @@ def main() -> int:
         # empty list and silently skip all ~154 graphs with no row-level record
         # of what to drop. Delete the manifest manually to force a fresh empty
         # enumeration.
+        #
+        # #5971: "empty" means the whole enumeration found nothing — NOT merely
+        # `teams == []`. A residue-only recurrence (the live #5971 case is
+        # `users=4 teams=0`) legitimately enumerates no teams while having Guard-D
+        # residue to act on, and the pre-#5971 test refused it as a post-success
+        # re-run — so the documented §6.1 procedure could not run at all against
+        # the default manifest path whenever a prior manifest was kept (the
+        # runbook's own rollback advice says to keep it).
         if os.path.exists(args.manifest):
             try:
                 with open(args.manifest) as fh:
@@ -555,9 +568,12 @@ def main() -> int:
                 prior_n = len(prior.get("teams") or [])
             except (OSError, json.JSONDecodeError):
                 prior_n = 0
-            if prior_n > 0 and len(manifest.get("teams") or []) == 0:
+            new_residue = manifest.get("residue") or {}
+            new_residue_n = (len(new_residue.get("teams") or [])
+                             + len(new_residue.get("users") or []))
+            if prior_n > 0 and not manifest.get("teams") and not new_residue_n:
                 print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
-                      f"{prior_n} teams but the new enumeration found 0 (post-success "
+                      f"{prior_n} teams but the new enumeration found none (post-success "
                       f"re-run?). Remove the file to force a fresh empty enumeration.")
                 return 2
         with open(args.manifest, "w") as fh:
@@ -590,6 +606,22 @@ def main() -> int:
             raise OpError(f"manifest {args.manifest} missing — run --phase enumerate first")
         with open(args.manifest) as fh:
             manifest = json.load(fh)
+        # #5971: `users`/`db` are the phases that ACTUALLY DELETE, and they are
+        # manifest-driven (no re-enumeration) — so report the manifest's residue
+        # here too. A run that removes only guard-shaped rows while staying quiet
+        # about the residue it leaves behind is the same silent exclusion #5971
+        # removed from the enumerate path.
+        _res = manifest.get("residue") or {}
+        _report_residue(_res.get("teams") or [], _res.get("users") or [],
+                        bool((manifest.get("scope") or {}).get("include_residue")))
+
+    if args.include_residue and args.phase not in ("enumerate", "all"):
+        # The delete set is the MANIFEST's, and these phases do not re-enumerate
+        # — so the flag cannot promote anything here. Never silently inert.
+        print(f"[residue] NOTE: --include-residue has no effect on --phase "
+              f"{args.phase} — the delete set is read from {args.manifest}. "
+              f"Re-enumerate (--phase enumerate|all --include-residue) to promote "
+              f"residue rows.")
 
     if args.phase in ("users", "all"):
         phase_users(args, manifest, runner)

@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-09-02
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 ---
 
 # 2146 — e2e-live Orphan Cleanup: Runbook & Verified Inventory

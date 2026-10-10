@@ -1983,9 +1983,11 @@ surfaces:
   # namespace — the guard shape, plus the residue the guard excludes. `core` owns
   # it: `graph-scripts/` is a CORE fallback tree with no named SOURCE_PATTERN (the
   # same placement argument as the test_2500_* pinner). Measured on this diff:
-  # `select(["graph-scripts/2146_e2e_live_orphan_cleanup.py"])` returns the full
-  # matrix, which includes this file — the registration is what keeps the guard
-  # CLASSIFIED (manifest-integrity) and selected on any `core`-matched change.
+  # `select(["graph-scripts/2146_e2e_live_orphan_cleanup.py"])` returns the `core`
+  # surface (431 files), which includes this file — the registration is what keeps
+  # the guard CLASSIFIED (manifest-integrity) and selected on any `core`-matched
+  # change. (A full-matrix answer is the unknown-path/push/schedule branch, not
+  # this one.)
   # DB-free — every driver is a fake runner.
   - test_e2e_live_reconcile_scope_parity.py
   ep:
