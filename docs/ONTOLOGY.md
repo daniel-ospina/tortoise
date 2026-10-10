@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-29
+updated: 2026-10-09
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -1117,6 +1117,17 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
 >
+> **The point↔object and point↔event kind overlap is CORRECT, not compatibility
+> residue (#7813 owner ruling, implemented by #7853).** Four kinds sit in BOTH
+> the point and object sets — `goal`, `plan`, `strategy`, `target` — and
+> `decision` sits in both the point and event sets. Under the ruling this is the
+> model: **confidence (EP) propagates across `:Point`, `:Subject`, `:Object` and
+> `:Event`**, so a belief written as an Object or Event is genuinely epistemic
+> and must propagate. Do NOT "clean up" the overlap as legacy — it is the
+> layer split being unwound (objects ARE in the epistemic layer). The
+> *operator* node itself stays `:Point {is_operator:true}`; only its children
+> and targets may be any of the four labels.
+>
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
 > `pointKind: statement`; the legacy write kinds remain valid Point kinds for write-compat,
@@ -1313,8 +1324,11 @@ A relationship operates on two layers — **semantic** (relation type) and **epi
 ### Reification rule — when an edge gets an operator
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
-support/contradict between Points and/or Events (Point↔Point, Event→Point,
-Point→Event).** All other edges stay plain and carry confidence as an
+support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
+`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap;
+#7813/#7853).** The operator node itself is always a
+`:Point {is_operator:true}`; its children/targets may carry any of the four
+labels. All other edges stay plain and carry confidence as an
 edge attribute.
 
 | Edge | Operator? | Confidence |

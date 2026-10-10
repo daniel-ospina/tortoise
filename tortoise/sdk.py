@@ -52,6 +52,8 @@ from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contra
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
+from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
@@ -3342,13 +3344,17 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
         # projection/__init__.py:1082 restores live on replay). Mirror
         # promote_point's _promote_incident_operators event exactly.
-        op_rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+        op_rows: list = []
+        # #7853: c is id-anchored — sweep the epistemic labels so an operator
+        # whose live endpoint is an Event/Subject/Object is promoted too.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:{label}) "
             "WHERE c.id IN $ids "
             "AND (o.status IS NULL OR o.status = 'draft') "
-            "RETURN DISTINCT o.id",
-            params={"ids": list(claim_ids)},
-        ).result_set
+            "RETURN DISTINCT o.id"
+        ):
+            op_rows.extend(proj.g.query(
+                _q, params={"ids": list(claim_ids)}).result_set)
         promoted_ops = []
         for (oid,) in op_rows:
             proj.g.query(
@@ -6596,19 +6602,23 @@ class TortoiseSDK:
                     # journal record; OperatorPromoted is its only durable
                     # record).
                     if minted_ids:
-                        proj.g.query(
+                        # #7853: c is id-anchored — sweep the epistemic labels.
+                        # The SET is idempotent, so a multi-labelled endpoint is
+                        # stamped under each matching label harmlessly.
+                        for _q in epistemic_label_queries(
                             "MATCH (o:Point {is_operator:true})-"
-                            "[:IMPL|NAND]->(c:Point) "
+                            "[:IMPL|NAND]->(c:{label}) "
                             "WHERE c.id IN $ids "
                             "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
                             "SET o.eventId=$eid, o.source_session=$sid, "
                             "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing",
-                            params={"ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
-                        )
+                            "    o.ingested_at=$ing"
+                        ):
+                            proj.g.query(_q, params={
+                                "ids": minted_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now})
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
                     # graph node (#4716 Part 1): the payload point resolved
@@ -9642,15 +9652,20 @@ class TortoiseSDK:
         model (projection coalesce default; #944 review) and are skipped —
         never re-promoted into the event stream.
         """
-        rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
-            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
-            params={"id": point_id},
-        ).result_set
+        rows: list = []
+        # #7853: n is id-anchored — sweep the epistemic labels so a draft
+        # operator incident to an Event/Subject/Object endpoint is promoted.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:{label} {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id"
+        ):
+            rows.extend(proj.g.query(
+                _q, params={"id": point_id}).result_set)
         promoted = []
         for (oid,) in rows:
             eps = proj.g.query(
-                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "MATCH (o:Point {id:$oid})-[r]->(s) "
+                f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status",
                 params={"oid": oid},
             ).result_set

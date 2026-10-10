@@ -1984,6 +1984,7 @@ surfaces:
   - test_2500_terminal_ep_backfill.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
+  - test_7853_confidence_label_propagation.py  # #7853: EP confidence propagates across :Point/:Subject/:Object/:Event children
   - test_ep_projections.py
   - test_ep_quadrature.py
   - test_ep_selector.py
