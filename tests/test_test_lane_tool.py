@@ -10,8 +10,8 @@ tool's CONTRACT, not Docker's behaviour:
     another lane's private test DB, and the shared dev/test instances must not
     be removable by it either), and
   * ``uri`` prints an ``eval``-able export line on stdout, with diagnostics on
-    stderr only — the documented ``eval "$(uv run python tools/test_lane.py
-    uri)"`` usage silently breaks if a diagnostic lands on stdout.
+    stderr only — anything that leaked onto stdout would corrupt the ``eval``-ed
+    value, which silently breaks the lane's target rather than aborting it.
 
 Where a function's real body is the safety property (``container_state``,
 ``_graph_count``, ``_container_publishes``, ``repo_root``), it is tested
@@ -247,9 +247,9 @@ def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
 
 
 def test_published_scan_asks_for_all_containers(monkeypatch):
-    """The scan must ask for the full list (`-a`/`--all`) rather than running
-    containers only, so a container this tool did not start is still seen as an
-    owner of the port."""
+    """The scan must ask for the full list (`-a`/`--all`): a container this tool
+    did not start is still an owner of the port. (`-a` itself is a hedge —
+    measured, only RUNNING containers report a published port.)"""
     seen = {}
 
     def _fake(*args, **kwargs):
@@ -396,8 +396,9 @@ def test_pick_port_skips_ports_already_taken(monkeypatch):
 
 
 def test_pick_port_skips_ports_published_by_a_container(monkeypatch):
-    """A port can be free on the host yet already published (another lane's
-    container), which would make `docker run -p` fail."""
+    """A port can be free on the HOST yet already taken by a FOREIGN container
+    publishing on a non-loopback interface, so the host probe alone would hand out
+    a port already in use. What `docker run -p` would then do is not what this pins."""
     monkeypatch.setattr(tl, "port_is_free", lambda _p: True)
     monkeypatch.setattr(tl, "_published_scan", lambda: "")
     monkeypatch.setattr(tl, "_container_publishes",
@@ -675,6 +676,43 @@ def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
                         lambda n: (_ for _ in ()).throw(
                             AssertionError("must not remove a live lane")))
     assert tl.start(port=16390) == ("fdb-lane-0123456789", 16390)
+
+
+def test_the_documented_shell_contract_aborts_on_failure():
+    """The USAGE block is the entry point every lane copies, and the one-line form
+    `eval "$(...)" || exit 1` CANNOT abort: a failure prints nothing on stdout and
+    `eval ""` returns 0, so the shell runs on with a STALE ``TORTOISE_DB_URI``
+    (commonly the shared lane) — the cross-lane contamination this tool exists to
+    prevent. The documented TWO-step form must abort."""
+    script = (
+        'export TORTOISE_DB_URI="docker://:pw@127.0.0.1:6379/stale_shared_lane"\n'
+        f'uri="$(DOCKER_HOST=tcp://127.0.0.1:1 {tl.sys.executable} {tl.__file__} uri)" || exit 1\n'
+        'eval "$uri"\n'
+        'echo REACHED\n'
+    )
+    r = tl.subprocess.run(["/bin/bash", "-c", script], capture_output=True,
+                          text=True, timeout=120)
+    assert r.returncode == 1, f"the documented contract must abort: {r}"
+    assert r.stdout.strip() == "", f"nothing reaches stdout on failure: {r.stdout!r}"
+    assert "REACHED" not in r.stdout + r.stderr, "the shell ran on with a stale URI"
+    doc = tl.__doc__ or ""
+    assert 'uri="$(uv run python tools/test_lane.py uri)" || exit 1' in doc, (
+        "USAGE must document the two-step form: assigning first is what puts the "
+        "tool's exit status on the `||`"
+    )
+    assert 'eval "$uri"' in doc, (
+        "USAGE must document evaluating the captured value as its own step"
+    )
+    # AGENTS.md carries the SAME documented command and is the copy lanes actually
+    # read, so pinning only the module docstring would leave that copy free to
+    # regress on its own.
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert 'uri="$(uv run python tools/test_lane.py uri)" || exit 1' in agents, (
+        "AGENTS.md must carry the two-step form too, not just the module docstring"
+    )
+    assert 'eval "$uri"' in agents, (
+        "AGENTS.md must show evaluating the captured value as its own step"
+    )
 
 
 def test_docker_forwards_its_timeout_to_subprocess(monkeypatch):

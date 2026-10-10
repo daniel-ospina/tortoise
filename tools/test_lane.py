@@ -18,9 +18,12 @@ instance accumulates per-run graphs:
     THEIR sessions (each journaled under its own session nonce).
 
 A private instance removes the class for every test that resolves its target
-from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container that dies
-with the lane, so nothing it does can contaminate another lane and no peer's
-leftovers can contaminate it.
+from ``TORTOISE_DB_URI``: the graphs a lane mints live in a container this tool
+refuses to address from any other lane, so nothing it does can contaminate
+another lane and no peer's leftovers can contaminate it. The container is NOT self-cleaning — it is a
+``docker run -d`` with no ``--rm`` and nothing binds it to this session — so it
+lives until an explicit ``down`` (or a reap), and a forgotten lane leaves one
+container and its graphs behind.
 
 SCOPE — NOT THE WHOLE SUITE (do not oversell)
 ----------------------------------------------------------------------------------
@@ -59,11 +62,15 @@ Also fail-closed by design:
 * persistence is OFF (``--appendonly no --save ''``) — the data is disposable;
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
-* ````docker ps -a`` is consulted for port collisions (kept for
-  created-but-not-started and foreign containers). A STOPPED container does NOT
-  reserve its published host port — measured on Docker 29.4.0 — so the guard
-  covers RUNNING containers, and a lost race is caught by ``docker run`` itself
-  refusing the binding;
+* ````docker ps -a`` is consulted for port collisions, and THAT SCAN is the
+  load-bearing half of the guard for a FOREIGN container publishing on a
+  NON-loopback interface: the host probe still binds ``127.0.0.1:<port>`` freely
+  while ``0.0.0.0:<port>`` is taken. A PEER's container publishes on loopback
+  (``-p 127.0.0.1:<port>:6379``), which the host probe refuses on its own
+  (measured, Docker 29.4.0).
+  ``-a`` adds nothing measured — neither a stopped nor a created container
+  reports or reserves its published port (Docker 29.4.0) — and is kept only as a
+  cheap hedge;
 * ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike ``GIT_DIR``/
   ``GIT_WORK_TREE``): a remote daemon is addressed as-is, so the printed
   ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
@@ -73,17 +80,20 @@ Also fail-closed by design:
 
 USAGE
 -----
-    eval "$(uv run python tools/test_lane.py uri)" || exit 1
+    uri="$(uv run python tools/test_lane.py uri)" || exit 1
+    eval "$uri"
     uv run pytest tests/ -q
     uv run python tools/test_lane.py down            # remove it
 
-The ``|| exit 1`` is not decoration. On a failure the tool exits non-zero and
-prints nothing on stdout, and `eval ""` returns 0 — so a bare
-`eval "$(...)"` leaves a PREVIOUSLY exported ``TORTOISE_DB_URI`` (commonly the
-shared lane) in place while the command looks like it succeeded.
+The two steps are deliberate; do NOT collapse them into
+``eval "$(...)" || exit 1``. A FAILED run prints nothing on stdout, and
+``eval ""`` returns 0 — so the one-line form cannot abort at all: it leaves a
+PREVIOUSLY exported ``TORTOISE_DB_URI`` (commonly the shared lane) in place while
+the command looks like it succeeded. Assigning first is what puts the TOOL's exit
+status on the ``||``, which is the only thing that can abort.
 
 ``uri`` prints ``export TORTOISE_DB_URI='...'`` on stdout so it can be
-``eval``-ed; every diagnostic goes to stderr, so ``eval "$(...)"`` stays clean.
+``eval``-ed; every diagnostic goes to stderr, so the captured value stays clean.
 """
 from __future__ import annotations
 
@@ -125,11 +135,15 @@ GIT_TIMEOUT = 30
 IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
 READY_TIMEOUT = 60
-#: The shared instances every lane and the orchestration graph depend on. They
-#: do not carry NAME_PREFIX, so the prefix rule already refuses them; this
-#: constant documents them AND is what `is_managed` consults, so a future shared
-#: container that DID share the prefix would still be refused (pinned by
-#: tests/test_test_lane_tool.py::test_is_managed_refuses_a_protected_name_that_shares_the_prefix).
+#: The shared instances every lane and the orchestration graph depend on, PLUS
+#: particular peer lanes' private containers that must never be removed. It is
+#: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
+#: prefix rule refuses them anyway, and the list is what refuses a FUTURE name
+#: that both carries the prefix and must be protected (pinned by
+#: tests/test_test_lane_tool.py::test_a_protected_name_sharing_the_prefix_is_still_refused).
+#: A container THIS tool creates does carry the prefix and reads as managed; the
+#: list does not cover it, and its protection is `_remove_and_describe`'s refusal
+#: unless the name equals `lane_name()`.
 PROTECTED_NAMES = frozenset({
     "falkordb", "falkordb-16379", "fdb-6599", "w6213-fdb",
 })
@@ -299,11 +313,14 @@ def _published_scan() -> str | None:
     timed-out call is not evidence for it. This tool exists for an overloaded
     host, so a failed scan is an expected case, not an exotic one.
     """
-    # `-a` is kept for created-but-not-started and foreign containers. A STOPPED
-    # container does NOT reserve its published host port (measured on Docker
-    # 29.4.0: an exited container reports no `Ports`, and the port rebinds at
-    # once), so this guard covers RUNNING containers — a lost race is caught by
-    # `docker run` refusing the binding, not here.
+    # The SCAN is the load-bearing guard, but for FOREIGN containers: one that
+    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`)
+    # leaves the host probe free to bind 127.0.0.1:16478, so only this table shows
+    # it. A PEER's container publishes on loopback (`-p 127.0.0.1:<port>:6379`,
+    # what `start()` asks for), which the host probe DOES refuse — measured,
+    # Docker 29.4.0. `-a` adds nothing measured — a stopped or created container
+    # reports no `Ports` — so this covers RUNNING containers, and `-a` is kept only
+    # as a cheap hedge.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return None if r.returncode != 0 else (r.stdout or "")
 
