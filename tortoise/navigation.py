@@ -89,7 +89,8 @@ def entityProfile(
     Returns {entity: {...}, connected: {points, documents, events, subjects, objects}}.
     Categorizes connected nodes by label, optionally filtering by pointKind and confidenceMin.
     Each connected node carries ``_relationship`` (edge type) and ``_idx`` (#6101 —
-    the traversed edge's idx: 0 = the operator's SOURCE, >= 1 = a TARGET).
+    the traversed edge's idx: on an operator's IMPL/NAND/hasPart edge 0 names the
+    operator's SOURCE and >= 1 a TARGET; ``None`` when the edge carries no idx).
     """
     g = db.select_graph(graph_name)
 
@@ -178,10 +179,11 @@ def tortoise_traverse(
     Returns {entity: {...}, nodes: [{"node": {...}, "relationship": "...",
     "idx": N, "depth": N}, ...]}. Each connected node includes the relationship
     type, BFS depth, and the traversed edge's ``idx`` (#6101) — the position of
-    the OPERATOR-INPUT end of the edge (0 = the operator's SOURCE, >= 1 = a
-    TARGET). Without ``idx`` an operator's two endpoints are an unordered pair,
-    so a cycle reads as its reverse. Non-operator edges carry no ``idx``
-    (``None``).
+    the OPERATOR-INPUT end of the edge. On an operator's IMPL/NAND/hasPart edge
+    that is 0 for the operator's SOURCE and >= 1 for a TARGET; without ``idx``
+    an operator's two endpoints are an unordered pair, so a cycle reads as its
+    reverse. The key is ``None`` when the edge carries no ``idx`` (non-operator
+    edges, and edges predating the property).
     """
     g = db.select_graph(graph_name)
 

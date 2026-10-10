@@ -55,6 +55,18 @@ response_fields:
   field: graph_ops
   emitted_when: 'always on the SDK path — the capture''s measured graph-operation count as {total, by_phase}, added by the counts_capture_ops decorator (#3561)'
   unchanged_when_off: 'n/a — not gated by a flag; an additive key on the returned dict, absent from the MCP tortoise_session_capture response, which calls the underlying impl directly'
+- response: sdk:traverse
+  field: idx
+  emitted_when: 'always, on every returned point — the matched edge''s idx (0 names the operator''s SOURCE, >= 1 a TARGET; null on an edge written without the property), so an operator and its reverse read distinctly (#6101)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is present (null where the edge carries no idx) on every returned point, and every pre-existing key keeps its value'
+- response: tortoise_traverse
+  field: idx
+  emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx, same value sdk:traverse returns (#6101)'
+  unchanged_when_off: 'n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries no idx), and node/relationship/depth are unchanged'
+- response: tortoise_entity_profile
+  field: _idx
+  emitted_when: 'always, on every connected node — the traversed edge''s idx (underscore-prefixed like the sibling _relationship key, #6101)'
+  unchanged_when_off: 'n/a — not flag-gated; additive key on each connected node, present (null where the edge carries no idx), and the categorised lists are unchanged'
 counts:
   tools: 82
   sdk_public_methods: 150

@@ -10840,12 +10840,14 @@ class TortoiseSDK:
         ``idx`` 0 on the SOURCE and ``idx >= 1`` on each TARGET (mirrored by
         ``(input)-[:INPUT {idx}]->(operator)``). Dropping that property made a
         returned endpoint pair unordered, so an operator read identically to
-        its own reverse. ``idx`` is the position of the OPERATOR-INPUT end of
-        the edge: with ``direction="outgoing"`` that is the RETURNED node
-        (traverse from an operator names each input's role); with
-        ``direction="incoming"`` it is the QUERIED ``id`` (the returned node
-        is the operator, which holds no position). Non-operator edges carry no
-        ``idx``, so it is ``None`` there.
+        its own reverse. ``idx`` always names the OPERATOR-INPUT end of the
+        matched edge. On an operator's own edge that end is not the operator,
+        so ``direction="outgoing"`` (queried from the operator) reports each
+        input's position and ``direction="incoming"`` (queried from an input)
+        reports the queried point's position. The ``:INPUT`` mirror points the
+        other way, so for it those two SWAP. Edges written without an ``idx``
+        — non-operator edges, and edges predating the property — return
+        ``None``.
         """
         proj = self._get_proj()
         # #329: validate before building any Cypher
