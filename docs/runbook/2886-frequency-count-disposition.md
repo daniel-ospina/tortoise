@@ -80,7 +80,9 @@ Per-question rows are a strict superset of the 2578 row shape (the tool reads
 ten keys): all ten source fields (arm / qid / cls / label / context_tokens /
 **pool_limit** / **pool_depth** / gold_admitted / reader_refusal / answer)
 plus the reclassification (`reclassified_cls`, `aggregate_kind`,
-`aggregate_unit`), `disposition` and `issue`.
+`aggregate_unit`), `disposition`, the deterministic arm's read-out
+(`deterministic_resolution` — `resolved` / `abstained:<reason>` /
+`unmeasured`) and `issue`.
 Regenerate:
 
 ```bash
@@ -130,6 +132,7 @@ events the reader already admitted.
 | per-question outcomes committed, 2578 shape | ✅ `docs/runbook/2886-frequency-count-outcomes.jsonl` |
 | structural vs conversion split stated | ✅ this doc; 11 structural / 0 conversion (unreachable) / 1 abstention-control |
 | reader-model change stays #2013-gated | ✅ no reader/prompt/production path changed |
+| deterministic core has a production/eval caller | ✅ `tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` wired behind the OFF-by-default `temporal_aggregate` arm (env `TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG`); per-outcome `deterministic_resolution` field |
 
 ## Scope decision — the count/total path is built deliberately
 
@@ -150,16 +153,55 @@ does not happen, the count/total machinery (`_DisjointSet`,
 `_canonical_order`, the paraphrase band, `MAX_EVENTS`) is the part to delete,
 not the date-arithmetic half.
 
+## The wiring — eval reader lane arm (`Refs #2886` remainder item 2)
+
+The deterministic core now has a production caller on the eval reader lane,
+behind an **OFF-by-default** arm (mirroring #2521's `aggregative_flag`):
+
+* `tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` — pure adapter:
+  classifies the question with the shipped owner
+  (`classify_temporal_aggregate`) and resolves it through
+  `resolve_temporal_aggregate` over the **reader-reachable pool window**
+  (`pool[:effective_top_k]`; a two-sided approximation of the reader's
+  admitted set, #3594). COUNT/TOTAL tally the distinct events; the
+  date-arithmetic shapes take the two anchor dates when the caller already
+  has them (an explicit `between <date> and <date>` window), else abstain
+  (`reason="no_anchors"`) — never a guessed number.
+* arm resolution: kwarg `temporal_aggregate` (tri-state) > env
+  `TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG` (only `1/true/yes/on`) > OFF;
+  CLI `--temporal-aggregate` / `--no-temporal-aggregate`; fingerprinted and
+  recorded in the run methodology (mirrors the sibling arms).
+* per-outcome: `temporal_aggregate` marker + `temporal_aggregate_verdict`
+  ride the outcome **only under the arm** (the OFF path is byte-identical).
+  The verdict carries `{kind, unit, distinct, value, method, n_events,
+  reason, n_dated_events, span_days, anchors}`.
+
+It does **not** change retrieval or the answer: the owner abstains rather
+than guessing, so the reader lane keeps the case (a reader-model swap
+stays #2013-gated).
+
+**Span honesty.** The eval's ranked hits carry `session_date` only, so a
+TOTAL over them sums zero spans (`span_days == 0`): the
+published `total` is then not a measured sum, and the diagnostic makes that
+auditable instead of a silent zero. The disposition read-out consults that
+diagnostic — a span-less TOTAL reads as `abstained:no_span_bounds`, never
+`resolved` — so the "how many were fixed" count cannot be inflated by it.
+
 ## Remainder disposition
 
 1. **Run the 12 under a gold-admitting arm** (`applied-rerank`) to make the
    conversion leg reachable. Until then the disposition is
    `conversion_undetermined=True`, not `conversion=0`.
-2. **Wire the core into the eval reader lane** behind an OFF-by-default
-   flag (mirroring #2521's `aggregative_flag`), so a gold-admitted run can
-   measure how many of the conversion-bound cases the deterministic path
-   closes. Not landed here — it is measurement wiring, and it needs the
-   gold-admitting run to read out.
+2. **~~Wire the core into the eval reader lane behind an OFF-by-default
+   flag~~ — LANDED** (see "The wiring" above): the caller exists, the arm is
+   OFF by default, and the per-outcome verdict records the resolution. What
+   the arm cannot do yet is shown honestly: every census member is
+   **event-referenced** date arithmetic ("how many days before X did Y"),
+   so until its two anchor EVENTS are resolved to dates it abstains
+   (`no_anchors`) — the verdict's `reason` says so per question rather than
+   guessing. Resolving those anchors for the class is the remaining
+   admission-side work (and the reason the gold-admitting run is needed to
+   read the resolved/abstained split out).
 3. **`detect_aggregative_intent` false-positive** — the #2521 detector
    currently classifies all 12 date-arithmetic rows as entity-scoped
    aggregative (its own contract says elapsed-time shapes are R5 temporal).
@@ -171,5 +213,6 @@ not the date-arithmetic half.
 ```bash
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
   tests/test_temporal_aggregation.py \
+  tests/test_temporal_aggregate_arm.py \
   tests/longmem_eval/test_freq_count_disposition.py -q -p no:cacheprovider
 ```
