@@ -77,6 +77,12 @@ Change the `TORTOISE_DB_PATH` row description to: "Embedded FalkorDBLite eval pa
 | Zero-ops | [Hosted Cloud](quickstart-cloud.md) |
 ```
 
+<!-- #7919: the `quickstart-cloud.md` link inside the block above is relative to
+     `docs/quickstart-selfhosted.md`, where the block is to be inserted (a
+     sibling there), NOT to this plan doc — it is a quoted snippet, not a link
+     in this file. Left byte-identical on purpose; `tools/docs_lint_baseline.py
+     sweep` ignores fenced blocks, matching the lychee check. -->
+
 - §2 becomes: **Option A — Docker compose (recommended, durable)** → `docker compose up -d` in the repo clone (daemon http://localhost:8000/mcp; sidecar with requirepass + AOF; TORTOISE_DB_URI is wired by compose — nothing to set). **Option B — Bare container (durable variant)** → `docker run -d --name tortoise-falkordb -p 127.0.0.1:6379:6379 -e REDIS_ARGS="--requirepass falkordb --appendonly yes" falkordb/falkordb-server:latest` + `export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise'`. ⚠️ Auth/AOF go via the `REDIS_ARGS` env var — the falkordb image entrypoint ignores command-line args (same lesson as docker-compose.yml's header; a bare `--requirepass` run arg silently starts a passwordless sidecar). **Option C — Embedded (single-agent eval only, no Docker)** → `tortoise init` auto-creates `~/.tortoise/tortoise.db` via falkordblite; ⚠️ SINGLE-WRITER: concurrent writers lose data; fine for one agent.
 - §5 connect step: lead with the DAEMON-URL config for compose users (`claude mcp add tortoise http://localhost:8000/mcp`, or the `.mcp.json` `"type": "http"` block — both already exist in README §2); DEMOTE the stdio block (`"command": "python3", "args": ["-m", "tortoise.mcp_server"]` + TORTOISE_DB_PATH) to the no-Docker eval path, explicitly labeled single-writer. ⚛️ Rationale: after the flip, a compose user following the quickstart to §5 must NOT be steered into configuring a SECOND embedded stdio server on the single-writer engine — install leads with compose, connect must lead with the daemon too (the flip is only half-done otherwise).
 - §5 "Authenticated local MCP (optional)" block: add one line — "`serve --http --auth tenant` on an embedded DB is single-agent eval only; a durable team deployment uses Docker (Option A/B) or Cloud." (Compose users: the daemon already serves /mcp with auth via TORTOISE_API_KEY.)
