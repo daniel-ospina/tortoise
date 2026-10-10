@@ -561,8 +561,9 @@ class _EdgeHandlers:
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source endpoints referenced by short IDs (#6713).
-        Operator endpoints may be Point OR Event nodes (A1b #1272) — the
-        existence checks and edge MERGEs match the four epistemic labels
+        Operator endpoints may carry any of the four epistemic labels
+        :Point/:Subject/:Object/:Event (#7902, owner ruling #7813) — the
+        existence checks and edge MERGEs match all four
         (#7902 fold-parity: live create_operator writes the same typed +
         INPUT edges this replay does)."""
         op = p.get("operator")
