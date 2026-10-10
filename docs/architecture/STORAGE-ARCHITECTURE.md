@@ -788,7 +788,7 @@ Because `based_on` carries ids that address **different tables**, a "which of th
 
 ### 11.1 Why the connections are not the cost problem — measured
 
-Our `aboutObject` links are **property-free**: a full-repo search found **zero** `aboutObject` edges carrying any property (`rg -n 'aboutObject \{'` → **0 matches / 1,842 files**). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
+Our `aboutObject` links are **property-free**: the write path emits `MERGE (s)-[:aboutObject]->(t)` and **never a `SET`** (`projection/edges.py`, `create_about_edge` — `:344` at the pinned revision), and a full-repo search for a property-bearing edge finds **none** (`rg -n 'aboutObject \{'` → **0 matches at the 2026-09-23 pin `c79ba1cf2`**; **2** at HEAD on 2026-10-10, both display strings inside a test — `tests/test_commit_endpoint.py:1214`/`:1217`). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
 
 Estimated footprint in Postgres (two 16-byte ids, one B-tree index, standard tuple + index overhead):
 
@@ -1329,24 +1329,31 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
   **The primary search path does NOT read it.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for this path.**
 
-  **It IS load-bearing elsewhere — four default-ON sites, two of them customer-callable:**
+  **It IS load-bearing elsewhere — ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE** (all line numbers pinned to `c79ba1cf2`; the symbols are authoritative):
 
-  | # | site | what it reads for | kind |
+  | # | site | what it reads for | reach |
   |---|---|---|---|
-  | 1 | `sdk.py:6397` — SDK **`belief_timeline`** (`mcp_server.py:3126` exposes it) | walks decision → Object named by topic | traversal |
-  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** | finds seed claims via Object | traversal |
-  | 3 | `extractor_v2.py:1934` | the classifier's "same entity?" gate | traversal |
-  | 4 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | traversal, **2-hop** |
+  | 1 | `sdk.py:6411` — SDK **`belief_timeline`** (MCP `tortoise_belief_timeline`, `tool_registry.py:391`) | walks decision → Object named by topic | **customer-callable** |
+  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (MCP `tortoise_topic_summarize`) | finds seed claims via Object | **customer-callable** |
+  | 3 | `ranking.py:1195`/`:1206` — SDK **`recall_subgraph`** (`ranking.SubgraphExpander._neighbors`) | its default `completeness="full"` walks **every** relationship type (`MATCH (n)-[r]->(m)`) — so it reads the edge **without naming it** and no grep can find it | **customer-callable** |
+  | 4 | `ranking.py:461` / `:714` — **`search(order_by="graph")`** (MCP `tortoise_search`) | event and point degree centrality | **customer-callable** |
+  | 5 | `extractor_v2.py:1934` (`_enrich_point_priors`) | the classifier's "same entity?" gate | default-ON, write path |
+  | 6 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | default-ON, write path, **2-hop** |
+  | 7 | `sdk.py:14744` (`_entity_key_expansion_pass`) | the entity-key alias harvest | **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`) |
+  | 8 | `assembly.py:573`/`:789`/`:809` (`alias_objects`, `collect_slices`) | the connected-assembly slices | **OFF by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
+  | 9 | `subgraph.py:312`/`:319-320` (`build_subgraph`) | the `#3011` epistemic-subgraph engine | **eval harness only** (`tools/longmem_eval/context_assembly_arms.py`) |
+  | 10 | `aggregate.py:502` (`collect_anchor_census`) | the aggregative-verdict anchor census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
+  | 11 | `coverage_loop.py:238` (`facet_census`) | the rule-based facet census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
 
-  Plus `sdk.py:14744` (`_entity_key_expansion_pass`) — **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`). And **23 test files assert the edge.**
+  And **36 test files assert the edge at the pin** (41 at HEAD, 2026-10-10).
 
-  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break two public surfaces.
+  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break **four** customer-callable surfaces. ⚠️ **An earlier version of this table named four sites and called TWO of them customer-callable — that undercounts on both axes, and the count is the whole argument: `recall_subgraph` and `search(order_by="graph")` were missing** (review finding B2.7, `REVIEW-CONSOLIDATED-2026-09-23.md`).
 
-  **But the structural door stays open:** a full-repo search found **zero** `aboutObject` edges carrying **any property** (`rg -n 'aboutObject \{'` → 0 matches / 1,842 files). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
+  **But the structural door stays open:** **no** `aboutObject` edge carries **any property** — `create_about_edge` (`projection/edges.py:344`) emits `MERGE (s)-[:aboutObject]->(t)` with no `SET`, and the search for a property-bearing edge returns **zero** at the pin (2 at HEAD, both test display strings — `tests/test_commit_endpoint.py:1214`/`:1217`). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
 
   **⚠️ `#4240` is half-right, and the true half is the sharper argument.** Capture-path edges **are** journaled (`EntityLinked`, `#3664`; replayed by `projection/entities.py:785+`). **Indexer-path edges are NOT** - `_connect_issue_objects` (`sdk.py:20154`) calls `create_about_edge` with no journal write, and `test_index_restore.py:373-403` asserts `count(*) == 0` after rebuild. **So the finding is not "this edge saves no storage" but "this edge class is internally inconsistent about durability"** - a cleanup question, arguably more urgent than stored-vs-derived.
 
-  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** We have neither today.
+  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** ⚠️ **CORRECTED 2026-10-10: this sentence used to end *"We have neither today"*, which was true at the pin but is stale — `#5010` has since CLOSED and the cap is implemented** (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, wired query-side; PR `#5057`). At 200 it **binds nothing today** (worst hub 123 — the next bullet).
 
   **What remains UNKNOWN, and would flip the recommendation:** whether `belief_timeline` / `topic_summarize` are **ever actually called** in production. If they are reachable-but-unused, Hindsight's premise is restored and deriving becomes correct.
 
