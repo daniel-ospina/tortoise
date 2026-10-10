@@ -1418,9 +1418,10 @@ class TestMilestoneCanonicalEventKind:
     """#2767: `milestone` has ONE canonical identity — a core EVENT kind.
 
     Pre-fix the bare name was simultaneously a pm ``objectKind``, a legacy base
-    point/event kind, and the miner's event kind. A second pack referencing the
-    bare name in ``nearMisses`` then made it ambiguous and failed pack install.
-    These are the drift guards: they fail if any layer moves without the others.
+    point/event kind, and the miner's event kind. Once a second pack DECLARED
+    the bare name, a ``nearMisses`` reference to it became ambiguous and failed
+    pack install. These are the drift guards: they fail if any layer moves
+    without the others.
     """
 
     def test_milestone_is_canonical_event_not_object(self):
