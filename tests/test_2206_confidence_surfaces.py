@@ -78,8 +78,10 @@ def _fresh_sdk():
 
 
 def _make_point(sdk, content, kind="statement"):
-    # #943: create_point defaults to status='draft'; the #780 draft filter
-    # strips draft inputs (mirrors test_ep_directional's sweep) — mark live.
+    # #943: the #780 draft filter strips draft inputs (mirrors
+    # test_ep_directional's sweep) — status="live" is explicit for intent;
+    # create_point's implicit status is live since #1088 (it was draft from
+    # #943).
     return sdk.create_point(kind, content, status="live")
 
 

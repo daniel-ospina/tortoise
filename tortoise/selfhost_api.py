@@ -39,6 +39,16 @@ class CreatePointRequest(BaseModel):
     # persists both as props, so declare + forward them.
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1088: the same parity gap as the two fields above, closed at the SAME
+    # time as hosted_api.CreatePointRequest — the REST write surface can
+    # AUTHOR a calibration baseline, the capability the MCP
+    # ``tortoise_create_point`` tool has had all along. Without it a self-host
+    # client writes a LIVE point that ``/v1/dream`` then refuses (the
+    # fail-closed #344/#1157 gate) and can never make it EP-able. Resolved
+    # into the ep_alpha/ep_beta baseline, NOT stored as a Point prop (unlike
+    # confidence/authoredBy above); on a dedup hit ``create_point`` drops it
+    # with a logged warning.
+    credibility: str | int | float | None = None
 
     @field_validator("kind")
     @classmethod
@@ -55,6 +65,21 @@ class CreatePointRequest(BaseModel):
                 raise ValueError("each tag must be 1-200 characters")
             if any(ch in t for ch in "\n\r\t"):
                 raise ValueError("tags cannot contain newlines or tabs")
+        return v
+
+    @field_validator("credibility")
+    @classmethod
+    def valid_credibility(cls, v):
+        # #1088: resolve the ladder word/scale up front (the SDK's own
+        # resolver) so a typo is the 422 the sibling author fields promise,
+        # never the route's catch-all 500.
+        if v is None:
+            return v
+        from tortoise.source_credibility import credibility_prior
+        if credibility_prior(v) is None:
+            raise ValueError(
+                f"Unknown credibility {v!r}. Ladder words: gold / high / "
+                "medium / low / unverified (or the T0-T4 / numeric forms).")
         return v
 
 
@@ -214,13 +239,15 @@ async def create_point(body: CreatePointRequest):
     """Create a Point in the self-host graph (registry: POST /v1/points)."""
     sdk = _sdk()
     try:
-        # #4032: forward caller confidence/authoredBy as props — only when
-        # supplied (a None would stamp a null property).
+        # #4032/#1088: forward caller confidence/authoredBy/credibility as
+        # props — only when supplied (a None would stamp a null property).
         _author_props: dict = {}
         if body.confidence is not None:
             _author_props["confidence"] = body.confidence
         if body.authoredBy is not None:
             _author_props["authoredBy"] = body.authoredBy
+        if body.credibility is not None:
+            _author_props["credibility"] = body.credibility
         result = sdk.create_point(
             content=body.content,
             kind=body.kind,

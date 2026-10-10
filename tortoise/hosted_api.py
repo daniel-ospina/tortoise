@@ -6565,6 +6565,18 @@ class CreatePointRequest(BaseModel):
     # tool use. A value the store cannot hold is a 422, never a silent drop.
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1088: a no-status write is LIVE, and the fail-closed calibration gate
+    # (#344/#1157) demands an authored baseline before an EP surface (dream)
+    # runs — so the REST write surface must be able to AUTHOR one, exactly as
+    # the MCP ``tortoise_create_point`` tool already can (it has carried
+    # ``credibility`` since before this endpoint existed). Without this a
+    # hosted client could write a live point that ``/v1/dream`` then refuses
+    # and never make it EP-able through this surface. Forwarded to
+    # ``create_point``'s ``credibility=`` and consumed into the
+    # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
+    # with a logged warning (the existing point keeps its own baseline).
+    credibility: str | int | float | None = None
 
     @field_validator("kind")
     @classmethod
@@ -6585,6 +6597,23 @@ class CreatePointRequest(BaseModel):
                 raise ValueError("each tag must be 1-200 characters")
             if any(ch in t for ch in '\n\r\t'):
                 raise ValueError("tags cannot contain newlines or tabs")
+        return v
+
+    @field_validator("credibility")
+    @classmethod
+    def valid_credibility(cls, v):
+        # #1088: the ladder word/scale is resolved by the SDK itself
+        # (`source_credibility.credibility_prior`). Validating HERE turns a
+        # typo into the 422 this model's other author fields promise instead
+        # of a 500 raised from deep inside `create_point` (the route's bare
+        # `except Exception` maps anything unanticipated to 500).
+        if v is None:
+            return v
+        from tortoise.source_credibility import credibility_prior
+        if credibility_prior(v) is None:
+            raise ValueError(
+                f"Unknown credibility {v!r}. Ladder words: gold / high / "
+                "medium / low / unverified (or the T0-T4 / numeric forms).")
         return v
 
 
@@ -8283,6 +8312,8 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["confidence"] = body.confidence
             if body.authoredBy is not None:
                 _author_props["authoredBy"] = body.authoredBy
+            if body.credibility is not None:
+                _author_props["credibility"] = body.credibility
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
@@ -13517,10 +13548,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (byte-parity with the mirror) — minted ids calibrate; folded entries
     # resolved to nodes already calibrated at their original ingest are
     # never re-calibrated (no EP churn on re-ingest); a folded canonical
-    # still draft/uncalibrated from a fail-open first ingest gets its
-    # FIRST calibration here.
+    # still UNCALIBRATED from a fail-open first ingest keeps being nominated
+    # for its FIRST calibration here. A folded EXPLICIT draft is
+    # intentionally left uncalibrated: #1088 never retro-promotes a folded
+    # id, and the local EP pass excludes drafts (``include_draft=False``).
     ep_ids = _capture_ep_target_ids(extracted, proj)
-    if ep_ids:
+    # #1088 P2: the operator-promotion arm must not ride the CALIBRATION
+    # selector. A capture whose payload points ALL fold onto canonicals that
+    # are ALREADY calibrated gets ``ep_ids == []`` — the selector keys on
+    # ``posterior_alpha IS NULL AND ep_alpha IS NULL`` — yet the capture can
+    # still have wired a NEW IMPL/NAND operator; gating the whole pass on
+    # ``ep_ids`` left that operator ``status='draft'`` (EP-inert under the
+    # #780 live-only selector, with no public promote path). Run the pass
+    # when EITHER list is non-empty. (e96b01681 widened the promotion JOIN
+    # but left this guard, so only the folded-but-UNCALIBRATED sub-case was
+    # fixed.)
+    operator_ids = list(meta.get("operator_ids") or [])
+    if ep_ids or operator_ids:
         # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
         # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
         # (#3718). It ran INLINE here, ON the event loop, freezing every
@@ -13548,7 +13592,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         def _capture_ep_pass() -> None:
             with _dream_lock(_dk):
                 _apply_capture_ingest_ep(
-                    sdk, ep_ids, warn=extraction_warnings.append)
+                    sdk, ep_ids,
+                    promotion_ids=_capture_minted_ids(extracted),
+                    operator_ids=operator_ids,
+                    warn=extraction_warnings.append)
 
         await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write

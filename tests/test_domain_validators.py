@@ -327,8 +327,11 @@ def _seed_chain_violations(sdk: TortoiseSDK) -> dict:
         "product-strategy:useCase", "orphan uc", uc_id="UC-ORPH-405",
         status="live")
     # Draft orphan useCase (must be EXCLUDED from orphan_use_case — draft rule)
+    # Draft is EXPLICIT now: since #1088 a no-status create_point is LIVE, so
+    # the fixture states the status it means.
     ids["draft_uc"] = sdk.create_point(
-        "product-strategy:useCase", "draft orphan uc", uc_id="UC-DRAFT-405")
+        "product-strategy:useCase", "draft orphan uc", uc_id="UC-DRAFT-405",
+        status="draft")
     # Properly parented chain (clean control)
     ids["jtbd"] = sdk.create_point(
         "product-strategy:jobToBeDone", "JTBD", jtbd_id="JTBD-405",

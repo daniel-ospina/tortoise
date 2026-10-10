@@ -285,8 +285,8 @@ def test_v2_cross_session_reingest_is_content_hash_hit(sdk):
 # ── v2 seam via a stubbed extractor (S3-bypass coverage) ────────────────────
 
 
-def _stub_extractor(payload_points, noops=None):
-    """Deterministic extract_session_v2 stub: fixed payload + noops."""
+def _stub_extractor(payload_points, noops=None, operators=None):
+    """Deterministic extract_session_v2 stub: fixed payload + noops/operators."""
     from tortoise.ids import content_hash
 
     def _fake(model, conversation, **kw):
@@ -298,7 +298,8 @@ def _stub_extractor(payload_points, noops=None):
                         "search_keys": [], "quote": content[:200]})
         return {
             "payload": {"points": pts, "entities": [], "events": [],
-                        "operators": [], "supersessions": []},
+                        "operators": list(operators or []),
+                        "supersessions": []},
             "noops": list(noops or []), "errors": [], "warnings": [],
             "minted_kinds": [], "chain_notes": [], "link_before_create": [],
             "supersessions": [], "story_arc": "", "search": {},
@@ -424,23 +425,21 @@ def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
 
 def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     """Review fix (P2): a folded canonical that never got calibrated (its
-    own ingest's EP pass failed fail-open — still draft) must receive its
-    FIRST calibration on a folded re-ingest; a live/calibrated canonical is
-    never re-calibrated; minted entries always calibrate."""
+    own ingest's EP pass failed fail-open) must receive its FIRST calibration
+    on a folded re-ingest; a live/calibrated canonical is never re-calibrated;
+    minted entries always calibrate. The selector keys on the EP MARKERS, not
+    on status (#1088 review P2) — the explicit-draft case is covered
+    end-to-end by test_capture_never_promotes_a_folded_explicit_draft."""
     from tortoise.sdk import _capture_ep_target_ids
     proj = sdk._get_proj()
-    draft = sdk.create_point("statement", "draft uncalibrated claim")
     live = sdk.create_point("statement", "live calibrated claim")
-    sdk.update_point(live["id"], status="live")
-    # mark the live node as EP-calibrated (the state a successful ingest EP
+    # No promotion call: create_point's implicit status is live since #1088
+    # (the old update_point(status="live") here was a redundant no-op).
+    # Mark the live node as EP-calibrated (the state a successful ingest EP
     # pass leaves behind — the has_ep read the enrichment uses)
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.ep_alpha=1.0, n.ep_beta=1.0",
         params={"id": live["id"]})
-    # folded + still draft → first-time calibration target
-    assert _capture_ep_target_ids(
-        [{"id": draft["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
-    ) == [draft["id"]]
     # folded + live + calibrated → never re-calibrated (no EP churn)
     assert _capture_ep_target_ids(
         [{"id": live["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
@@ -448,12 +447,214 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     # a live node WITHOUT EP (its ingest EP pass failed fail-open) gets its
     # FIRST calibration on a folded re-ingest
     uncal = sdk.create_point("statement", "live but uncalibrated claim")
-    sdk.update_point(uncal["id"], status="live")
     assert _capture_ep_target_ids(
         [{"id": uncal["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
     ) == [uncal["id"]]
     # minted entries always calibrate
     assert _capture_ep_target_ids([{"id": live["id"]}], proj) == [live["id"]]
+
+
+def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
+    """#1088 review P2: a capture that merely DEDUPS onto a point an agent
+    explicitly created as draft must NOT promote it AND must leave it
+    UNCALIBRATED. Only ids MINTED by this capture are promotion targets
+    (#2104); the folded canonical may still be an EP/dirty target (the folded
+    selector keys on the EP markers), but its explicit draft survives and the
+    EP pass excludes drafts (``include_draft=False``), so it never receives a
+    calibration. That is the folded explicit draft's intentional end state.
+
+    MUTATION THAT REDS THIS TEST: drop ``promotion_ids`` so the folded leg's
+    ids are promoted by ``_apply_capture_ingest_ep``.
+
+    The folded canonical MUST be CAPTURE-MINTED (``pt_`` id + ``eventId``):
+    the consolidation surface refuses to fold onto anything else
+    (``sdk.py`` — ``reason != "identical" or not nid.startswith("pt_") or
+    row is None or not row[1]``), so a directly-created draft never reaches
+    the pass and the assertions below hold vacuously.
+    """
+    import tortoise.extractor_v2 as ev2
+    proj = sdk._get_proj()
+    # 1. Mint a canonical through a capture, so it carries the ``pt_`` id
+    #    and provenance the fold surface requires.
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor(["explicitly staged claim"]))
+    first = sdk.capture_session([{"role": "user", "content": "seed"}])
+    canonical_id = first["points"][0]["id"]
+    assert canonical_id.startswith("pt_"), canonical_id
+    # 2. The agent stages it draft and it carries NO EP calibration (its own
+    #    ingest pass failed fail-open / never ran) — the folded selector keys
+    #    on the EP markers, so it IS a target.
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='draft' "
+        "REMOVE n.posterior_alpha, n.posterior_beta, n.ep_alpha, n.ep_beta",
+        params={"id": canonical_id})
+    assert sdk.get_point(canonical_id)["status"] == "draft"
+    # 3. A later capture folds onto the explicit draft (no payload points).
+    fold = _stub_extractor([], noops=[
+        {"point_id": canonical_id, "reason": "identical",
+         "overlap": 1.0, "evidence": "exact"}])
+    monkeypatch.setattr(ev2, "extract_session_v2", fold)
+    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    after = sdk.get_point(canonical_id)
+    assert after["status"] == "draft", (
+        "an explicitly-drafted point a later capture deduped onto was "
+        f"promoted: {res}"
+    )
+    assert after.get("posterior_alpha") is None \
+        and after.get("ep_alpha") is None, (
+            "a folded explicit draft must stay uncalibrated: it is never "
+            f"promoted, so the draft-excluding EP pass cannot reach it: {after}"
+        )
+
+
+def test_capture_promotes_a_new_operator_over_an_already_calibrated_fold(
+        sdk, monkeypatch):
+    """#1088 review P2: a capture whose payload points ALL fold onto
+    canonicals that are ALREADY calibrated, yet which wires a NEW operator,
+    must still promote that operator live.
+
+    The ingest-EP pass was gated on the CALIBRATION selector's own result
+    (``if ep_ids:``) at both capture call sites.  ``_capture_ep_target_ids``
+    keys on the EP markers (``n.posterior_alpha IS NULL AND n.ep_alpha IS
+    NULL``) and returns ``[]`` for a folded canonical that already carries
+    them, so the pass never ran: the IMPL operator this capture created
+    stayed ``status='draft'`` — EP-inert under the #780 live-only selector,
+    with no public promote path.  ``e96b01681`` widened the promotion JOIN to
+    ``(c.id IN $ids OR o.id IN $op_ids)`` but left the guard, so only the
+    folded-but-UNCALIBRATED sub-case (where ``ep_ids`` is non-empty) was
+    fixed — and the helper's ``if not claim_ids: return`` blocked the
+    operator-only call as well.
+
+    MUTATION THAT REDS THIS TEST: restore ``if ep_ids:`` as the guard on the
+    ingest-EP pass (either capture call site), or restore
+    ``if not claim_ids: return`` in ``_apply_capture_ingest_ep``.
+    """
+    import tortoise.extractor_v2 as ev2
+    from tortoise.ids import content_hash
+    from tortoise.sdk import _capture_ep_target_ids
+
+    a = "the schema migration lands before the release cut"
+    b = "the release cut waits on the schema migration"
+    pid_a = f"pt_{content_hash(a)[:62]}"
+    pid_b = f"pt_{content_hash(b)[:62]}"
+
+    # 1st capture mints the two canonicals (no operator wired).
+    monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([a, b]))
+    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert {p["id"] for p in first["points"]} == {pid_a, pid_b}, first["points"]
+
+    proj = sdk._get_proj()
+    # Make BOTH canonicals ALREADY calibrated — the state a successful ingest
+    # EP pass leaves behind (the same EP-marker write the unit test above
+    # uses), so the folded selector nominates nothing.
+    proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "SET n.ep_alpha=1.0, n.ep_beta=1.0",
+        params={"ids": [pid_a, pid_b]})
+    # Pin the defect's precondition: the calibration selector finds NOTHING
+    # for this all-folded payload.
+    assert _capture_ep_target_ids(
+        [{"id": pid_a, "dedup": DEDUP_CONTENT_HASH_HIT},
+         {"id": pid_b, "dedup": DEDUP_CONTENT_HASH_HIT}], proj) == []
+
+    # 2nd capture: both points fold onto the calibrated canonicals and the
+    # payload wires a NEW operator between them.
+    operators = [{"src": pid_a, "dst": pid_b, "op_type": "IMPL",
+                  "direction": "unidirectional"}]
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor([a, b], operators=operators))
+    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert [p["dedup"] for p in second["points"]] == [
+        DEDUP_CONTENT_HASH_HIT, DEDUP_CONTENT_HASH_HIT], second["points"]
+
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})"
+        "-[:IMPL]->(c:Point) WHERE c.id IN $ids "
+        "RETURN DISTINCT o.id, o.status",
+        params={"ids": [pid_a, pid_b]}).result_set
+    assert len(rows) == 1, (
+        f"the payload must wire exactly one NEW operator: {rows}")
+    assert rows[0][1] == "live", (
+        "the operator this capture created over an already-calibrated fold "
+        f"stayed draft: {rows}")
+
+
+def test_capture_promotes_operator_when_all_payload_folds_are_paraphrase(
+        sdk, monkeypatch):
+    """#1088 review P2: a capture whose payload points ALL fold as
+    PARAPHRASE noops still wires a NEW operator — that operator must go live.
+
+    The surfacing block skips every fold whose ``reason != "identical"``, so
+    a paraphrase-fold capture has ``extracted == []`` even though the
+    extractor resolved its operator endpoints onto existing canonicals and
+    ``apply_payload_operators`` minted an IMPL operator for it
+    (``meta["operator_ids"]`` is non-empty).  ``sdk.capture_session`` nested
+    the whole ingest-EP/promotion pass inside ``if extracted:``, so the pass
+    never ran and the operator stayed ``status='draft'`` — EP-inert under the
+    #780 live-only selector, with no public promote path — while the hosted
+    mirror (which has no such wrapper) promoted it: the documented
+    byte-parity drift.  The calibration selector alone must stay guarded by
+    ``extracted``; the run condition is EITHER list non-empty.
+
+    MUTATION THAT REDS THIS TEST: restore the ``if extracted:`` wrapper
+    around the ``_capture_ep_target_ids``/operator decision in
+    ``sdk.capture_session``.
+    """
+    import tortoise.extractor_v2 as ev2
+    from tortoise.ids import content_hash
+    from tortoise.sdk import _capture_ep_target_ids
+
+    a = "the schema migration lands before the release cut"
+    b = "the release cut waits on the schema migration"
+    pid_a = f"pt_{content_hash(a)[:62]}"
+    pid_b = f"pt_{content_hash(b)[:62]}"
+
+    # 1st capture mints the two canonicals (no operator wired).
+    monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([a, b]))
+    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert {p["id"] for p in first["points"]} == {pid_a, pid_b}, first["points"]
+
+    proj = sdk._get_proj()
+    # Both canonicals ALREADY calibrated, so the calibration selector has
+    # NOTHING to nominate for this all-folded payload — the wired operator is
+    # the capture's ONLY work item.
+    proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "SET n.ep_alpha=1.0, n.ep_beta=1.0",
+        params={"ids": [pid_a, pid_b]})
+    # Pin the precondition with the ACTUAL folded ids — `_capture_ep_target_ids([], proj)`
+    # is trivially [] and would pin nothing.
+    assert _capture_ep_target_ids(
+        [{"id": pid_a, "dedup": DEDUP_CONTENT_HASH_HIT},
+         {"id": pid_b, "dedup": DEDUP_CONTENT_HASH_HIT}], proj) == []
+
+    # 2nd capture: EVERY payload point folds as a PARAPHRASE noop (the
+    # surfacing block skips them — not ``identical``), so ``extracted == []``
+    # while the payload wires a NEW operator between the two canonicals.
+    noops = [
+        {"point_id": pid_a, "reason": "paraphrase", "overlap": 0.8,
+         "evidence": "value-signature equal", "content": a},
+        {"point_id": pid_b, "reason": "paraphrase", "overlap": 0.8,
+         "evidence": "value-signature equal", "content": b},
+    ]
+    operators = [{"src": pid_a, "dst": pid_b, "op_type": "IMPL",
+                  "direction": "unidirectional"}]
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor([], noops=noops, operators=operators))
+    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert second["points"] == [], (
+        "paraphrase folds must never be surfaced: " + repr(second["points"]))
+
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})"
+        "-[:IMPL]->(c:Point) WHERE c.id IN $ids "
+        "RETURN DISTINCT o.id, o.status",
+        params={"ids": [pid_a, pid_b]}).result_set
+    assert len(rows) == 1, (
+        f"the payload must wire exactly one NEW operator: {rows}")
+    assert rows[0][1] == "live", (
+        "the operator created by an all-paraphrase-fold capture stayed "
+        f"draft: {rows}")
 
 
 # ── Pure classifier ─────────────────────────────────────────────────────────
@@ -536,3 +737,58 @@ def test_hosted_and_mirror_reingest_parity(client):
     assert _stamped_claim_ids(proj) == [p["id"] for p in b1["points"]], (
         "first-writer provenance never re-stamped"
     )
+
+
+def test_hosted_capture_promotes_operator_with_no_ep_target(client, monkeypatch):
+    """#1088: the HOSTED capture mirror promotes a capture's own operator even
+    when there is no EP target — the byte-parity half of
+    ``sdk.capture_session``'s gate.
+
+    Both capture call sites must run the pass on ``ep_ids or operator_ids``:
+    a capture whose points ALL fold onto ALREADY-calibrated canonicals has
+    ``ep_ids == []`` yet can still have wired a NEW IMPL operator. Gating on
+    ``ep_ids`` alone leaves it ``draft`` (EP-inert, no public promote path).
+
+    MUTATION THAT REDS THIS TEST: restore ``if ep_ids:`` at the hosted call
+    site (``tortoise/hosted_api.py`` — ``_capture_session_impl``).
+    """
+    import tortoise.extractor_v2 as ev2
+    import tortoise.hosted_api as ha_mod
+    from tortoise.ids import content_hash
+
+    a = "the schema migration lands before the release cut"
+    b = "the release cut waits on the schema migration"
+    pid_a = f"pt_{content_hash(a)[:62]}"
+    pid_b = f"pt_{content_hash(b)[:62]}"
+
+    # 1st hosted capture mints the two canonicals (no operator wired).
+    monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([a, b]))
+    r1 = client.post("/v1/sessions",
+                     json={"conversation": [{"role": "user",
+                                             "content": "seed"}]})
+    assert r1.status_code == 200, r1.text
+
+    sdk = ha_mod._make_sdk(namespace="team-001")
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "SET n.ep_alpha=1.0, n.ep_beta=1.0",
+        params={"ids": [pid_a, pid_b]})
+
+    # 2nd hosted capture: both points fold onto the calibrated canonicals and
+    # the payload wires a NEW operator between them.
+    operators = [{"src": pid_a, "dst": pid_b, "op_type": "IMPL",
+                  "direction": "unidirectional"}]
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor([a, b], operators=operators))
+    r2 = client.post("/v1/sessions",
+                     json={"conversation": [{"role": "user",
+                                             "content": "second"}]})
+    assert r2.status_code == 200, r2.text
+
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'})-[:IMPL]->(c:Point) "
+        "WHERE c.id IN $ids RETURN DISTINCT o.id, o.status",
+        params={"ids": [pid_a, pid_b]}).result_set
+    assert rows, "the hosted capture must have wired an operator"
+    assert all(r[1] == "live" for r in rows), rows

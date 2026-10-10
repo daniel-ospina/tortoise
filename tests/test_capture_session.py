@@ -619,12 +619,13 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
         assert conf.get("variance") is not None, conf
         assert conf.get("effective_n") is not None and conf["effective_n"] > 0, conf
 
-    # 3) Negative control — the create_point GLOBAL default is untouched: a
-    # claim created through the ordinary draft path stays EP-inert (no
-    # persisted α/β) after the same local dream. Capture-scoped promotion
-    # (not an EP-semantics change) is the differentiator.
+    # 3) Negative control — capture-scoped promotion must NOT leak into the
+    # ordinary create path: a claim created as an EXPLICIT draft (since #1088
+    # a no-status create_point is LIVE, so a draft has to be asked for) stays
+    # EP-inert (no persisted α/β) after the same local dream.
     draft_pid = sdk.create_point(
-        "statement", "a non-captured draft claim stays EP-inert")["id"]
+        "statement", "a non-captured draft claim stays EP-inert",
+        status="draft")["id"]
     sdk.dream(mode="local", require_calibration=False, warm_start=False)
     drow = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, "
@@ -632,7 +633,7 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
         params={"id": draft_pid},
     ).result_set
     assert drow[0][0] == "draft" and drow[0][1] is False, \
-        f"global draft default changed by Phase C: {drow}"
+        f"capture-scoped promotion leaked into the ordinary create path: {drow}"
 
 
 def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):

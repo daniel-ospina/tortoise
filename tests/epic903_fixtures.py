@@ -86,9 +86,10 @@ def fresh_sdk(prefix: str = "tortoise_epic903_") -> tuple[TortoiseSDK, str]:
 
 
 def _make_claim(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    """#992: EP tests model live claims — create_point defaults to draft since
-    #943 (#780 draft filter strips draft inputs from operators, making them
-    degenerate)."""
+    """#992: EP tests model live claims — the explicit status="live" states
+    the intent; create_point's implicit status is live since #1088 (it was
+    draft from #943, where the #780 draft filter strips draft inputs from
+    operators, making them degenerate)."""
     return sdk.create_point(kind, content, dedup=False, status="live")
 
 

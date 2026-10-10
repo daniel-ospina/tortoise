@@ -126,6 +126,11 @@ class TestCreateDirectEdge:
 
     def test_promotion_only_on_created(self, sdk):
         pa, pb = _two_points(sdk)
+        # #1088: the promotion clause now fills only a NEVER-SET status, so
+        # exercise it with a genuinely NULL-status node (the legacy graph
+        # shape) instead of the retired implicit-draft default.
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = NULL", params={"id": pa})
         # auto parity: created -> source live
         sdk.create_direct_edge("IMPL", pa, pb, promote_source=True)
         assert sdk.get_point(pa)["status"] == "live"
@@ -133,7 +138,8 @@ class TestCreateDirectEdge:
         sdk.create_direct_edge("IMPL", pa, pb, promote_source=True)
         assert sdk.get_point(pa)["status"] == "live"
         # promote_source=False: no status write
-        pc, pd = _two_points(sdk)
+        pc = sdk.create_point("statement", "A implies B", status="draft")["id"]
+        pd = sdk.create_point("statement", "B", status="draft")["id"]
         sdk.create_direct_edge("IMPL", pc, pd, promote_source=False)
         assert sdk.get_point(pc)["status"] == "draft"
 

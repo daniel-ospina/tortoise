@@ -361,8 +361,10 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
     the marker is still written on both lanes for state equality.
 
     Query 1: guarded points CREATE (MERGE on deterministic id — idempotent;
-    status only set ON CREATE so a promoted live point is never downgraded;
-    marker points ride the same UNWIND — no extra round trip).
+    status only set ON CREATE so a re-run never downgrades an existing point;
+    marker points ride the same UNWIND — no extra round trip). The ON-CREATE
+    default is 'live', matching create_point's #1088 default, so this
+    reference lane stays state-equal to the SDK lane.
     Query 2: operators (MERGE nodes; edges MERGE (o)-[:NAND {idx}]->(s) —
     idx inside the pattern so re-runs match without dropping input-order
     fidelity). Endpoint existence is validated IN-BATCH (Python) with the
@@ -411,7 +413,7 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
             f"UNWIND $rows AS r "  # noqa: F541
             f"MERGE (n:Point {{id: r.id}}) "  # noqa: F541
             f"ON CREATE SET n += {{content: r.content, pointKind: r.kind, "  # noqa: F541
-            f"is_operator: false, status: 'draft', createdAt: r.now, "  # noqa: F541
+            f"is_operator: false, status: 'live', createdAt: r.now, "  # noqa: F541
             f"updatedAt: r.now, content_hash: r.content_hash}}, "  # noqa: F541
             f"n += r.props "  # noqa: F541
             f"SET n.embedding = vecf32(r.embedding)",  # noqa: F541
@@ -437,7 +439,7 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
                 f"MERGE (o)-[:NAND {{idx: inp.idx}}]->(s) "  # noqa: F541
                 f"WITH DISTINCT o, r "  # noqa: F541
                 f"MATCH (src:Point {{id: r.source_id}}) "  # noqa: F541
-                f"WHERE src.status IS NULL OR src.status = 'draft' "  # noqa: F541
+                f"WHERE src.status IS NULL "  # noqa: F541
                 f"SET src.status = 'live'",  # noqa: F541
                 params={"rows": op_rows},
             )
@@ -447,7 +449,8 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
 
 def _promote_sources(g, graph: ScenarioGraph) -> None:
     """Mirror create_operator's promote_source: flip only Point sources with
-    status IS NULL or 'draft' to 'live' (never Events, never terminal).
+    a NEVER-SET status to 'live' (never Events, never terminal, and never an
+    EXPLICIT draft — #1088: an agent that asked for draft keeps it).
 
     NOTE (2026-08-17): superseded by the batched promotion folded into
     batch_setup's query 2 — kept only as the single-scenario reference
@@ -459,7 +462,7 @@ def _promote_sources(g, graph: ScenarioGraph) -> None:
     g.query(
         "UNWIND $ids AS sid "
         "MATCH (s:Point {id: sid}) "
-        "WHERE s.status IS NULL OR s.status = 'draft' "
+        "WHERE s.status IS NULL "
         "SET s.status = 'live'",
         params={"ids": source_ids},
     )
@@ -617,9 +620,10 @@ def seed_scenario_via_ingest(sdk, scenario: Scenario, *,
 
     Product behavior (pinned by probe, plan Task 2 Step 1): credibility is
     author-set on ANY kind/status ⇒ ``baseline_set: true`` even on drafts;
-    kind=evidence lands live, kind=statement lands draft; ingest is
-    content-hash idempotent (re-run ⇒ deduped, same batch_id); connections
-    reify to operator points only with the reification anchor; labels on
+    this lane ingests under ``promotion_policy='gated'``, so every no-status
+    point is stated ``draft`` and then promoted explicitly below (a bare
+    ``create_point`` is live since #1088); ingest is content-hash idempotent
+    (re-run ⇒ deduped, same batch_id); connections reify to operator points only with the reification anchor; labels on
     connections must be declared relations (omit them — decorative).
 
     Returns ``{batch_id, promoted: [ids], created_points: [ids]}``.

@@ -1562,6 +1562,35 @@ class TestPointsCreateConfidenceAndAuthor:
         assert "confidence" not in props, props
         assert "authoredBy" not in props, props
 
+    def test_credibility_calibrates_the_point(self, client):
+        # #1088: the REST write surface can AUTHOR a baseline — the same
+        # capability the MCP `tortoise_create_point` tool has. Without it a
+        # live write can never be made EP-able through this endpoint (the
+        # fail-closed calibration gate makes `/v1/dream` refuse it).
+        r = client.post(
+            "/v1/points",
+            json={"content": "credibility round trip", "kind": "statement",
+                  "credibility": "gold"},
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("baseline_set") is True, props
+        # An author-stated baseline carries the CONTRACT source token — a
+        # mere `!= "system-default"` would pass for a null or garbage value.
+        from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
+        assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
+
+    def test_bad_credibility_is_rejected_not_500(self, client):
+        # A ladder word the store cannot resolve must be ANSWERED with a 4xx
+        # (like the sibling confidence bound), never mapped to the route's
+        # catch-all 500 — the value is a client error, not a server fault.
+        r = client.post(
+            "/v1/points",
+            json={"content": "bad credibility", "kind": "statement",
+                  "credibility": "platinum"},
+        )
+        assert r.status_code == 422, r.text
+
 
 class TestPointsList:
     """GET /v1/points — list Points."""
@@ -2597,9 +2626,19 @@ class TestDreamEndpoint:
         assert "converged_all" in body or "converged" in body
 
     def test_dream_after_writes(self, client):
-        """Writes then dream → stabilization without explicit EP (O/I/T #85)."""
-        client.post("/v1/points", json={"content": "claim A"})
-        client.post("/v1/points", json={"content": "claim B"})
+        """Writes then dream → stabilization without explicit EP (O/I/T #85).
+
+        #1088: a no-status write lands LIVE, and the fail-closed calibration
+        gate (#344/#1157) demands an authored baseline before an EP surface
+        runs — the writes carry an explicit ``credibility`` through the REST
+        write surface (the same author-set baseline the MCP tool accepts).
+        The gate itself is test_calibration.py's subject; this test is the
+        dream endpoint's stabilization path."""
+        for claim in ("claim A", "claim B"):
+            r = client.post("/v1/points", json={"content": claim,
+                                                "kind": "statement",
+                                                "credibility": "gold"})
+            assert r.status_code == 200, r.text
         r = client.post("/v1/dream?full=true")
         assert r.status_code == 200, r.text
         body = r.json()

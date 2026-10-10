@@ -780,9 +780,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "row 9 — case variants, nested props={...}, and terminal statuses "
                     "included) — use promotion_policy='auto' or promote after ingest via "
                     "update_point(status='live'). promotion_policy='auto' preserves the #131 "
-                    "promote-on-wire lifecycle (draft/null-status sources go live on first "
-                    "edge; terminal sources are never resurrected; deduped connections never "
-                    "retro-promote). Idempotent-ish: "
+                    "promote-on-wire lifecycle (null-status sources only — an explicit draft "
+                    "is never retro-promoted, #1088; terminal sources are never resurrected; "
+                    "deduped connections never retro-promote). Idempotent-ish: "
                     "points dedup by content hash + kind, sources by url, operators by "
                     "input set.",
         annotations=_idem(),
@@ -1066,8 +1066,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.update",
         writes=True,
         description="Update a Point OR entity by id. Points get point-lifecycle semantics "
-                    "(draft→live promote via status, version increment for Point:Object, "
-                    "status validation); entities get a plain property update.",
+                    "(draft→live promote via status — an already-live point is an idempotent "
+                    "no-op, version increment for Point:Object, status validation); entities "
+                    "get a plain property update.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="update",
