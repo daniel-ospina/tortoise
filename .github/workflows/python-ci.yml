@@ -1480,6 +1480,7 @@ jobs:
               eval/retrieval/test_gate_1349
               eval/why_suite/test_why_suite_benchmark
               eval/write_path/test_write_path_runner test_abuse_integration
+              test_3311_multilabel_status_vocab
               test_backfill_sources test_billing test_capture_session
               test_cli_context test_commit_endpoint test_dr_endpoints
               test_enumeration_surfaces test_epic903_modes

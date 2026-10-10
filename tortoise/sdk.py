@@ -22507,6 +22507,60 @@ class TortoiseSDK:
             secondary_entity_id_props,
         )
 
+        # #3311: POINT-LABEL PRECEDENCE on the multi-label shape. A node that
+        # carries the :Point label is governed by the claim lifecycle
+        # vocabulary (#2977), and a `status` write through this generic
+        # surface must be JOURNALED against the label the node REPLAYS as.
+        #
+        # Before this guard the :Point arm below wrote caller props with a live
+        # `SET n += $p` and emitted no state record, while a sibling arm (e.g.
+        # :Object) re-wrote the SAME node and journaled a `restatus` for ITS
+        # label. That record cannot fold on replay — no production path mints a
+        # `:Point:Object`, so the node re-materializes as `:Point` — which is
+        # why `update_entity(<:Point:Object>, status=...)` BOTH accepted an
+        # unvalidated value (`''`, `'deprecated'`, arbitrary text) AND left a
+        # record `rebuild_all` refused with `state-op-miss`. Validate once
+        # against the Point vocabulary, write once, journal once through the
+        # ONE builder (`_journal_entity_mutation`, which already handles
+        # `restatus`), then drop the key so no sibling arm repeats it.
+        #
+        # A union vocabulary would close the validation half and leave the
+        # journal half: journaling is what decides this mechanism.
+        if "status" in props:
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _pt_hits:
+                _status = props["status"]
+                if (not isinstance(_status, str)
+                        or _status not in POINT_STATUS_VALUES):
+                    # Same refusal `update_point` issues (#3311 defect 1). The
+                    # raise precedes every write, so a refused status leaves
+                    # the node untouched.
+                    raise ValueError(
+                        f"Invalid status {_status!r}. "
+                        f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
+                    )
+                # Write FIRST, journal SECOND, gated on the write having
+                # MATCHED (a missed/no-op write must never leave a phantom
+                # record — the count probe above and this SET are two
+                # statements, so a concurrent delete between them must not
+                # journal a record whose fold then reports
+                # `state-op-miss`). `status` is then dropped from `props` so
+                # the per-label loop cannot re-write it — and, on a sibling
+                # arm, cannot journal a second `restatus` against a label this
+                # node cannot replay as.
+                _wrote = proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n += $s RETURN count(n)",
+                    params={"id": id_val, "s": {"status": _status}},
+                ).result_set
+                if _wrote and _wrote[0][0]:
+                    self._journal_entity_mutation(
+                        "Point", id_val, "restatus",
+                        state={"status": _status})
+                props = {k: v for k, v in props.items() if k != "status"}
+
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT

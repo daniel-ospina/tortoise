@@ -4392,9 +4392,11 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 points.pop(mid, None)
     elif t == "EntityMutated":
         # #3299/#3860: the write-surface mutation record. In-memory points are
-        # keyed by id, so `op=delete` drops the point; other ops (rename/
-        # restatus) are no-ops on this pure-point index until a sibling
-        # extends them. #3860: identity is (kind, id) — a delete naming a
+        # keyed by id, so `op=delete` drops the point. A STATE op
+        # (rename/restatus/revise) is folded onto a `:Point` below (#3311);
+        # for the non-Point canonical labels it stays the deliberate no-op
+        # named in the arm's own paragraph (`_fold_journal_entities` owns
+        # those). #3860: identity is (kind, id) — a delete naming a
         # DIFFERENT canonical kind does not own a Point and must not pop it;
         # a missing/unknown label keeps the legacy id-wide delete (parity
         # with the graph fold's fallback).
@@ -4450,6 +4452,25 @@ def _apply_one(points: dict[str, dict], ev: dict,
                     id=_srid, op=ev.get("op"),
                     detail="in-memory fold: state op matched no Point",
                 )
+            elif (isinstance(_srid, str) and _slabel == "Point"
+                  and isinstance(ev.get("state"), dict) and _srid in points):
+                # #3311: the generic entity surface now journals a `status`
+                # write on a `:Point` as an `EntityMutated restatus` (the ONE
+                # builder, `_journal_entity_mutation`). This reference index
+                # must FOLD that record or it silently disagrees with the graph
+                # fold (`_fold_entity_mutation`) and `check_consistency`
+                # reports a content divergence on a faithful journal — the #330
+                # parity contract / #5048's rule that every write the graph
+                # folds must also ride `_apply_one`. Presence-conditional,
+                # exactly like the graph's `SET n += $s`: a null value REMOVES
+                # the key, a present one writes it. Reached only for a
+                # well-formed `label="Point"` state op whose target this index
+                # HOLDS — every malformed/absent case is the `if` above.
+                for _k, _v in ev["state"].items():
+                    if _v is None:
+                        points[_srid].pop(_k, None)
+                    else:
+                        points[_srid][_k] = _v
         elif ev.get("op") in _ENTITY_MUTATION_PENDING_OPS:
             # #3585 (R8): the GRAPH fold records this as a non-folded event
             # (`SHAPE_UNIMPLEMENTED_OP`) and fails the run, so this reference
@@ -8189,11 +8210,12 @@ class FalkorProjection(
         # double-reported every fold-miss warning).
         for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
             if _ujm_label != "Object":
-                # `_fold_object_superseded` is the only non-Point deferred fold
-                # that writes a property a state op also writes; the point
-                # sweeps below are :Point-scoped and no producer emits an
-                # `EntityMutated` state op for a Point (`_update_entity`'s Point
-                # branch emits PointRevised instead).
+                # The `:Point` half of this re-fold CANNOT live here: the
+                # `:Point` terminalizer sweep runs LATER in this function, so a
+                # point re-fold at this position would be clobbered by it. It
+                # is done after that sweep (below), gated on `supersede_last` —
+                # `_supersede_seq` is populated only in the `ObjectSuperseded`
+                # branch, so it can never name a Point.
                 continue
             _sup = _supersede_seq.get(("id", _ujm_id))
             _rows = self.g.query(
@@ -8369,6 +8391,54 @@ class FalkorProjection(
                         "not re-created by any journaled event (legacy "
                         "journal, unjournaled producer, or delete race)",
                         ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+        # #3311 review P1: the `:Point` analog of the #4743 re-fold above. It
+        # MUST run here, after the `:Point` terminalizer sweep — at the Object
+        # loop's position it would be clobbered by the sweep that follows. The
+        # premise the old `continue` asserted ("no producer emits an
+        # `EntityMutated` state op for a Point") is false: `_update_entity`'s
+        # #3311 arm journals `restatus` against `Point` for a status write on a
+        # `:Point`-carrying node, and `_fold_point_superseded` writes
+        # `status='superseded'` UNCONDITIONALLY — so a status write the journal
+        # places AFTER a supersede was reverted to the supersede's value by
+        # every `rebuild_all`, while live and the chronological `apply()` arm
+        # kept the later write (measured: create(status=live) →
+        # supersede_point → update_entity(status=archived) rebuilt as
+        # `superseded` and failed `check_consistency`). The gate is the id's
+        # SURVIVING supersede (`supersede_last`, the same canonicalized
+        # survivor the sweep just folded), NOT `_supersede_seq` — that map is
+        # populated only in the `ObjectSuperseded` branch and can never govern
+        # a Point. `PointSuperseded` is the only deferred fold that writes
+        # `status` (the invalidate arm deliberately leaves it live) and
+        # `restatus` is the only state op a Point producer emits, so this one
+        # gate covers every such record. Events re-fold in seq order (each
+        # `_state_folds` list is append-ordered), so the LAST journaled writer
+        # wins — exactly as live and `apply()` resolve it.
+        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
+            if _ujm_label != "Point":
+                continue
+            _psup = supersede_last.get(_ujm_id)
+            if _psup is None:
+                continue
+            # Mirror the Object loop's existence guard: a Point the journal
+            # HARD-DELETED by this point in the replay has nothing for the
+            # sweep to have clobbered and nothing to restore, so re-folding
+            # here can only MANUFACTURE a `state-op-miss` for a mutation the
+            # inline fold already applied correctly (the shape
+            # create -> supersede -> update(status) -> delete: the delete is
+            # journalled and folded inline, so the node is gone by now and
+            # the sweep's own 0-row miss is the EXEMPT delete-race shape).
+            if not self.g.query(
+                    "MATCH (p:Point {id:$i}) RETURN p.id LIMIT 1",
+                    params={"i": _ujm_id}).result_set:
+                continue
+            _psup_seq = _psup[0]
+            for _seq, _ev in _ujm_events:
+                if _seq > _psup_seq:
+                    self._fold_entity_mutation(
+                        _ev,
+                        journal_first_materialized=first_materialized,
+                        journal_seq=_seq)
+
         # fold_seq[old_id] = journal seq of the id's surviving supersede fold
         # (pass-2b re-point discriminator; bound to the supersede-kind
         # survivor so a mixed invalidate→supersede never binds the invalidate
