@@ -18666,6 +18666,37 @@ class TortoiseSDK:
                     edge_sid = (row[6] or "") if len(row) > 6 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
+                if _prov and entity_data:
+                    # #5581 (the #5038 read-path half): the POINT-LEVEL currency
+                    # verdict, and the sourced disclosure that rides with it.
+                    # ONE batch query for the hits' ``extractedFrom`` links —
+                    # read ONLY under the flag, exactly like the two columns
+                    # above, so an unflagged call pays nothing and returns the
+                    # byte-identical row it always did.
+                    #
+                    # ⛔ The verdict is the §4.6 AGGREGATE, never one link's
+                    # pair: a hit is a Point, and ``extractedFrom`` is
+                    # many→many, so reporting a single link's verdict as the
+                    # Point's says ``current`` for a Point another link makes
+                    # stale — the false-current the note exists to prevent
+                    # (see ``currency_status``'s ⚠ and
+                    # ``tests/test_source_version_read_wiring_5199.py``'s
+                    # ``test_search_hit_makes_no_version_claim``).
+                    #
+                    # ``outdated_sources`` carries the behind links' sources so
+                    # the row DISCLOSES what moved rather than flagging a
+                    # binary state — the owner's ruling (2026-09-26) is that the
+                    # out-of-date fact is withheld as an answer and disclosed as
+                    # an FYI **carrying its source**; a flag alone is the shape
+                    # the plan's `OVERRIDES:` line rejects.
+                    from .search_engine import aggregate_currency, read_currency_links
+                    _currency_links = read_currency_links(graph, list(entity_data))
+                    for pid, entry in entity_data.items():
+                        links = _currency_links.get(pid, [])
+                        entry["currency"] = aggregate_currency(
+                            (lk["recorded"], lk["current"]) for lk in links)
+                        entry["outdated_sources"] = [
+                            lk for lk in links if lk["currency"] == "stale"]
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
                     # Point's own ``sessionId`` (camel) prop, else its own
@@ -18861,6 +18892,11 @@ class TortoiseSDK:
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),
                 captured_at=pt.get("captured_at", ""),
+                # #5581: the §4.6 Point-level verdict and the disclosure's
+                # material — present only when the flag fetched them, so
+                # ``to_dict``'s provenance block stays absent by default.
+                currency=pt.get("currency", ""),
+                outdated_sources=pt.get("outdated_sources") or [],
             )
             results.append(result)
 

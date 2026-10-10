@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
@@ -361,8 +362,24 @@ def search_provenance_enabled() -> bool:
     / ``subject`` search carries no ``source_ref``/``captured_at`` either, and
     ``to_dict`` emits no ``provenance`` block. The flag enriches the
     non-degraded POINT query path only.
+
+    #5581 extends this same block with the Point-level §4.6 currency verdict
+    and its sourced disclosure (``currency`` / ``fyi``), so every clause above
+    applies to them unchanged: the two fallback tiers carry neither, and the
+    ``if entity_type == "point":`` branch is where the extra batch read of the
+    Point's ``extractedFrom`` LINKS runs. That read is ONE query for the whole
+    hit batch, taken ONLY under the flag, so an unflagged call pays nothing and
+    its rows stay byte-identical.
     """
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
+
+
+#: #5581: the disclosure's reason tag — the ONE spelling (``SearchResult``
+#: emits it; ``tools/source_currency.sourced_fyi`` builds it). Named so a
+#: consumer can branch on WHY a fact was disclosed rather than sniffing the
+#: payload's shape, and defined HERE because the read path may not import from
+#: ``tools/`` (that tree is not in the wheel).
+FYI_REASON_SOURCE_DRIFT = "source-version-drift"
 
 
 def currency_status(remembered: str, current: str) -> str:
@@ -395,6 +412,116 @@ def currency_status(remembered: str, current: str) -> str:
     if not remembered or not current:
         return "unknown"
     return "current" if remembered == current else "stale"
+
+
+def aggregate_currency(links: Iterable[tuple[str, str]]) -> str:
+    """#5581 — the §4.6 **Point-level** verdict, over the Point's OWN links.
+
+    ``links`` is one ``(remembered, current)`` pair per ``extractedFrom`` edge —
+    the recorded ``r.sourceVersion`` and the Source's current ``contentHash``.
+    This is the aggregate the per-link :func:`currency_status` explicitly does
+    NOT make (see its ⚠ note): ONTOLOGY §4.6 — *"the Point is **stale if any**
+    of those links is behind its source's current version, and **current only
+    when every** link is"*.
+
+    Three states, and the precedence is the whole point:
+
+    * ``stale`` — **ANY** link is behind. A verifiable change is proof the
+      Point's recorded read no longer matches its source, and one such link is
+      enough; a sibling link cannot rehabilitate it. ``stale`` therefore
+      OUTRANKS ``unknown``: the links are independent, so an unfilled pair on
+      one edge says nothing about a pair that is filled and differs on another.
+    * ``current`` — **EVERY** link is current **and there is at least one**.
+    * ``unknown`` — no link is stale and not every link is current, i.e. some
+      pair was unfillable (an absent note, or a Source with no version). This
+      is the HONEST answer, never a synonym for ``current`` — the same rule
+      :func:`currency_status` applies to one pair, lifted to the set.
+
+    ⛔ **ZERO LINKS IS ``unknown``, NOT ``current``.** Read literally, "current
+    only when every link is" is VACUOUSLY true of an empty link set, so a Point
+    with no ``extractedFrom`` link at all — the ordinary orphan write — would
+    read ``current``. That is precisely the false-current §4.6 exists to
+    prevent (it would report a Point with no recorded read as verified-fresh),
+    so the rule is refuted by the section's own intent and refused here. The
+    aggregate answers *"is the recorded read still current?"*; with no recorded
+    read there is nothing to answer and the verdict is ``unknown``.
+
+    A pure function of the pairs: currency stays a READ (§4.6 *"a read, never a
+    stored flag"*), so no backfill is needed and two readers cannot disagree
+    about the same set of pairs. The caller owns the GRAPH read that produces
+    the pairs — see ``tools/source_currency.py`` for the shared derivation used
+    by in-repo read paths.
+    """
+    pairs = list(links)
+    # ⛔ Anti-vacuity FIRST — see the docstring. Not reachable from the set
+    # comprehension below, which would answer `current` for an empty set.
+    if not pairs:
+        return "unknown"
+    verdicts = {currency_status(remembered or "", current or "")
+                for remembered, current in pairs}
+    if "stale" in verdicts:
+        return "stale"
+    if verdicts == {"current"}:
+        return "current"
+    return "unknown"
+
+
+def read_currency_links(graph, point_ids: Iterable[str]) -> dict[str, list[dict]]:
+    """#5581 — the ``(remembered, current)`` pair behind every ``extractedFrom``
+    link of every requested Point, as one query.
+
+    Returns ``{point_id: [link, ...]}`` where a link is
+    ``{"source", "recorded", "current", "currency"}``. A Point with no link is
+    ABSENT from the dict (``.get(pid, [])`` at the call site) — never present
+    with an empty list, so "this Point has no versioned provenance" and "this
+    Point was not in the batch" cannot be confused by a caller that checks
+    membership.
+
+    ONE row per EDGE, not one per Point: §4.6 aggregates over the links, and the
+    disclosure the ruling requires must name *which* source moved (*"older fact
+    from source X"*), which a collapsed single verdict cannot carry.
+
+    The two operands, and why each is read where it is:
+
+    * ``sourceVersion`` comes from the **EDGE** — the authoritative per-link
+      scalar (#5256). The Point's ``sourceVersionTransit`` node prop is the
+      replay transit, not a read.
+    * ``contentHash`` comes from the **Source node** — the version the source
+      holds NOW. It is the comparison's moving side by construction: a source
+      edit is exactly what makes a previously-current link read ``stale``.
+
+    Either operand absent (a bare edge, or a Source whose hash is ``''`` — a
+    minted stub, a connector, the capture path before materialization) leaves
+    the pair unfillable and its verdict ``unknown``, never ``current``: a
+    missing operand cannot verify anything.
+
+    Rows are sorted by ``(source, recorded)`` so two reads of an unchanged graph
+    agree. The sort is deterministic but NOT total — two edges to one Source
+    whose notes agree are engine-ordered — and nothing downstream may depend on
+    row POSITION: select a link by its source identity, never by index.
+    """
+    ids = list(point_ids)
+    if not ids:
+        return {}
+    rows = graph.query(
+        "MATCH (n:Point)-[ef:extractedFrom]->(s:Source) "
+        "WHERE n.id IN $ids "
+        "RETURN n.id, s.url, ef.sourceVersion, s.contentHash",
+        params={"ids": ids},
+    ).result_set
+    out: dict[str, list[dict]] = {}
+    for pid, url, remembered, current in rows:
+        recorded = remembered or ""
+        now = current or ""
+        out.setdefault(pid, []).append({
+            "source": url or "",
+            "recorded": recorded,
+            "current": now,
+            "currency": currency_status(recorded, now),
+        })
+    for links in out.values():
+        links.sort(key=lambda lk: (lk["source"], lk["recorded"]))
+    return out
 
 
 @dataclass
@@ -445,6 +572,14 @@ class SearchResult:
     # byte-identical to pre-change output.
     source_ref: Any = None  # Point.extractedFrom — the Source/document link
     captured_at: str = ""   # Point.createdAt — when the fact entered memory
+    # #5581 (the #5038 read-path half): the Point's OWN §4.6 currency verdict —
+    # the AGGREGATE over its ``extractedFrom`` links, never one link's pair —
+    # and the links that make it ``stale``, whose sources are what the ruling
+    # requires the row to DISCLOSE ("older fact from source X"). Both ride
+    # INSIDE the provenance block and only under the same flag that fetched
+    # them, so an unflagged call stays byte-identical; empty ⇒ absent.
+    currency: str = ""  # current | stale | unknown
+    outdated_sources: list = field(default_factory=list)  # the behind links
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -498,12 +633,21 @@ class SearchResult:
         # Provenance (#3837 owner decision: source + when learned). Additive —
         # emitted only when a value is present, so an unflagged call and an
         # unflagged empty-provenance hit both stay byte-identical.
-        if self.source_ref or self.captured_at:
+        if self.source_ref or self.captured_at or self.currency:
             prov: dict[str, Any] = {}
             if self.source_ref:
                 prov["source"] = self.source_ref
             if self.captured_at:
                 prov["captured_at"] = self.captured_at
+            # #5581: the §4.6 verdict, and — only when it is ``stale`` — the
+            # SOURCED FYI the owner's ruling requires. Emitted only when the
+            # flag fetched it (``currency`` is ``""`` otherwise), so the block's
+            # pre-#5581 shape is unchanged for every unflagged caller.
+            if self.currency:
+                prov["currency"] = self.currency
+            if self.currency == "stale" and self.outdated_sources:
+                prov["fyi"] = {"reason": FYI_REASON_SOURCE_DRIFT,
+                               "sources": self.outdated_sources}
             d["provenance"] = prov
         return d
 

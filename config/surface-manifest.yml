@@ -21,6 +21,23 @@ response_fields:
   field: status
   emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
+# #5581 (the #5038 read-path half): the Point-level §4.6 currency verdict and
+# the sourced disclosure that rides with a `stale` verdict. INSIDE the existing
+# flag-gated `provenance` block, so the addition needs the block's flag rather
+# than a new one. Recorded here for the same reason as every other response
+# field — an unrecorded addition has no approval behind it and the carve-out
+# does not cover it. The placement was ALREADY RULED (Policy B, #5038: the
+# check is a read on the EXISTING read surfaces — no new MCP tool, no new SDK
+# method, no stored `status` field), so #4282's tool/method rule is not engaged;
+# see docs/plans/2026-09-25-5038-source-version-anchor.md §8 O3.
+- response: tortoise_search
+  field: provenance.currency
+  emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point — the §4.6 AGGREGATE over the Point''s `extractedFrom` links: current (every link current, at least one link), stale (ANY link behind), unknown (no link, or a pair with an absent operand). Never one link''s verdict, and never a stored field (tortoise/search_engine.py::aggregate_currency is its ONE home)'
+  unchanged_when_off: 'yes — the whole `provenance` block is absent when the flag is off, so the row is byte-identical'
+- response: tortoise_search
+  field: provenance.fyi
+  emitted_when: 'the same flag AND a `stale` verdict with at least one behind link — {reason: source-version-drift, sources: [{source, recorded, current, currency}]}, the OUT-OF-DATE FACT DISCLOSED CARRYING ITS SOURCE (owner ruling 2026-09-26: withheld as the answer, disclosed as a sourced FYI). Omitted for current/unknown, so its absence means `no drift` rather than `drift we failed to name`'
+  unchanged_when_off: 'yes — nested in the same flag-gated `provenance` block; absent when the flag is off'
 - response: tortoise_session_capture
   field: capture_redactions
   emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
