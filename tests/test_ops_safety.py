@@ -1115,3 +1115,518 @@ def test_rebuild_cli_inmemory_fallback_keeps_a_harmless_tear(capsys, monkeypatch
     assert "Done: 1 total (1 statements, 0 operators) [in-memory, no DB]" \
         in captured.out, captured.out
     assert rc is None, f"a successful in-memory rebuild exits 0, got {rc!r}"
+
+
+# ── #7929: a declined recovery must not leave a HALF-BUILT store ──────────
+#
+# `recover_from_log` can reach three refusals only AFTER the replay has
+# populated the graph — the non-folded set, the final `ok: False` verdict, and
+# a pending-snapshot `rebuild_all` failure — because the verdict depends on the
+# graph the replay LANDS on, so no pre-flight can produce it. Before #7929 the
+# caller (`_recover_or_raise`, i.e. the real open path) then refused to open a
+# store it had itself just half-built: the NEXT open read `db_count > 0` and
+# took the OTHER refusal ("graph already has nodes — no rebuild"), so the retry
+# path was gone and a store that was neither empty nor correct got served.
+
+
+def _node_total(proj) -> int:
+    """ALL nodes, not just :Point — the count `recover_from_log` gates on."""
+    rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
+    return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+
+def _lost_store(db_path: str) -> FalkorProjection:
+    """A live handle on a deliberately 0-node ("lost DB") embedded store.
+
+    `skip_health_check=True` keeps construction from running the very recovery
+    under test, and the explicit reset covers the Meta/config node a
+    brand-new projection can carry (#7929's note) — whichever nodes exist, the
+    branch `recover_from_log` handles is the one that starts at 0.
+    """
+    proj = FalkorProjection(db_path, skip_health_check=True)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    return proj
+
+
+def _non_folded_event() -> dict:
+    """One journal record no replay engine can fold to exactly one node.
+
+    `EntityMutated op=restatus` naming an Object that no creation made records
+    `state-op-miss` (refused), so the reference fold and both graph engines
+    agree the journal is unreplayable (#3585).
+    """
+    return {
+        "type": "EntityMutated", "op": "restatus", "label": "Object",
+        "id": "obj-never-registered", "state": {"status": "archived"},
+        "event_id": "e-7929-poison",
+    }
+
+
+def _poisoned_journal(tmp: str, *, points: int = 4) -> str:
+    """Write the adjacent single JSONL log: `points` foldable + one poison."""
+    log_path = os.path.join(tmp, "events.jsonl")
+    log = EventLog(log_path)
+    for i in range(points):
+        log.append(_point_event(i))
+    log.append(_non_folded_event())
+    return log_path
+
+
+def test_a_declined_post_replay_recovery_is_rolled_back():
+    """#7929 (THE DEFECT, measured): the non-folded verdict arrives AFTER the
+    replay landed, so the store must be restored to the empty state the call
+    found — measured 4 nodes left behind before the fix, 0 after.
+
+    FAILS IF: a declined recovery leaves a partially populated store, which
+    makes the retry path unreachable and serves a store that is neither empty
+    nor correct.
+    REACHABLE: the real `_auto_health_recover` leg, with the open probe
+    failing (an injected unresponsive backend — the cheapest way in) over a
+    journal carrying one unfoldable record.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "declined.db")
+    proj = _lost_store(db_path)
+    _poisoned_journal(tmp)
+    orig = FalkorProjection._probe_ok
+    FalkorProjection._probe_ok = lambda self: False
+    try:
+        with pytest.raises(RuntimeError, match="recovery did not complete"):
+            proj._auto_health_recover()
+        assert _node_total(proj) == 0, (
+            "a declined recovery must not leave a partially rebuilt store")
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert r["replay_rolled_back"] == 4, r
+        assert r["db_points"] == 0, (
+            "the reported count must match the restored (empty) store")
+        # The refusal that survives is the REAL one — not the dead-end
+        # "already has nodes" refusal the partial population used to trigger.
+        assert "already has nodes" not in r["reason"], r["reason"]
+        assert "could not" in r["reason"], r["reason"]
+        assert _node_total(proj) == 0
+    finally:
+        FalkorProjection._probe_ok = orig
+        proj.close()
+
+
+def test_the_declined_recovery_keeps_the_retry_path():
+    """The point of the rollback: the SAME store recovers once the journal is
+    repaired, instead of being permanently stuck on "graph already has nodes".
+
+    FAILS IF: the first decline leaves nodes behind — the repaired journal then
+    cannot be replayed at all, because recovery never rebuilds a non-empty
+    graph.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "retry.db")
+    log_path = _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+    try:
+        first = recover_from_log(tmp, proj)
+        assert first["recovered"] is False and first["db_points"] == 0, first
+        assert _node_total(proj) == 0
+        # Repair: a journal whose every record folds.
+        os.remove(log_path)
+        clean = EventLog(log_path)
+        for i in range(4):
+            clean.append(_point_event(i))
+        second = recover_from_log(tmp, proj)
+        assert second["recovered"] is True, second
+        assert _point_count(proj) == 4, (
+            "the retry path must survive the declined recovery")
+    finally:
+        proj.close()
+
+
+def test_the_unresponsive_leg_leaves_the_store_untouched(monkeypatch):
+    """The OTHER `_recover_or_raise` leg (`db_count is None`) returns before
+    the replay, so its node-count delta is 0 on both sides and there is nothing
+    to roll back. Measured: 0 -> 0.
+
+    FAILS IF: a pre-mutation refusal reported a rollback, which would blur the
+    two legs the issue asks to tell apart.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "unresponsive.db")
+    _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+
+    def _dead(*_a, **_k):
+        raise RuntimeError("backend unresponsive (injected)")
+
+    try:
+        monkeypatch.setattr(proj, "query", _dead)
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert "unresponsive" in r["reason"], r["reason"]
+        assert "replay_rolled_back" not in r, (
+            "nothing was replayed, so nothing was rolled back")
+        monkeypatch.undo()
+        assert _node_total(proj) == 0
+    finally:
+        proj.close()
+
+
+def test_a_successful_recovery_never_reports_a_rollback():
+    """The additive key is a REFUSAL signal only — a completed replay keeps the
+    graph it built and says nothing about a rollback."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "clean.db")
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(3):
+        log.append(_point_event(i))
+    proj = _lost_store(db_path)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is True, r
+        assert "replay_rolled_back" not in r, r
+        assert _point_count(proj) == 3
+    finally:
+        proj.close()
+
+
+def test_a_failed_rollback_is_named_not_hidden(monkeypatch):
+    """A rollback that cannot run must not be silent: the refusal keeps its
+    partial state VISIBLE in `reason` and reports the true (unwiped) count.
+
+    FAILS IF: the failure is swallowed and the result looks like a clean
+    refusal over an empty store.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "wipefail.db")
+    _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+
+    def _boom(**_k):
+        raise RuntimeError("injected wipe failure")
+
+    monkeypatch.setattr(proj, "_wipe_all_nodes", _boom)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert "rollback wipe FAILED" in r["reason"], r["reason"]
+        assert "PARTIALLY rebuilt" in r["reason"], r["reason"]
+        assert "tortoise rebuild --dir" in r["reason"], r["reason"]
+        assert "replay_rolled_back" not in r, r
+        assert r["db_points"] == 4, r
+        assert _node_total(proj) == 4, "the wipe really did fail"
+    finally:
+        proj.close()
+
+
+def test_an_unmeasurable_post_replay_count_is_not_reported_as_empty(monkeypatch):
+    """#7929 review: `after is None` means the graph could not be MEASURED (the
+    backend died between the replay and the count), NOT that it is empty. The
+    refusal must report `db_points: None` (unknown) and must not claim the
+    replay produced an empty graph — the replayed nodes are still there,
+    because there is no reachable backend to wipe them.
+
+    FAILS IF: an unmeasurable count is flattened to 0 and described as an
+    empty store. That is the same false "the store is empty" claim this change
+    exists to remove, and it is worse here than elsewhere: the caller reads it
+    as a clean refusal over an empty store while a partially-populated graph is
+    on disk.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "unmeasured.db")
+    _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            # The FIRST count is the entry invariant, which must still succeed
+            # (a None there returns early). Everything from the post-replay
+            # measurement onwards fails, which is the state under test.
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-replay count was never taken — this fixture is not "
+            "exercising the unmeasurable leg")
+        assert r["recovered"] is False, r
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r}; 0 "
+            f"asserts an empty store that was never observed")
+        # The refusal this fixture reaches is the non-folded one, so its reason
+        # is the non-folded clause — but it must NOT additionally claim the
+        # store is empty, which is the lie a flattened `db_points: 0` told.
+        assert "empty graph" not in r["reason"], r["reason"]
+        assert "silently incomplete" in r["reason"], r["reason"]
+    finally:
+        proj.close()
+
+
+def test_a_clean_replay_whose_count_fails_is_not_reported_as_empty(monkeypatch):
+    """#7929 review: the FINAL leg — a replay that REFUSED nothing but whose
+    post-replay measurement failed — must not flatten the unmeasurable count to
+    0 either, and must not describe the replay as producing an empty graph.
+
+    This is the `ok is False` leg: `ok` is False because the graph could not be
+    measured, NOT because nothing landed. The replayed nodes are still there.
+
+    FAILS IF: the final leg reports `db_points: 0` / "empty graph" for a graph
+    it never managed to measure.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "cleanfinal.db")
+    proj = _lost_store(db_path)
+    # A CLEAN journal: every record folds, so there is no non-folded refusal and
+    # the run reaches the final leg rather than the non-folded one.
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(4):
+        log.append(_point_event(i))
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-replay count was never taken — this fixture is not "
+            "exercising the final leg")
+        assert r["recovered"] is False, r
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r}; 0 "
+            f"asserts an empty store that was never observed")
+        assert "could not be measured afterwards" in r["reason"], r["reason"]
+        assert "empty graph" not in r["reason"], r["reason"]
+    finally:
+        proj.close()
+
+
+def test_the_pending_route_reports_an_unmeasurable_count_as_unknown(monkeypatch):
+    """#7929 review: the pending pre-wipe-snapshot route's refusal must not
+    flatten an unmeasurable count to 0 either.
+
+    That route reaches its refusal through an `except` on `rebuild_all`, and it
+    then measures the graph to report how much survived. The measurement can
+    fail (`_node_count` returns None on a dead backend), and reporting 0 there
+    asserts an empty store while the merged graph — the last copy of the
+    graph-only nodes — is still on disk.
+
+    FAILS IF: this route flattens the unmeasurable count to 0.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pendingunmeasured.db")
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    proj = _lost_store(db_path)
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(3):
+        log.append(_point_event(i))
+    # Same shape as the refusal fixture: a belief write no record creates, so
+    # `rebuild_all` raises AFTER its own wipe + replay and this route's
+    # `except` (the site under test) runs.
+    log.append({"type": "ConfidenceChanged", "id": "p-never-created",
+                "confidence": 0.9, "event_id": "e-7929-belief-u"})
+    sidecar = prewipe_snapshot_path(tmp)
+    _write_prewipe_snapshot(sidecar, {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-failure count was never taken — this fixture is not "
+            "exercising the pending route's measurement")
+        assert r["recovered"] is False, r
+        assert "pending pre-wipe snapshot" in r["reason"], r["reason"]
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r} on the "
+            f"pending route; 0 asserts an empty store that was never observed")
+    finally:
+        proj.close()
+
+
+def test_the_rollback_wipe_uses_the_rebuild_lane_token(monkeypatch):
+    """#2944 reciprocity: a non-empty wipe ADDED to `recover_from_log` must
+    route through the REBUILD-LANE path (`_wipe_all_nodes`), which owns the
+    per-call `confirm_destructive=True` opt-in — never the raw-query lane.
+
+    FAILS IF: the rollback issues a bare `MATCH (n) DETACH DELETE n` (or calls
+    `_wipe_all_nodes` without the token), reopening the guard hole #2944
+    closed.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "token.db")
+    _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+    seen: dict = {}
+    orig = FalkorProjection._wipe_all_nodes
+    try:
+        def _record(self, **kwargs):
+            seen.update(kwargs)
+            return orig(self, **kwargs)
+
+        monkeypatch.setattr(FalkorProjection, "_wipe_all_nodes", _record)
+        r = recover_from_log(tmp, proj)
+        assert r["replay_rolled_back"] == 4, r
+        assert seen.get("confirm_destructive") is True, seen
+        assert "recover_from_log" in str(seen.get("operation")), seen
+    finally:
+        proj.close()
+
+
+def test_the_pending_route_refuses_a_lossy_rollback():
+    """The pending #2943 route is the ONE leg where a blind rollback would LOSE
+    data: `rebuild_all` retires its sidecar (``_clear_prewipe_snapshot``) before
+    the post-replay `NonFoldedEventsError` — its `@_fail_closed` assertion runs
+    AFTER the function body — so the merged graph is then the last copy of the
+    graph-only nodes. The rollback must be REFUSED and NAMED, and the partial
+    graph kept for an explicit `tortoise rebuild --dir`.
+
+    FAILS IF: the destructive route is rolled back like the apply-replay legs,
+    wiping the only remaining record of the graph-only nodes.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pending.db")
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    proj = _lost_store(db_path)
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(3):
+        log.append(_point_event(i))
+    # A belief write no record creates: `rebuild_all` hoists every creation and
+    # still finds no Point, so it raises AFTER its own wipe + replay.
+    log.append({"type": "ConfidenceChanged", "id": "p-never-created",
+                "confidence": 0.9, "event_id": "e-7929-belief"})
+    sidecar = prewipe_snapshot_path(tmp)
+    _write_prewipe_snapshot(sidecar, {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+    try:
+        assert _node_total(proj) == 0
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert "pending pre-wipe snapshot" in r["reason"], r["reason"]
+        assert "rollback is REFUSED" in r["reason"], r["reason"]
+        assert "replay_rolled_back" not in r, (
+            "a refused rollback must not claim it rolled anything back")
+        assert r["db_points"] > 0, (
+            "the refusal must report the store it actually left behind, not 0")
+        kept = proj.g.query(
+            "MATCH (n:Point {id:'sidecar-only-1'}) RETURN count(n)"
+        ).result_set[0][0]
+        assert kept == 1, (
+            "the graph-only Point must survive — it exists nowhere else once "
+            "the sidecar is retired")
+        assert not os.path.exists(sidecar), (
+            "pre-existing: rebuild_all retires the sidecar before the "
+            "@_fail_closed raise — the loss the refusal prevents")
+    finally:
+        proj.close()
+
+
+def test_the_pending_route_rolls_back_when_its_source_survives(monkeypatch):
+    """The same route CAN be rolled back safely when it fails BEFORE retiring
+    its sidecar (a genuine mid-replay exception rather than the post-replay
+    decorator): the source is still durable, so the wipe loses nothing.
+
+    FAILS IF: the refusal is unconditional, leaving the retry path dead on a
+    shape where nothing would have been lost.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pending-safe.db")
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    proj = _lost_store(db_path)
+    EventLog(os.path.join(tmp, "events.jsonl")).append(_point_event(0))
+    sidecar = prewipe_snapshot_path(tmp)
+    _write_prewipe_snapshot(sidecar, {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        # Non-empty: an entry-less sidecar is reported ABSENT by the loader and
+        # diverts nothing (`_load_prewipe_snapshot` returns None), so the
+        # pending route would never fire.
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+
+    def _half_rebuild(self, log_dir, *, confirm_destructive=False):
+        self.g.query(
+            "CREATE (n:Point {id:'half', content:'half', status:'live',"
+            " pointKind:'statement'})")
+        raise RuntimeError("mid-replay explosion (injected)")
+
+    monkeypatch.setattr(FalkorProjection, "rebuild_all", _half_rebuild)
+    try:
+        assert _node_total(proj) == 0
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert "mid-replay explosion" in r["reason"], r["reason"]
+        assert r["replay_rolled_back"] == 1, r
+        assert _node_total(proj) == 0, (
+            "the half-built graph must be undone when the sidecar survives")
+        assert os.path.exists(sidecar), "an intact source must be left alone"
+    finally:
+        proj.close()
