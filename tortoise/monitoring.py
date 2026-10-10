@@ -4118,9 +4118,12 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
         # #7924 review P2: an audit event that reached no durable sink is
-        # the same class of failure, and the hosted app serves no `/metrics`
-        # route (monitoring says so itself), so it rides the surface that IS
-        # read — the health payload — and not only the counter's scrape form.
+        # the same class of failure as a journal write, so it rides THIS
+        # payload alongside ``journal_write_failures`` rather than a log line
+        # nothing watches. Scope stated honestly: it is visible wherever
+        # ``metrics()`` is served (``monitoring.serve_health``). The HOSTED
+        # app exposes its own health dict and has no `/metrics` route, so a
+        # drop there is counted here but not surfaced by that endpoint.
         "audit_fallback_drops": audit_fallback_drop_counts(),
         "uptime": round(time.monotonic() - _start, 2),
     }
