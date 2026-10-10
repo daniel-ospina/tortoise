@@ -1614,6 +1614,23 @@ def _disable_embedder_autowarmup(monkeypatch):
     yield
 
 
+# ── #7816: the audit JSONL fallback never lands in the real $HOME ─────────
+# `hosted_api` builds a module-level `AuditLogger` at IMPORT. The logger's
+# Tier-2 JSONL fallback resolves `$HOME/.tortoise/audit_fallback.jsonl`, so
+# any test that reaches an audit write without a Postgres DSN appended into
+# the developer's REAL `$HOME` — the logger was constructed at import, before
+# any per-test HOME fixture, and had frozen that path. The library now
+# resolves the path at WRITE time (#7816); this fixture pins the fallback
+# directory to the per-test tmp tree, so a normal pytest run cannot write an
+# `audit_fallback.jsonl` into the real `$HOME` at all. Deliberately scoped to
+# the audit fallback (NOT a blanket HOME redirect): tests that legitimately
+# consult the ambient `$HOME` keep the value they expect.
+@pytest.fixture(autouse=True)
+def _isolated_audit_fallback_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", str(tmp_path / ".tortoise"))
+    yield
+
+
 # ── #4387 item 2: hermetic egress BY DESIGN, not by accident of DNS ───────
 #
 # Two product paths build a default httpx client and therefore leave the

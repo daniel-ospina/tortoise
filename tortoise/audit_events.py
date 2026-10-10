@@ -71,17 +71,50 @@ class AuditLogger:
              mode (no Postgres writes, no replay).
 
     Thread-safe for single-process use. JSONL fallback uses a per-process
-    file (~/.tortoise/audit_fallback.jsonl).
+    file (``$HOME/.tortoise/audit_fallback.jsonl``, relocatable with
+    ``$TORTOISE_AUDIT_FALLBACK_DIR``).
     """
 
     def __init__(self, dsn: str | None = None):
         self._dsn = dsn or os.environ.get("TORTOISE_AUDIT_DSN")
         self._conn = None
-        self._fallback_dir = Path.home() / ".tortoise"
-        self._fallback_dir.mkdir(parents=True, exist_ok=True)
-        self._fallback_path = self._fallback_dir / "audit_fallback.jsonl"
+        # #7816: the fallback location is resolved LAZILY, at write/replay
+        # time, NEVER here. `hosted_api` builds a module-level AuditLogger at
+        # import, so binding ``Path.home()`` (and mkdir-ing it) in __init__
+        # made an IMPORT write into the developer's real ``~/.tortoise`` —
+        # before any per-test HOME fixture — and froze that path, so a later
+        # test's fallback append still landed there. ``_fallback_dir`` /
+        # ``_fallback_path`` remain settable OVERRIDES (tests pin them); when
+        # unset, ``_fallback_file()`` reads the environment in effect at CALL
+        # time.
+        self._fallback_dir: Path | None = None
+        self._fallback_path: Path | None = None
         self._replay_lock = threading.Lock()
         self._replay_backoff = 1.0
+
+    def _fallback_file(self) -> Path:
+        """Resolve the JSONL fallback path for the CURRENT environment.
+
+        #7816: resolution is deferred to call time so the path honours the
+        ``$HOME`` in effect when the fallback is actually used (e.g. a
+        per-test tmp tree) instead of the ``$HOME`` captured at import.
+        Precedence:
+
+        1. an explicit ``_fallback_path`` (tests pin this),
+        2. an explicit ``_fallback_dir`` (tests pin this),
+        3. ``$TORTOISE_AUDIT_FALLBACK_DIR`` (a relocation knob),
+        4. ``$HOME/.tortoise`` (the documented default).
+
+        Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
+        malformed ``$HOME``); callers that must not raise wrap the call.
+        """
+        if self._fallback_path is not None:
+            return self._fallback_path
+        if self._fallback_dir is not None:
+            return self._fallback_dir / "audit_fallback.jsonl"
+        override = os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR")
+        base = Path(override) if override else Path.home() / ".tortoise"
+        return base / "audit_fallback.jsonl"
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -230,8 +263,9 @@ class AuditLogger:
         (or a deleted dir) never silently drops audit events.
         """
         try:
-            self._fallback_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._fallback_path, "a") as f:
+            path = self._fallback_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as f:
                 f.write(json.dumps(event, default=str) + "\n")
         except Exception as e:
             _logger.error("AuditLogger: fallback write failed: %s", e)
@@ -242,7 +276,12 @@ class AuditLogger:
         Uses a lock to prevent concurrent replay. Reads the fallback file,
         replays each line, and truncates on success.
         """
-        if not self._fallback_path.exists():
+        try:
+            path = self._fallback_file()
+        except Exception as e:
+            _logger.error("AuditLogger: fallback path resolution failed: %s", e)
+            return
+        if not path.exists():
             return
 
         acquired = self._replay_lock.acquire(blocking=False)
@@ -250,11 +289,11 @@ class AuditLogger:
             return  # Another thread is replaying
 
         try:
-            if not self._fallback_path.exists():
+            if not path.exists():
                 return
 
             # Read all fallback lines
-            lines = self._fallback_path.read_text().strip().split("\n")
+            lines = path.read_text().strip().split("\n")
             if not lines or lines == [""]:
                 return
 
@@ -305,9 +344,9 @@ class AuditLogger:
             # (review P2, PR #919 — the old contiguous-tail truncation could
             # drop a mid-list failure when a later event succeeded).
             if not failed:
-                self._fallback_path.write_text("")
+                path.write_text("")
             else:
-                self._fallback_path.write_text(
+                path.write_text(
                     "\n".join(json.dumps(e, default=str) for e in failed) + "\n"
                 )
         except Exception as e:
