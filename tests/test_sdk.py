@@ -431,6 +431,22 @@ class TestTraverse:
         assert corrected and corrected[0]["idx"] is None
         assert corrected[0]["id"] == old["id"]
 
+    def test_input_mirror_reports_the_queried_position(self, sdk):
+        """#6101: the :INPUT mirror points the other way from the operator's own
+        edge — with direction="outgoing" from an input, the RETURNED operator's
+        idx is the QUERIED node's position, not the operator's (the swap the
+        traverse docstring calls out)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        out_a = sdk.traverse(a["id"], "INPUT", direction="outgoing")
+        assert len(out_a) == 1 and out_a[0]["id"] == op["id"]
+        assert out_a[0]["idx"] == 0  # a is the operator's SOURCE
+
+        in_op = {c["id"]: c for c in sdk.traverse(op["id"], "INPUT", direction="incoming")}
+        assert in_op[a["id"]]["idx"] == 0
+        assert in_op[b["id"]]["idx"] == 1
+
 
 # ── verify_chain ─────────────────────────────────────────────────────
 

@@ -128,6 +128,30 @@ def test_entity_profile_multi_hop():
     print("✓ entityProfile multi-hop (2 hops)")
 
 
+def test_entity_profile_reports_edge_idx():
+    """#6101: a connected node carries the traversed edge's idx (`_idx`), so the
+    manifest's response-field record for `tortoise_entity_profile._idx` is
+    backed. A legacy 2-column row degrades to None, never an IndexError."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    src = _node("src", ["Point"], {"content": "src"})
+    tgt = _node("tgt", ["Point"], {"content": "tgt"})
+    plain = _node("plain", ["Point"], {"content": "plain"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[src, "IMPL", 1], [tgt, "IMPL", 0], [plain, "TAGGED"]],
+        ],
+    })
+    result = entityProfile(db, "tortoise", "root-1", hops=1)
+    by_id = {p["id"]: p for p in result["connected"]["points"]}
+    assert by_id["src"]["_idx"] == 1
+    assert by_id["tgt"]["_idx"] == 0
+    assert by_id["plain"]["_idx"] is None
+    assert by_id["plain"]["_relationship"] == "TAGGED"
+    print("✓ entityProfile reports edge idx (None on a 2-column row)")
+
+
 def test_entity_profile_filter_pointKind():
     """pointKind filter excludes non-matching nodes."""
     root = _node("root-1", ["Point"], {"content": "root"})
@@ -409,6 +433,7 @@ if __name__ == "__main__":
         test_entity_profile_empty_entity,
         test_entity_profile_single_hop,
         test_entity_profile_multi_hop,
+        test_entity_profile_reports_edge_idx,
         test_entity_profile_filter_pointKind,
         test_entity_profile_categorize_types,
         test_tortoise_traverse_basic,
