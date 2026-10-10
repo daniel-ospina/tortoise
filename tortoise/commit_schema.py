@@ -136,6 +136,11 @@ EVENT_KINDS: frozenset[str] = frozenset({
     "extraction", "meeting", "experiment", "friction", "turn",
     "sessionCaptured", "AgentSession", "documentCreated",
     "roleCreated", "pointAdded", "humanApproval",
+    # #2767: the miner writes `event_kind="milestone"` (ConversationMiner
+    # fallback). Without this the Layer-1 write gate rejected an event kind
+    # its own miner emits; `milestone` is a core event (a milestone is
+    # reached at a moment), so it belongs in the canonical core set.
+    "milestone",
 })
 
 

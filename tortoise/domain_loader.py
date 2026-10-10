@@ -210,7 +210,11 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     _check_bucket(bucket)
     kinds: set[str] = set(_CORE_KINDS_BY_BUCKET[bucket])
     if bucket == "pointKind":
-        kinds.update(_BASE_KINDS)  # legacy flat registry ≈ point/event kinds
+        # Legacy flat registry ≈ point/event kinds. Event kinds are excluded
+        # (#2767): `milestone` (and `meeting`) are core EVENT kinds, never
+        # point kinds — the milestone three-way collision
+        # (Object kind + legacy point kind + miner event kind).
+        kinds.update(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"])
     kinds.update(_pack_kinds_by_bucket()[bucket])
     return frozenset(kinds)
 
@@ -258,8 +262,9 @@ def domain_kinds(domain: str, bucket: str) -> list[str]:
             seen.add(k)
     if bucket == "pointKind":
         # Legacy flat registry (workflow/requirement/issue/...) — kept so the
-        # old document-domain vocabulary stays visible to the prompt.
-        for k in sorted(_BASE_KINDS):
+        # old document-domain vocabulary stays visible to the prompt. Event
+        # kinds are excluded (#2767): a canonical event is never a point kind.
+        for k in sorted(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]):
             if k not in seen:
                 result.append(k)
     return result

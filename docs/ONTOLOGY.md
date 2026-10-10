@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-29
+updated: 2026-10-09
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -1167,6 +1167,8 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 ```text
 meeting, decision, experiment, deployment, review, friction, extraction,
 documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval,  # #531
+milestone,          # #2767: a milestone is REACHED at a moment — core event (a
+                    # `pm:milestone` objectKind declaration was the deformation)
 occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted occurrence;
                     # turn = capture turn records (replaces pointKind 'event', issue #1013)
 ```

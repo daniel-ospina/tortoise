@@ -16,7 +16,13 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.pack_registry import CANONICAL_OBJECT_KINDS, PackManifest, PackRegistry
+from tortoise.pack_registry import (
+    CANONICAL_EVENT_KINDS,
+    CANONICAL_OBJECT_KINDS,
+    CORE_KINDS,
+    PackManifest,
+    PackRegistry,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1406,3 +1412,60 @@ class TestCanonicalObjectKindAlignment:
         assert canonical_lower - _OBJECT_KIND_VOCAB == {
             "strategy", "plan", "goal", "target",
         }
+
+
+class TestMilestoneCanonicalEventKind:
+    """#2767: `milestone` has ONE canonical identity — a core EVENT kind.
+
+    Pre-fix the bare name was simultaneously a pm ``objectKind``, a legacy base
+    point/event kind, and the miner's event kind. A second pack referencing the
+    bare name in ``nearMisses`` then made it ambiguous and failed pack install.
+    These are the drift guards: they fail if any layer moves without the others.
+    """
+
+    def test_milestone_is_canonical_event_not_object(self):
+        assert "milestone" in CANONICAL_EVENT_KINDS
+        assert "milestone" not in CANONICAL_OBJECT_KINDS
+        assert "milestone" in CORE_KINDS
+
+    def test_repo_pack_catalog_declares_no_milestone(self):
+        registry = PackRegistry(REPO_PACKS_DIR)
+        assert registry.load_all() >= 1
+        assert not registry.errors, registry.errors
+        for ns, pack in registry.packs.items():
+            assert "milestone" not in pack.object_kinds, ns
+            assert "milestone" not in pack.event_kinds, ns
+
+    def test_legacy_base_vocabulary_is_event_not_point(self):
+        from tortoise.domain_loader import known_kinds
+        assert "milestone" in known_kinds("eventKind")
+        assert "milestone" not in known_kinds("pointKind")
+        assert "milestone" in known_kinds()  # flat legacy view keeps it known
+
+    def test_miner_event_kind_is_declared(self):
+        from tortoise.commit_schema import EVENT_KINDS, compile_vocab
+        assert "milestone" in EVENT_KINDS
+        assert "milestone" in compile_vocab().event_kinds
+
+    def test_cross_pack_bare_reference_is_not_ambiguous(self, tmp_path):
+        """Two packs declare `milestone`; a third references the bare name in
+        `nearMisses`. Core owns the name, so the reference resolves — pre-fix
+        this was 'ambiguous — declared by multiple packs'."""
+        for ns in ("alpha", "beta"):
+            _write_pack(str(tmp_path), ns, {
+                "namespace": ns, "name": ns.title(), "version": "0.1.0",
+                "tier": "free",
+                "ontology": {"extends": "core", "objectKinds": ["milestone"]},
+            })
+        _write_pack(str(tmp_path), "gamma", {
+            "namespace": "gamma", "name": "Gamma", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        registry.load_all()
+        assert not registry.errors, registry.errors
