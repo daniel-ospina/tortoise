@@ -1,0 +1,21 @@
+# Declared (blocked) exceptions for the agent-infra #841 SIGPIPE false-negative guard.
+#
+# Format: <path> <occurrences> <content-hash> #<issue>
+#
+# scripts/ is a SYMLINK into agent-infra, so the guard reached at
+# scripts/check-no-sigpipe-grep.sh cannot be written through — which is why this file is at
+# the REPO ROOT rather than under scripts/. The guard resolves the root file in preference to
+# the shared one (agent-infra#1643). Semantics, unchanged: a declaration whose COUNT or
+# CONTENT-HASH does not match the file FAILS the guard, so neither a stale exception nor a
+# count-preserving swap can hide behind one, a declaration without a tracking issue is
+# rejected, and every declaration is printed LOUDLY on every run.
+#
+# CONVERTED, not declared: `.github/scripts/ai-review-gate.test.sh`,
+# `.github/scripts/auto-file-issue.test.sh` and `.github/scripts/registry-cron.test.sh` were
+# declared here while the PR wiring the guard in was pending. Those three, and one further site
+# the guard reported undeclared — `tools/install-queue-reconcile-schedule.sh` — are now
+# here-strings (`grep -qF -- "$2" <<<"$GATE_OUT"`). Conversion removes the race rather than
+# blessing it, and it removes this file's brittleness: the declaration hash covered the guard's
+# reported LINE NUMBERS, so inserting any line above an occurrence redded it as CONTENT changed.
+#
+# Hash = shasum -a 256 of the guard's own reported hit lines (LC_ALL=C sorted), first 16 hex.

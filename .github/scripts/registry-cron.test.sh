@@ -186,15 +186,15 @@ assert_eq() { # <actual> <expected> <label>
   if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi
 }
 assert_contains() { # <haystack> <needle> <label>
-  if printf '%s' "$1" | grep -qF -- "$2"; then ok "$3"; else bad "$3 (missing: $2)"; fi
+  if grep -qF -- "$2" <<<"$1"; then ok "$3"; else bad "$3 (missing: $2)"; fi
 }
 assert_not_contains() { # <haystack> <needle> <label>
-  if printf '%s' "$1" | grep -qF -- "$2"; then bad "$3 (unexpected: $2)"; else ok "$3"; fi
+  if grep -qF -- "$2" <<<"$1"; then bad "$3 (unexpected: $2)"; else ok "$3"; fi
 }
 assert_match() { # <haystack> <regex> <label>
-  if printf '%s' "$1" | grep -qE -- "$2"; then ok "$3"; else bad "$3 (no match: $2)"; fi
+  if grep -qE -- "$2" <<<"$1"; then ok "$3"; else bad "$3 (no match: $2)"; fi
 }
-# Grep a FILE rather than a string: `printf '%s' "$huge" | grep -q` is racy under
+# Grep a FILE rather than a string: `grep -q <<<"$huge"` is racy under
 # `set -o pipefail` — grep -q exits at the first match, printf takes SIGPIPE, and
 # the pipeline's status becomes the failed printf even though grep MATCHED. A
 # whole-source scan must therefore never pipe the source through printf.
@@ -202,12 +202,12 @@ assert_file_match() { # <file> <regex> <label>
   if grep -qE -- "$2" "$1"; then ok "$3"; else bad "$3 (no match: $2)"; fi
 }
 assert_not_match() { # <haystack> <regex> <label>
-  if printf '%s' "$1" | grep -qE -- "$2"; then bad "$3 (unexpected match: $2)"; else ok "$3"; fi
+  if grep -qE -- "$2" <<<"$1"; then bad "$3 (unexpected match: $2)"; else ok "$3"; fi
 }
 assert_filed() { # <log> <KIND> <label> — a create POST whose body carries KIND
   # NB: matching a bare KIND against the log is confounded by the GitHub SEARCH
   # URL (which carries the kind). Assert on the create POST instead.
-  if printf '%s' "$1" | grep -qE "GH POST .*/issues .*${2}"; then ok "$3"; else bad "$3 (no incident POST for ${2})"; fi
+  if grep -qE "GH POST .*/issues .*${2}" <<<"$1"; then ok "$3"; else bad "$3 (no incident POST for ${2})"; fi
 }
 
 FIX="$(mktemp -d)"
@@ -300,11 +300,11 @@ case "$op" in
     # #3032 knobs: a client that rejects the conditional flag, a store that
     # fails the write outright, and an unrelated error that merely contains the
     # digits 412. All three are distinguished from the real 412 race.
-    if [ "${STUB_NO_IFNONEMATCH:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
+    if [ "${STUB_NO_IFNONEMATCH:-0}" = "1" ] && grep -q -- '--if-none-match' <<<"${args[*]}"; then
       echo "Unknown options: --if-none-match" >&2
       exit 2
     fi
-    if [ "${STUB_PUT_412_SUBSTRING:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
+    if [ "${STUB_PUT_412_SUBSTRING:-0}" = "1" ] && grep -q -- '--if-none-match' <<<"${args[*]}"; then
       echo "An error occurred (InternalError) when calling the PutObject operation: RequestId 4120xyz" >&2
       exit 1
     fi
@@ -325,7 +325,7 @@ case "$op" in
     # object only. A test that must exercise the create-once write
     # (`r2_put_once`) uses this so `file_alert`'s #2844 legacy-alias pre-read
     # (which consults `global.json`) does not adopt the object first.
-    if [ "${STUB_GET_ONLY_CANONICAL:-0}" = "1" ] && ! printf '%s' "${args[*]}" | grep -q '/_\.json'; then
+    if [ "${STUB_GET_ONLY_CANONICAL:-0}" = "1" ] && ! grep -q '/_\.json' <<<"${args[*]}"; then
       exit 1
     fi
     printf '%s' "${STUB_GET_BODY:-}" ;;
@@ -401,7 +401,7 @@ case "$url" in
           for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN STALE PURGE_FAILED RECONCILE_FAILED; do
             var="GH_ISSUE_$kind"
             val="${!var:-}"
-            if [ -n "$val" ] && printf '%s' "$url" | grep -q "$kind"; then
+            if [ -n "$val" ] && grep -q "$kind" <<<"$url"; then
               items="[{\"number\":$val,\"title\":\"${GH_ISSUE_TITLE:-[DR] $kind}\"}]"
               break
             fi

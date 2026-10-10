@@ -1299,6 +1299,71 @@ jobs:
       - name: Check entrypoint guards (env-reject + missing-cache FATAL)
         run: bash .ci-checks/check-entrypoint-guards.sh
 
+  sigpipe-guard:
+    # #841 — the agent-infra guard, wired where the bug actually ships. This is the
+    # DEPLOYMENT half of the gap recorded on tortoise#7588 (the guard existed and was
+    # wired in agent-infra but never invoked HERE), and it does NOT close #7588: that
+    # issue's own sites are a `printf | sed | head -n1` shape this guard does not match.
+    #
+    # NOT `needs: changes`-gated on purpose: the whole defect class is "a file a path
+    # filter decided is not shell", and two of the four sites that shipped this false
+    # negative were extensionless `.github/scripts/` entries a `*.sh` filter read as
+    # clean. It costs about a second, so it runs on every change.
+    #
+    # The guard lives in agent-infra, reached locally through the committed `scripts/`
+    # symlink — an absolute MACHINE-LOCAL path, so it dangles on a runner (see the
+    # workflow header). Agent-infra is public, so check it out alongside and run the
+    # SAME guard: a vendored copy would be a second source of truth free to drift from
+    # the one that owns the idiom (#863's "guard nobody runs").
+    #
+    # ORDERING: `--dirs` ships in agent-infra#1643. Until that lands and is tagged, this
+    # job is red (the guard exits 2 on an unknown argument) — land it first, then pin
+    # `ref:` to the tag here, matching how this file's other agent-infra jobs consume
+    # agent-infra at a semver pin rather than at whatever `main` happens to be.
+    #
+    # `--dirs` names THIS repo's layout — the guard's default set is agent-infra's and
+    # `scripts/` here points back at it. The list lives in ONE place, `.sigpipe-grep-dirs`,
+    # shared with .husky/pre-commit, so the two invocation sites cannot diverge.
+    #
+    # ⚠️ THIS JOB IS NOT A REQUIRED CONTEXT YET (tortoise#7778), so a red here does not
+    # block a merge: it is visible but unenforced. The sites it covers are already fixed,
+    # so the exposure is a FUTURE reintroduction of the idiom, not the current tree.
+    # Making it required is a branch-protection change — the declaration home, the
+    # required-context record, and the required-set enumeration must move together, and it
+    # must land in the SAME change as the wiring: requiring it earlier would block every
+    # merge while the resolving guard still rejects `--dirs`. Measured repro on #7778.
+    # (The declaration home is deliberately not named here: the recut guard reads any
+    # workflow naming it as a workflow reading it as an authoritative source, and reds.)
+    # `website/` is excluded: it carries a node_modules tree. Its shell files are NOT
+    # covered anywhere else, so this exclusion is a known gap, not a claim of coverage.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: daniel-ospina/agent-infra
+          path: .agent-infra-guard
+      - name: SIGPIPE false-negative guard (#841)
+        run: |
+          bash .agent-infra-guard/scripts/check-no-sigpipe-grep.sh \
+            --dirs "$(cat .sigpipe-grep-dirs)"
+      # The hook's own block is tested HERE, not left as a file nobody runs. This test
+      # stubs the guard, so it needs no agent-infra and no network — it runs even while
+      # the step above is red for the ordering reason. It exists because the hook's block
+      # once discarded the guard's verdict (a glued `else` made `exit` take two arguments
+      # and fail) while `sh -n` stayed green; only an executed assertion catches that.
+      - name: SIGPIPE hook block self-test
+        # `if: always()` is REQUIRED here, not defensive. Without it a failing
+        # step above (the NORMAL state while `--dirs` is unlanded — see the
+        # ordering note) SKIPS this step, so the test written to catch a
+        # discarded guard verdict would itself never run in the one case it
+        # exists for. Measured on this PR's own CI run: the guard step exited 2
+        # on `unknown argument: --dirs` and the job log contains no record of
+        # this step at all. The comment above claims it "runs even while the
+        # step above is red"; only this line makes that true.
+        if: always()
+        run: sh .github/scripts/sigpipe-hook.test.sh
+
   license-surface:
     runs-on: ubuntu-latest
     steps:
