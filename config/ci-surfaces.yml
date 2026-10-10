@@ -213,6 +213,19 @@ surfaces:
   # tortoise/quota.py and tortoise/supabase_control.py are all `api` patterns —
   # so an `api`-only PR is exactly the shape that must run it.
   - test_metering_unmetered.py
+  # #4242: the ledger WINDOW follows the authoritative bound on every increment
+  # (`period_end = EXCLUDED.period_end` in each period-keyed `DO UPDATE`), and
+  # the cohort read's fail-open direction is asserted through the REAL writer and
+  # the REAL reader. DUAL-REGISTERED with `core` (the drift half reads
+  # `supabase/migrations`, which has no named surface and falls through to
+  # `core` — see the entry there for the measured limits of both arms). This
+  # `api` arm is the load-bearing one: the behavioural half pins
+  # `tortoise/metering.py` + `tortoise/supabase_control.py` (both `api`
+  # SOURCE_PATTERNS, and a named-surface match REPLACES the `core` fallback), so
+  # a metering-only PR reaches the file only through here.
+  # Without this line `test_integrity_covers_all_test_files` fails (every
+  # tests/**/test_*.py must be classified — the scope-v5 drift trap).
+  - test_4242_metering_period_end_refresh.py
   # #4488: embedding-encode measurement. Dual/triple-registered with `core` and
   # `eval`: the hook lives in tortoise/embeddings.py (an `eval`-owned module) and
   # the writer in tortoise/metering.py, so a change to EITHER must run it — a
@@ -1608,6 +1621,25 @@ surfaces:
   - test_migration_append_only.py
   - test_migration_consumers.py
   - test_migration_drift_gate.py
+  # #4242: DUAL-REGISTERED with `api`. The two halves read different sources,
+  # and no single arm covers both: the behavioural half pins
+  # tortoise/metering.py + tortoise/supabase_control.py (BOTH `api`
+  # SOURCE_PATTERNS, and a named-surface match REPLACES the `core` fallback), so
+  # a metering-only PR reaches it only through the `api` arm; the drift half
+  # reads `supabase/migrations`, which selects no named surface and falls
+  # through to `core` — reachable through this `core` arm on any diff that
+  # selects the core surface (the #2938 dual-membership convention).
+  #
+  # MEASURED, so nobody re-derives it: a MIGRATIONS-ONLY diff selects NO surface
+  # and short-circuits to the tier-1 smoke set (`tools/ci_selection.py` returns
+  # before surface matching for a diff with no python-relevant file), so this
+  # arm does NOT cover that shape. The net for a migration that re-creates one
+  # of these RPCs without the window refresh is the `schema-drill` CI job: it
+  # runs on every `supabase/migrations/**` change and executes
+  # `supabase/tests/20261010000001_metering_period_end_refresh.sql`, which
+  # drives the REAL functions and REDs per lane. This file is a second, cheaper
+  # net for the PR shapes that do select a surface.
+  - test_4242_metering_period_end_refresh.py
   - test_mining.py
   - test_model_adapters_routing.py
   - test_model_adapters_taxonomy.py
