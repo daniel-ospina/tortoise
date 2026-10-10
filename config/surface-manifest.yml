@@ -151,9 +151,21 @@ retired:
   sdk_method: taxonomy
   http_policy: true
   approval: null
+# Every tool row records BOTH halves of that tool's served identity (#4192):
+#   `served_from`       — the CODE OBJECT behind the name (the implementation)
+#   `served_attributes` — the parts of the function that live OUTSIDE its code object and are
+#                         still caller-visible: parameter defaults, keyword-only defaults and
+#                         annotations, all of which the MCP `tools/list` inputSchema publishes.
+# They are two cells, not one, because the guard that measures `served_from` in CI is pinned
+# to the BASE ref (#5132/#4606): folding the attributes into it re-stamps all 82 rows, and the
+# pinned guard then reds on every one of them — a required check no PR can satisfy. A separate
+# cell leaves `served_from` byte-identical; the attributes are enforced by
+# `tools/surface_manifest.py check` at PR time and by the guard on the tree itself. See
+# `_served_attributes` in tools/surface_manifest.py.
 rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:7dc2585e3d3af508
+  served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
   served: http
@@ -181,6 +193,7 @@ rows:
   cluster_canonical: tortoise_query
 - name: tortoise_belief_timeline
   served_from: tortoise/mcp_server.py:c98791122a8ac095
+  served_attributes: 4480c4f834b1425d
   family: memory
   family_rank: 1
   served: http
@@ -206,6 +219,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_expand_relationships
   served_from: tortoise/mcp_server.py:49a9b90d2c619ae9
+  served_attributes: c81d1f648ddc8eef
   family: memory
   family_rank: 1
   served: stdio-only
@@ -231,6 +245,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_get_confidence
   served_from: tortoise/mcp_server.py:599f2042e3adb8c3
+  served_attributes: d2f18f2a10b5d4e9
   family: memory
   family_rank: 1
   served: http
@@ -255,6 +270,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_get_source_reliability
   served_from: tortoise/mcp_server.py:f22f086f20440631
+  served_attributes: f56aaaf55ed5bc4b
   family: memory
   family_rank: 1
   served: http
@@ -280,6 +296,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_recall
   served_from: tortoise/mcp_server.py:d625dc916f15d980
+  served_attributes: 1c54c858b857cc84
   family: memory
   family_rank: 1
   served: http
@@ -317,6 +334,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_search
   served_from: tortoise/mcp_server.py:7a57b7eac0fe41ea
+  served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
   served: http
@@ -343,6 +361,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_suggest_entry_points
   served_from: tortoise/mcp_server.py:564fb24731914250
+  served_attributes: 542cf2dbb222d260
   family: memory
   family_rank: 1
   served: http
@@ -370,6 +389,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_index_files
   served_from: tortoise/mcp_server.py:d7376787bf6dbb81
+  served_attributes: 056016f648fa419a
   family: memory
   family_rank: 1
   served: stdio-only
@@ -398,6 +418,7 @@ rows:
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
   served_from: tortoise/mcp_server.py:068bffeb250a7729
+  served_attributes: edb6c4d045fc0522
   family: memory
   family_rank: 1
   served: http
@@ -431,6 +452,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_calibrate_summary
   served_from: tortoise/mcp_server.py:9016811f802f1d77
+  served_attributes: d1d847feeecfe0de
   family: memory
   family_rank: 1
   served: http
@@ -455,6 +477,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_set_point_baseline
   served_from: tortoise/mcp_server.py:c3af82b2f8e014ef
+  served_attributes: f58fd142750807b7
   family: memory
   family_rank: 1
   served: http
@@ -479,6 +502,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_set_source_tier
   served_from: tortoise/mcp_server.py:a693ab8865e44562
+  served_attributes: 149fed3f3da9c0c6
   family: memory
   family_rank: 1
   served: http
@@ -503,6 +527,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_update
   served_from: tortoise/mcp_server.py:3bc8a368244adaa0
+  served_attributes: c3d8b9054bea89bb
   family: memory
   family_rank: 1
   served: http
@@ -530,6 +555,7 @@ rows:
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_update_point
   served_from: tortoise/mcp_server.py:1771dbb9cedadef9
+  served_attributes: 5a4d3c453ce9837b
   family: memory
   family_rank: 1
   served: http
@@ -556,6 +582,7 @@ rows:
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete
   served_from: tortoise/mcp_server.py:6d7f25614cef979a
+  served_attributes: e613762460869509
   family: memory
   family_rank: 1
   served: http
@@ -585,6 +612,7 @@ rows:
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete_point
   served_from: tortoise/mcp_server.py:8449e50d5d6790b4
+  served_attributes: e613762460869509
   family: memory
   family_rank: 1
   served: http
@@ -612,6 +640,7 @@ rows:
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_invalidate
   served_from: tortoise/mcp_server.py:591cd80d422875c0
+  served_attributes: 00367491344548f0
   family: memory
   family_rank: 1
   served: http
@@ -637,6 +666,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_retract_point
   served_from: tortoise/mcp_server.py:6445ec6797d54bca
+  served_attributes: e613762460869509
   family: memory
   family_rank: 1
   served: http
@@ -663,6 +693,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_supersede
   served_from: tortoise/mcp_server.py:274ce04207a1e00f
+  served_attributes: a546b21f5ed08523
   family: memory
   family_rank: 1
   served: http
@@ -689,6 +720,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_audit
   served_from: tortoise/mcp_server.py:196e1fe0b1cd9e26
+  served_attributes: 7310e65a02933605
   family: memory
   family_rank: 1
   served: http
@@ -717,6 +749,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_batch
   served_from: tortoise/mcp_server.py:719e932618e3cb36
+  served_attributes: a7ef3c89c9e6bab0
   family: memory
   family_rank: 1
   served: http
@@ -743,6 +776,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_batches
   served_from: tortoise/mcp_server.py:9f24b2ea216a4739
+  served_attributes: a6f98a0ada3b45d0
   family: memory
   family_rank: 1
   served: http
@@ -768,6 +802,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_dream_health
   served_from: tortoise/mcp_server.py:985bdbeeb36df6e0
+  served_attributes: 734ca6ea44c83df3
   family: memory
   family_rank: 1
   served: stdio-only
@@ -793,6 +828,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_issue_insight
   served_from: tortoise/mcp_server.py:c00d1786ba538ea6
+  served_attributes: 432a3854a01085d8
   family: memory
   family_rank: 1
   served: http
@@ -820,6 +856,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_assess_source
   served_from: tortoise/mcp_server.py:1312ac9046d1e886
+  served_attributes: 000b4f1bb370dd2e
   family: memory
   family_rank: 1
   served: http
@@ -845,6 +882,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_compute_confidence
   served_from: tortoise/mcp_server.py:28ac9b7c1d92c173
+  served_attributes: b04b6f08d49a2177
   family: memory
   family_rank: 1
   served: http
@@ -874,6 +912,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_get_entity
   served_from: tortoise/mcp_server.py:faaf6508b2146468
+  served_attributes: fce9f1e16a49d0d4
   family: graph
   family_rank: 2
   served: http
@@ -902,6 +941,7 @@ rows:
     approval
 - name: tortoise_create_entity
   served_from: tortoise/mcp_server.py:79f1a88a819f3e87
+  served_attributes: 764058954f66db36
   family: graph
   family_rank: 2
   served: http
@@ -928,6 +968,7 @@ rows:
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_event
   served_from: tortoise/mcp_server.py:7094ce9d3ea25313
+  served_attributes: f15148fa26e4d095
   family: graph
   family_rank: 2
   served: http
@@ -954,6 +995,7 @@ rows:
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_object
   served_from: tortoise/mcp_server.py:409ccaa6a5187341
+  served_attributes: a0b97014d5bd1404
   family: graph
   family_rank: 2
   served: http
@@ -980,6 +1022,7 @@ rows:
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_subject
   served_from: tortoise/mcp_server.py:4d74895486d4d108
+  served_attributes: af0f73916896a555
   family: graph
   family_rank: 2
   served: http
@@ -1006,6 +1049,7 @@ rows:
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_edge
   served_from: tortoise/mcp_server.py:f584fb5c935a1e9a
+  served_attributes: 674a7d628b644657
   family: graph
   family_rank: 2
   served: http
@@ -1032,6 +1076,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_create_operator
   served_from: tortoise/mcp_server.py:607a8fcf59c53553
+  served_attributes: 91d227eba1a642ab
   family: graph
   family_rank: 2
   served: http
@@ -1056,6 +1101,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_ingest
   served_from: tortoise/mcp_server.py:212e8c7865fe39e7
+  served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
   served: http
@@ -1092,6 +1138,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_update_entity
   served_from: tortoise/mcp_server.py:95bbbe0c977171c8
+  served_attributes: c3d8b9054bea89bb
   family: graph
   family_rank: 2
   served: http
@@ -1118,6 +1165,7 @@ rows:
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete_entity
   served_from: tortoise/mcp_server.py:72d367c45cf4b38a
+  served_attributes: e353b3f25fb68584
   family: graph
   family_rank: 2
   served: http
@@ -1145,6 +1193,7 @@ rows:
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_operator_action
   served_from: tortoise/mcp_server.py:78cfac57f2f4e433
+  served_attributes: 07f3aa2bf8138e28
   family: graph
   family_rank: 2
   served: http
@@ -1170,6 +1219,7 @@ rows:
   cluster_canonical: tortoise_operator_action
 - name: tortoise_annotate_operator
   served_from: tortoise/mcp_server.py:547005a52f454068
+  served_attributes: 8e53a16954d82aee
   family: graph
   family_rank: 2
   served: http
@@ -1195,6 +1245,7 @@ rows:
   cluster_canonical: tortoise_operator_action
 - name: tortoise_mitigate_operator
   served_from: tortoise/mcp_server.py:7eac8336ca728939
+  served_attributes: 3d86b6571fc4c911
   family: graph
   family_rank: 2
   served: http
@@ -1221,6 +1272,7 @@ rows:
   cluster_canonical: tortoise_operator_action
 - name: tortoise_overview
   served_from: tortoise/mcp_server.py:84c7d0ba4cc19b63
+  served_attributes: 057395375ee74063
   family: reasoning
   family_rank: 3
   served: http
@@ -1246,6 +1298,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_provenance
   served_from: tortoise/mcp_server.py:00ea8b06eb2203ba
+  served_attributes: e3d93d06b286ca0c
   family: reasoning
   family_rank: 3
   served: http
@@ -1270,6 +1323,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_traverse
   served_from: tortoise/mcp_server.py:290da6f2d39818ea
+  served_attributes: cebbf079c1b1d7da
   family: reasoning
   family_rank: 3
   served: http
@@ -1295,6 +1349,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_entity_profile
   served_from: tortoise/mcp_server.py:9ad536c494823538
+  served_attributes: 3a272b21b8020f47
   family: reasoning
   family_rank: 3
   served: http
@@ -1320,6 +1375,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_topics
   served_from: tortoise/mcp_server.py:5587bba06df5db18
+  served_attributes: c17994837a1e8834
   family: reasoning
   family_rank: 3
   served: http
@@ -1345,6 +1401,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_analyze
   served_from: tortoise/mcp_server.py:d0985e54a0f9be3d
+  served_attributes: 0b934dac2f43c7b6
   family: reasoning
   family_rank: 3
   served: http
@@ -1370,6 +1427,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_dream
   served_from: tortoise/mcp_server.py:f491c798b9dafda6
+  served_attributes: e78d4ca7b428050a
   family: reasoning
   family_rank: 3
   served: stdio-only
@@ -1396,6 +1454,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_find_cross_lens_candidates
   served_from: tortoise/mcp_server.py:63afae77dd7e95d4
+  served_attributes: 4641b6abde665209
   family: reasoning
   family_rank: 3
   served: http
@@ -1426,6 +1485,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_check_structure
   served_from: tortoise/mcp_server.py:4f597330997001ab
+  served_attributes: d1d847feeecfe0de
   family: reasoning
   family_rank: 3
   served: http
@@ -1450,6 +1510,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_review_connections
   served_from: tortoise/mcp_server.py:5113550a59a294b2
+  served_attributes: 249495af9a061d6d
   family: reasoning
   family_rank: 3
   served: http
@@ -1480,6 +1541,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_summarize_structure
   served_from: tortoise/mcp_server.py:61ca73c0dc694f7a
+  served_attributes: 734ca6ea44c83df3
   family: reasoning
   family_rank: 3
   served: http
@@ -1506,6 +1568,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_validate_domain
   served_from: tortoise/mcp_server.py:f14122a777d481c6
+  served_attributes: 1056f463ee0f2b95
   family: reasoning
   family_rank: 3
   served: http
@@ -1532,6 +1595,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_get_session
   served_from: tortoise/mcp_server.py:308bf87a6a2da5ee
+  served_attributes: 8df739457ebc961a
   family: sessions
   family_rank: 4
   served: http
@@ -1559,6 +1623,7 @@ rows:
     approval
 - name: tortoise_search_sessions
   served_from: tortoise/mcp_server.py:16bcff0396c5ce23
+  served_attributes: 0a83402375ac3bcd
   family: sessions
   family_rank: 4
   served: http
@@ -1583,6 +1648,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_session_capture
   served_from: tortoise/mcp_server.py:5aac73bc86e8a8a1
+  served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4
   served: http
@@ -1620,6 +1686,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_graph_set_recording
   served_from: tortoise/mcp_server.py:15170799317795b4
+  served_attributes: 153b4547ee465158
   family: sessions
   family_rank: 4
   served: http
@@ -1648,6 +1715,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_graphs
   served_from: tortoise/mcp_server.py:db7cc8b065b95c5d
+  served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
   served: http
@@ -1672,6 +1740,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_namespaces
   served_from: tortoise/mcp_server.py:6a99f017417419c9
+  served_attributes: d1d847feeecfe0de
   family: sessions
   family_rank: 4
   served: http
@@ -1696,6 +1765,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_events_poll
   served_from: tortoise/mcp_server.py:f12291c2c470e88c
+  served_attributes: 324350c5a3a0d9bf
   family: sessions
   family_rank: 4
   served: http
@@ -1722,6 +1792,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_session_context
   served_from: tortoise/mcp_server.py:5e1abe12c810e056
+  served_attributes: 734ca6ea44c83df3
   family: sessions
   family_rank: 4
   served: http
@@ -1746,6 +1817,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_backfill_v25
   served_from: tortoise/mcp_server.py:11a11ccddfc39a61
+  served_attributes: b2ccff9a3ef0cde7
   family: admin
   family_rank: 5
   served: stdio-only
@@ -1770,6 +1842,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_org_create
   served_from: tortoise/mcp_server.py:e457a262c42b17dc
+  served_attributes: 1b06f44dc97e7126
   family: admin
   family_rank: 5
   served: stdio-only
@@ -1795,6 +1868,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_packs_list
   served_from: tortoise/mcp_server.py:396c6a85aa37ac6b
+  served_attributes: d1d847feeecfe0de
   family: admin
   family_rank: 5
   served: http
@@ -1821,6 +1895,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_pack_install
   served_from: tortoise/mcp_server.py:bc46590f5bd8ee56
+  served_attributes: edc1d2043e67e989
   family: admin
   family_rank: 5
   served: http
@@ -1848,6 +1923,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_demo_create
   served_from: tortoise/mcp_server.py:da386226cbbb7443
+  served_attributes: 734ca6ea44c83df3
   family: onboarding
   family_rank: 6
   served: http
@@ -1872,6 +1948,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_github_index
   served_from: tortoise/mcp_server.py:2cf4f3e3798f46d3
+  served_attributes: b6cd4585bccc8fed
   family: onboarding
   family_rank: 6
   served: http
@@ -1896,6 +1973,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_seed
   served_from: tortoise/mcp_server.py:b62f83ed0ceae2b1
+  served_attributes: d36e38d2db6e5d71
   family: onboarding
   family_rank: 6
   served: http
@@ -1922,6 +2000,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_github_status
   served_from: tortoise/mcp_server.py:469dc9c6da903e43
+  served_attributes: 734ca6ea44c83df3
   family: onboarding
   family_rank: 6
   served: http
@@ -1946,6 +2025,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_github_connect
   served_from: tortoise/mcp_server.py:b892f3c3afc81854
+  served_attributes: 57e846f8c03eb41e
   family: onboarding
   family_rank: 6
   served: http
@@ -1970,6 +2050,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_session_recording
   served_from: tortoise/mcp_server.py:7cecd526f677f743
+  served_attributes: 8ba7b99c016dff2d
   family: onboarding
   family_rank: 6
   served: http
@@ -1994,6 +2075,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_onboarding_state
   served_from: tortoise/mcp_server.py:700ed9a50405ecdf
+  served_attributes: 734ca6ea44c83df3
   family: onboarding
   family_rank: 6
   served: http
@@ -2018,6 +2100,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_diary_write
   served_from: tortoise/mcp_server.py:bea2c90da23a5f5f
+  served_attributes: 4a3d03fdedc491ac
   family: journal
   family_rank: 7
   served: http
@@ -2042,6 +2125,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_checkpoint
   served_from: tortoise/mcp_server.py:03b49528425efbe4
+  served_attributes: 9b5a55e0b5d62fcd
   family: journal
   family_rank: 7
   served: http
@@ -2067,6 +2151,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_diary_read
   served_from: tortoise/mcp_server.py:4f586bf77a5bcd8c
+  served_attributes: fd3a38a2d5978fbf
   family: journal
   family_rank: 7
   served: http
@@ -2091,6 +2176,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_file_decision
   served_from: tortoise/mcp_server.py:1a8c8a757eb40d30
+  served_attributes: da87ff8736c0ecdc
   family: journal
   family_rank: 7
   served: http
@@ -2119,6 +2205,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_file_human_approval
   served_from: tortoise/mcp_server.py:80e93a9397565f9f
+  served_attributes: bde251bf8d7cd4ae
   family: journal
   family_rank: 7
   served: http
@@ -2144,6 +2231,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_create_document
   served_from: tortoise/mcp_server.py:0ecc1785041000d5
+  served_attributes: 2fda7769c65f26af
   family: sources
   family_rank: 8
   served: http
@@ -2170,6 +2258,7 @@ rows:
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_source
   served_from: tortoise/mcp_server.py:0446433ba3bdbc83
+  served_attributes: aeb2aaa1691a5367
   family: sources
   family_rank: 8
   served: http
@@ -2195,6 +2284,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_promote_point
   served_from: tortoise/mcp_server.py:556f39f9ee779461
+  served_attributes: e3d93d06b286ca0c
   family: review
   family_rank: 9
   served: http
@@ -2220,6 +2310,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_list_dedup_candidates
   served_from: tortoise/mcp_server.py:59470da9dc956a21
+  served_attributes: 99ff1f4787995a66
   family: review
   family_rank: 9
   served: http
@@ -2244,6 +2335,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_approve_merge
   served_from: tortoise/mcp_server.py:6fdf72e74dbf2aa4
+  served_attributes: 7ef9ac912a56d88b
   family: review
   family_rank: 9
   served: http
@@ -2269,6 +2361,7 @@ rows:
   cluster_canonical: null
 - name: tortoise_mine_conversations
   served_from: tortoise/mcp_server.py:7e4594164cdeb8a9
+  served_attributes: 9885413e99690d9c
   family: mining
   family_rank: 11
   served: stdio-only
