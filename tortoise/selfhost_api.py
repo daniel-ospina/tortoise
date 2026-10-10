@@ -44,7 +44,10 @@ class CreatePointRequest(BaseModel):
     # AUTHOR a calibration baseline, the capability the MCP
     # ``tortoise_create_point`` tool has had all along. Without it a self-host
     # client writes a LIVE point that ``/v1/dream`` then refuses (the
-    # fail-closed #344/#1157 gate) and can never make it EP-able.
+    # fail-closed #344/#1157 gate) and can never make it EP-able. Resolved
+    # into the ep_alpha/ep_beta baseline, NOT stored as a Point prop (unlike
+    # confidence/authoredBy above); on a dedup hit ``create_point`` drops it
+    # with a logged warning.
     credibility: str | int | float | None = None
 
     @field_validator("kind")

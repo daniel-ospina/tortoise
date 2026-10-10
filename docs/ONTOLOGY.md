@@ -1307,7 +1307,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 
 | Status | Kind | Write path | Transitions to | Notes |
 |--------|------|------------|----------------|-------|
-| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point` | `live` | Inert for EP computation; promoted only by `promote_point` / `update_point(status='live')` — an EXPLICIT draft is never auto-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
+| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point`, the capture/extraction writers | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
 | `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |

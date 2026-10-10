@@ -291,8 +291,9 @@ def test_non_evidence_kinds_ignored_by_gate(sdk):
 def test_dream_require_calibration_raises(sdk):
     """dream(require_calibration=True) on uncalibrated graph raises
     CalibrationError BEFORE any EP write (#1157)."""
-    # #943: default status is draft; the #1157 gate excludes drafts (#780),
-    # so the point must be live for the gate to see it.
+    # Since #1088 a no-status create_point is LIVE, and a DRAFT is excluded
+    # from the #1157 gate (#780/PR #1212), so the point must be explicitly
+    # live for the gate to see it.
     sdk.create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="dream.*uncalibrated"):  # noqa: RUF043

@@ -6571,8 +6571,11 @@ class CreatePointRequest(BaseModel):
     # the MCP ``tortoise_create_point`` tool already can (it has carried
     # ``credibility`` since before this endpoint existed). Without this a
     # hosted client could write a live point that ``/v1/dream`` then refuses
-    # and never make it EP-able through this surface. Forwarded as a prop,
-    # the same posture as confidence/authoredBy above.
+    # and never make it EP-able through this surface. Forwarded to
+    # ``create_point``'s ``credibility=`` and consumed into the
+    # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
+    # with a logged warning (the existing point keeps its own baseline).
     credibility: str | int | float | None = None
 
     @field_validator("kind")
