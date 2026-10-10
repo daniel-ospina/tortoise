@@ -82,6 +82,32 @@ def test_relative_override_seam_is_refused_not_materialized(tmp_path, monkeypatc
         logger._fallback_file()
 
 
+def test_whitespace_only_knob_warns_once_not_per_call(tmp_path, monkeypatch, caplog):
+    """#7924 review P2: the whitespace-only-knob warning is warn-ONCE.
+
+    ``_fallback_file()`` runs on the audit hot path, so a warning emitted per
+    call is one log line per audit event for the entire duration of an outage.
+    Mutation that reds this test: drop the ``_WHITESPACE_OVERRIDE_WARNED``
+    gate (back to an unconditional warning) — 5 calls then emit 5 records
+    instead of 1.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "   ")
+    from tortoise import audit_events as _ae
+    monkeypatch.setattr(_ae, "_WHITESPACE_OVERRIDE_WARNED", False)
+    logger = AuditLogger(dsn=None)
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            logger._fallback_file()
+    hits = [r.getMessage() for r in caplog.records
+            if "whitespace-only" in r.getMessage()]
+    assert len(hits) == 1, f"expected exactly one warning, got {len(hits)}"
+    # Whitespace-only is still treated as UNSET (never a CWD-relative base).
+    assert logger._fallback_file() == (
+        tmp_path / ".tortoise" / "audit_fallback.jsonl")
+
+
 def test_fallback_resolves_home_at_write_time_not_construction(
         tmp_path, monkeypatch):
     """The module-level-logger shape: construct under HOME_A, write under HOME_B.
