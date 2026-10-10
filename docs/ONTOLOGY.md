@@ -66,7 +66,6 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
-
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
@@ -1385,11 +1384,10 @@ optional free data). It carries an operator **only when it needs one**.
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
 support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
-`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap;
-#7813/#7853).** The operator node itself is always a
-`:Point {is_operator:true}`; its children/targets may carry any of the four
-labels. All other edges stay plain and carry confidence as an
-edge attribute.
+`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap; #7813/#7853).**
+The operator node itself is always a `:Point {is_operator:true}`; its
+children/targets may carry any of the four labels. All other edges stay plain
+and carry confidence as an edge attribute.
 
 | Edge | Operator? | Confidence |
 |---|---|---|
