@@ -1258,8 +1258,9 @@ def retrieve_for_question(
     # resolution arm — tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG``; only 1/true/yes/on enables —
     # fail-safe OFF, the #1745 default decision). When ON, each question's
-    # outcome records the #2886 owner's resolution over the ADMITTED dated
-    # hits (``resolve_temporal_aggregate`` via :func:`temporal_aggregate_verdict`)
+    # outcome records the #2886 owner's resolution over the reader-reachable
+    # pool window (``pool[:effective_top_k]``; a two-sided approximation of
+    # the reader's admitted set, #3594) via :func:`temporal_aggregate_verdict`
     # as ``temporal_aggregate_verdict`` — distinct-event tally for COUNT/TOTAL,
     # calendar difference for interval/before-offset/duration when the two
     # anchors are in hand, else an explicit abstention (``reason``). This is

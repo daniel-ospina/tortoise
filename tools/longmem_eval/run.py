@@ -3665,7 +3665,9 @@ def run_evaluation(
     # AGGREGATE_FLAG`` env > OFF, the #1745 fail-safe default). Resolved once,
     # fingerprinted, and recorded in the methodology; the per-question
     # ``temporal_aggregate_verdict`` (present under the arm only) records the
-    # #2886 owner's resolution over the admitted dated hits. Measurement only
+    # #2886 owner's resolution over the reader-reachable pool window
+    # (``pool[:effective_top_k]``; a two-sided approximation of the reader's
+    # admitted set, #3594). Measurement only
     # — it does NOT change retrieval/answer behavior.
     temporal_aggregate: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
@@ -6009,8 +6011,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--temporal-aggregate", dest="temporal_aggregate",
                     action="store_true", default=None,
                     help="enable the #2886 deterministic temporal-aggregation "
-                         "resolution over the admitted dated hits (records the "
-                         "resolver verdict per outcome; default: env "
+                         "resolution over the reader-reachable pool window "
+                         "(records the resolver verdict per outcome; default: env "
                          "TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG — OFF by "
                          "default, #2886)")
     ta.add_argument("--no-temporal-aggregate", dest="temporal_aggregate",

@@ -219,6 +219,12 @@ def test_resolution_readout_from_arm_verdict():
         {"qid": "x", "temporal_aggregate_verdict": {
             "kind": "total", "value": 5, "reason": None,
             "n_span_bounded_events": 2}}) == "resolved"
+    # A TOTAL that abstained for an unrelated cause keeps the owner's reason —
+    # the span-less-TOTAL arm must not overwrite it.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": None, "reason": "no_events",
+            "n_span_bounded_events": 0}}) == "abstained:no_events"
 
 
 def test_summary_counts_deterministic_resolution():

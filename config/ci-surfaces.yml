@@ -794,10 +794,12 @@ surfaces:
   - test_4220_blog_residue_cleanup.py
   # #2886: the wiring seam's hermetic adapter guard
   # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
-  # core's `resolve_temporal_aggregate`). `core` runs it when the core's
-  # verdict semantics change; the eval-seam plumbing has its own docker-lane
-  # home in `test_aggregative_facet_coverage.py`. Without the registration
-  # the file's own guard is skipped on its diff-selected legs (#7076 class).
+  # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,
+  # like `test_time_aware_run_2520.py`): `core` runs it when the core's
+  # verdict semantics change, `eval` when `tools/longmem_eval/retrieve.py`
+  # changes alone (`tools/longmem_eval/` is an `eval` SOURCE_PATTERN).
+  # Without a registration the file's own guard is skipped on its
+  # diff-selected legs (#7076 class).
   - test_temporal_aggregate_arm.py
   # #2886: the deterministic temporal-aggregation core
   # (`tortoise/temporal_aggregation.py`). That source matches no SOURCE_PATTERNS
@@ -2293,6 +2295,7 @@ surfaces:
   - test_ask_eval_only.py  # #3849: N6 pins tools/longmem_eval/reader.py's prompt re-export (an eval-owned file) — also under api/core/sdk
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
+  - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
   - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
