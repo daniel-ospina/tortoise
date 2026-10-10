@@ -874,13 +874,26 @@ def _install_missing_dbdir_guard() -> None:
 # B cannot run its release path because that path needs the same guard. The
 # entry's own `rlock` is already held at the mutation, so the guard is only
 # needed to look the entry up.
-# `_CONSTRUCT_LOCKS` is keyed on the canonical path and is never pruned: an
+# `_CONSTRUCT_LOCKS` is keyed on the canonical path (or on `_MEMORY_DB_KEY`
+# for the `:memory:` sentinel, #7943) and is never pruned: an
 # entry is one `RLock` + one int per DISTINCT `<dbdir>/<dbfilename>` for the
 # process lifetime — the same shape and the same accepted bound as
 # `_owner_refcounts` / `_own_start_cache` in this module (bounded in practice by
 # the process's own embedded DBs, i.e. its test fixtures).
 _CONSTRUCT_LOCKS: dict[str, _ConstructLock] = {}
 _CONSTRUCT_LOCKS_GUARD = threading.Lock()
+
+# #7943: the `:memory:` sentinel is a legitimate tortoise DB key but NOT a
+# filesystem path. redislite anchors it to `<cwd>/:memory:` (client.py:435-436),
+# so the lock's `<key>.tortoise-construct.lock` derivation used to create
+# `<cwd>/:memory:.tortoise-construct.lock` — an untracked file in the repo/
+# worktree root after any pytest run. The sentinel therefore gets its own
+# (non-path) `_CONSTRUCT_LOCKS` key for the in-process RLock, and
+# `_open_construct_lock` relocates its flock sidecar out of the cwd
+# (`_memory_construct_lock_path`) instead of dropping the lock — the sentinel
+# still names a SHARED `<cwd>/:memory:` RDB, so the cross-process half of the
+# `#4921` guard is required.
+_MEMORY_DB_KEY = ":memory:"
 
 
 class _ConstructLock:
@@ -950,7 +963,10 @@ def _construction_key(args: tuple, kwargs: dict) -> str | None:
 
     None means there is nothing to serialise: `host`/`port` names a server we do
     not start, and a construction naming no db file lets redislite mint its own
-    `mkdtemp()`.
+    `mkdtemp()`. The `:memory:` sentinel is the one non-None key that is NOT a
+    filesystem path: it returns `_MEMORY_DB_KEY` itself so the caller gets the
+    in-process RLock without deriving (and littering) a `<key>.lock` sidecar
+    (#7943).
 
     `realpath` is what makes two spellings of one file SHARE a lock — the
     symlinked temp root this box produces is the realistic case. It is a
@@ -967,7 +983,40 @@ def _construction_key(args: tuple, kwargs: dict) -> str | None:
     db_filename = _requested_db_filename(args, kwargs)
     if not db_filename:
         return None
+    if db_filename == os.path.join(os.getcwd(), _MEMORY_DB_KEY):
+        # #7943: `:memory:` is not a filesystem path. `_requested_db_filename`
+        # anchors it to the cwd to mirror redislite client.py:435-436, but the
+        # lock path is `<key>.tortoise-construct.lock`, so any path-returning
+        # key here litters the process cwd. Return the sentinel itself: the
+        # in-process RLock still serialises it, and `_open_construct_lock`
+        # relocates its flock sidecar out of the cwd — the flock is KEPT, not
+        # dropped, because the sentinel names a shared `<cwd>/:memory:` RDB.
+        return _MEMORY_DB_KEY
     return os.path.realpath(db_filename)
+
+
+def _memory_construct_lock_path() -> str:
+    """The `:memory:` construction lock's sidecar — OUTSIDE the process cwd.
+
+    #7943 kept the sentinel from littering `<cwd>/:memory:.tortoise-construct.lock`
+    by returning no lock at all, which also removed the CROSS-PROCESS half of the
+    `#4921` guard. That half is required here: redislite anchors `:memory:` to a
+    SHARED `<cwd>/:memory:` RDB (plus a `<cwd>/:memory:.settings` registry) with no
+    internal lock, so two processes in one cwd are two writers over one file.
+    Measured with 4 concurrent processes in one cwd: with no flock one process's
+    key was destroyed (split-brain check-then-start); with the flock restored all
+    four survived.
+
+    So relocate the sidecar rather than drop it. The path is derived from the
+    REALPATH of the cwd, so (a) every process in the same cwd derives the SAME
+    path and still serialises cross-process, and (b) nothing is written into the
+    worktree — the litter `#7943` filed is gone, and the guard stays.
+    """
+    digest = hashlib.sha256(
+        os.path.realpath(os.getcwd()).encode("utf-8", "surrogateescape")
+    ).hexdigest()[:32]
+    return os.path.join(tempfile.gettempdir(),
+                        f"tortoise-memory-construct-{digest}.lock")
 
 
 def _open_construct_lock(key: str) -> int:
@@ -999,7 +1048,10 @@ def _open_construct_lock(key: str) -> int:
     A failure to FLOCK closes the just-opened fd before propagating — the fd
     would otherwise leak on every construction of that key.
     """
-    path = key + ".tortoise-construct.lock"
+    if key == _MEMORY_DB_KEY:
+        path = _memory_construct_lock_path()
+    else:
+        path = key + ".tortoise-construct.lock"
     try:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     except FileNotFoundError:

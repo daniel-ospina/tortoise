@@ -27,8 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.embedded_lifecycle import (
     _CONSTRUCT_LOCKS,
+    _MEMORY_DB_KEY,
     _construction_key,
     _construction_lock,
+    _memory_construct_lock_path,
     _open_construct_lock,
 )
 
@@ -91,6 +93,90 @@ def test_kwarg_wins_over_the_positional(tmp_path):
     """
     a, b = str(tmp_path / "a.rdb"), str(tmp_path / "b.rdb")
     assert _construction_key((a,), {"dbfilename": b}) == os.path.realpath(b)
+
+
+# ── #7943: the `:memory:` sentinel is not a filesystem path ────────────────
+
+
+def test_memory_key_is_not_a_filesystem_path(tmp_path, monkeypatch):
+    """#7943: `:memory:` yields the sentinel key, never a cwd-joined path.
+
+    `_requested_db_filename` anchors a bare name to the cwd to mirror
+    redislite (client.py:435-436), so before the fix the key was
+    `<cwd>/:memory:` and `_open_construct_lock` created
+    `<cwd>/:memory:.tortoise-construct.lock` in the repo root.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert _construction_key((":memory:",), {}) == _MEMORY_DB_KEY
+    assert _construction_key((), {"dbfilename": ":memory:"}) == _MEMORY_DB_KEY
+    assert _MEMORY_DB_KEY == ":memory:"
+    assert not os.path.isabs(_construction_key((":memory:",), {}))
+
+
+def test_memory_key_keeps_the_flock_out_of_the_cwd(tmp_path, monkeypatch):
+    """#7943: holding the `:memory:` lock must leave the cwd free of a sidecar —
+    WITHOUT dropping the flock.
+
+    Dropping the flock was the first attempt at this fix, and it re-opened the
+    `#4921` two-writer race for a SHARED resource: redislite anchors `:memory:`
+    to `<cwd>/:memory:` (plus a `<cwd>/:memory:.settings` registry) with no
+    internal lock, so two processes in one cwd are two writers over one file.
+    Measured with 4 concurrent processes in one cwd: with no flock one
+    process's key was destroyed; with the flock restored all four survived.
+
+    FAILS IF: the sidecar lands in the cwd (the litter #7943 filed), or the
+    flock is dropped (`fd == -1`), which removes the cross-process half of the
+    guard.
+    """
+    monkeypatch.chdir(tmp_path)
+    key = _construction_key((":memory:",), {})
+    sidecar = tmp_path / ":memory:.tortoise-construct.lock"
+    relocated = _memory_construct_lock_path()
+    with _construction_lock(key):
+        entry = _CONSTRUCT_LOCKS[key]
+        assert entry.depth == 1
+        # The flock is TAKEN — it is not -1.
+        assert entry.fd >= 0, (
+            "the cross-process lock was dropped for `:memory:`; the sentinel "
+            "still names a SHARED <cwd>/:memory: RDB (#4921)")
+        # ... and it is taken OUTSIDE the cwd, so nothing is littered.
+        assert not sidecar.exists(), "the cwd was littered with a lock sidecar"
+        assert os.path.realpath(relocated) != os.path.realpath(str(sidecar))
+        assert not os.path.realpath(relocated).startswith(
+            os.path.realpath(str(tmp_path))), (
+            "the relocated sidecar must be outside the cwd")
+    assert entry.depth == 0
+
+
+def test_memory_key_relocates_to_a_stable_cwd_derived_path(tmp_path, monkeypatch):
+    """The relocated sidecar must be STABLE and cwd-DERIVED, or the cross-process
+    lock silently degrades to per-process (two processes would take two locks).
+
+    FAILS IF: the path is per-call (a uuid/`id()`), or it does not depend on the
+    cwd (so two DIFFERENT stores would share one lock).
+    """
+    monkeypatch.chdir(tmp_path)
+    first = _memory_construct_lock_path()
+    assert first == _memory_construct_lock_path(), (
+        "the path must be stable across calls, or the lock is per-call")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert _memory_construct_lock_path() != first, (
+        "the path must be derived from the cwd, or two different stores "
+        "would share one lock")
+
+
+def test_memory_key_keeps_the_in_process_rlock(tmp_path, monkeypatch):
+    """#7943: the flock must not drop the in-process serialisation either."""
+    monkeypatch.chdir(tmp_path)
+    key = _construction_key((":memory:",), {})
+    with _construction_lock(key):
+        assert _CONSTRUCT_LOCKS[key].depth == 1
+        with _construction_lock(key):  # the nesting must not deadlock
+            assert _CONSTRUCT_LOCKS[key].depth == 2
+        assert _CONSTRUCT_LOCKS[key].depth == 1
+    assert _CONSTRUCT_LOCKS[key].depth == 0
 
 
 def test_bytes_filename_yields_no_key():
