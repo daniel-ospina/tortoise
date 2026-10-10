@@ -70,6 +70,28 @@ a GRANDCHILD at CH99.8%. So ``free`` requires BOTH:
 
 Both are fail-closed: an unmeasured signal is ``not free``, never ``free``.
 
+THE GHOST LANE — a lane whose workspace no longer exists (#7738)
+----------------------------------------------------------------
+A lane is recorded in ``lane-registry.tsv`` (label <-> workspace) and that row
+outlives the cmux workspace it names. Nothing reconciled the record against
+workspace EXISTENCE, so a closed or crashed workspace kept a verdict forever —
+and because an unmeasured lane mapped to "live" (the anti-false-orphan default),
+a ghost was reported as a live owner indefinitely.
+
+Every lane is now reconciled against the LIVE ``cmux list-workspaces`` set. When
+the list WAS read and the lane's workspace is absent, the lane is **terminal**:
+
+  * ``RECOVERABLE`` — a session file still resolves on disk; the verdict carries
+    the exact ``pi --session <sid>`` that restores it.
+  * ``RETIRED``     — no session file resolves; never nudge, never dispatch,
+    never route.
+
+A terminal lane is reported (never silently dropped) and is NOT live, NOT free
+and NOT dispatchable. Polarity is fail-OPEN with provenance: an unreadable
+workspace list retires NOTHING, and ``reconciliation.workspaces_measured`` says
+so — a cmux outage must never hide a real lane, and a fail-open path must not be
+silent.
+
 USAGE
 -----
   fleet_state.py build [--out PATH] [--sample S] [--json]
@@ -496,6 +518,51 @@ def is_genuinely_free(liveness: Liveness, open_pr_count: int, held_issue_count: 
     return not free_reasons(liveness, open_pr_count, held_issue_count)
 
 
+def workspace_terminal(
+    ws: str,
+    live: Mapping[str, Any],
+    measured: bool,
+    session: SessionResolution,
+) -> dict[str, Any]:
+    """The terminal verdict for a lane whose cmux workspace no longer exists (#7738).
+
+    ``measured`` is the live list's provenance. When it is False the verdict is
+    NOT evaluated (``state == ""``, ``workspace_present is None``) — fail-open, so
+    a cmux outage can never retire a real lane. When the list WAS read and the
+    workspace is absent, the lane is terminal: ``RECOVERABLE`` if a session file
+    resolves on disk (carrying the exact restore command), else ``RETIRED``.
+
+    A deliberate close and a crash-vanish are the same observation here — the
+    workspace is not in the live list — so both are caught.
+    """
+    if not measured:
+        return {"state": "", "workspace_present": None, "reason": "", "resume_command": ""}
+    present = any(str(k).upper() == ws.upper() for k in live)
+    if present:
+        return {"state": "", "workspace_present": True, "reason": "", "resume_command": ""}
+    short = ws[:8]
+    if session.file and session.sid:
+        return {
+            "state": "RECOVERABLE",
+            "workspace_present": False,
+            "reason": (
+                f"cmux workspace {short} no longer exists, but its session "
+                f"{session.sid[:8]}… survives on disk — recover with "
+                f"`pi --session {session.sid}`; terminal until then"
+            ),
+            "resume_command": f"pi --session {session.sid}",
+        }
+    return {
+        "state": "RETIRED",
+        "workspace_present": False,
+        "reason": (
+            f"cmux workspace {short} no longer exists and no session file "
+            f"resolves — RETIRED; never nudge, never dispatch, never route"
+        ),
+        "resume_command": "",
+    }
+
+
 # ===========================================================================
 # review binding (AT-HEAD | diff-match | none)
 # ===========================================================================
@@ -677,18 +744,38 @@ def load_registry(path: Path = REGISTRY) -> list[tuple[str, str, str]]:
     return rows
 
 
+class WorkspaceMap(dict):
+    """The live cmux workspace map, carrying the READ'S provenance (#7738).
+
+    A plain ``{}`` cannot distinguish "cmux says there are no workspaces" from
+    "cmux could not be read" — and the reconciliation must fail OPEN on the
+    latter (an unreadable list retires NOTHING). ``measured`` records which of the
+    two happened, so the caller can SAY it failed open instead of silently
+    filtering nothing. ``error`` names the failure when ``measured`` is False.
+    """
+
+    measured: bool
+    error: str
+
+    def __init__(self, *args: Any, measured: bool = False, error: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.measured = measured
+        self.error = error
+
+
 def cmux_workspaces() -> dict[str, dict[str, Any]]:
     out = _run(["cmux", "list-workspaces", "--json"], timeout=45)
     try:
         data = json.loads(out)
     except Exception:
-        return {}
+        return WorkspaceMap(error="cmux list-workspaces returned no parseable JSON")
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
         items = data.get("workspaces") or []
     else:
-        return {}  # valid JSON that is not an object/list (null, string) -> empty
+        # valid JSON that is not an object/list (null, string) -> unreadable
+        return WorkspaceMap(error="cmux list-workspaces returned JSON that is not an object or list")
     result: dict[str, dict[str, Any]] = {}
     for x in items:
         if not isinstance(x, dict):
@@ -699,7 +786,11 @@ def cmux_workspaces() -> dict[str, dict[str, Any]]:
                 "title": (x.get("custom_title") or "").strip(),
                 "cwd": (x.get("current_directory") or "").strip(),
             }
-    return result
+    if not result:
+        # An EMPTY answer is unreadable, not "no workspaces": the fleet always has
+        # lanes, and retiring every lane on an empty set is the failure to avoid.
+        return WorkspaceMap(error="cmux list-workspaces returned an empty set")
+    return WorkspaceMap(result, measured=True)
 
 
 def pane_bindings() -> dict[str, str]:
@@ -915,6 +1006,11 @@ def build_state(
     """Build the joined fleet state. Every live source degrades to empty."""
     registry = load_registry()
     workspaces = cmux_workspaces()
+    # #7738: workspace-existence reconciliation is only sound when the live list
+    # was actually READ. An unreadable list (e.g. the beat's launchd context cannot
+    # reach cmux) must retire NOTHING — fail open, and carry the evidence of why.
+    workspaces_measured = bool(getattr(workspaces, "measured", False))
+    workspaces_error = str(getattr(workspaces, "error", ""))
     bindings = pane_bindings()
     live = live_sessions()
     overrides = load_overrides()
@@ -1012,6 +1108,10 @@ def build_state(
         branch = wt.get("branch", "").split("refs/heads/")[-1]
         head = wt.get("head", "")
         res = resolutions.get(label, SessionResolution(None, SOURCE_UNKNOWN, None, "not in registry"))
+        # #7738: a lane whose cmux workspace no longer exists cannot keep a live
+        # verdict. The verdict is terminal — RECOVERABLE (a session survives on
+        # disk) or RETIRED — and is reported, never silently dropped.
+        terminal = workspace_terminal(ws, workspaces, workspaces_measured, res)
 
         # live process: a lane is alive if ANY recorded pi pid for its workspace is
         # still running. Requiring exactly one "running" record is too strict — a
@@ -1151,6 +1251,8 @@ def build_state(
             reasons.append("no session record for this lane — liveness UNMEASURED, not dead")
         elif not alive:
             reasons.append("no live pi process — a dead lane is not dispatchable")
+        if terminal["state"]:
+            reasons.append(terminal["reason"])
         lanes.append({
             "identity": {
                 "lane": label,
@@ -1178,6 +1280,7 @@ def build_state(
                 "last_transcript_write_age_s": live_lv.transcript_age_seconds,
                 "last_head_sha": head,
             },
+            "terminal": terminal,
             "free": not reasons,
             "not_free_reasons": reasons,
         })
@@ -1186,13 +1289,18 @@ def build_state(
     # When a lane has NO session record at all, its liveness is UNMEASURED — never
     # "owner lane X has no live pi" (an unmeasured liveness must not manufacture a
     # dead owner, per-lane as well as fleet-wide).
-    lane_live = {
-        lane_["identity"]["lane"]: (
-            True if not lane_["liveness"]["liveness_measured"]
-            else bool(lane_["session"]["pi_pid"] and lane_["session"]["pid_alive"])
-        )
-        for lane_ in lanes
-    }
+    lane_live: dict[str, bool] = {}
+    for lane_ in lanes:
+        lbl = lane_["identity"]["lane"]
+        if lane_["terminal"]["state"]:
+            # #7738: a terminal lane is DEAD, not "unmeasured". Mapping an
+            # unmeasured lane to True (the anti-false-orphan default) is exactly
+            # how a ghost kept a live verdict forever.
+            lane_live[lbl] = False
+        elif not lane_["liveness"]["liveness_measured"]:
+            lane_live[lbl] = True
+        else:
+            lane_live[lbl] = bool(lane_["session"]["pi_pid"] and lane_["session"]["pid_alive"])
     conflicts, conflict_claimants, orphans = resolve_conflicts(lanes, prs, owner_of_pr, lane_live)
     if not liveness_measured:
         orphans.append({
@@ -1223,6 +1331,18 @@ def build_state(
             index["issues"][str(n)]["evidence"][lbl] = lane_["claim"]["evidence"].get(f"issue {n}", "")
 
     free_lanes = [lane_["identity"]["lane"] for lane_ in lanes if lane_["free"]]
+    terminal_lanes = [
+        {
+            "lane": lane_["identity"]["lane"],
+            "workspace": lane_["identity"]["workspace"],
+            "state": lane_["terminal"]["state"],
+            "reason": lane_["terminal"]["reason"],
+            "resume_command": lane_["terminal"]["resume_command"],
+            "session": lane_["session"]["sid"],
+        }
+        for lane_ in lanes
+        if lane_["terminal"]["state"]
+    ]
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "repo": repo,
@@ -1230,6 +1350,11 @@ def build_state(
         "lanes": lanes,
         "violations": violations,
         "orphans": orphans,
+        "terminal": terminal_lanes,
+        "reconciliation": {
+            "workspaces_measured": workspaces_measured,
+            "error": workspaces_error,
+        },
         "conflicts": conflicts,
         "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},
         "index": index,
@@ -1243,6 +1368,10 @@ def build_state(
             "violations": len(violations),
             "orphans": len(orphans),
             "conflicts": len(conflicts),
+            "terminal": len(terminal_lanes),
+            "recoverable": sum(1 for t in terminal_lanes if t["state"] == "RECOVERABLE"),
+            "retired": sum(1 for t in terminal_lanes if t["state"] == "RETIRED"),
+            "workspaces_measured": workspaces_measured,
         },
     }
 
@@ -1336,6 +1465,18 @@ def cmd_build(args: argparse.Namespace) -> int:
               f"binding_missing_but_live={s['binding_missing_but_live']}")
         print(f"  genuinely_free={s['genuinely_free']} violations={s['violations']} "
               f"orphans={s['orphans']} conflicts={s.get('conflicts', 0)}")
+        print(f"  terminal={s.get('terminal', 0)} "
+              f"(recoverable={s.get('recoverable', 0)} retired={s.get('retired', 0)})")
+        rec = state.get("reconciliation") or {}
+        if "workspaces_measured" in rec and not rec.get("workspaces_measured"):
+            # A fail-open path must SAY it failed open: silence here would read as
+            # "no ghosts" when the truth is "ghosts cannot be detected" (#7738).
+            print(
+                "  ⚠️ workspace reconciliation is INERT (fail-open): "
+                f"{rec.get('error') or 'cmux workspace list unreadable'} — "
+                "no lane was retired; ghost lanes cannot be detected in this run",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -1373,6 +1514,11 @@ def lane_live_map(state: Mapping[str, Any]) -> dict[str, bool | None]:
     for lane_ in lanes:
         try:
             label = lane_["identity"]["lane"]
+            if (lane_.get("terminal") or {}).get("state"):
+                # #7738: a terminal lane is DEAD even when its liveness is
+                # unmeasured — otherwise a ghost reads as a live owner forever.
+                out[label] = False
+                continue
             measured = (lane_.get("liveness", {}) or {}).get("liveness_measured")
             s = lane_.get("session")
             if not measured or not isinstance(s, dict) or not s.get("pi_pid"):
@@ -1498,6 +1644,12 @@ def _render_lane(lane: Mapping[str, Any]) -> str:
         f"  claims    issues={list(c['issues'])} prs={list(c['prs'])}",
         f"  free      {lane['free']}" + (f"  (not: {'; '.join(lane['not_free_reasons'])})" if lane["not_free_reasons"] else ""),
     ]
+    term = lane.get("terminal") or {}
+    if term.get("state"):
+        lines.append(f"  terminal  {term['state']}")
+        lines.append(f"            {term.get('reason', '')}")
+        if term.get("resume_command"):
+            lines.append(f"            recover: {term['resume_command']}")
     for ev, why in c["evidence"].items():
         lines.append(f"      {ev}: {why}")
     for w in lane["work"]["prs"]:
