@@ -174,14 +174,14 @@ behind an **OFF-by-default** arm (mirroring #2521's `aggregative_flag`):
 * per-outcome: `temporal_aggregate` marker + `temporal_aggregate_verdict`
   ride the outcome **only under the arm** (the OFF path is byte-identical).
   The verdict carries `{kind, unit, distinct, value, method, n_events,
-  reason, n_dated_events, n_span_bounded_events, anchors}`.
+  reason, n_dated_events, span_days, anchors}`.
 
 It does **not** change retrieval or the answer: the owner abstains rather
 than guessing, so the reader lane keeps the case (a reader-model swap
 stays #2013-gated).
 
 **Span honesty.** The eval's ranked hits carry `session_date` only, so a
-TOTAL over them sums zero spans (`n_span_bounded_events == 0`): the
+TOTAL over them sums zero spans (`span_days == 0`): the
 published `total` is then not a measured sum, and the diagnostic makes that
 auditable instead of a silent zero. The disposition read-out consults that
 diagnostic — a span-less TOTAL reads as `abstained:no_span_bounds`, never

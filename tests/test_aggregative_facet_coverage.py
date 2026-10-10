@@ -448,7 +448,7 @@ def test_temporal_aggregate_arm_resolves_count_over_reachable_pool(
         temporal_aggregate=True)
     verdict = ret["temporal_aggregate_verdict"]
     assert verdict["kind"] == "count"
-    assert "n_span_bounded_events" in verdict
+    assert "span_days" in verdict
     if verdict["value"] is not None:
         assert verdict["reason"] is None
         assert verdict["value"] == verdict["n_events"]

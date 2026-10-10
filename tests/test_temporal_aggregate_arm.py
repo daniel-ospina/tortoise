@@ -143,25 +143,46 @@ def test_verdict_total_flags_span_less_sum():
         "How many weeks in total do I spent on reading and listening?", hits)
     assert v["kind"] == "total"
     assert v["value"] == 0
-    assert v["n_span_bounded_events"] == 0
+    assert v["span_days"] == 0
 
 
-def test_verdict_total_and_span_diagnostic_share_the_resolver_input():
-    """#2886: ``n_span_bounded_events`` is computed over the SAME dicts the
-    resolver receives, so the two halves of the "span honesty" contract
-    cannot disagree. A hit carrying both bounds is visible to BOTH: the
-    published total is a real sum, not a zero-span sum credited as measured
-    while the diagnostic reports a bounded event."""
+def test_verdict_total_span_signal_is_the_resolvers_own_sum():
+    """#2886: the span-honesty signal (``span_days``) is the summed span in
+    days across the DISTINCT cluster representatives the TOTAL path sums —
+    the SAME core tally the resolver rides, so the two cannot disagree. A
+    hit carrying both bounds yields a real sum, not a zero-span sum credited
+    as measured."""
     hits = [_hit("e1", "Reading 'The Nightingale'.", "2025-01-01")]
     hits[0]["start_date"] = "2025-01-01"
     hits[0]["end_date"] = "2025-01-08"
     v = temporal_aggregate_verdict(
         "How many weeks in total do I spent on reading and listening?", hits)
     assert v["kind"] == "total"
-    assert v["n_span_bounded_events"] == 1
-    # The resolver saw the same bounds, so the total is a measured sum.
+    assert v["span_days"] == 7
+    # The resolver rode that sum, so the total is a measured sum.
     assert v["value"] is not None
     assert v["value"] > 0
+
+
+def test_verdict_total_span_signal_follows_the_cluster_representative():
+    """A cluster's canonical representative may be span-less while a later
+    duplicate member is bounded — the TOTAL path sums only the
+    representative, and ``span_days`` follows that SAME sum (never a raw row
+    count), so a zero-span total is not read as a measured sum."""
+    hits = [
+        _hit("", "We adopted a rescue dog named Pixel.", "2025-01-01"),
+        _hit("", "We adopted a rescue dog named Pixel.", "2025-02-01"),
+    ]
+    hits[1]["start_date"] = "2025-02-01"
+    hits[1]["end_date"] = "2025-02-11"
+    v = temporal_aggregate_verdict(
+        "How many weeks in total do I spent on reading and listening?", hits)
+    assert v["kind"] == "total"
+    # One distinct event (identical identity-less content folds), whose
+    # canonical representative is the earlier span-less row.
+    assert v["n_events"] == 1
+    assert v["span_days"] == 0
+    assert v["value"] == 0
 
 
 def test_verdict_reversed_span_is_not_a_bounded_event():
@@ -175,7 +196,7 @@ def test_verdict_reversed_span_is_not_a_bounded_event():
         "How many weeks in total do I spent on reading and listening?", hits)
     assert v["kind"] == "total"
     assert v["value"] == 0
-    assert v["n_span_bounded_events"] == 0
+    assert v["span_days"] == 0
 
 
 # ── (d) the census class is exercised through the arm ──────────────────────
@@ -195,11 +216,11 @@ def test_verdict_runs_over_all_12_census_class_qids():
         assert v["kind"] is not None, row["qid"]
         # The three date-arithmetic shapes abstain without resolved anchors.
         # The one summed-span row publishes the module's span-less sum (0):
-        # the diagnostic records that no candidate hit carried both bounds, so
+        # the span signal records that no candidate hit rode a span, so
         # the 0 is auditable rather than read as a measured total.
         if v["kind"] == "total":
             assert v["value"] in (None, 0), (row["qid"], v["value"])
-            assert v["n_span_bounded_events"] == 0, row["qid"]
+            assert v["span_days"] == 0, row["qid"]
         else:
             assert v["value"] is None, (row["qid"], v["value"])
             assert v["reason"] == "no_anchors", (row["qid"], v["reason"])

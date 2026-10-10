@@ -225,15 +225,14 @@ def resolution_for(outcome: Mapping) -> str:
     if not isinstance(verdict, Mapping):
         return "unmeasured"
     # A TOTAL over span-less hits PUBLISHES the module's documented zero-span
-    # sum (a non-None ``value`` with no bounded spans) — the adapter's own
+    # sum (a non-None ``value`` whose span-days sum is 0) — the adapter's own
     # "span honesty" contract says that is NOT a measured sum, so crediting it
     # as a resolution would overstate what the deterministic path closed. The
-    # diagnostic (``n_span_bounded_events``) that exposes it is therefore
-    # consulted here, not merely carried on the verdict. A TOTAL that abstained
-    # for another reason (``no_events`` / ``no_unit``) keeps the owner's own
-    # reason below.
+    # signal (``span_days``) is the SAME core tally the resolver rode, so the
+    # two cannot disagree. A TOTAL that abstained for another reason
+    # (``no_events`` / ``no_unit``) keeps the owner's own reason below.
     if (verdict.get("kind") == "total" and verdict.get("value") is not None
-            and not verdict.get("n_span_bounded_events")):
+            and not verdict.get("span_days")):
         return "abstained:no_span_bounds"
     if verdict.get("value") is not None:
         return "resolved"

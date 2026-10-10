@@ -628,13 +628,11 @@ def temporal_aggregate_verdict(
     Returns a JSON-able verdict; ``kind=None`` / ``reason="not_temporal"``
     for a question that is not a temporal aggregation.
     """
-    from tortoise.temporal_aggregation import as_date, resolve_temporal_aggregate
-    # The span-bound keys the core's ``_span_bounds`` reads (the same lists
-    # here): carried through the projection so the resolver's span sum and the
-    # ``n_span_bounded_events`` diagnostic below are derived from the SAME
-    # dicts. Dropping them here would let the diagnostic report a bounded
-    # event while the resolver saw none — and published a zero-span sum that
-    # then reads as ``resolved``.
+    from tortoise.temporal_aggregation import count_distinct_events, resolve_temporal_aggregate
+    # The span-bound keys the core's ``_span_bounds`` reads: carried through
+    # the projection so the resolver actually receives any bounds the hits
+    # carry (a hit whose bounds the projection dropped would publish a
+    # zero-span sum).
     _START_KEYS = ("start_date", "started_at", "session_date", "date",
                    "created_at")
     _END_KEYS = ("end_date", "ended_at", "completed_at", "question_date")
@@ -645,26 +643,6 @@ def temporal_aggregate_verdict(
             if h.get(k) is not None}}
         for h in hits
     ]
-
-    def _has_span(h: dict) -> bool:
-        """True when the event carries BOTH bounds the TOTAL path needs.
-        The eval's ranked hits carry ``session_date`` only, so a TOTAL over
-        them sums zero spans (the module's documented "a span-less event
-        contributes 0 but still counts"): the published ``total`` is then
-        not a measured sum, and ``n_span_bounded_events`` makes that
-        auditable rather than silently read as a real zero."""
-        start = next(
-            (as_date(h.get(k)) for k in _START_KEYS
-             if as_date(h.get(k)) is not None), None)
-        end = next(
-            (as_date(h.get(k)) for k in _END_KEYS
-             if as_date(h.get(k)) is not None), None)
-        # Mirror the core's ``_span_days`` validity rule: a REVERSED span
-        # (``end < start``) is a data inconsistency that contributes nothing,
-        # so it is NOT a bounded event here either — otherwise the diagnostic
-        # would report a bounded event while the resolver published a
-        # zero-span sum.
-        return start is not None and end is not None and end >= start
 
     # The two arithmetic anchors: the eval already computed the ISO bounds for
     # an explicit ``between <date> and <date>`` window (``kind == "interval"``).
@@ -677,6 +655,18 @@ def temporal_aggregate_verdict(
     res = resolve_temporal_aggregate(
         question, events=events, start=start, end=end)
     intent = res.intent
+    # The resolver's OWN span measure for a TOTAL: the summed span (in days)
+    # across the DISTINCT cluster representatives the TOTAL path sums. A raw
+    # row count can disagree with it (a cluster's canonical representative
+    # may be span-less while a later member is bounded; a reversed span is
+    # rejected), so the span-honesty signal is read from the SAME core tally
+    # the resolver performs rather than inferred from the rows. 0 means the
+    # published ``total`` rode zero spans — and the eval lane's hits carry
+    # ``session_date`` only, so on that lane it is always 0.
+    span_days = 0
+    if res.kind is not None and res.kind.value == "total":
+        span_days = count_distinct_events(
+            events, unit="days", total=True).total or 0
     return {
         "kind": res.kind.value if res.kind is not None else None,
         "unit": res.unit,
@@ -687,11 +677,10 @@ def temporal_aggregate_verdict(
         "reason": res.reason,
         "n_dated_events": sum(
             1 for h in hits if str(h.get("session_date") or "").strip()),
-        # TOTAL-only honesty diagnostic: how many candidate events carried
-        # BOTH bounds. 0 means a published ``total`` sum rode zero spans.
-        # Computed over ``events`` — the resolver's ACTUAL input — so the two
-        # halves cannot disagree.
-        "n_span_bounded_events": sum(1 for e in events if _has_span(e)),
+        # TOTAL-only span-honesty signal: the summed span (in days) the
+        # resolver actually rode. 0 means a published ``total`` is not a
+        # measured sum.
+        "span_days": span_days,
         "anchors": ({"start": start, "end": end} if start and end else None),
     }
 
