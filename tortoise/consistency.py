@@ -2069,6 +2069,30 @@ def recover_from_log(events_dir: str, projection) -> dict:
     every one of those cases: the rebuild did complete and refusing to open the
     store would be strictly worse, so the signal is PROPAGATED for the caller
     to branch on rather than swallowed into a success-shaped result.
+
+    ATOMICITY on refusal (#7929): the refusals this function can only reach
+    AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
+    verdict) are UNDONE before the `recovered: False` result is returned — the
+    freshly replayed nodes are wiped, restoring the empty state the call found.
+    This is an exact rollback, not a loss: the function returns early on
+    `db_count > 0`, so every node present at a post-replay refusal was created
+    by that replay, and the JSONL it replayed is a file it never writes. The
+    result carries the additive key `replay_rolled_back` (the number of nodes
+    the declined replay had produced and this function then discarded) and
+    reports `db_points: 0`, because the store really is empty again.
+
+    The destructive pending-snapshot route is the exception, and it is a
+    deliberate one: its refusal can arrive only after `rebuild_all` has retired
+    its own #2943 sidecar, so the graph is then the last copy of the graph-only
+    nodes. A rollback there is REFUSED (with the reason naming it) rather than
+    performed, and the partial graph is left for an explicit
+    `tortoise rebuild --dir`. A rollback that could not run for any other
+    reason (no `_wipe_all_nodes`, or a backend that died) appends a named
+    WARNING to `reason` instead and leaves the partial state visible.
+
+    Without this the store was left partially populated and the NEXT open's
+    `db_count > 0` refusal ("graph already has nodes — no rebuild") destroyed
+    the retry path, serving a store that was neither empty nor correct.
     """
     import os
 
@@ -2078,6 +2102,97 @@ def recover_from_log(events_dir: str, projection) -> dict:
             return int(rows[0][0]) if rows and rows[0][0] is not None else 0
         except Exception:
             return None
+
+    def _roll_back_declined_replay(result: dict, after: int | None, *,
+                                   source_durable: bool = True) -> dict:
+        """Restore the EMPTY pre-call state for a refusal found AFTER the
+        replay landed, and return `result` (#7929).
+
+        Every refusal below this point is discovered late: the non-folded set
+        and the final `ok` verdict both depend on the graph the replay LANDS on
+        — which is why #7767 rejected a journal-only pre-flight for the same
+        family on `backup.restore` — and the pending-snapshot route's
+        `rebuild_all` wipes before it can raise. A verdict after the mutation
+        cannot un-apply it by ordering, so it is undone instead.
+
+        SAFE BY THE ENTRY INVARIANT, not by inspection: this function returns
+        early on `db_count is None` and on `db_count > 0`, so reaching any
+        post-replay branch PROVES the graph held 0 nodes when the call started
+        and that every node now present was created by the replay being
+        declined. Wiping it back is therefore an exact rollback, not a loss —
+        PROVIDED the source those nodes were reconstructed from is still
+        durable, which is what `source_durable` asserts:
+
+          * the apply-replay legs rebuild from the adjacent JSONL, a file this
+            function never writes, so their source is ALWAYS durable and the
+            rollback is always safe; the retry re-reads the same log.
+          * the pending-snapshot route goes through `rebuild_all`, which is
+            DESTRUCTIVE and whose `@_fail_closed` assertion runs AFTER the
+            function body — so a post-replay refusal retires the #2943 sidecar
+            (``_clear_prewipe_snapshot``) before it raises. There the graph is
+            the last copy of those graph-only nodes, and wiping it would
+            destroy data rather than undo a derivation. The rollback is
+            therefore REFUSED for that shape, and the partial graph is kept
+            for an explicit `tortoise rebuild --dir` (the #2943 "no loss
+            without proof" posture) with the reason naming why.
+
+        WITHOUT the rollback the store is left PARTIALLY populated by a
+        recovery the caller is about to refuse. The next open then reads
+        `db_count > 0` and takes the OTHER refusal (`"graph already has nodes —
+        no rebuild"`), so the retry path is gone and a store that is neither
+        empty nor correct is served — loudly on the `_recover_or_raise` leg,
+        but only as a warning on the lost-graph leg. Restoring the empty state
+        keeps the failure loud AND retryable: a repaired journal, or a
+        deliberate node-less reset, re-enters this same path.
+
+        Never raises — this function's contract is to REPORT a replay failure
+        (`recovered: False`), so a refused or failed rollback becomes an
+        additive `reason` clause rather than an exception. A `db_count` of
+        0/None means there is nothing to undo (the replay applied nothing, or
+        the backend died before the verdict and cannot be asked to wipe).
+        """
+        if not after:
+            return result
+        if not source_durable:
+            result["reason"] = (
+                f"{result.get('reason')}; the declined replay had already "
+                f"populated the graph, but its reconstruction source is no "
+                f"longer durable — the destructive route retired the #2943 "
+                f"pre-wipe sidecar before the refusal — so the rollback is "
+                f"REFUSED: wiping here would destroy the last copy of the "
+                f"graph-only nodes. The partial graph is kept; replay it "
+                f"explicitly with `tortoise rebuild --dir {events_dir}` "
+                f"(#7929/#2943).")
+            return result
+        wipe = getattr(projection, "_wipe_all_nodes", None)
+        if not callable(wipe):
+            result["reason"] = (
+                f"{result.get('reason')}; WARNING: the declined replay had "
+                f"already populated the graph and {type(projection).__name__} "
+                f"provides no rollback wipe (_wipe_all_nodes) — the store is "
+                f"left PARTIALLY rebuilt (#7929)")
+            return result
+        try:
+            # #2944: a non-empty wipe routes through the REBUILD-LANE path,
+            # which owns the per-call destructive opt-in token. The wipe is not
+            # a new deletion policy — it undoes nodes this very call created.
+            wipe(confirm_destructive=True,
+                 operation="recover_from_log rollback")
+        except Exception as e:
+            result["reason"] = (
+                f"{result.get('reason')}; WARNING: the declined replay had "
+                f"already populated the graph and the rollback wipe FAILED "
+                f"({e}) — the store is left PARTIALLY rebuilt; replay it "
+                f"explicitly with `tortoise rebuild --dir {events_dir}` "
+                f"(#7929)")
+            return result
+        result["replay_rolled_back"] = after
+        # The store IS empty again, so the reported count must say so: leaving
+        # the pre-wipe number here would contradict the graph a caller that
+        # ignores `replay_rolled_back` goes on to query. The discarded count is
+        # preserved on the flag itself.
+        result["db_points"] = 0
+        return result
 
     db_count = _node_count()
     if db_count is None:
@@ -2150,9 +2265,23 @@ def recover_from_log(events_dir: str, projection) -> dict:
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)
         except Exception as e:
-            return {"recovered": False, "log_points": 0, "db_points": 0,
-                    "reason": ("rebuild from the pending pre-wipe snapshot "
-                               f"failed: {e}")}
+            # #7929: `rebuild_all` wipes before it can raise, so this refusal
+            # can land on a partially replayed graph. Roll it back ONLY while
+            # the sidecar still exists — a post-replay `NonFoldedEventsError`
+            # (the `@_fail_closed` decorator, which runs after `rebuild_all`'s
+            # body) has ALREADY retired it, and the graph is then the last copy
+            # of the graph-only nodes: wiping there would lose data, so the
+            # rollback is refused and named instead. `db_points` reports the
+            # MEASURED count, not a hard-coded 0 — the store is not empty on
+            # the refused shape, and saying otherwise is the same lie about the
+            # store this change removes.
+            after = _node_count()
+            return _roll_back_declined_replay(
+                {"recovered": False, "log_points": 0,
+                 "db_points": after if after is not None else 0,
+                 "reason": ("rebuild from the pending pre-wipe snapshot "
+                            f"failed: {e}")}, after,
+                source_durable=os.path.exists(snapshot_path))
         # rebuild_all RAISES on failure, so reaching here IS a completed
         # recovery — not `nodes > 0`: a snapshot can legitimately carry only
         # the #990 half (a quarantined :Batch with no Points), and reporting
@@ -2427,7 +2556,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
     after = _node_count()
     nf_events = refused_events(_nf_entries)
     if nf_events:
-        return {
+        # #7929: the refused set is only knowable AFTER the replay, so this
+        # refusal lands on a graph the replay already populated. Restore the
+        # empty pre-call state (the entry invariant proves it), so the caller's
+        # refusal does not destroy the retry path.
+        return _roll_back_declined_replay({
             "recovered": False, "log_points": len(events),
             "db_points": after if after is not None else 0,
             "reason": (
@@ -2439,7 +2572,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
             # count, so the cap cannot make a large refusal look small.
             "non_folded_events": [
                 str(e) for e in _nf_entries[:_MAX_DIVERGENT_POINTS]],
-        }
+        }, after)
     ok = applied > 0 and after is not None and after > 0
     if refused:
         logger.warning(
@@ -2451,9 +2584,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
     extra = f" ({torn} skipped)" if torn else ""
     if refused:
         extra += f" ({refused} refused by the numeric domain)"
-    return {"recovered": ok, "log_points": len(events),
-            "db_points": after if after is not None else 0,
-            # The clause is ADDITIVE, so it rides BOTH branches — an `ok: False`
-            # result is exactly when a refused count matters most.
-            "reason": (f"replayed {applied} events from {files[0]}{extra}" if ok
-                       else f"replay produced an empty graph{extra}")}
+    result = {"recovered": ok, "log_points": len(events),
+              "db_points": after if after is not None else 0,
+              # The clause is ADDITIVE, so it rides BOTH branches — an `ok: False`
+              # result is exactly when a refused count matters most.
+              "reason": (f"replayed {applied} events from {files[0]}{extra}"
+                         if ok else f"replay produced an empty graph{extra}")}
+    # #7929: `ok is False` is the other late verdict this replay can reach —
+    # nothing applied yet the graph is non-empty (a deferred CORRECTS/link fold
+    # landed) — and it must not leave that partial population behind either.
+    return result if ok else _roll_back_declined_replay(result, after)
