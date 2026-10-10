@@ -1411,6 +1411,76 @@ def test_a_clean_replay_whose_count_fails_is_not_reported_as_empty(monkeypatch):
         proj.close()
 
 
+def test_the_pending_route_reports_an_unmeasurable_count_as_unknown(monkeypatch):
+    """#7929 review: the pending pre-wipe-snapshot route's refusal must not
+    flatten an unmeasurable count to 0 either.
+
+    That route reaches its refusal through an `except` on `rebuild_all`, and it
+    then measures the graph to report how much survived. The measurement can
+    fail (`_node_count` returns None on a dead backend), and reporting 0 there
+    asserts an empty store while the merged graph — the last copy of the
+    graph-only nodes — is still on disk.
+
+    FAILS IF: this route flattens the unmeasurable count to 0.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pendingunmeasured.db")
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    proj = _lost_store(db_path)
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(3):
+        log.append(_point_event(i))
+    # Same shape as the refusal fixture: a belief write no record creates, so
+    # `rebuild_all` raises AFTER its own wipe + replay and this route's
+    # `except` (the site under test) runs.
+    log.append({"type": "ConfidenceChanged", "id": "p-never-created",
+                "confidence": 0.9, "event_id": "e-7929-belief-u"})
+    sidecar = prewipe_snapshot_path(tmp)
+    _write_prewipe_snapshot(sidecar, {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-failure count was never taken — this fixture is not "
+            "exercising the pending route's measurement")
+        assert r["recovered"] is False, r
+        assert "pending pre-wipe snapshot" in r["reason"], r["reason"]
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r} on the "
+            f"pending route; 0 asserts an empty store that was never observed")
+    finally:
+        proj.close()
+
+
 def test_the_rollback_wipe_uses_the_rebuild_lane_token(monkeypatch):
     """#2944 reciprocity: a non-empty wipe ADDED to `recover_from_log` must
     route through the REBUILD-LANE path (`_wipe_all_nodes`), which owns the
