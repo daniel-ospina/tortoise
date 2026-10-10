@@ -1628,12 +1628,18 @@ class Dispatcher:
             try:
                 raw = getter(workspace, surface)
             except TypeError:
-                # A seam predating surface-scoping: ask it the old way rather than
-                # silently degrading to "no binding".
-                try:
-                    raw = getter(workspace)
-                except Exception:  # broad by design: a probe is best-effort
+                # A seam predating surface-scoping. Ask it the OLD one-arg way only
+                # when no surface is named — there the one-arg answer names the same
+                # pane. For a NAMED surface a one-arg answer is the SELECTED
+                # surface's binding, i.e. the very P1 this function exists to
+                # prevent, cached under the target's key (#7913 review).
+                if surface is not None:
                     raw = PROBE_UNAVAILABLE
+                else:
+                    try:
+                        raw = getter(workspace)
+                    except Exception:  # broad by design: a probe is best-effort
+                        raw = PROBE_UNAVAILABLE
             except Exception:  # broad by design: a probe is best-effort
                 raw = PROBE_UNAVAILABLE
         if raw is PROBE_UNAVAILABLE:

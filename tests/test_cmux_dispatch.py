@@ -3359,6 +3359,26 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
         )
         self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
 
+    def test_a_legacy_seam_cannot_answer_for_a_NAMED_surface(self):
+        # A `pane_session_id(workspace)` seam predating surface-scoping answers for
+        # the workspace's SELECTED surface. Accepting that answer for a NAMED
+        # target surface is the P1 in cache form (#7913 review).
+        class LegacyCmux(FakeCmux):
+            def pane_session_id(self, workspace):  # no surface parameter
+                return "99999999-9999-4999-8999-999999999999"
+
+        dispatcher = cd.Dispatcher(LegacyCmux(), sleep=self._clock.sleep)
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", "surface:16"),
+            (False, None),
+            "a one-arg seam must not answer for a named surface",
+        )
+        self.assertEqual(
+            dispatcher.pane_binding("workspace:14", None)[1],
+            "99999999-9999-4999-8999-999999999999",
+            "with no surface named, the one-arg answer names the same pane",
+        )
+
     def test_the_refusal_names_a_MALFORMED_binding(self):
         # A binding that is not an id shape is refused AND said to be malformed:
         # reporting it as "no transcript for this pane" sends the operator after
