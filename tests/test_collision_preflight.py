@@ -3326,6 +3326,80 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("merged into origin/main", out)
 
+    def test_branch_hit_reports_its_ahead_count_and_still_blocks(self):
+        # #6108: an EMPTY branch named after an issue and a branch holding real
+        # WIP printed IDENTICALLY, so the operator could not tell "a lane is
+        # working this" from "a branch whose name contains this number exists".
+        # Measured on four P0 issues, two of them empty; the difference was
+        # discoverable only by running `git rev-list --count origin/main..<b>`
+        # BY HAND afterwards. The count is now in the hit line.
+        #
+        # ⛔ THE COUNT IS REPORTED, NOT ACTED ON, and this test pins BOTH halves.
+        # The tempting follow-up — demote `ahead == 0` to non-blocking — was
+        # implemented and REFUSED: it reddened 8 tests that pin the decision
+        # (`test_branch_created_at_main_tip_with_no_commits_still_blocks`,
+        # `test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent`,
+        # `test_unresolvable_main_tip_never_downgrades`, ...). A future edit that
+        # starts DEMOTING 0-ahead refs reddens here as well, which is the point:
+        # the count informs the reader, it does not decide for them.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-empty")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn(f"refs/heads/fix/{ISSUE}-empty", out)
+        self.assertIn("0 commit(s) ahead", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_branch_hit_reports_a_nonzero_ahead_count(self):
+        # The other half of the datum, and the one that makes it useful: a branch
+        # with real WIP says so, and keeps blocking. TWO commits, so the count
+        # cannot be confused with the empty branch's 0 above.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-wip")
+        for i in (1, 2):
+            (self.repo / f"w{i}.txt").write_text("w\n")
+            _git(self.repo, "add", f"w{i}.txt")
+            _git(self.repo, "commit", "-q", "-m", f"wip {i}")
+        _git(self.repo, "checkout", "-q", "main")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn("2 commit(s) ahead", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_remote_branch_hit_also_reports_its_ahead_count(self):
+        # #6108 asks for the same treatment off the local surface, and the
+        # remote refs are where the OVER-BLOCK actually lands: the live refusal
+        # list for the measured issue named two remote refs, and #7693 keeps
+        # them blocking by design. A count here is REPORTING only — it does not
+        # change the verdict — which is exactly what makes the over-block
+        # auditable without reversing that decision.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "update-ref", f"refs/remotes/origin/fix/{ISSUE}-rc", "HEAD")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-rc", out)
+        self.assertIn("0 commit(s) ahead", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_unreadable_ahead_count_returns_none_and_is_never_fabricated(self):
+        # ⛔ THE FAIL-CLOSED HALF OF #6108's DATUM. `_ahead_behind` returns None
+        # when git cannot answer, and the caller must print NO count rather than
+        # "0": a fabricated zero reads as "empty branch, safe to ignore" on a
+        # ref whose distance from main was never measured — a false CLEAN
+        # manufactured out of a missing measurement.
+        bogus = self.tmp / "not-a-git"
+        bogus.write_text("#!/bin/sh\nexit 128\n")
+        bogus.chmod(0o755)
+        mod = _tool_module()
+        self.assertIsNone(
+            mod._ahead_behind(str(bogus), str(self.repo), "refs/heads/main", 10.0)
+        )
+        # And a code path that cannot even be EXECUTED is None too, not a raise.
+        self.assertIsNone(
+            mod._ahead_behind("/nonexistent/git", str(self.repo), "refs/heads/main", 10.0)
+        )
+
     def test_unresolvable_first_parent_never_downgrades(self):
         # ⛔ THE `first_parent is not None` GUARD AND `_first_parent_shas`'s
         # `return None`, both of which were unfalsifiable before this stub: no

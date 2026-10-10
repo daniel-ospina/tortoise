@@ -1970,6 +1970,54 @@ def _ancestor_merged_refs(
     return {ln.strip() for ln in out.splitlines() if ln.strip()}
 
 
+def _ahead_behind(
+    git_bin: str, repo: str, ref: str, timeout: float,
+) -> tuple[int, int] | None:
+    """(ahead, behind) of `ref` relative to `origin/main`, or None if unreadable.
+
+    #6108: the ONE datum that lets an operator tell "a lane has committed work
+    here" from "a branch with this issue's number in its name exists" was
+    measured NOWHERE in the output. The verdict was therefore identical for a
+    branch with 7 commits of WIP and for an empty branch created three days ago
+    and abandoned, and the difference was discoverable only by running
+    `git rev-list --count origin/main..<branch>` by hand afterwards — measured
+    on four P0 issues, two of which were empty.
+
+    `--left-right` on `origin/main...<ref>` prints `<left>\t<right>`, where the
+    LEFT count is the commits reachable from the first operand alone (main, i.e.
+    BEHIND) and the RIGHT count is those reachable from the ref alone (AHEAD).
+    The order is the reverse of the tuple, so it is unpacked explicitly rather
+    than positionally.
+
+    ONE local git call, and it runs ONLY for refs that already matched the issue
+    number — so it is normally 0-5 calls per run. It is deliberately NOT
+    `for-each-ref`-batched: batching means walking every one of this repo's ~1686
+    local refs to answer a question about three of them.
+
+    ANY failure returns None, and a caller must treat None as "not measured"
+    rather than as "zero ahead": a branch that could not be counted keeps
+    BLOCKING. A missing measurement must never become a downgrade — the same
+    fail-closed rule the terminal predicates above rest on.
+    """
+    rc, out, _err, _timed_out = _run(
+        [git_bin, "rev-list", "--count", "--left-right",
+         f"origin/main...{ref}"],
+        repo, timeout,
+    )
+    if rc != 0:
+        return None
+    parts = out.split()
+    if len(parts) != 2:
+        return None
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if ahead < 0 or behind < 0:  # pragma: no cover - defensive
+        return None
+    return ahead, behind
+
+
 def _branch_terminal_state(
     ref: str, sha: str | None, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
@@ -2402,6 +2450,7 @@ def scan_branch_surface(
     first_parent: set[str] | None,
     remote_namespaces: set[str] | None = None,
     targeted_terminal: dict[str, str] | None = None,
+    counts: object = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -2482,7 +2531,43 @@ def scan_branch_surface(
                 "weak",
             )
             continue
-        surface.add(ref, f"matched issue-number ({issue})", "strong")
+        # #6108: the ahead-count, reported on EVERY branch hit. A gate whose two
+        # cases — "a lane has committed work here" and "an empty branch whose
+        # name contains this number exists" — print identically cannot be
+        # audited by its reader, and an un-auditable gate gets overridden until
+        # it stops being a gate (#6108's own argument).
+        #
+        # ⛔ THE COUNT IS REPORTED, NOT ACTED ON, AND THAT IS DELIBERATE. The
+        # obvious next step — demote `ahead == 0` to non-blocking — is REFUSED
+        # here after measurement, not for lack of a mechanism. Every 0-ahead
+        # branch must keep blocking, and the test suite PINS it in terms that
+        # leave no room to refine within the frame: not only
+        # `test_branch_created_at_main_tip_with_no_commits_still_blocks` (the
+        # window `_branch_terminal_state` names — a lane between
+        # `git worktree add` and its first commit), but also
+        # `test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent`
+        # (a fresh branch main has since moved past) and
+        # `test_unresolvable_main_tip_never_downgrades` /
+        # `test_unresolvable_first_parent_never_downgrades` (no witness at all).
+        # A first attempt at exactly this demotion reddened those 8 tests.
+        #
+        # So this is a RECORDED DECISION with a stated trade-off, not a bug in
+        # the tool: the over-block is the accepted price of never reading a lane
+        # that has CLAIMED an issue — by creating the branch — as free. Changing
+        # it is a reopen to argue with the owner (#6108), never a quiet edit.
+        # Reporting the count is what makes that argument cheap: it is the one
+        # datum that lets a reader resolve the ambiguity by hand, which is
+        # precisely what #6108 asks for and what the verdict alone could not say.
+        ahead = behind = None
+        if counts is not None:
+            measured = counts(ref)  # type: ignore[operator]
+            if measured is not None:
+                ahead, behind = measured
+
+        detail = f"matched issue-number ({issue})"
+        if ahead is not None:
+            detail += f" — {ahead} commit(s) ahead / {behind} behind origin/main"
+        surface.add(ref, detail, "strong")
 
 
 def _worktree_blocks(porcelain: str) -> list[dict]:
@@ -4129,11 +4214,19 @@ def run_preflight(
             #
             # #7693 stays OPEN for the over-block. The evidence lives there and in
             # PR #7718; a doc line would not have stopped the collision.
+            # #6108: the ahead-count reaches the surface through a callable so
+            # the scan decides WHEN to pay for it — only for refs that already
+            # matched the issue number. See the note in `scan_branch_surface`
+            # for why the count is REPORTED and not acted on.
+            def _branch_counts(_ref: str) -> tuple[int, int] | None:
+                return _ahead_behind(git_bin, cwd, _ref, timeout)
+
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
                 remote_namespaces=remote_namespaces,
                 targeted_terminal=targeted_terminal,
+                counts=_branch_counts,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
