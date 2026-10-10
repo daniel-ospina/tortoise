@@ -89,7 +89,7 @@ def _mutations(events, pid: str) -> list[dict]:
 
 # ── Acceptance 1: an unrecognised status is refused, and writes nothing ───
 
-@pytest.mark.parametrize("bad", ["not-a-status-word", "", "deprecated"])
+@pytest.mark.parametrize("bad", ["not-a-status-word", "", "deprecated", None])
 def test_unrecognised_status_is_refused_and_writes_nothing(env, bad):
     """``''`` and the legacy ``'deprecated'`` are not vocabulary values.
 
@@ -198,5 +198,5 @@ def test_update_point_still_only_promotes_draft_to_live(env):
     assert _status(sdk, pid) == "live"
 
     for bad in ("archived", "retracted", "not-a-status-word", "", "deprecated"):
-        with pytest.raises(ValueError, match="Invalid status|only promotes"):
+        with pytest.raises(ValueError, match=r"Invalid status|only promotes"):
             sdk.update_point(pid, status=bad)
