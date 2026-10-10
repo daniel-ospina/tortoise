@@ -36,10 +36,14 @@ widened predicate would create.
 MUTATIONS THAT MUST RED:
 - drop the ``mitigated_by`` MERGE in ``edges.py::_create_edges`` → post-rebuild
   weight reads the undecayed base;
-- weaken its gate to ``not p.get("is_operator")`` (true on an ABSENT key) →
-  the EventAPI case reds (that payload carries no ``is_operator`` at all). The
-  SDK's generic operator stays green under that weakening because its payload
-  states ``is_operator: True`` — the absent-key case is the load-bearing one;
+- weaken the identity half of the gate to ``not p.get("is_operator")`` (true on
+  an ABSENT key) → the EventAPI case reds on its IDENTITY assertion (that
+  payload carries no ``is_operator`` at all, so the shared identity arm re-types
+  the operator as a non-operator, live and on rebuild). It does NOT red the edge
+  assertion — the strength half already excludes that payload — which is
+  exactly why the identity is asserted separately. The SDK's generic operator
+  stays green under that weakening because its payload states
+  ``is_operator: True``;
 - weaken the strength half of the gate (drop it, or accept a merely-present
   value) → a non-operator point carrying only an ``operator`` descriptor mints
   ``mitigated_by`` and dampens that operator by the fallback strength (the fold
@@ -122,6 +126,15 @@ def _all_mitigated_by(sdk):
         "MATCH (a:Point)-[:mitigated_by]->(b:Point) RETURN a.id, b.id"
     ).result_set
     return sorted(tuple(r) for r in rows) if rows else []
+
+
+def _point_identity(sdk, pid):
+    """``(is_operator, op_type)`` of one node — the identity a replay must keep."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.op_type",
+        params={"id": pid},
+    ).result_set
+    return tuple(rows[0]) if rows else None
 
 
 def _mitigation_row(sdk):
@@ -439,12 +452,26 @@ class TestMitigatedBySurvivesRebuild:
             prov = provenance("doc.txt", [0, 10], "quote", extracted_by="t@0")
             a = api.add_point("T0 source", prov)
             b = api.add_point("downstream claim", prov)
-            api.add_operator("IMPL", [a, b], prov)
+            op_id = api.add_operator("IMPL", [a, b], prov)
 
+            # The EDGE assertion alone is NOT enough here: the strength half of
+            # the gate already excludes this payload, so a predicate reading the
+            # flag as merely FALSY (`not p.get("is_operator")`) still leaves the
+            # edge absent — while silently re-typing the operator as a
+            # non-operator through the shared identity arm. Assert the identity
+            # too, live and after the rebuild.
+            assert _point_identity(sdk, op_id) == (True, "IMPL"), (
+                "a live EventAPI IMPL operator was re-typed: "
+                f"{_point_identity(sdk, op_id)!r}"
+            )
             assert _all_mitigated_by(sdk) == [], (
                 "a live EventAPI IMPL operator gained mitigated_by edges"
             )
             proj.rebuild_all(events, confirm_destructive=True)
+            assert _point_identity(sdk, op_id) == (True, "IMPL"), (
+                "replay re-typed a generic EventAPI IMPL operator: "
+                f"{_point_identity(sdk, op_id)!r}"
+            )
             assert _all_mitigated_by(sdk) == [], (
                 "a replayed EventAPI IMPL operator gained mitigated_by edges"
             )
