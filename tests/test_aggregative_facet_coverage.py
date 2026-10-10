@@ -377,3 +377,77 @@ def test_arm_records_per_outcome_vocabulary(seeded_sdk):
     assert verdict["signal"] == "none"
     assert verdict["reason"] == "not_aggregative"
     assert verdict["facet_coverage"] is None
+
+
+# ── #2886: deterministic temporal-aggregation resolution arm (docker lane) ──
+
+def test_temporal_aggregate_off_by_default_byte_identical(seeded_sdk,
+                                                          monkeypatch):
+    """Default (no kwarg, no env) == explicit ``temporal_aggregate=False`` —
+    byte-identical outcomes with NO verdict key: the arm changes nothing
+    without opt-in (the #1745 fail-safe default decision)."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    monkeypatch.delenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", raising=False)
+    default = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60)
+    assert "temporal_aggregate" not in default
+    assert "temporal_aggregate_verdict" not in default
+    off = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        temporal_aggregate=False)
+    assert {k: v for k, v in off.items() if k != "retrieval_latency_ms"} \
+        == {k: v for k, v in default.items()
+            if k != "retrieval_latency_ms"}, \
+        "explicit OFF must be byte-identical to default"
+
+
+def test_temporal_aggregate_env_gate_failsafe_off_and_tristate(
+        seeded_sdk, monkeypatch):
+    """The #2886 arm is fail-safe OFF: unset and garbage resolve no verdict,
+    only explicit truthy (1/true/yes/on) arms it. Explicit flags beat the env
+    in both directions."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    monkeypatch.delenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", raising=False)
+    assert "temporal_aggregate_verdict" not in retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60)
+    monkeypatch.setenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", "garbage")
+    assert "temporal_aggregate_verdict" not in retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60)
+    monkeypatch.setenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", "1")
+    on = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60)
+    assert on["temporal_aggregate"] is True
+    assert on["temporal_aggregate_verdict"] is not None
+    monkeypatch.setenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", "1")
+    forced_off = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        temporal_aggregate=False)
+    assert "temporal_aggregate_verdict" not in forced_off
+    monkeypatch.delenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", raising=False)
+    forced_on = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        temporal_aggregate=True)
+    assert forced_on["temporal_aggregate"] is True
+
+
+def test_temporal_aggregate_arm_resolves_count_over_admitted_pool(
+        seeded_sdk, monkeypatch):
+    """Under the arm, a COUNT question is resolved by the #2886 owner over
+    the ADMITTED pool — the verdict is genuinely produced and classified
+    (not a marker-only stub). When the admitted pool is non-empty the owner
+    publishes a tally (value == distinct events); the pure resolution
+    correctness lives in ``tests/test_temporal_aggregate_arm.py``."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    monkeypatch.delenv("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG", raising=False)
+    q = _question()
+    q["question"] = "how many times did the road bike repairs cost me money"
+    ret = retrieve_for_question(
+        seeded_sdk, q, ks=(5,), top_k=10, pool_size=60,
+        temporal_aggregate=True)
+    verdict = ret["temporal_aggregate_verdict"]
+    assert verdict["kind"] == "count"
+    assert "n_span_bounded_events" in verdict
+    if verdict["value"] is not None:
+        assert verdict["reason"] is None
+        assert verdict["value"] == verdict["n_events"]
+        assert verdict["value"] >= 1

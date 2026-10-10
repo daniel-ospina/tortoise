@@ -189,3 +189,31 @@ def test_build_rows_is_deterministic():
     census = fcd.load_census()
     outcomes = fcd.load_outcomes()
     assert fcd.build_rows(census, outcomes) == fcd.build_rows(census, outcomes)
+
+
+def test_resolution_readout_from_arm_verdict():
+    """The #2886 wiring read-out: a committed outcome carrying the arm's
+    verdict reports ``resolved`` when a value was published and
+    ``abstained:<reason>`` when the owner declined — never guessing. An
+    outcome without a verdict is ``unmeasured`` (the arm was OFF)."""
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {"value": 30,
+                                                    "reason": None}}) \
+        == "resolved"
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "value": None, "reason": "no_anchors"}}) == "abstained:no_anchors"
+    assert fcd.resolution_for({"qid": "x"}) == "unmeasured"
+    # A malformed verdict (not a mapping) is not a resolution.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": "garbage"}) == "unmeasured"
+
+
+def test_summary_counts_deterministic_resolution():
+    """The summary surfaces the arm read-out; the committed (arm-OFF) rows
+    are all ``unmeasured`` and the split is not invented."""
+    rows = fcd.build_rows(fcd.load_census(), fcd.load_outcomes())
+    summary = fcd.summarize(rows)
+    assert summary["deterministic_resolution"] == {
+        "resolved": 0, "abstained": 0, "unmeasured": 12}
+    assert all(r["deterministic_resolution"] == "unmeasured" for r in rows)

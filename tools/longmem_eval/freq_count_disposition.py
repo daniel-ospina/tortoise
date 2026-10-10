@@ -206,6 +206,29 @@ def disposition_for(outcome: Mapping) -> str:
     return "fixed-by-admission" if label else "conversion"
 
 
+def resolution_for(outcome: Mapping) -> str:
+    """How the #2886 deterministic temporal-aggregation arm resolved the
+    question, read off the per-outcome verdict the arm records.
+
+    * ``resolved`` — the owner (``resolve_temporal_aggregate``) published a
+      value (the deterministic path closed it);
+    * ``abstained:<reason>`` — the owner declined (no anchors / no events /
+      no unit — never a guess);
+    * ``unmeasured`` — the committed outcome carries NO verdict (the arm was
+      OFF, the default, or the row predates the wiring). An absent field is
+      never read as a resolution.
+
+    This is the field that turns the acceptance's "how many of the 12 were
+    fixed" into a read-out once a gold-admitting run records the arm.
+    """
+    verdict = outcome.get("temporal_aggregate_verdict")
+    if not isinstance(verdict, Mapping):
+        return "unmeasured"
+    if verdict.get("value") is not None:
+        return "resolved"
+    return f"abstained:{verdict.get('reason') or 'unknown'}"
+
+
 def build_rows(census: Mapping, outcomes: Mapping[str, dict]) -> list[dict]:
     """One disposition row per census class member, in census order."""
     rows: list[dict] = []
@@ -235,6 +258,11 @@ def build_rows(census: Mapping, outcomes: Mapping[str, dict]) -> list[dict]:
             "reader_refusal": (
                 outcome.get("reader_refusal") if outcome else None),
             "disposition": disposition_for(outcome) if outcome else "unmeasured",
+            # #2886: how the deterministic arm resolved the question when it
+            # ran (the wiring's read-out); ``unmeasured`` when the committed
+            # outcome carries no verdict (arm OFF — the default).
+            "deterministic_resolution": (
+                resolution_for(outcome) if outcome else "unmeasured"),
             "answer": outcome.get("answer") if outcome else None,
             "issue": 2886,
         }
@@ -268,6 +296,15 @@ def summarize(rows: Iterable[Mapping], *,
         counts[r["disposition"]] = counts.get(r["disposition"], 0) + 1
     n_answerable = sum(1 for r in rows if is_answerable(str(r["qid"])))
     loaded_admitted = {str(r["qid"]) for r in rows if r.get("gold_admitted")}
+    resolution = {"resolved": 0, "abstained": 0, "unmeasured": 0}
+    for r in rows:
+        value = str(r.get("deterministic_resolution") or "unmeasured")
+        if value == "resolved":
+            resolution["resolved"] += 1
+        elif value.startswith("abstained:"):
+            resolution["abstained"] += 1
+        else:
+            resolution["unmeasured"] += 1
     if reachable_qids is None:
         reachable_qids = loaded_admitted
     return {
@@ -278,6 +315,10 @@ def summarize(rows: Iterable[Mapping], *,
         "fixed_by_admission": counts["fixed-by-admission"],
         "abstention_controls": counts["abstention-control"],
         "unmeasured": counts["unmeasured"],
+        # #2886: the deterministic arm's read-out over these rows — resolved
+        # (a value published) vs abstained (never a guess, with reason).
+        # ``unmeasured`` is the default (arm OFF / pre-wiring outcome).
+        "deterministic_resolution": resolution,
         # ``conversion == 0`` is a MEASUREMENT only when the rows being
         # summed actually observed gold admitted for a class member; an
         # admission in some OTHER arm (the union scan) never tested these

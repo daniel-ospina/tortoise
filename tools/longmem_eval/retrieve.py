@@ -597,6 +597,86 @@ def detect_time_constraint(text: str, *,
     return TimeConstraint(None)
 
 
+def temporal_aggregate_verdict(
+    question: str,
+    hits: list[dict],
+    *,
+    constraint: TimeConstraint | None = None,
+) -> dict[str, Any]:
+    """Deterministic temporal-aggregation resolution over the ADMITTED hits
+    (#2886 wiring).
+
+    Pure/IO-free: classifies the question with the shipped #2886 owner
+    (``tortoise.temporal_aggregation``) and resolves it through the named
+    ``resolve_temporal_aggregate`` path over the admitted dated hits the
+    reader already received. COUNT/TOTAL tally the distinct admitted events;
+    the date-arithmetic shapes (interval / before-offset / duration) take the
+    two anchor dates the caller already extracted (``constraint`` — the eval's
+    ``detect_time_constraint`` ISO bounds for an explicit ``between`` window)
+    and abstain (``reason="no_anchors"``) when those anchors are absent.
+
+    It NEVER changes the answer: the owner abstains rather than guesses
+    (non-temporal / no anchors / empty admitted set), so the reader lane keeps
+    the case — a reader-model swap stays #2013-gated. The verdict rides the
+    eval outcome ONLY under the OFF-by-default arm, so a gold-admitting run
+    can read out how many conversion-bound cases the deterministic path
+    closes.
+
+    Returns a JSON-able verdict; ``kind=None`` / ``reason="not_temporal"``
+    for a question that is not a temporal aggregation.
+    """
+    from tortoise.temporal_aggregation import as_date, resolve_temporal_aggregate
+    events = [
+        {"event_id": h.get("id"), "content": h.get("content"),
+         "session_date": h.get("session_date")}
+        for h in hits
+    ]
+
+    def _has_span(h: dict) -> bool:
+        """True when the hit carries BOTH bounds the TOTAL path needs.
+        The eval's ranked hits carry ``session_date`` only, so a TOTAL over
+        them sums zero spans (the module's documented "a span-less event
+        contributes 0 but still counts"): the published ``total`` is then
+        not a measured sum, and ``n_span_bounded_events`` makes that
+        auditable rather than silently read as a real zero."""
+        start = next(
+            (as_date(h.get(k)) for k in
+             ("start_date", "started_at", "session_date", "date",
+              "created_at") if as_date(h.get(k)) is not None), None)
+        end = next(
+            (as_date(h.get(k)) for k in
+             ("end_date", "ended_at", "completed_at", "question_date")
+             if as_date(h.get(k)) is not None), None)
+        return start is not None and end is not None
+
+    # The two arithmetic anchors: the eval already computed the ISO bounds for
+    # an explicit ``between <date> and <date>`` window (``kind == "interval"``).
+    # A recency ``start`` is a DAY COUNT, not a date, so it is deliberately not
+    # forwarded; every event-referenced arithmetic shape abstains until its two
+    # anchors are resolved (the reported remainder).
+    start = end = None
+    if constraint is not None and constraint.kind == "interval":
+        start, end = constraint.start, constraint.end
+    res = resolve_temporal_aggregate(
+        question, events=events, start=start, end=end)
+    intent = res.intent
+    return {
+        "kind": res.kind.value if res.kind is not None else None,
+        "unit": res.unit,
+        "distinct": intent.distinct if intent is not None else None,
+        "value": res.value,
+        "method": res.method,
+        "n_events": res.n_events,
+        "reason": res.reason,
+        "n_dated_events": sum(
+            1 for h in hits if str(h.get("session_date") or "").strip()),
+        # TOTAL-only honesty diagnostic: how many admitted events carried BOTH
+        # bounds. 0 means a published ``total`` sum rode zero spans.
+        "n_span_bounded_events": sum(1 for h in hits if _has_span(h)),
+        "anchors": ({"start": start, "end": end} if start and end else None),
+    }
+
+
 def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
                        *, question_date: str | None) -> list[dict]:
     """R5 (D5): hard time-window filter on the annotated hits' session_date.
@@ -1171,6 +1251,20 @@ def retrieve_for_question(
     # C3-3) — it records {detected_intent, facet_coverage, missing_facets}
     # per outcome so the routing's signal-to-flag mapping is decidable.
     aggregative_flag: bool | None = None,
+    # #2886 (census frequency/count): deterministic temporal-aggregation
+    # resolution arm — tri-state (True/False explicit, None = env
+    # ``TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG``; only 1/true/yes/on enables —
+    # fail-safe OFF, the #1745 default decision). When ON, each question's
+    # outcome records the #2886 owner's resolution over the ADMITTED dated
+    # hits (``resolve_temporal_aggregate`` via :func:`temporal_aggregate_verdict`)
+    # as ``temporal_aggregate_verdict`` — distinct-event tally for COUNT/TOTAL,
+    # calendar difference for interval/before-offset/duration when the two
+    # anchors are in hand, else an explicit abstention (``reason``). This is
+    # the MEASUREMENT wiring the #2886 disposition named as its remainder
+    # (mirrors #2521's ``aggregative_flag``): it does NOT change retrieval or
+    # the answer — a reader-model swap stays #2013-gated — it records the
+    # verdict so a gold-admitting run can split structural from conversion.
+    temporal_aggregate: bool | None = None,
     # A6 (Slice A #2683, epic #2080): the evidence-package ASSEMBLY arm —
     # tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_EVIDENCE_ASSEMBLY``; only 1/true/yes/on enables —
@@ -1349,6 +1443,17 @@ def retrieve_for_question(
         _agg_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG")
                     or "")
         aggregative_flag_on = _agg_env.strip().lower() in _AGG_TRUTHY
+    # #2886: resolve the deterministic temporal-aggregation arm tri-state the
+    # same way (explicit flag > env > OFF — fail-safe: only 1/true/yes/on
+    # enables). The verdict rides the outcome ONLY under the arm (D2: the
+    # off-path dict keeps today's exact shape).
+    if temporal_aggregate is not None:
+        temporal_aggregate_on = temporal_aggregate
+    else:
+        from .rerank import _TRUTHY as _TA_TRUTHY
+        _ta_env = (os.environ.get("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG")
+                   or "")
+        temporal_aggregate_on = _ta_env.strip().lower() in _TA_TRUTHY
     # A6 (Slice A #2683): resolve the evidence-package assembly tri-state the
     # same way (explicit flag > env > OFF — fail-safe: only 1/true/yes/on
     # enables). The resolved bool rides the outcome as the arm marker; the
@@ -2268,6 +2373,23 @@ def retrieve_for_question(
                 question.get("question_id", "?"), exc_info=True)
             aggregative_verdict_out = None
 
+    # ── #2886: deterministic temporal-aggregation resolution (MEASUREMENT
+    # seam — retrieval/answer behavior is untouched). Under the arm ONLY:
+    # classify the question and resolve it over the admitted dated hits the
+    # reader already received. Fail-open (the #1745 default): an unexpected
+    # failure records no verdict rather than breaking a working lane.
+    temporal_aggregate_verdict_out: dict | None = None
+    if temporal_aggregate_on:
+        try:
+            temporal_aggregate_verdict_out = temporal_aggregate_verdict(
+                question["question"], pool[:effective_top_k],
+                constraint=tr_constraint)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "temporal aggregation verdict failed open for %s",
+                question.get("question_id", "?"), exc_info=True)
+            temporal_aggregate_verdict_out = None
+
     out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
@@ -2438,6 +2560,13 @@ def retrieve_for_question(
     # the OFF arm render identically).
     if aggregative_flag_on:
         out["aggregative_verdict"] = aggregative_verdict_out
+    # #2886: the temporal-aggregation arm marker + verdict ride the outcome
+    # ONLY under the arm (D2 — the off-path dict keeps today's exact shape;
+    # the report projection reads them via o.get so pre-feature checkpoints
+    # and the OFF arm render identically).
+    if temporal_aggregate_on:
+        out["temporal_aggregate"] = True
+        out["temporal_aggregate_verdict"] = temporal_aggregate_verdict_out
     # Conditional keys (D2): the off-path dict keeps today's exact shape.
     if rerank_on:
         out["rerank_pass"] = rerank_pass

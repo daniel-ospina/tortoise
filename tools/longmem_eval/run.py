@@ -1434,6 +1434,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # knobs (a flagged checkpoint resumed without the arm
                        # is refused by the fingerprint gate).
                        aggregative_flag: bool | None = None,
+                       # #2886: the deterministic temporal-aggregation
+                       # resolution arm — conditional presence like the other
+                       # measurement arms (a valued checkpoint resumed
+                       # without the arm is refused by the fingerprint gate).
+                       temporal_aggregate: bool | None = None,
                        max_chunks_per_session: int | None = None,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
@@ -1606,6 +1611,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
             ("aggregative_flag", aggregative_flag),
+            # #2886: the deterministic temporal-aggregation resolution arm
+            # — conditional presence like the C2/C5 knob (a valued
+            # checkpoint resumed without the arm is refused).
+            ("temporal_aggregate", temporal_aggregate),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
             # presence (the eval always passes 1500, so a fingerprint-bearing
@@ -3651,6 +3660,14 @@ def run_evaluation(
     # records {detected_intent, facet_coverage, missing_facets} per outcome
     # under the arm.
     aggregative_flag: bool | None = None,
+    # #2886 (census frequency/count): the deterministic temporal-aggregation
+    # resolution arm — tri-state (explicit flag > ``TORTOISE_LME_TEMPORAL_
+    # AGGREGATE_FLAG`` env > OFF, the #1745 fail-safe default). Resolved once,
+    # fingerprinted, and recorded in the methodology; the per-question
+    # ``temporal_aggregate_verdict`` (present under the arm only) records the
+    # #2886 owner's resolution over the admitted dated hits. Measurement only
+    # — it does NOT change retrieval/answer behavior.
+    temporal_aggregate: bool | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -3839,6 +3856,14 @@ def run_evaluation(
     if aggregative_flag is None:
         af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
         aggregative_flag = af_env.strip().lower() in _TRUTHY
+    # #2886: resolve the deterministic temporal-aggregation arm tri-state
+    # ONCE, before the loop — same fail-safe contract (only 1/true/yes/on
+    # enables; a None with the env unset records OFF and the per-question
+    # outcomes stay byte-identical).
+    if temporal_aggregate is None:
+        ta_env = (os.environ.get("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG")
+                  or "")
+        temporal_aggregate = ta_env.strip().lower() in _TRUTHY
     # #2578 (Task 1): resolve the measurement-lane gate tri-state ONCE,
     # before the loop — same fail-safe contract as the C2 knobs (only
     # 1/true/yes/on enables; a None with the env unset records OFF and the
@@ -3977,6 +4002,10 @@ def run_evaluation(
         # fingerprint — a flagged checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         aggregative_flag=bool(aggregative_flag),
+        # #2886: the resolved deterministic temporal-aggregation arm rides
+        # the fingerprint — a valued checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        temporal_aggregate=bool(temporal_aggregate),
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
@@ -4459,6 +4488,11 @@ def run_evaluation(
                             # under the arm only; the C3-3 routing decides
                             # adoption).
                             aggregative_flag=aggregative_flag,
+                            # #2886: the deterministic temporal-aggregation
+                            # resolution arm (resolved above; OFF by default
+                            # — records the per-outcome verdict under the arm
+                            # only).
+                            temporal_aggregate=temporal_aggregate,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
@@ -4707,6 +4741,11 @@ def run_evaluation(
                         "aggregative_flag": ret.get("aggregative_flag"),
                         "aggregative_verdict": ret.get(
                             "aggregative_verdict"),
+                        # #2886: the deterministic temporal-aggregation arm
+                        # marker + verdict (present under the arm only).
+                        "temporal_aggregate": ret.get("temporal_aggregate"),
+                        "temporal_aggregate_verdict": ret.get(
+                            "temporal_aggregate_verdict"),
                         # R6 (#1545): the rerank pass + latency ride the outcome —
                         # they stay ABSENT on baseline outcomes (the projection in
                         # outcomes_to_report adds them conditionally).
@@ -5164,6 +5203,10 @@ def run_evaluation(
             # carry which A/B arm produced them; OFF by default — the C3-3
             # routing #2519 decides adoption).
             "aggregative_flag": bool(aggregative_flag),
+            # #2886: the deterministic temporal-aggregation resolution arm
+            # recorded verbatim in the methodology (published numbers carry
+            # which A/B arm produced them; OFF by default).
+            "temporal_aggregate": bool(temporal_aggregate),
             # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
             # + the write-path retry knobs recorded in the methodology so
             # the revalidation comparison can distinguish retried outcomes
@@ -5358,6 +5401,12 @@ def outcomes_to_report(
                 # checkpoints resume without KeyError).
                 "aggregative_flag",
                 "aggregative_verdict",
+                # #2886: the deterministic temporal-aggregation arm marker +
+                # verdict ride the projection (read via o.get — absent until
+                # the outcome carries them under the arm; pre-feature
+                # checkpoints resume without KeyError).
+                "temporal_aggregate",
+                "temporal_aggregate_verdict",
                 # #1948: the reader-surface metric rides the projection
                 # alongside reader_evidence@k (absent until the outcome
                 # carries it — pre-#1948 checkpoints resume without
@@ -5951,6 +6000,24 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C5 aggregative-intent detection even "
                          "when TORTOISE_LME_AGGREGATIVE_FLAG is set "
                          "(tri-state: explicit flags beat the env)")
+    # #2886: deterministic temporal-aggregation resolution — tri-state
+    # --temporal-aggregate / --no-temporal-aggregate (None default so the
+    # TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG env still applies; OFF by default
+    # in code). Measurement only — records the per-outcome verdict under the
+    # arm; retrieval/answer behavior is unchanged.
+    ta = p.add_mutually_exclusive_group()
+    ta.add_argument("--temporal-aggregate", dest="temporal_aggregate",
+                    action="store_true", default=None,
+                    help="enable the #2886 deterministic temporal-aggregation "
+                         "resolution over the admitted dated hits (records the "
+                         "resolver verdict per outcome; default: env "
+                         "TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG — OFF by "
+                         "default, #2886)")
+    ta.add_argument("--no-temporal-aggregate", dest="temporal_aggregate",
+                    action="store_false", default=None,
+                    help="disable the #2886 temporal-aggregation resolution "
+                         "even when TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG is "
+                         "set (tri-state: explicit flags beat the env)")
     p.add_argument("--evidence-boost-verbatim", type=float, default=None,
                    help="verbatim/raw-chunk mark rank-offset multiplier "
                         "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
@@ -6532,6 +6599,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         af_env = (os.environ.get("TORTOISE_LME_AGGREGATIVE_FLAG") or "")
         aggregative_flag = af_env.strip().lower() in _TRUTHY
+    # #2886: deterministic temporal-aggregation resolution — tri-state
+    # (CLI flag > TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG env > OFF — fail-safe:
+    # only 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual).
+    if args.temporal_aggregate is not None:
+        temporal_aggregate = args.temporal_aggregate
+    else:
+        ta_env = (os.environ.get("TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG")
+                  or "")
+        temporal_aggregate = ta_env.strip().lower() in _TRUTHY
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -6746,6 +6823,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # the per-outcome verdict under the arm; the C3-3 routing
                 # #2519 decides adoption).
                 aggregative_flag=aggregative_flag,
+                # #2886: the deterministic temporal-aggregation resolution
+                # arm (tri-state resolved above; OFF by default — records the
+                # resolver verdict per outcome under the arm only).
+                temporal_aggregate=temporal_aggregate,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],
