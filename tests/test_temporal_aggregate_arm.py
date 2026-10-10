@@ -53,7 +53,7 @@ def test_seam_kwarg_is_off_by_default():
 
 # ── (b) COUNT tallies the distinct dated events (non-vacuous) ─────────────
 
-def test_verdict_count_tallies_distinct_admitted_events():
+def test_verdict_count_tallies_distinct_candidate_events():
     hits = [
         _hit("e1", "Went to the gym.", "2025-01-01"),
         _hit("e2", "Went to the gym.", "2025-02-01"),
@@ -82,8 +82,8 @@ def test_verdict_count_folds_identity_less_restatement():
     assert v["value"] == 1
 
 
-def test_verdict_count_abstains_on_empty_admitted_set():
-    """An empty admitted set is NOT a measured zero — the owner abstains
+def test_verdict_count_abstains_on_empty_candidate_set():
+    """An empty candidate set is NOT a measured zero — the owner abstains
     (``no_events``) so the reader lane keeps the case."""
     v = temporal_aggregate_verdict("How many times did I skydive?", [])
     assert v["kind"] == "count"
@@ -107,7 +107,7 @@ def test_verdict_interval_from_explicit_iso_bounds():
 
 
 def test_verdict_event_referenced_arithmetic_abstains_no_anchors():
-    """The census class's shape: the two anchor EVENTS are admitted (with
+    """The census class's shape: the two anchor EVENTS are candidate hits (with
     dates) but the caller has not resolved WHICH two — the owner abstains
     (``no_anchors``) rather than guessing from the pool span. This is the
     recorded remainder, surfaced instead of silently mis-answered."""
@@ -164,6 +164,20 @@ def test_verdict_total_and_span_diagnostic_share_the_resolver_input():
     assert v["value"] > 0
 
 
+def test_verdict_reversed_span_is_not_a_bounded_event():
+    """A REVERSED span (``end < start``) is a data inconsistency the core's
+    ``_span_days`` rejects (it contributes nothing), so it is not a bounded
+    event here either — and a TOTAL over it is not a measured sum."""
+    hits = [_hit("e1", "Reading 'The Nightingale'.", "2025-01-01")]
+    hits[0]["start_date"] = "2025-01-08"
+    hits[0]["end_date"] = "2025-01-01"
+    v = temporal_aggregate_verdict(
+        "How many weeks in total do I spent on reading and listening?", hits)
+    assert v["kind"] == "total"
+    assert v["value"] == 0
+    assert v["n_span_bounded_events"] == 0
+
+
 # ── (d) the census class is exercised through the arm ──────────────────────
 
 def test_verdict_runs_over_all_12_census_class_qids():
@@ -172,16 +186,16 @@ def test_verdict_runs_over_all_12_census_class_qids():
     resolved anchors) — it never publishes a guessed number."""
     rows = [r for r in _CENSUS["rows"] if r.get("cls") == "frequency/count"]
     assert len(rows) == 12
-    admitted = [
-        _hit("a", "a dated admitted event.", "2025-01-01"),
-        _hit("b", "another dated admitted event.", "2025-02-01"),
+    candidates = [
+        _hit("a", "a dated candidate event.", "2025-01-01"),
+        _hit("b", "another dated candidate event.", "2025-02-01"),
     ]
     for row in rows:
-        v = temporal_aggregate_verdict(row["question"], admitted)
+        v = temporal_aggregate_verdict(row["question"], candidates)
         assert v["kind"] is not None, row["qid"]
         # The three date-arithmetic shapes abstain without resolved anchors.
         # The one summed-span row publishes the module's span-less sum (0):
-        # the diagnostic records that no admitted hit carried both bounds, so
+        # the diagnostic records that no candidate hit carried both bounds, so
         # the 0 is auditable rather than read as a measured total.
         if v["kind"] == "total":
             assert v["value"] in (None, 0), (row["qid"], v["value"])

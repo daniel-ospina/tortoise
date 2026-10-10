@@ -659,7 +659,12 @@ def temporal_aggregate_verdict(
         end = next(
             (as_date(h.get(k)) for k in _END_KEYS
              if as_date(h.get(k)) is not None), None)
-        return start is not None and end is not None
+        # Mirror the core's ``_span_days`` validity rule: a REVERSED span
+        # (``end < start``) is a data inconsistency that contributes nothing,
+        # so it is NOT a bounded event here either — otherwise the diagnostic
+        # would report a bounded event while the resolver published a
+        # zero-span sum.
+        return start is not None and end is not None and end >= start
 
     # The two arithmetic anchors: the eval already computed the ISO bounds for
     # an explicit ``between <date> and <date>`` window (``kind == "interval"``).

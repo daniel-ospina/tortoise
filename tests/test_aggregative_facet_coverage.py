@@ -430,11 +430,13 @@ def test_temporal_aggregate_env_gate_failsafe_off_and_tristate(
     assert forced_on["temporal_aggregate"] is True
 
 
-def test_temporal_aggregate_arm_resolves_count_over_admitted_pool(
+def test_temporal_aggregate_arm_resolves_count_over_reachable_pool(
         seeded_sdk, monkeypatch):
     """Under the arm, a COUNT question is resolved by the #2886 owner over
-    the ADMITTED pool — the verdict is genuinely produced and classified
-    (not a marker-only stub). When the admitted pool is non-empty the owner
+    the reader-reachable pool window (``pool[:effective_top_k]``; a two-sided
+    approximation of the reader's admitted set, #3594) — the verdict is
+    genuinely produced and classified
+    (not a marker-only stub). When the pool window is non-empty the owner
     publishes a tally (value == distinct events); the pure resolution
     correctness lives in ``tests/test_temporal_aggregate_arm.py``."""
     from tools.longmem_eval.retrieve import retrieve_for_question
