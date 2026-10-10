@@ -2,22 +2,18 @@
 #
 # Format: <path> <occurrences> <content-hash> #<issue>
 #
-# The guard is scripts/check-no-sigpipe-grep.sh — a SYMLINK into agent-infra, which is why
-# this file is at the REPO ROOT rather than under scripts/: a consumer repo cannot write
-# through that symlink. The guard resolves the root file in preference to the shared one
-# (agent-infra#1643). Semantics, unchanged: a declaration whose COUNT or CONTENT-HASH does
-# not match the file FAILS the guard, so neither a stale exception nor a count-preserving
-# swap can hide behind one, a declaration without a tracking issue is rejected, and every
-# declaration is printed LOUDLY on every run.
+# scripts/ is a SYMLINK into agent-infra, so the guard reached at
+# scripts/check-no-sigpipe-grep.sh cannot be written through — which is why this file is at
+# the REPO ROOT rather than under scripts/. The guard resolves the root file in preference to
+# the shared one (agent-infra#1643). Semantics, unchanged: a declaration whose COUNT or
+# CONTENT-HASH does not match the file FAILS the guard, so neither a stale exception nor a
+# count-preserving swap can hide behind one, a declaration without a tracking issue is
+# rejected, and every declaration is printed LOUDLY on every run.
 #
-# These three are TEST ASSERTION HELPERS. Their haystacks are captured test output — measured
-# at most ~3.5 KB — far below the ~64 KiB pipe buffer the race needs, so the false negative
-# cannot fire on them.
-#
-# CONVERTED, not declared: they were declared here while the PR that wired the guard in was
-# pending, and are now here-strings (`grep -qF -- "$2" <<<"$GATE_OUT"`). That removes the race
-# rather than blessing it, and it removes this file's brittleness — the declaration hash covered
-# the guard's reported LINE NUMBERS, so inserting any line above an occurrence redded it as
-# CONTENT changed.
+# CONVERTED, not declared: three test-assertion helpers, plus one schedule script, that this
+# file declared while the PR wiring the guard in was pending, are now here-strings
+# (`grep -qF -- "$2" <<<"$GATE_OUT"`). That removes the race rather than blessing it, and it
+# removes this file's brittleness — the declaration hash covered the guard's reported LINE
+# NUMBERS, so inserting any line above an occurrence redded it as CONTENT changed.
 #
 # Hash = shasum -a 256 of the guard's own reported hit lines (LC_ALL=C sorted), first 16 hex.
