@@ -7408,7 +7408,7 @@ class FalkorProjection(
                 # fields it actually wrote — the pass-1b content boundary
                 # needs the outcome, never a `bool(content)` guess (the
                 # embedder can be unavailable while the hash still computes).
-                wrote_embedding, wrote_content_hash = (
+                wrote_embedding, wrote_content_hash, persisted_extras = (
                     self._upsert_point_props(p))
                 # #4042: record this creation's per-source-file chronology
                 # anchors (see their declaration above). A synthetic event
@@ -7427,14 +7427,14 @@ class FalkorProjection(
                         last_embed_write_by_source[key] = seq
                     if wrote_content_hash:
                         last_hash_write_by_source[key] = seq
-                    # #5048: ``mitigation_strength`` is an open-set prop
-                    # persisted by ``_persist_extra_props``, whose write
-                    # condition is ``value is not None and persistable`` — the
-                    # exact test below, so this anchor means "the creation
-                    # actually wrote it", never "the payload mentioned it".
-                    _ms_val = p.get("mitigation_strength")
-                    if (_ms_val is not None
-                            and _is_persistable_prop_value(_ms_val)):
+                    # #5048: ``mitigation_strength`` is an open-set prop the
+                    # passthrough writes CONDITIONALLY, so the boundary is the
+                    # creation that actually WROTE it — read from the writer's
+                    # own reported key set, never a second copy of its
+                    # condition (`_persist_extra_props` also drops undeclared
+                    # lists, which a hand-spelled `is not None and persistable`
+                    # test would wrongly count as a write).
+                    if "mitigation_strength" in persisted_extras:
                         last_ms_write_by_source[key] = seq
                     # #4305: the id-wide counterpart (see the sets'
                     # declaration). A re-creation explicitly cleared both
@@ -7634,7 +7634,7 @@ class FalkorProjection(
                     if _prom_anchor is not None and seq <= _prom_anchor:
                         _prom_props = {k: v for k, v in p.items()
                                        if k not in BELIEF_PROPS}
-                    wrote_embedding, wrote_content_hash = (
+                    wrote_embedding, wrote_content_hash, _prom_extras = (
                         self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks. #5004: the
                     # payload carrying the key is itself ownership, even when
@@ -7660,7 +7660,7 @@ class FalkorProjection(
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
                     op_p = _promotion_point_with_operator(p)
-                    wrote_embedding, wrote_content_hash = (
+                    wrote_embedding, wrote_content_hash, _prom_extras = (
                         self._upsert_point_props(op_p))
                     # #4305: id-wide journal-owned derived marks. #5004: the
                     # payload carrying the key is itself ownership, even when
@@ -7836,9 +7836,15 @@ class FalkorProjection(
                         # genuinely does not carry ``mitigation_strength``
                         # never cleared it live, so suppressing the older
                         # revision would revert the node to its FIRST strength
-                        # and diverge from the ``apply()`` oracle. A real
-                        # hard delete→recreate DOES clear it (the node was
-                        # DETACH-DELETEd), hence the recreate leg.
+                        # and diverge from the ``apply()`` oracle. The recreate
+                        # leg suppresses the REVISION half of a
+                        # delete→recreate. It does NOT clear a stale value: the
+                        # pass-1a recreate wipe above covers only
+                        # embedding/content_hash/embedding_verbatim/
+                        # sourceVersionTransit, so an open-set prop the
+                        # re-creation omits survives from the dead incarnation
+                        # (pre-existing, general to every open-set prop — see
+                        # the residual note on the PR; not a #5048 regression).
                         skip_mitigation_strength = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_ms_write_by_source.get(key, -1) > seq)
@@ -11015,18 +11021,25 @@ class FalkorProjection(
         False.
 
         ``skip_mitigation_strength`` (#5048) is the ``skip_hash`` rule applied
-        to an OPEN-SET prop: ``mitigation_strength`` is written by
-        ``_persist_extra_props``, whose condition is ``value is not None and
-        persistable`` — conditional, so its boundary is the creation that
-        actually WROTE it, or a hard delete→recreate that cleared it. It is
-        NOT ``skip_content``'s unconditional boundary: anchoring it there
-        reverted the node to its FIRST strength whenever a later same-file
-        creation merely omitted the property (unreachable from the SDK's own
-        producers, since a ``get_point`` snapshot always carries it, but a
-        real divergence from the ``apply()`` oracle on a hand-written
-        journal). The opposite error (``skip_belief_props``, the hard-delete
-        anchor) IS reachable: it lets a pre-supersession revision fold its OLD
-        strength over the newer creation's write.
+        to an OPEN-SET prop: whether a creation wrote ``mitigation_strength``
+        comes from the writer's own reported key set
+        (``_upsert_point_props``'s ``persisted_extra_keys``), so the boundary is
+        the creation that actually WROTE it, or a hard delete→recreate for the
+        REVISION half. It is NOT ``skip_content``'s unconditional boundary:
+        anchoring it there reverted the node to its FIRST strength whenever a
+        later same-file creation merely omitted the property (unreachable from
+        the SDK's own producers, since a ``get_point`` snapshot always carries
+        it, but a real divergence from the ``apply()`` oracle on a
+        hand-written journal). The opposite error (``skip_belief_props``, the
+        hard-delete anchor) IS reachable: it lets a pre-supersession revision
+        fold its OLD strength over the newer creation's write.
+
+        This flag governs only whether the REVISION folds. A recreate that
+        omits the property still leaves the dead incarnation's value on the
+        node, because the pass-1a recreate wipe clears only
+        embedding/content_hash/embedding_verbatim/sourceVersionTransit — a
+        pre-existing gap general to every open-set prop (#4042 class), not
+        something this flag can reach.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
