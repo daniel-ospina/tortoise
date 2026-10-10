@@ -61,7 +61,18 @@ case "$1 $2" in
   *) echo "gh-stub: unexpected argv: $*" >&2; exit 64 ;;
 esac
 if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
-if [ "${hdr:-}" = "1" ]; then printf 'HTTP/2.0 200 OK\n\n'; fi
+# `-i` prints the status line, then headers, then a BLANK line, then the body.
+# GH_STUB_LINK=1 also sends a Link header — that is how the pre-flight learns a
+# page was truncated (it cannot see >100 closed PRs in one request), which is
+# the ADVISORY-partiality case production ALWAYS hits on a repo this size while
+# a fixture with no Link never does.
+if [ "${hdr:-}" = "1" ]; then
+  printf 'HTTP/2.0 200 OK\n'
+  if [ "${GH_STUB_LINK:-}" = "1" ]; then
+    printf 'Link: <https://api.github.invalid/repos/acme/example/pulls?page=2>; rel="next", <https://api.github.invalid/repos/acme/example/pulls?page=99>; rel="last"\n'
+  fi
+  printf '\n'
+fi
 cat "$f"
 """
 
@@ -456,6 +467,208 @@ exec {real} "$@"
         self.assertNotIn("ANSWER: nobody", out)
 
     # ── the wrapper is the documented verb ───────────────────────────────────
+
+    def test_inventory_unexpected_failure_is_incomplete_never_exit_one(self):
+        """The inventory branch must keep the same promise the question branch
+        keeps. A non-UTF-8 byte from git makes the gate's
+        `subprocess.run(text=True)` raise UnicodeDecodeError (a ValueError, which
+        `_run` does not catch); escaping `main` exits 1 — the COLLISION code — so
+        a caller would read a crash as "a holder". It must be rc 2.
+
+        The shim answers `git remote -v` — the one call the gate's `_remote_slug`
+        makes through ITS `_run`, which catches only OSError — with an
+        undecodable byte, and delegates everything else. That call sits in
+        `_resolve_inventory_path`, which had no guard at all."""
+        real = shutil.which("git")
+        stub = self.tmp / "gitbad" / "git"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        self._write_exec(stub, f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" = "-v" ]; then
+  printf 'origin\\thttps://github.com/acme/\\xffrepo.git (fetch)\\n'
+  printf 'origin\\thttps://github.com/acme/\\xffrepo.git (push)\\n'
+  exit 0
+fi
+exec {real} "$@"
+''')
+        rc, out = self.run_tool("--inventory", git_bin=stub)
+        self.assertNotEqual(rc, 1, out)
+        self.assertEqual(rc, 2, out)
+
+    def test_advisory_partiality_does_not_make_the_answer_incomplete(self):
+        """#5251: the bounded closed-PR sample is ADVISORY — the gate is
+        explicit that "its partiality does NOT make the run INCOMPLETE". On any
+        repo with more closed PRs than one page it is PERMANENTLY partial, so
+        counting it as INCOMPLETE would make rc 0 — the complete answer —
+        unreachable in this tool's primary use case, and would print "could not
+        be queried" for a surface that answered."""
+        self.local_branch(f"fix/{ISSUE}-strand")
+        env = self._env()
+        env["GH_STUB_LINK"] = "1"
+        proc = subprocess.run(
+            [PYTHON, str(TOOL), "9999", "--repo", str(self.repo),
+             "--gh", str(self.gh)], capture_output=True, text=True, env=env,
+            timeout=120,
+        )
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertNotIn("INCOMPLETE SURFACES", out)
+        # The control: if the Link header had not been parsed the surface would
+        # not be partial and this note would be absent, so this assertion is
+        # what proves the partial case was actually exercised.
+        self.assertIn("ADVISORY", out)
+
+    def test_git_status_warning_that_omits_a_subtree_is_unknown_not_clean(self):
+        """`git status` exits 0 while warning it could not open a directory, and
+        then OMITS that subtree's uncommitted files. Treating rc 0 as CLEAN
+        reports a directory it could not read as clean — the same fail-open this
+        tool exists to close, one level down."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("who_is_on_under_test", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        warn = self._write_exec(self.tmp / "git-warn", '''#!/usr/bin/env bash
+printf '%s\\n' "warning: could not open directory 'sub/': Permission denied" >&2
+exit 0
+''')
+        self.assertEqual(mod.worktree_state(str(warn), str(self.repo))[0], mod.DS_UNKNOWN)
+        # Control: the same shim WITHOUT the warning is CLEAN, so the assertion
+        # above is not satisfied by every possible shim.
+        quiet = self._write_exec(self.tmp / "git-quiet", "#!/usr/bin/env bash\nexit 0\n")
+        self.assertEqual(mod.worktree_state(str(quiet), str(self.repo))[0], mod.DS_CLEAN)
+
+    def test_an_unenumerated_local_surface_is_not_printed_as_none(self):
+        """A local surface that could not be read must not render as `none`:
+        that asserts absence for a read that never happened, and the LOCAL block
+        is the section this tool exists for, so a reader who skims it would take
+        "nobody" from it."""
+        proc = subprocess.run(
+            [PYTHON, str(TOOL), str(ISSUE), "--repo", "acme/other",
+             "--gh", str(self.gh)], capture_output=True, text=True,
+            env=self._env(), timeout=120,
+        )
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 2, out)
+        self.assertIn("no-local-clone", out)
+        self.assertNotIn("[local branches] none", out)
+        self.assertNotIn("[local worktrees] none", out)
+
+    def test_an_ambiguous_remote_prefix_never_hides_a_local_branch(self):
+        """With remotes `foo` and `foo/bar`, `refs/remotes/foo/bar/qux` is either
+        remote `foo`'s branch `bar/qux` or remote `foo/bar`'s branch `qux`, and
+        `git remote` alone cannot say which. Crediting the longest prefix
+        declared a never-pushed local branch named `qux` PUSHED and hid it from
+        every surface — stranded work reported FREE."""
+        self._git(self.repo, "remote", "add", "foo", "https://github.com/acme/foo.git")
+        self._git(self.repo, "remote", "add", "foo/bar", "https://github.com/acme/bar.git")
+        self._git(self.repo, "update-ref", "refs/remotes/foo/bar/qux", "HEAD")
+        self.local_branch("qux")          # never pushed; the ambiguous ref is not it
+        rc, out = self.run_tool("--inventory")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 local-only branch", out)
+        self.assertIn("qux", out)
+
+    def test_asking_about_a_pr_number_is_a_designed_refusal_not_a_crash(self):
+        """Asking "who is on #N?" with a PR number is a likely human invocation.
+        The gate refuses a number that resolves to a PR rather than an issue
+        (NotAWorkItem). That is a DESIGNED answer, so it must not read as an
+        unexpected failure — and the handler has to sit in `who_holds`: that
+        function's own generic fail-closed clause swallows the exception before
+        `main()` could ever see it, so a handler there is dead code."""
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": ISSUE,
+            "title": "an open pull request",
+            "body": "",
+            "state": "open",
+            "url": f"https://example.invalid/pulls/{ISSUE}",
+            "headRefName": "feat/some-pr",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("OPEN PULL REQUEST", out)
+        self.assertNotIn("unexpected", out)
+
+    def test_a_control_sequence_in_a_refname_cannot_reach_the_output(self):
+        """Ref names are untrusted input and this report NAMES them, so a
+        control sequence in one can rewrite the ANSWER line the tool exists to
+        print. ESC is a C0 control and git rejects it in a ref name — but git
+        does not UTF-8-decode when validating ref names, so a C1 control
+        (U+0080-U+009F, here CSI U+009B) is accepted, enumerated, and reaches
+        this report raw. That is exactly what `_clean` is for."""
+        self.local_branch(f"fix/{ISSUE}-strand")
+        self.add_worktree("strand", f"fix/{ISSUE}-strand")
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo,
+                             capture_output=True, text=True,
+                             env=self._env()).stdout.strip()
+        with open(self.repo / ".git" / "packed-refs", "ab") as fh:
+            fh.write(sha.encode() + b" refs/heads/fix/" + str(ISSUE).encode()
+                     + "\u009b31mstrand\u009b0m\n".encode("utf-8"))
+        rc, out = self.run_tool(ISSUE, git_bin=self.failing_worktree_git())
+        self.assertEqual(rc, 2, out)
+        # Control: the C1-control refname really did reach the printed list
+        # (only the control bytes were stripped) …
+        self.assertIn(f"fix/{ISSUE}31mstrand", out)
+        # … and no raw C1 control byte survives into the report.
+        self.assertNotIn("\u009b", out)
+
+    def test_an_unread_remote_surface_is_not_rendered_as_absent(self):
+        """`(no remote branch, open/closed PR, assignee or claim comment)` asserts
+        ABSENCE for the whole remote half. If a BLOCKING remote surface could not
+        be queried, that line is exactly the fail-open the LOCAL block guards
+        against: a reader skimming it takes "nobody" from a read that never
+        happened."""
+        self.local_branch(f"fix/{ISSUE}-strand")
+        rc, out = self.run_tool(ISSUE, gh=self.tmp / "nonexistent-gh")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("could NOT be read", out)
+        self.assertNotIn("(no remote branch, open/closed PR", out)
+
+    def test_an_advisory_closed_pr_hit_is_not_a_holder(self):
+        """A closed PR is an ADVISORY surface — the gate filters advisory out of
+        its blocking set ("advisory — cannot block"), so it must not count as a
+        holder here either. Counting one made this tool answer "1 holder" at
+        rc 0 on a fixture where the gate answers CLEAN, which is the one thing
+        this tool promises cannot happen."""
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([{
+            "number": 777,
+            "title": f"fix: something (#{ISSUE})",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/777",
+            "headRefName": "feat/some-pr",
+            "headSha": "deadbeef",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+
+    def test_the_answer_does_not_claim_completeness_it_does_not_have(self):
+        """The final ANSWER line must not assert completeness it does not have.
+        The gate prints `N/total surfaces queried` plus an advisory note rather
+        than a hardcoded total; its own comment calls that a false completeness
+        statement in the artifact a human reads to authorize a dispatch. Here the
+        closed-PR surface is never read while every blocking surface answers, so
+        the run is legitimately rc 0 — and the count must say so."""
+        failing_api = self._write_exec(self.tmp / "gh-noapi", f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "api" ] && [ "${{2:-}}" = "-i" ]; then
+  echo "gh-stub: api -i forced to fail" >&2; exit 1
+fi
+exec {self.gh} "$@"
+''')
+        rc, out = self.run_tool(ISSUE, gh=failing_api)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        ratio = re.search(r"ANSWER: nobody — (\d+)/(\d+) surfaces queried", out)
+        self.assertIsNotNone(ratio, out)
+        self.assertLess(int(ratio.group(1)), int(ratio.group(2)), out)
+        self.assertIn("advisory surface(s) partial or unqueried", out)
+        # …and the remote half must not assert absence for that unread surface.
+        self.assertNotIn("(no remote branch, open/closed PR", out)
+        self.assertIn("could NOT be read in full", out)
 
     def test_wrapper_runs_the_same_verb(self):
         self.local_branch(f"fix/{ISSUE}-strand")

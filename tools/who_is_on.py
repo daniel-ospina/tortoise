@@ -193,10 +193,20 @@ def pushed_branch_names(git_bin: str, repo: str,
     names: set[str] = set()
     for ref in refs:
         rest = ref[len("refs/remotes/"):] if ref.startswith("refs/remotes/") else ref
-        for remote in remotes:
-            if rest.startswith(remote + "/"):
-                names.add(rest[len(remote) + 1:])
-                break
+        matched = [r for r in remotes if rest.startswith(r + "/")]
+        if len(matched) > 1:
+            # AMBIGUOUS, and `git remote` cannot resolve it: with remotes `foo`
+            # and `foo/bar`, `refs/remotes/foo/bar/qux` is either remote `foo`'s
+            # branch `bar/qux` or remote `foo/bar`'s branch `qux`. Crediting the
+            # longest prefix hid a never-pushed local branch named `qux` from
+            # every surface — i.e. it reported stranded work as FREE, the exact
+            # fail-open this tool exists to close. Add NO candidate name instead:
+            # a branch stays visible rather than being declared pushed on a
+            # guess. (Resolving it properly needs the configured fetch refspecs;
+            # the gate does that in `_remote_tracking_namespaces`.)
+            continue
+        if matched:
+            names.add(rest[len(matched[0]) + 1:])
         else:
             # No known remote prefix (e.g. a remote removed but its tracking ref
             # left behind): fall back to stripping one path component.
@@ -298,8 +308,17 @@ def worktree_state(git_bin: str, path: str, timeout: float = DEFAULT_TIMEOUT) ->
         return DS_UNKNOWN, 0
     if not stat.S_ISDIR(st.st_mode):
         return DS_UNKNOWN, 0
-    rc, out, _ = _git(git_bin, path, "status", "--porcelain", timeout=timeout)
+    rc, out, err = _git(git_bin, path, "status", "--porcelain", timeout=timeout)
     if rc != 0:
+        return DS_UNKNOWN, 0
+    # A non-zero exit is not the only way `git status` fails to see something.
+    # With an unreadable subdirectory it exits 0, prints
+    # "warning: could not open directory 'X/': Permission denied", and then
+    # OMITS that subtree's uncommitted files — so taking rc 0 as CLEAN reports a
+    # directory it could not read as clean. Same fail-open, one level down. Match
+    # that specific marker rather than arbitrary stderr, which legitimately
+    # carries benign warnings.
+    if "could not open directory" in err:
         return DS_UNKNOWN, 0
     count = len([ln for ln in out.splitlines() if ln.strip()])
     return (DS_DIRTY if count else DS_CLEAN), count
@@ -423,7 +442,7 @@ def _local_detail_lines(surfaces: list, git_bin: str, repo: str,
         wt = wt_by_ref.get(ref)
         if map_failed:
             dirty_txt = "could not read the worktree list — NOT clean"
-            unknown_refs.append(branch_name(ref))
+            unknown_refs.append(_clean(branch_name(ref)))
         elif wt is None:
             dirty_txt = "no worktree"
         else:
@@ -437,7 +456,7 @@ def _local_detail_lines(surfaces: list, git_bin: str, repo: str,
             else:
                 dirty_txt = (f"could not read uncommitted state "
                              f"({_clean(wt['path'])}) — NOT clean")
-                unknown_refs.append(branch_name(ref))
+                unknown_refs.append(_clean(branch_name(ref)))
         # The unreadable refs are collected for EVERY holder (fail-closed), but
         # only the first MAX_HITS_SHOWN lines are printed — the same cap the hit
         # lists use, so a broad match cannot flood the report.
@@ -484,6 +503,15 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         surfaces, title, _rc = cp.run_preflight(
             issue, target, gh_bin, git_bin, timeout, identity=cp.Identity(login=None),
         )
+    except cp.NotAWorkItem as exc:
+        # A DESIGNED refusal, not an unexpected failure: the gate refuses a
+        # number that resolves to a PR rather than an issue, and "who is on
+        # #5461?" (a PR number) is a likely human invocation. It is raised
+        # INSIDE `run_preflight`, so it must be caught HERE — a handler in
+        # `main()` is unreachable, because the generic fail-closed clause below
+        # swallows it first and reports a designed refusal as a crash.
+        return (f"ANSWER INCOMPLETE: {_clean(str(exc))} This is NOT \"nobody\".\n",
+                EXIT_INCOMPLETE)
     except cp.SurfaceError as exc:
         return f"who-is-on: {_clean(str(exc))}\n", EXIT_INCOMPLETE
     except Exception as exc:  # FAIL-CLOSED by contract
@@ -498,7 +526,20 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
                 EXIT_INCOMPLETE)
 
     local_surfaces = (cp.SURFACE_LOCAL_BRANCHES, cp.SURFACE_WORKTREES)
-    incomplete = [s for s in surfaces if s.status == cp.STATUS_INCOMPLETE or s.truncated]
+    # #5251: an ADVISORY surface is still queried, still reported and can still
+    # HIT — it simply cannot block a dispatch and cannot force INCOMPLETE. The
+    # gate is explicit that "its partiality does NOT make the run INCOMPLETE",
+    # and this verb claims parity with the gate. It matters here: the bounded
+    # closed-PR sample is PERMANENTLY partial on any repo with more closed PRs
+    # than one page (~3,100 here against 100), so counting it would make rc 0 —
+    # the complete answer — unreachable in the tool's primary use case, while
+    # printing "could not be queried" for a surface that answered.
+    incomplete = [s for s in surfaces
+                  if s.authority != cp.AUTHORITY_ADVISORY
+                  and (s.status == cp.STATUS_INCOMPLETE or s.truncated)]
+    advisory_partial = [s for s in surfaces
+                        if s.authority == cp.AUTHORITY_ADVISORY
+                        and (s.status == cp.STATUS_INCOMPLETE or s.truncated)]
     # A holder is a NUMBER match (strong); a weak prose cross-reference is
     # explicitly not work — the gate says so too, and counting it would answer
     # "someone is on it" for a passing mention. There is no keyword arm to
@@ -507,7 +548,12 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     # could ever set it), so neither can occur here and neither is reported.
     strong = [(s, h) for s in surfaces for h in s.hits if h.strength == "strong"]
     weak = [(s, h) for s in surfaces for h in s.hits if h.strength == "weak"]
-    holders = strong
+    # An ADVISORY surface's hit cannot hold work: the gate filters advisory out of
+    # its blocking set structurally ("advisory — cannot block"), so counting one
+    # here answers "1 holder" at rc 0 where the gate answers CLEAN — and the
+    # tool's contract is that the two cannot disagree about what a holder is.
+    # Advisory hits are still DISPLAYED above; they just do not count as holders.
+    holders = [(s, h) for s, h in strong if s.authority != cp.AUTHORITY_ADVISORY]
 
     lines: list[str] = []
     lines.append(f"who is on #{issue}?  —  repo: {_clean(target.slug or '(unresolved)')}"
@@ -522,7 +568,15 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         if surface is None:
             continue
         if not surface.hits:
-            lines.append(f"  [{surface.name}] none")
+            if surface.status == cp.STATUS_INCOMPLETE or surface.truncated:
+                # A surface that could not be read is NOT an empty one. Printing
+                # "none" asserts absence for a read that never happened — and this
+                # LOCAL block is the section the tool exists for, so a reader who
+                # skims it would take "nobody" from it.
+                lines.append(f"  [{surface.name}] could not be read — "
+                             "see INCOMPLETE SURFACES below")
+            else:
+                lines.append(f"  [{surface.name}] none")
             continue
         lines.extend(_hit_lines(surface))
     detail_lines, unknown_detail = _local_detail_lines(surfaces, git_bin, local_repo, timeout)
@@ -536,7 +590,22 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         remote_any = True
         lines.extend(_hit_lines(surface))
     if not remote_any:
-        lines.append("  (no remote branch, open/closed PR, assignee or claim comment)")
+        # The same rule as the LOCAL block above: "(no …)" asserts ABSENCE, so it
+        # may only be printed for surfaces READ IN FULL. A blocking remote surface
+        # that failed must never be rendered as an empty one, and an ADVISORY
+        # surface is no different here — "no closed PR" is just as false when the
+        # closed-PR sample was never fetched, or was cut short.
+        remote_unread = [s for s in surfaces
+                         if s.name not in local_surfaces
+                         and not s.hits
+                         and (s.status == cp.STATUS_INCOMPLETE or s.truncated)]
+        if remote_unread:
+            lines.append(
+                "  (nothing found on the surface(s) that could be read; "
+                + ", ".join(_clean(s.name) for s in remote_unread)
+                + " could NOT be read in full — see below)")
+        else:
+            lines.append("  (no remote branch, open/closed PR, assignee or claim comment)")
     if weak and not holders:
         lines.append("")
         lines.append(f"WEAK SIGNALS (non-blocking — prose is not work): {len(weak)} "
@@ -545,6 +614,13 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         lines.append("")
         lines.append("INCOMPLETE SURFACES — could not be queried:")
         for surface in incomplete:
+            lines.append(f"  [{_clean(surface.name)}] "
+                         f"{_clean(surface.truncation_note or surface.note)}")
+    if advisory_partial:
+        lines.append("")
+        lines.append("ADVISORY — partial or unqueried, but it cannot make this answer "
+                     "incomplete (the gate treats it the same way):")
+        for surface in advisory_partial:
             lines.append(f"  [{_clean(surface.name)}] "
                          f"{_clean(surface.truncation_note or surface.note)}")
     if unknown_detail:
@@ -571,9 +647,25 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         ans = f"ANSWER: {len(holders)} holder(s) across {n_surfaces} surface(s)"
         lines.append(ans + " — local-only branches and worktrees WERE enumerated.")
     else:
+        # Mirror the gate, which prints the count of surfaces it ACTUALLY queried
+        # plus an advisory note. Its own comment calls a hardcoded "7/7" a "NEW
+        # false completeness statement" in the very artifact a human reads to
+        # authorize a dispatch — and this tool made exactly that claim. It is
+        # reachable at rc 0 precisely because the advisory surface cannot make
+        # the answer incomplete, so the count is of surfaces read in full, with
+        # any advisory shortfall named beside it.
+        n_queried = len([s for s in surfaces
+                         if s.status != cp.STATUS_INCOMPLETE and not s.truncated])
+        advisory_short = [s for s in surfaces
+                          if s.authority == cp.AUTHORITY_ADVISORY
+                          and (s.status == cp.STATUS_INCOMPLETE or s.truncated)]
+        advisory_note = ""
+        if advisory_short:
+            advisory_note = (f" ({len(advisory_short)} advisory surface(s) partial "
+                             "or unqueried — cannot block; see the ADVISORY section)")
         lines.append(
-            f"ANSWER: nobody — all {len(cp.ALL_SURFACES)} surfaces queried. "
-            "Local-only branches and worktrees WERE enumerated."
+            f"ANSWER: nobody — {n_queried}/{len(cp.ALL_SURFACES)} surfaces queried"
+            f"{advisory_note}. Local-only branches and worktrees WERE enumerated."
         )
     return "\n".join(lines) + "\n", EXIT_ANSWERED
 
@@ -699,16 +791,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.limit < 1:
             print("who-is-on: --limit must be >= 1", file=sys.stderr)
             return EXIT_USAGE
-        repo, code = _resolve_inventory_path(args.repo, args.gh, args.git, timeout)
-        if repo is None:
-            return code
         try:
+            repo, code = _resolve_inventory_path(args.repo, args.gh, args.git, timeout)
+            if repo is None:
+                return code
             rows, summary = inventory(repo, args.git, timeout, args.limit,
                                       args.dirty_only, args.detached)
+            sys.stdout.write(format_inventory(repo, rows, summary))
         except cp.SurfaceError as exc:
             print(f"who-is-on: {exc}", file=sys.stderr)
             return EXIT_INCOMPLETE
-        sys.stdout.write(format_inventory(repo, rows, summary))
+        except Exception as exc:  # FAIL-CLOSED: never a crash, never 1
+            # The same promise the question branch keeps and this branch was
+            # missing: a non-UTF-8 refname or worktree path makes the gate's
+            # subprocess.run(text=True) raise UnicodeDecodeError, which `_run`
+            # does not catch. Escaping `main` would exit 1 — the COLLISION code —
+            # so a crash would be read as "a holder". Report INCOMPLETE instead.
+            print(f"who-is-on: unexpected failure ({type(exc).__name__}: {_clean(str(exc))}); "
+                  "reporting an INCOMPLETE answer rather than a crash", file=sys.stderr)
+            return EXIT_INCOMPLETE
         # An unreadable worktree is an INCOMPLETE answer, never a clean one — the
         # safety-critical query must not page "all clear" over a status it could
         # not read. A missing dir is a fully-determined state (the work is gone),
