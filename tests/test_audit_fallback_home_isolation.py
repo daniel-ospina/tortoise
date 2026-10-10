@@ -227,12 +227,22 @@ def test_whitespace_only_home_is_refused_as_a_drop(tmp_path, monkeypatch):
     override leg. Since #7924 review round 3 it is refused UP FRONT, before
     ``Path.home()`` is consulted (``_refuse_unusable_home``); it must still be
     refused (and counted as a drop), never materialized under the CWD.
+
+    The refusal MESSAGE is asserted on purpose (#7924 review round 3): a
+    whitespace ``$HOME`` is ALREADY refused by the absolute-path check (its
+    ``Path.home()`` is relative), so a drop is counted either way and an
+    assertion on the drop alone does not exercise ``_refuse_unusable_home``.
+    Mutation that reds this test: drop the ``home.strip()`` gate — the raise
+    becomes "is not an absolute path" and the message match fails.
     """
     _no_override(monkeypatch)
     monkeypatch.setenv("HOME", "   ")
     monkeypatch.chdir(tmp_path)
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match=r"\$HOME is set but empty"):
+        logger._fallback_file()
     before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
-    AuditLogger(dsn=None).append("org-1", None, "op")  # must NOT raise
+    logger.append("org-1", None, "op")  # must NOT raise
     after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
     assert after == before + 1, "a non-absolute resolved base must be counted"
     assert not (tmp_path / "   ").exists(), (
@@ -402,6 +412,36 @@ def test_filesystem_root_override_is_refused(tmp_path, monkeypatch):
     logger.append("org-1", None, "op")  # must NOT raise
     after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
     assert after == before + 1, "a root base must be counted as a path drop"
+
+
+def test_dotdot_cannot_escape_to_the_root_on_any_leg(tmp_path, monkeypatch):
+    """#7924 review round 3: the root refusal must survive ``..``.
+
+    ``Path('/..') != Path('/')`` LEXICALLY, but the kernel resolves both to
+    the filesystem root, so a lexical comparison accepted the path and
+    ``mkdir``+``open`` wrote ``/audit_fallback.jsonl`` — the round-2
+    silent-loss shape, one spelling over. It is reachable through the env
+    knob AND the ``_fallback_path`` seam, so both legs are pinned here. The
+    check resolves the directory (collapsing ``..`` and symlinks) first.
+
+    Mutation that reds this test: compare ``base`` to ``Path(base.anchor)``
+    lexically — ``/..`` is then accepted and no drop is counted.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "/..")
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match="filesystem root"):
+        logger._fallback_file()
+    before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    logger.append("org-1", None, "op")  # must NOT raise
+    after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    assert after == before + 1, "a `..` escape we refuse must be counted"
+    # The same escape must be closed on the explicit-path seam.
+    pinned = AuditLogger(dsn=None)
+    pinned._fallback_path = Path("/../audit_fallback.jsonl")
+    with pytest.raises(RuntimeError, match="filesystem root"):
+        pinned._fallback_file()
 
 
 def test_replay_resolution_failure_warns_once_not_per_successful_append(

@@ -133,6 +133,25 @@ def _refuse_unusable_home() -> None:
             "path or fix $HOME")
 
 
+def _refuse_a_root_location(path: Path) -> None:
+    """Refuse a fallback artefact whose resolved DIRECTORY is the root.
+
+    A LEXICAL comparison is not enough (#7924 review round 3):
+    ``Path('/..') != Path('/')``, yet the kernel resolves both to the
+    filesystem root, so a check that compared the two strings saw a NON-root
+    path while ``mkdir``/``open`` wrote ``/audit_fallback.jsonl`` — the
+    round-2 silent-loss shape, one spelling over. ``os.path.realpath``
+    collapses ``..`` AND symlinks, which is where the write actually lands,
+    and it does not require the leaf to exist.
+    """
+    resolved_dir = Path(os.path.realpath(path.parent))
+    if resolved_dir == Path(resolved_dir.anchor):
+        raise RuntimeError(
+            "audit fallback directory resolves to the filesystem root: "
+            f"{resolved_dir!r} — refusing (the fallback must live under $HOME "
+            "or an explicit absolute directory)")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -232,6 +251,9 @@ class AuditLogger:
         ``_fallback_path`` was read) the winning path and mkdir it in the CWD.
         A resolved base that IS the filesystem root is refused outright
         (#7924 review round 3), so no leg can reach ``/audit_fallback.jsonl``.
+        The check RESOLVES the directory (``os.path.realpath``), because a
+        lexical comparison is defeated by ``..``: ``Path('/..')`` is not equal
+        to ``Path('/')`` yet the kernel resolves both to the root.
 
         Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
         malformed ``$HOME``), and ``RuntimeError`` for a path that is not
@@ -242,6 +264,7 @@ class AuditLogger:
             if not path.is_absolute():
                 raise RuntimeError(
                     f"audit fallback path is not absolute: {path!r}")
+            _refuse_a_root_location(path)
             return path
         if self._fallback_dir is not None:
             base = self._fallback_dir
@@ -271,16 +294,12 @@ class AuditLogger:
                 f"audit fallback base is not an absolute path: {base!r} "
                 "(set TORTOISE_AUDIT_FALLBACK_DIR to an absolute path, or fix "
                 "$HOME)")
-        if base == Path(base.anchor):
-            # Defense in depth (#7924 review round 3): the resolved base must
-            # never BE the filesystem root, however it got there — an explicit
-            # `TORTOISE_AUDIT_FALLBACK_DIR=/`, or any future leg that expands
-            # to it. (`base.anchor` is `""` for a relative path, but the
-            # absolute check above has already refused those.)
-            raise RuntimeError(
-                f"audit fallback base resolves to the filesystem root: "
-                f"{base!r} — refusing (the fallback must live under $HOME or "
-                "an explicit absolute directory)")
+        # The root check RESOLVES the directory first (#7924 review round 3):
+        # `base == Path(base.anchor)` is a lexical comparison, and `Path('/..')`
+        # is not equal to `Path('/')` even though the kernel resolves both to
+        # the root — so `TORTOISE_AUDIT_FALLBACK_DIR=/..` (and `HOME=/..`) used
+        # to write `/audit_fallback.jsonl` while the guard saw a non-root path.
+        _refuse_a_root_location(base / "audit_fallback.jsonl")
         return base / "audit_fallback.jsonl"
 
     # ── Public API ──────────────────────────────────────────────────
