@@ -282,11 +282,17 @@ def test_doctor_surfaces_session_indexing_before_init(
     assert "corpus empty" in out, out
     assert "not set up yet" in out  # the pre-init branch really was taken
     assert rc == 0  # #2204: a missing DEFAULT target is the expected first run
-    # The DB artifact the #2204 guard is about. The whole `~/.tortoise` dir is
-    # NOT a valid assertion: `tortoise.hosted_api`'s module-level AuditLogger
-    # creates it under HOME at import (audit_events.AuditLogger.__init__), which
-    # doctor triggers via an import — so the dir's absence only proves the
-    # import was cached.
+    # The DB artifact the #2204 guard is about. The assertion stays scoped to
+    # the DB FILE rather than the whole `~/.tortoise` dir, and the reason is
+    # NOT the one this comment used to give. The dir is ALSO the suite's pinned
+    # audit-fallback directory (`tests/conftest.py::
+    # _isolated_audit_fallback_dir` pins TORTOISE_AUDIT_FALLBACK_DIR to
+    # `tmp_path/.tortoise`, which is this test's HOME), so a dir-level
+    # assertion would be red for an unrelated writer. Before #7816
+    # `AuditLogger.__init__` additionally mkdir'd the dir at IMPORT — an import
+    # doctor triggers — so the dir's absence only proved the import was cached;
+    # that eager mkdir is gone (#7816), but the narrower assertion below is
+    # unchanged and remains the precise #2204 artifact.
     assert not (tmp_path / ".tortoise" / "tortoise.db").exists()
 
 
