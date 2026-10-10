@@ -2805,5 +2805,48 @@ class TestDurableInboxFallback(unittest.TestCase):
         self.assertIn("channel: inbox", out.getvalue())
 
 
+class TestBracketedProgramOutputIsNotAFooterRow(unittest.TestCase):
+    """#7918 — the fail-open #7875 shipped to `main` must not come back.
+
+    To survive a clobbered pwd row (#7863), #7875 widened the footer anchor to
+    accept ANY bracketed line as a "footer row". But a bracketed line is
+    PROGRAM OUTPUT, so the anchor then trusts whatever the process printed: a
+    bare shell that writes a bracketed line above a stats-shaped line moves the
+    anchor PAST the prompt, `shell_prompt_below_footer` scans only below itself,
+    and `screen_ready` returns True — the brief is then typed into a live shell
+    and EXECUTED. That is the #7158 direction this tool exists to prevent.
+
+    Measured on `main@8dc62a407` while #7875 was on it (`_footer_stats_end` = 47,
+    `shell_prompt_below_footer` = False, `screen_ready` = True); this test reddens
+    if the anchor is ever widened again.
+    """
+
+    _BARE_SHELL = ("host % cat notes.txt\n"
+                   "[INFO] starting\n"
+                   "42.0%/700k (auto)\n")
+
+    def test_a_bracketed_output_line_cannot_move_the_anchor_past_a_prompt(self):
+        self.assertTrue(cd.status_bar_present(self._BARE_SHELL),
+                        "precondition: this fixture must have a status bar")
+        self.assertTrue(
+            cd.shell_prompt_below_footer(self._BARE_SHELL),
+            "the live prompt above the bracketed line was not seen")
+        self.assertFalse(
+            cd.screen_ready(self._BARE_SHELL),
+            "FAIL-OPEN: a bracketed program-output line moved the anchor past "
+            "a live prompt — this types the brief into a bare shell")
+
+    def test_a_bracketed_line_is_not_accepted_as_a_footer_row(self):
+        # The anchor may trust the pwd line and NOTHING else.
+        self.assertGreater(
+            cd._footer_stats_end("~/proj\n42.0%/700k (auto)\n"), 0,
+            "a pwd line above the stats line must still anchor the scan")
+        self.assertEqual(
+            cd._footer_stats_end("[INFO] starting\n42.0%/700k (auto)\n"), -1,
+            "a bracketed program-output line was accepted as a footer row — "
+            "this is the #7918 fail-open")
+        self.assertFalse(cd._is_pwd_line("[INFO] starting"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
