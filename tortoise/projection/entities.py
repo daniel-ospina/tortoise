@@ -94,19 +94,26 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
     A rejection must also be safe for a corrupt/hand-edited journal, which is
     the input this whole fold exists to tolerate: refusing never raises, so one
     hand-edited record can never abort the rebuild after the wipe. Refusal is
-    fail-safe — no edge, no fabricated dampening — so a hand-edited record
-    keeps the PRE-#5048 behaviour (no reconstructed edge) rather than acquiring
-    a dampening no writer asked for.
+    TOTAL — any exception out of the band comparison is a refusal, not an
+    abort, because ``isinstance`` also admits a hostile ``int``/``float``
+    SUBCLASS whose comparison methods raise, and ``_create_edges`` is the live
+    writer too (``EventAPI.add_point(**fields)`` forwards caller objects).
+    Refusal is fail-safe — no edge, no fabricated dampening — so a hand-edited
+    record keeps the PRE-#5048 behaviour (no reconstructed edge) rather than
+    acquiring a dampening no writer asked for.
     """
     value = payload.get("mitigation_strength")
     if not isinstance(value, (int, float)):
         return False
     # The band check IS the finiteness check, and it must come FIRST. A
-    # comparison on an ``int``/``float`` never raises and never converts: a
-    # value past float range (``10**400``) is refused by the comparison itself
-    # — no ``OverflowError`` — and ``nan``/``inf`` fail it too. Calling
-    # ``math.isfinite`` here would be a second, unreachable opinion.
-    return 0 <= value <= 1
+    # comparison on an ``int``/``float`` does not convert, so a value past
+    # float range (``10**400``) is refused by the comparison itself — no
+    # ``OverflowError`` — and ``nan``/``inf`` fail it too. ``math.isfinite``
+    # here would be a second, unreachable opinion.
+    try:
+        return 0 <= value <= 1
+    except Exception:  # total refusal — see the docstring
+        return False
 
 
 def _terminal_object_statuses() -> list:

@@ -55,13 +55,17 @@ MUTATIONS THAT MUST RED:
 - drop the BAND from the strength test (keep only a type check) → a payload
   outside the writer's own ``0 <= strength <= 1`` band mints the edge and
   dampens at the read-clamped band edge nobody asked for (see the
-  ``above-band`` / ``below-band`` / ``nan`` parameters);
-- drop ``AND s.is_operator = true`` from the MERGE → a payload naming a
-  NON-operator origin mints ``mitigated_by`` and violates ONTOLOGY §3.9's hard
-  rule (#2315) — the violation ``mitigate_operator`` refuses on the SDK path
-  and this fold, as the predicate's only other writer, must refuse too (see
-  ``test_non_operator_origin_gains_no_mitigated_by``, whose sibling
-  ``…from_an_operator_origin_mints_the_edge`` is its non-vacuity control);
+  ``above-band`` / ``below-band`` / ``nan`` / ``out-of-float-range``
+  parameters);
+- make the refusal non-total (drop the ``try``/``except``) → a hostile
+  ``int`` subclass whose comparisons raise THROWS out of the fold instead of
+  being refused (see the ``hostile-subclass`` parameter);
+- gate the MERGE on the origin (``AND s.is_operator = true``, ONTOLOGY §3.9's
+  hard rule) → ``rebuild_all`` mints the edge for a `#329`-stub origin where
+  ``apply()`` mints nothing, i.e. a live!=replay divergence, which reds
+  ``test_non_operator_origin_still_mints_the_edge_for_parity`` (its sibling
+  ``…from_an_operator_origin_mints_the_edge`` is the non-vacuity control). The
+  rule stays with the SDK writer — see that test's docstring and #5048;
 - drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
   identity parity assertion fails;
 - drop the ``mitigation_strength`` fold in ``_revise_point`` → the
@@ -100,6 +104,21 @@ from tortoise.weights import (
 BASE_WEIGHT = 1.0
 # The sanctioned mitigation band (weights.py: [0.10, 0.50]).
 SANCTIONED_STRENGTHS = (0.10, 0.30, 0.50)
+
+
+class _RaisingInt(int):
+    """An ``int`` whose comparisons raise — hostile, but ``isinstance``-legal.
+
+    ``0 <= value`` dispatches to the SUBCLASS's reflected method, so an
+    unguarded band check raises instead of refusing. Only a TOTAL refusal
+    (``except Exception``) can honour the predicate's "never raises" guarantee.
+    """
+
+    def __le__(self, other):  # pragma: no cover - must never be reached
+        raise RuntimeError("hostile __le__")
+
+    def __ge__(self, other):  # pragma: no cover - must never be reached
+        raise RuntimeError("hostile __ge__")
 
 
 def _fresh_sdk(tmp_path):
@@ -381,6 +400,11 @@ class TestMitigatedBySurvivesRebuild:
         pytest.param(5.0, id="above-band"),
         pytest.param(-0.5, id="below-band"),
         pytest.param(float("nan"), id="nan"),
+        # a hostile int SUBCLASS whose comparisons raise: ``isinstance`` admits
+        # it, so a refusal that is not TOTAL throws instead of refusing — and
+        # ``_create_edges`` is the live writer, where a caller controls the
+        # payload (``EventAPI.add_point(**fields)``)
+        pytest.param(_RaisingInt(1), id="hostile-subclass"),
     ])
     def test_payload_without_a_usable_strength_gains_no_edge(self, tmp_path,
                                                              strength):
@@ -426,21 +450,20 @@ class TestMitigatedBySurvivesRebuild:
         finally:
             sdk.close()
 
-    def test_non_operator_origin_gains_no_mitigated_by(self, tmp_path):
-        """ONTOLOGY §3.9's hard rule: the edge originates from an OPERATOR.
+    def test_non_operator_origin_still_mints_the_edge_for_parity(self, tmp_path):
+        """NOT gated on the origin: ONTOLOGY §3.9's rule must not cost parity.
 
-        ``(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`` — a
-        mitigation's ``operator`` descriptor names the operator it damps, and
-        ``mitigate_operator`` validates that side too (``Point … is not an
-        operator``). ``_create_edges`` is the predicate's only OTHER writer, so
-        a payload naming a non-operator ``src`` must be refused there or the
-        violation the SDK guards against walks in through the low-level
-        ``EventAPI.add_point(**fields)`` door — an edge ONTOLOGY itself calls
-        dead structure (no EP factor addresses a non-operator).
-
-        The sibling ``…from_an_operator_origin_mints_the_edge`` is the
-        non-vacuity control: the SAME payload with an operator ``src`` does
-        mint the edge, so its absence here is the origin predicate's doing.
+        §3.9's hard rule (#2315) is that ``mitigated_by`` originates only from
+        an ``is_operator:true`` Point, and ``mitigate_operator`` enforces it.
+        The fold does NOT, deliberately, and this test pins that: gating the
+        MERGE on ``s.is_operator = true`` was measured to make ``rebuild_all``
+        mint the edge for a `#329`-stub origin (``is_operator=false``, created
+        for a short ``src`` that does not resolve yet) where ``apply()`` minted
+        nothing — apply folds the mitigation before the operator exists and
+        never re-attempts the edge, while rebuild pass-1a hoists it first. That
+        is a live!=replay divergence, the exact invariant this fold exists to
+        establish, traded for an edge ONTOLOGY itself calls dead structure (no
+        EP factor addresses a non-operator). Recorded on #5048.
         """
         sdk, _events = _fresh_sdk(tmp_path)
         try:
@@ -458,25 +481,24 @@ class TestMitigatedBySurvivesRebuild:
                 "is_operator": False, "mitigation_strength": 0.5,
                 "operator": {"op_type": "IMPL", "inputs": [bystander]},
             })
-            assert _all_mitigated_by(sdk) == [], (
-                "a non-operator origin minted a mitigated_by edge"
+            assert _all_mitigated_by(sdk) == [(bystander, mitigation)], (
+                "the fold must rebuild the edge the record names, whatever the "
+                "origin's flag is — see this test's docstring for why"
             )
             assert compute_operator_weight(
                 sdk._get_proj(), op_id) == pytest.approx(BASE_WEIGHT), (
-                "a payload naming a non-operator origin dampened an operator"
+                "the edge must dampen only the operator it names"
             )
         finally:
             sdk.close()
 
     def test_mitigation_payload_from_an_operator_origin_mints_the_edge(
             self, tmp_path):
-        """Non-vacuity control for the origin predicate: an operator ``src``.
+        """Non-vacuity control: an operator ``src`` mints the edge too.
 
-        A hand-built payload (the same shape as the refused one, with an
-        ``is_operator:true`` origin) MUST still mint the edge — otherwise the
-        predicate would be refusing the honest record rather than the
-        malformed one, and ``test_non_operator_origin_gains_no_mitigated_by``
-        would pass for the wrong reason.
+        The sibling test asserts the edge for a non-operator origin; this one
+        asserts the honest record is not refused in the process, so the
+        acceptance is a property of the fold rather than of one fixture.
         """
         sdk, _events = _fresh_sdk(tmp_path)
         try:
@@ -493,7 +515,7 @@ class TestMitigatedBySurvivesRebuild:
                 "operator": {"op_type": "IMPL", "inputs": [op_id]},
             })
             assert _all_mitigated_by(sdk) == [(op_id, mitigation)], (
-                "an operator origin must still mint the mitigated_by edge"
+                "an operator origin must mint the mitigated_by edge"
             )
             # The weight MOVES (the minted edge is read) even though the node
             # itself never received ``mitigation_strength`` here — this call

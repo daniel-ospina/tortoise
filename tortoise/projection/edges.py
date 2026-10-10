@@ -686,27 +686,27 @@ class _EdgeHandlers:
                 # the operator it damps — matching the live writer's
                 # direction, and ONTOLOGY §3.9's ``(op)-[:mitigated_by]->(m)``.
                 #
-                # ``s.is_operator = true`` is that section's HARD RULE (#2315,
-                # pinned 2026-09-07): the edge originates ONLY from an
-                # ``is_operator:true`` Point, and ``mitigate_operator`` was its
-                # only writer until this fold became the second one — so the
-                # fold must uphold what its co-writer enforces, or
-                # ``EventAPI.add_point(**fields)`` could name any ``src``.
-                # Measured safe rather than assumed: the origin's flag survives
-                # the rebuild on BOTH the SDK path and the generic
-                # ``api.py::_point`` ingest path (which journals no
-                # ``is_operator`` at all — the promotion restores it), so no
-                # real mitigation edge is dropped. The refusal only ever fires
-                # on the same paths it fires for live: a hand-crafted ``src``
-                # that is not an operator, or a `#329` stub (``SET
-                # s.is_operator=false``) for an operator absent from the graph
-                # — both of which ``mitigate_operator`` itself refuses.
+                # NOT gated on ``s.is_operator = true``, deliberately, though
+                # §3.9's hard rule (#2315) wants exactly that and
+                # ``mitigate_operator`` enforces it. Measured: this fold is the
+                # SHARED live+replay writer, and in `#329`'s stub case (a
+                # mitigation whose short-id ``src`` does not resolve yet, so the
+                # stub above is created ``is_operator=false``) the two engines
+                # reach this MERGE with DIFFERENT origins — ``apply()`` folds the
+                # mitigation before the operator exists and never re-attempts
+                # the edge when it arrives, while ``rebuild_all`` pass-1a hoists
+                # the operator first. The predicate therefore made rebuild mint
+                # ``(op)-[:mitigated_by]->(m)`` where apply minted nothing: a
+                # live!=replay divergence, and that invariant is the whole point
+                # of this fold. The rule it would enforce concerns an edge
+                # ONTOLOGY itself calls dead structure (no EP factor addresses a
+                # non-operator), so the fold keeps its parity and the rule stays
+                # with the SDK writer. Recorded on #5048 with the measurement.
                 if (rel_type == "IMPL" and is_non_operator_payload(p)
                         and has_usable_mitigation_strength(p)):
                     self.g.query(
                         "MATCH (o:Point {id:$oid}), (s) "
                         "WHERE (s:Point OR s:Event) AND s.id = $sid "
-                        "AND s.is_operator = true "
                         "MERGE (s)-[:mitigated_by]->(o)",
                         params={"oid": p["id"], "sid": src},
                     )
