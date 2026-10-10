@@ -7986,21 +7986,64 @@ class FalkorProjection(
         # live (which never removed the node). Both are recorded below.
         hard_deleted_seq: dict[tuple[str | None, str], int] = (
             hard_deleted_pairs(events))
-        # #7951: the `:Session` re-creation anchor — the LAST `SessionRecorded`
-        # seq per session id. A `SessionDeleted` at or before it was superseded
-        # live by that re-capture, so the container (and its agentSession
-        # `:Source`, which `_fold_session_deleted` removes with it) must
-        # survive the deferred re-apply at the end of the replay. `hard_deleted
-        # _pairs` cannot carry this anchor — its re-creation anchors are seeded
-        # from Point/Operator creations only, and `Session` is not a canonical
-        # entity label.
-        last_session_recorded: dict[str, int] = {}
+        # #7951: the `:Session` / agentSession `:Source` re-creation anchors.
+        # A `SessionDeleted` must survive the deferred re-apply — and the
+        # inline fold — only while NO LATER journal record re-materialises the
+        # node it removed. The container and the Source are re-created by
+        # DIFFERENT records, so the anchor is per-node (P1-a):
+        #
+        #   * `session_rematerialise_seq` — the LAST record that materialises
+        #     the `:Session`: a later `SessionRecorded`, or a `PointAdded` /
+        #     `OperatorAdded` whose RAW envelope carries
+        #     `contains_session=<id>` (`_link_session`, reached from
+        #     `_upsert_point_edges` — the pass-2 side effect the deferral
+        #     exists to undo).
+        #   * `source_rematerialise_seq` — the LAST record that mints the
+        #     agentSession `:Source`: a `PointAdded` / `OperatorAdded` whose
+        #     `extractedFrom` names `session:<id>` (`_link_source` →
+        #     `_mint_source_stub` — the SECOND re-creation path the container
+        #     anchor cannot see), or a `SourceCreated` / `SourceVersioned` for
+        #     that url.
+        #
+        # Before P1-a the deferred re-apply was gated on `SessionRecorded`
+        # alone and removed the Source unconditionally, so a post-delete write
+        # naming the session (which re-mints the Source LIVE, #3263) was
+        # re-created by pass 2 and then deleted again — `rebuild_all` said 0
+        # while `rebuild` (inline, chronology-ordered) said 1: the two replay
+        # engines disagreed on one journal. `hard_deleted_pairs` cannot carry
+        # these anchors — its re-creation anchors are seeded from
+        # Point/Operator creations only, and neither `Session` nor an
+        # url-only Source stub is a canonical entity id.
+        session_rematerialise_seq: dict[str, int] = {}
+        source_rematerialise_seq: dict[str, int] = {}
         for _seq, _raw in enumerate(events):
-            _ev = _norm(_raw) if isinstance(_raw, dict) else None
-            if _ev is not None and _ev.get("type") == "SessionRecorded":
+            if not isinstance(_raw, dict):
+                continue
+            _cs = _raw.get("contains_session")
+            _ev = _norm(_raw)
+            _t = _ev.get("type")
+            if _t == "SessionRecorded":
                 _rid = _ev.get("id")
                 if isinstance(_rid, str):
-                    last_session_recorded[_rid] = _seq
+                    session_rematerialise_seq[_rid] = _seq
+            elif _t in ("PointAdded", "OperatorAdded"):
+                _p = _ev.get("point")
+                if isinstance(_p, dict):
+                    if isinstance(_cs, str) and _cs:
+                        session_rematerialise_seq[_cs] = _seq
+                    _ef = _p.get("extractedFrom")
+                    _refs = ([_ef] if isinstance(_ef, str)
+                             else list(_ef) if isinstance(_ef, (list, tuple))
+                             else [])
+                    for _ref in _refs:
+                        if (isinstance(_ref, str)
+                                and _ref.startswith("session:") and _ref[8:]):
+                            source_rematerialise_seq[_ref[8:]] = _seq
+            elif _t in ("SourceCreated", "SourceVersioned"):
+                _u = _ev.get("url") or _ev.get("id")
+                if (isinstance(_u, str)
+                        and _u.startswith("session:") and _u[8:]):
+                    source_rematerialise_seq[_u[8:]] = _seq
         # The map is built ONCE for the whole journal (the same builder the
         # apply()-based engines and the reference fold use), not accumulated
         # in the loops below — a single reader is what keeps the five surfaces
@@ -8242,7 +8285,9 @@ class FalkorProjection(
         # / `_link_session` side effects MERGE the `:Source` / `:Session` back —
         # undoing the pass-1b `SessionDeleted` fold for the deleted Points'
         # payloads. Carried WITH the journal seq so the deferred re-apply can
-        # skip a delete a later `SessionRecorded` supersedes.
+        # skip, per node, a delete a later record re-materialised (see the
+        # re-materialisation anchors built with the journal near
+        # `hard_deleted_seq`).
         session_delete_folds: list[tuple[int, dict]] = []
         # #2884 A3 (supersede): the supersede family's BELIEF decay folds
         # INLINE at the event's own journal seq, exactly as the invalidate
@@ -10105,18 +10150,26 @@ class FalkorProjection(
         # `PointAdded`, and its `_link_source` / `_link_session` side effects
         # MERGE the deleted session's `:Source` / `:Session` back — undoing the
         # pass-1b `SessionDeleted` fold for the deleted Points' payloads. The
-        # re-apply is GATED on a later `SessionRecorded` for the same id: a
-        # same-id re-capture supersedes the delete, so its container and Source
-        # must survive. Idempotent — a 0-row `_fold_session_deleted` is the
-        # record's end state, never a fold-miss.
+        # re-apply is GATED PER NODE on the re-materialisation anchors built
+        # with the journal above (P1-a): a later record that re-creates the
+        # container (or the Source, whose second re-creation path is
+        # `_link_source` from any PointAdded naming `session:<id>`) supersedes
+        # the delete for THAT node only, so the container and its Source can
+        # neither drift from each other nor be clobbered by a post-delete
+        # write. Idempotent — a 0-row `_fold_session_deleted` is the record's
+        # end state, never a fold-miss.
         for _seq, _ev in session_delete_folds:
             _sid = _ev.get("id")
-            if (isinstance(_sid, str)
-                    and last_session_recorded.get(_sid, -1) > _seq):
-                # A later same-id `SessionRecorded` re-created the container
-                # live, so this delete was superseded — do not re-apply it.
+            if not isinstance(_sid, str):
+                # Malformed: the fold self-guards and is a no-op. Attempt it
+                # so a repair never depends on the gate's shape checks.
+                self._fold_session_deleted(_ev)
                 continue
-            self._fold_session_deleted(_ev)
+            self._fold_session_deleted(
+                _ev,
+                remove_session=session_rematerialise_seq.get(_sid, -1) <= _seq,
+                remove_source=source_rematerialise_seq.get(_sid, -1) <= _seq,
+            )
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is

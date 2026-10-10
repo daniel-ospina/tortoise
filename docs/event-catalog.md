@@ -164,14 +164,27 @@ that the payload does not name:
   `SessionRecorded` re-materialised it. Folded idempotently by
   `FalkorProjection._fold_session_deleted` (a 0-row `DETACH DELETE` is the
   record's END STATE, never a fold-miss). The fold removes the session's
-  agentSession `:Source` stub (`url = session:{id}`) in the SAME step — that
-  node is re-materialised by `rebuild_all`'s pass-2 `_link_source` from the
-  deleted Points' own payloads, and both nodes are keyed off the same
-  re-creation anchor (a later `SessionRecorded`), so one carrier cannot
-  drift from the other. The session's `CONTAINS` Points and its
-  `sessionCaptured` Event(s) are journaled separately as `EntityMutated`
-  op=delete records by the same delete site and by the delete-during-capture
-  sweep (`_sweep_orphaned_writes`).
+  agentSession `:Source` stub (`url = session:{id}`) in the SAME step, because
+  that node has TWO journal re-creation paths the container anchor does not:
+  a later `SessionRecorded` re-creates the container, and `_link_source`
+  mints the Source from ANY `PointAdded` carrying `extractedFrom=session:{id}`
+  (which is why a post-delete write naming the session re-mints it live).
+  Only `rebuild_all` DEFERS this fold: its pass 2 re-derives edges from every
+  `PointAdded` — including ones a later record hard-deletes — so its
+  `_link_source` / `_link_session` side effects MERGE back what pass 1b
+  removed, and the deferred re-apply runs after every pass. The `apply()`-based
+  engines (`rebuild` / `recover_from_log` / `backup.restore`) fold the record
+  INLINE at its own journal seq, so a later record's own fold re-creates what
+  the delete removed. The deferred re-apply is therefore gated PER NODE on the
+  journal's own re-materialisation anchors — the last `SessionRecorded` **or**
+  `contains_session`-carrying `PointAdded` for the container, and the last
+  `extractedFrom=session:{id}` `PointAdded` / `SourceCreated` / `SourceVersioned`
+  for the Source — so the two nodes can neither drift from each other nor be
+  deleted after a later record re-created them, and the two engines reach ONE
+  verdict on the same journal (#7951 P1-a). The session's `CONTAINS` Points
+  and its `sessionCaptured` Event(s) are journaled separately as
+  `EntityMutated` op=delete records by the same delete site and by the
+  delete-during-capture sweep (`_sweep_orphaned_writes`).
 
 **Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
 four whole-journal replay engines (`rebuild_all`, and the `apply()`-based

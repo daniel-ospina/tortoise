@@ -233,6 +233,72 @@ class TestDeletedSessionDoesNotResurrect:
         assert _contained_points(proj, SID) >= 1
 
 
+class TestPostDeleteWriteReMaterialisesSource:
+    """P1-a (review): the Session fold must not own the ``:Source``'s lifetime
+    against an anchor it does not see.
+
+    A post-delete write that names the deleted session re-mints
+    ``Source{url:session:<id>}`` LIVE through the #3263 inferred ref — the
+    journaled ``PointAdded`` carries ``extractedFrom=session:<id>``, which is
+    exactly the record ``_link_source``/``_mint_source_stub`` re-materialises
+    the stub from on replay. The ``SessionDeleted`` fold removes the Source as
+    part of the container removal, so the deferred re-apply (``rebuild_all``)
+    must NOT delete a Source a LATER journal record re-created. Before the
+    fix, ``rebuild_all`` deleted it and the two replay engines DISAGREED on
+    the same journal."""
+
+    def test_point_written_after_delete_re_mints_source_and_survives_rebuild(
+            self, hosted):
+        tc, sdk = hosted
+        proj = sdk._get_proj()
+        _capture(tc, SID)
+        _delete(tc, SID)
+        assert _source_count(proj, SID) == 0
+
+        # Live re-mint: the write names the deleted session, so the #3263
+        # inferred ref mints `session:<SID>` again and journals the PointAdded
+        # that carries it.
+        sdk.create_point("fact", "written after the delete", session_id=SID)
+        assert _source_count(proj, SID) == 1, "live re-mint did not happen"
+
+        # Engine 1: the apply()-based engine folds SessionDeleted INLINE, so
+        # the later PointAdded legitimately re-materialises the Source.
+        proj.rebuild(EventLog(sdk._get_event_log().path),
+                     confirm_destructive=True)
+        assert _source_count(proj, SID) == 1, (
+            "rebuild() lost the Source a post-delete PointAdded "
+            "re-materialised (#7951 P1-a)")
+
+        # Engine 2: `rebuild_all` defers the SessionDeleted re-apply past pass
+        # 2. It must reach the SAME verdict as engine 1.
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        assert _source_count(proj, SID) == 1, (
+            "rebuild_all() deleted a Source that a later PointAdded "
+            "re-materialised — the deferred SessionDeleted re-apply is "
+            "anchored to `SessionRecorded` only, but the Source has a second "
+            "re-creation path (`_link_source` from any PointAdded naming "
+            "session:<id>) (#7951 P1-a)")
+
+    def test_both_replay_engines_agree_on_the_post_delete_write(self, hosted):
+        """The two replay engines must not disagree on one journal."""
+        tc, sdk = hosted
+        proj = sdk._get_proj()
+        _capture(tc, SID)
+        _delete(tc, SID)
+        sdk.create_point("fact", "post-delete", session_id=SID)
+
+        proj.rebuild(EventLog(sdk._get_event_log().path),
+                     confirm_destructive=True)
+        via_rebuild = _source_count(proj, SID)
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        via_rebuild_all = _source_count(proj, SID)
+
+        assert via_rebuild == via_rebuild_all == 1, (
+            f"the two replay engines disagree on one journal: "
+            f"rebuild={via_rebuild} vs rebuild_all={via_rebuild_all} "
+            f"(#7951 P1-a)")
+
+
 class TestDeleteIsJournaled:
     def test_delete_journals_session_and_canonical_nodes(self, hosted):
         """Every node the delete removes has a journal record."""

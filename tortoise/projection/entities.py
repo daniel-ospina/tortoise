@@ -2023,7 +2023,8 @@ class _EntityHandlers:
             params={"sid": session_id, "tid": point_id},
         )
 
-    def _fold_session_deleted(self, ev: dict) -> int:
+    def _fold_session_deleted(self, ev: dict, *, remove_session: bool = True,
+                              remove_source: bool = True) -> int:
         """#7951: the ``:Session`` node's hard-delete carrier.
 
         ``hosted_api._delete_session_sync`` removes the ``:Session`` with a raw
@@ -2049,7 +2050,21 @@ class _EntityHandlers:
         edges; the owned Points and Events themselves are removed by their own
         ``EntityMutated`` op=delete records, which the same delete site emits.
 
-        Returns the number of Session nodes deleted.
+        ``remove_session`` / ``remove_source`` (#7951 P1-a) let the caller
+        suppress ONE of the two removals. They exist for ``rebuild_all``'s
+        DEFERRED re-apply: the Source has a SECOND journal re-creation path
+        the container anchor cannot see — ``_link_source`` mints
+        ``session:{id}`` from ANY journaled ``PointAdded`` carrying
+        ``extractedFrom=session:{id}`` — so a deferred re-apply carried out
+        after pass 2 must not delete a Source a LATER record re-materialised
+        while still deleting a container no later record re-materialised.
+        Both default ``True``: the inline folds (``apply`` / ``rebuild`` /
+        ``rebuild_all`` pass 1b) are chronology-ordered, so a later record's
+        own fold re-creates whatever the delete removed and no suppression is
+        needed.
+
+        Returns the number of Session nodes deleted (0 when ``remove_session``
+        is False, whatever the Source removal did).
         """
         from tortoise.projection import _writable_id
 
@@ -2058,10 +2073,13 @@ class _EntityHandlers:
         sid = ev.get("id")
         if not _writable_id(sid):
             return 0
-        self.g.query(
-            "MATCH (src:Source {url:$url}) DETACH DELETE src",
-            params={"url": f"session:{sid}"},
-        )
+        if remove_source:
+            self.g.query(
+                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                params={"url": f"session:{sid}"},
+            )
+        if not remove_session:
+            return 0
         r = self.g.query(
             "MATCH (s:Session {id:$sid}) DETACH DELETE s RETURN count(s)",
             params={"sid": sid},
