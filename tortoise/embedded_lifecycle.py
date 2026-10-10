@@ -888,9 +888,11 @@ _CONSTRUCT_LOCKS_GUARD = threading.Lock()
 # so the lock's `<key>.tortoise-construct.lock` derivation used to create
 # `<cwd>/:memory:.tortoise-construct.lock` — an untracked file in the repo/
 # worktree root after any pytest run. The sentinel therefore gets its own
-# (non-path) `_CONSTRUCT_LOCKS` key for the in-process RLock but no flock
-# sidecar: `_construction_key` returns this value and `_open_construct_lock`
-# refuses to derive a path from it.
+# (non-path) `_CONSTRUCT_LOCKS` key for the in-process RLock, and
+# `_open_construct_lock` relocates its flock sidecar out of the cwd
+# (`_memory_construct_lock_path`) instead of dropping the lock — the sentinel
+# still names a SHARED `<cwd>/:memory:` RDB, so the cross-process half of the
+# `#4921` guard is required.
 _MEMORY_DB_KEY = ":memory:"
 
 
@@ -986,8 +988,9 @@ def _construction_key(args: tuple, kwargs: dict) -> str | None:
         # anchors it to the cwd to mirror redislite client.py:435-436, but the
         # lock path is `<key>.tortoise-construct.lock`, so any path-returning
         # key here litters the process cwd. Return the sentinel itself: the
-        # in-process RLock still serialises, `_open_construct_lock` opens no
-        # lock file for it, and no filesystem path is derived from the key.
+        # in-process RLock still serialises it, and `_open_construct_lock`
+        # relocates its flock sidecar out of the cwd — the flock is KEPT, not
+        # dropped, because the sentinel names a shared `<cwd>/:memory:` RDB.
         return _MEMORY_DB_KEY
     return os.path.realpath(db_filename)
 
@@ -1019,16 +1022,10 @@ def _memory_construct_lock_path() -> str:
 def _open_construct_lock(key: str) -> int:
     """Open + LOCK_EX the lock file for `key`, or -1 when no lock can be taken.
 
-    Three failures deliberately yield -1 ("no lock", the caller keeps the
+    Two failures deliberately yield -1 ("no lock", the caller keeps the
     in-process RLock) rather than raising, mirroring `_acquire_owner_lock`'s
     #4098/#4577 discipline for a lock file in a shared directory:
 
-    * the `:memory:` sentinel (`_MEMORY_DB_KEY`, #7943) — a non-filesystem DB
-      key. Its sidecar is RELOCATED out of the cwd (`_memory_construct_lock_path`)
-      rather than dropped, because the sentinel still names a SHARED resource:
-      redislite anchors it to `<cwd>/:memory:` with no internal lock, so the
-      cross-process half of the `#4921` guard is required. Nothing is written
-      into the worktree, which is what #7943 actually filed;
     * a vanished db directory — that refusal belongs to #3653's missing-dbdir
       guard one call later, and two constructions into a directory that does
       not exist cannot both create an RDB;
