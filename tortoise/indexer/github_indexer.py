@@ -628,21 +628,96 @@ class GitHubIndexer:
         return bool(rows)
 
     @staticmethod
-    def _entity_registered(proj, label: str, id_val: str) -> bool:
-        """True when a canonical entity node (Object/Subject) with this id
-        already exists (#7951).
+    def _entity_registered(proj, label: str, id_val: str,
+                           journal_ids: set | None = None) -> bool:
+        """True when the entity is ALREADY registered in the journal (#7951).
 
-        Mirrors the existence probe ``TortoiseSDK._create_entity`` uses for
-        its probe-gated first registration: the journal carries ONE
-        ``ObjectRegistered``/``SubjectAdded`` per MINT, not one per poll. The
-        label is interpolated because Cypher cannot parameterise a node
+        The gate exists to answer ONE question: does the journal already carry
+        this entity's registration record (``ObjectRegistered`` /
+        ``SubjectAdded``), so a poll must not append it again?
+
+        TWO probes, and BOTH are needed:
+
+        * the GRAPH probe — the node may never have existed at all (first
+          sight) or may have been written while the journal was unavailable;
+        * the JOURNAL probe — a node the PRE-#7951 binary wrote straight
+          through ``proj.apply`` (graph, no journal) exists in the graph but
+          has NO registration record, so probing the graph alone read it as
+          "registered" and kept ``journal=False`` for ever: `derived =
+          replay(journal)` stayed false for it on every later poll (review
+          P2-a). Reading the journal lets the next poll BACKFILL it.
+
+        FAIL-OPEN (review P2-b): ANY probe failure returns False (= journal
+        it). ``_create_entity``'s probe fails open the same way. A duplicate
+        registration line is replay-safe (idempotent MERGE, and the payload is
+        the same record); skipping the journal is the node-loss bug. Before
+        this, a transient probe error propagated out of the argument expression
+        ``journal=not self._entity_registered(...)`` and aborted the issue's
+        ENTIRE projection — a failure mode that was impossible before the door
+        landed.
+
+        ``journal_ids`` is the run-scoped set of ``(record type, id)`` pairs
+        the journal already carries (``_journal_registered_entities``); it is
+        MUTATED by the caller as it journals, so a Subject repeated across
+        issues within one run is not re-journaled. ``None`` (a caller that has
+        not read the journal) means "no registration known" — journal it.
+
+        The label is interpolated because Cypher cannot parameterise a node
         label; it is a module-local literal at every call site (never caller
         input), so there is no injection surface.
         """
-        rows = proj.g.query(
-            f"MATCH (n:{label} {{id:$id}}) RETURN n.id",
-            params={"id": id_val}).result_set
-        return bool(rows)
+        try:
+            rows = proj.g.query(
+                f"MATCH (n:{label} {{id:$id}}) RETURN n.id",
+                params={"id": id_val}).result_set
+        except Exception:
+            logger.warning(
+                "%s existence probe failed for %s — journaling optimistically "
+                "(fail-open, #7951 P2-b)", label, id_val)
+            return False
+        if not rows:
+            return False
+        record_type = ("ObjectRegistered" if label == "Object"
+                       else "SubjectAdded")
+        try:
+            return (record_type, id_val) in (journal_ids or ())
+        except Exception:
+            logger.warning(
+                "%s journal-registration probe failed for %s — journaling "
+                "optimistically (fail-open, #7951 P2-b)", label, id_val)
+            return False
+
+    @staticmethod
+    def _journal_registered_entities(sdk) -> set:
+        """The ``(record type, id)`` pairs the journal already carries for the
+        indexer's entities — read ONCE per ``index_repo`` run.
+
+        Feeds ``_entity_registered``'s journal probe (#7951 P2-a): a node a
+        pre-fix binary wrote to the graph without a journal record is in the
+        graph but NOT in this set, so the next poll backfills it. A journal
+        read failure degrades to the EMPTY set (fail-open: every entity is
+        re-journaled once) rather than aborting the run.
+        """
+        out: set = set()
+        try:
+            log = sdk._get_event_log() if sdk is not None else None
+            if log is None:
+                return out
+            for ev in log.read_all():
+                if not isinstance(ev, dict):
+                    continue
+                t = ev.get("type")
+                if t not in ("ObjectRegistered", "SubjectAdded"):
+                    continue
+                rid = ev.get("id")
+                if isinstance(rid, str):
+                    out.add((t, rid))
+        except Exception:
+            logger.warning(
+                "journal registration read failed — every entity will be "
+                "re-journaled this run (fail-open, #7951 P2-a)")
+            return set()
+        return out
 
     def _next_transition_id(self, proj, base_id: str) -> str:
         """Monotonic transition eventId (P1-3, PR #1792).
@@ -666,7 +741,8 @@ class GitHubIndexer:
                 max_n = max(max_n, int(suffix))
         return f"{base_id}-{max_n + 1}"
 
-    def _project_issue(self, sdk, proj, repo: str, issue: dict) -> dict:
+    def _project_issue(self, sdk, proj, repo: str, issue: dict,
+                       *, journal_ids: set | None = None) -> dict:
         """Project one issue: Object + Subjects + Events (object-only, #1844).
 
         Returns {"points_created", "statements_superseded", "events_minted"}
@@ -702,15 +778,24 @@ class GitHubIndexer:
         # replay can still reproduce the node. Before this, the write went
         # straight through ``proj.apply`` with ZERO journal calls, so
         # ``derived = replay(journal)`` LOST it.
-        sdk._apply_and_journal(
-            proj, obj,
-            journal=not self._entity_registered(proj, "Object", obj_id))
+        #
+        # The registration gate probes the journal TOO (#7951 P2-a), so a node
+        # an earlier binary wrote to the graph without a record is backfilled
+        # here; ``journal_ids`` is updated in lockstep so a re-mint later in
+        # this same run is not double-journaled.
+        _obj_registered = self._entity_registered(
+            proj, "Object", obj_id, journal_ids)
+        sdk._apply_and_journal(proj, obj, journal=not _obj_registered)
+        if not _obj_registered and journal_ids is not None:
+            journal_ids.add(("ObjectRegistered", obj_id))
 
         subjects, about_ids = github_map.issue_to_subjects(issue)
         for subj in subjects:
-            sdk._apply_and_journal(
-                proj, subj,
-                journal=not self._entity_registered(proj, "Subject", subj["id"]))
+            _subj_registered = self._entity_registered(
+                proj, "Subject", subj["id"], journal_ids)
+            sdk._apply_and_journal(proj, subj, journal=not _subj_registered)
+            if not _subj_registered and journal_ids is not None:
+                journal_ids.add(("SubjectAdded", subj["id"]))
         for sid in about_ids:
             proj.g.query(
                 "MATCH (o:Object {id:$oid}) "
@@ -946,6 +1031,10 @@ class GitHubIndexer:
         """
         client = await self._get_client()
         proj = sdk._get_proj()
+        # #7951 P2-a: read the journal's registrations ONCE per run so the
+        # entity door can backfill a node a pre-fix binary wrote (graph only)
+        # and skip re-journaling one already recorded.
+        journal_ids = self._journal_registered_entities(sdk)
         stats: dict[str, Any] = {
             "repo": repo,
             "total_fetched": 0,
@@ -993,7 +1082,8 @@ class GitHubIndexer:
                 stats["events_minted"] += self._project_pr(sdk, proj, repo, item)["events_minted"]
             else:
                 try:
-                    s_stats = self._project_issue(sdk, proj, repo, item)
+                    s_stats = self._project_issue(
+                        sdk, proj, repo, item, journal_ids=journal_ids)
                 except Exception as e:
                     stats["errors"].append(f"{repo}#{n['number']}: {e}")
                     continue

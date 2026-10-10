@@ -1049,7 +1049,7 @@ def test_all_projection_failure_keeps_truncated(sdk):
         page_size=100)
     indexer = _indexer(t)
 
-    def _boom(sdk, proj, repo, issue):
+    def _boom(sdk, proj, repo, issue, **kw):
         raise ValueError("projection failure (test)")
     indexer._project_issue = _boom
 
@@ -1579,5 +1579,77 @@ def test_7951_indexer_journals_createdAt_for_events(tmp_path):
         assert records[0].get("createdAt"), (
             "the journaled EventRecorded carries no createdAt — "
             "`_apply_and_journal` skipped the door's synthesis (#7951 P1-b)")
+    finally:
+        sdk.close()
+
+
+# ── P2-a (review): a pre-fix node in the GRAPH is never backfilled
+# `_entity_registered` probed the LIVE node only, so an Object/Subject a
+# PRE-#7951 binary wrote straight through `proj.apply` (graph, no journal)
+# read as "registered" on every later poll and `journal=False` for ever —
+# `derived = replay(journal)` stayed false for it. Reproduced by writing the
+# Object through the pre-fix door and then running a real poll.
+#
+# ── P2-b (review): the probe is fail-CLOSED
+# Id-only with no `try/except`, while `_create_entity`'s probe fails OPEN. A
+# transient probe error aborted `_project_issue` (caught by `index_repo`),
+# skipping an ENTIRE issue's projection — a failure mode that was impossible
+# before the door landed.
+
+def test_7951_prefix_object_in_graph_is_backfilled_to_the_journal(tmp_path):
+    """A node the pre-fix binary wrote (graph only) must be journaled by the
+    next poll — journal=False for ever is the P2-a defect."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        obj = github_map.issue_to_object(gh_issue(1), "acme/repo1")
+        proj.apply(obj)  # the PRE-FIX door: live graph, no journal append
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        records = _jdoor_journal(events)
+        assert any(e.get("type") == "ObjectRegistered"
+                   and e.get("id") == _JDOOR_OID for e in records), (
+            "a node the PRE-FIX binary wrote (graph only) was never backfilled "
+            "into the journal — `derived = replay(journal)` stays false for it "
+            "on every later poll (#7951 P2-a)")
+        # and the backfilled record now reproduces the node on replay
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the backfilled ObjectRegistered did not reproduce the node on "
+            "rebuild_all (#7951 P2-a)")
+    finally:
+        sdk.close()
+
+
+def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
+    """A transient failure of the existence probe must not abort the issue's
+    projection — it fails OPEN, exactly like `_create_entity`'s probe."""
+    from tortoise.projection import _GuardedGraph
+
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        real_query = _GuardedGraph.query
+
+        def flaky_query(self, q, params=None, **kw):
+            if ("RETURN n.id" in q and "{id:$id}" in q
+                    and (":Object " in q or ":Subject " in q)):
+                raise RuntimeError("transient probe failure (test)")
+            return real_query(self, q, params=params, **kw)
+
+        monkeypatch.setattr(_GuardedGraph, "query", flaky_query)
+        stats = _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        assert not stats["errors"], (
+            f"a transient probe error aborted the issue's projection: "
+            f"{stats['errors']} (#7951 P2-b)")
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the probe failure skipped the Object write entirely (#7951 P2-b)")
+        assert any(e.get("type") == "ObjectRegistered"
+                   for e in _jdoor_journal(events)), (
+            "the fail-open path did not journal the Object (#7951 P2-b)")
     finally:
         sdk.close()
