@@ -162,7 +162,8 @@ class GitHubConnector:
                 "--repo", self.repo,
                 "--state", self.state,
                 "--limit", str(self.limit),
-                "--json", "number,title,state,createdAt,closedAt,url",
+                "--json", "number,title,state,createdAt,closedAt,url,"
+                          "labels,assignees",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -430,6 +431,16 @@ class GitHubConnector:
         if event_type == "issues":
             issue = payload.get("issue", {})
             action = payload.get("action", "")
+            # #8019: `labels`/`assignees` ride the event because
+            # `_connector_content_hash` covers them — and the entity/indexer
+            # producers supply the real lists. Omitting them here would default
+            # to `[]` (`_norm_issue`) and hash one unchanged item two ways, so a
+            # poll↔webhook alternation would advance the Source version with no
+            # content change. GitHub includes both in the webhook `issue` object.
+            content = {
+                "labels": issue.get("labels"),
+                "assignees": issue.get("assignees"),
+            }
             if action in ("closed", "reopened"):
                 return github_map.issue_to_event({
                     "number": issue.get("number"),
@@ -438,6 +449,7 @@ class GitHubConnector:
                     "createdAt": issue.get("created_at", ""),
                     "closedAt": issue.get("closed_at"),
                     "html_url": issue.get("html_url", ""),
+                    **content,
                 }, self.repo,
                     previous_state="open" if action == "closed" else "closed")
             return self._issue_to_event({
@@ -447,6 +459,7 @@ class GitHubConnector:
                 "createdAt": issue.get("created_at", ""),
                 "closedAt": issue.get("closed_at"),
                 "html_url": issue.get("html_url", ""),
+                **content,
             })
         if event_type == "pull_request":
             pr = payload.get("pull_request", {})

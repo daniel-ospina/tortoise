@@ -310,6 +310,127 @@ def test_one_item_state_hashes_equal_across_the_poll_and_webhook_producers():
         assert after_poll[1] == 1
 
 
+def test_one_item_state_hashes_equal_from_the_webhook_and_the_entity_producer():
+    """P1 (#8019 review r3): the producer-independence pin must exercise the REAL
+    webhook mapping, not two hand-built dicts. `GitHubConnector._webhook_to_event`
+    builds a REDUCED issue dict (number/title/state/createdAt/closedAt/html_url);
+    `_norm_issue` then defaulted the absent `labels`/`assignees` to `[]`, while the
+    entity/indexer producers pass the REAL lists — so one unchanged item hashed
+    two ways and a poll↔webhook alternation advanced the version, the false stale
+    this PR exists to prevent. GitHub includes both lists in the webhook `issue`
+    object, so the producer can carry them.
+
+    FAILS IF `_webhook_to_event` drops `labels`/`assignees`: the webhook digest
+    differs from the entity digest and the second apply advances the pair."""
+    from tortoise.connectors.github import GitHubConnector
+
+    # The entity/indexer shape (REST / `gh --json …labels,assignees…`).
+    entity_issue = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z",
+        "updated_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL, "body": "The bug is in the parser.",
+        "labels": [{"name": "bug"}, {"name": "P1"}],
+        "assignees": [{"login": "alice"}],
+        "user": {"login": "alice"},
+    }
+    entity_event = gm.issue_to_event(dict(entity_issue), "test/repo")
+
+    # The webhook producer on the SAME item state — GitHub's `issues` payload.
+    connector = GitHubConnector(config={"repo": "test/repo"})
+    webhook_event = connector._webhook_to_event("issues", {
+        "action": "opened",
+        "issue": {
+            "number": 42, "title": "Fix login bug", "state": "open",
+            "created_at": "2026-07-10T10:00:00Z",
+            "updated_at": "2026-07-10T10:00:00Z", "closed_at": None,
+            "html_url": GH_URL, "body": "The bug is in the parser.",
+            "labels": [{"name": "bug"}, {"name": "P1"}],
+            "assignees": [{"login": "alice"}],
+            "user": {"login": "alice"},
+        },
+    })
+    assert webhook_event is not None, "the payload must map to an event"
+    assert webhook_event["eventId"] == entity_event["eventId"], (
+        "the two producers must mint ONE item event"
+    )
+    assert _connector_content_hash(entity_event) == _connector_content_hash(webhook_event), (
+        "one item state must hash equal across the webhook and entity producers"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(entity_event)
+        after_entity = _source(proj, GH_URL)
+        proj.apply(webhook_event)
+        assert _source(proj, GH_URL) == after_entity, (
+            "a producer switch on an unchanged item must not advance the version"
+        )
+        assert after_entity[1] == 1
+
+
+def test_label_and_assignee_order_does_not_advance_the_version():
+    """P3 (#8019 review r3): a label/assignee list is semantically UNORDERED —
+    REST, GraphQL, `gh --json` and the webhook each return it in their own
+    order. Hashing API order lets a mere reorder (or a producer switch) mint a
+    new version with no item change.
+
+    FAILS IF `_norm_issue` keeps API order: `[bug, P1]` and `[P1, bug]` hash
+    differently and the second apply advances the pair."""
+    base = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL,
+    }
+    ordered = gm.issue_to_event(dict(
+        base, labels=[{"name": "bug"}, {"name": "P1"}],
+        assignees=[{"login": "alice"}, {"login": "bob"}]), "test/repo")
+    reordered = gm.issue_to_event(dict(
+        base, labels=[{"name": "P1"}, {"name": "bug"}],
+        assignees=[{"login": "bob"}, {"login": "alice"}]), "test/repo")
+    assert _connector_content_hash(ordered) == _connector_content_hash(reordered), (
+        "list order is not item content: the digest must be order-independent"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(ordered)
+        first = _source(proj, GH_URL)
+        proj.apply(reordered)
+        assert _source(proj, GH_URL) == first, (
+            "a reordered label/assignee list must not advance the version"
+        )
+        assert first[1] == 1
+
+
+def test_the_poll_cli_requests_the_same_content_fields_as_the_entity_producer(
+        monkeypatch):
+    """Every live GitHub producer must carry the content the digest covers. The
+    legacy `poll()` issue fetch (`_poll_issues`) builds its own `gh issue list`
+    argv; if it omits `labels`/`assignees` while the entity/indexer producers
+    request them, one unchanged item hashes two ways (P1). Pinned at the fetch
+    layer because the two paths share the mapper.
+
+    FAILS IF `_poll_issues`'s `--json` field list omits `labels`/`assignees`."""
+    import subprocess as sp
+
+    from tortoise.connectors.github import GitHubConnector
+
+    seen: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        seen.append(list(args))
+        return sp.CompletedProcess(args=args, returncode=0, stdout="[]")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    GitHubConnector(config={"repo": "test/repo"}).poll()
+    issue_cmds = [c for c in seen if "issue" in c]
+    assert issue_cmds, "poll must fetch issues"
+    fields = " ".join(issue_cmds[0])
+    assert "labels" in fields and "assignees" in fields, (
+        f"the poll producer must request the content fields the digest covers: "
+        f"{issue_cmds[0]!r}"
+    )
+
+
 def test_the_digest_is_canonical_over_key_order():
     """Canonical form (sorted keys, no insignificant whitespace), so a producer
     that builds the payload in a different order does not mint a new version.

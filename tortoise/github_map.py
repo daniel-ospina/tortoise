@@ -83,6 +83,15 @@ def _norm_issue(issue: dict) -> dict:
     else:
         assignee_logins = [str(a) for a in assignees]
 
+    # #8019 (P3): a label/assignee list is semantically UNORDERED — REST,
+    # GraphQL, `gh --json` and the webhook each return it in their own order.
+    # Canonicalise to a sorted list here (the one place the shapes converge),
+    # so a reorder or a producer switch cannot advance the `contentHash`
+    # version of an UNCHANGED item — the false stale this digest excludes the
+    # record id for.
+    label_names.sort()
+    assignee_logins.sort()
+
     author = _get("author", "user", default=None)
     if isinstance(author, dict):
         author_login = str(author.get("login", "") or "")
