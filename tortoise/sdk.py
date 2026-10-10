@@ -51,6 +51,7 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
+from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
@@ -15235,10 +15236,9 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking). The
-        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
-        are not mirrors, so `affected` can exceed the closure and coverage can
-        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        ranking). The `0 ≤ coverage ≤ 1` bound holds: `_window_closure` now
+        mirrors the pass's seed expansion and liveness predicates (#6597), so
+        ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
         flag: a converged pass clears the affected roots; a failed pass clears
         nothing (W4 retention — non-converged regions reselect via the window
@@ -15316,30 +15316,36 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
-        are transparent bridges — one claim-hop per BFS level; the operator
-        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
-        are bridged; operator-less direct edges via #888 W5 semantics; #780
-        draft exclusion). The window members themselves are reachable at 0
-        claim-hops (an operator-less isolated claim is its own window).
+        Mirrors ``TortoiseEP._affected_claims``'s reach so that
+        ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
+        (#6597). The window members themselves are reachable at 0 claim-hops
+        (an operator-less isolated claim is its own window); then, exactly as
+        ``_affected_claims`` seeds its own expansion, the plain window
+        members are expanded by ONE claim-hop (direct edges + operator
+        siblings) BEFORE the BFS loop — the closure is no longer one hop short
+        on ≥4-claim chains. Per-hop narrowing is shared: operators are
+        transparent bridges (one claim-hop per BFS level); the operator hop is
+        typed `IMPL|NAND` AND directed (#5566, only operator INPUTS bridged);
+        operator-less direct edges use #888 W5 semantics; every traversal
+        predicate is ``_live_only`` (draft AND terminal exclusion, #2422), so
+        a terminal/outdated bridge can no longer inflate the denominator.
 
-        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
-        guaranteed — do not reinstate that claim. Two gaps remain, both
-        predating #5566 and both filed (as the duplicate pair **#6597** /
-        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
-        seeds by ONE claim-hop before its loop while this starts at 0, so
-        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
-        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
-        rather than ``_live_only``, so a terminal/outdated bridge is counted
-        here but can never be reached by EP. The third asymmetry — an operator
-        window member being dropped from the seed set — was #5566's own
-        regression and is handled below.
+        One deliberate asymmetry: the SEED query keeps the draft-only filter.
+        A terminal/outdated window claim must stay a seed because
+        ``_affected_claims`` still expands its operator siblings through
+        ``_live_neighbors`` (which does not filter the seed); dropping it here
+        would make the closure miss reachable claims and re-introduce
+        ``coverage > 1.0``. The reverse — a terminal window member the pass
+        never affects — can only OVER-count, so the subset invariant holds.
 
-        Two batched queries per hop (operator-bridge + direct-edge), seeded
-        with the whole window — cheap for the scheduler's large windows
-        (2 × max_hops queries total), unlike a per-seed BFS.
+        Batched queries per hop (operator-bridge + direct-edge), seeded with
+        the whole window and one extra seed hop — cheap for the scheduler's
+        large windows (O(max_hops) queries total), unlike a per-seed BFS.
         """
         proj = self._get_proj()
+        # #6597: the SEED keeps the draft-only predicate (see docstring) —
+        # terminal window claims must remain seeds so the operator siblings
+        # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -15348,73 +15354,104 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+
+        live_op = _live_only("op.status")
+        live_m = _live_only("m.status")
+        live_a = _live_only("a.status")
+        live_b = _live_only("b.status")
+        live_o = _live_only("o.status")
+        live_c = _live_only("c.status")
+
+        def _hop(frontier: list[str]) -> list[str]:
+            """One batched claim-hop; returns the newly-reached claim ids.
+
+            Query shape mirrors ``_affected_claims``'s per-hop batch:
+            operator-mediated bridges (operator INPUTS only, typed AND
+            directed — #5566; op_type OR is_operator legacy parity, #943)
+            plus operator-less direct IMPL|NAND edges (#888 W5). Every
+            endpoint predicate is ``_live_only`` (#2422) so the closure does
+            not count a terminal bridge EP can never reach.
+            """
+            new_frontier: list[str] = []
+            if not frontier:
+                return new_frontier
+            nbr_rows = proj.g.query(
+                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m:Point) "
+                "WHERE n.id IN $ids AND m.id <> n.id "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                f"AND {live_op} AND {live_m} "
+                "RETURN DISTINCT n.id, m.id",
+                params={"ids": frontier},
+            ).result_set
+            for _nid, mid in nbr_rows:
+                if mid not in closure:
+                    closure.add(mid)
+                    new_frontier.append(mid)
+            dir_rows = proj.g.query(
+                "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                "WHERE a.id IN $ids AND b.id <> a.id "
+                f"AND {live_a} AND {live_b} "
+                # #3139/#3154: index-independent non-operator predicate
+                # (the `= false` form is emptied by a GRAPH.COPY'd index).
+                "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                "AND a.op_type IS NULL "
+                "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                "AND b.op_type IS NULL "
+                "RETURN DISTINCT a.id, b.id",
+                params={"ids": frontier},
+            ).result_set
+            for _aid, bid in dir_rows:
+                if bid not in closure:
+                    closure.add(bid)
+                    new_frontier.append(bid)
+            return new_frontier
+
+        # #6597: one claim-hop of SEED expansion from the plain window
+        # members, mirroring `_affected_claims`'s plain-seed branch (direct
+        # neighbors + operator siblings). Without it the closure trails the
+        # pass by a claim-hop and `coverage` exceeds 1.0 on ≥4-claim chains.
+        seed_frontier = _hop(list(closure))
         # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
         # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
         # operator reaches that operator's INPUTS, so they are part of what a
         # pass CAN reach and belong in the denominator. Without them the closure
         # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
-        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
-        # denominator bug #6597/#6598 describe, reached through the SEED rather
-        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
-        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), the
+        # denominator bug reached through the SEED rather than the hop. Mirrors
+        # `_affected_claims`'s operator-seed branch, which admits an operator
+        # seed's outgoing `IMPL|NAND` targets.
         op_input_rows = proj.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND (o.status IS NULL OR o.status <> 'draft') "
-            "AND (c.status IS NULL OR c.status <> 'draft') "
+            f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
             params={"ids": list(window)},
         ).result_set
-        closure |= {r[0] for r in op_input_rows}
-        frontier = list(closure)
+        op_inputs: list[str] = []
+        for _r in op_input_rows:
+            if _r[0] not in closure:
+                closure.add(_r[0])
+                op_inputs.append(_r[0])
+        frontier = seed_frontier + op_inputs
+        # #6597: the pass does NOT seed EP from the raw window — `dream.py`
+        # seeds it from `_bfs_select_operators(window, max_hops)`, which
+        # already expands the window by up to `max_hops` graph hops. The pass
+        # therefore reaches the selector's max_hops hops PLUS
+        # `_affected_claims`'s own seed hop and its max_hops BFS — up to
+        # `2*max_hops + 1` claim-hops from the window. A claim-hop is never
+        # shorter than a graph hop, so expanding one seed hop + `2*max_hops`
+        # more is a provable SUPERSET of every claim the selector can hand
+        # EP. This is deliberately conservative for operator window members
+        # (whose seed hop already lands on the operator's inputs); the hard
+        # contract is `affected ⊆ closure` / `coverage <= 1.0`, not a tight
+        # denominator.
+        hop_budget = None if max_hops is None else 2 * max_hops
         hops = 0
-        while frontier and (max_hops is None or hops < max_hops):
+        while frontier and (hop_budget is None or hops < hop_budget):
             hops += 1
-            new_frontier: list[str] = []
-            if frontier:
-                # Operator-mediated bridges (op_type OR is_operator — legacy
-                # operator detection parity, #943). Never hops through drafts.
-                # #5566: typed AND directed, mirroring _affected_claims — only
-                # operator INPUTS are bridged (a structural predicate or the
-                # reverse-only mitigation `IMPL` forms no factor and would
-                # inflate the denominator, permanently under-reporting
-                # coverage).
-                nbr_rows = proj.g.query(
-                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                    "-[r2:IMPL|NAND]->(m:Point) "
-                    "WHERE n.id IN $ids AND m.id <> n.id "
-                    "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                    "AND (op.status IS NULL OR op.status <> 'draft') "
-                    "AND (m.status IS NULL OR m.status <> 'draft') "
-                    "RETURN DISTINCT n.id, m.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _nid, mid in nbr_rows:
-                    if mid not in closure:
-                        closure.add(mid)
-                        new_frontier.append(mid)
-                # Operator-less direct IMPL|NAND edges between plain Points
-                # (#888 W5). Draft endpoints never propagate (#780).
-                dir_rows = proj.g.query(
-                    "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
-                    "WHERE a.id IN $ids AND b.id <> a.id "
-                    "AND (a.status IS NULL OR a.status <> 'draft') "
-                    "AND (b.status IS NULL OR b.status <> 'draft') "
-                    # #3139/#3154: index-independent non-operator predicate
-                    # (the `= false` form is emptied by a GRAPH.COPY'd index).
-                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
-                    "AND a.op_type IS NULL "
-                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
-                    "AND b.op_type IS NULL "
-                    "RETURN DISTINCT a.id, b.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _aid, bid in dir_rows:
-                    if bid not in closure:
-                        closure.add(bid)
-                        new_frontier.append(bid)
-            frontier = new_frontier
+            frontier = _hop(frontier)
         return closure
 
     def _reachable_claim_count(self) -> int:
