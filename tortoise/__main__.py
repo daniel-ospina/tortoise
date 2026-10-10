@@ -8344,6 +8344,23 @@ def _cmd_decide(args) -> int:
             # Try as a raw graph ID (pass-through)
             return name
 
+        # #7813: the decision-authoring path could not express a direction, so
+        # every operator it wired took create_operator's default — including the
+        # NANDs that mean "X attacks Y", which were silently recorded as mutual
+        # exclusion. `--direction` now lets the author choose; it is threaded to
+        # all three wiring loops below.
+        #
+        # ⛔ Pass the kwarg ONLY when a direction was chosen. create_operator's
+        # signature default is the string "bidirectional" (#807 — the authoring
+        # default), and an omitted kwarg keeps it. Passing direction=None
+        # explicitly would instead reach create_operator's `if direction is None`
+        # guard and canonicalize NAND → "unidirectional", reversing #807/#753/#86.
+        chosen_direction = getattr(args, "direction", None)
+
+        def _direction_kw() -> dict:
+            """Operator kwargs carrying the chosen direction (empty when unset)."""
+            return {"direction": chosen_direction} if chosen_direction is not None else {}
+
         # ── Create regular edges (IMPL/NAND) ──
         # Track created operators so relevance_edges can reuse them instead of
         # creating duplicates (same src/op_type/tgt in both sections).
@@ -8363,7 +8380,8 @@ def _cmd_decide(args) -> int:
                 continue
 
             try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], label=label)
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                         label=label, **_direction_kw())
                 created_ops[(src, op_type, tgt)] = op["id"]
                 all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
@@ -8376,7 +8394,8 @@ def _cmd_decide(args) -> int:
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                          **_direction_kw())
                 all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
@@ -8396,7 +8415,8 @@ def _cmd_decide(args) -> int:
                 # duplicate operators feeding EP twice).
                 op_id = created_ops.get((src, op_type, tgt))
                 if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                             **_direction_kw())
                     op_id = op["id"]
                     all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
@@ -9333,6 +9353,10 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
+    dc.add_argument("--direction", choices=["bidirectional", "unidirectional"], default=None,
+                    help="Direction recorded on every operator this run wires (#7813): "
+                         "'bidirectional' (mutual, the default when omitted) or "
+                         "'unidirectional' (directed attack — no back-pressure).")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help=(
