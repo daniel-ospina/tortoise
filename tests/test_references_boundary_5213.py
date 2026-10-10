@@ -173,7 +173,7 @@ def test_the_escape_hatch_offers_no_way_to_supply_the_anchor():
     entry_points = {
         "TortoiseSDK.create_edge": TortoiseSDK.create_edge,
         "mcp_server.tortoise_create_edge": mcp_server.tortoise_create_edge,
-        "EdgeHandlers.create_edge": _EdgeHandlers.create_edge,
+        "_EdgeHandlers.create_edge": _EdgeHandlers.create_edge,
     }
     allowed = {"self", "relation", "predicate", "from_id", "to_id",
                "source_id", "target_id"}
@@ -223,11 +223,15 @@ def test_backfill_references_merges_a_bare_reference():
 def test_storage_architecture_still_records_the_boundary():
     """Input: ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6, read as text.
 
-    FAILS IF the boundary statement is removed or reworded out of the section.
+    FAILS IF the boundary statement is removed or reworded out of the section,
+    OR if any claim #5213 added to it is dropped.
     This is the DELIVERABLE of #5213 (option 3 is *document only*), so a pin on
     the record itself is the one thing that keeps the decision from being tidied
-    away — the code pins above cannot see a deletion. Deliberately narrow: it
-    asserts the two load-bearing claims and the two writer names, not prose.
+    away — the code pins above cannot see a deletion. It asserts the two
+    pre-existing sentences, the two writer names, the third entry point by its
+    REAL symbol, the two measured claims #5213 added, and the decision itself —
+    not prose. Without the last four the added paragraph can be deleted and
+    every pin above still passes, which is the drift they exist to stop.
     """
     doc = (_ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
         encoding="utf-8")
@@ -243,4 +247,23 @@ def test_storage_architecture_still_records_the_boundary():
     )
     assert "#5213" in section, (
         "§9.6 no longer points at #5213 — the boundary's owning issue"
+    )
+    # The claims THIS PR adds. Deleting the paragraph while keeping the sentence
+    # above used to leave every assertion in this test green.
+    assert "no property parameter at all" in section, (
+        "§9.6 no longer records that no public entry point can supply the "
+        "anchor — the remedy #5213 recorded as unavailable (raw Cypher is the "
+        "only route)"
+    )
+    assert "satisfies the later" in section and "`ON CREATE` only" in section, (
+        "§9.6 no longer records that a bare edge PRE-EMPTS the later anchor "
+        "stamp — the ``ON CREATE``-only mechanism #5213's option-3 note rests on"
+    )
+    assert "_EdgeHandlers" in section, (
+        "§9.6 no longer names the third ``create_edge`` entry point by its "
+        "real (private) symbol — ``projection.edges._EdgeHandlers``"
+    )
+    assert "stays option 3" in section, (
+        "§9.6 no longer records the DECISION (option 3 — document, do not "
+        "re-route); re-opening it must be a deliberate change to this pin"
     )
