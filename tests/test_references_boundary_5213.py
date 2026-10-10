@@ -68,7 +68,7 @@ def _fixture(sdk: TortoiseSDK, *, content_hash: str = "h1"):
 
 def _anchor_exists(proj, key: str, value: str) -> bool:
     rows = proj.g.query(
-        f"MATCH (:Source {{url:'src.txt'}})-[r:references]->(e {{id:$v}}) "
+        "MATCH (:Source {url:'src.txt'})-[r:references]->(e {id:$v}) "
         "WHERE e:Event OR e:Source RETURN exists(r.sourceVersion)",
         params={"v": value},
     ).result_set
