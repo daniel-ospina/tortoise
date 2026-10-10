@@ -27,8 +27,9 @@ aboutObjects: tortoise
 > **#5971 (2026-10-10): the recurrence path.** A recurrence is NEWER than this
 > runbook's historical window and may sit off the strict email guard shape, so
 > the default procedure below finds nothing in its DELETE set — see **§6.1** for
-> `--all-e2e-live` + `--include-residue` (Guard D). Everything in §1–§6 is
-> unchanged and still correct for the original red window.
+> `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 remain the record of the
+> original red window (their table names carry the #3543 `teams` →
+> `organizations` rename).
 
 ---
 
@@ -61,7 +62,7 @@ endpoint in-repo).
 
 | Resource | Window scope (default) | All e2e-live (with `--all-e2e-live`) |
 |---|---|---|
-| `public.teams` (`email LIKE 'e2e-live-%@premise-labs.dev'`) | **154** | **222** |
+| `public.organizations` (`email LIKE 'e2e-live-%@premise-labs.dev'`) | **154** | **222** |
 | `auth.users` remaining (`e2e-live-*`) | 1 | **12** |
 | `public.api_keys` (orphan teams) | 154 | 222 |
 | `public.org_memberships` (orphan teams) | 2 | 2 |
@@ -109,7 +110,7 @@ curl -sS -X POST "https://api.supabase.com/v1/projects/ybetwichurajbfswfeqa/data
 
 ```sql
 SELECT t.id, t.name, t.email, t.graph_name, t.created_at::text, t.deleted_at::text
-FROM public.teams t
+FROM public.organizations t
 WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
   AND t.email ~ '^e2e-live-[0-9a-f]{8}@premise-labs\.dev$'
   AND t.created_at >= '2026-08-19T22:20:00Z'
@@ -156,7 +157,7 @@ UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
 
 ```sql
 SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
-WHERE conrelid IN ('public.teams','public.api_keys','public.org_memberships',
+WHERE conrelid IN ('public.organizations','public.api_keys','public.org_memberships',
                    'public.invitations','public.abuse_events')::regclass
   AND contype = 'f';
 ```
@@ -297,7 +298,8 @@ product purge): **auth users** (GoTrue) → **org_memberships** →
 
 Guards (in code): email/name must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$`;
 teams are limited to the window unless `--all-e2e-live`; every delete is
-enumerated up-front; graphs must match `team_[0-9a-f]{26}` exactly; nothing
+enumerated up-front; graphs must match `<org|team>_[0-9a-f]{26}` exactly (#3543:
+pre-rename `team_`, post-rename `org_`); nothing
 runs without `--execute`.
 
 ### 6.1 Recurrence (the #2189 case) and the Guard-A residue (#5971)
@@ -336,7 +338,8 @@ the namespace but OFF the guard shape was therefore excluded **silently** by a
 SQL regex, so nothing in-repo could DELETE it
 while the detector kept filing. The script now:
 
-+ **always** enumerates and prints the residue (teams + auth users, ALL-TIME,
++ **always** enumerates the residue on `--phase enumerate|all` and PRINTS it on
+  every phase (teams + auth users, ALL-TIME,
   explicitly `!~` the guard shape) and records it in the manifest's `residue`
   key — nothing is silent, even on a run that does not delete it;
 + refuses to proceed (guard logic error) if a "residue" row actually matches the
@@ -398,7 +401,7 @@ wants DB-level insurance, `pg_dump` the four tables scoped to the orphan ids
 first.
 
 **Verify (post-cleanup, expect 0):** re-run Q1–Q3; then
-`supabase db query --linked "SELECT count(*) FROM public.teams WHERE email LIKE 'e2e-live-%@premise-labs.dev';"` → 0;
+`supabase db query --linked "SELECT count(*) FROM public.organizations WHERE email LIKE 'e2e-live-%@premise-labs.dev';"` → 0;
 FalkorDB: `GRAPH.LIST` contains none of the manifest `graph_name`s; the
 welcome-e2e-monitor's next scheduled run is green (it already route-blocks, #2144).
 

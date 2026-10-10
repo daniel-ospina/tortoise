@@ -555,7 +555,8 @@ def main() -> int:
                          "REQUIRED for a recurrence, whose rows are newer than the window")
     ap.add_argument("--include-residue", action="store_true",
                     help="also purge Guard-A residue (in the e2e-live namespace, off the guard "
-                         "shape). Always enumerated + printed for review; pass this only after "
+                         "shape). Enumerated on --phase enumerate|all and printed on "
+                         "every phase; pass this only after "
                          "reading that list (#5971)")
     ap.add_argument("--window-start", default=WINDOW_START)
     ap.add_argument("--window-end", default=WINDOW_END)

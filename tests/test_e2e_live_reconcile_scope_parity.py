@@ -21,8 +21,9 @@ The fix has two halves, both pinned here:
 1. **parity by declaration** — both scripts keep their own regex, and this module
    asserts they are the SAME pattern and the SAME namespace literal, so widening
    one without the other reds a test instead of silently re-opening the gap;
-2. **residue is never silent** — the remediator always enumerates + prints the
-   off-guard-shape rows and records them in the manifest, and promotes them into
+2. **residue is never silent** — the remediator always enumerates the
+   off-guard-shape rows on ``--phase enumerate|all``, prints them on every phase
+   and records them in the manifest, and promotes them into
    the delete set only behind the explicit, review-gated ``--include-residue``
    (the ``--all-e2e-live`` shape: never a widened regex); the detector reports
    the same set as its own ``residue`` key with FULL emails.
@@ -268,10 +269,12 @@ def test_enumerate_fails_closed_if_a_residue_row_matches_the_guard() -> None:
 def test_default_window_excludes_a_recurrence() -> None:
     """The window is a red-window artifact; a recurrence is NEWER than it.
 
-    Pins the second half of #5971's scope mismatch: rows created after the
-    historical window (the whole #2189 use case) are invisible to a plain
-    ``--phase enumerate``, which is why the reconcile issue's remediation now
-    names ``--all-e2e-live``.
+    Pins the second half of #5971's scope mismatch: strict-shape rows created
+    after the historical window (the whole #2189 use case) are invisible to a
+    plain ``--phase enumerate``'s DELETE set, which is why the reconcile issue's
+    remediation now names ``--all-e2e-live``. (A residue row is NOT invisible —
+    it is enumerated all-time and printed; only its deletion needs
+    ``--include-residue``.)
     """
     default = _remediator_runner(users=[])
     with redirect_stdout(StringIO()):
