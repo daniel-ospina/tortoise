@@ -5945,7 +5945,19 @@ class TortoiseSDK:
         (``datetime.now(timezone.utc).isoformat()``), so production commits
         get date-anchored extraction by default. Returns the endpoint
         response, or the local extraction result with the payload when the
-        endpoint is unreachable."""
+        endpoint is unreachable.
+
+        ``base_url`` / ``api_key`` are the **Tortoise API POST** credentials
+        ONLY (they reach exactly one call site — ``_post_commit``, where they
+        stand in for ``TORTOISE_API_URL`` / ``TORTOISE_API_KEY``). They do NOT
+        select the extraction provider: the LLM that reads the conversation is
+        chosen on a different credential plane — ``extractor_model`` when
+        given, and the ambient environment (``TORTOISE_EXTRACT_MODEL``,
+        ``TORTOISE_EXTRACTOR_PROVIDER`` + the provider API keys) otherwise.
+        A caller that supplies ``base_url``/``api_key`` while
+        ``extractor_model`` is None therefore still extracts on the
+        deployment's provider account; that divergence is warned about
+        (``UserWarning``) rather than silently assumed (#6869)."""
         import os
         import uuid
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
@@ -5969,6 +5981,30 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
                     "payload": None}
+        # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
+        # they never reach the extraction model. With extractor_model=None the
+        # model is built from the AMBIENT environment (_default_byok_model →
+        # build_extractor_model, env-routed), so a caller who reads
+        # base_url/api_key as BYOK controls silently extracts (and bills) on
+        # the deployment's provider account and egresses the conversation to a
+        # provider it did not name. The divergence is invisible by
+        # construction — an in-tree test made exactly this wrong inference
+        # (tests/test_value_extractor.py::test_commit_session_warn_mode_reaches
+        # _payload) — so surface it at the entry point. Placed AFTER the
+        # consent gate: a declined call spends nothing and needs no notice.
+        if (base_url or api_key) and extractor_model is None:
+            import warnings
+            warnings.warn(
+                "commit_session(base_url=..., api_key=...) configures the "
+                "Tortoise API POST credentials only — it does NOT select the "
+                "extraction provider. With extractor_model=None the "
+                "extraction model is built from the ambient environment "
+                "(TORTOISE_EXTRACT_MODEL / TORTOISE_EXTRACTOR_PROVIDER and "
+                "the provider API keys), so the conversation is extracted — "
+                "and billed — on this deployment's provider account, not the "
+                "endpoint named by base_url. Pass extractor_model=<adapter> "
+                "to control extraction (#6869).",
+                UserWarning, stacklevel=2)
         extractor = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
         if extractor == "v1" or summary is not None:
             return self._commit_session_v1(

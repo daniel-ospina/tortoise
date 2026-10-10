@@ -531,10 +531,16 @@ class TestClosedVocab:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)
+        # #6869: base_url/api_key govern the POST only — they do NOT stop the
+        # ambient BYOK model from being built and called. Passing them WITHOUT
+        # extractor_model (as this test originally did) let extraction reach
+        # the real vendor on whatever key the shell held; an explicit
+        # extractor_model is what makes the call hermetic.
         out = sdk.commit_session(
             summary={"session": {"summary": "S"},
                      "state": [{"name": "artifact", "objectKind": "design-artifact"}],
                      "decisions": [], "logic": [], "issues": []},
+            extractor_model=MockModel(),
             mode="warn", base_url="http://unused", api_key="k")
         # warn mode does NOT block the payload on the vocab (fail-closed
         # would return ok=False with an objectKind error). The POST is
