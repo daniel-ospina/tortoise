@@ -245,8 +245,39 @@ MARKER_MAX_AGE_S = 24 * 3600
 ZERO_CLIENT_STATE_MAX_AGE = 7 * 86400.0
 # Persisted zero-client observation state (pid + process start time, so a
 # recycled pid restarts the confirmation window — #1642 FIX 5).
-ZERO_CLIENT_STATE_PATH = os.path.join(
-    os.path.expanduser("~"), ".tortoise", "reaper-zero-client.json")
+#
+# #7923: the path is resolved at CALL time, never frozen at import. The
+# import-time constant it used to be had two defects: (1) redirecting the
+# ambient `$HOME` (or this module's attribute) AFTER import could not move
+# it — the same shape as the #7816 audit-fallback defect — which is exactly
+# what a per-session test tree does; and (2) there was no env override for
+# it, unlike `_index_lock_dir()` (TORTOISE_INDEX_LOCK_DIR). Resolution
+# precedence, highest first:
+#   1. the `ZERO_CLIENT_STATE_PATH` module attribute when set — the existing
+#      test seam, kept verbatim so `monkeypatch.setattr(...)` keeps working;
+#   2. the `TORTOISE_ZERO_CLIENT_STATE_PATH` env override (the pytest session
+#      isolation pins it inside the private session root —
+#      tests/_tmpdir_hygiene.py);
+#   3. the ambient `$HOME` at call time.
+# `None` (the default) means "resolve dynamically": the attribute is an
+# override SLOT, not a cached path.
+ZERO_CLIENT_STATE_PATH_ENV = "TORTOISE_ZERO_CLIENT_STATE_PATH"
+ZERO_CLIENT_STATE_PATH: str | None = None
+
+
+def _zero_client_state_path() -> str:
+    """Resolve the persisted zero-client state path at CALL time (#7923).
+
+    Mirrors `_index_lock_dir()`'s call-time env override, with the module
+    attribute kept as the highest-precedence seam (tests monkeypatch it).
+    """
+    if ZERO_CLIENT_STATE_PATH:
+        return ZERO_CLIENT_STATE_PATH
+    override = os.environ.get(ZERO_CLIENT_STATE_PATH_ENV, "")
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".tortoise",
+                        "reaper-zero-client.json")
 
 # #1642 FIX 2 (#1449): time budget for the socket-dir walk. The walk is a
 # backstop, never a gate on the tempdir's entry count (pollution disabled
@@ -3448,7 +3479,7 @@ def _zero_client_state_read() -> dict:
     orphan confirmation, never a correctness dependency.
     """
     try:
-        return json.loads(Path(ZERO_CLIENT_STATE_PATH).read_text())
+        return json.loads(Path(_zero_client_state_path()).read_text())
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
 
@@ -3457,11 +3488,16 @@ def _zero_client_state_write(state: dict) -> None:
     """Persist the zero-client state atomically (tmp file + os.replace).
     Best-effort: a write failure never fails the sweep.
     """
+    path = _zero_client_state_path()
     try:
-        os.makedirs(os.path.dirname(ZERO_CLIENT_STATE_PATH), exist_ok=True)
-        tmp = ZERO_CLIENT_STATE_PATH + f".{os.getpid()}.tmp"
+        # A bare (dir-less) override has an empty dirname — makedirs("") is
+        # an ENOENT, not a no-op, so guard it (#7923).
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + f".{os.getpid()}.tmp"
         Path(tmp).write_text(json.dumps(state, indent=2))
-        os.replace(tmp, ZERO_CLIENT_STATE_PATH)
+        os.replace(tmp, path)
     except OSError:
         logger.warning("could not persist zero-client state")
 

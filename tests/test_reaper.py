@@ -44,6 +44,109 @@ def _isolate_zero_client_state(tmp_path, monkeypatch):
                         str(tmp_path / "reaper-zero-client.json"))
 
 
+# ── #7923: the zero-client state path must resolve at CALL time ────────────
+# The path used to be an import-time constant off `os.path.expanduser("~")`,
+# with no env override — so a suite that redirected $HOME after import (the
+# private session root) still wrote the state file into the developer's real
+# $HOME, and a per-test fixture that only patched the attribute could not move
+# the frozen constant. These four pin the resolution contract; the autouse
+# `_isolate_zero_client_state` above is deliberately undone (attribute ->
+# None) so the resolver, not the seam, is under test.
+
+
+def _reset_state_path(monkeypatch):
+    """Clear both the attribute seam and the env override."""
+    from tortoise import embedded_reaper
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", None)
+    monkeypatch.delenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       raising=False)
+    return embedded_reaper
+
+
+def test_zero_client_state_path_resolves_ambient_home_at_call_time(
+        tmp_path, monkeypatch):
+    """#7923: the path follows the ambient $HOME at CALL time, so redirecting
+    HOME after import (the per-session test root) moves it with it."""
+    reaper = _reset_state_path(monkeypatch)
+    home_a = tmp_path / "home_a"
+    monkeypatch.setenv("HOME", str(home_a))
+    assert reaper._zero_client_state_path() == str(
+        home_a / ".tortoise" / "reaper-zero-client.json")
+    # Not frozen: a later $HOME redirect relocates the path.
+    home_b = tmp_path / "home_b"
+    monkeypatch.setenv("HOME", str(home_b))
+    assert reaper._zero_client_state_path() == str(
+        home_b / ".tortoise" / "reaper-zero-client.json")
+
+
+def test_zero_client_state_path_env_override_wins_over_home(
+        tmp_path, monkeypatch):
+    """#7923 indicator 2: TORTOISE_ZERO_CLIENT_STATE_PATH redirects the path,
+    mirroring TORTOISE_INDEX_LOCK_DIR."""
+    reaper = _reset_state_path(monkeypatch)
+    override = tmp_path / "session" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(tmp_path / "real_home"))
+    monkeypatch.setenv(reaper.ZERO_CLIENT_STATE_PATH_ENV, str(override))
+    assert reaper._zero_client_state_path() == str(override)
+
+
+def test_zero_client_state_write_honours_env_override(tmp_path, monkeypatch):
+    """#7923 indicator 1's mechanism: a redirected state path keeps the write
+    out of the real $HOME entirely."""
+    reaper = _reset_state_path(monkeypatch)
+    real_home = tmp_path / "real_home"
+    override = tmp_path / "session" / ".tortoise" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv(reaper.ZERO_CLIENT_STATE_PATH_ENV, str(override))
+
+    reaper._zero_client_state_write(
+        {"/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}})
+
+    assert override.is_file(), "the override path must receive the write"
+    assert json.loads(override.read_text()) == {
+        "/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}}
+    assert not (real_home / ".tortoise" / "reaper-zero-client.json").exists()
+    assert reaper._zero_client_state_read() == {
+        "/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}}
+
+
+def test_zero_client_state_path_attribute_seam_still_wins(
+        tmp_path, monkeypatch):
+    """Back-compat: the module attribute remains the highest-precedence
+    redirect, so the existing fixtures (and any operator patch) keep working."""
+    from tortoise import embedded_reaper
+    seam = tmp_path / "seam.json"
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", str(seam))
+    monkeypatch.setenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       str(tmp_path / "env.json"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert embedded_reaper._zero_client_state_path() == str(seam)
+
+
+def test_zero_client_state_confirmation_writes_inside_override(
+        tmp_path, monkeypatch):
+    """#7923 end-to-end through the confirmation path: the state persisted for a
+    live 0-client candidate lands under the env override (the per-session test
+    tree), never under the developer's real $HOME."""
+    from tortoise import embedded_reaper
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", None)
+    real_home = tmp_path / "real_home"
+    override = tmp_path / "session" / ".tortoise" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       str(override))
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(embedded_reaper, "_pid_alive", lambda p: True)
+    monkeypatch.setattr(embedded_reaper, "_pid_is_redis", lambda p: True)
+
+    rec = _zero_client_candidate("/tmp/fake-orphan-7923.sock", os.getpid())
+    embedded_reaper._mark_orphan_confirmation([rec])
+
+    assert override.is_file(), "the confirmation state must be persisted"
+    assert not (real_home / ".tortoise").exists(), \
+        "no state may be written under the real $HOME"
+
+
 @pytest.fixture(autouse=True)
 def _clean_redislite_residue():
     """Remove redislite servers + socket dirs spawned by THIS test.
