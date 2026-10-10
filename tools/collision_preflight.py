@@ -2531,11 +2531,18 @@ def scan_branch_surface(
                 "weak",
             )
             continue
-        # #6108: the ahead-count, reported on EVERY branch hit. A gate whose two
-        # cases — "a lane has committed work here" and "an empty branch whose
-        # name contains this number exists" — print identically cannot be
+        # #6108: the ahead-count, reported on every BLOCKING branch hit. A gate
+        # whose two cases — "a lane has committed work here" and "an empty branch
+        # whose name contains this number exists" — print identically cannot be
         # audited by its reader, and an un-auditable gate gets overridden until
         # it stops being a gate (#6108's own argument).
+        #
+        # Note the scope: this is the path that DECIDES the verdict. A ref that
+        # already `continue`d above (the caller's own branch, a terminal one, a
+        # fetch-cache key) is non-blocking by construction, so its distance from
+        # main carries none of the ambiguity this datum exists to resolve — and
+        # skipping the call there means no git subprocess is paid for a hit whose
+        # strength is already settled.
         #
         # ⛔ THE COUNT IS REPORTED, NOT ACTED ON, AND THAT IS DELIBERATE. The
         # obvious next step — demote `ahead == 0` to non-blocking — is REFUSED

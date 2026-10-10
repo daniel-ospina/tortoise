@@ -3382,6 +3382,35 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("0 commit(s) ahead", out)
         self.assertNotEqual(rc, 0, out)
 
+    def test_unmeasured_ahead_count_is_omitted_not_zeroed(self):
+        # ⛔ THE CALLER HALF OF THE "never fabricated" PROPERTY, which the unit
+        # test above cannot reach: it asserts `_ahead_behind` returns None, but
+        # the NON-FABRICATION decision lives in the CALLER (`if measured is not
+        # None:` / `if ahead is not None:`). A mutant that defaulted a missing
+        # measurement to `(0, 0)` — `ahead, behind = measured or (0, 0)` — passed
+        # the whole file otherwise, because every other matching-branch test
+        # asserts only `assertIn("matched issue-number …")`, a prefix the
+        # fabricated text still satisfies.
+        #
+        # That mutant is exactly the failure #6108's fail-closed paragraph names:
+        # a fabricated `0` reads as "empty branch, safe to ignore" on a ref whose
+        # distance from main was never measured — a false CLEAN manufactured out
+        # of a missing measurement.
+        #
+        # `setUp` never creates `origin/main`, so the matching branch here is
+        # UNMEASURABLE by construction and the count must be absent — not zero.
+        _git(self.repo, "branch", f"fix/{ISSUE}-unmeasured")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn(f"refs/heads/fix/{ISSUE}-unmeasured", out)
+        self.assertIn(f"matched issue-number ({ISSUE})", out)
+        self.assertNotIn("commit(s) ahead", out)
+        self.assertNotIn("0 commit(s) ahead", out)
+        # ...and the unmeasured ref still BLOCKS: an absent measurement is not a
+        # downgrade.
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
     def test_unreadable_ahead_count_returns_none_and_is_never_fabricated(self):
         # ⛔ THE FAIL-CLOSED HALF OF #6108's DATUM. `_ahead_behind` returns None
         # when git cannot answer, and the caller must print NO count rather than
