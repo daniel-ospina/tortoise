@@ -2724,5 +2724,133 @@ class TestDurableInboxFallback(unittest.TestCase):
         self.assertIn("channel: inbox", out.getvalue())
 
 
+#: #7863 — VERBATIM `cmux read-screen --workspace <ws> --lines 80` captures from
+#: five LIVE lanes, taken 2026-10-09 while the defect was live. These are real
+#: screens, not strings written to match a regex. Four of the five were REFUSED
+#: by this tool at capture time (anchor -1, no pwd line); the fifth was healthy
+#: and carries a pwd line, which is what makes the set discriminating.
+CMUX_7863_DIR = ROOT / "tests" / "fixtures" / "cmux-dispatch" / "7863"
+
+#: Lanes whose footer drew extension statuses in the pwd line's row, so their
+#: capture contains NO pwd line at all and the old anchor test returned -1.
+CMUX_7863_REFUSED_AT_CAPTURE = (
+    ("7AF6EB2E-1E4E-48E2-8D2A-AC61306B46DB", "3 Onboarding"),
+    ("DE2BADBB-5BDE-43A7-8C71-113B2FE84CCD", "Design partners website"),
+    ("FC26938C-9CF6-4C01-8D40-66E316B099D6", "lane-b-ci-substrate"),
+    ("597F6D5A-66CB-45A2-B339-9D6D50942D37", "PR 2"),
+)
+
+#: A live lane captured at the same time that did NOT regress — its footer
+#: carried a pwd line. Included so the suite proves the fix did not trade one
+#: layout for the other.
+CMUX_7863_HEALTHY_AT_CAPTURE = (
+    ("8D07EA2E-79DB-436A-8B21-8EB52A1F337F", "land-lane-3"),
+)
+
+
+class TestLiveLaneWithStatusFooterIsReady(unittest.TestCase):
+    """#7863 — a LIVE lane whose footer carries statuses must be READY.
+
+    The footer drops the pwd line while it renders extension statuses, so
+    `_footer_stats_end` returned -1 on a healthy lane. That took the
+    whole-capture fallback in `shell_prompt_below_footer`, whose own comment
+    claimed a live pane never reaches it — and the fallback's `SHELL_PROMPT_RE`
+    matches `#` before whitespace ANYWHERE, so ordinary assistant prose (a
+    `### #2935` markdown heading, a `# noqa: E402` fragment) was read as a shell
+    prompt. Four of five live lanes were refused with "a shell prompt is drawn
+    BELOW pi's footer" — a position that was false.
+
+    Fixtures are the real captures (`tests/fixtures/cmux-dispatch/7863/`), so
+    this cannot pass by construction: the trigger bytes are the panes' own.
+    """
+
+    def _read(self, ws: str) -> str:
+        path = CMUX_7863_DIR / f"{ws}.txt"
+        self.assertTrue(path.exists(), f"missing #7863 fixture: {path}")
+        return path.read_text()
+
+    def test_the_refused_fixtures_really_carry_the_offending_prose(self):
+        # Without this, every assertion below could go vacuous: if the captured
+        # transcripts stopped containing a line SHELL_PROMPT_RE matches, the
+        # regression would be unexercised and the suite would still pass.
+        for ws, lane in CMUX_7863_REFUSED_AT_CAPTURE:
+            text = self._read(ws)
+            with self.subTest(lane=lane):
+                self.assertTrue(
+                    any(cd.SHELL_PROMPT_RE.search(ln)
+                        for ln in text.splitlines() if ln.strip()),
+                    f"{lane}: fixture no longer carries a prose line matching "
+                    f"SHELL_PROMPT_RE — the whole-capture scan is no longer "
+                    f"exercised by this fixture")
+
+    def test_every_captured_live_lane_is_ready(self):
+        # The regression itself: all five panes were live; four were refused.
+        for ws, lane in (CMUX_7863_REFUSED_AT_CAPTURE
+                         + CMUX_7863_HEALTHY_AT_CAPTURE):
+            text = self._read(ws)
+            with self.subTest(lane=lane):
+                self.assertTrue(cd.status_bar_present(text),
+                                f"{lane}: no status bar in the capture")
+                self.assertTrue(cd.screen_ready(text),
+                                f"{lane}: refused "
+                                f"({cd.not_ready_reason(text)!r})")
+                self.assertNotIn("BELOW pi's footer", cd.not_ready_reason(text),
+                                 f"{lane}: the below-footer message is false here")
+
+    def test_the_refused_panes_have_no_pwd_line_and_now_anchor(self):
+        # The precise mechanism. These layouts have NO pwd line — which is why
+        # accepting `[` in PWD_LINE_RE (the obvious non-fix) could not have
+        # worked — and the fix must give them a real anchor rather than leaving
+        # them to the whole-capture scan.
+        for ws, lane in CMUX_7863_REFUSED_AT_CAPTURE:
+            text = self._read(ws)
+            with self.subTest(lane=lane):
+                self.assertFalse(
+                    any(cd.PWD_LINE_RE.match(ln) and ln.strip()
+                        for ln in text.splitlines()),
+                    f"{lane}: fixture gained a pwd line — this fixture exists to "
+                    f"model the pwd-LESS layout of #7863")
+                self.assertGreater(
+                    cd._footer_stats_end(text), 0,
+                    f"{lane}: no footer anchor, so the whole-capture fallback "
+                    f"is back in play")
+
+    def test_the_healthy_pane_still_anchors_on_its_pwd_line(self):
+        # The fix adds a footer-row shape; it must not have displaced the pwd
+        # line as the primary anchor.
+        for ws, lane in CMUX_7863_HEALTHY_AT_CAPTURE:
+            text = self._read(ws)
+            with self.subTest(lane=lane):
+                self.assertTrue(
+                    any(cd._is_pwd_line(ln) for ln in text.splitlines()),
+                    f"{lane}: expected a pwd line in this capture")
+                self.assertGreater(cd._footer_stats_end(text), 0)
+
+    def test_a_real_prompt_below_the_footer_is_STILL_refused(self):
+        # ⛔ FAIL-CLOSED GUARD — the requirement the fix must not trade away.
+        # Take REAL captures and put a REAL zsh prompt below the footer: the
+        # #7158 direction, a pane that returned to its shell while the dead
+        # pi's footer is still in the scrollback. Every one must still be
+        # refused, on every layout in the set.
+        for ws, lane in (CMUX_7863_REFUSED_AT_CAPTURE
+                         + CMUX_7863_HEALTHY_AT_CAPTURE):
+            dead = self._read(ws).rstrip("\n") + \
+                "\ndanielospina@mac tortoise % ls -la\n"
+            with self.subTest(lane=lane):
+                self.assertTrue(
+                    cd.shell_prompt_below_footer(dead),
+                    f"{lane}: a live prompt below the footer was missed "
+                    f"(FAIL-OPEN — this types the brief into a bare shell)")
+                self.assertFalse(cd.screen_ready(dead),
+                                 f"{lane}: refused pane declared READY")
+
+    def test_a_bare_pane_with_no_footer_at_all_is_still_refused(self):
+        # The other fail-closed direction, and it does NOT depend on the anchor:
+        # no footer token anywhere means not ready, whatever the anchor does.
+        bare = "Last login: Thu Oct  9 17:20:00 on ttys004\n~ % \n"
+        self.assertFalse(cd.status_bar_present(bare))
+        self.assertFalse(cd.screen_ready(bare))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
