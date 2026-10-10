@@ -603,20 +603,23 @@ def temporal_aggregate_verdict(
     *,
     constraint: TimeConstraint | None = None,
 ) -> dict[str, Any]:
-    """Deterministic temporal-aggregation resolution over the ADMITTED hits
-    (#2886 wiring).
+    """Deterministic temporal-aggregation resolution over the reader-reachable
+    pool window (#2886 wiring).
 
     Pure/IO-free: classifies the question with the shipped #2886 owner
     (``tortoise.temporal_aggregation``) and resolves it through the named
-    ``resolve_temporal_aggregate`` path over the admitted dated hits the
-    reader already received. COUNT/TOTAL tally the distinct admitted events;
+    ``resolve_temporal_aggregate`` path over the hits the caller passes — at
+    the eval seam, the ranked pool window that can REACH the reader
+    (``pool[:effective_top_k]``): a two-sided approximation of the reader's
+    admitted set (#3594), not a claim that every hit was admitted.
+    COUNT/TOTAL tally the distinct events;
     the date-arithmetic shapes (interval / before-offset / duration) take the
     two anchor dates the caller already extracted (``constraint`` — the eval's
     ``detect_time_constraint`` ISO bounds for an explicit ``between`` window)
     and abstain (``reason="no_anchors"``) when those anchors are absent.
 
     It NEVER changes the answer: the owner abstains rather than guesses
-    (non-temporal / no anchors / empty admitted set), so the reader lane keeps
+    (non-temporal / no anchors / empty candidate set), so the reader lane keeps
     the case — a reader-model swap stays #2013-gated. The verdict rides the
     eval outcome ONLY under the OFF-by-default arm, so a gold-admitting run
     can read out how many conversion-bound cases the deterministic path
@@ -670,8 +673,8 @@ def temporal_aggregate_verdict(
         "reason": res.reason,
         "n_dated_events": sum(
             1 for h in hits if str(h.get("session_date") or "").strip()),
-        # TOTAL-only honesty diagnostic: how many admitted events carried BOTH
-        # bounds. 0 means a published ``total`` sum rode zero spans.
+        # TOTAL-only honesty diagnostic: how many candidate events carried
+        # BOTH bounds. 0 means a published ``total`` sum rode zero spans.
         "n_span_bounded_events": sum(1 for h in hits if _has_span(h)),
         "anchors": ({"start": start, "end": end} if start and end else None),
     }
@@ -2375,9 +2378,12 @@ def retrieve_for_question(
 
     # ── #2886: deterministic temporal-aggregation resolution (MEASUREMENT
     # seam — retrieval/answer behavior is untouched). Under the arm ONLY:
-    # classify the question and resolve it over the admitted dated hits the
-    # reader already received. Fail-open (the #1745 default): an unexpected
-    # failure records no verdict rather than breaking a working lane.
+    # classify the question and resolve it over the reader-reachable pool
+    # window (``pool[:effective_top_k]`` — the ranked window that can reach
+    # the reader; a two-sided approximation of the reader's admitted set,
+    # #3594, exactly as the C5 arm above). Fail-open (the #1745 default): an
+    # unexpected failure records no verdict rather than breaking a working
+    # lane.
     temporal_aggregate_verdict_out: dict | None = None
     if temporal_aggregate_on:
         try:

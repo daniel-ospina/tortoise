@@ -161,8 +161,9 @@ behind an **OFF-by-default** arm (mirroring #2521's `aggregative_flag`):
 * `tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` — pure adapter:
   classifies the question with the shipped owner
   (`classify_temporal_aggregate`) and resolves it through
-  `resolve_temporal_aggregate` over the **admitted dated hits** the reader
-  already received. COUNT/TOTAL tally the distinct admitted events; the
+  `resolve_temporal_aggregate` over the **reader-reachable pool window**
+  (`pool[:effective_top_k]`; a two-sided approximation of the reader's
+  admitted set, #3594). COUNT/TOTAL tally the distinct events; the
   date-arithmetic shapes take the two anchor dates when the caller already
   has them (an explicit `between <date> and <date>` window), else abstain
   (`reason="no_anchors"`) — never a guessed number.
@@ -176,13 +177,15 @@ behind an **OFF-by-default** arm (mirroring #2521's `aggregative_flag`):
   reason, n_dated_events, n_span_bounded_events, anchors}`.
 
 It does **not** change retrieval or the answer: the owner abstains rather
-than guessing, so the reader lane keeps the case (a reader-model swap stays
-#2013-gated).
+than guessing, so the reader lane keeps the case (a reader-model swap
+stays #2013-gated).
 
 **Span honesty.** The eval's ranked hits carry `session_date` only, so a
 TOTAL over them sums zero spans (`n_span_bounded_events == 0`): the
 published `total` is then not a measured sum, and the diagnostic makes that
-auditable instead of a silent zero.
+auditable instead of a silent zero. The disposition read-out consults that
+diagnostic — a span-less TOTAL reads as `abstained:no_span_bounds`, never
+`resolved` — so the "how many were fixed" count cannot be inflated by it.
 
 ## Remainder disposition
 

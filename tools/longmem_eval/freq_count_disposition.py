@@ -211,9 +211,9 @@ def resolution_for(outcome: Mapping) -> str:
     question, read off the per-outcome verdict the arm records.
 
     * ``resolved`` — the owner (``resolve_temporal_aggregate``) published a
-      value (the deterministic path closed it);
+      MEASURED value (the deterministic path closed it);
     * ``abstained:<reason>`` — the owner declined (no anchors / no events /
-      no unit — never a guess);
+      no unit / a TOTAL that rode zero spans — never a guess);
     * ``unmeasured`` — the committed outcome carries NO verdict (the arm was
       OFF, the default, or the row predates the wiring). An absent field is
       never read as a resolution.
@@ -224,6 +224,15 @@ def resolution_for(outcome: Mapping) -> str:
     verdict = outcome.get("temporal_aggregate_verdict")
     if not isinstance(verdict, Mapping):
         return "unmeasured"
+    # A TOTAL over span-less hits publishes the module's documented zero-span
+    # sum (``value == 0`` with ``reason is None``) — the adapter's own "span
+    # honesty" contract says that is NOT a measured sum, so crediting it as a
+    # resolution would overstate what the deterministic path closed. The
+    # diagnostic (``n_span_bounded_events``) that exposes it is therefore
+    # consulted here, not merely carried on the verdict.
+    if verdict.get("kind") == "total" and not verdict.get(
+            "n_span_bounded_events"):
+        return "abstained:no_span_bounds"
     if verdict.get("value") is not None:
         return "resolved"
     return f"abstained:{verdict.get('reason') or 'unknown'}"

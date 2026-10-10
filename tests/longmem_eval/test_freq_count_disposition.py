@@ -207,6 +207,18 @@ def test_resolution_readout_from_arm_verdict():
     # A malformed verdict (not a mapping) is not a resolution.
     assert fcd.resolution_for(
         {"qid": "x", "temporal_aggregate_verdict": "garbage"}) == "unmeasured"
+    # A span-less TOTAL publishes the module's documented zero-span sum
+    # (value 0, reason None) — the adapter's "span honesty" contract says that
+    # is NOT a measured sum, so the read-out must not credit it as resolved.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": 0, "reason": None,
+            "n_span_bounded_events": 0}}) == "abstained:no_span_bounds"
+    # ... but a TOTAL that rode real spans IS a measured resolution.
+    assert fcd.resolution_for(
+        {"qid": "x", "temporal_aggregate_verdict": {
+            "kind": "total", "value": 5, "reason": None,
+            "n_span_bounded_events": 2}}) == "resolved"
 
 
 def test_summary_counts_deterministic_resolution():

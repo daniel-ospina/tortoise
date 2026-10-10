@@ -792,6 +792,13 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #2886: the wiring seam's hermetic adapter guard
+  # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
+  # core's `resolve_temporal_aggregate`). `core` runs it when the core's
+  # verdict semantics change; the eval-seam plumbing has its own docker-lane
+  # home in `test_aggregative_facet_coverage.py`. Without the registration
+  # the file's own guard is skipped on its diff-selected legs (#7076 class).
+  - test_temporal_aggregate_arm.py
   # #2886: the deterministic temporal-aggregation core
   # (`tortoise/temporal_aggregation.py`). That source matches no SOURCE_PATTERNS
   # rule and falls back to `core`, so this is the surface that runs the guard
