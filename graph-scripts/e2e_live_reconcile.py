@@ -44,8 +44,9 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     `^e2e-live-[0-9a-f]{8}@premise-labs.dev$` still fail the check (they are
     inside the test namespace) and are surfaced as shape_clean=false in the
     --json output — the 2146 cleanup script's DEFAULT delete set is the strict
-    shape only, so an operator reviews before running it (Guard-D residue needs
-    its explicit --include-residue).
+    shape WITHIN the historical window only, so an operator reviews before
+    running it (Guard-D residue, and the pre-window mints, need their explicit
+    --include-residue / --all-e2e-live).
   * Scope parity (#5971): this detector's scope (the LIKE namespace, all-time)
     is DELIBERATELY broader than the remediator's DELETE scope
     (`graph-scripts/2146_e2e_live_orphan_cleanup.py` deleted only the strict
@@ -331,10 +332,12 @@ def main() -> int:
             n_residue = sum(len(v) for v in residue.values())
             log(
                 f"[reconcile]   NOTE: {_plural(n_residue, 'row')} in the test namespace "
-                "deviate from the 2146 guard email shape "
+                f"{'deviates' if n_residue == 1 else 'deviate'}"
+                " from the 2146 guard email shape "
                 "^e2e-live-[0-9a-f]{8}@premise-labs.dev$ — the cleanup script skips "
-                "them unless run with --include-residue (after reviewing the residue "
-                "list it prints); --json carries the full emails"
+                f"{'it' if n_residue == 1 else 'them'} unless run with --include-residue "
+                "(after reviewing the residue list it prints); --json carries the "
+                "full emails"
             )
         rc = 1
 

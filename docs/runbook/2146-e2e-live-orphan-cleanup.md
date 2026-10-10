@@ -45,7 +45,8 @@ loaded (~15 s/run) and ran #1566 welcome-mode provisioning:
 `provisionInApp`) → Supabase edge fn **`tenant-provision`**
 (`supabase/functions/tenant-provision/index.ts`) → **`provision_team` RPC**
 (migration 0010) → atomic `teams` + `org_memberships` + `api_keys` rows,
-then FastAPI `/internal/demo` seeds the FalkorDB **graph `org_{org_id}`**
+then FastAPI `/internal/demo` seeds the FalkorDB **graph `team_{org_id}`**
+(the red-window convention; #3543 later generalized the prefix to `org_`)
 where `org_id = sha256(user_id).hexdigest()[:26]` (deterministic per user),
 team `name`/`email` = `e2e-live-<8 hex>@premise-labs.dev`, key `tt_<64 hex>`
 (one api_keys row per team; `created_via='provisioned'`).
@@ -369,20 +370,24 @@ uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
 #    prints e.g.: [residue] Guard-A residue — in the e2e-live namespace, OFF the
 #    guard shape …  [residue]   user <id>  e2e-live-3781-…@premise-labs.dev  created …
 #    [residue]   1 row(s) NOT in the delete set — pass --include-residue …
-# 2. dry-run — write it to a SCRATCH manifest: a dry-run re-enumerates and writes
-#    $RECUR, and for a residue TEAM that write makes prior_n>0 with Guard-A=0, so
-#    the execute step below would refuse. The scratch keeps $RECUR team-empty.
+# 2. dry-run — write it to a SCRATCH manifest, and remove the scratch first: a
+#    dry-run re-enumerates and writes its own --manifest, and for a residue TEAM
+#    that write would leave prior_n>0 with Guard-A=0, so the execute below would
+#    refuse (and a scratch left over from a previous recurrence would refuse
+#    here). The scratch keeps the execute's manifest team-empty.
+rm -f "$RECUR.dryrun"
 uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
     --phase all --all-e2e-live --include-residue --manifest "$RECUR.dryrun"
 # 3. execute (writes $RECUR, so its residue team's graph_name reaches the
-#    FalkorDB companion)
+#    FalkorDB companion; a retry after a partial failure needs $RECUR removed)
 uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
     --phase all --all-e2e-live --include-residue --manifest "$RECUR" --execute
 # 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
 #    reconcile run is green (that check is the end-to-end proof, not this list).
 #    For a residue TEAM that re-run refuses by design ($RECUR now holds the
 #    promoted team, but Guard-A found none) — remove $RECUR once its graph has
-#    been dropped, or re-enumerate to a fresh --manifest.
+#    been dropped, or re-enumerate to a fresh --manifest. Remove the scratch too:
+#    rm -f "$RECUR" "$RECUR.dryrun"
 ```
 
 For a residue **team** (none today: every `teams` row in the namespace matched

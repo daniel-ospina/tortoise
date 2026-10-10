@@ -16,7 +16,8 @@ Mint path (verified in repo, 2026-09-02):
   → Supabase edge fn `tenant-provision` (supabase/functions/tenant-provision/
     index.ts) → `provision_team` SECURITY DEFINER RPC (migration 0010) which
     writes teams + org_memberships + api_keys atomically, then FastAPI
-    `/internal/demo` seeds the FalkorDB graph `org_{org_id}` where
+    `/internal/demo` seeds the FalkorDB graph `team_{org_id}` (the red-window
+    convention; #3543 later generalized the prefix to `org_`) where
     org_id = sha256(user_id).hexdigest()[:26] (deterministic per user).
 
 This script cleans the SUPABASE side (auth users + teams + api_keys +
@@ -129,9 +130,18 @@ refuses exactly that, by design).
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
       --phase enumerate --all-e2e-live \\
       --manifest 2146-recurrence.manifest.json   # review BOTH printed lists
+  rm -f 2146-recurrence.manifest.json.dryrun     # ephemeral (see below)
+  # dry-run to a SCRATCH manifest: a dry-run re-enumerates and writes its own
+  # --manifest, and for a residue TEAM that write would leave prior_n>0 with
+  # Guard-A=0, so the execute below would refuse. The scratch keeps the execute's
+  # manifest team-empty.
+  uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
+      --phase all --all-e2e-live --include-residue \\
+      --manifest 2146-recurrence.manifest.json.dryrun
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
       --phase all --all-e2e-live --include-residue \\
       --manifest 2146-recurrence.manifest.json --execute
+  # then: rm 2146-recurrence.manifest.json{,.dryrun}
 """
 
 from __future__ import annotations
