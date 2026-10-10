@@ -5416,15 +5416,14 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # Points enter as draft, go live when first edge is created (#131) —
-        # EXCEPT decision parts (#2199): a decision-part kind created without
-        # an explicit status is born live (matching how the decide skill's
-        # protocol is written), so EP factor extraction sees the option /
-        # criterion / finding right away. "Was status given?" is decided
-        # BEFORE the pop so a caller that explicitly passes a status (the
-        # capture/extraction paths pass status="draft" + extractedFrom, or a
-        # decide flow staging drafts deliberately) keeps full manual control
-        # and the #344/#1212 fail-closed posture.
+        # #1088: LIVE is the default for everything added to the graph; an
+        # agent that deliberately asks for draft gets draft, and it is
+        # honoured. "Was status given?" is decided BEFORE the pop so an
+        # explicit status (the capture/extraction paths pass status="draft" +
+        # extractedFrom, or an agent staging a draft deliberately) is explicit
+        # BY CONSTRUCTION, keeps full manual control, and preserves the
+        # #344/#1212 fail-closed posture. Precedent: #2199 did exactly this
+        # for the decide-part kinds.
         explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
@@ -5433,14 +5432,13 @@ class TortoiseSDK:
         # items as committed). Popping up front also keeps vocabulary
         # validation uniform for both paths: an invalid status raises even
         # when the point already exists (no silent-ignore asymmetry).
-        if not explicit_status and (kind in DECIDE_PART_KINDS
-                                    or kind in GOAL_KINDS):
-            # #2199 decide parts and #7856 goals are born LIVE: a draft goal
-            # that is only ever a TARGET is EP-inert and silently reported as
-            # converged, so it must not be creatable by default.
-            status = props.pop("status", "live")
-        else:
-            status = props.pop("status", "draft")
+        # Merge of main's #7856 (goals born live) with #1088 (LIVE is the
+        # default for EVERY kind): the universal default below subsumes
+        # main's GOAL_KINDS rule — a goal is still born live, for exactly the
+        # reason main gives (a draft goal that is only ever a TARGET is
+        # EP-inert while converged=True is still reported), and so is every
+        # other kind. An explicit status is honoured by the pop below.
+        status = props.pop("status", "live")
         # Fail-closed vocabulary validation (mirrors update_point): a
         # non-canonical status (case variant, junk, non-str, typo) would
         # otherwise be stored verbatim and treated as EP-LIVE by _live_only
@@ -8428,6 +8426,27 @@ class TortoiseSDK:
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
 
+        # #1088: with LIVE as the create default, an ordinary flow reaches
+        # here with status='live' on a point that is ALREADY live. That is an
+        # idempotent success, not the illegal transition the draft-born guard
+        # was written to refuse — promote_point already answers 'already_live'
+        # as a no-op (DE2E-N9), and this mirrors it. The probe runs only when
+        # a status was supplied, and a genuinely illegal transition (a
+        # terminal status resurrected) still falls through to the guarded
+        # WHERE below and raises.
+        if 'status' in props:
+            _cur_status = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+            ).result_set
+            if _cur_status and _cur_status[0][0] == 'live':
+                if len(props) == 1:
+                    # status-only: a true no-op — no write, no event.
+                    return self.get_point(id)
+                # Other props still belong to the caller; drop only the
+                # already-satisfied status and let the non-status write path
+                # below apply them (never silently discard caller data).
+                props.pop('status')
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
@@ -10384,9 +10403,12 @@ class TortoiseSDK:
         # #780: extraction paths (promote_source=False) skip this entirely —
         # the source stays draft and the draft operator node carries the status.
         if promote_source:
+            # #1088: only a never-set status is filled in with the live
+            # default; an explicitly-drafted source is never moved to live
+            # by this command.
             proj.g.query(
                 "MATCH (s:Point {id:$sid}) "
-                "WHERE (s.status IS NULL OR s.status = 'draft') "
+                "WHERE s.status IS NULL "
                 "SET s.status = 'live'",
                 params={"sid": source_id},
             )
@@ -12296,7 +12318,34 @@ class TortoiseSDK:
                                 "item": item, "result": node,
                                 "deduped": bool(existed and existed[0][0])})
 
-        # ── 2. Points (default status='draft', #131) ────────────────────
+        # ── 2. Points (status stated EXPLICITLY, #1088) ─────────────────
+        # #1088 / INGEST_CONTRACT.md §11: with live as the create_point
+        # default, ingest states each point's status by INTENT instead of
+        # inheriting a default. Under gated every no-status point is born
+        # draft and stays draft (the operator wiring passes
+        # promote_source=False). Under auto the edge SOURCE is the point the
+        # #131 contract promotes live, so it is created live; the TARGET is
+        # created draft. An explicit per-item status (top-level or nested
+        # props) always wins — the gated row-9 gate above already rejected
+        # any non-draft explicit status, and this default fills only items
+        # that carry no status key anywhere (mirrors _check_gated_status's
+        # has_status).
+        _auto_sources: set[str] = set()
+        if promotion_policy == "auto":
+            for _conn in bundle.get("connections") or []:
+                if (isinstance(_conn, dict)
+                        and isinstance(_conn.get("from"), str)):
+                    _auto_sources.add(_conn["from"])
+
+        def _bundle_item_has_status(it: dict) -> bool:
+            """True when a point item carries a status key top-level OR in a
+            nested props dict (the two forms _coerce_props flattens — the
+            same two _check_gated_status inspects)."""
+            if "status" in it:
+                return True
+            return (isinstance(it.get("props"), dict)
+                    and "status" in it["props"])
+
         for i, item in enumerate(bundle.get("points") or []):
             viols = []
             self._check_item_shape("points", i, item, viols)
@@ -12304,6 +12353,12 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
+            if not _bundle_item_has_status(item):
+                item["status"] = (
+                    "live" if (promotion_policy == "auto"
+                               and ref in _auto_sources)
+                    else "draft"
+                )
             # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
             # the extraction write kind). Legacy kinds are write-compat; the
             # event kind is rejected by the shared _check_kind helper (check 2).
@@ -13045,9 +13100,12 @@ class TortoiseSDK:
         # Promotion-on-created-only (CYCLE-24 pin): the guarded #131-style SET
         # fires ONLY when the MERGE created the edge.
         if created and promote_source:
+            # #1088: only a never-set status is filled in with the live
+            # default; an explicitly-drafted source is never moved to live
+            # by this command.
             proj.g.query(
                 "MATCH (s:Point {id:$id}) "
-                "WHERE s.status IS NULL OR s.status = 'draft' "
+                "WHERE s.status IS NULL "
                 "SET s.status = 'live', s.updatedAt = $now",
                 params={"id": source_id,
                         "now": _now_iso()},
@@ -13188,9 +13246,11 @@ class TortoiseSDK:
         operator under auto (a crash after the full input-edge loop, before
         the promotion SET). Mirrors create_operator's #131 guarded SET."""
         proj = self._get_proj()
+        # #1088: only a never-set status is filled in with the live default;
+        # an explicitly-drafted operator node is never moved to live here.
         proj.g.query(
             "MATCH (s:Point {id:$id}) "
-            "WHERE s.status IS NULL OR s.status = 'draft' "
+            "WHERE s.status IS NULL "
             "SET s.status = 'live', s.updatedAt = $now",
             params={"id": op_id, "now": _now_iso()},
         )

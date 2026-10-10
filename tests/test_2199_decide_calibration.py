@@ -126,10 +126,14 @@ class TestDecisionPartsBornLive:
             BASELINE_SOURCE_INHERITED
 
     def test_statement_without_status_unchanged_draft_no_default(self, sdk):
-        """Non-decide kinds are untouched — no silent uniform anywhere."""
+        """#1088 supersedes the #2199 scope statement: the born-live default
+        now applies to EVERY kind, not only the decide parts. A plain
+        statement created without an explicit status is live; an explicit
+        status="draft" is still honoured (see TestExplicitDraftIsHonoured1088
+        in tests/test_sdk.py). The test name predates that and is retained."""
         p = sdk.create_point("statement", "Plain claim")
         pt = sdk.get_point(p["id"])
-        assert pt["status"] == "draft"
+        assert pt["status"] == "live"
         assert pt.get("baseline_set") in (None, False)
 
 

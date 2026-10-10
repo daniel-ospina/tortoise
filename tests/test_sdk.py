@@ -267,8 +267,11 @@ class TestQuery:
             sdk.paginated_query(kind="statement", **{"kind": "goal"})
 
     def test_filter_key_legit_still_works(self, sdk):
-        sdk.create_point("statement", "A", confidence=0.9)
-        sdk.create_point("statement", "B", confidence=0.1)
+        # #1088: a draft must be asked for explicitly now that live is the
+        # default — this keeps the test about the status FILTER, not the
+        # retired implicit draft default.
+        sdk.create_point("statement", "A", confidence=0.9, status="draft")
+        sdk.create_point("statement", "B", confidence=0.1, status="live")
         results = sdk.query(confidence=0.9, status="draft")
         assert len(results) == 1
         assert results[0]["content"] == "A"
@@ -1357,3 +1360,91 @@ def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
     TortoiseSDK._maybe_purge_events(object(), None)
     assert len(purges) == first, (
         "interval=0 made the purge gate always false — a DELETE on every poll")
+
+
+# ── #1088: live is the default; an explicit draft is honoured ─────────
+
+class TestExplicitDraftIsHonoured1088:
+    """#1088 ruling: LIVE is the default for everything added to the graph;
+    an agent that deliberately asks for draft gets draft, and no OTHER
+    command may move it to live. Only an explicit promotion (``promote_point``
+    or ``update_point(status="live")``) may do that.
+
+    Non-vacuous because the pre-#1088 code did the opposite on every path
+    pinned here: a non-decide kind defaulted to 'draft', and each promotion
+    clause moved an explicitly-drafted source to live.
+    """
+
+    def test_create_point_defaults_to_live_for_non_decide_kind(self, sdk):
+        # 'evidence' deliberately exercises a NON-decide-part kind here, so
+        # the pre-#1088 code would have defaulted it to 'draft'.
+        p = sdk.create_point("evidence", "the sky is blue")
+        assert p["status"] == "live"
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_survives_default_operator_promotion(self, sdk):
+        """#1088 REGRESSION: a point explicitly created draft is NOT promoted
+        to live as a side effect of create_operator's DEFAULT promote_source
+        (the exact call the tortoise_create_operator MCP tool makes).
+        """
+        draft = sdk.create_point("statement", "deliberately staged",
+                                 status="draft")
+        other = sdk.create_point("statement", "second operand")
+        assert sdk.get_point(draft["id"])["status"] == "draft"
+        sdk.create_operator("IMPL", draft["id"], [other["id"]])
+        assert sdk.get_point(draft["id"])["status"] == "draft", (
+            "explicit draft must not be moved to live by create_operator"
+        )
+
+    def test_1088_explicit_draft_survives_default_direct_edge(self, sdk):
+        """#1088 REGRESSION: the direct-edge promotion-on-created path is
+        narrowed the same way — an explicit draft stays draft."""
+        draft = sdk.create_point("statement", "staged draft", status="draft")
+        other = sdk.create_point("statement", "peer")
+        sdk.create_direct_edge("IMPL", draft["id"], other["id"])
+        assert sdk.get_point(draft["id"])["status"] == "draft"
+
+    def test_1088_null_status_is_still_filled_with_live(self, sdk):
+        """The narrowed clause still fills in a never-set status: promotion
+        is not simply disabled. A raw NULL-status node goes live on the first
+        operator edge."""
+        p = sdk.create_point("statement", "legacy node")
+        _set_status(sdk, p["id"], None)
+        other = sdk.create_point("statement", "peer")
+        sdk.create_operator("IMPL", p["id"], [other["id"]])
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_still_promotable(self, sdk):
+        """The explicit routes still work: promote_point moves a
+        deliberately-drafted point to live."""
+        p = sdk.create_point("statement", "ready to ship", status="draft")
+        assert sdk.get_point(p["id"])["status"] == "draft"
+        res = sdk.promote_point(p["id"])
+        assert res["promoted"] is True
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_promotable_via_update_point(self, sdk):
+        p = sdk.create_point("statement", "ready", status="draft")
+        sdk.update_point(p["id"], status="live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_update_point_live_on_live_is_idempotent(self, sdk):
+        """#1088: with live as the create default, ordinary flows reach
+        update_point(status="live") on an ALREADY-live point. That is an
+        idempotent success (mirrors promote_point's DE2E-N9 already_live
+        no-op), not the draft-born guard's illegal transition."""
+        p = sdk.create_point("statement", "already live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+        sdk.update_point(p["id"], status="live")
+        sdk.update_point(p["id"], status="live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_update_point_still_refuses_terminal_resurrection(self, sdk):
+        """The narrowing is only for the already-live case: a terminal point
+        cannot be resurrected through the promote guard."""
+        p = sdk.create_point("statement", "retracted claim", status="live")
+        sdk.retract_point(p["id"])
+        assert sdk.get_point(p["id"])["status"] == "retracted"
+        with pytest.raises(ValueError):
+            sdk.update_point(p["id"], status="live")
+
