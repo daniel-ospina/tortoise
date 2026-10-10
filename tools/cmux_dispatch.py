@@ -267,6 +267,17 @@ READY_RE = re.compile(
 #: PREFIX only; a missed real pwd line is the fail-open direction.
 PWD_LINE_RE = re.compile(r"^\s*(?:~|/)")
 
+#: A footer EXTENSION-STATUS line. pi renders `ctx.ui.setStatus(...)` output into
+#: the footer as a bracketed tag followed by content — this fleet's are
+#: `[loop-enforcer] 🔔 …` and `[tortoise-capture] …`. Such a line occupies the
+#: SAME footer row region as the pwd line and REPLACES it on a pane whose footer
+#: is carrying statuses, so it is the second shape that legitimately sits
+#: directly above a real stats line (#7863). Measured 2026-10-09 on 5 live
+#: panes: every refused pane had status lines in that row and NO pwd line at
+#: all, which is why accepting `[` in `PWD_LINE_RE` (the obvious non-fix) would
+#: not have worked — there was no pwd line to accept.
+FOOTER_STATUS_RE = re.compile(r"^\s*\[[^\]\s][^\]]*\]\s")
+
 #: A shell prompt SIGIL used ONLY to detect that a pane has returned to a shell
 #: BELOW a stale pi frame — never to detect pi. A sigil counts when it is a
 #: STANDALONE token (`%`, `$`, `#`, `>` at a whitespace/line boundary), or a
@@ -465,13 +476,58 @@ def _is_pwd_line(line: str) -> bool:
     return bool(PWD_LINE_RE.match(line)) and not SHELL_PROMPT_RE.search(line)
 
 
+def _is_footer_row(line: str) -> bool:
+    """True when a line is a footer row that may sit above the stats line.
+
+    Two shapes: the pwd line, or an extension-STATUS line (`FOOTER_STATUS_RE`).
+    The second shape is what #7863 was missing — a footer carrying statuses
+    drops the pwd line, so requiring the pwd line alone refused live lanes.
+    """
+    return _is_pwd_line(line) or _is_footer_status_line(line)
+
+
+def _is_footer_status_line(line: str) -> bool:
+    """True when a line looks like a pi footer extension-status line."""
+    return bool(FOOTER_STATUS_RE.match(line))
+
+
 def _footer_stats_end(screen: str | None) -> int:
     """Offset just past the LAST stats line that belongs to a pi footer BLOCK,
-    i.e. is directly preceded (ignoring blank lines) by a pwd line, or -1.
+    i.e. is directly preceded (ignoring blank lines) by a footer row (the pwd
+    line OR an extension-status line), or -1.
 
     This is the anchor `shell_prompt_below_footer` scans from: a stats-shaped
-    line WITHOUT a pwd line above it is not a footer — it is output. See
-    `PWD_LINE_RE`.
+    line WITHOUT a footer row above it is not a footer — it is output. See
+    `PWD_LINE_RE` and `FOOTER_STATUS_RE`.
+
+    #7863 CORRECTED A FALSE PREMISE HERE. This test used to require the pwd line
+    ALONE, justified by "pi always draws the pwd line above the stats line". That
+    premise is false on a footer carrying extension statuses: measured on live
+    panes, the status lines occupy the pwd line's row and there is NO pwd line
+    anywhere in the capture. The anchor then fell to -1 on a perfectly healthy
+    lane, which took the whole-capture fallback in
+    `shell_prompt_below_footer` — whose OWN comment asserts "A live pane does not
+    reach this branch", also false for exactly this layout. In production that
+    refused 4 of 22 live lanes, on ordinary assistant prose that matches
+    `SHELL_PROMPT_RE` (a markdown `### #2935` heading, a `# noqa: E402`
+    fragment). The verified layouts (2026-10-09):
+
+        healthy   : [separator, pwdLine,            statsLine]
+        affected  : [separator, statusLine…,        statsLine]
+
+    Both end at the stats line; only the row ABOVE it differs. Accepting either
+    footer-row shape restores the anchor on both, and the pwd line stays the
+    primary shape (§`_is_footer_row`).
+
+    This is deliberately NOT a loosening in the direction that matters: the scan
+    still starts at the last footer BLOCK, so a bare pane is still refused (see
+    `screen_ready` — no status bar means no readiness at all, independently of
+    this anchor), and a stale footer above a live prompt is still caught because
+    the prompt sits BELOW the anchor. The residual (a shell reproducing an
+    entire footer row directly above a genuine stats line) is the INHERENT
+    content-based limit already documented on `shell_prompt_below_footer` —
+    accepting a status row makes that mimic one shape cheaper, and that trade is
+    the whole point of the fix.
     """
     text = screen or ""
     prev_nonempty: str | None = None
@@ -479,7 +535,7 @@ def _footer_stats_end(screen: str | None) -> int:
     best = -1
     for line in text.split("\n"):
         match = READY_RE.search(line)
-        if match and prev_nonempty is not None and _is_pwd_line(prev_nonempty):
+        if match and prev_nonempty is not None and _is_footer_row(prev_nonempty):
             best = pos + match.end()
         if line.strip():
             prev_nonempty = line
@@ -549,9 +605,9 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
     appended to the footer's own row). Anchoring on "the last stats-shaped line"
     alone is bypassable: shell OUTPUT below the prompt which mimics the stats shape
     (`host % ` then a line reading `42.0%/700k (auto)`) would place the prompt ABOVE
-    the anchor and hide it. Requiring a real footer block (a pwd line above the
-    stats) rejects that; when no block exists at all the anchor falls back to the
-    last stats-shaped line, which is the conservative (more-scanning) choice.
+    the anchor and hide it. Requiring a real footer block (a pwd line or an
+    extension-status line above the stats — see `_footer_stats_end`) rejects
+    that.
 
     RESIDUALS — direction stated honestly:
     * FAIL-OPEN (INHERENT to judging liveness from screen content, not fixable by
@@ -577,9 +633,31 @@ def shell_prompt_below_footer(screen: str | None) -> bool:
         # scan sits BELOW the marker, so a loose marker printed by the shell
         # (`host % echo '(auto)'` then `(auto)`) hides the prompt ABOVE it and
         # declares a bare shell READY (#7158 round 8). Without a block, scan the
-        # WHOLE capture — the fail-closed direction. A live pane does not reach
-        # this branch: pi always draws the pwd line above the stats line
-        # (`footer.js` `[pwdLine, statsLine, ...statuses]`).
+        # WHOLE capture — the fail-closed direction.
+        #
+        # #7863: this branch used to claim "A live pane does not reach this
+        # branch: pi always draws the pwd line above the stats line
+        # (`footer.js` `[pwdLine, statsLine, ...statuses]`)". THAT CLAIM WAS
+        # FALSE, and it is what produced the false refusals: a live footer
+        # carrying extension statuses draws the statuses in the pwd line's row
+        # and NO pwd line, so `_footer_stats_end` returned -1 on a healthy lane
+        # and the WHOLE capture — including ordinary assistant prose — was
+        # scanned for a sigil. `SHELL_PROMPT_RE` matches "#" before whitespace
+        # ANYWHERE, so a markdown `### #2935` heading or a linter-directive
+        # fragment in the transcript refused the lane. Measured 2026-10-09:
+        # 4 of 22 live lanes refused. `_footer_stats_end` now also accepts a
+        # footer STATUS row, which restores the anchor on that layout.
+        #
+        # The branch is therefore KEPT, not removed, and it is still needed for
+        # exactly one shape: a pane where a status-bar token survived in the
+        # capture but NO footer row does — a dead pi's stale footer whose
+        # pwd/status row has scrolled out of the captured window, with the
+        # revived shell's prompt below it. That is the #7158 direction this tool
+        # exists to prevent, and a wrong "ready" there types the brief into a
+        # bare shell. Scanning the whole capture can only OVER-refuse, which is
+        # why the residual prose false-positive is preferred to the alternative.
+        # With the anchor fixed, an unrecognised footer is a real (not
+        # hypothetical) trigger for this branch.
         return any(
             line.strip() and SHELL_PROMPT_RE.search(line)
             for line in text.splitlines()
