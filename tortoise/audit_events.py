@@ -114,30 +114,33 @@ _REPLAY_RESOLUTION_WARNED = False
 
 
 def _refuse_unusable_home() -> None:
-    """Refuse a ``$HOME`` that cannot anchor the fallback.
+    """Refuse a home directory that cannot anchor the fallback.
 
-    Two spellings, one outcome — the fallback would land at the filesystem
-    root, outside any ``$HOME`` a reader would recognise:
+    Three shapes reach the SAME root artefact (``/.tortoise/audit_fallback.jsonl``),
+    where a root-writable container (the hosted shape) lets the mkdir+append
+    SUCCEED — so no drop is counted and the loss is silent:
 
-    * SET-but-empty/whitespace: ``Path.home()`` returns ``/`` for
-      ``HOME=""``, and ``Path.expanduser()`` expands a bare leading ``~`` to
-      that same root.
+    * SET-but-EMPTY ``$HOME`` (``""``): ``Path.home()`` returns ``/``, which IS
+      absolute, so the absolute-path check cannot see it.
 
-    * A ``$HOME`` whose RESOLVED location IS the filesystem root — ``HOME="/"``,
+    * A ``$HOME`` whose RESOLVED location IS the filesystem root — ``"/"``,
       ``"/.."``, ``"//"``, ``"/tmp/../.."``, or a symlink to ``/``. Keying the
       refusal on the literal string MISSED these (#7924 review round 4): they
       are non-empty, so the empty check passed, and the resulting
       ``$HOME/.tortoise`` is not itself the root, so the artifact-location
-      check below could not see it either. Each resolved to
-      ``/.tortoise/audit_fallback.jsonl`` — the SAME file the empty spelling is
-      refused for — with the mkdir+append succeeding and no drop counted.
+      guard could not see it either.
 
     * An UNSET ``$HOME`` whose PASSWORD-DATABASE entry is the root (#7924
       review round 5): ``Path.home()`` then returns ``/`` from ``pwd``, so
       treating "unset" as "fine" reopened the hole for a minimal container.
       The pwd-derived home is resolved and checked here too.
 
-    All of these ARE absolute, so the absolute-path check cannot see them.
+    A fourth shape, SET-but-WHITESPACE ``$HOME`` (``"   "``), is a DIFFERENT
+    failure mode rather than a root escape: ``Path.home()`` is then the
+    RELATIVE ``PosixPath('   ')``, which the absolute-path check already
+    refuses (and which would otherwise mkdir a CWD-relative directory). The
+    ``home.strip()`` gate below refuses it here first, with the same message,
+    so that hazard is reported as the misconfiguration it is.
     """
     home = os.environ.get("HOME")
     if home is None:
