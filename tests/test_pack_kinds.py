@@ -1424,6 +1424,49 @@ class TestMilestoneCanonicalEventKind:
     without the others.
     """
 
+    def test_cross_pack_reference_with_a_declaring_pack_resolves(self, tmp_path):
+        """#2767 indicator (2): a fixture that *declares* `milestone` on a pack
+        axis, plus a second pack that references it in `nearMisses`, must load
+        cleanly. This is the half the reported failure needed: pre-fix the bare
+        name was simultaneously a pm `objectKind`, a legacy base point/event
+        kind and the miner's event kind, so once a second pack declared it the
+        reference became ambiguous. Post-fix core owns `milestone` on the EVENT
+        axis, so the referencing pack resolves without an ambiguity error.
+
+        Pinned separately from `test_cross_pack_bare_reference_resolves_to_core`
+        so that BOTH shapes stay covered: that test pins the no-declaration
+        shape (`pm`'s `sprint`), this one pins the declaring shape."""
+        _write_pack(str(tmp_path), "alpha", {
+            "namespace": "alpha", "name": "Alpha", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["milestone"],
+                "kindDefs": {"milestone": {"description": "m"}},
+            },
+        })
+        # a SECOND declaring pack is what made the pre-fix reference ambiguous
+        # ("is ambiguous — declared by multiple packs") — the reported failure.
+        _write_pack(str(tmp_path), "delta", {
+            "namespace": "delta", "name": "Delta", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["milestone"],
+                "kindDefs": {"milestone": {"description": "m"}},
+            },
+        })
+        _write_pack(str(tmp_path), "beta", {
+            "namespace": "beta", "name": "Beta", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        registry.load_all()
+        assert not registry.errors, registry.errors
+
     def test_milestone_is_canonical_event_not_object(self):
         assert "milestone" in CANONICAL_EVENT_KINDS
         assert "milestone" not in CANONICAL_OBJECT_KINDS

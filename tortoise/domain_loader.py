@@ -199,8 +199,8 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     No arg (legacy): base + registered + every loaded pack's kinds (bare
     names) — the compiled pack vocabulary, flat.
     With a bucket: kinds for that bucket only (canonical core + pack kinds;
-    pointKind also includes the legacy base registry so existing document-
-    domain warnings don't change).
+    pointKind also includes the legacy base registry, minus the core EVENT kinds
+    the #2767 ruling moved, so existing document-domain warnings don't change).
     """
     if bucket is None:
         pack_kinds: set[str] = set()
@@ -210,13 +210,22 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     _check_bucket(bucket)
     kinds: set[str] = set(_CORE_KINDS_BY_BUCKET[bucket])
     if bucket == "pointKind":
-        # Legacy flat registry ≈ point/event kinds, minus the core EVENT kinds
-        # that own no point identity (#2767). Subtracting
-        # _BASE_KINDS ∩ CANONICAL_EVENT_KINDS is a net loss for `meeting` and
-        # `milestone`; `decision` is dropped here but re-supplied by
-        # _CORE_KINDS_BY_BUCKET above, so it keeps its point identity. A name
-        # in neither canonical set (e.g. `humanApproval`) is untouched.
-        kinds.update(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"])
+        # #2767 (owner ruling, 2026-10-09): `milestone` is a core EVENT kind, not
+        # a point/Object kind — a milestone is *reached* at a moment. The legacy
+        # flat registry must therefore stop offering it as a pointKind.
+        #
+        # SCOPED to the kind the ruling actually moved. The generic form,
+        # `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]`, does NOT merely
+        # drop `milestone`: measured, it also removes `meeting` from pointKind
+        # (both names sit in _BASE_KINDS and in CANONICAL_EVENT_KINDS), which is
+        # a hard-block behaviour change on the hosted write path —
+        # `known_kinds("pointKind")` is the validator at hosted_api.py:6575, so
+        # `CreatePointRequest(kind="meeting")` would start raising. That removal
+        # was never ruled on by #2767, is not pinned by a test, and is not
+        # mentioned in the changelog. It is a separate question for its own
+        # issue; it must not ride in on this one. `decision` is unaffected in
+        # either form — _CORE_KINDS_BY_BUCKET re-supplies it above.
+        kinds.update(_BASE_KINDS - {"milestone"})
     kinds.update(_pack_kinds_by_bucket()[bucket])
     return frozenset(kinds)
 
