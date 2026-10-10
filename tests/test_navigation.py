@@ -212,6 +212,44 @@ def test_tortoise_traverse_diamond():
     print("✓ tortoise_traverse diamond (dedup)")
 
 
+def test_tortoise_traverse_reports_edge_idx():
+    """#6101: each hop carries the traversed edge's idx (0 = the operator's
+    SOURCE, >= 1 = a TARGET), so orientation survives the traversal."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    src = _node("src", ["Point"], {"content": "src"})
+    tgt = _node("tgt", ["Point"], {"content": "tgt"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[src, "IMPL", 1], [tgt, "IMPL", 0]],
+        ],
+    })
+    result = tortoise_traverse(db, "tortoise", "root-1", max_hops=1)
+    by_id = {n["node"]["id"]: n for n in result["nodes"]}
+    assert by_id["src"]["idx"] == 1
+    assert by_id["tgt"]["idx"] == 0
+    print("✓ tortoise_traverse reports edge idx")
+
+
+def test_tortoise_traverse_idx_none_on_plain_edge():
+    """#6101: a 2-column row (legacy graph / non-operator edge) degrades to
+    idx=None, never an IndexError and never a fabricated 0."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    plain = _node("plain", ["Point"], {"content": "plain"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[plain, "TAGGED"]],
+        ],
+    })
+    result = tortoise_traverse(db, "tortoise", "root-1", max_hops=1)
+    assert result["nodes"][0]["idx"] is None
+    assert result["nodes"][0]["relationship"] == "TAGGED"
+    print("✓ tortoise_traverse idx=None on a non-operator edge")
+
+
 def test_parse_node_prefers_public_id_over_internal():
     """Regression: #44 — _parse_node must return the public id property,
     not the internal FalkorDB numeric node ID.
@@ -375,6 +413,8 @@ if __name__ == "__main__":
         test_entity_profile_categorize_types,
         test_tortoise_traverse_basic,
         test_tortoise_traverse_diamond,
+        test_tortoise_traverse_reports_edge_idx,
+        test_tortoise_traverse_idx_none_on_plain_edge,
         test_parse_node_prefers_public_id_over_internal,
         test_tortoise_traverse_returns_public_ids,
         test_entity_profile_returns_public_ids,

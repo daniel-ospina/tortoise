@@ -385,6 +385,52 @@ class TestTraverse:
         with pytest.raises(ValueError, match="Invalid direction"):
             sdk.traverse(p["id"], "IMPL", direction="sideways")
 
+    def test_operator_orientation_is_surfaced(self, sdk):
+        """#6101: an operator and its reverse must not read identically.
+
+        create_operator writes IMPL{idx=0} to the SOURCE and IMPL{idx>=1} to
+        each TARGET, so traverse has to hand the edge's idx back — without it
+        the two endpoints are an unordered pair and a cycle reads as its
+        reverse.
+        """
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        forward = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+        reverse = sdk.create_operator("IMPL", b["id"], [a["id"]], label="produces")
+
+        fwd = {c["id"]: c for c in sdk.traverse(forward["id"], "IMPL", direction="outgoing")}
+        assert fwd[a["id"]]["idx"] == 0  # forward's SOURCE
+        assert fwd[b["id"]]["idx"] == 1  # forward's TARGET
+
+        rev = {c["id"]: c for c in sdk.traverse(reverse["id"], "IMPL", direction="outgoing")}
+        assert rev[b["id"]]["idx"] == 0  # reverse's SOURCE
+        assert rev[a["id"]]["idx"] == 1  # reverse's TARGET
+
+        # The two reads are distinguishable ONLY by idx (same ids, same
+        # content): this is the property the issue reported as lost.
+        assert (sorted(sdk.traverse(forward["id"], "IMPL"), key=lambda c: c["id"])
+                != sorted(sdk.traverse(reverse["id"], "IMPL"), key=lambda c: c["id"]))
+
+    def test_incoming_idx_locates_the_queried_point(self, sdk):
+        """#6101: reading a point's incoming IMPL edge reports where the
+        QUERIED point sits in the operator (0 = source, >= 1 = target)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        src_side = {c["id"]: c for c in sdk.traverse(a["id"], "IMPL", direction="incoming")}
+        tgt_side = {c["id"]: c for c in sdk.traverse(b["id"], "IMPL", direction="incoming")}
+        assert src_side[op["id"]]["idx"] == 0
+        assert tgt_side[op["id"]]["idx"] == 1
+
+    def test_non_operator_edges_carry_no_idx(self, sdk):
+        """#6101: idx is None where the graph holds no operator position — the
+        key is additive, never a fabricated 0."""
+        old = _make_point(sdk, content="old")
+        new = sdk.create_point("statement", "new")
+        sdk.supersede_point(old["id"], new["id"])
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert corrected and corrected[0]["idx"] is None
+        assert corrected[0]["id"] == old["id"]
+
 
 # ── verify_chain ─────────────────────────────────────────────────────
 
