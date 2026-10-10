@@ -659,6 +659,18 @@ JOURNAL_WRITE_FAILURE_COUNT = Counter(
     "tortoise_journal_write_failures_total",
     "JSONL rebuild-journal append failures on a configured journal (#4240)",
 )
+# #7924 review P2: an audit event that reached NO durable sink — the fallback
+# location could not be resolved, or the JSONL append failed. That write is
+# deliberately fail-soft (audit failure must never break the serving flow —
+# hosted_api._audit_auth_failure), so this counter is what makes the loss
+# observable, exactly as JOURNAL_WRITE_FAILURE_COUNT above does for the rebuild
+# journal. Single writer: ``record_audit_fallback_drop`` (the #501/#3677 house
+# shape — callers never touch the counter directly).
+AUDIT_FALLBACK_DROP_COUNT = Counter(
+    "tortoise_audit_fallback_drops_total",
+    "Audit events that reached no durable sink (#7924 review)",
+    ["reason"],
+)
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -1230,6 +1242,22 @@ def journal_write_failure_count() -> int:
     used by ``metrics()`` and by tests (mirrors ``analytics_outcome_counts``).
     """
     return _counter_val(JOURNAL_WRITE_FAILURE_COUNT)
+
+
+def record_audit_fallback_drop(reason: str) -> None:
+    """Count one audit event that reached NO durable sink (#7924 review).
+
+    ``reason`` is ``"unresolvable_path"`` (the fallback location could not be
+    resolved — a malformed ``$HOME`` or a non-absolute base) or
+    ``"write_failed"`` (the JSONL append raised). Called from
+    ``audit_events._write_fallback``, whose swallow is deliberate.
+    """
+    AUDIT_FALLBACK_DROP_COUNT.labels(reason=reason).inc()
+
+
+def audit_fallback_drop_counts() -> dict[str, int]:
+    """In-process snapshot of ``AUDIT_FALLBACK_DROP_COUNT``, by reason (#7924)."""
+    return _collect_by_label(AUDIT_FALLBACK_DROP_COUNT, "reason")
 
 
 def record_cost(team: str, cents: int) -> None:
@@ -3970,7 +3998,7 @@ def _reset_graph_size_worker() -> None:
 
 def metrics(sdk=None, setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
-    errors, uptime}.
+    errors, journal_write_failures, audit_fallback_drops, uptime}.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -4089,6 +4117,14 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # real degradation (the derived graph becomes live-only), so it rides
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
+        # #7924 review P2: an audit event that reached no durable sink is
+        # the same class of failure as a journal write, so it rides THIS
+        # payload alongside ``journal_write_failures`` rather than a log line
+        # nothing watches. Scope stated honestly: it is visible wherever
+        # ``metrics()`` is served (``monitoring.serve_health``). The HOSTED
+        # app exposes its own health dict and has no `/metrics` route, so a
+        # drop there is counted here but not surfaced by that endpoint.
+        "audit_fallback_drops": audit_fallback_drop_counts(),
         "uptime": round(time.monotonic() - _start, 2),
     }
 
