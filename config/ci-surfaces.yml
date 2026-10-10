@@ -1410,6 +1410,12 @@ surfaces:
   - test_3516_client_captured_at.py
   - test_connector_loader.py
   - test_connector_secrets.py
+  # #5214: the connector Source's CONTENT VERSION — the Source half that makes
+  # the #5199 derivation anchor land on the connector path instead of reading
+  # NULL. `tortoise/projection/entities.py` (the choke point) selects `core`, so
+  # the guard runs with the code it guards. Lane: embedded (like the sibling
+  # `test_connector_sources.py` below) — deliberately NOT carve_out-registered.
+  - test_connector_source_version_5214.py
   - test_connector_sources.py
   # #5011: divergence detection is by CONTENT, not size — the per-projection
   # watermark + graph baseline live in a sidecar next to the journal, written by
@@ -3261,6 +3267,7 @@ durations:
   test_mcp_rename_table.py: 3.0
   test_sdk_rename_table.py: 6.1
   test_sdk_surface.py: 32.6
+  test_connector_source_version_5214.py: 20.0  # #5214: 13 tests; embedded lane (like test_connector_sources.py). Local wall time ~135s of which ~110s is the ONE-OFF embedding-model load on a cold cache (this machine cannot fetch it — the hermetic egress guard blocks HF), so ~20s is the steady-state figure; locally measured, not a junit sweep
   test_connector_sources.py: 1.7
   test_e2e9_point_in_time.py: 2.6
   test_file_human_approval.py: 2.4

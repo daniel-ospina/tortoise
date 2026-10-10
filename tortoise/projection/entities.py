@@ -333,6 +333,78 @@ def _is_real_source_url(url: str) -> bool:
     return url.startswith(("http://", "https://"))
 
 
+# #5214: the keys of a materialized connector payload that are NOT item content.
+#
+# The connector Source's `contentHash` is the digest of the payload the
+# projection was handed for that item (`_connector_content_hash` below), so what
+# is EXCLUDED here decides what a "new version" means. Two classes go:
+#
+#   1. ENVELOPE — `type`/`projection_version`/`version` are the record's own
+#      shape, and the SDK/journal keys (`event_id`, `ts`, `initiated_by`,
+#      `agent_id`, `actor_user_id`, `corrects`, `_merge_run_id`, `__runId`) are
+#      stamped on the journal line rather than by the connector. A change to any
+#      of them is a change to how we WRITE, never to what we hold, and folding
+#      them in would advance a version on a journal-format bump.
+#
+#   2. IDENTITY of the graph record — `eventId`/`id`. This exclusion is the one
+#      that carries weight: ONE item state is materialized by MORE than one
+#      producer with DIFFERENT ids. GitHub's poll path mints
+#      `github-issue-{repo}-{n}-created` for an already-closed issue, while the
+#      webhook path mints `…-closed` for the same closed state
+#      (`github_map.issue_to_event`), and `github.py`'s entity path re-emits the
+#      same event again. Hashing the id would give one unchanged item two
+#      different digests depending on which producer ran last — a version
+#      transition with no content change, i.e. a FALSE stale on every other
+#      poll. The digest is defined over the item's materialized content, so
+#      the record that carried it is deliberately not part of it.
+#
+# `embedding` is excluded for the same reason in a different medium: it is a
+# DERIVED vector, so re-encoding (or an embedding-model change) would advance
+# the version with no item change.
+_CONNECTOR_HASH_EXCLUDED: frozenset = frozenset({
+    "type", "projection_version", "version",
+    "id", "eventId",
+    "embedding",
+    "event_id", "ts", "initiated_by", "agent_id", "actor_user_id",
+    "corrects", "_merge_run_id", "__runId",
+})
+
+
+def _connector_content_hash(inner: dict) -> str:
+    """#5214: the connector Source's `contentHash` — sha256 over the
+    MATERIALIZED CONNECTOR PAYLOAD.
+
+    Why this is the honest digest (ONTOLOGY §4.6: *"the digest of the content
+    read"*, *"a re-fetched source whose content differs is a new version"*): for
+    a connector item the graph IS the only copy we hold — §9.6 bounds a version
+    at *"windows and hashes only, never content copies"* — so the payload the
+    projection materialized for that item is exactly the content read. That is
+    also why this is NOT per-sourceKind code: each connector emits its own
+    payload shape (`github_map`'s single vocabulary for GitHub, the connector's
+    own mapper for Slack/Linear), so keying the digest to the payload scopes it
+    per kind by construction, with no registry to keep in sync.
+
+    Determinism is a requirement, not a nicety: this is the input to a version
+    transition, so two records of ONE item state must hash equal (see
+    ``_CONNECTOR_HASH_EXCLUDED`` — the excluded id is the case that makes it
+    true). Canonical form: sorted keys, no insignificant whitespace, UTF-8.
+
+    Returns `""` (never raises) when the payload cannot be canonicalized — a
+    connector Source with no computable digest stays honestly unanchored, the
+    same state as a `_mint_source_stub`. A raise here would abort a connector
+    poll mid-ingest.
+    """
+    import hashlib
+    import json
+    body = {k: v for k, v in inner.items() if k not in _CONNECTOR_HASH_EXCLUDED}
+    try:
+        blob = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError):  # pragma: no cover - default=str is total
+        return ""
+
+
 def _build_search_text(title, summary=None, topics=None) -> str:
     """#125: compute the Document FTS search surface.
 
@@ -3337,7 +3409,65 @@ class _EntityHandlers:
             coalesce so an existing kind is never re-stamped, and a stub
             without kind still gets one);
           - no version bump on re-materialization (unlike ``_upsert_source``,
-            which bumps on hash-diff — TypeGraph churn pitfall).
+            which bumps on hash-diff — TypeGraph churn pitfall) — EXCEPT the
+            #5214 content version below, which is gated on a REAL change and
+            writes nothing when the item is unchanged.
+
+        #5214 — the connector content version. Before this, the Source was
+        created with ``contentHash = ''`` and never had one written, so the
+        #5199 derivation anchor on ``(Source)-[:references]->(Event)`` was
+        ``NULL`` for 100% of connector-derived Events: *"are these entities
+        about the content we currently hold?"* was unanswerable on this path,
+        and §9.6 recorded it as an open boundary. This is the SOURCE half of
+        the pair §9.6's known limitation already assumes exists ("a connector
+        re-poll that bumps the Source with no target rebuild"): the version
+        advances on a content-changing re-fetch, the ON CREATE-only edge anchor
+        deliberately does NOT, and the earlier derivation therefore reads
+        ``stale`` — the conservative direction the model prefers (``stale !=
+        wrong``, §4.6).
+
+        The digest is `_connector_content_hash(inner)` — sha256 over the
+        materialized connector payload, i.e. the content we actually read
+        (see that function for why the payload, and not a per-kind registry, is
+        the honest input).
+
+        Gate — TWO conditions, both derived from the writer's own contracts:
+
+        1. **A REAL per-item URL** (``_is_real_source_url``, the same
+           discriminator the conf-60 direction guard uses). A container-level
+           fallback key (``slack:{channel}``, ``linear:{team_key}``) names no
+           item — every message in the channel shares that one Source — so
+           stamping it with one message's digest would advance the version on
+           every poll and mark every sibling derivation stale. Those Sources
+           keep ``contentHash = ''`` and stay honestly unanchored, as before.
+        2. **The node's OWN ``sourceKind`` is a registered connector kind** —
+           i.e. this choke point materialized it. The choke point already
+           treats an existing ``sourceKind`` as authoritative (#398: "an
+           EXISTING Source's kind is authoritative", never re-stamped), so the
+           writer that OWNS the kind owns this node — and it is the same
+           ownership question for the version. Without the gate, a connector
+           event whose URL names a node another writer owns (a document
+           ``:Source``, a ``_link_source`` stub) would CLOBBER that writer's
+           ``contentHash`` — silently re-versioning a document against a
+           connector poll, and contradicting the sweep below ("the survivor's
+           own [metadata] wins — inheritance only fills a gap").
+
+        ⚠️ **The consequence of gate 2 is deliberate: a node whose kind belongs
+        to another writer stays UNVERSIONED.** That node reads ``unknown`` (no
+        recorded version), never ``current`` — the honest state, and the same
+        one it had before #5214. The alternative — stamping it anyway — buys an
+        anchor at the price of a false current on a node whose content this
+        path does not own, which is the one direction §4.6 forbids. It also
+        heals in place: a connector ``:Source`` that a pre-#5214 writer left at
+        ``contentHash = ''`` is completed on the next poll, with no backfill.
+
+        The write is gated in the query (``WHERE`` the stored hash differs), so
+        an unchanged re-poll performs NO write at all — no property moves, no
+        version bumps, no churn. On a real transition the pair moves together
+        (``contentHash`` + the §4.6 ordinal ``version``), using the clause
+        ``_upsert_document`` already uses for the document path: half-writing
+        the pair is the #7362 bug class (*the hash advances, the counter does
+        not*), so the two columns share one predicate.
 
         ``(Source)-[:references]->(Object {id})`` is wired ONLY when the event
         carries an explicit ``sourceObjectId`` (set exclusively by the github
@@ -3386,6 +3516,10 @@ class _EntityHandlers:
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.sourceKind = $sk, s.title = $url, "
             "    s.canonicalUrl = $cu, s.urlAliases = [$raw_url], "
+            # #5214: the placeholder stays — the real content version, when one
+            # exists, is written by the gated statement below (ONE home for the
+            # hash+ordinal pair, so the create and the transition cannot
+            # disagree).
             "    s.contentHash = '', s.ingestedAt = $now "
             "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk), "
             "    s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
@@ -3395,8 +3529,49 @@ class _EntityHandlers:
             params={"url": key, "raw_url": url, "cu": canonical,
                     "sk": sk or "document", "now": _now_iso()},
         )
+        # #5214: the connector content version — see the docstring. `ch` is
+        # `''` for a container-level fallback key (no per-item identity → no
+        # version), so those Sources never reach the statement at all.
+        ch = _connector_content_hash(inner) if _is_real_source_url(url) else ""
+        if ch:
+            # Gate 2 of the docstring: the node must be one THIS writer
+            # materialized (`sourceKind` a registered connector kind — the
+            # choke point's own ownership contract, #398). `IN $ck` is the
+            # NODE's kind, never the incoming `$sk`: a node another writer owns
+            # keeps its own `contentHash` untouched.
+            #
+            # The rest of the predicate is repeated in the `WHERE` and mirrored
+            # in the `SET`'s CASE pair: the WHERE is what makes an unchanged
+            # re-poll a true no-op (nothing is written, nothing is dirtied), and
+            # the CASE pair is what keeps the two columns moving together if the
+            # query is ever run without it. Both read the PRE-write
+            # `s.contentHash` — pinned by
+            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`.
+            self.g.query(
+                "MATCH (s:Source {url: $url}) "
+                "WHERE s.sourceKind IN $ck "
+                "  AND (s.contentHash IS NULL OR s.contentHash = '' "
+                "       OR s.contentHash <> $ch) "
+                "SET s.contentHash=CASE "
+                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+                "             OR s.contentHash <> $ch THEN $ch "
+                "        ELSE s.contentHash END, "
+                "    s.version=CASE "
+                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+                "             OR s.contentHash <> $ch "
+                "             THEN coalesce(s.version, 0) + 1 "
+                "        ELSE coalesce(s.version, 1) END",
+                params={"url": key, "ch": ch,
+                        "ck": list(_CONNECTOR_SOURCE_KINDS)},
+            )
         # (Source)-[:references]->(Event) — always, when the event exists, and
-        # anchored ON CREATE by the shared derivation writer (#5199).
+        # anchored ON CREATE by the shared derivation writer (#5199) from the
+        # Source's current `contentHash`. Since #5214 that hash EXISTS on this
+        # path for a real per-item URL (written just above), so the anchor
+        # lands here instead of reading NULL — and because the edge anchors ON
+        # CREATE only while the Source's version may advance, a re-fetch whose
+        # content differs leaves this edge reading `stale`. That is the
+        # intended pair (§9.6), not a bug.
         self.link_source_to_event(key, eid)
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
