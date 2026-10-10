@@ -1315,6 +1315,56 @@ def test_a_failed_rollback_is_named_not_hidden(monkeypatch):
         proj.close()
 
 
+def test_an_unmeasurable_post_replay_count_is_not_reported_as_empty(monkeypatch):
+    """#7929 review: `after is None` means the graph could not be MEASURED (the
+    backend died between the replay and the count), NOT that it is empty. The
+    refusal must report `db_points: None` (unknown) and must not claim the
+    replay produced an empty graph — the replayed nodes are still there,
+    because there is no reachable backend to wipe them.
+
+    FAILS IF: an unmeasurable count is flattened to 0 and described as an
+    empty store. That is the same false "the store is empty" claim this change
+    exists to remove, and it is worse here than elsewhere: the caller reads it
+    as a clean refusal over an empty store while a partially-populated graph is
+    on disk.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "unmeasured.db")
+    _poisoned_journal(tmp)
+    proj = _lost_store(db_path)
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            # The FIRST count is the entry invariant, which must still succeed
+            # (a None there returns early). Everything from the post-replay
+            # measurement onwards fails, which is the state under test.
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-replay count was never taken — this fixture is not "
+            "exercising the unmeasurable leg")
+        assert r["recovered"] is False, r
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r}; 0 "
+            f"asserts an empty store that was never observed")
+        # The refusal this fixture reaches is the non-folded one, so its reason
+        # is the non-folded clause — but it must NOT additionally claim the
+        # store is empty, which is the lie a flattened `db_points: 0` told.
+        assert "empty graph" not in r["reason"], r["reason"]
+        assert "silently incomplete" in r["reason"], r["reason"]
+    finally:
+        proj.close()
+
+
 def test_the_rollback_wipe_uses_the_rebuild_lane_token(monkeypatch):
     """#2944 reciprocity: a non-empty wipe ADDED to `recover_from_log` must
     route through the REBUILD-LANE path (`_wipe_all_nodes`), which owns the

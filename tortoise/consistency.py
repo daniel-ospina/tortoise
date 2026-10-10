@@ -2562,7 +2562,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # refusal does not destroy the retry path.
         return _roll_back_declined_replay({
             "recovered": False, "log_points": len(events),
-            "db_points": after if after is not None else 0,
+            # #7929 review: `after is None` means the graph could not be
+            # MEASURED (the backend died between the replay and the count), not
+            # that it is empty — and the replayed nodes are necessarily left in
+            # place, because there is no reachable backend to wipe them. `None`
+            # is this surface's established "unmeasurable" value (see the
+            # `db_count is None` early return above); reporting 0 here would be
+            # the same false "the store is empty" claim this change exists to
+            # remove.
+            "db_points": after,
             "reason": (
                 f"replay refused {len(nf_events)} journal event(s) it could not "
                 f"resolve to exactly one node (R8/#3585) — the rebuilt graph "
@@ -2585,11 +2593,24 @@ def recover_from_log(events_dir: str, projection) -> dict:
     if refused:
         extra += f" ({refused} refused by the numeric domain)"
     result = {"recovered": ok, "log_points": len(events),
-              "db_points": after if after is not None else 0,
+              # #7929 review: `after` is `None` when the count could not be
+              # taken — pass it through rather than flattening it to 0, so a
+              # reader can tell "the store is empty" from "the store could not
+              # be measured".
+              "db_points": after,
               # The clause is ADDITIVE, so it rides BOTH branches — an `ok: False`
               # result is exactly when a refused count matters most.
               "reason": (f"replayed {applied} events from {files[0]}{extra}"
-                         if ok else f"replay produced an empty graph{extra}")}
+                         if ok else
+                         # #7929 review: with `applied > 0` and no measurement
+                         # the graph is NOT empty — the replayed nodes are still
+                         # there. Say that, instead of asserting an emptiness
+                         # that was never observed.
+                         (f"replayed {applied} events from {files[0]}{extra} "
+                          f"but the graph could not be measured afterwards, so "
+                          f"the replayed state may remain"
+                          if applied > 0 and after is None
+                          else f"replay produced an empty graph{extra}"))}
     # #7929: `ok is False` is the other late verdict this replay can reach —
     # nothing applied yet the graph is non-empty (a deferred CORRECTS/link fold
     # landed) — and it must not leave that partial population behind either.
