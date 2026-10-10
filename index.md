@@ -39,7 +39,10 @@ updated: 2026-08-10
 ## Testing
 
 - [Test suite](tests/) — 950 tests, 788 passing
-- [Deprecated SVBP tests](tests/deprecated_svbp/) — Replaced by EP (ep.py)
+
+<!-- #7919: `[Deprecated SVBP tests](tests/deprecated_svbp/)` was removed — the
+     `tests/deprecated_svbp/` directory is not in the tracked tree (the suite was
+     superseded by EP), so the link was dead in every checkout CI builds. -->
 
 ## License
 

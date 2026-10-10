@@ -5689,6 +5689,10 @@ class FalkorProjection(
                     # Lost-graph case but recovery declined (ambiguous/unreadable
                     # log) — warn loudly instead of silently continuing with an
                     # empty DB (ops safety #428: no silent data loss).
+                    # #7929: a decline that arrived AFTER the replay landed is
+                    # rolled back by `recover_from_log`, so this really is an
+                    # empty DB here rather than a half-built one that a later
+                    # open would serve as "already has nodes".
                     logger.warning(
                         "empty embedded DB not auto-recovered: %s",
                         result.get("reason"))
@@ -5700,6 +5704,13 @@ class FalkorProjection(
         to open the store (it is usable, and refusing would be strictly worse)
         — but it must not pass unmentioned either, since this is the caller for
         the unresponsive-graph path where no other surface reports it (#4641).
+
+        #7929: a DECLINED recovery that had already replayed is rolled back to
+        the empty state this call found (see `recover_from_log`'s ATOMICITY
+        note), so the refusal below does not leave a half-built store whose
+        next open takes the other refusal (`"graph already has nodes — no
+        rebuild"`) and loses the retry path. Measured before the fix: 4 nodes
+        left behind by a declined replay.
         """
         from tortoise.consistency import recover_from_log
         result = recover_from_log(events_dir, self)
