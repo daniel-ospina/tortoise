@@ -750,3 +750,227 @@ def test_dream_writeback_persists_full_precision_for_non_point(sdk):
         params={"id": event}).result_set
     assert stamp and stamp[0][0] is not None, (
         "the dream write-back did not stamp lastDreamedAt on the Event")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 9. Round-4 (#7936) — the ordered existence boundary
+# ═══════════════════════════════════════════════════════════════════
+#
+# Round 4 found the interim exemption answering the WRONG question: it tested
+# first-materialization membership plus a LAST-delete-wins map, which cannot
+# express a RE-CREATION or a delete on either side of the belief write. It
+# disagreed with `rebuild_all` in BOTH directions:
+#   * `create → hard-delete → RE-CREATE (same id) → belief` was called a MISS
+#     even though `rebuild_all` folds the belief onto the re-created node —
+#     a FALSE RED on a healthy graph (the reported P1).
+#   * an id hard-deleted both BEFORE and AFTER the write exposed only the
+#     later delete, so the diagnostic called it HEALTHY while `rebuild_all`
+#     refused — a FALSE GREEN (P2-3).
+#
+# The fix judges existence AT THE RECORD from the ordered create/delete
+# boundary (`projection.journal_epistemic_existence`). This matrix is the
+# deliverable: it pins that the reference fold and `rebuild_all` reach the
+# SAME verdict on every ordering, so the class cannot silently return.
+
+_MATRIX_ID = "n-7936-matrix"
+
+
+def _m_object(nid: str = _MATRIX_ID) -> dict:
+    return {"type": "ObjectRegistered", "id": nid, "name": "matrix-obj"}
+
+
+def _m_delete(label=None, nid: str = _MATRIX_ID) -> dict:
+    ev = {"type": "EntityMutated", "op": "delete", "id": nid}
+    if label is not None:
+        ev["label"] = label
+    return ev
+
+
+def _m_belief(nid: str = _MATRIX_ID) -> dict:
+    return {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77}
+
+
+#: ``(row, events, refused?)`` — ``refused`` is the verdict BOTH folds must
+#: reach. A row is "refused" when the belief write cannot be reproduced:
+#: the reference fold records a `point-belief-miss` and `rebuild_all` raises
+#: `NonFoldedEventsError`. The converse is "accepted" (no refusal).
+_BOUNDARY_MATRIX = [
+    # Each required ordering, plus the P2-2 forward reference.
+    ("materialize-delete-belief",
+     [_m_object(), _m_delete("Object"), _m_belief()], True),
+    ("materialize-belief-delete",
+     [_m_object(), _m_belief(), _m_delete("Object")], False),
+    ("materialize-delete-recreate-belief",
+     [_m_object(), _m_delete("Object"), _m_object(), _m_belief()], False),
+    # A buried incarnation, with the RE-CREATION still AFTER the write: live
+    # no-op'd the write, so it is a forward reference (skip), NOT a miss —
+    # the re-creation after ``seq`` is the future signal even though an
+    # earlier creation exists. The first-materialization form alone cannot see
+    # this.
+    ("materialize-delete-belief-recreate-after",
+     [_m_object(), _m_delete("Object"), _m_belief(), _m_object()], False),
+    ("delete-no-create",
+     [_m_delete("Object"), _m_belief()], True),
+    ("belief-no-materialization",
+     [_m_belief()], True),
+    ("two-deletes-around-write",
+     [_m_object(), _m_delete("Object"), _m_belief(), _m_delete("Object")],
+     True),
+    # id-wide (missing label) removes every canonical node → burial.
+    ("id-wide-delete",
+     [_m_object(), _m_delete(None), _m_belief()], True),
+    # label-scoped delete of a FOREIGN kind leaves the Object alive.
+    ("label-scoped-delete-other-label",
+     [_m_object(), _m_delete("Subject"), _m_belief()], False),
+    # the P2-2 shape: the write PRECEDES its own materialization.
+    ("belief-forward-references-its-materialization",
+     [_m_belief(), _m_object()], False),
+]
+
+
+@pytest.mark.parametrize(
+    "row,events,refused", _BOUNDARY_MATRIX,
+    ids=[r[0] for r in _BOUNDARY_MATRIX])
+def test_boundary_matrix_reference_and_graph_agree(
+        tmp_path, row, events, refused):
+    """The deliverable: every ordering gets ONE verdict from both classifiers.
+
+    Reference side — the pure fold AND the diagnostic's own reference fold
+    (`consistency._fold_journal`, the arm `check_consistency` runs). Graph side
+    — the production replay (`FalkorProjection.rebuild_all`). All three must
+    agree, so a future drift in either the exemption predicate or the graph
+    gate reds a row here instead of shipping a false red/green.
+    """
+    import json
+
+    from tortoise.consistency import _fold_journal
+    from tortoise.projection import FalkorProjection, fold
+    from tortoise.projection.nonfolded import (
+        NonFoldedEventsError,
+        collect_non_folded,
+        refused_events,
+    )
+
+    for name, folder in (("fold", fold), ("_fold_journal", _fold_journal)):
+        with collect_non_folded() as entries:
+            folder(list(events))
+        got = any(_MATRIX_ID in str(e) for e in refused_events(entries))
+        assert got == refused, (
+            f"[{row}] reference {name}: refused={got}, expected={refused}; "
+            f"entries={[str(e) for e in entries]}")
+
+    events_dir = tmp_path / "events-matrix"
+    events_dir.mkdir()
+    with open(events_dir / "events.jsonl", "w") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev) + "\n")
+    proj = FalkorProjection(path=str(tmp_path / "matrix.db"),
+                            skip_health_check=True)
+    graph_refused = False
+    try:
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
+    except NonFoldedEventsError:
+        graph_refused = True
+    finally:
+        proj.close()
+    assert graph_refused == refused, (
+        f"[{row}] graph rebuild_all: refused={graph_refused}, "
+        f"expected={refused}")
+
+
+def test_boundary_matrix_non_point_labels_all_agree():
+    """The boundary is label-agnostic: Object / Subject / Event re-creations.
+
+    `rebuild_all` per label would buy a second model load for no extra
+    coverage (the graph gate sweeps `EPISTEMIC_LABELS` with ONE arm), so this
+    pins the REFERENCE verdict for each label — including an Event, whose id
+    lives under `eventId`/nested `event` and is read through the shared
+    `_creation_entity_id_from_record`.
+    """
+    from tortoise.projection import fold
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    creations = {
+        "Object": {"type": "ObjectRegistered", "id": "x", "name": "n"},
+        "Subject": {"type": "SubjectAdded", "id": "x", "name": "n"},
+        "Event": {"type": "EventRecorded", "id": "x", "name": "n",
+                  "eventKind": "test",
+                  "startedAt": "2026-01-01T00:00:00Z"},
+    }
+    for label, creation in creations.items():
+        # create → delete → RE-CREATE → belief: accepted (P1).
+        accepted = [dict(creation),
+                    {"type": "EntityMutated", "op": "delete", "label": label,
+                     "id": "x"},
+                    dict(creation),
+                    {"type": "ConfidenceChanged", "id": "x",
+                     "confidence": 0.77}]
+        with collect_non_folded() as entries:
+            fold(accepted)
+        assert list(refused_events(entries)) == [], (label, [
+            str(e) for e in entries])
+        # delete → belief with NO re-creation: refused.
+        buried = [dict(creation),
+                  {"type": "EntityMutated", "op": "delete", "label": label,
+                   "id": "x"},
+                  {"type": "ConfidenceChanged", "id": "x",
+                   "confidence": 0.77}]
+        with collect_non_folded() as entries:
+            fold(buried)
+        assert any("x" in str(e) for e in refused_events(entries)), (
+            label, [str(e) for e in entries])
+
+
+def test_content_comparison_known_gap_non_point_belief_is_invisible(tmp_path):
+    """#7936 KNOWN GAP — this asserts the PRESENT, WRONG verdict, not a right.
+
+    `check_consistency`'s content leg compares a POINT-ONLY journal fold
+    against `MATCH (n:Point)` and `db_hash` fingerprints that Point-only dict,
+    so a corrupted belief on a `:Subject`/`:Object`/`:Event` is invisible.
+
+    This test PINS the blind spot so it is visible in the suite and MUST be
+    deleted or inverted when #7936's `(label, id)` re-key lands: at that point
+    the verdict below becomes `ok=False, divergence="content"` and this test
+    goes RED, which is the intended signal — NOT a regression.
+    """
+    from tortoise.consistency import check_consistency
+
+    db = str(tmp_path / "gap-7936.db")
+    events = tmp_path / "events-7936"
+    events.mkdir()
+    log_path = str(events / "events.jsonl")
+    sdk = TortoiseSDK(db, event_log_path=log_path)
+    try:
+        proj = sdk._get_proj()
+        src = sdk.create_point("statement", "strong source", status="live")["id"]
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
+            "n.baseline_set=true", params={"id": src})
+        event = sdk.create_entity("event", "an event",
+                                  eventKind="test")["node"]["id"]
+        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._get_ep().run([src, event], max_hops=2,
+                          evidence={src: (12.0, 1.0)})
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+        healthy = check_consistency(log_path, proj, record_state=False)
+        assert healthy["ok"] is True, healthy
+
+        # Corrupt ONLY the Event's belief; the journal is untouched.
+        proj.g.query(
+            "MATCH (n:Event {id:$id}) SET n.confidence=0.01",
+            params={"id": event})
+        changed = proj.g.query(
+            "MATCH (n:Event {id:$id}) RETURN n.confidence",
+            params={"id": event}).result_set
+        assert changed and changed[0][0] == 0.01, changed
+
+        after = check_consistency(log_path, proj, record_state=False)
+    finally:
+        sdk.close()
+
+    # DOCUMENTED GAP: the corruption is NOT seen. When #7936 lands, these
+    # assertions are the ones that must flip.
+    assert after["ok"] is True, after
+    assert after["divergence"] is None, after
+    assert after["hash_match"] is True, after
