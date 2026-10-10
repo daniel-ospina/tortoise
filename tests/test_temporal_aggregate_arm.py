@@ -6,8 +6,10 @@ the eval reader lane's per-question seam (``tools/longmem_eval/retrieve.py``:
 :func:`temporal_aggregate_verdict`) behind an OFF-by-default arm, so a
 gold-admitting run can read out structural-vs-conversion per question.
 
-HERMETIC half (this file): the pure verdict builder over already-admitted
-hits — distinct-event tally for COUNT, calendar difference for an explicit
+HERMETIC half (this file): the pure verdict builder over the caller's hits
+(at the eval seam, the reader-reachable pool window — a two-sided
+approximation of the reader's admitted set, #3594) — distinct-event tally
+for COUNT, calendar difference for an explicit
 interval window, and an explicit abstention (never a guess) when the two
 arithmetic anchors are not in hand. The docker-lane arm plumbing (OFF parity,
 env tri-state, the outcome keys) lives with the sibling aggregative-arm tests
@@ -49,7 +51,7 @@ def test_seam_kwarg_is_off_by_default():
     assert sig.parameters["temporal_aggregate"].default is None
 
 
-# ── (b) COUNT tallies the admitted dated events (non-vacuous) ──────────────
+# ── (b) COUNT tallies the distinct dated events (non-vacuous) ─────────────
 
 def test_verdict_count_tallies_distinct_admitted_events():
     hits = [
@@ -130,7 +132,7 @@ def test_verdict_non_temporal_question():
 
 
 def test_verdict_total_flags_span_less_sum():
-    """A TOTAL over admitted hits that carry no span bounds publishes the
+    """A TOTAL over hits that carry no span bounds publishes the
     module's span-less sum (0) BUT the honesty diagnostic reports 0 bounded
     spans — a gold-admitting run must not read that 0 as measured."""
     hits = [
@@ -142,6 +144,24 @@ def test_verdict_total_flags_span_less_sum():
     assert v["kind"] == "total"
     assert v["value"] == 0
     assert v["n_span_bounded_events"] == 0
+
+
+def test_verdict_total_and_span_diagnostic_share_the_resolver_input():
+    """#2886: ``n_span_bounded_events`` is computed over the SAME dicts the
+    resolver receives, so the two halves of the "span honesty" contract
+    cannot disagree. A hit carrying both bounds is visible to BOTH: the
+    published total is a real sum, not a zero-span sum credited as measured
+    while the diagnostic reports a bounded event."""
+    hits = [_hit("e1", "Reading 'The Nightingale'.", "2025-01-01")]
+    hits[0]["start_date"] = "2025-01-01"
+    hits[0]["end_date"] = "2025-01-08"
+    v = temporal_aggregate_verdict(
+        "How many weeks in total do I spent on reading and listening?", hits)
+    assert v["kind"] == "total"
+    assert v["n_span_bounded_events"] == 1
+    # The resolver saw the same bounds, so the total is a measured sum.
+    assert v["value"] is not None
+    assert v["value"] > 0
 
 
 # ── (d) the census class is exercised through the arm ──────────────────────

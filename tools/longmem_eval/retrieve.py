@@ -629,26 +629,35 @@ def temporal_aggregate_verdict(
     for a question that is not a temporal aggregation.
     """
     from tortoise.temporal_aggregation import as_date, resolve_temporal_aggregate
+    # The span-bound keys the core's ``_span_bounds`` reads (the same lists
+    # here): carried through the projection so the resolver's span sum and the
+    # ``n_span_bounded_events`` diagnostic below are derived from the SAME
+    # dicts. Dropping them here would let the diagnostic report a bounded
+    # event while the resolver saw none — and published a zero-span sum that
+    # then reads as ``resolved``.
+    _START_KEYS = ("start_date", "started_at", "session_date", "date",
+                   "created_at")
+    _END_KEYS = ("end_date", "ended_at", "completed_at", "question_date")
     events = [
         {"event_id": h.get("id"), "content": h.get("content"),
-         "session_date": h.get("session_date")}
+         "session_date": h.get("session_date"),
+         **{k: h[k] for k in (*_START_KEYS, *_END_KEYS)
+            if h.get(k) is not None}}
         for h in hits
     ]
 
     def _has_span(h: dict) -> bool:
-        """True when the hit carries BOTH bounds the TOTAL path needs.
+        """True when the event carries BOTH bounds the TOTAL path needs.
         The eval's ranked hits carry ``session_date`` only, so a TOTAL over
         them sums zero spans (the module's documented "a span-less event
         contributes 0 but still counts"): the published ``total`` is then
         not a measured sum, and ``n_span_bounded_events`` makes that
         auditable rather than silently read as a real zero."""
         start = next(
-            (as_date(h.get(k)) for k in
-             ("start_date", "started_at", "session_date", "date",
-              "created_at") if as_date(h.get(k)) is not None), None)
+            (as_date(h.get(k)) for k in _START_KEYS
+             if as_date(h.get(k)) is not None), None)
         end = next(
-            (as_date(h.get(k)) for k in
-             ("end_date", "ended_at", "completed_at", "question_date")
+            (as_date(h.get(k)) for k in _END_KEYS
              if as_date(h.get(k)) is not None), None)
         return start is not None and end is not None
 
@@ -675,7 +684,9 @@ def temporal_aggregate_verdict(
             1 for h in hits if str(h.get("session_date") or "").strip()),
         # TOTAL-only honesty diagnostic: how many candidate events carried
         # BOTH bounds. 0 means a published ``total`` sum rode zero spans.
-        "n_span_bounded_events": sum(1 for h in hits if _has_span(h)),
+        # Computed over ``events`` — the resolver's ACTUAL input — so the two
+        # halves cannot disagree.
+        "n_span_bounded_events": sum(1 for e in events if _has_span(e)),
         "anchors": ({"start": start, "end": end} if start and end else None),
     }
 
