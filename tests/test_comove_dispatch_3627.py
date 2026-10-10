@@ -75,6 +75,24 @@ _APPLY_GATE = "github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_T
 # them — that is what makes a failed apply skip it.
 _STATUS_FUNCTIONS = ("always()", "failure()", "cancelled()", "success()")
 
+# ── #7907: `gh api -f` is ALWAYS a string; typed fields need `-F` ──────────
+# A request field that is a boolean or an integer in the endpoint's schema must
+# be sent with `-F`, which coerces a bare literal to the typed JSON value. `-f`
+# posts a STRING, and the API rejects the body before acting: the dispatches
+# endpoint answered the flip with `HTTP 422 — For 'properties/
+# return_run_details', "true" is not a boolean`, so no dispatch was ever
+# created and the step's fail-closed message blamed the credential grant.
+_TYPED_LITERAL = re.compile(r"^(?:true|false|-?\d+)$")
+_STRING_FLAG = re.compile(
+    r"""-f\s+
+        (?:
+            "(?P<qname>[A-Za-z_][A-Za-z0-9_\[\]]*)=(?P<qval>[^"]*)"
+          | '(?P<sname>[A-Za-z_][A-Za-z0-9_\[\]]*)=(?P<sval>[^']*)'
+          | (?P<name>[A-Za-z_][A-Za-z0-9_\[\]]*)=(?P<val>\S+)
+        )""",
+    re.VERBOSE,
+)
+
 
 @lru_cache(maxsize=1)
 def _doc() -> dict:
@@ -156,6 +174,28 @@ def _run_step(
 def _argv(tmp_path: Path) -> str:
     log = tmp_path / "gh-argv.log"
     return log.read_text(encoding="utf-8") if log.is_file() else ""
+
+
+def _string_flags() -> list[tuple[str, str, str]]:
+    """`gh api -f` flags in the workflow's run blocks as (step, name, value).
+
+    Read from the ACTUAL `run:` text (never a duplicated copy that could drift
+    from the workflow), the same source the other guards in this file parse.
+    """
+    found: list[tuple[str, str, str]] = []
+    for step in _steps():
+        for match in _STRING_FLAG.finditer(step.get("run") or ""):
+            name = next(
+                g for g in (match.group("qname"), match.group("sname"), match.group("name"))
+                if g is not None
+            )
+            value = next(
+                (g for g in (match.group("qval"), match.group("sval"), match.group("val"))
+                 if g is not None),
+                "",
+            )
+            found.append((step.get("name") or "", name, value))
+    return found
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -413,6 +453,65 @@ def test_the_flip_is_awaited_and_the_request_asks_for_the_run_id(
     assert "watch" in argv, argv
     assert "7" in argv, argv
     assert "--exit-status" in argv, argv
+
+
+def test_the_run_id_request_uses_a_typed_flag_not_a_string_flag(tmp_path: Path) -> None:
+    """The flag that ASKS for the run id must be `-F`, not `-f` (#7907).
+
+    Asserted on the argv the step ACTUALLY ran. This is the property the sibling
+    argv test above could not see: that one asserts the request NAMES
+    `return_run_details=true`, which a string-typed `-f` also does — the request
+    was well-formed and the ANSWER was a 422, so "asks for the run id" held
+    while the step was dead. `gh api -f` always sends a string; the field is a
+    boolean, so only `-F` (which coerces a bare `true`) is accepted.
+
+    State that fails it: the flag reverts to `-f`, or loses its coercion — the
+    endpoint then rejects the body with HTTP 422 before any dispatch exists.
+    """
+    _run_step(_DISPATCH_STEP, tmp_path, gh_stdout='{"workflow_run_id": 7}', gh_rc=0)
+    args = [a for a in _argv(tmp_path).split("\n") if a != ""]
+    assert "return_run_details=true" in args, args
+    i = args.index("return_run_details=true")
+    assert args[i - 1] == "-F", (
+        "the typed `return_run_details` field must be sent with `-F`, which "
+        "coerces a bare `true` to a JSON boolean; `-f` sends the STRING \"true\" "
+        f"and the dispatches endpoint answers HTTP 422 before dispatching (#7907): {args}"
+    )
+
+
+def test_no_string_flag_carries_a_typed_literal_in_the_workflow() -> None:
+    """The CLASS guard for #7907 — not only the one line that was wrong.
+
+    Scans every `run:` block for `gh api -f <name>=<bare true|false|integer>`
+    and fails on any: `-f` sends the value as a STRING, so the request posts
+    `"true"` where the schema wants a boolean and the API rejects it with a
+    422. The defect was invisible to the whole check-run surface for eight days
+    because the step is `workflow_dispatch`-only — nothing executes it on a PR,
+    so nothing could notice. This guard needs no dispatch; it reads the file.
+
+    Scoped to THIS workflow (the file these co-move guards own) rather than the
+    repo: a repo-wide scan would have to tell a typed field from a string field
+    whose value merely LOOKS numeric (`-f title=2024`), which needs the
+    endpoint's schema, not a regex.
+    """
+    flags = _string_flags()
+    # Non-vacuity: the scan must actually reach the dispatch's `gh api` call.
+    # `ref` is a genuine string field and correctly stays `-f` — its presence
+    # proves the pattern is looking at the call and not at nothing.
+    assert any(name == "ref" for _, name, _ in flags), (
+        "the scan found no `-f ref=` flag, so it is not reaching the dispatch's "
+        f"`gh api` call and is asserting nothing: {flags}"
+    )
+    offenders = [
+        (step, name, value)
+        for step, name, value in flags
+        if _TYPED_LITERAL.match(value)
+    ]
+    assert not offenders, (
+        "`gh api -f` sends its value as a STRING unconditionally; a typed field "
+        "(boolean/integer) needs `-F`, which coerces it. These flags would post "
+        f"a string and get HTTP 422 (#7907): {offenders}"
+    )
 
 
 def test_dispatch_succeeds_and_names_the_created_run(tmp_path: Path) -> None:
