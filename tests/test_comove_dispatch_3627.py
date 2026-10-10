@@ -83,8 +83,14 @@ _STATUS_FUNCTIONS = ("always()", "failure()", "cancelled()", "success()")
 # return_run_details', "true" is not a boolean`, so no dispatch was ever
 # created and the step's fail-closed message blamed the credential grant.
 _TYPED_LITERAL = re.compile(r"^(?:true|false|-?\d+)$")
+# `-f` is the shorthand for `--raw-field`; BOTH are the STRING field flag, and
+# a guard that reads only the shorthand stops guarding the class the moment a
+# call site spells it the long way (`gh api` accepts either). The `(?:\s+|=)`
+# separator covers `--raw-field "x=1"` and `--raw-field=x=1`; the lookbehind
+# keeps `--field` (the long form of the TYPED `-F`) from matching.
 _STRING_FLAG = re.compile(
-    r"""-f\s+
+    r"""(?<![\w-])(?:-f|--raw-field)
+        (?:\s+|=)
         (?:
             "(?P<qname>[A-Za-z_][A-Za-z0-9_\[\]]*)=(?P<qval>[^"]*)"
           | '(?P<sname>[A-Za-z_][A-Za-z0-9_\[\]]*)=(?P<sval>[^']*)'
@@ -176,15 +182,35 @@ def _argv(tmp_path: Path) -> str:
     return log.read_text(encoding="utf-8") if log.is_file() else ""
 
 
+def _run_blocks() -> list[tuple[str, str, str]]:
+    """(job id, step name, `run:` text) for EVERY job in the workflow.
+
+    The class guard must read the whole FILE, not only the `deploy` job: a
+    typed `gh api -f` literal in another job is the same defect, and a guard
+    that scanned only `deploy` while its own docstring promised the workflow
+    would assert less than it says. `_steps()` stays deploy-only because the
+    co-move tests are about that job.
+    """
+    blocks: list[tuple[str, str, str]] = []
+    for job_id, job in (_doc().get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for step in (job.get("steps") or []):
+            run = step.get("run")
+            if run:
+                blocks.append((job_id, step.get("name") or "", run))
+    return blocks
+
+
 def _string_flags() -> list[tuple[str, str, str]]:
-    """`gh api -f` flags in the workflow's run blocks as (step, name, value).
+    """`gh api -f`/`--raw-field` flags as (step, name, value), every job.
 
     Read from the ACTUAL `run:` text (never a duplicated copy that could drift
     from the workflow), the same source the other guards in this file parse.
     """
     found: list[tuple[str, str, str]] = []
-    for step in _steps():
-        for match in _STRING_FLAG.finditer(step.get("run") or ""):
+    for _job, step_name, run in _run_blocks():
+        for match in _STRING_FLAG.finditer(run):
             name = next(
                 g for g in (match.group("qname"), match.group("sname"), match.group("name"))
                 if g is not None
@@ -194,7 +220,7 @@ def _string_flags() -> list[tuple[str, str, str]]:
                  if g is not None),
                 "",
             )
-            found.append((step.get("name") or "", name, value))
+            found.append((step_name, name, value))
     return found
 
 
@@ -492,7 +518,8 @@ def test_no_string_flag_carries_a_typed_literal_in_the_workflow() -> None:
     Scoped to THIS workflow (the file these co-move guards own) rather than the
     repo: a repo-wide scan would have to tell a typed field from a string field
     whose value merely LOOKS numeric (`-f title=2024`), which needs the
-    endpoint's schema, not a regex.
+    endpoint's schema, not a regex. Within this file the scan is workflow-WIDE —
+    every job's `run:` block, not only the `deploy` job.
     """
     flags = _string_flags()
     # Non-vacuity: the scan must actually reach the dispatch's `gh api` call.
@@ -511,6 +538,44 @@ def test_no_string_flag_carries_a_typed_literal_in_the_workflow() -> None:
         "`gh api -f` sends its value as a STRING unconditionally; a typed field "
         "(boolean/integer) needs `-F`, which coerces it. These flags would post "
         f"a string and get HTTP 422 (#7907): {offenders}"
+    )
+
+
+def test_the_class_guard_reads_both_string_flag_spellings() -> None:
+    """`-f` has a documented long form, `--raw-field` — both are the STRING flag.
+
+    Fails when the matcher is narrowed back to `-f` alone: `gh api` accepts
+    either spelling, so a call site switched to the long form would carry a
+    typed literal straight past a guard whose whole job is to catch that class
+    (#7907).
+    """
+    for spelling in ('-f "x=true"', '--raw-field "x=true"', "--raw-field=x=true"):
+        match = _STRING_FLAG.search(spelling)
+        assert match, spelling
+        name = next(
+            g for g in (match.group("qname"), match.group("sname"), match.group("name"))
+            if g is not None
+        )
+        value = next(
+            (g for g in (match.group("qval"), match.group("sval"), match.group("val"))
+             if g is not None),
+            "",
+        )
+        assert (name, value) == ("x", "true"), (spelling, name, value)
+
+
+def test_the_class_guard_scans_every_job_not_only_deploy() -> None:
+    """The guard claims workflow-wide coverage; `_steps()` is deploy-only.
+
+    Fails when the scan is narrowed back to `jobs.deploy.steps`: the
+    `check-drift` job owns a `run:` block, so a typed `gh api -f` literal there
+    would be invisible to a guard that says it reads the file.
+    """
+    run_jobs = {job for job, _name, _run in _run_blocks()}
+    assert "deploy" in run_jobs
+    assert "check-drift" in run_jobs, (
+        "the check-drift job's run block is not scanned — the guard is "
+        f"deploy-only while claiming the whole file: {sorted(run_jobs)}"
     )
 
 
