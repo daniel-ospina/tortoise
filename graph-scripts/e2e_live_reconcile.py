@@ -45,8 +45,23 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     inside the test namespace) and are surfaced as shape_clean=false in the
     --json output — the 2146 cleanup script needs the strict shape, so an
     operator reviews before running it.
-  * Counts ABOVE --threshold (default 0) = exit 1 with the offenders listed
-    (emails truncated). Post-#2146 baseline (0 rows) = green.
+  * Scope parity (#5971): this detector's scope (the LIKE namespace, all-time)
+    is DELIBERATELY broader than the remediator's
+    (`graph-scripts/2146_e2e_live_orphan_cleanup.py` enumerates with the strict
+    EMAIL_RE **and** the historical window). A row inside the namespace but
+    outside the guard shape is therefore DETECTED forever and enumerated by NO
+    cleanup phase — it is reported separately (the `residue` key, with FULL
+    emails) so the auto-filed issue names it as a guard-scope decision instead
+    of implying the runbook will sweep it. The remediator now reports the same
+    residue and accepts it behind its explicit `--include-residue` flag; the
+    two scopes are pinned in agreement by
+    `tests/test_e2e_live_reconcile_scope_parity.py`. The live example is the
+    #3781 manual-verification account `e2e-live-3781-<hex>@premise-labs.dev`
+    (created 2026-09-17, in prod since, un-deletable by the pre-#5971 tooling).
+  * Counts ABOVE --threshold (default 0) = exit 1 with the offenders listed.
+    Offender emails are FULL in the --json doc (the operator's input to the
+    cleanup script — a truncated address is not actionable; #5971) and
+    truncated on stderr only. Post-#2146 baseline (0 rows) = green.
 
 Exit codes: 0 = clean (every count <= threshold) | 1 = bleed detected
 (offenders listed) | 2 = could-not-determine (guard/transport failure).
@@ -194,8 +209,15 @@ def _plural(n: int, word: str) -> str:
 
 # ── Counting (runbook Q1-Q3, SELECT-only) ───────────────────────────────────
 
-def _counts(run_sql) -> tuple[dict[str, int], dict[str, list[str]], bool]:
-    """Return (counts by COUNT_KINDS short key, offender emails by kind, shape_clean)."""
+def _counts(
+    run_sql,
+) -> tuple[dict[str, int], dict[str, list[str]], bool, dict[str, list[str]]]:
+    """Return (counts by COUNT_KINDS short key, emails by kind, shape_clean, residue).
+
+    ``residue`` holds the in-namespace emails that FAIL ``EMAIL_RE`` (the #2146
+    guard shape) — the detector↔remediator scope gap (#5971); see the SAFETY
+    MODEL note above. It is keyed by kind and only carries NON-EMPTY kinds.
+    """
     teams = _run(run_sql, TEAMS_SQL, "teams count (Q1)")
     users = _run(run_sql, USERS_SQL, "auth.users count (Q2)")
     counts: dict[str, int] = {
@@ -220,7 +242,15 @@ def _counts(run_sql) -> tuple[dict[str, int], dict[str, list[str]], bool]:
     shape_clean = all(
         EMAIL_RE.match(email) for kind_emails in emails.values() for email in kind_emails
     )
-    return counts, emails, shape_clean
+    # #5971: the guard-shape residue, reported separately from `offenders` so the
+    # auto-filed issue distinguishes "the runbook sweeps this" from "the runbook
+    # needs --include-residue, after review".
+    residue = {
+        kind: sorted(e for e in emails.get(kind, []) if not EMAIL_RE.match(e))
+        for kind in ("teams", "users")
+    }
+    residue = {kind: v for kind, v in residue.items() if v}
+    return counts, emails, shape_clean, residue
 
 
 def main() -> int:
@@ -260,10 +290,13 @@ def main() -> int:
         return _mgmt_api_sql(args.project_ref, token, query)
 
     checked_at = _now_iso()
-    counts, emails, shape_clean = _counts(run_sql)
+    counts, emails, shape_clean, residue = _counts(run_sql)
 
     over_counts = {k: counts[k] for k in COUNT_KINDS if counts[k] > args.threshold}
-    over_emails = {k: [_short_email(e) for e in emails.get(k, [])] for k in over_counts}
+    # #5971: the doc carries FULL offender emails (they are the operator's input
+    # to the cleanup script); only the stderr log is truncated.
+    over_emails = {k: [str(e) for e in emails.get(k, [])] for k in over_counts}
+    short_emails = {k: [_short_email(e) for e in v] for k, v in over_emails.items()}
 
     def log(msg: str) -> None:
         # --json keeps stdout machine-only (single JSON doc) — diagnostics to stderr.
@@ -281,12 +314,16 @@ def main() -> int:
             f"{args.threshold} (max {_plural(max(counts.values()), 'orphaned row')})"
         )
         for kind in over_counts:
-            tail = f": {', '.join(over_emails[kind])}" if over_emails[kind] else ""
+            tail = f": {', '.join(short_emails[kind])}" if short_emails[kind] else ""
             log(f"[reconcile]   {kind}={counts[kind]}{tail}")
         if not shape_clean:
+            n_residue = sum(len(v) for v in residue.values())
             log(
-                "[reconcile]   NOTE: a row deviates from the 2146 guard email shape "
-                "^e2e-live-[0-9a-f]{8}@premise-labs.dev$ — review before running the cleanup"
+                f"[reconcile]   NOTE: {_plural(n_residue, 'row')} in the test namespace "
+                "deviate from the 2146 guard email shape "
+                "^e2e-live-[0-9a-f]{8}@premise-labs.dev$ — the cleanup script skips "
+                "them unless run with --include-residue (after reviewing the residue "
+                "list it prints); full emails are in the --json doc"
             )
         rc = 1
 
@@ -302,6 +339,9 @@ def main() -> int:
             "offenders": {
                 k: {"count": c, "emails": over_emails.get(k, [])} for k, c in over_counts.items()
             },
+            # #5971: in-namespace rows OFF the #2146 guard shape — the
+            # cleanup script needs --include-residue for these.
+            "residue": residue,
         }
         print(json.dumps(doc))  # the ONLY stdout output in --json mode
     return rc

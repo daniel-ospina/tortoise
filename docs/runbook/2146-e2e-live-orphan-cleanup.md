@@ -21,6 +21,12 @@ ownedBy: epistemic-team
 > remaining. Issues #2140/#2146 closed.** The scripts + queries below stay as
 > the standing remediation for any future recurrence (see #2189's weekly
 > reconcile for automatic detection).
+>
+> **#5971 (2026-10-10): the recurrence path.** A recurrence is NEWER than this
+> runbook's historical window and may sit off the strict email guard shape, so
+> the default procedure below finds nothing for it — see **§6.1** for
+> `--all-e2e-live` + `--include-residue` (Guard D). Everything in §1–§6 is
+> unchanged and still correct for the original red window.
 
 ---
 
@@ -291,6 +297,76 @@ Guards (in code): email/name must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev
 teams are limited to the window unless `--all-e2e-live`; every delete is
 enumerated up-front; graphs must match `team_[0-9a-f]{26}` exactly; nothing
 runs without `--execute`.
+
+### 6.1 Recurrence (the #2189 case) and the Guard-A residue (#5971)
+
+The default scope above is a **one-shot artifact of the #2140 red window**
+(2026-08-19 → 2026-09-03). A *recurrence* — the whole point of the weekly
+reconcile — is by definition NEWER than that window, so a plain
+`--phase enumerate` finds **nothing** for a reconcile issue and an operator can
+wrongly conclude the detection was stale. Two things are needed instead:
+
+1. **`--all-e2e-live`** drops the window entirely (the flag predates this and
+   exists for exactly this reason; its help text used to read as "the 68
+   pre-window mints", which is why it was easy to miss here).
+2. **`--include-residue`** adds the rows the strict guard shape excludes — see
+   Guard D below. Without it those rows are **reported but never deleted**, and
+the reconcile check can never go green.
+
+The live instance: the weekly reconcile (#2189) has been RED since 2026-09-21 on
+one row, `e2e-live-3781-e2a26d39@premise-labs.dev`, filed first as #4445 and then
+as #5971. It is **not** a monitor mint and **not** a legacy survivor of the red
+window: it is the #3781 manual-verification account that PR #3790's own commit
+message hands to the operator ("the live verification created one account … the
+environment has no `SUPABASE_SERVICE_KEY`, so the Admin-API teardown the repo's
+own live-signup monitor uses could not run — delete it before/at merge if that
+matters"). The reconcile run on 2026-09-14 was green (`users=0`), so the row
+postdates the window and was created 2026-09-17. Its email deliberately names
+the issue (`e2e-live-3781-<hex>`), which is why it does **not** match the
+`<8 hex>` guard shape — the manual probe chose a readable local part.
+
+**Guard D — residue.** `graph-scripts/2146_e2e_live_orphan_cleanup.py`
+enumerates with the strict shape AND the window, while the detector counts the
+whole namespace all-time. A row inside the namespace but outside either bound
+was excluded **silently** by a SQL regex, so nothing in-repo could remove it
+while the detector kept filing. The script now:
+
++ **always** enumerates and prints the residue (teams + auth users, ALL-TIME,
+  explicitly `!~` the guard shape) and records it in the manifest's `residue`
+  key — nothing is silent, even on a run that does not delete it;
++ refuses to proceed (guard logic error) if a "residue" row actually matches the
+  guard shape — the two predicates disagreeing is a declared-scope bug, not a
+  row to skip;
++ promotes the residue into the delete set only behind the explicit
+  `--include-residue`, after the operator has read the printed list. This is the
+  `--all-e2e-live` shape (explicit, review-gated inclusion) — the regex is
+  deliberately NOT widened: the guard is what keeps a non-test row out.
+
+Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
+`SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`):
+
+```bash
+# 1. enumerate the recurrence + the residue; REVIEW both lists
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase enumerate --all-e2e-live
+#    prints e.g.: [residue] Guard-A residue — in the e2e-live namespace, OFF the
+#    guard shape …  [residue]   user <id>  e2e-live-3781-…@premise-labs.dev  created …
+#    [residue]   1 row(s) NOT in the delete set — pass --include-residue …
+# 2. dry-run
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase all --all-e2e-live --include-residue
+# 3. execute
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase all --all-e2e-live --include-residue --execute
+# 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
+#    reconcile run is green (that check is the end-to-end proof, not this list).
+```
+
+For a residue **team** (none today: every `teams` row in the namespace matched
+the strict shape in the 2026-09-02 inventory), `--include-residue` also puts its
+`graph_name` in the manifest, so run the FalkorDB companion the same way. A
+residue **auth user** has no control-plane rows of its own (`users=4 teams=0` in
+the #5971 run), so phase `users` is all it needs.
 
 **Rollback notes:** irreversible once executed — the free-tier test teams had
 `backup_enabled=false` (no R2 backups). Mitigations: (a) keep the manifest
