@@ -7122,30 +7122,42 @@ class TortoiseSDK:
         # fail-open first ingest keeps being nominated for its FIRST
         # calibration here, whereas a folded EXPLICIT draft is intentionally
         # left uncalibrated).
-        if extracted:
-            ep_ids = _capture_ep_target_ids(extracted, proj)
-            # #1088 P2: the operator-promotion arm must not ride the
-            # CALIBRATION selector. A capture whose payload points ALL fold
-            # onto canonicals that are ALREADY calibrated gets
-            # ``ep_ids == []`` — ``_capture_ep_target_ids`` keys on
-            # ``n.posterior_alpha IS NULL AND n.ep_alpha IS NULL`` — yet the
-            # capture can still have wired a NEW IMPL/NAND operator; gating
-            # the whole pass on ``ep_ids`` left that operator
-            # ``status='draft'`` (EP-inert under the #780 live-only selector,
-            # with no public promote path). Run the pass when EITHER list is
-            # non-empty. (e96b01681 widened the promotion JOIN but left this
-            # guard, so only the folded-but-UNCALIBRATED sub-case was fixed.)
-            operator_ids = list(meta.get("operator_ids") or [])
-            if ep_ids or operator_ids:
-                # #1088: only ids this capture MINTED may be promoted; a
-                # folded, pre-existing canonical stays as its author left it
-                # (draft included), and is only calibrated if it needs it.
-                _apply_capture_ingest_ep(
-                    self, ep_ids,
-                    promotion_ids=_capture_minted_ids(extracted),
-                    operator_ids=operator_ids,
-                    warn=extraction_warnings.append,
-                )
+        # #1088 P2: the pass must not ride ``extracted`` either. A capture
+        # whose payload points ALL fold as PARAPHRASE noops (the reason is not
+        # ``identical``, so the surfacing block above skips every one and
+        # ``extracted == []``) or all fold onto priors with no capture
+        # provenance can still have wired a NEW IMPL/NAND operator via
+        # ``apply_payload_operators`` (``meta["operator_ids"]`` non-empty,
+        # minted ``draft``). Nesting this whole pass inside ``if extracted:``
+        # left that operator ``status='draft'`` — EP-inert under the #780
+        # live-only selector, with no public promote path — and broke the
+        # documented byte-parity with the hosted mirror, which has no such
+        # wrapper (``hosted_api.py``). The calibration selector still needs
+        # ``extracted``, so it alone stays guarded; the run condition is EITHER
+        # list non-empty.
+        ep_ids = _capture_ep_target_ids(extracted, proj) if extracted else []
+        # #1088 P2: the operator-promotion arm must not ride the
+        # CALIBRATION selector. A capture whose payload points ALL fold
+        # onto canonicals that are ALREADY calibrated gets
+        # ``ep_ids == []`` — ``_capture_ep_target_ids`` keys on
+        # ``n.posterior_alpha IS NULL AND n.ep_alpha IS NULL`` — yet the
+        # capture can still have wired a NEW IMPL/NAND operator; gating
+        # the whole pass on ``ep_ids`` left that operator
+        # ``status='draft'`` (EP-inert under the #780 live-only selector,
+        # with no public promote path). Run the pass when EITHER list is
+        # non-empty. (e96b01681 widened the promotion JOIN but left this
+        # guard, so only the folded-but-UNCALIBRATED sub-case was fixed.)
+        operator_ids = list(meta.get("operator_ids") or [])
+        if ep_ids or operator_ids:
+            # #1088: only ids this capture MINTED may be promoted; a
+            # folded, pre-existing canonical stays as its author left it
+            # (draft included), and is only calibrated if it needs it.
+            _apply_capture_ingest_ep(
+                self, ep_ids,
+                promotion_ids=_capture_minted_ids(extracted),
+                operator_ids=operator_ids,
+                warn=extraction_warnings.append,
+            )
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
         # receipt — byte-parity with hosted_api._capture_session_impl (the
         # shared-surface rule): ``surfaced`` uses the §3.2.2 marker
