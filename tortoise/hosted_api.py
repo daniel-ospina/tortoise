@@ -13487,30 +13487,36 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # `SessionDeleted` is the dedicated JSONL-only carrier
         # (`_fold_session_deleted`), and it removes the Source in the same fold.
         #
-        # The emit is GATED on the same session-absence check the guarded delete
-        # below performs, read immediately BEFORE it: a same-id re-capture that
-        # MERGEd a fresh Session between the dead-branch check and here must not
-        # be journaled as deleted (the re-capture's own `SessionRecorded` may
-        # sit EARLIER in the journal than this sweep, so the deferred re-apply's
-        # re-creation gate cannot be relied on to undo a false record).
-        session_gone = False
+        # The emit is GATED ON THE GUARDED DELETE'S OWN RESULT (review P2-d).
+        # The guard's `WHERE present = 0` and the Source delete execute as ONE
+        # command, so a same-id re-capture that MERGEd a fresh Session before
+        # this command makes it a NO-OP (0 rows) and NOTHING is journaled —
+        # which is the right answer. A SEPARATE `session_gone` live read could
+        # not see that: it could read "absent" and then emit a false
+        # `SessionDeleted` AFTER the re-capture's own `SessionRecorded`, which
+        # the deferred re-apply's seq gate cannot undo (the delete's seq is
+        # LATER than the re-capture's, so it looks like a genuine delete).
+        #
+        # RESIDUAL — stated, not claimed closed: the re-capture's Session MERGE
+        # can still land AFTER this command while its `SessionRecorded` was
+        # appended BEFORE it. Only the §17.1 atomic journal+graph write removes
+        # that last window; until then this sweep is best-effort and the
+        # re-capture's own capture wins. What the delete-result gate DOES close
+        # is the whole window in which the re-capture won before the delete ran
+        # — the case the old live-read gate mis-journaled.
+        source_removed = False
         with suppress(Exception):
-            _g = proj.g.query(
-                "OPTIONAL MATCH (s:Session {id:$sid}) "
-                "WITH count(s) AS present RETURN present",
-                params={"sid": session_id},
-            )
-            session_gone = bool(_g.result_set) and not (
-                _g.result_set[0][0] or 0)
-        with suppress(Exception):
-            proj.g.query(
+            _r = proj.g.query(
                 "OPTIONAL MATCH (s:Session {id:$sid}) "
                 "WITH count(s) AS present "
                 "WHERE present = 0 "
-                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                "MATCH (src:Source {url:$url}) DETACH DELETE src "
+                "RETURN count(src)",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
-        if session_gone:
+            source_removed = bool(
+                _r.result_set and (_r.result_set[0][0] or 0))
+        if source_removed:
             sdk._emit_event("SessionDeleted", id=session_id)
 
     receipt_key = _capture_receipt_key(capture_harness)
@@ -16006,15 +16012,14 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
         #    the Source's own eventId is the fallback leg for the Source-absent
         #    materialization path). A missing Event-write leaves no eventId —
         #    nothing to match, no dangling.
-        #    #7951: the owned Point ids are gathered here too. The JSONL
-        #    hard-delete records emitted below need them and after step 3 the
-        #    nodes no longer exist to enumerate; without a record per removed
-        #    node the deletion is invisible to `derived = replay(journal)` and
-        #    the next rebuild RESURRECTS the session subgraph.
-        point_ids = [r[0] for r in proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
-            params={"sid": session_id},
-        ).result_set if r[0]]
+        #    #7951: the owned Point ids are NOT gathered here any more. The
+        #    JSONL hard-delete records still need one per removed node, but a
+        #    separate gather query left a TOCTOU window: a concurrent capture
+        #    MERGEing a Point (with its CONTAINS edge) between the gather and
+        #    the DETACH DELETE was removed LIVE but never journaled, so a
+        #    replay RESURRECTED it (review P2-c). Step 3 journals from the
+        #    DELETE statement's OWN result, which is the set it actually
+        #    removed.
         ev_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
@@ -16033,15 +16038,21 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
         #    DETACH DELETE also drops their aboutObject edges — the linked
         #    WorkItem/Object entities themselves survive: deleting a transcript
         #    never deletes the issue/entity it referenced).
-        proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+        deleted_point_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "DETACH DELETE p RETURN p.id",
             params={"sid": session_id},
-        )
-        # #7951: journal each removed Point. `EntityMutated` op=delete is the
-        # established hard-delete record (#3299) whose fold removes the node;
-        # without it the PointAdded lines replay and the Points resurrect.
-        for _pid in point_ids:
-            sdk._journal_entity_mutation("Point", _pid, "delete")
+        ).result_set
+        # #7951: journal each removed Point FROM THE DELETE'S OWN RESULT
+        # (review P2-c). `EntityMutated` op=delete is the established
+        # hard-delete record (#3299) whose fold removes the node; without it
+        # the PointAdded lines replay and the Points resurrect. Reading the
+        # ids off the delete — rather than from an earlier gather — closes the
+        # window in which a concurrent capture's Point was deleted live but
+        # left unjournaled.
+        for _row in deleted_point_rows:
+            if _row and _row[0]:
+                sdk._journal_entity_mutation("Point", _row[0], "delete")
 
         # 4) the sessionCaptured provenance Event(s) by the collected ids.
         if event_ids:

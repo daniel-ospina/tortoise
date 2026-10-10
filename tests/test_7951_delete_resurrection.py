@@ -299,6 +299,68 @@ class TestPostDeleteWriteReMaterialisesSource:
             f"(#7951 P1-a)")
 
 
+# ═════════════════════════════════════════════════════════════════════
+# P2-c (review): the gather/delete TOCTOU
+# `point_ids` was gathered in a query SEPARATE from the `DETACH DELETE`, so a
+# concurrent capture MERGEing a Point (with its CONTAINS edge) between the two
+# was deleted LIVE but never journaled — it resurrects on replay. The delete
+# must journal from its OWN result.
+# ═════════════════════════════════════════════════════════════════════
+
+class TestConcurrentCaptureDuringDelete:
+    def test_point_captured_during_delete_is_journaled(self, hosted,
+                                                       monkeypatch):
+        """A Point that lands between the id gather and the DETACH DELETE is
+        removed live AND journaled (from the delete's own result)."""
+        from tortoise.projection import _GuardedGraph
+
+        tc, sdk = hosted
+        proj = sdk._get_proj()
+        _capture(tc, SID)
+        concurrent = f"{SID}_t-concurrent"
+        real_query = _GuardedGraph.query
+        injected = {"done": False}
+
+        def racing_query(self, q, params=None, **kw):
+            # Inject the concurrent capture IMMEDIATELY before the session's
+            # Point delete — the exact window the reviewer names.
+            if (not injected["done"] and isinstance(q, str)
+                    and "CONTAINS" in q and "DETACH DELETE p" in q):
+                injected["done"] = True
+                real_query(
+                    self,
+                    "MERGE (x:Point {id:$pid}) "
+                    "SET x.pointKind='fact', x.content='concurrent capture' "
+                    "WITH x MATCH (s:Session {id:$sid}) "
+                    "MERGE (s)-[:CONTAINS]->(x)",
+                    params={"pid": concurrent, "sid": SID},
+                )
+            return real_query(self, q, params=params, **kw)
+
+        monkeypatch.setattr(_GuardedGraph, "query", racing_query)
+        _delete(tc, SID)
+
+        assert injected["done"], "the race never fired — test is vacuous"
+        # the concurrent Point is gone LIVE (the delete matched it) …
+        assert _one(proj, "MATCH (p:Point {id:$id}) RETURN count(p)",
+                    id=concurrent) == 0
+        # … so its removal MUST be in the journal, or a replay resurrects it.
+        recs = _journal(sdk)
+        assert any(
+            e.get("type") == "EntityMutated" and e.get("op") == "delete"
+            and e.get("label") == "Point" and e.get("id") == concurrent
+            for e in recs), (
+            "a Point removed by the session delete was not journaled because "
+            "it was gathered BEFORE the DETACH DELETE — replay resurrects it "
+            "(#7951 P2-c)")
+
+        proj.rebuild_all(_log_dir(sdk), confirm_destructive=True)
+        assert _one(proj, "MATCH (p:Point {id:$id}) RETURN count(p)",
+                    id=concurrent) == 0, (
+            "the concurrently-captured Point RESURRECTED on rebuild_all "
+            "(#7951 P2-c)")
+
+
 class TestDeleteIsJournaled:
     def test_delete_journals_session_and_canonical_nodes(self, hosted):
         """Every node the delete removes has a journal record."""
@@ -411,3 +473,79 @@ class TestOrphanedWriteSweepIsJournaled:
             for e in recs), (
             "the sweep must journal the container removal (SessionDeleted "
             "removes the orphaned agentSession Source too) (#7951)")
+
+    def test_recapture_winning_the_sweep_race_is_not_journaled_deleted(
+            self, hosted, monkeypatch):
+        """P2-d: the sweep's `SessionDeleted` must be gated on the guarded
+        delete actually removing the Source, not on a separate live read.
+
+        The reviewer's window: the capture takes its dead branch (Session
+        absent), then a same-id re-capture MERGEs a fresh Session immediately
+        BEFORE the guarded Source delete. The guard's `present = 0` predicate
+        is then false, so the delete is a NO-OP — and a separate `session_gone`
+        live read (taken before the re-capture's MERGE) still says "absent", so
+        the old code journalled a FALSE `SessionDeleted` AFTER the re-capture's
+        `SessionRecorded` (whose seq is EARLIER, so the deferred re-apply's seq
+        gate cannot undo it): live holds the re-captured Session, replay
+        deletes it."""
+        tc, sdk = hosted
+        real_proj = sdk._get_proj()
+        real_query = real_proj.g.query
+        sid = "s-7951-residual"
+        injected = {"done": False}
+
+        def fake_query(query, params=None, **kw):
+            merged = dict(params or {})
+            merged.update(kw)
+            if "DETACH DELETE" in query and "src:Source {url:$url}" in query:
+                # The same-id RE-CAPTURE wins: MERGE the fresh Session just
+                # before the guarded delete, so `present = 0` is false and the
+                # command removes nothing.
+                if not injected["done"]:
+                    injected["done"] = True
+                    real_query(
+                        "MERGE (s:Session {id:$sid}) SET s.created_at=$now",
+                        params={"sid": sid,
+                                "now": "2026-01-01T00:00:00+00:00"},
+                    )
+                return real_query(query, params=merged)
+            if "count(s)" in query and "{id:$sid}" in query:
+                # Dead-branch reads see the Session gone (4 columns — the
+                # capture's session-state read indexes all of them).
+                return type("Rows", (), {
+                    "result_set": [[0, None, None, None]]})()
+            return real_query(query, params=merged)
+
+        class _FakeProj:
+            g = type("G", (), {"query": staticmethod(fake_query)})()
+            query = staticmethod(fake_query)
+
+            def __getattr__(self, name):  # delegate everything else
+                return getattr(real_proj, name)
+
+        class _GuardSdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def __getattr__(self, name):
+                return getattr(sdk, name)
+
+        real_make_sdk = _ha._make_sdk
+
+        def patched_make_sdk(namespace=None, **kw):
+            if namespace == TEAM_ID:
+                return _GuardSdk()
+            return real_make_sdk(namespace=namespace, **kw)
+
+        monkeypatch.setattr(_ha, "_make_sdk", patched_make_sdk)
+        r = tc.post("/v1/sessions", json={"conversation": CONV,
+                                          "session_id": sid})
+        assert r.status_code == 200, r.text
+        assert injected["done"], "the race never fired — test is vacuous"
+
+        recs = _journal(sdk)
+        assert not any(e.get("type") == "SessionDeleted" and e.get("id") == sid
+                       for e in recs), (
+            "the sweep journaled a SessionDeleted although the guarded delete "
+            "was a NO-OP (the same-id re-capture won the race) — a replay "
+            "would delete the live re-capture (#7951 P2-d)")
