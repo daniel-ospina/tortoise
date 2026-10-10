@@ -430,3 +430,108 @@ def test_compute_confidence_live_invariant_with_draft_subgraph(sdk, tmp_path):
         "the draft-connected leak operator must not change the live posterior "
         "through compute_confidence"
     )
+
+
+# ── #6105: a dropped factor is REPORTED, not only logged ─────────────────
+#
+# A point wired only as an operator TARGET never votes: when it is draft the
+# factor is stripped below 2 participating inputs and skipped as degenerate
+# (#780/#2422) — while the run still reports `converged=True`. A caller reading
+# that alone sees a healthy result over a graph whose whole arm was discarded;
+# this is the canonical causality-map shape (`blockers --NAND--> GOAL`, the
+# goal a pure target), where 27 of 224 operators were dropped and the run was
+# still "healthy". Every skip is now stashed on `ep._last_skipped_factors` and
+# surfaced by `compute_confidence`.
+#
+# SCOPE NOTE: the PROMOTION half of #6105 — an implicitly-drafted endpoint
+# being promoted by the wiring itself — is #1088/PR #7909's (a no-status
+# `create_point` becoming live). These tests pin the DIAGNOSTIC half, which is
+# what keeps the residual case visible: an EXPLICITLY-draft endpoint is the one
+# #1088 deliberately leaves draft, and it stays silent under that change.
+# The fixtures therefore state `status="draft"` explicitly — they must not
+# depend on which way the implicit default goes.
+
+def test_6105_degenerate_draft_target_reported_not_silently_dropped(sdk):
+    blocker = sdk.create_point("statement", "blocker", status="live")
+    goal = sdk.create_point("statement", "GOAL - pure target", status="draft")
+    set_evidence(sdk, blocker["id"], 8.0, 1.0)
+    set_evidence(sdk, goal["id"], 1.0, 1.0)
+    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
+
+    res = sdk.compute_confidence(factors=[op["id"]])
+
+    # The healthy-looking report that hid the dropped arm...
+    assert res["converged"] is True
+    # ...now carries the diagnostic.
+    assert res["diagnostic"] == "factors_skipped"
+    assert [s["operator_id"] for s in res["skipped_factors"]] == [op["id"]]
+    entry = res["skipped_factors"][0]
+    assert entry["reason"] == "degenerate"
+    assert entry["op_type"] == "NAND"
+    assert entry["participating_inputs"] == 1
+    assert {i["id"]: i["status"] for i in entry["inputs"]} == {
+        blocker["id"]: "live", goal["id"]: "draft"}
+    # The GOAL never voted — no posterior was ever written for it.
+    assert sdk.get_point(goal["id"]).get("posterior_alpha") is None
+
+
+def test_6105_skipped_factors_stash_resets_between_runs(sdk):
+    """The stash is run-set state: reset at entry like _last_affected /
+    _last_truncated, so a clean run never reports a previous run's skips."""
+    blocker = sdk.create_point("statement", "blocker", status="live")
+    goal = sdk.create_point("statement", "draft goal", status="draft")
+    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
+    # A DISJOINT clean component (2 live inputs — nothing to strip).
+    a = sdk.create_point("statement", "a", status="live")
+    b = sdk.create_point("statement", "b", status="live")
+    clean = sdk.create_operator("IMPL", a["id"], [b["id"]])
+
+    ep = sdk._get_ep()
+    ep.run([op["id"]])
+    assert [s["operator_id"] for s in ep._last_skipped_factors] == [op["id"]]
+    ep.run([clean["id"]])
+    assert ep._last_skipped_factors == [], (
+        "a run that drops nothing must not inherit the previous run's skips"
+    )
+
+
+def test_6105_skip_diagnostics_are_precise(sdk):
+    """No crying wolf: a factor that still has 2 participating inputs is KEPT
+    and not reported; a directional operator whose source was stripped reports
+    its own reason. The read-only scope callers (no sink) stay side-effect
+    free."""
+    a = sdk.create_point("statement", "a", status="live")
+    b = sdk.create_point("statement", "b", status="live")
+    c = sdk.create_point("statement", "c", status="draft")
+    partial = sdk.create_operator("IMPL", a["id"], [b["id"], c["id"]])
+
+    ep = sdk._get_ep()
+    seen: list[dict] = []
+    factors = ep._affected_factors({a["id"], b["id"], c["id"]},
+                                   include_draft=False, skipped=seen)
+    assert any(f[0] == partial["id"] for f in factors), (
+        "2 of 3 inputs live is NOT degenerate — the factor must still run"
+    )
+    assert seen == [], "a kept factor must not be reported as skipped"
+
+    # Directional operator with a stripped idx-0 source — skipped for a
+    # different reason (renumbering would invert the direction).
+    draft_src = sdk.create_point("statement", "draft source", status="draft")
+    t1 = sdk.create_point("statement", "t1", status="live")
+    t2 = sdk.create_point("statement", "t2", status="live")
+    op = sdk.create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
+                             direction="unidirectional", promote_source=False)
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.status = 'live'",
+        params={"id": op["id"]},
+    )
+    seen2: list[dict] = []
+    factors2 = ep._affected_factors({t1["id"], t2["id"]},
+                                    include_draft=False, skipped=seen2)
+    assert all(f[0] != op["id"] for f in factors2)
+    assert [s["reason"] for s in seen2] == ["source_stripped"]
+    assert seen2[0]["operator_id"] == op["id"]
+
+    # The read-only callers pass no sink: the EP object's own stash is
+    # untouched by a scope-only extraction.
+    assert ep._last_skipped_factors == []
