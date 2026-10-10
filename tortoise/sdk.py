@@ -12385,25 +12385,44 @@ class TortoiseSDK:
         # inheriting a default. Under gated every no-status point is born
         # draft and stays draft (the operator wiring passes
         # promote_source=False). Under auto the edge SOURCE is the point the
-        # #131 contract promotes live, so it is created live; the TARGET is
-        # created draft. An explicit per-item status (top-level or nested
-        # props) always wins — the gated row-9 gate above already rejected
-        # any non-draft explicit status, and this default fills only items
-        # that carry no status key anywhere (mirrors _check_gated_status's
-        # has_status).
-        _auto_sources: set[str] = set()
+        # #131 contract promotes live — and under the #1088 ruling that is
+        # exactly what create_point's default supplies, so ingest injects
+        # NOTHING for a source; the operator-connection TARGET keeps the
+        # draft→live lifecycle. An explicit per-item status (top-level or
+        # nested props) always wins — the gated row-9 gate above already
+        # rejected any non-draft explicit status, and this default fills only
+        # items that carry no status key anywhere (mirrors
+        # _check_gated_status's has_status).
+        # #1088: the operator-connection TARGETS, collected from the
+        # operator-requiring connections. A target is NOT promoted — the #131
+        # contract promotes only the source — so under auto a no-status
+        # target keeps the draft→live lifecycle (tests/test_mcp_server.py,
+        # "source-only"). A point that is neither source nor target is a
+        # standalone point: no status is injected at all, so create_point's
+        # (live) default supplies it.
+        _auto_targets: set[str] = set()
         if promotion_policy == "auto":
             for _conn in bundle.get("connections") or []:
                 # Only an OPERATOR-requiring connection has a promotion path
                 # (create_operator / create_direct_edge, both keyed on
                 # "operator"). A plain relation connection (extractedFrom /
-                # aboutSubject / …) never promotes, so its source must stay
-                # draft under auto (#1088) — mirror the ``if "operator" in
-                # conn`` write branch below.
-                if (isinstance(_conn, dict)
-                        and "operator" in _conn
-                        and isinstance(_conn.get("from"), str)):
-                    _auto_sources.add(_conn["from"])
+                # aboutSubject / …) never promotes, so it contributes no
+                # target — mirror the ``if "operator" in conn`` write branch
+                # below.
+                if not (isinstance(_conn, dict) and "operator" in _conn):
+                    continue
+                # #3263 parity: `to` is a LIST on a many-to-many operator
+                # connection (the same shape _resolve_ref_field and the
+                # extractedFrom branch above handle element-wise). Collecting
+                # only the scalar form silently reclassified every list-`to`
+                # endpoint as a STANDALONE point, which then inherited the
+                # live default — main wrote those targets draft.
+                _to = _conn.get("to")
+                if isinstance(_to, str):
+                    _auto_targets.add(_to)
+                elif isinstance(_to, list):
+                    _auto_targets.update(
+                        t for t in _to if isinstance(t, str))
 
         def _bundle_item_has_status(it: dict) -> bool:
             """True when a point item carries a status key top-level OR in a
@@ -12421,24 +12440,6 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
-            # #1088 / #2199: an explicit per-item status (top-level or nested
-            # props) ALWAYS wins — the defaults below fill only items that
-            # carry no status key anywhere (mirrors _check_gated_status's
-            # has_status). Under gated every no-status point is born draft
-            # (today's Q2 contract). Under auto a NON-decide-part point is
-            # stated (connection source -> live, otherwise draft), but a
-            # DECIDE-PART item is left WITHOUT a status so create_point's
-            # #2199 normalization supplies its system-default baseline — an
-            # injected status would set explicit_status and silently disable
-            # that baseline.
-            if not _bundle_item_has_status(item):
-                _kind = item.get("kind") or "statement"
-                if promotion_policy == "gated":
-                    item["status"] = "draft"
-                elif not (isinstance(_kind, str)
-                          and _kind in DECIDE_PART_KINDS):
-                    item["status"] = (
-                        "live" if ref in _auto_sources else "draft")
             # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
             # the extraction write kind). Legacy kinds are write-compat; the
             # event kind is rejected by the shared _check_kind helper (check 2).
@@ -12470,25 +12471,32 @@ class TortoiseSDK:
             # carries the same non-operator predicate the writer uses, so the
             # counter matches the writer exactly.
             existed = self._find_point_by_content(content, pointKind=kind)
-            # #7856: under the gated contract EVERY ingest point stays draft.
-            # A born-live kind (`goal`, and the #2199 decide parts) would
-            # otherwise be written LIVE when the item carries no explicit
-            # status — `_check_gated_status` only inspects an EXPLICIT status,
-            # so the born-live default was a silent bypass of the gate. Name
-            # `draft` explicitly so the effective status is the one the
-            # contract promises; `promotion_policy='auto'` stays the sanctioned
-            # route to a live goal.
+            # #1088 / #2199: decide the status on the WRITE COPY only — never
+            # on `item` itself. An explicit per-item status (top-level or
+            # nested props) ALWAYS wins: the branches below fill only items
+            # that carry no status key anywhere (mirrors _check_gated_status's
+            # has_status). Under gated EVERY no-status ingest point is born
+            # draft — that explicit draft IS the request the gate promises
+            # (`_check_gated_status` only inspects an EXPLICIT status, so
+            # without it a born-live kind would silently bypass the gate).
             write_item = item
-            if promotion_policy == "gated" and "status" not in item and not (
-                isinstance(item.get("props"), dict)
-                and "status" in item["props"]
-            ):
-                # #7856: a COPY, not a mutation of `item`. Granular
-                # `results[].item` echoes the item's remaining props
-                # (docs/INGEST_CONTRACT.md — empty for a bare statement
-                # point), so forcing the draft in place would report a
-                # status the caller never passed.
-                write_item = {**item, "status": "draft"}
+            if not _bundle_item_has_status(item):
+                if promotion_policy == "gated":
+                    # gated IS the explicit draft request: every no-status
+                    # ingest point is born draft and stays draft.
+                    write_item = {**item, "status": "draft"}
+                elif (ref in _auto_targets and not (
+                        isinstance(kind, str) and kind in DECIDE_PART_KINDS)):
+                    # #131 "source-only": an operator-connection TARGET keeps
+                    # the draft→live lifecycle. Everything else under auto is
+                    # left with NO status, so create_point's default supplies
+                    # it — live, per the #1088 ruling.
+                    write_item = {**item, "status": "draft"}
+            # #7856: a COPY, never a mutation of `item`. Granular
+            # `results[].item` echoes the item's remaining props
+            # (docs/INGEST_CONTRACT.md — empty for a bare statement point),
+            # so forcing the draft in place would report a status the caller
+            # never passed.
             point = self.create_point(kind, content, dedup=True, **write_item)
             pid = point["id"]
             if ref:

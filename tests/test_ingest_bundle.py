@@ -160,20 +160,29 @@ class TestIngestFullBundle:
         source = sdk._get_entity(res["ids"]["sources"][0])
         assert "ref" not in source
 
-    def test_points_default_to_draft_unless_specified(self, sdk):
-        # Per-item status:'live' is only allowed under promotion_policy='auto'
-        # (INGEST_CONTRACT row 9: under gated it is a violation).
+    def test_points_born_live_unless_explicit_draft(self, sdk):
+        """#1088 owner ruling: live is the DEFAULT for everything added to the
+        graph, so a no-status point under promotion_policy='auto' is born
+        live — an agent asks for draft with an explicit status="draft".
+
+        A per-item status is only allowed under 'auto' (INGEST_CONTRACT row 9:
+        under gated any non-draft explicit status is a violation).
+        """
         bundle = {
             "points": [
-                {"kind": "claim", "content": "draft point, no connections"},
-                {"kind": "claim", "content": "live point", "status": "live"},
+                {"kind": "claim", "content": "no status → born live"},
+                {"kind": "claim", "content": "explicitly live",
+                 "status": "live"},
+                {"kind": "claim", "content": "explicitly draft",
+                 "status": "draft"},
             ],
             "connections": [],
         }
         res = sdk.ingest(bundle, promotion_policy="auto")
-        pid_draft, pid_live = res["ids"]["points"]
-        assert sdk.get_point(pid_draft)["status"] == "draft"
+        pid_default, pid_live, pid_draft = res["ids"]["points"]
+        assert sdk.get_point(pid_default)["status"] == "live"
         assert sdk.get_point(pid_live)["status"] == "live"
+        assert sdk.get_point(pid_draft)["status"] == "draft"
 
 # ── promotion_policy (epic #902 W4 A0) ─────────────────────────────
 
@@ -304,14 +313,16 @@ class TestPromotionPolicy:
         pA, _ = res["ids"]["points"]
         assert sdk.get_point(pA)["status"] == "live"
 
-    def test_auto_relation_only_source_stays_draft(self, sdk):
-        # #1088 (review P1): only an OPERATOR-requiring connection has a
-        # promotion path. A plain relation connection (extractedFrom /
-        # aboutSubject / …) must not put its source in the auto-promote set,
-        # so a relation-only source stays draft under auto.
+    def test_auto_relation_only_source_is_born_live(self, sdk):
+        # #1088 owner ruling: a relation-only source is NEITHER an
+        # operator-connection source nor an operator-connection TARGET, so
+        # under auto nothing asks for draft — it gets NO injected status and
+        # is born live by create_point's default.
         #
-        # MUTATION THAT REDS THIS TEST: build _auto_sources from every
-        # connection's `from` (drop the `"operator" in conn` guard).
+        # The surviving `"operator" in conn` guard is what keeps a
+        # relation-only source out of the TARGET set; the target path itself
+        # is covered by tests/test_mcp_server.py's source-only pin
+        # (test_mcp_auto_promotes_source_live: source live, target draft).
         bundle = {
             "points": [
                 {"ref": "p1", "kind": "statement",
@@ -328,8 +339,9 @@ class TestPromotionPolicy:
         }
         res = sdk.ingest(bundle, promotion_policy="auto")
         p1 = res["ids"]["points"][0]
-        assert sdk.get_point(p1)["status"] == "draft", (
-            "a relation-only source must not be auto-promoted"
+        assert sdk.get_point(p1)["status"] == "live", (
+            "a relation-only source is born live under auto — nothing "
+            "asked for draft"
         )
 
     def test_auto_granular_parity(self, sdk):
