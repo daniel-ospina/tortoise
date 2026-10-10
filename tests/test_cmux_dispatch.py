@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -1030,6 +1031,9 @@ class FakeCmux:
         fail_read_indices: frozenset[int] | set[int] = frozenset(),
         shallow_screen_without_queue: bool = False,
         narrow_unparsed_queue: bool = False,
+        menu_open: bool = False,
+        pre_typed: str = "",
+        cwd: str = "",
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -1071,11 +1075,20 @@ class FakeCmux:
         #: right-truncated on a narrow pane, so no container parses. Recovery must
         #: not treat the empty composer as licence to re-send.
         self.narrow_unparsed_queue = narrow_unparsed_queue
+        #: AN OPEN COMPLETION MENU (#7913, second root). While it is open the menu
+        #: renders a `→ ` selected row below the composer's bottom rule and a bare
+        #: Enter is consumed by the menu (accepts the highlighted completion) — it
+        #: NEVER submits. Escape dismisses it; Ctrl-U clears the line but does NOT
+        #: close the menu (verified against the installed pi-tui editor).
+        self.menu_open = menu_open
+        #: The workspace cwd `cmux list-workspaces --json` reports. It is what the
+        #: non-pane session-mtime probe (#7913) resolves a session directory from.
+        self.cwd = cwd
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
 
-        self.pending = ""          # text in the composer, unsent
+        self.pending = pre_typed    # text in the composer, unsent
         self.submitted: list[str] = []
         self.sends: list[str] = repr
         self.sent_log: list[str] = []
@@ -1102,6 +1115,7 @@ class FakeCmux:
         entry = {
             "ref": "workspace:99",
             "id": "FAKE-0000",
+            "current_directory": self.cwd,
             "latest_submitted_message": self.visible,
             "latest_submitted_at": (
                 f"2026-09-20T19:48:{len(self.submitted):02d}.000Z"
@@ -1152,6 +1166,12 @@ class FakeCmux:
                     "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292",
                     self.pending,
                 )
+        if self.menu_open:
+            # The autocomplete list renders below the composer's bottom rule, with
+            # the selected candidate marked `→ ` (`SelectList.renderItem`).
+            screen = screen.replace(
+                "\n0.0%/700k", "\n \u2192 ci-checks/\n0.0%/700k", 1
+            )
         return cd.CmuxResult(0, screen)
 
     def send_text(self, workspace: str, text: str, surface: str | None = None) -> cd.CmuxResult:
@@ -1188,6 +1208,10 @@ class FakeCmux:
     def send_enter(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
         self.sent_log.append("\\n")
         self._tick()
+        if self.menu_open:
+            # Enter ACCEPTS the highlighted completion — it never submits. This is
+            # the exact keystroke the menu eats (#7913).
+            return cd.CmuxResult(0, "OK")
         if self.enter_is_noop > 0:
             self.enter_is_noop -= 1
             return cd.CmuxResult(0, "OK")  # rc=0, but nothing is submitted
@@ -1202,6 +1226,17 @@ class FakeCmux:
             self.submitted.append(self.pending)
             self.pending = ""
             self.lag_remaining = self.submit_lag_polls
+        return cd.CmuxResult(0, "OK")
+
+
+    def send_ctrl_u(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
+        self.sent_log.append("\x15")
+        self.pending = ""   # deleteToLineStart — does NOT close the menu
+        return cd.CmuxResult(0, "OK")
+
+    def send_escape(self, workspace: str, surface: str | None = None) -> cd.CmuxResult:
+        self.sent_log.append("\x1b")
+        self.menu_open = False   # tui.select.cancel — dismiss the menu
         return cd.CmuxResult(0, "OK")
 
 
@@ -1278,6 +1313,22 @@ class BareShellAtTheGateThenReadyCmux(FakeCmux):
         if self.read_calls <= 1:
             return cd.CmuxResult(0, SCREEN_BARE_SHELL)
         return cd.CmuxResult(0, SCREEN_IDLE_READY)
+
+
+class MenuOpensOnOurTextCmux(FakeCmux):
+    """A pane where typing OUR brief OPENS a completion menu (#7913, 2nd root).
+
+    Models the real trigger: the brief carries a completion trigger character (or
+    a Tab-like completion), so the autocomplete list appears AFTER the text is
+    typed and the subsequent Enter is consumed by the menu. The pre-send hygiene
+    cannot see this menu (it did not exist at read time); the RECOVERY must.
+    """
+
+    def send_text(self, workspace, text, surface=None):
+        result = super().send_text(workspace, text, surface)
+        if text == PROBE:
+            self.menu_open = True
+        return result
 
 
 class FakeClock:
@@ -2765,6 +2816,273 @@ class TestBracketedProgramOutputIsNotAFooterRow(unittest.TestCase):
             "a bracketed program-output line was accepted as a footer row — "
             "this is the #7918 fail-open")
         self.assertFalse(cd._is_pwd_line("[INFO] starting"))
+
+
+class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
+    """#7913: an EMPTY read must not be a statement about the lane.
+
+    A lane whose session transcript advanced recently has a live pi whatever the
+    pane read returned, so it must stay DISPATCHABLE; a lane with no fresh
+    transcript must still be REFUSED (the #7158 fail-closed direction).
+    """
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp(prefix="cmux-7913-sessions-"))
+        self._saved = os.environ.get(cd.SESSIONS_ROOT_ENV)
+        os.environ[cd.SESSIONS_ROOT_ENV] = str(self._dir)
+        self._clock = FakeClock()
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop(cd.SESSIONS_ROOT_ENV, None)
+        else:
+            os.environ[cd.SESSIONS_ROOT_ENV] = self._saved
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _session(self, cwd: str, age_s: float) -> Path:
+        session_dir = self._dir / cd.mangle_cwd(cwd)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        path = session_dir / (
+            "2026-10-10T00-00-00-000Z_00000000-0000-4000-8000-000000000000.jsonl"
+        )
+        path.write_text('{"type":"user","message":"x"}\n')
+        stamp = time.time() - age_s
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def _send(self, fake, **kwargs):
+        logs: list[str] = []
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now, log=logs.append
+        )
+        result = dispatcher.send_message("workspace:99", PROBE, label="B4", **kwargs)
+        return result, logs
+
+    def test_empty_read_with_a_fresh_session_file_is_NOT_refused(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, logs = self._send(fake, ready_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertIn(PROBE, fake.sent_log, "the brief must be sent")
+        self.assertIn(
+            "session-mtime", "\n".join(logs), "the evidence used must be logged"
+        )
+
+    def test_an_EMPTY_capture_is_treated_like_a_failed_read(self):
+        # rc==0 with zero lines is the same instrument failure as rc!=0.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class EmptyCaptureCmux(FakeCmux):
+            def read_screen(self, workspace, lines=80, surface=None):
+                return cd.CmuxResult(0, "")
+
+        fake = EmptyCaptureCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+
+    def test_empty_read_with_a_STALE_session_is_still_refused(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 60)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_empty_read_with_NO_resolvable_session_is_refused(self):
+        fake = FakeCmux(screen_unreadable=True)   # no cwd -> no session
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.sent_log, [])
+
+    def test_a_READABLE_pane_with_no_footer_is_never_rescued_by_session_evidence(self):
+        # #7158 must stay fail-closed: a bare shell is a real claim about the lane,
+        # so a fresh sibling transcript must NOT green-light a write.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = BareShellCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "not-ready")
+        self.assertEqual(
+            fake.sent_log, [],
+            "session-mtime must not override a readable bare shell",
+        )
+
+    def test_stale_session_mtime_is_reported_not_asserted(self):
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=cd.DEFAULT_SESSION_FRESH_S + 1)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        fresh, detail = dispatcher.session_liveness(
+            "workspace:99", {"current_directory": cwd}
+        )
+        self.assertFalse(fresh)
+        self.assertIn("advanced", detail)
+
+
+class TestIssue7913ReadinessClassification(unittest.TestCase):
+    def test_readiness_state_classifies_the_instrument_not_the_lane(self):
+        self.assertEqual(cd.readiness_state(None), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state("   \n"), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(SCREEN_BOOT_BLOCK), cd.ST_BLOCKED)
+        self.assertEqual(cd.readiness_state(SCREEN_IDLE_READY), cd.ST_READY)
+        self.assertEqual(cd.readiness_state(SCREEN_BARE_SHELL), cd.ST_NOT_READY)
+
+    def test_unreadable_is_distinct_from_every_lane_state(self):
+        # The vocabulary itself: UNREADABLE must not collide with the beat's
+        # lane states, which are what feed WEDGED/STALL/IDLE dispatch advice.
+        for lane_state in ("WEDGED", "STALL", "IDLE", "WIP"):
+            self.assertNotEqual(cd.ST_UNREADABLE, lane_state)
+
+    def test_completion_menu_is_detected_from_the_renderer_shape(self):
+        screen = SCREEN_IDLE_READY.replace(
+            "\n0.0%/700k", "\n \u2192 ci-checks/\n0.0%/700k", 1
+        )
+        self.assertTrue(cd.completion_menu_open(screen))
+
+    def test_an_arrow_ABOVE_the_rule_is_not_a_menu(self):
+        screen = "\u2192 not a menu\n" + SCREEN_IDLE_READY
+        self.assertFalse(cd.completion_menu_open(screen))
+
+    def test_a_plain_ready_screen_has_no_menu(self):
+        self.assertFalse(cd.completion_menu_open(SCREEN_IDLE_READY))
+
+
+class TestIssue7913ComposerHygiene(unittest.TestCase):
+    def _send(self, fake, **kwargs):
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        return dispatcher.send_message("workspace:99", PROBE, label="B4", **kwargs)
+
+    def test_dismiss_keystroke_precedes_the_text_when_a_menu_is_open(self):
+        fake = FakeCmux(menu_open=True)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("\x1b", fake.sent_log, "a dismiss keystroke must be sent")
+        self.assertLess(
+            fake.sent_log.index("\x1b"),
+            fake.sent_log.index(PROBE),
+            "Escape must be sent BEFORE the brief is typed",
+        )
+
+    def test_leftover_composer_text_is_cleared_before_the_brief(self):
+        fake = FakeCmux(pre_typed="leftover text from a previous dispatch ")
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(
+            fake.submitted, [PROBE],
+            "the brief must not concatenate onto leftover text",
+        )
+        self.assertIn("\x15", fake.sent_log, "Ctrl-U must clear the line")
+
+    def test_clear_composer_dismisses_a_menu_that_is_the_last_line(self):
+        # Literal #7913 acceptance shape: a screen whose LAST LINE is a completion
+        # menu. The pre-send sequence must include the dismiss keystroke BEFORE
+        # anything else so the menu cannot eat the submit Enter.
+        fake = FakeCmux()
+        sent: list[str] = []
+        fake.send_escape = lambda ws, surface=None: (
+            sent.append("escape") or cd.CmuxResult(0, "OK")
+        )
+        fake.send_ctrl_u = lambda ws, surface=None: (
+            sent.append("ctrl-u") or cd.CmuxResult(0, "OK")
+        )
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        screen = (
+            "\u2500" * 36 + "\n" + PROBE + "\n\n" + "\u2500" * 36
+            + "\n \u2192 ci-checks/\n"
+        )
+        self.assertTrue(cd.completion_menu_open(screen))
+        returned = dispatcher.clear_composer("workspace:99", screen)
+        self.assertEqual(returned, ["escape", "ctrl-u"])
+        self.assertEqual(sent, ["escape", "ctrl-u"])
+
+    def test_no_escape_when_no_menu_is_open(self):
+        fake = FakeCmux()
+        result = self._send(fake)
+        self.assertTrue(result.ok)
+        self.assertNotIn(
+            "\x1b", fake.sent_log,
+            "Escape with no menu open would ABORT the live turn",
+        )
+
+    def test_menu_that_our_own_text_opens_is_dismissed_then_released(self):
+        fake = MenuOpensOnOurTextCmux()
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertIn(cd.R_DISMISS_RELEASE, result.recoveries)
+        self.assertEqual(
+            fake.sent_log.count(PROBE), 1, "the brief must not be re-sent"
+        )
+        self.assertEqual(fake.submitted, [PROBE])
+
+
+class TestIssue7913FailureCondition(unittest.TestCase):
+    def test_recovery_action_dismisses_a_menu_instead_of_a_bare_enter(self):
+        screen = (
+            "\u2500" * 36 + "\n" + PROBE + "\n\n" + "\u2500" * 36
+            + "\n \u2192 ci-checks/\n"
+        )
+        self.assertEqual(
+            cd.recovery_action(screen, cd.fingerprint(PROBE), PROBE),
+            cd.R_DISMISS_RELEASE,
+        )
+
+    def test_unreadable_confirmation_reports_unreadable_pane(self):
+        class DiesAtConfirmation(FakeCmux):
+            """Ready through gate + pre-send; every read after that fails."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.my_reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.my_reads += 1
+                if self.my_reads <= 2:
+                    return super().read_screen(workspace, lines, surface)
+                return cd.CmuxResult(1, "", "cmux read-screen: timed out")
+
+        fake = DiesAtConfirmation(never_consumes=True)
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertIn("condition: unreadable-pane", result.detail)
+
+    def test_unsent_composer_reports_composer_not_submitted(self):
+        fake = FakeCmux(never_consumes=True, no_rules=True)
+        clock = FakeClock()
+        dispatcher = cd.Dispatcher(
+            fake, sleep=clock.sleep, now=clock.now, log=lambda _m: None
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.condition, "composer-not-submitted")
+        self.assertIn("condition: composer-not-submitted", result.detail)
 
 
 if __name__ == "__main__":
