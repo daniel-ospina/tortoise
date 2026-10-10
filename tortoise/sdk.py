@@ -113,6 +113,40 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
 DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 
+# #7856: a GOAL's ACHIEVEMENT state — a SEPARATE axis from `status` (the
+# draft/live lifetime). `status` says whether a claim is promoted for use;
+# `goalState` says whether the goal is met. The two were conflated: the
+# objective map's state was an unvalidated free string written by a throwaway
+# script (`unmet`/`active`/`met`/`guideline`), so a reader could not tell a
+# belief about a goal from its state, and `update_entity(id, status="met")`
+# was accepted (the #2977 OBJECT_STATUS_VALUES guard is not on main). The
+# vocabulary is the owner's closed set (the #7871 read-side comment: `met` /
+# `active` / `blocked` / `unmet` / `superseded` / `abandoned`) plus
+# `guideline` — the value the objective map already uses for the demoted
+# <10-min-CI "target" (tortoise#6792 form ruling: a guideline cannot outrank a
+# goal, so it is recorded as a goal state no reader treats as pass/fail).
+GOAL_STATE_VALUES = frozenset({
+    "met",         # achieved
+    "active",      # being pursued
+    "blocked",     # pursued but gated by an unmet dependency
+    "unmet",       # not yet achieved and not yet being pursued
+    "superseded",  # replaced by a newer commitment
+    "abandoned",   # deliberately dropped
+    "guideline",   # directional, no pass/fail (owner ruling #6792)
+})
+
+# #7856 defect 2: the objective map's TOP node was a `goal` POINT created
+# without an explicit status, so it defaulted to `draft`. A draft point that
+# is only ever a TARGET is EP-inert — `create_operator` promotes only the
+# SOURCE (#131) — so the top of the cascade could never influence a verdict
+# while `converged=True` was still reported. A goal that can never influence a
+# verdict must not be creatable by default: goal-kind Points are born LIVE
+# unless the caller passes an explicit status (the extraction path passes
+# `status="draft"`, so it is unaffected). The canonical representation of a
+# goal remains an OBJECT (ONTOLOGY §5), which is born live already; this is
+# the legacy-Point-leg safety net.
+GOAL_KINDS = frozenset({"goal"})
+
 
 def _baseline_create_fields() -> list[tuple[str, str]]:
     """Extra CREATE-map (key, expression) pairs for the #2199 baseline (#2952:
@@ -2798,6 +2832,22 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             f"{_source_version_keys} are server-managed provenance fields and "
             "cannot be set via props."
         )
+    # #7856: a goal's ACHIEVEMENT state is a CLOSED vocabulary — never a free
+    # string. Before this `goalState` accepted any value (the objective map's
+    # state was written by a throwaway script), so "what is active?" could not
+    # be answered from the graph. This is the fail-closed boundary shared by
+    # every write surface (`create_point`, `create_object`, `create_entity`,
+    # `update_point`, `update_entity`); an invalid word is refused BEFORE any
+    # graph write. `None` is allowed (explicit clear).
+    if "goalState" in props and props["goalState"] is not None:
+        _goal_state = props["goalState"]
+        if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
+            raise ValueError(
+                f"Invalid goalState {_goal_state!r}. A goal's achievement "
+                f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
+                "(Lifecycle is the separate `status` field — goalState is not "
+                "draft/live/superseded/retracted/archived.)"
+            )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -5379,7 +5429,11 @@ class TortoiseSDK:
         # items as committed). Popping up front also keeps vocabulary
         # validation uniform for both paths: an invalid status raises even
         # when the point already exists (no silent-ignore asymmetry).
-        if not explicit_status and kind in DECIDE_PART_KINDS:
+        if not explicit_status and (kind in DECIDE_PART_KINDS
+                                    or kind in GOAL_KINDS):
+            # #2199 decide parts and #7856 goals are born LIVE: a draft goal
+            # that is only ever a TARGET is EP-inert and silently reported as
+            # converged, so it must not be creatable by default.
             status = props.pop("status", "live")
         else:
             status = props.pop("status", "draft")

@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-29
+updated: 2026-10-09
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -864,6 +864,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
+| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated on every write surface (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
 
 ### §4.2 Subject
 
@@ -898,6 +899,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2194) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
+| `goalState` | string | — | — | ✅ | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated on every write surface (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the lifecycle cache, above): `status` says whether the Object is current, `goalState` says whether the goal is met. `None` clears |
 
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 >
@@ -1161,6 +1163,23 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 > (product-strategy: useCase, userJourney, jobToBeDone, valueProposition) are
 > OPTION/STATE kinds — pack-mapping item: promote to objectKinds (near-miss
 > convention until the pack amendment).
+
+> **Goal state (`goalState`) — achievement is a SEPARATE axis (#7856).** The
+> commitment-state kinds (`goal`/`target`/`strategy`/`plan`) carry two
+> orthogonal fields. `status` is the claim **lifecycle** (draft/live/…, §4.1) —
+> whether the node is promoted for use. `goalState` is the goal's
+> **achievement** state — a CLOSED vocabulary validated on every write surface
+> (`GOAL_STATE_VALUES` in `sdk.py`): `met`, `active`, `blocked`, `unmet`,
+> `superseded`, `abandoned`, and `guideline` (directional, no pass/fail — the
+> owner's #6792 form ruling, which is why `<10 min of CI` is a guideline and
+> not an absolute target). The two must not be conflated: a goal that reads
+> `status='met'` is a lifecycle violation, and `goalState` is never
+> `draft`/`live`. Because a **draft Point that is only ever a TARGET is
+> EP-inert** (wiring promotes only the SOURCE, #131) while `converged=True` is
+> still reported, a `goal`-kind **Point** created without an explicit status is
+> **born live** (issue #7856) — a goal that can never influence a verdict must
+> not be creatable by default. The canonical representation of a goal remains
+> an **Object**; the born-live rule is the legacy-Point-leg safety net.
 
 ### Event Kind Vocabulary (core)
 
