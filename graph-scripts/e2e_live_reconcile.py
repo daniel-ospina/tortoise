@@ -46,14 +46,16 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     --json output — the 2146 cleanup script needs the strict shape, so an
     operator reviews before running it.
   * Scope parity (#5971): this detector's scope (the LIKE namespace, all-time)
-    is DELIBERATELY broader than the remediator's
-    (`graph-scripts/2146_e2e_live_orphan_cleanup.py` enumerates with the strict
-    EMAIL_RE **and** the historical window). A row inside the namespace but
-    outside the guard shape is therefore DETECTED forever and enumerated by NO
-    cleanup phase — it is reported separately (the `residue` key, with FULL
+    is DELIBERATELY broader than the remediator's DELETE scope
+    (`graph-scripts/2146_e2e_live_orphan_cleanup.py` deleted only the strict
+    EMAIL_RE **and** the historical window; its residue ENUMERATION is separate
+    and all-time). A row inside the namespace but outside the guard shape was
+    therefore DETECTED forever and DELETED by NO phase by default — it is
+    reported separately (the `residue` key, with FULL
     emails) so it is named as a guard-scope decision instead of reading as a row
-    the runbook will sweep. The remediator now reports the same residue on every
-    phase and accepts it behind its explicit `--include-residue` flag; the two
+    the runbook will sweep. The remediator now enumerates the same residue
+    all-time, prints it on every phase, and accepts it into the delete set only
+    behind its explicit `--include-residue` flag; the two
     scopes are pinned in agreement by
     `tests/test_e2e_live_reconcile_scope_parity.py`. (The auto-filed issue BODY
     still names no flag — it carries the full offender emails today; the wording

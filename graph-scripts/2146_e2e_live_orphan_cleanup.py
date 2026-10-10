@@ -85,10 +85,10 @@ REQUIRED ACCESS (operator)
 
 GUARD D — RESIDUE (#5971). The weekly reconcile detector
 (`graph-scripts/e2e_live_reconcile.py`) counts every row in the namespace
-(`email LIKE 'e2e-live-%@premise-labs.dev'`, all-time), but this script
-enumerates only Guard A's strict shape AND the historical window. A row inside
-the namespace but outside Guard A was therefore DETECTED forever and enumerated
-by NO phase — silently, so the reconcile issue read as "just not cleaned yet"
+(`email LIKE 'e2e-live-%@premise-labs.dev'`, all-time), but this script's DELETE
+scope was only Guard A's strict shape AND the historical window. A row inside
+the namespace but outside Guard A was therefore DETECTED forever and deleted by
+NO phase — silently, so the reconcile issue read as "just not cleaned yet"
 while nothing in the repo could clean it. The live example is the #3781
 manual-verification account `e2e-live-3781-<hex>@premise-labs.dev` (created
 2026-09-17; the operator had no SUPABASE_SERVICE_KEY, so the monitor's Admin-API
@@ -102,9 +102,9 @@ teardown could not run — see PR #3790's commit message).
     inclusion, the same shape as `--all-e2e-live` (never a widened regex: the
     guard is what keeps a non-test row out).
   * Recurrences use a SEPARATE --manifest (below): a residue-only recurrence
-    enumerates 0 teams, and the clobber guard refuses to overwrite a manifest
-    that holds team graph names with an empty team list — that list is the
-    FalkorDB companion's only drop record.
+    enumerates no Guard-A (strict-shape) teams, and the clobber guard refuses to
+    overwrite a manifest that holds team graph names when the new enumeration
+    has no Guard-A rows — that list is the FalkorDB companion's only drop record.
 
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
@@ -122,7 +122,8 @@ Usage (dry-run first, then execute):
 Recurrence (the #2189 reconcile case — the rows are NEWER than the window, and
 usually have NO teams: the live #5971 case is users=4 teams=0). Use a SEPARATE
 --manifest: the historical #2146 manifest is the FalkorDB companion's only
-record of 154 graph targets, and a residue-only enumeration has 0 teams, so
+record of 154 graph targets, and a residue-only enumeration has no Guard-A
+(strict-shape) teams, so
 writing it over that file would silently discard them (the clobber guard
 refuses exactly that, by design).
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
@@ -571,9 +572,9 @@ def main() -> int:
 
     if args.phase in ("enumerate", "all"):
         manifest = phase_enumerate(args, runner)
-        # #2146 review P2-1: refuse to clobber a non-empty manifest with an
-        # empty team list. A post-success re-run enumerates 0 teams; if it
-        # overwrote the manifest in place, the FalkorDB companion would read an
+        # #2146 review P2-1: refuse to clobber a non-empty manifest with no
+        # Guard-A team rows. A post-success re-run enumerates no Guard-A teams; if
+        # it overwrote the manifest in place, the FalkorDB companion would read an
         # empty list and silently skip all ~154 graphs with no row-level record
         # of what to drop. Delete the manifest manually to force a fresh empty
         # enumeration.
@@ -601,8 +602,9 @@ def main() -> int:
                 guard_a_teams = len(manifest.get("teams") or [])
             if prior_n > 0 and not guard_a_teams:
                 print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
-                      f"{prior_n} teams but the new enumeration found none (post-success "
-                      f"re-run, or a residue-only recurrence?). Those teams are the "
+                      f"{prior_n} teams but the new enumeration found no Guard-A "
+                      f"(strict-shape) teams (post-success re-run, or a residue-only "
+                      f"recurrence?). Those teams are the "
                       f"FalkorDB companion's drop list; re-enumerate a recurrence to a "
                       f"separate --manifest (2146-recurrence.manifest.json — runbook "
                       f"§6.1), or remove this file once those graphs are already dropped.")

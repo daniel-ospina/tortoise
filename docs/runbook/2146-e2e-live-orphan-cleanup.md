@@ -346,11 +346,10 @@ while the detector kept filing. The script now:
 
 Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
-separate `--manifest`**: a residue-only recurrence enumerates 0 Guard-A (strict
-shape) teams, and the
-clobber guard refuses to overwrite the historical
-`2146-e2e-live-orphans.manifest.json` (154 team rows) with an empty team list —
-that list is the FalkorDB companion's only drop record, and
+separate `--manifest`**: a residue-only recurrence enumerates no Guard-A
+(strict-shape) teams, and the clobber guard refuses to overwrite the historical
+`2146-e2e-live-orphans.manifest.json` (154 team rows) when the new enumeration
+has no Guard-A rows — that list is the FalkorDB companion's only drop record, and
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
 do" on an empty list. The separate path keeps both:
 
@@ -370,6 +369,9 @@ uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
     --phase all --all-e2e-live --include-residue --manifest "$RECUR" --execute
 # 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
 #    reconcile run is green (that check is the end-to-end proof, not this list).
+#    For a residue TEAM this re-run refuses by design ($RECUR now holds that
+#    team, but Guard-A found none) — remove $RECUR (its graphs are now dropped)
+#    or re-enumerate to a fresh --manifest.
 ```
 
 For a residue **team** (none today: every `teams` row in the namespace matched
@@ -383,11 +385,12 @@ the #5971 run), so phase `users` is all it needs.
 JSON (full rows); (b) optional `--dump-csv` for a CSV snapshot before any
 delete; (c) the audit_events append-only rows survive the team deletion as the
 purge trail; (d) re-running any phase is a no-op (idempotent) — with one
-exception: the manifest refuses to be overwritten with an EMPTY team list
-(post-success re-enumeration, or a residue-only recurrence — its `teams` is the
-FalkorDB companion's only drop record), so the FalkorDB phase always has its
-target list; re-enumerate a recurrence to its own `--manifest` (see §6.1) to
-keep that list, or remove the file to force a fresh empty enumeration. If an operator
+exception: the manifest refuses to be overwritten with no Guard-A (strict-shape)
+team rows (a post-success re-enumeration, or a residue-only recurrence — its
+`teams` is the FalkorDB companion's only drop record), so the FalkorDB phase
+always has its target list; re-enumerate a recurrence to its own `--manifest`
+(see §6.1) to keep that list, or remove the file to force a fresh empty
+enumeration. If an operator
 wants DB-level insurance, `pg_dump` the four tables scoped to the orphan ids
 first.
 
