@@ -3394,7 +3394,12 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
     ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
     capture surfaces can never drift (byte-parity).
     """
-    if not claim_ids:
+    # No-op only when there is NOTHING to do: no claim to promote/calibrate
+    # AND no operator this capture created. #1088 P2 — keying this on
+    # ``claim_ids`` alone blocks the folded-but-calibrated case below, where
+    # a capture wired a new operator while every payload point folded onto
+    # an already-calibrated canonical (``claim_ids == []``).
+    if not claim_ids and not operator_ids:
         return
     # #1088: only ids MINTED by this capture may be promoted. A folded,
     # pre-existing id can still be an EP target, but an explicit draft must
@@ -7119,14 +7124,26 @@ class TortoiseSDK:
         # left uncalibrated).
         if extracted:
             ep_ids = _capture_ep_target_ids(extracted, proj)
-            if ep_ids:
+            # #1088 P2: the operator-promotion arm must not ride the
+            # CALIBRATION selector. A capture whose payload points ALL fold
+            # onto canonicals that are ALREADY calibrated gets
+            # ``ep_ids == []`` — ``_capture_ep_target_ids`` keys on
+            # ``n.posterior_alpha IS NULL AND n.ep_alpha IS NULL`` — yet the
+            # capture can still have wired a NEW IMPL/NAND operator; gating
+            # the whole pass on ``ep_ids`` left that operator
+            # ``status='draft'`` (EP-inert under the #780 live-only selector,
+            # with no public promote path). Run the pass when EITHER list is
+            # non-empty. (e96b01681 widened the promotion JOIN but left this
+            # guard, so only the folded-but-UNCALIBRATED sub-case was fixed.)
+            operator_ids = list(meta.get("operator_ids") or [])
+            if ep_ids or operator_ids:
                 # #1088: only ids this capture MINTED may be promoted; a
                 # folded, pre-existing canonical stays as its author left it
                 # (draft included), and is only calibrated if it needs it.
                 _apply_capture_ingest_ep(
                     self, ep_ids,
                     promotion_ids=_capture_minted_ids(extracted),
-                    operator_ids=list(meta.get("operator_ids") or []),
+                    operator_ids=operator_ids,
                     warn=extraction_warnings.append,
                 )
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture

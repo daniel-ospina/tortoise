@@ -13533,7 +13533,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # intentionally left uncalibrated: #1088 never retro-promotes a folded
     # id, and the local EP pass excludes drafts (``include_draft=False``).
     ep_ids = _capture_ep_target_ids(extracted, proj)
-    if ep_ids:
+    # #1088 P2: the operator-promotion arm must not ride the CALIBRATION
+    # selector. A capture whose payload points ALL fold onto canonicals that
+    # are ALREADY calibrated gets ``ep_ids == []`` — the selector keys on
+    # ``posterior_alpha IS NULL AND ep_alpha IS NULL`` — yet the capture can
+    # still have wired a NEW IMPL/NAND operator; gating the whole pass on
+    # ``ep_ids`` left that operator ``status='draft'`` (EP-inert under the
+    # #780 live-only selector, with no public promote path). Run the pass
+    # when EITHER list is non-empty. (e96b01681 widened the promotion JOIN
+    # but left this guard, so only the folded-but-UNCALIBRATED sub-case was
+    # fixed.)
+    operator_ids = list(meta.get("operator_ids") or [])
+    if ep_ids or operator_ids:
         # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
         # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
         # (#3718). It ran INLINE here, ON the event loop, freezing every
@@ -13563,7 +13574,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 _apply_capture_ingest_ep(
                     sdk, ep_ids,
                     promotion_ids=_capture_minted_ids(extracted),
-                    operator_ids=list(meta.get("operator_ids") or []),
+                    operator_ids=operator_ids,
                     warn=extraction_warnings.append)
 
         await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
