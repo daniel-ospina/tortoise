@@ -415,6 +415,13 @@ def phase_enumerate(args: argparse.Namespace, runner) -> dict:
                 f"GUARD FAIL: residue row {row.get('id')} email {email!r} DOES match "
                 f"{EMAIL_RE.pattern} — the residue query and Guard A disagree; aborting")
     _report_residue(residue_teams, residue_users, bool(args.include_residue))
+    # #5971: the clobber guard's input is the GUARD-A enumeration, captured BEFORE
+    # any promotion. Promoting a residue TEAM makes `teams` non-empty, and a guard
+    # that read the promoted list would then overwrite a prior manifest holding
+    # team graph names — silently discarding the FalkorDB companion's only drop
+    # record, which is the failure the guard exists to prevent. So record the
+    # pre-promotion count for `main()` to test.
+    guard_a_teams = len(teams)
     if args.include_residue:
         # Explicit, review-gated inclusion (the --all-e2e-live shape). The two sets
         # are disjoint by construction (strict shape vs. NOT strict shape), so no
@@ -435,6 +442,11 @@ def phase_enumerate(args: argparse.Namespace, runner) -> dict:
             "window_start": None if args.all_e2e_live else args.window_start,
             "window_end": None if args.all_e2e_live else args.window_end,
             "email_regex": EMAIL_RE.pattern,
+            # #5971: the Guard-A (pre-promotion) team count — what the manifest
+            # would hold WITHOUT --include-residue. `main()`'s clobber guard
+            # tests this, never the promoted `teams`, so a promoted residue team
+            # cannot route around the protection.
+            "guard_a_teams": guard_a_teams,
         },
         "counts": counts,
         # #5971: ALWAYS the residue as enumerated (never the delete-set view), so
@@ -566,15 +578,16 @@ def main() -> int:
         # of what to drop. Delete the manifest manually to force a fresh empty
         # enumeration.
         #
-        # #5971: a residue-only recurrence also enumerates 0 teams (the live case
-        # is `users=4 teams=0`), so this refusal fires for it too — deliberately.
-        # The prior `teams` list is the FalkorDB companion's ONLY drop record
-        # (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns 0
-        # on an empty list), so relaxing the guard to "residue counts as
-        # non-empty" would discard that list silently — which is the very failure
-        # the guard prevents. A recurrence therefore enumerates to its OWN
-        # --manifest (the runbook §6.1 path): the historical list survives, and
-        # the residue is still reachable.
+        # #5971: a residue-only recurrence also enumerates 0 Guard-A teams (the
+        # live case is `users=4 teams=0`), so this refusal fires for it too —
+        # deliberately. The test is against the PRE-promotion count
+        # (`scope.guard_a_teams`), never the promoted `teams`: promoting a residue
+        # team must not route around it. The prior `teams` list is the FalkorDB
+        # companion's ONLY drop record (`2146_falkordb_graph_cleanup.py` reads
+        # `manifest["teams"]` and returns 0 on an empty list), so the guard is
+        # what keeps that list from being discarded silently. A recurrence
+        # therefore enumerates to its OWN --manifest (the runbook §6.1 path): the
+        # historical list survives, and the residue is still reachable.
         if os.path.exists(args.manifest):
             try:
                 with open(args.manifest) as fh:
@@ -582,7 +595,11 @@ def main() -> int:
                 prior_n = len(prior.get("teams") or [])
             except (OSError, json.JSONDecodeError):
                 prior_n = 0
-            if prior_n > 0 and not manifest.get("teams"):
+            scope = manifest.get("scope") or {}
+            guard_a_teams = scope.get("guard_a_teams")
+            if guard_a_teams is None:  # a pre-#5971 manifest shape / fixture
+                guard_a_teams = len(manifest.get("teams") or [])
+            if prior_n > 0 and not guard_a_teams:
                 print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
                       f"{prior_n} teams but the new enumeration found none (post-success "
                       f"re-run, or a residue-only recurrence?). Those teams are the "

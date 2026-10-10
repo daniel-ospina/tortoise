@@ -155,8 +155,8 @@ def test_json_doc_carries_full_emails_and_a_residue_key(monkeypatch, capsys) -> 
         "to the cleanup script"
     )
     assert detector._short_email(RESIDUE_USER) in captured.err, (
-        "the stderr log must name the residue (truncated on stderr by design — the "
-        "FULL form is in the doc)"
+        "the human log must name the residue (truncated there by design — the "
+        "--json doc carries the FULL form)"
     )
     assert "--include-residue" in captured.err
 
@@ -364,6 +364,56 @@ def test_residue_only_recurrence_uses_its_own_manifest_and_keeps_the_old_one(
     assert RESIDUE_USER in out.getvalue()
     # And the historical list is still intact afterwards.
     assert json.loads(prior_path.read_text(encoding="utf-8"))["teams"] == prior_teams
+
+
+def test_a_promoted_residue_team_cannot_route_around_the_clobber_guard(
+    tmp_path, monkeypatch
+) -> None:
+    """--include-residue must not make a 0-team enumeration look non-empty.
+
+    The guard has to test the PRE-promotion (Guard-A) team list. A promoted
+    residue TEAM makes `manifest["teams"]` non-empty, and a guard reading the
+    promoted list would overwrite a prior manifest holding 154 team graph names
+    — silently discarding the FalkorDB companion's only drop record.
+    """
+    prior_path = tmp_path / "2146-e2e-live-orphans.manifest.json"
+    prior_teams = [{"id": f"old-{i}", "graph_name": f"team_{i:026x}"} for i in range(154)]
+    _write_manifest(prior_path, {"teams": prior_teams})
+    residue_team = {
+        "id": RESIDUE_TEAM_ID, "name": "e2e-live-3781-beefcafe", "email": RESIDUE_TEAM,
+        "graph_name": f"team_{RESIDUE_TEAM_ID}", "created_at": "2026-09-17",
+        "deleted_at": None,
+    }
+    runner = _remediator_runner(residue_teams=[residue_team])
+    monkeypatch.setattr(remediator, "_make_sql_runner", lambda args: runner)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
+         "--all-e2e-live", "--include-residue", "--manifest", str(prior_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 2 and "REFUSING" in out.getvalue(), (
+        "a promoted residue team must not bypass the clobber guard"
+    )
+    assert json.loads(prior_path.read_text(encoding="utf-8"))["teams"] == prior_teams
+
+    # With no prior manifest the promoted residue team is written normally.
+    fresh_path = tmp_path / "2146-recurrence.manifest.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["2146_e2e_live_orphan_cleanup.py", "--phase", "enumerate",
+         "--all-e2e-live", "--include-residue", "--manifest", str(fresh_path)],
+    )
+    out = StringIO()
+    with redirect_stdout(out):
+        rc = remediator.main()
+    assert rc == 0
+    written = json.loads(fresh_path.read_text(encoding="utf-8"))
+    assert [t["email"] for t in written["teams"]] == [RESIDUE_TEAM]
+    assert written["scope"]["guard_a_teams"] == 0
+    assert written["scope"]["include_residue"] is True
 
 
 def test_genuinely_empty_reenumeration_still_refuses(tmp_path, monkeypatch) -> None:

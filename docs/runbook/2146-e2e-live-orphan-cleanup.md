@@ -346,7 +346,8 @@ while the detector kept filing. The script now:
 
 Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
-separate `--manifest`**: a residue-only recurrence enumerates `teams=0`, and the
+separate `--manifest`**: a residue-only recurrence enumerates 0 Guard-A (strict
+shape) teams, and the
 clobber guard refuses to overwrite the historical
 `2146-e2e-live-orphans.manifest.json` (154 team rows) with an empty team list —
 that list is the FalkorDB companion's only drop record, and

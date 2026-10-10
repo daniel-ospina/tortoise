@@ -301,7 +301,8 @@ def main() -> int:
 
     over_counts = {k: counts[k] for k in COUNT_KINDS if counts[k] > args.threshold}
     # #5971: the doc carries FULL offender emails (they are the operator's input
-    # to the cleanup script); only the stderr log is truncated.
+    # to the cleanup script); the truncated form is the HUMAN log — stderr under
+    # --json, stdout otherwise.
     over_emails = {k: [str(e) for e in emails.get(k, [])] for k in over_counts}
     short_emails = {k: [_short_email(e) for e in v] for k, v in over_emails.items()}
 
@@ -330,7 +331,7 @@ def main() -> int:
                 "deviate from the 2146 guard email shape "
                 "^e2e-live-[0-9a-f]{8}@premise-labs.dev$ — the cleanup script skips "
                 "them unless run with --include-residue (after reviewing the residue "
-                "list it prints); full emails are in the --json doc"
+                "list it prints); --json carries the full emails"
             )
         rc = 1
 
