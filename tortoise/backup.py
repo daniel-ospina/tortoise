@@ -9,6 +9,8 @@ import inspect
 import logging
 import os
 import shutil
+import uuid
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +49,96 @@ def _count_journal_events(events_file: Path) -> int:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
+
+
+@contextmanager
+def _destination_rollback(events_path: str, db_path: str | None, *,
+                          replace_db: bool):
+    """#7767 — a refused restore must not leave the destination destroyed.
+
+    ``restore`` REPLACES the destination journal, and — when the backup
+    carries a snapshot — the destination DB *and* its AOF dir, BEFORE the
+    replay loop that can refuse (``assert_no_non_folded``) or fail (a torn
+    backend, a malformed mid-file journal line, an ``OSError`` mid-copy). The
+    torn-tail verdict is taken earlier still (#3316), but every OTHER refusal
+    shape is only decidable by replaying, so a refusal used to land on a store
+    that had already been destroyed, with no rollback: the caller got the
+    exception AND a mutated destination.
+
+    Each destination the copy is about to overwrite is renamed ASIDE — an
+    O(1) same-filesystem rename, NOT a copy of the whole DB, so the guarantee
+    costs ~nothing on a large store — and moved back verbatim when the block
+    raises. Any partial artifact left at the destination is discarded first,
+    so a destination that did not exist before is not left behind either; on
+    success the aside copies are dropped.
+
+    ``db_path`` is overwritten by the copy ONLY when the backup carries a
+    snapshot, so it is staged aside only then. When it does NOT, the
+    destination DB is deliberately left IN PLACE — the JSONL fallback folds
+    ON TOP of it, so moving it aside would silently replay onto an empty
+    graph. It is still TRACKED, so a destination DB the replay newly created
+    is removed rather than left half-populated.
+
+    Deliberately NOT a pre-flight classification of the journal (the rejected
+    option (a) on #7767). The non-folded set depends on the graph the replay
+    LANDS on — the JSONL fallback folds into the existing destination graph
+    when the backup carries no snapshot — so a journal-only pre-flight could
+    not decide it, and every future refusal shape would re-open the window.
+    Renaming aside is correct for every failure mode instead, including ones
+    the code cannot attribute to a known refusal.
+
+    BOUND (named, not claimed away): an in-place fold into a destination graph
+    that already had nodes is mutated before the refusal and a rename cannot
+    un-apply it. That case only arises when the backup carries NO snapshot (a
+    snapshot is copied over, so the replay starts from the backup's own DB),
+    and closing it needs option (b)'s full temp copy of the DB rather than an
+    O(1) rename — tracked by #7928, with the measurement. A destination DB the
+    replay newly CREATED is removed, so the common shape is covered here.
+    The adjacent `_recover_or_raise` leg of the issue is #7929.
+    """
+    token = uuid.uuid4().hex[:12]
+    staged: list[tuple[Path, Path]] = []
+    created: list[Path] = []
+
+    def _stage(original: Path, *, overwrite: bool) -> None:
+        if not original.exists():
+            created.append(original)
+            return
+        if not overwrite:
+            return          # stays in place; the replay folds INTO it
+        side = original.with_name(f"{original.name}.restore-aside-{token}")
+        os.replace(original, side)
+        staged.append((original, side))
+
+    def _discard(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            with suppress(FileNotFoundError):
+                os.remove(path)
+
+    _stage(Path(events_path), overwrite=True)
+    if (db_path is not None and str(db_path) != ":memory:"
+            and not is_db_uri(str(db_path))):
+        from tortoise.projection import stale_aof_dirs
+        _stage(Path(db_path), overwrite=replace_db)
+        # The AOF dirs go with the DB: `remove_stale_aof` deletes them, so a
+        # refused restore must not take the destination's unflushed data too.
+        for aof in stale_aof_dirs(db_path):
+            _stage(aof, overwrite=replace_db)
+    try:
+        yield
+    except BaseException:
+        for original, _side in staged:
+            _discard(original)
+        for path in created:
+            _discard(path)
+        for original, side in reversed(staged):
+            os.replace(side, original)
+        raise
+    else:
+        for _original, side in staged:
+            _discard(side)
 
 
 def backup(db_path: str, events_path: str = "events.jsonl",
@@ -184,167 +276,179 @@ def restore(backup_dir: str, db_path: str,
             # let the JSONL fallback below raise it, as it did before #3316.
             _source_records = None
 
-    # Copy files to target
-    shutil.copy2(events_file, events_path)
-    if db_file.exists():
-        # #915 — with AOF enabled, Redis loads the AOF in preference to the
-        # RDB. A stale appendonlydir/ at the target path would make this
-        # restore silently serve the OLD live graph instead of the snapshot.
-        # Restore semantics = "the restored snapshot wins".
-        from tortoise.projection import remove_stale_aof
-        remove_stale_aof(db_path)
-        shutil.copy2(db_file, db_path)
-
-    # Count events: records AND torn fragments, which is the number this
-    # surface has always reported (`test_backup_restore_default_copies_a_torn_
-    # tail_backup` pins a torn journal at 2) — minus the seal annotations
-    # `append` writes, which annotate a fragment rather than being one (#5917).
-    # Counted WITHOUT parsing: the reader-derived count parsed every record a
-    # second time (twice on the ``into_falkor`` path, which already parsed the
-    # journal above) to produce a number this surface only reports — measured
-    # 20.4 s vs 0.07 s on a 300,000-record journal.
-    count = _count_journal_events(events_file)
-
-    # Restore into FalkorDB if requested
-    if into_falkor:
-        from tortoise.projection import (  # noqa: I001
-            FalkorProjection,
-            _object_hard_deleted_ids,
-            hard_deleted_pairs,
-            journal_first_materialization,
-            journal_hard_delete_seqs,
-            journal_object_surviving_keys,
-            plan_point_restamp_folds,
-        )
-        from tortoise.projection.nonfolded import (
-            assert_no_non_folded,
-            collect_non_folded,
-        )
-        from tortoise.log import EventLog
-        # RDB-first: open the snapshot directly — it holds the full graph
-        # incl. SDK-created points that never made it into events.jsonl.
+    # #7767: everything below REPLACES the destination — the journal always,
+    # and (when the backup carries a snapshot) the DB and its AOF dir — while
+    # the replay that can REFUSE runs LAST, so a refusal used to land on a
+    # store that had already been destroyed, with no rollback. Each
+    # destination is renamed aside first and put back verbatim if anything
+    # below raises; see `_destination_rollback`.
+    with _destination_rollback(
+            events_path, db_path, replace_db=db_file.exists()):
+        # Copy files to target
+        shutil.copy2(events_file, events_path)
         if db_file.exists():
+            # #915 — with AOF enabled, Redis loads the AOF in preference to the
+            # RDB. A stale appendonlydir/ at the target path would make this
+            # restore silently serve the OLD live graph instead of the snapshot.
+            # Restore semantics = "the restored snapshot wins". (The stale dirs
+            # were already staged aside by `_destination_rollback`, so this is
+            # a no-op today — kept because it is the #915 wiring, and because a
+            # caller of `remove_stale_aof` must never be able to see the old
+            # AOF survive a completed restore.)
+            from tortoise.projection import remove_stale_aof
+            remove_stale_aof(db_path)
+            shutil.copy2(db_file, db_path)
+
+        # Count events: records AND torn fragments, which is the number this
+        # surface has always reported (`test_backup_restore_default_copies_a_torn_
+        # tail_backup` pins a torn journal at 2) — minus the seal annotations
+        # `append` writes, which annotate a fragment rather than being one (#5917).
+        # Counted WITHOUT parsing: the reader-derived count parsed every record a
+        # second time (twice on the ``into_falkor`` path, which already parsed the
+        # journal above) to produce a number this surface only reports — measured
+        # 20.4 s vs 0.07 s on a 300,000-record journal.
+        count = _count_journal_events(events_file)
+
+        # Restore into FalkorDB if requested
+        if into_falkor:
+            from tortoise.projection import (  # noqa: I001
+                FalkorProjection,
+                _object_hard_deleted_ids,
+                hard_deleted_pairs,
+                journal_first_materialization,
+                journal_hard_delete_seqs,
+                journal_object_surviving_keys,
+                plan_point_restamp_folds,
+            )
+            from tortoise.projection.nonfolded import (
+                assert_no_non_folded,
+                collect_non_folded,
+            )
+            from tortoise.log import EventLog
+            # RDB-first: open the snapshot directly — it holds the full graph
+            # incl. SDK-created points that never made it into events.jsonl.
+            if db_file.exists():
+                proj = FalkorProjection(db_path)
+                try:
+                    # Verify the snapshot actually has data; if the RDB is a
+                    # stub/empty, fall through to JSONL replay below.
+                    rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
+                    if rows and rows[0][0]:
+                        return {"events": count, "status": "ok", "restored_via": "rdb"}
+                finally:
+                    proj.close()
+            # JSONL replay fallback (no RDB, or RDB was empty)
             proj = FalkorProjection(db_path)
             try:
-                # Verify the snapshot actually has data; if the RDB is a
-                # stub/empty, fall through to JSONL replay below.
-                rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
-                if rows and rows[0][0]:
-                    return {"events": count, "status": "ok", "restored_via": "rdb"}
+                # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
+                # whose endpoint is created LATER in the journal folds to nothing
+                # inline. This engine buffers the records and folds them AFTER the
+                # pass, the same trailing sweep ``rebuild`` / ``rebuild_all`` /
+                # ``recover_from_log`` give the type. The records carry their
+                # journal seq so the sweep can suppress a link whose endpoint was
+                # HARD-DELETED afterwards (#3722 review P2). A fold failure is
+                # logged, never raised: restore must not abort on one unreplayable
+                # link.
+                # #3316: the torn-tail verdict was already taken on the SOURCE
+                # journal above, BEFORE this engine replaced the destination store
+                # — the refusal cannot be re-taken here, after the mutation, and
+                # the copy made above is byte-identical to the source. ``None``
+                # means the source parse hit mid-file corruption; re-reading the
+                # copy raises the same actionable error from the same reader.
+                log = EventLog(events_path)
+                records = (_source_records if _source_records is not None
+                           else log.read_all())
+                hard_delete_seqs = journal_hard_delete_seqs(records)
+                # #7719: the anchor-gated hard-delete MEMBERSHIP map, hoisted ONCE
+                # over the SAME ``records`` iterable the replay loop walks.
+                hard_deleted = hard_deleted_pairs(records)
+                deferred_links: list[tuple[int, dict]] = []
+                # #3305: the Point lifecycle terminalizers fold through the SHARED
+                # whole-journal plan (the same selection ``rebuild_all`` uses),
+                # not through ``apply()``'s inline branch — that branch folds every
+                # terminalizer, including the pre-recreation ones ``rebuild_all``
+                # drops and the non-canonical supersedes it collapses.
+                restamp_plan, _ = plan_point_restamp_folds(records)
+                # #3305: their CORRECTS edges name a SUCCESSOR this pass may create
+                # later, so defer the edges and re-apply them after the pass (the
+                # inline MERGE no-ops for a forward reference, while
+                # ``rebuild_all``'s after-creations sweep resolves it).
+                deferred_corrects: list[tuple[int, str, str]] = []
+                # #5285 cycle-3 (FIX 3): this is the FOURTH whole-journal replay
+                # engine, and it replayed one record at a time with NO journal
+                # context — so `apply()`'s ObjectSuperseded refusal gate (keyed on
+                # `journal_object_surviving is not None`) was SKIPPED and an
+                # id-only absent-target supersede restored silently, while
+                # `rebuild_all` refuses the identical journal. Supply the same
+                # whole-journal keys `rebuild`/`recover_from_log` supply, and
+                # feature-detect the kwargs (an `apply(ev)`-only injected backend
+                # must not be handed a kwarg it does not accept).
+                journal_object_surviving = journal_object_surviving_keys(records)
+                # #7719: derived from the GATED map via `_hard_deleted_any`, so an
+                # anchor-suppressed delete no longer exempts the supersede.
+                journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
+                # #3585 (P1-1): the whole-journal EXISTENCE map, so a
+                # retract/state-op that precedes its own creation (folded by
+                # `rebuild_all`'s hoist) is not refused on this chronological path.
+                first_materialized = journal_first_materialization(records)
+                apply_kwargs: dict = {}
+                _pass_seq = False
+                try:
+                    _apply_params = inspect.signature(proj.apply).parameters
+                except (TypeError, ValueError):
+                    _apply_params = {}
+                if "journal_object_surviving" in _apply_params:
+                    apply_kwargs["journal_object_surviving"] = journal_object_surviving
+                    apply_kwargs["journal_object_deleted"] = journal_object_deleted
+                if "journal_first_materialized" in _apply_params:
+                    apply_kwargs["journal_first_materialized"] = first_materialized
+                    _pass_seq = "journal_seq" in _apply_params
+                # The refusal is a RUN BOUNDARY, exactly as on the other three
+                # engines: without the collector `record_non_folded` is a no-op
+                # and the context would change nothing. `assert_no_non_folded`
+                # raises `NonFoldedEventsError` AFTER the close, so a miss fails
+                # the restore loudly instead of returning `{"status": "ok"}`.
+                with collect_non_folded() as _nf_entries:
+                    for seq, ev in enumerate(records):
+                        if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                            deferred_links.append((seq, ev))
+                            continue
+                        # Keyed on the PLAN, not the raw envelope type — the plan
+                        # selects by the NORMALIZED type (``_norm`` splices a nested
+                        # payload), so a raw-type guard would let a ``type``-in-``point``
+                        # terminalizer fall through to ``apply()``'s inline branch and
+                        # its unshared selection (#325/#3722's raw-vs-normalized class).
+                        if seq in restamp_plan:
+                            edge = proj.apply_journal_point_restamp(
+                                ev, seq, restamp_plan, hard_deleted=hard_deleted)
+                            if edge is not None:
+                                deferred_corrects.append(edge)
+                            continue
+                        if _pass_seq:
+                            proj.apply(ev, journal_seq=seq, **apply_kwargs)
+                        else:
+                            proj.apply(ev, **apply_kwargs)
+                    if deferred_corrects:
+                        try:
+                            proj.fold_deferred_corrects_edges(
+                                deferred_corrects, hard_delete_seqs)
+                        except Exception:
+                            logger.exception(
+                                "restore: deferred CORRECTS fold failed; %d "
+                                "edge(s) not replayed", len(deferred_corrects))
+                    if deferred_links:
+                        try:
+                            proj.fold_deferred_entity_links(
+                                deferred_links, hard_delete_seqs)
+                        except Exception:
+                            logger.exception(
+                                "restore: deferred EntityLinked fold failed; %d "
+                                "link(s) not replayed", len(deferred_links))
+                assert_no_non_folded(_nf_entries, engine="restore")
             finally:
                 proj.close()
-        # JSONL replay fallback (no RDB, or RDB was empty)
-        proj = FalkorProjection(db_path)
-        try:
-            # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
-            # whose endpoint is created LATER in the journal folds to nothing
-            # inline. This engine buffers the records and folds them AFTER the
-            # pass, the same trailing sweep ``rebuild`` / ``rebuild_all`` /
-            # ``recover_from_log`` give the type. The records carry their
-            # journal seq so the sweep can suppress a link whose endpoint was
-            # HARD-DELETED afterwards (#3722 review P2). A fold failure is
-            # logged, never raised: restore must not abort on one unreplayable
-            # link.
-            # #3316: the torn-tail verdict was already taken on the SOURCE
-            # journal above, BEFORE this engine replaced the destination store
-            # — the refusal cannot be re-taken here, after the mutation, and
-            # the copy made above is byte-identical to the source. ``None``
-            # means the source parse hit mid-file corruption; re-reading the
-            # copy raises the same actionable error from the same reader.
-            log = EventLog(events_path)
-            records = (_source_records if _source_records is not None
-                       else log.read_all())
-            hard_delete_seqs = journal_hard_delete_seqs(records)
-            # #7719: the anchor-gated hard-delete MEMBERSHIP map, hoisted ONCE
-            # over the SAME ``records`` iterable the replay loop walks.
-            hard_deleted = hard_deleted_pairs(records)
-            deferred_links: list[tuple[int, dict]] = []
-            # #3305: the Point lifecycle terminalizers fold through the SHARED
-            # whole-journal plan (the same selection ``rebuild_all`` uses),
-            # not through ``apply()``'s inline branch — that branch folds every
-            # terminalizer, including the pre-recreation ones ``rebuild_all``
-            # drops and the non-canonical supersedes it collapses.
-            restamp_plan, _ = plan_point_restamp_folds(records)
-            # #3305: their CORRECTS edges name a SUCCESSOR this pass may create
-            # later, so defer the edges and re-apply them after the pass (the
-            # inline MERGE no-ops for a forward reference, while
-            # ``rebuild_all``'s after-creations sweep resolves it).
-            deferred_corrects: list[tuple[int, str, str]] = []
-            # #5285 cycle-3 (FIX 3): this is the FOURTH whole-journal replay
-            # engine, and it replayed one record at a time with NO journal
-            # context — so `apply()`'s ObjectSuperseded refusal gate (keyed on
-            # `journal_object_surviving is not None`) was SKIPPED and an
-            # id-only absent-target supersede restored silently, while
-            # `rebuild_all` refuses the identical journal. Supply the same
-            # whole-journal keys `rebuild`/`recover_from_log` supply, and
-            # feature-detect the kwargs (an `apply(ev)`-only injected backend
-            # must not be handed a kwarg it does not accept).
-            journal_object_surviving = journal_object_surviving_keys(records)
-            # #7719: derived from the GATED map via `_hard_deleted_any`, so an
-            # anchor-suppressed delete no longer exempts the supersede.
-            journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
-            # #3585 (P1-1): the whole-journal EXISTENCE map, so a
-            # retract/state-op that precedes its own creation (folded by
-            # `rebuild_all`'s hoist) is not refused on this chronological path.
-            first_materialized = journal_first_materialization(records)
-            apply_kwargs: dict = {}
-            _pass_seq = False
-            try:
-                _apply_params = inspect.signature(proj.apply).parameters
-            except (TypeError, ValueError):
-                _apply_params = {}
-            if "journal_object_surviving" in _apply_params:
-                apply_kwargs["journal_object_surviving"] = journal_object_surviving
-                apply_kwargs["journal_object_deleted"] = journal_object_deleted
-            if "journal_first_materialized" in _apply_params:
-                apply_kwargs["journal_first_materialized"] = first_materialized
-                _pass_seq = "journal_seq" in _apply_params
-            # The refusal is a RUN BOUNDARY, exactly as on the other three
-            # engines: without the collector `record_non_folded` is a no-op
-            # and the context would change nothing. `assert_no_non_folded`
-            # raises `NonFoldedEventsError` AFTER the close, so a miss fails
-            # the restore loudly instead of returning `{"status": "ok"}`.
-            with collect_non_folded() as _nf_entries:
-                for seq, ev in enumerate(records):
-                    if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
-                        deferred_links.append((seq, ev))
-                        continue
-                    # Keyed on the PLAN, not the raw envelope type — the plan
-                    # selects by the NORMALIZED type (``_norm`` splices a nested
-                    # payload), so a raw-type guard would let a ``type``-in-``point``
-                    # terminalizer fall through to ``apply()``'s inline branch and
-                    # its unshared selection (#325/#3722's raw-vs-normalized class).
-                    if seq in restamp_plan:
-                        edge = proj.apply_journal_point_restamp(
-                            ev, seq, restamp_plan, hard_deleted=hard_deleted)
-                        if edge is not None:
-                            deferred_corrects.append(edge)
-                        continue
-                    if _pass_seq:
-                        proj.apply(ev, journal_seq=seq, **apply_kwargs)
-                    else:
-                        proj.apply(ev, **apply_kwargs)
-                if deferred_corrects:
-                    try:
-                        proj.fold_deferred_corrects_edges(
-                            deferred_corrects, hard_delete_seqs)
-                    except Exception:
-                        logger.exception(
-                            "restore: deferred CORRECTS fold failed; %d "
-                            "edge(s) not replayed", len(deferred_corrects))
-                if deferred_links:
-                    try:
-                        proj.fold_deferred_entity_links(
-                            deferred_links, hard_delete_seqs)
-                    except Exception:
-                        logger.exception(
-                            "restore: deferred EntityLinked fold failed; %d "
-                            "link(s) not replayed", len(deferred_links))
-            assert_no_non_folded(_nf_entries, engine="restore")
-        finally:
-            proj.close()
 
-    return {"events": count, "status": "ok"}
+        return {"events": count, "status": "ok"}
 
 
 def _bgsave(uri: str | None = None) -> str:

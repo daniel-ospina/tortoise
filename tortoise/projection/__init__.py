@@ -3131,6 +3131,31 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+def stale_aof_dirs(db_path: str | os.PathLike) -> list[Path]:
+    """#915/#7767 — the AOF dirs adjacent to an embedded DB, in removal order.
+
+    The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
+    so multiple embedded DBs in one directory keep isolated AOF dirs. Also
+    tolerate the old literal "appendonlydir" sibling and the
+    "<db>-appendonlydir" suffix form (pre-appenddirname builds).
+
+    ONE home for the rule: :func:`remove_stale_aof` DELETES exactly these, and
+    ``backup.restore``'s refusal rollback STAGES exactly these aside before it
+    overwrites the destination (#7767). A newly-tolerated AOF name therefore
+    cannot be deleted by one surface and missed by the other — the re-derived
+    rule that #5285 lesson names.
+
+    Empty for ``:memory:`` (or a missing path) — there is no adjacent dir.
+    """
+    if not db_path or str(db_path) == ":memory:":
+        return []
+    db = Path(str(db_path))
+    return [
+        db.with_name(db.name + "-appendonlydir"),
+        db.parent / "appendonlydir",
+    ]
+
+
 def remove_stale_aof(db_path: str | os.PathLike) -> None:
     """#915 — remove a stale AOF dir adjacent to an embedded DB.
 
@@ -3142,18 +3167,7 @@ def remove_stale_aof(db_path: str | os.PathLike) -> None:
     "the restored snapshot wins" — call this on the target path before any
     open/copy. No-op when the DB path is ``:memory:`` or has no adjacent dir.
     """
-    if not db_path or str(db_path) == ":memory:":
-        return
-    # The projection sets appenddirname to "<db-filename>-appendonlydir" (#915)
-    # so multiple embedded DBs in one directory keep isolated AOF dirs.
-    # Also tolerate the old literal "appendonlydir" sibling and the
-    # "<db>-appendonlydir" suffix form (pre-appenddirname builds).
-    db = Path(str(db_path))
-    candidates = [
-        db.with_name(db.name + "-appendonlydir"),
-        db.parent / "appendonlydir",
-    ]
-    for d in candidates:
+    for d in stale_aof_dirs(db_path):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
             logger.warning("removed stale AOF dir %s (restore/migrate contract, #915)", d)

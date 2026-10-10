@@ -764,6 +764,7 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_7767_restore_rollback.py
   - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
