@@ -40,11 +40,12 @@ MUTATIONS THAT MUST RED:
   the EventAPI case reds (that payload carries no ``is_operator`` at all). The
   SDK's generic operator stays green under that weakening because its payload
   states ``is_operator: True`` — the absent-key case is the load-bearing one;
-- drop ``mitigation_strength`` from ``is_mitigation_payload`` → a non-operator
-  point carrying only an ``operator`` descriptor mints ``mitigated_by`` and
-  dampens that operator by the fallback strength (the fold is the LIVE+replay
-  edge writer, so this is a belief change, not just a replay one); see
-  ``test_non_operator_descriptor_without_strength_gains_no_edge``;
+- weaken the strength half of ``is_mitigation_payload`` (drop it, or
+  accept a merely-present value) → a non-operator point carrying only an
+  ``operator`` descriptor mints ``mitigated_by`` and dampens that operator by
+  the fallback strength (the fold is the LIVE+replay edge writer, so this is a
+  belief change, not just a replay one); see
+  ``test_payload_without_a_usable_strength_gains_no_edge``;
 - drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
   identity parity assertion fails;
 - drop the ``mitigation_strength`` fold in ``_revise_point`` → the
@@ -334,16 +335,31 @@ class TestMitigatedBySurvivesRebuild:
         finally:
             sdk.close()
 
-    def test_non_operator_descriptor_without_strength_gains_no_edge(self, tmp_path):
-        """The descriptor alone does not make a mitigation.
+    @pytest.mark.parametrize("strength", [
+        # omitted entirely — the shape a low-level EventAPI caller produces
+        pytest.param(None, id="omitted"),
+        # dropped by ``_persist_extra_props`` (a map, and the Point layer's
+        # list policy — ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up
+        # with NO strength and a fabricated edge would dampen at the fallback
+        pytest.param({"not": "persistable"}, id="map"),
+        pytest.param([0.5], id="undeclared-list"),
+        # persistable, so it LANDS on the node and then makes
+        # ``weights.compute_operator_weight`` raise on every read
+        pytest.param("not-a-number", id="non-numeric"),
+    ])
+    def test_payload_without_a_usable_strength_gains_no_edge(self, tmp_path,
+                                                             strength):
+        """Only a NON-operator point carrying a usable strength is a mitigation.
 
         ``EventAPI.add_point(content, prov, **fields)`` forwards arbitrary
         fields, and ``_create_edges`` is the SHARED live+replay edge writer, so
         a low-level producer can attach an ``operator`` descriptor to a
-        non-operator point. Without the mitigation's own ``mitigation_strength``
-        that is not a record any live writer produced, and minting
-        ``mitigated_by`` for it dampens the operator by the fallback strength
-        (measured 1.0 -> 0.7) — a silent belief change.
+        non-operator point. That is not a record any live writer produced — and
+        neither is one whose ``mitigation_strength`` is merely PRESENT but
+        unusable (``mitigate_operator`` writes a finite real; the passthrough
+        drops a map/list, and a non-numeric value poisons every weight read).
+        Minting ``mitigated_by`` for either dampens the operator by the
+        fallback strength (measured 1.0 -> 0.7) — a silent belief change.
         """
         sdk, _events = _fresh_sdk(tmp_path)
         try:
@@ -353,15 +369,18 @@ class TestMitigatedBySurvivesRebuild:
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(BASE_WEIGHT)
 
-            sdk._get_proj()._upsert_point_edges({
+            payload = {
                 "id": victim, "content": "annotated rel",
                 "is_operator": False,
                 "operator": {"op_type": "IMPL", "inputs": [op_id]},
-            })
+            }
+            if strength is not None:
+                payload["mitigation_strength"] = strength
+            sdk._get_proj()._upsert_point_edges(payload)
 
             assert _all_mitigated_by(sdk) == [], (
-                "a non-operator descriptor without mitigation_strength minted "
-                "a mitigated_by edge"
+                "a non-operator descriptor with an unusable "
+                f"mitigation_strength ({strength!r}) minted a mitigated_by edge"
             )
             assert compute_operator_weight(
                 sdk._get_proj(), op_id) == pytest.approx(before), (

@@ -48,17 +48,25 @@ def is_mitigation_payload(payload: dict) -> bool:
       ``OperatorAdded`` with no flag at all — that form would treat every
       generic IMPL operator on the main write path as a mitigation and dampen
       each of its inputs.
-    * ``mitigation_strength`` present. The descriptor is NOT enough on its own:
+    * ``mitigation_strength`` is a USABLE strength — a finite real, which is the
+      only thing ``sdk.py::mitigate_operator`` can write (``weights.py`` clamps
+      on read). The descriptor is NOT enough on its own:
       ``EventAPI.add_point(content, prov, **fields)`` forwards arbitrary
       fields, so a low-level producer can attach an ``operator`` descriptor to
       a non-operator point. Treating that as a mitigation would mint
       ``(op)-[:mitigated_by]->(m)`` for every input and silently dampen that
       operator by the fallback strength (measured ``w_eff`` 1.0 -> 0.7) — a
-      belief change the producer never asked for. No live writer ever produced
-      a non-operator point with a descriptor and no strength; a legacy
-      mitigation that predates ``mitigation_strength`` keeps the pre-#5048
-      behaviour (no reconstructed edge) rather than acquiring a fabricated
-      one.
+      belief change the producer never asked for. Nor is mere PRESENCE enough:
+      a map/list/``None`` strength is dropped by ``_persist_extra_props`` (so
+      the node ends up with no strength and the fabricated edge dampens at the
+      fallback anyway), and a non-numeric one is stored and then makes
+      ``weights.compute_operator_weight`` RAISE on every read. The predicate
+      therefore matches what the writer can actually store, exactly as the
+      pass-1b anchor is keyed on the writer's reported outcome rather than a
+      re-spelling of its condition. No live writer ever produced a non-operator
+      point with a descriptor and no usable strength; a legacy mitigation that
+      predates ``mitigation_strength`` keeps the pre-#5048 behaviour (no
+      reconstructed edge) rather than acquiring a fabricated one.
 
     ONE home for that identity, because the record's replay is split across two
     modules: ``_upsert_point_props`` (here) decides what the node IS, and
@@ -67,8 +75,11 @@ def is_mitigation_payload(payload: dict) -> bool:
     and did: the two halves of this one record's replay must agree by
     construction, not by review.
     """
+    strength = payload.get("mitigation_strength")
     return (payload.get("is_operator") is False
-            and payload.get("mitigation_strength") is not None)
+            and isinstance(strength, (int, float))
+            and not isinstance(strength, bool)
+            and math.isfinite(strength))
 
 
 def _terminal_object_statuses() -> list:
