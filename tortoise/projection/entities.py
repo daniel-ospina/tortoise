@@ -960,6 +960,12 @@ class _EntityHandlers:
         # drift warning on every rebuild.
         "annotator_bias", "annotator_precision",
         "annotator_consistency", "annotator_directness",
+        # #7856: the goal ACHIEVEMENT state (a validated closed vocabulary,
+        # `sdk.GOAL_STATE_VALUES` — separate from the `status` lifecycle). A
+        # legacy goal POINT carries it via the Point write path; declaring it
+        # keeps the replay open-set passthrough from logging a FALSE
+        # `"Point prop %r is not declared"` drift warning on every rebuild.
+        "goalState",
     })
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
