@@ -1836,6 +1836,11 @@ surfaces:
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
   - test_unjournaled_mutation_class.py
+  # #3311: the multi-label (`:Point:Object`) status write — vocabulary validation
+  # plus a replayable journal line on the generic entity surface. Same
+  # projection/journal seam as test_unjournaled_mutation_class.py directly above;
+  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so `core` is the default home.
+  - test_3311_multilabel_status_vocab.py
   - test_uri_env_mutations_declared.py
   # #4649: the write OR-set (Source by id OR url) — producer, both replay
   # folds and the MCP delete preview, with the rebuild residual pinned to #5048.
