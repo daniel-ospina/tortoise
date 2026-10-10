@@ -208,6 +208,16 @@ def issue_to_event(issue: dict, repo: str,
         # `object` references the pm:issue Object by NAME — the projection's
         # produces-edge wiring matches Object.name (#1155).
         "object": f"{repo}#{n['number']}",
+        # #8019: the item's CONTENT rides the event so the connector Source's
+        # `contentHash` (`_connector_content_hash`) covers it. `object` above is
+        # the Object NAME the produces-edge wires on, not content — so without
+        # these, a title-only or label/assignee change left the digest
+        # unchanged and the derivation reading `current` on a changed item,
+        # while `pr_to_event` (whose title IS its `object`) advanced. The body
+        # is absent on purpose: the poll path does not fetch it (#8010).
+        "title": n["title"],
+        "labels": n["labels"],
+        "assignees": n["assignees"],
         "startedAt": n["created_at"],
         "endedAt": n["closed_at"] if state == "closed" else None,
         "source": f"github:{repo}",

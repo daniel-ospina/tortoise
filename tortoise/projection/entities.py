@@ -358,12 +358,23 @@ def _is_real_source_url(url: str) -> bool:
 #      poll. The digest is defined over the item's materialized content, so
 #      the record that carried it is deliberately not part of it.
 #
+#   3. IDENTITY of the SOURCE NODE — `source`/`sourceUrl`. Both are the node's
+#      own MERGE key, resolved to ONE node by `resolve_source_key` /
+#      `normalize_source_url` (`tortoise/source_identity.py`) BEFORE this
+#      digest is computed: those collapse spelling variants (trailing slash,
+#      host case, tracking params) onto the same `:Source`. Hashing the raw
+#      spelling would give two records of one UNCHANGED item two digests — a
+#      version bump on a respelled URL, the same false stale the id exclusion
+#      prevents for a producer switch. The digest is over item CONTENT; the
+#      node's identity is not content.
+#
 # `embedding` is excluded for the same reason in a different medium: it is a
 # DERIVED vector, so re-encoding (or an embedding-model change) would advance
 # the version with no item change.
 _CONNECTOR_HASH_EXCLUDED: frozenset = frozenset({
     "type", "projection_version", "version",
     "id", "eventId",
+    "source", "sourceUrl",
     "embedding",
     "event_id", "ts", "initiated_by", "agent_id", "actor_user_id",
     "corrects", "_merge_run_id", "__runId",
@@ -386,8 +397,15 @@ def _connector_content_hash(inner: dict) -> str:
 
     Determinism is a requirement, not a nicety: this is the input to a version
     transition, so two records of ONE item state must hash equal (see
-    ``_CONNECTOR_HASH_EXCLUDED`` — the excluded id is the case that makes it
-    true). Canonical form: sorted keys, no insignificant whitespace, UTF-8.
+    ``_CONNECTOR_HASH_EXCLUDED`` — the excluded id and the node identity are
+    the cases that make it true). Canonical form: sorted keys, no insignificant
+    whitespace, UTF-8.
+
+    The encoder is STRICT — deliberately no ``default=str``. Falling back to
+    ``str()`` for an arbitrary object makes the digest process-dependent: a
+    `set` iterates in hash order, so `PYTHONHASHSEED` alone changes the digest
+    and mints a version bump on every restart with no content change. A payload
+    we cannot canonicalize is one we cannot honestly anchor.
 
     Returns `""` (never raises) when the payload cannot be canonicalized — a
     connector Source with no computable digest stays honestly unanchored, the
@@ -399,9 +417,9 @@ def _connector_content_hash(inner: dict) -> str:
     body = {k: v for k, v in inner.items() if k not in _CONNECTOR_HASH_EXCLUDED}
     try:
         blob = json.dumps(body, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False, default=str)
+                          ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-    except (TypeError, ValueError):  # pragma: no cover - default=str is total
+    except (TypeError, ValueError):
         return ""
 
 

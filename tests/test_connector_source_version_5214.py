@@ -38,6 +38,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tortoise import github_map as gm
 from tortoise.projection.entities import _connector_content_hash
 from tortoise.sdk import TortoiseSDK
 
@@ -188,6 +189,30 @@ def test_an_unchanged_repoll_does_not_advance_the_version():
         assert first[1] == 1
 
 
+def test_a_url_spelling_variant_does_not_advance_the_version():
+    """Finding 1 (#8019): `sourceUrl` is the Source NODE's identity, not item
+    content. `resolve_source_key`/`normalize_source_url` collapse a trailing
+    slash (and host case, tracking params) onto ONE node, so a respelled URL for
+    an UNCHANGED item must not move `(contentHash, version)`.
+
+    FAILS IF `sourceUrl`/`source` are folded into `_connector_content_hash`:
+    the variant hashes differently from the item's canonical spelling and
+    advances the version — a false stale on a respelling, the same defect the
+    `eventId` exclusion prevents for a producer switch."""
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(gh_issue_event())
+        first = _source(proj, GH_URL)
+        assert first[1] == 1
+        proj.apply(gh_issue_event(sourceUrl=GH_URL + "/"))
+        assert _source(proj, GH_URL) == first, (
+            "the same item state with a respelled URL must not advance the version"
+        )
+        assert _source(proj, GH_URL + "/") is None, (
+            "the variant must resolve onto the canonical node, not mint a second"
+        )
+
+
 # ── 3. a content change advances the pair TOGETHER ───────────────────
 
 def test_a_content_changing_repoll_advances_the_hash_and_the_ordinal():
@@ -296,6 +321,89 @@ def test_the_digest_is_canonical_over_key_order():
     b = {"startedAt": "T", "sourceUrl": GH_URL, "eventKind": "github.issue.open",
          "object": "a#1", "subject": "issue:a#1"}
     assert _connector_content_hash(a) == _connector_content_hash(b)
+
+
+def test_an_issue_title_change_advances_the_version_like_a_pr_title():
+    """Finding 2 (#8019): the digest must cover the same item content for the
+    connector's two GitHub kinds. `pr_to_event` carries the PR title as its
+    `object`, but `issue_to_event` carried only the lifecycle envelope — so a
+    title-only issue change advanced nothing and the derivation read `current`
+    on a changed item.
+
+    FAILS IF `issue_to_event` omits the title: the issue pair below hashes
+    equal and the Source version does not move, while the PR pair (the control)
+    already differs."""
+    issue = {
+        "number": 42,
+        "title": "Fix login bug",
+        "state": "open",
+        "created_at": "2026-07-10T10:00:00Z",
+        "updated_at": "2026-07-10T10:00:00Z",
+        "closed_at": None,
+        "html_url": GH_URL,
+        "body": "The bug is in the parser.",
+        "labels": [{"name": "bug"}],
+        "assignees": [{"login": "alice"}],
+        "user": {"login": "alice"},
+    }
+    a = gm.issue_to_event(dict(issue), "test/repo")
+    b = gm.issue_to_event(dict(issue, title="Changed title"), "test/repo")
+    assert _connector_content_hash(a) != _connector_content_hash(b), (
+        "an issue title change is item content and must be in the digest"
+    )
+    pr = {
+        "number": 7, "title": "PR title", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "merged_at": None, "html_url": "https://github.com/test/repo/pull/7",
+    }
+    pa = gm.pr_to_event(dict(pr), "test/repo")
+    pb = gm.pr_to_event(dict(pr, title="Changed PR title"), "test/repo")
+    assert _connector_content_hash(pa) != _connector_content_hash(pb), (
+        "control: a PR title change is already covered via `object`"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        v1 = _source(proj, GH_URL)
+        proj.apply(b)
+        v2 = _source(proj, GH_URL)
+        assert v2[0] != v1[0], "a title change must move the contentHash"
+        assert v2[1] == v1[1] + 1, (
+            f"the ordinal must advance with the hash: {v1[1]} -> {v2[1]}"
+        )
+
+
+def test_a_non_canonicalizable_payload_returns_the_honest_absent_digest():
+    """Finding 3 (#8019): the digest must be a function of the payload ALONE.
+    `default=str` serialised arbitrary objects via `str()`, and a `set`
+    iterates in hash order, so `PYTHONHASHSEED` alone changed the digest and
+    minted a version bump on every restart with no content change.
+
+    FAILS IF `_connector_content_hash` passes `default=str` to `json.dumps`:
+    the set payload below returns a 64-char digest instead of `""`, and the
+    in-process assertion pins the never-raises/honest-absent contract."""
+    import subprocess
+
+    assert _connector_content_hash(
+        {"payload": {"alpha", "beta", "gamma", "delta"}}) == "", (
+        "a payload we cannot canonicalize is honestly unanchored, never a str() hash"
+    )
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import sys; sys.path.insert(0, %r);"
+        "from tortoise.projection.entities import _connector_content_hash as h;"
+        "print(h({'payload': {'alpha', 'beta', 'gamma', 'delta'}}))" % repo_root
+    )
+    digests = set()
+    for seed in ("1", "2", "3"):
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        digests.add(out.stdout.strip())
+    assert digests == {""}, (
+        f"the digest must not depend on PYTHONHASHSEED (set iteration order): {digests!r}"
+    )
 
 
 # ── 5. container-level fallback keys stay honestly unanchored ────────
