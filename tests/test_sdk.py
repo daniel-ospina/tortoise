@@ -447,6 +447,28 @@ class TestTraverse:
         assert in_op[a["id"]]["idx"] == 0
         assert in_op[b["id"]]["idx"] == 1
 
+    def test_navigation_surfaces_the_idx_from_a_real_graph(self, sdk):
+        """#6101: `tortoise_traverse` and `entityProfile` read `r.idx` in
+        `navigation._hop_query` — a REAL-graph test, because the navigation
+        mocks hand back pre-seeded 3-column rows and so cannot fail when the
+        `, r.idx` projection is dropped from the emitted Cypher (the recorded
+        response fields for both surfaces need a producer-side guard)."""
+        from tortoise.navigation import entityProfile, tortoise_traverse
+
+        proj = sdk._get_proj()
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        hops = {n["node"]["id"]: n
+                for n in tortoise_traverse(proj.db, proj.graph_name, op["id"], 2)["nodes"]}
+        assert hops[a["id"]]["idx"] == 0  # a is the operator's SOURCE
+        assert hops[b["id"]]["idx"] == 1  # b is its TARGET
+
+        profile = entityProfile(proj.db, proj.graph_name, op["id"], hops=1)
+        connected = {p["id"]: p for p in profile["connected"]["points"]}
+        assert connected[a["id"]]["_idx"] == 0
+        assert connected[b["id"]]["_idx"] == 1
+
 
 # ── verify_chain ─────────────────────────────────────────────────────
 
