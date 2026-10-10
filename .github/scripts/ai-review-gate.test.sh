@@ -94,10 +94,10 @@ assert_rc() {
     if [ "$GATE_RC" = "$1" ]; then ok "$2"; else bad "$2 (got rc=$GATE_RC want $1; out: $GATE_OUT)"; fi
 }
 assert_contains() {
-    if printf '%s' "$GATE_OUT" | grep -qF -- "$2"; then ok "$1"; else bad "$1 (missing: $2; out: $GATE_OUT)"; fi
+    if grep -qF -- "$2" <<<"$GATE_OUT"; then ok "$1"; else bad "$1 (missing: $2; out: $GATE_OUT)"; fi
 }
 assert_not_contains() {
-    if printf '%s' "$GATE_OUT" | grep -qF -- "$2"; then bad "$1 (unexpected: $2; out: $GATE_OUT)"; else ok "$1"; fi
+    if grep -qF -- "$2" <<<"$GATE_OUT"; then bad "$1 (unexpected: $2; out: $GATE_OUT)"; else ok "$1"; fi
 }
 
 T="$(mktemp -d /tmp/ai-review-gate-test.XXXXXX)"
@@ -416,7 +416,7 @@ mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_LOG"
-if printf '%s' "$*" | grep -qF -- "application/vnd.github.v3.diff"; then
+if grep -qF -- "application/vnd.github.v3.diff" <<<"$*"; then
     [ "${STUB_DIFF_FAIL:-0}" = "1" ] && exit 1
     cat "${STUB_DIFF_FILE:?}"
     exit 0
@@ -424,7 +424,7 @@ fi
 # The PR's issue comments — the SECOND evidence channel (#1224). The default is
 # a SUCCESSFUL fetch that returns nothing (no comment-carried evidence), which
 # must stay distinguishable from the failure arm inside.
-if printf '%s' "$*" | grep -qE -- "/issues/[0-9]+/comments"; then
+if grep -qE -- "/issues/[0-9]+/comments" <<<"$*"; then
     if [ "${STUB_COMMENTS_FAIL:-0}" = "1" ]; then
         # gh's real failure mode: the HTTP error envelope on STDOUT, rc != 0.
         printf '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":404}\n'
@@ -433,7 +433,7 @@ if printf '%s' "$*" | grep -qE -- "/issues/[0-9]+/comments"; then
     [ -n "${STUB_COMMENTS_FILE:-}" ] && cat "$STUB_COMMENTS_FILE"
     exit 0
 fi
-if printf '%s' "$*" | grep -qF -- "--jq .body"; then
+if grep -qF -- "--jq .body" <<<"$*"; then
     if [ "${STUB_BODY_FAIL:-0}" = "1" ]; then
         # gh's real failure mode: the HTTP error envelope on STDOUT, rc != 0.
         printf '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":404}\n'
@@ -577,7 +577,7 @@ legacy_marker "$HEAD" > "$T/body-c"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-c"
 assert_rc 0 "(c) gate passes"
 assert_contains "(c) normal pass message" "AI review gate passed:"
-if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+if grep -qF "passed via diff match" <<<"$GATE_OUT"; then
     bad "(c) legacy pass must not claim the diff path"
 else
     ok "(c) legacy pass does not claim the diff path"
@@ -603,7 +603,7 @@ assert_rc 0 "(d2) sha-match still passes without a live diff hash"
 diff_marker "$HEAD" "$DH2" > "$T/body-d3"
 STUB_DIFF_FILE="$DIFF_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-d3"
 assert_rc 0 "(d3) a head-bound diff= marker passes when the live diff fetch fails"
-if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+if grep -qF "passed via diff match" <<<"$GATE_OUT"; then
     bad "(d3) head-bound pass must not claim the diff path"
 else
     ok "(d3) head-bound pass does not claim the diff path"
@@ -844,7 +844,7 @@ assert_contains "(o4) says the live hash was unavailable" "live diff hash could 
 diff_marker "$HEAD" "$DH_NEITHER" > "$T/body-o5"
 STUB_DIFF_FILE="$DIFF_NORM_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-o5"
 assert_rc 0 "(o5) the head-bound path is unchanged by normalization"
-if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+if grep -qF "passed via diff match" <<<"$GATE_OUT"; then
     bad "(o5) head-bound pass must not claim the diff path"
 else
     ok "(o5) head-bound pass does not claim the diff path"

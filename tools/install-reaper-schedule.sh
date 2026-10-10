@@ -304,7 +304,7 @@ install_linux() {
     current="$($CRONTAB_CMD -l 2>/dev/null || true)"
     local new_line
     new_line="$(cron_line | tail -1)"
-    if printf '%s\n' "$current" | grep -qF "$CRON_MARKER"; then
+    if grep -qF "$CRON_MARKER" <<<"$current"; then
         # Replace any prior tortoise-reaper block (marker + schedule lines).
         # #4438 review: the old ERE never matched the marker (it omitted the
         # space in "# ... reaper (#1642)"), so re-running the installer

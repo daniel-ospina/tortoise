@@ -55,6 +55,17 @@ carve_shards: 3
 
 surfaces:
   api:
+  # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
+  # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
+  # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
+  # that REPLACES the `core` fallback in `select()` (`core` is added only when
+  # NOTHING named matched). So a `tortoise/hosted_api.py`-only PR — e.g. a
+  # revert of the #7809 `_embedder_warmup_enabled()` gate — selects
+  # `api`+`onboarding` and would never run the registered-in-`core` guard: the
+  # #1349/#2938/#3154 silent-drop class (the surface audit flags exactly this:
+  # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
+  # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
+  - test_7809_hosted_prewarm_warmup_flag.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
@@ -764,6 +775,14 @@ surfaces:
   core:
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
+  - test_7809_hosted_prewarm_warmup_flag.py
+  - test_7767_restore_rollback.py
+  # #7856: half this file's subject is the `goalState` declaration in
+  # `tortoise/projection/entities.py` (`_POINT_DECLARED_PROPS` — it suppresses
+  # the replay passthrough's false drift warning). An `entities.py`-only change
+  # falls through to `core`, so without this entry the declaration's guard
+  # never runs on the change that can delete it.
+  - test_7856_goal_state.py
   - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
@@ -792,6 +811,15 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #2886: the wiring seam's hermetic adapter guard
+  # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
+  # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,
+  # like `test_time_aware_run_2520.py`): `core` runs it when the core's
+  # verdict semantics change, `eval` when `tools/longmem_eval/retrieve.py`
+  # changes alone (`tools/longmem_eval/` is an `eval` SOURCE_PATTERN).
+  # Without a registration the file's own guard is skipped on its
+  # diff-selected legs (#7076 class).
+  - test_temporal_aggregate_arm.py
   # #2886: the deterministic temporal-aggregation core
   # (`tortoise/temporal_aggregation.py`). That source matches no SOURCE_PATTERNS
   # rule and falls back to `core`, so this is the surface that runs the guard
@@ -1183,6 +1211,7 @@ surfaces:
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
+  - test_5048_mitigated_by_replay.py  # #5048: a mitigation's mitigated_by edge, NON-operator identity and revised strength must survive rebuild_all, and check_consistency must not call the faithful rebuild diverged. `tortoise/consistency.py` and `tortoise/projection/entities.py` select `core`; `projection/edges.py` and `projection/__init__.py` are SHARED_MODULEs, and `tortoise/api.py` selects `api`+`core`, so `core` alone reaches every seam this file guards. Lane: DOCKER (the #1647 default) — URI-less it FAILS at the session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
@@ -2154,6 +2183,11 @@ surfaces:
   sdk:
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #7856: the goal-STATE axis — the closed, validated `goalState` vocabulary
+  # (the objective map's achievement state, separate from `status`) and the
+  # born-live default for goal-kind Points (a target-only draft goal is
+  # EP-inert while `converged=True` is still reported).
+  - test_7856_goal_state.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -2256,6 +2290,13 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
+  # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
+  # hosted lifespan now calls), and that module is an EXACT
+  # SOURCE_PATTERNS["eval"] match, so an `embeddings.py`-only change selects
+  # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
+  # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
+  - test_7809_hosted_prewarm_warmup_flag.py
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
@@ -2286,6 +2327,7 @@ surfaces:
   - test_ask_eval_only.py  # #3849: N6 pins tools/longmem_eval/reader.py's prompt re-export (an eval-owned file) — also under api/core/sdk
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
+  - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
   - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
@@ -3495,6 +3537,7 @@ durations:
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.2
   test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
+  test_5048_mitigated_by_replay.py: 30.0  # unmeasured — #5048: local private-lane readings on this host (17.5s/24.8s/26.5s/29.7s across the review rounds, 10 tests each driving real FalkorDB rebuild cycles); 30.0 is their max. Refresh from the first CI junit that includes it. Registered here rather than in `slow_files` deliberately: ~30s is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives, and the value errs high (the conservative side for a shard-balance veto) without inflating the slow leg.
   test_build_cohorts_2517.py: 0.1
   test_eval_reinjection_cap_resume.py: 0.5
   test_guard_measured_revision.py: 3.5
