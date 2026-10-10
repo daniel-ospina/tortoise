@@ -5502,6 +5502,28 @@ class TortoiseSDK:
         replay cannot undo.
         """
         if journal:
+            # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
+            # the journaling path, BEFORE the append (so the record and the
+            # fold carry the SAME instant). `_create_entity` stamps
+            # `event["createdAt"] = now_iso()` exactly to close the #2164-P4
+            # "a replay stamps rebuild time" class: without it a journaled
+            # record carries no create instant, so `_upsert_subject` /
+            # `_upsert_object`'s `coalesce($ca, $now)` stamps the REBUILD
+            # time on replay and live != replayed for the same journal.
+            # `_journal_record_payload` shares the payload-KEY rule between
+            # the two doors; this shares the value-SYNTHESIS rule, which the
+            # reviewer found had drifted (the Subject payloads the indexer
+            # mints carry no `createdAt` of their own).
+            #
+            # Gate on is-None (not key-absence), exactly like `_create_entity`:
+            # an explicit `createdAt=None` caller prop must not slip a NULL
+            # onto the journal line (replay ON CREATE would stamp rebuild
+            # time). A producer-supplied instant (`issue_to_object` carries
+            # one) is kept verbatim.
+            if (event.get("type") in _JOURNALED_ENTITY_EVENT_TYPES
+                    and event.get("createdAt") is None):
+                from .ids import now_iso
+                event["createdAt"] = now_iso()
             _failures_before = self._journal_write_failures
             self._journal_entity_event(event)
             if self._journal_write_failures > _failures_before:

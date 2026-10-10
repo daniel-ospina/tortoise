@@ -1490,3 +1490,94 @@ def test_7951_sdk_create_entity_survives_replay(tmp_path):
         )
     finally:
         sdk.close()
+
+
+# ── P1-b (review): the door skipped `_create_entity`'s `createdAt` synthesis
+# `_create_entity` synthesises `event["createdAt"] = now_iso()` on the
+# journaling path BEFORE apply (`sdk.py`, the #2194/#2295 block) exactly to
+# close the #2164-P4 "a replay stamps rebuild time" class. `_apply_and_journal`
+# journaled the record with NO `createdAt`, so a journaled Subject (and Object)
+# carried no create instant and a replay re-stamped rebuild time. The payload
+# KEY rule was shared (`_journal_record_payload`); the value-SYNTHESIS rule was
+# not — which falsified commit 2's "the two live doors cannot drift" claim.
+#
+# RED before the fix:
+#   AssertionError: the journaled SubjectAdded carries no createdAt — a replay
+#   would stamp rebuild time (#2164-P4 class, #7951 P1-b)  [rec.get('createdAt')
+#   is None]
+#   and live != replayed after rebuild_all.
+
+_SUBJ_CREATED_AT = (
+    "MATCH (s:Subject {id:$id}) RETURN s.createdAt")
+
+
+def test_7951_indexer_journals_createdAt_and_replay_does_not_restamp(tmp_path):
+    """The indexer's Subject write must carry the SAME create instant into the
+    journal and the graph, and a replay must reproduce it (not rebuild time)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+        live = _jdoor_one(proj, _SUBJ_CREATED_AT, id=_JDOOR_SID)
+        assert live, (
+            "the live Subject has no createdAt — the probe below would be "
+            "vacuous (#7951 P1-b)")
+
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "SubjectAdded"]
+        assert len(records) == 1, f"expected one SubjectAdded, got {records!r}"
+        assert records[0].get("createdAt") == live, (
+            "the journaled SubjectAdded carries no createdAt (or a different "
+            "one) — `_apply_and_journal` skipped `_create_entity`'s synthesis, "
+            "so a replay would stamp rebuild time instead of the live create "
+            "time (#2164-P4 class, #7951 P1-b)")
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        replayed = _jdoor_one(proj, _SUBJ_CREATED_AT, id=_JDOOR_SID)
+        assert replayed == live, (
+            f"replay RE-STAMPED the Subject's createdAt: live={live!r} "
+            f"replayed={replayed!r} (#7951 P1-b)")
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_journals_createdAt_for_the_object_too(tmp_path):
+    """The Object arm of the same rule (both are `_create_entity`-synthesised)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+        live = _jdoor_one(proj,
+                          "MATCH (o:Object {id:$id}) RETURN o.createdAt",
+                          id=_JDOOR_OID)
+        assert live
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "ObjectRegistered"]
+        assert len(records) == 1
+        assert records[0].get("createdAt") == live, (
+            "the journaled ObjectRegistered carries no createdAt (#7951 P1-b)")
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_one(
+            proj, "MATCH (o:Object {id:$id}) RETURN o.createdAt",
+            id=_JDOOR_OID) == live, "replay re-stamped the Object createdAt"
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_journals_createdAt_for_events(tmp_path):
+    """The Event arm — `_apply_and_journal` journals EventRecorded records,
+    which the producer also mints without a `createdAt`; the door must stamp
+    one so every record it journals carries its create instant uniformly."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_pr(7)])), sdk)
+        pid = "github-pr-acme/repo1-7"
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "EventRecorded"
+                   and e.get("eventId") == pid]
+        assert len(records) == 1, f"expected one EventRecorded, got {records!r}"
+        assert records[0].get("createdAt"), (
+            "the journaled EventRecorded carries no createdAt — "
+            "`_apply_and_journal` skipped the door's synthesis (#7951 P1-b)")
+    finally:
+        sdk.close()
