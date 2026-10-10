@@ -193,6 +193,33 @@ def _check_bucket(bucket: str) -> None:
         )
 
 
+# #2767 (owner ruling, 2026-10-09): `milestone` is a core EVENT kind, not a point
+# kind — a milestone is *reached* at a moment. It is therefore removed from the
+# legacy flat point registry.
+#
+# This is the ONLY name the ruling moved, and it is defined ONCE here because two
+# call sites depend on it (`known_kinds` and `domain_kinds`) and they must not
+# diverge. The generic form, `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]`,
+# does NOT merely drop `milestone`: measured, it also removes `meeting` (both names
+# sit in _BASE_KINDS and in CANONICAL_EVENT_KINDS). That is a hard-block behaviour
+# change on the hosted write path — `known_kinds("pointKind")` is the validator at
+# hosted_api.py:6575, so `CreatePointRequest(kind="meeting")` would start raising.
+# The `meeting` removal was never ruled on by #2767 and needs its own issue; it
+# must not ride in on this one.
+_POINT_KINDS_REMOVED = frozenset({"milestone"})
+
+
+def _legacy_point_kinds() -> set[str]:
+    """The legacy flat registry, minus the kinds the #2767 ruling moved.
+
+    ONE definition for both consumers — `known_kinds('pointKind')` (the hosted
+    write validator) and `domain_kinds(...'pointKind')` (the extractor prompt).
+    They diverged once already: the generic subtraction stayed in `domain_kinds`
+    and went on dropping `meeting` after `known_kinds` had been scoped.
+    """
+    return _BASE_KINDS - _POINT_KINDS_REMOVED
+
+
 def known_kinds(bucket: str | None = None) -> set[str]:
     """Return the current set of known kind values.
 
@@ -210,22 +237,12 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     _check_bucket(bucket)
     kinds: set[str] = set(_CORE_KINDS_BY_BUCKET[bucket])
     if bucket == "pointKind":
-        # #2767 (owner ruling, 2026-10-09): `milestone` is a core EVENT kind, not
-        # a point/Object kind — a milestone is *reached* at a moment. The legacy
-        # flat registry must therefore stop offering it as a pointKind.
-        #
-        # SCOPED to the kind the ruling actually moved. The generic form,
-        # `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]`, does NOT merely
-        # drop `milestone`: measured, it also removes `meeting` from pointKind
-        # (both names sit in _BASE_KINDS and in CANONICAL_EVENT_KINDS), which is
-        # a hard-block behaviour change on the hosted write path —
-        # `known_kinds("pointKind")` is the validator at hosted_api.py:6575, so
-        # `CreatePointRequest(kind="meeting")` would start raising. That removal
-        # was never ruled on by #2767, is not pinned by a test, and is not
-        # mentioned in the changelog. It is a separate question for its own
-        # issue; it must not ride in on this one. `decision` is unaffected in
-        # either form — _CORE_KINDS_BY_BUCKET re-supplies it above.
-        kinds.update(_BASE_KINDS - {"milestone"})
+        # #2767: the legacy flat registry carries point/event names; the ruling
+        # moved `milestone` to the EVENT axis, so it leaves this bucket.
+        # `decision` is unaffected — _CORE_KINDS_BY_BUCKET re-supplies it above.
+        # The single definition (and why `meeting` is NOT removed) lives on
+        # _POINT_KINDS_REMOVED, consumed by domain_kinds() too.
+        kinds.update(_legacy_point_kinds())
     kinds.update(_pack_kinds_by_bucket()[bucket])
     return frozenset(kinds)
 
@@ -274,10 +291,11 @@ def domain_kinds(domain: str, bucket: str) -> list[str]:
     if bucket == "pointKind":
         # Legacy flat registry (workflow/requirement/issue/...) — kept so the
         # old document-domain vocabulary stays visible to the prompt, minus the
-        # core EVENT kinds that own no point identity (#2767). Same rule as
-        # known_kinds: a name the subtraction drops but _CORE_KINDS_BY_BUCKET
-        # re-supplies (`decision`) is still appended above.
-        for k in sorted(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]):
+        # one kind the #2767 ruling moved. Deliberately the SAME set as
+        # known_kinds(), from the one definition: these two paths diverged once
+        # (this loop kept the generic subtraction and went on dropping
+        # `meeting` after known_kinds had been scoped).
+        for k in sorted(_legacy_point_kinds()):
             if k not in seen:
                 result.append(k)
     return result

@@ -1467,6 +1467,29 @@ class TestMilestoneCanonicalEventKind:
         registry.load_all()
         assert not registry.errors, registry.errors
 
+    def test_both_kind_paths_agree_on_the_removed_set(self):
+        """`known_kinds('pointKind')` (the hosted write validator) and
+        `domain_kinds(...'pointKind')` (the extractor prompt vocabulary) must
+        resolve the legacy registry identically. They diverged once: the generic
+        `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]` subtraction stayed in
+        `domain_kinds` and went on dropping `meeting` after `known_kinds` had
+        been scoped to the ruling's one kind. Both now read the single
+        `_legacy_point_kinds()` definition.
+        """
+        from tortoise.domain_loader import domain_kinds, known_kinds
+        known = known_kinds("pointKind")
+        dk = set(domain_kinds("core", "pointKind"))
+        assert "meeting" in known and "meeting" in dk, \
+            "`meeting` must survive the #2767 change on BOTH paths"
+        assert "milestone" not in known and "milestone" not in dk, \
+            "`milestone` must be gone from pointKind on BOTH paths"
+        # NOTE: a full `dk >= known` comparison is deliberately NOT asserted —
+        # the two sets have different SCOPE (known_kinds unions every loaded
+        # pack's kinds; domain_kinds is one domain's). The divergence that
+        # actually happened is caught by the two membership assertions above:
+        # reverting domain_kinds to the generic subtraction drops `meeting`
+        # from `dk` and fails here.
+
     def test_milestone_is_canonical_event_not_object(self):
         assert "milestone" in CANONICAL_EVENT_KINDS
         assert "milestone" not in CANONICAL_OBJECT_KINDS
@@ -1485,6 +1508,12 @@ class TestMilestoneCanonicalEventKind:
         assert "milestone" in known_kinds("eventKind")
         assert "milestone" not in known_kinds("pointKind")
         assert "milestone" in known_kinds()  # flat legacy view keeps it known
+        # The fix removed a regression without leaving a guard: pin the
+        # RETENTION, so a future change to the subtraction cannot quietly drop
+        # `meeting` again. `meeting` is a core EVENT kind, but it keeps its
+        # legacy pointKind identity — the #2767 ruling moved only `milestone`.
+        assert "meeting" in known_kinds("pointKind")
+        assert "meeting" in known_kinds("eventKind")
 
     def test_miner_event_kind_is_declared(self):
         from tortoise.commit_schema import EVENT_KINDS, compile_vocab
