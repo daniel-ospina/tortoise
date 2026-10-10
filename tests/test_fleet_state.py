@@ -151,6 +151,73 @@ def test_free_requires_quiet_tree_and_quiescent_pane() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the #7743 stall — an orphaned in-flight tool must not read as "working"
+# ---------------------------------------------------------------------------
+
+#: The measured #7743 signature (2026-10-09): parent pi alive, pane spinner
+#: animating, NO descendant process backing the in-flight `task` tool, and no
+#: session write for ~36 min. The turn can never end, so the lane is stalled.
+WEDGED = dict(
+    pid_alive=True,
+    pane_working=True,
+    cpu_delta_seconds=0.0,
+    descendant_count=0,
+    transcript_age_seconds=36 * 60.0,
+)
+
+
+def test_stalled_turn_is_the_three_way_conjunction() -> None:
+    """Every signal ALONE is ambiguous; only their conjunction is the wedge (#7743).
+    Dropping any one must clear the flag, so this fails if the detector keys on a
+    single signal and would then fire on healthy lanes."""
+    assert fs.Liveness(**WEDGED).pane_stalled_turn
+
+    # 1. spinner not animating -> not the wedge (a stalled turn spins).
+    assert not fs.Liveness(**{**WEDGED, "pane_working": False}).pane_stalled_turn
+    # 2. a live child process backs the in-flight tool -> genuinely busy.
+    assert not fs.Liveness(**{**WEDGED, "descendant_count": 1}).pane_stalled_turn
+    # 3. transcript written recently -> a slow-but-progressing turn.
+    assert not fs.Liveness(
+        **{**WEDGED, "transcript_age_seconds": 30.0}
+    ).pane_stalled_turn
+    # 4. dead/unknown parent -> not a live stalled lane.
+    assert not fs.Liveness(**{**WEDGED, "pid_alive": False}).pane_stalled_turn
+    # 5. unmeasured transcript age is fail-closed, never a stall.
+    assert not fs.Liveness(
+        **{**WEDGED, "transcript_age_seconds": None}
+    ).pane_stalled_turn
+    # 6. an UNREADABLE process table is unmeasured, not "the child is gone":
+    #    `cpu_delta_seconds is None` means the descendant tree was never read, so
+    #    `descendant_count == 0` is an artifact, not evidence.
+    assert not fs.Liveness(
+        **{**WEDGED, "cpu_delta_seconds": None}
+    ).pane_stalled_turn
+
+
+def test_a_long_test_run_with_a_live_child_is_not_a_stall() -> None:
+    """A lane running a long quiet tool has an OLD transcript but a LIVE child
+    (descendant). It must not be flagged — that false positive is why the bound is
+    a conjunction and not just "old transcript"."""
+    busy = fs.Liveness(**{**WEDGED, "descendant_count": 3})
+    assert not busy.pane_stalled_turn
+
+
+def test_free_reasons_surfaces_a_stalled_turn_as_recoverable() -> None:
+    lv = fs.Liveness(**WEDGED, cpu_sample_seconds=3.0)
+    reasons = " ".join(fs.free_reasons(lv, 0, 0))
+    assert "STALLED TURN" in reasons
+    assert "RECOVERABLE" in reasons
+    assert "#7743" in reasons
+
+
+def test_to_dict_carries_pane_stalled_turn() -> None:
+    """The persisted lane record must expose the flag, or the reader commands
+    (`lane`, `--json`) cannot report it."""
+    assert fs.Liveness(**WEDGED).to_dict()["pane_stalled_turn"] is True
+    assert fs.Liveness().to_dict()["pane_stalled_turn"] is False
+
+
+# ---------------------------------------------------------------------------
 # the authoritative binding field
 # ---------------------------------------------------------------------------
 

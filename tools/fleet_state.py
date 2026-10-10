@@ -124,6 +124,16 @@ SOURCE_GUESS = "GUESS"  # reported, never used as a session id
 CPU_TOLERANCE_S = 0.10
 DEFAULT_SAMPLE_S = 3.0
 
+#: The #7743 stall bound. A lane whose pane is Working but which has NO descendant
+#: process and has written NOTHING to its session for this long is not busy — it is
+#: STALLED with an in-flight tool whose child is gone, so nothing can end the turn
+#: and any message delivered into its queue can never be drained. 10 min is far
+#: above any healthy model/tool latency and far below the measured wedge (35+ min);
+#: the detection is REPORTING ONLY (it kills nothing), so a conservative value that
+#: can occasionally flag a very slow model call is safe, while a value below the
+#: latency would cry wolf on every long call.
+STALLED_TURN_SECONDS = 600.0
+
 # --- paths ------------------------------------------------------------------
 
 HOME = Path.home()
@@ -466,8 +476,39 @@ class Liveness:
             return None  # unmeasured — never silently "quiescent"
         return not self.pane_ch_moving
 
+    @property
+    def pane_stalled_turn(self) -> bool:
+        """The #7743 wedge: a LIVE, Working pane with no backing child process and
+        a transcript that has not moved for ``STALLED_TURN_SECONDS``.
+
+        This is the orphaned in-flight `task`/`subagent` tool. The child is gone, so
+        `descendant_count == 0` while the spinner keeps animating; nothing will ever
+        resolve the tool or end the turn, so the lane is not busy — it is stalled.
+        Any ONE signal is ambiguous (a slow model call animates the spinner with no
+        child; a long test run has a child and a frozen transcript); the CONJUNCTION
+        is the wedge. Fail-closed: an unmeasured transcript age or an UNMEASURED
+        descendant tree is never a stall — ``cpu_delta_seconds`` is non-None only
+        when the process table was read, so an unreadable ``ps`` cannot be mistaken
+        for "the child is gone".
+
+        Reporting only — it changes no verdict and kills nothing. Recovery is a
+        session resume (``cmux respawn-pane … pi --session <sid>``), which the lane
+        record already carries as ``session.sid``.
+        """
+        return (
+            self.pid_alive
+            and self.pane_working
+            and self.cpu_delta_seconds is not None  # the tree was MEASURED
+            and self.descendant_count == 0
+            and self.transcript_age_seconds is not None
+            and self.transcript_age_seconds >= STALLED_TURN_SECONDS
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self) | {"pane_quiescent": self.pane_quiescent}
+        return asdict(self) | {
+            "pane_quiescent": self.pane_quiescent,
+            "pane_stalled_turn": self.pane_stalled_turn,
+        }
 
 
 def free_reasons(liveness: Liveness, open_pr_count: int, held_issue_count: int) -> list[str]:
@@ -489,6 +530,12 @@ def free_reasons(liveness: Liveness, open_pr_count: int, held_issue_count: int) 
         reasons.append("pane quiescence unmeasured")
     elif not pq:
         reasons.append("pane not quiescent (spinner or moving CH line)")
+    if liveness.pane_stalled_turn:
+        reasons.append(
+            f"STALLED TURN: pane Working with no descendant process and no session "
+            f"write for {liveness.transcript_age_seconds:.0f}s — the in-flight tool's "
+            f"child is gone (#7743); RECOVERABLE by resuming the session"
+        )
     return reasons
 
 
@@ -1494,7 +1541,8 @@ def _render_lane(lane: Mapping[str, Any]) -> str:
         f"            pid={s['pi_pid']} alive={s['pid_alive']} binding_missing={s['binding_missing']}",
         f"  liveness  cpu_delta={lv['cpu_delta_seconds']} over {lv['cpu_sample_seconds']}s "
         f"descendants={lv['descendant_count']} pane_working={lv['pane_working']} "
-        f"pane_quiescent={lv['pane_quiescent']}",
+        f"pane_quiescent={lv['pane_quiescent']} "
+        f"pane_stalled_turn={lv.get('pane_stalled_turn')}",
         f"  claims    issues={list(c['issues'])} prs={list(c['prs'])}",
         f"  free      {lane['free']}" + (f"  (not: {'; '.join(lane['not_free_reasons'])})" if lane["not_free_reasons"] else ""),
     ]

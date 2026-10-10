@@ -1421,18 +1421,25 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertIn("sent-but-not-consumed", result.detail)
         self.assertEqual(result.attempts, 3)  # initial + 2 retries
 
-    def test_busy_lane_pending_turn_is_a_queued_success(self):
-        # THE #5979 DEFECT. `latest_submitted_message` only advances at a turn
-        # boundary, so on a mid-turn lane the strict check can never be
-        # satisfied: pi has ACCEPTED the message into its pending queue (the
-        # `Steering:` display is up) and it becomes a turn when the current turn
-        # ends. That is a DELIVERED message and it must exit 0 — the old verdict
-        # spent the whole timeout and reported `sent-but-not-consumed`.
+    def test_busy_lane_pending_turn_is_delivered_but_not_consumed(self):
+        # THE #5979 DEFECT, then the #7743 correction. `latest_submitted_message`
+        # only advances at a turn boundary, so on a mid-turn lane the strict check
+        # can never be satisfied: pi has ACCEPTED the message into its pending
+        # queue (the `Steering:` display is up) and it becomes a turn when the
+        # current turn ends. That is a DELIVERED message and the old verdict spent
+        # the whole timeout reporting `sent-but-not-consumed` (#5979).
+        #
+        # #7743: it is NOT CONSUMED, and on a lane wedged inside its turn the queue
+        # is drained NEVER. So delivery is carried (`delivered`) but success is not
+        # (`ok` stays False, exit 4) — reporting this as a completed dispatch is
+        # exactly the false positive #7743 names.
         fake = FakeCmux(queued_turn=True)
         result = self._send(fake, consume_timeout=0.0, retries=2)
-        self.assertTrue(result.ok, result.detail)
+        self.assertFalse(result.ok, "a queued-only send is NOT a completed dispatch")
+        self.assertTrue(result.delivered, "it IS in pi's hands — do not re-send")
         self.assertEqual(result.status, "queued")
         self.assertIn("pending queue", result.detail)
+        self.assertIn("NOT consumed", result.detail)
         self.assertEqual(result.attempts, 1, "no need to wait out the retries")
         self.assertEqual(fake.submitted, [], "queued is not yet consumed")
         self.assertEqual(fake.sent_log.count(PROBE), 1, "must never be re-sent")
@@ -1526,7 +1533,8 @@ class TestDispatcherRecovery(unittest.TestCase):
         #2 the baseline, #3 the retry."""
         fake = FakeCmux(queued_turn=True, fail_read_indices={2})
         result = self._send(fake, consume_timeout=0.0, retries=0)
-        self.assertTrue(result.ok, result.detail)
+        self.assertTrue(result.delivered, result.detail)
+        self.assertFalse(result.ok, result.detail)
         self.assertEqual(result.status, "queued")
 
     def test_a_baseline_at_a_DIFFERENT_depth_than_the_confirmation_is_refused(self):
@@ -1556,7 +1564,7 @@ class TestDispatcherRecovery(unittest.TestCase):
             consume_timeout=0.0, retries=0,
         )
         flat = "line one line two"
-        self.assertTrue(result.ok, result.detail)
+        self.assertTrue(result.delivered, result.detail)
         self.assertEqual(result.status, "queued")
         self.assertEqual(fake.queued, flat)
 
@@ -2151,19 +2159,66 @@ class TestCliExitCodes(unittest.TestCase):
         )
         self.assertEqual(rc, 1, "an unconsumed send must NEVER exit 0")
 
-    def test_exit_zero_when_the_message_is_queued_for_the_next_turn(self):
-        # #5979: pi accepted the message into its pending queue. The CLI
-        # contract is exit 0 — a queued message is delivered.
+    def test_exit_four_when_the_message_is_queued_but_not_consumed(self):
+        # #7743: pi accepted the message into its pending queue, so it is
+        # DELIVERED — but it is NOT CONSUMED, and the lane has not acted on it. A
+        # queued-only send must NOT read as a completed dispatch (exit 0): the
+        # lane may be wedged inside its turn, in which case the queue is never
+        # drained. Exit 4 is the distinct DELIVERED-but-not-consumed outcome.
         fake = FakeCmux(queued_turn=True)
-        rc = self._main(
-            fake, "send", "--workspace", "workspace:99", "--text", PROBE,
-            "--ready-timeout", "0", "--consume-timeout", "0",
-        )
-        self.assertEqual(rc, 0, "a queued message is a success, not a failure")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self._main(
+                fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+                "--ready-timeout", "0", "--consume-timeout", "0",
+            )
+        self.assertEqual(rc, 4, "a queued-only send is delivered but NOT success")
+        self.assertTrue(out.getvalue().startswith("QUEUED "), out.getvalue())
+        self.assertNotIn("OK ", out.getvalue())
+
+    def test_exit_four_is_distinct_from_both_success_and_unconsumed(self):
+        # The three-way contract the fleet keys on: 0 consumed, 4 queued (in
+        # pi's hands), 1 not consumed. A change that collapses any pair breaks an
+        # orchestration caller silently.
+        self.assertEqual(cd._EXIT_FOR_STATUS["queued"], 4)
+        self.assertEqual(cd._EXIT_FOR_STATUS.get("sent-but-not-consumed", 1), 1)
+        self.assertNotEqual(cd._EXIT_FOR_STATUS["queued"], 1)
+        self.assertNotEqual(cd._EXIT_FOR_STATUS["queued"], 3)
+
+    def test_json_carries_delivered_and_not_ok_for_a_queued_send(self):
+        # `--json` is the machine-readable contract: a queued send is
+        # `delivered: true` (so a caller knows a re-send would duplicate) AND
+        # `ok: false` (so a caller knows the turn has not started).
+        fake = FakeCmux(queued_turn=True)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self._main(
+                fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+                "--ready-timeout", "0", "--consume-timeout", "0", "--json",
+            )
+        self.assertEqual(rc, 4)
+        payload = json.loads(out.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["delivered"])
+        self.assertEqual(payload["status"], "queued")
+
+    def test_consumed_json_is_ok_and_delivered(self):
+        fake = FakeCmux()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self._main(
+                fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+                "--ready-timeout", "0", "--consume-timeout", "0", "--json",
+            )
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["delivered"])
+        self.assertEqual(payload["status"], "consumed")
 
     def test_verify_is_SUBMITTED_only_and_diverges_from_send(self):
-        # The documented contract: on a mid-turn lane a message `send` correctly
-        # reports as `queued`/exit 0 still reads NOT-CONSUMED/exit 1 under
+        # The documented contract: on a mid-turn lane a message `send` reports as
+        # `queued`/exit 4 still reads NOT-CONSUMED/exit 1 under
         # `verify`, because `verify` has no dispatch to be novel against. Pinned so
         # a future "consistency" change to `verify` cannot land silently.
         fake = FakeCmux(queued_turn=True)
