@@ -210,10 +210,12 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     _check_bucket(bucket)
     kinds: set[str] = set(_CORE_KINDS_BY_BUCKET[bucket])
     if bucket == "pointKind":
-        # Legacy flat registry ≈ point/event kinds. Event kinds are excluded
-        # (#2767): `milestone` (and `meeting`) are core EVENT kinds, never
-        # point kinds — the milestone three-way collision
-        # (Object kind + legacy point kind + miner event kind).
+        # Legacy flat registry ≈ point/event kinds, minus the core EVENT kinds
+        # that own no point identity (#2767). Subtracting
+        # _BASE_KINDS ∩ CANONICAL_EVENT_KINDS is a net loss for `meeting` and
+        # `milestone`; `decision` is dropped here but re-supplied by
+        # _CORE_KINDS_BY_BUCKET above, so it keeps its point identity. A name
+        # in neither canonical set (e.g. `humanApproval`) is untouched.
         kinds.update(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"])
     kinds.update(_pack_kinds_by_bucket()[bucket])
     return frozenset(kinds)
@@ -262,8 +264,10 @@ def domain_kinds(domain: str, bucket: str) -> list[str]:
             seen.add(k)
     if bucket == "pointKind":
         # Legacy flat registry (workflow/requirement/issue/...) — kept so the
-        # old document-domain vocabulary stays visible to the prompt. Event
-        # kinds are excluded (#2767): a canonical event is never a point kind.
+        # old document-domain vocabulary stays visible to the prompt, minus the
+        # core EVENT kinds that own no point identity (#2767). Same rule as
+        # known_kinds: a name the subtraction drops but _CORE_KINDS_BY_BUCKET
+        # re-supplies (`decision`) is still appended above.
         for k in sorted(_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]):
             if k not in seen:
                 result.append(k)

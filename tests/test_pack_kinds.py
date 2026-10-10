@@ -1447,16 +1447,12 @@ class TestMilestoneCanonicalEventKind:
         assert "milestone" in EVENT_KINDS
         assert "milestone" in compile_vocab().event_kinds
 
-    def test_cross_pack_bare_reference_is_not_ambiguous(self, tmp_path):
-        """Two packs declare `milestone`; a third references the bare name in
-        `nearMisses`. Core owns the name, so the reference resolves — pre-fix
-        this was 'ambiguous — declared by multiple packs'."""
-        for ns in ("alpha", "beta"):
-            _write_pack(str(tmp_path), ns, {
-                "namespace": ns, "name": ns.title(), "version": "0.1.0",
-                "tier": "free",
-                "ontology": {"extends": "core", "objectKinds": ["milestone"]},
-            })
+    def test_cross_pack_bare_reference_resolves_to_core(self, tmp_path):
+        """A pack naming the bare `milestone` in `nearMisses` resolves, because
+        core owns the name — this is `pm`, whose `sprint` nearMisses names it.
+        Pre-fix the bare name was `pm`'s objectKind *and* a base event kind, so
+        a second pack declaring it made the reference fail the install with
+        'ambiguous — declared by multiple packs'."""
         _write_pack(str(tmp_path), "gamma", {
             "namespace": "gamma", "name": "Gamma", "version": "0.1.0",
             "tier": "free",

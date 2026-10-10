@@ -136,10 +136,10 @@ EVENT_KINDS: frozenset[str] = frozenset({
     "extraction", "meeting", "experiment", "friction", "turn",
     "sessionCaptured", "AgentSession", "documentCreated",
     "roleCreated", "pointAdded", "humanApproval",
-    # #2767: the miner writes `event_kind="milestone"` (ConversationMiner
-    # fallback). Without this the Layer-1 write gate rejected an event kind
-    # its own miner emits; `milestone` is a core event (a milestone is
-    # reached at a moment), so it belongs in the canonical core set.
+    # #2767: `milestone` is a core EVENT kind (ONTOLOGY §5 — a milestone is
+    # REACHED at a moment), and ConversationMiner's significant-finding
+    # fallback emits `event_kind="milestone"`. Listed here so this set matches
+    # §5 and declares a kind the miner writes.
     "milestone",
 })
 

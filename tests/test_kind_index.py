@@ -122,9 +122,12 @@ class TestKindIndexBuild:
         assert spec["marketing:keyword"]["section"] == "objects"
         assert spec["marketing:contentCalendar"]["section"] == "objects"
         assert spec["pm:kanbanBoard"]["section"] == "objects"
-        # #2767: `milestone` is a CORE event kind, not a pm object kind.
+        # #2767: `milestone` is a CORE event kind, not a pm object kind — so
+        # pm contributes no `pm:milestone` entry. (No bare-`milestone`
+        # assertion here: the index keys core kinds as `core:*` and pack kinds
+        # as `ns:kind`, so a bare key can never appear and the check would be
+        # unfalsifiable.)
         assert "pm:milestone" not in spec
-        assert "milestone" not in spec
         for ek in ("cardCreated", "cardMoved", "sprintStarted",
                    "sprintCompleted", "stepStarted", "stepCompleted",
                    "gatePassed", "gateBlocked"):
