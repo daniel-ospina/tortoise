@@ -26415,6 +26415,25 @@ class TortoiseSDK:
         (``from``/``to`` are Python keywords — mapped to from_id/to_id).
 
         Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+
+        ⚠️ **A derivation ``references`` edge minted HERE carries no
+        ``sourceVersion`` anchor, and nothing will add one later.** ``references``
+        is in the allowlist above, and this method writes the edge BARE: it takes
+        no property parameter (neither do the MCP tool ``tortoise_create_edge``
+        nor ``projection.edges.EdgeHandlers.create_edge``), and ``create_source``
+        refuses a caller-supplied ``sourceVersion`` — so the anchor cannot be
+        supplied from the outside. The provenance writers
+        (``link_source_to_entity`` / ``link_source_to_event`` /
+        ``link_source_to_legacy_event``) are the only writers that stamp it, and
+        their stamp is ``ON CREATE``-only, so a bare edge created here also
+        PRE-EMPTS them: the later ``MERGE`` matches the existing edge and the
+        clause never fires. A currency read of such an edge is ``unknown``
+        (honest — never ``current``), and the only repair is deleting and
+        re-creating the edge. This is the documented boundary, not an oversight:
+        option 3 of `#5213`; `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6
+        ("a pipeline guarantee, NOT a graph invariant") carries the decision, and
+        `tests/test_references_boundary_5213.py` pins this behaviour — read it
+        before re-routing this method through the anchor.
         """
         proj = self._get_proj()
         created = proj.create_edge(from_id, to_id, relation)  # validates relation

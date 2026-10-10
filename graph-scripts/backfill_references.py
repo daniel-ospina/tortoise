@@ -12,6 +12,22 @@ Strategy (no-migration decision):
 Entity range = Document | Event | Object ONLY (Action dissolved in v3.0).
 
 Idempotent — uses MERGE, safe to re-run.
+
+⛔ THIS WRITER DOES NOT STAMP THE `sourceVersion` ANCHOR, and that is deliberate (#5213,
+option 3). `_MERGE_REFERENCE` below is a bare `MERGE (s)-[:references]->(e)` — it is one
+of the two non-provenance writers `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6 names
+as bypassing the pipeline guarantee (the other is the public `create_edge` escape hatch).
+The `aboutEvent` / `aboutDocument` rows below mint DERIVATION edges, so what this script
+writes reads `unknown` on every currency read — honest, never `current`.
+
+⚠️ If you are here to ADD the anchor, note it is not a one-line change: every provenance
+writer stamps `ON CREATE` only, so an edge this script has already written will NOT be
+repaired by a later provenance link of the same pair — the later `MERGE` matches the
+existing bare edge and the `ON CREATE` clause never fires. Also: the pre-D10 `"Document"`
+signal the anchor discriminates on is a CALL-SITE relation alias, not a target label;
+reaching it from here means passing `"Document"` as the relation spelling, not the
+`Source` label this script resolves. Reopening the decision is on #5213 — update §9.6 and
+`tests/test_references_boundary_5213.py` in the same change.
 """
 from __future__ import annotations
 

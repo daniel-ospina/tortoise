@@ -1719,6 +1719,15 @@ surfaces:
   - test_reaper_ownership.py
   - test_redirect_seam.py
   - test_references_edge.py
+  # #5213: the NON-provenance writers of a derivation `references` link — the
+  # `create_edge` escape hatch and `graph-scripts/backfill_references.py` — carry
+  # no `sourceVersion` anchor, BY DECISION (option 3: document, do not re-route).
+  # `graph-scripts/` matches no named surface and falls through to `core`, and
+  # `tortoise/projection/edges.py` selects `sdk` + adds `core` via CORE_ALSO, so
+  # this arm is what runs the pin on an ops-script-only diff. DUAL with `sdk`
+  # (below), because an `edges.py`-only change selects `sdk` and a named-surface
+  # match REPLACES the `core` fallback. Hermetic (embedded DB per test, no URI).
+  - test_references_boundary_5213.py
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
@@ -2295,6 +2304,13 @@ surfaces:
   # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
   # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
   - test_vocab_gating_callers_5163.py
+  # #5213: `tortoise/projection/edges.py` IS a SOURCE_PATTERNS["sdk"] source, so
+  # this arm owns the pin for the anchor's `ON CREATE`-only mechanism (the
+  # measured pre-emption half) and for the `create_edge` signatures. DUAL with
+  # `core`: a graph-scripts-only diff selects `core`, and `tortoise/sdk.py` — the
+  # other file this pins — is a SHARED_MODULE, so a sdk.py change runs it under
+  # the full matrix regardless. See the `core` arm's entry for the same file.
+  - test_references_boundary_5213.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
