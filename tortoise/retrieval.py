@@ -1048,7 +1048,13 @@ def _render_block(h: dict) -> str:
     assembly lanes are byte-identical. Only a hit with the key ABSENT (the
     ask/search case) is tagged with the derived session id
     (:func:`hit_session_id`), falling back to ``[session ?]`` when the
-    identity is unknown."""
+    identity is unknown.
+
+    The BODY is fenced as well as the prefix: ``content`` is stored verbatim
+    and can carry newlines, so it is passed through :func:`_fence_body` — a
+    continuation line of the body can never start a line at block scope
+    (#6252, the body-side sibling of the #3844 prefix fix).
+    """
     if "lme_session_index" in h:
         idx = h["lme_session_index"]
         prefix = (f"[session {idx}]"
@@ -1085,7 +1091,7 @@ def _render_block(h: dict) -> str:
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
         # extra wrap.
         prefix = f"{prefix} {marker}"
-    return f"{prefix} {h.get('content', '')}"
+    return f"{prefix} {_fence_body(h.get('content', ''))}"
 
 
 def _one_line(value: object) -> str:
@@ -1119,6 +1125,75 @@ def _one_line(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split())
+
+
+#: Prefix applied to every NON-BLANK continuation line of a block BODY (#6252).
+#: Two spaces of indent — the verbatim-content indent the arm-C serializer
+#: already uses for source turns (``subgraph_render._render``: ``f"  {…}"``)
+#: — plus a non-whitespace marker, so the fence survives an ``lstrip()``-based
+#: reading of "did a forged turn reach the reader" (the predicate the #3844
+#: test module uses): an indentation-only fence does not.
+_BODY_FENCE = "  | "
+
+
+def _fence_body(content: object) -> str:
+    """Fence a block BODY so an embedded newline cannot forge a block (#6252).
+
+    ``_render_block`` interpolates the hit's ``content`` verbatim, and
+    ``content`` is stored verbatim too (``SDK.create_point``), while
+    ``capture_session`` stores a turn as ``f"[{role}] {content[:5000]}"`` — a
+    multi-line user message keeps its embedded newlines. So a newline inside a
+    stored claim renders a fabricated block:
+
+        content = "the gym is open at 7am\n\n[session 999] (session date …)"
+
+    The reader parses the second paragraph exactly as a real session/turn,
+    which is the harm #3844 closes for the ANNOTATION PREFIX (``session_date``,
+    ``speaker``, the validity marker). This is its BODY-side sibling: the same
+    harm reachable by moving the payload out of the prefix and into the claim.
+
+    Why not ``_one_line(content)``: it would destroy legitimate multi-line
+    claims (and re-render the frozen assembly goldens). Why not an
+    indentation-only fence: ``lstrip()`` defeats it, so a fabricated ``[user]
+    …`` line is still a line that STARTS (after stripping) with the role
+    bracket — the shape the reader parses. Every non-blank continuation line is
+    therefore indented AND marked (:data:`_BODY_FENCE`), which keeps the block
+    invariant the reader relies on: **the first line of a block is the only
+    line of that block at block scope, and it carries the trusted annotation**;
+    every body line after it is fenced, so no content byte sequence can
+    introduce a real-looking ``[session …]`` / ``[role] …`` line.
+
+    Blank continuation lines are left blank (they carry no forging line and a
+    whitespace-only line is not a turn the reader can act on); exotic line
+    separators (``\r``, ``\r\n``, NEL, ``\x0b``, ``\x0c``, ``\u2028``,
+    ``\u2029``) are normalised to ``\n`` by ``str.splitlines``, so the fence
+    covers them by construction rather than by blacklist.
+
+    BYTE-IDENTICAL for anything that carries no second non-blank line — a
+    single-line claim, a missing ``content`` (``""``), and a trailing newline
+    all render unchanged. That is the invariant the frozen ``_FROZEN_CHUNKS``
+    goldens and the assembly byte-parity seam rely on: the fence is a no-op on
+    every block that was never forgeable.
+
+    The ONE deliberate byte change: a hit with the ``content`` key PRESENT and
+    ``None`` used to render the literal ``"None"`` (the pre-fence f-string
+    interpolated ``h.get('content', '')`` directly). It now renders ``""``,
+    matching the D7 None-content truncation the rerank path already applies
+    (``tests/test_longmem_rerank.py::test_none_content_is_scored_zero_no_degrade``).
+    Pinned by ``tests/test_6252_body_fence.py::test_key_present_none_content_renders_empty_not_none``.
+    """
+    if content is None:
+        return ""
+    text = str(content)
+    lines = text.splitlines()
+    # Nothing to fence: no line break, or no content after the first line.
+    if len(lines) < 2 or not any(line.strip() for line in lines[1:]):
+        return text
+    return "\n".join(
+        [lines[0]]
+        + [f"{_BODY_FENCE}{line}" if line.strip() else line
+           for line in lines[1:]]
+    )
 
 
 def _has_claim_text(h: dict) -> bool:
