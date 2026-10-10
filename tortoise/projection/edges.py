@@ -5,6 +5,16 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+# #5048: the ONE home for the two mitigation predicates, shared with
+# `_upsert_point_props` in this package (imported before this module by
+# `projection/__init__.py`): the identity rule, and the separate requirement
+# that the record carries a strength a live writer could have written. See
+# their docstrings for why the polarity is ``is False`` and why presence of the
+# strength is not enough.
+from tortoise.projection.entities import (
+    has_usable_mitigation_strength,
+    is_non_operator_payload,
+)
 from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
@@ -638,6 +648,68 @@ class _EdgeHandlers:
                     f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
+                # #5048: a MITIGATION point's edge is BIDIRECTIONAL live —
+                # ``mitigate_operator`` writes ``(m)-[:IMPL]->(op)`` AND the
+                # canonical reverse ``(op)-[:mitigated_by]->(m)`` — but the
+                # ``OperatorAdded`` payload only names the IMPL direction, so
+                # the reverse edge rode no record and the fold above rebuilt
+                # only one half. ``compute_operator_weight`` reads
+                # ``mitigated_by``, so a rebuild silently reverted w_eff to the
+                # undecayed base (measured 0.5 -> 1.0, 1 -> 0 edges).
+                #
+                # The gate is the record's OWN stated non-operator identity
+                # AND a strength a live writer could have written — the two
+                # shared predicates, so the identity half and the edge half of
+                # this record's replay agree by construction. A mitigation is a
+                # NON-operator Point that carries an operator EDGE descriptor
+                # solely so this fold can rebuild ``(m)-[:IMPL]->(op)``
+                # (`#4937` — ``mitigated_by`` is canonical only from a
+                # mitigation Point, NEVER a generic operator).
+                #
+                # Neither half alone is enough. The identity must be EXPLICITLY
+                # false: ``not p.get("is_operator")`` is ALSO true when the key
+                # is ABSENT, and the EventAPI / extractor / ingest producer
+                # (`api.py::_point`) emits an ``OperatorAdded`` with no
+                # ``is_operator`` at all — that widened every generic IMPL
+                # operator on the main ingest path. And the strength must be
+                # USABLE: the descriptor is attachable by any low-level producer
+                # (``EventAPI.add_point(**fields)``), so descriptor-alone minted
+                # the edge for a payload that was never a mitigation, while a
+                # present-but-malformed strength is either dropped by the writer
+                # or poisons every weight read. ``is False`` also excludes the
+                # SDK's generic operator (``is_operator: true``) and
+                # ``rebuild_all``'s #548 graph-only synthesis, whose
+                # ``op_type``-bearing node may carry no flag.
+                # ``rel_type == "IMPL"`` pins WHICH relation the record names
+                # (the live writer hardcodes IMPL); the identity pins whether
+                # its source is a mitigation. `o` is the mitigation Point, `s`
+                # the operator it damps — matching the live writer's
+                # direction, and ONTOLOGY §3.9's ``(op)-[:mitigated_by]->(m)``.
+                #
+                # NOT gated on ``s.is_operator = true``, deliberately, though
+                # §3.9's hard rule (#2315) wants exactly that and
+                # ``mitigate_operator`` enforces it. Measured: this fold is the
+                # SHARED live+replay writer, and in `#329`'s stub case (a
+                # mitigation whose short-id ``src`` does not resolve yet, so the
+                # stub above is created ``is_operator=false``) the two engines
+                # reach this MERGE with DIFFERENT origins — ``apply()`` folds the
+                # mitigation before the operator exists and never re-attempts
+                # the edge when it arrives, while ``rebuild_all`` pass-1a hoists
+                # the operator first. The predicate therefore made rebuild mint
+                # ``(op)-[:mitigated_by]->(m)`` where apply minted nothing: a
+                # live!=replay divergence, and that invariant is the whole point
+                # of this fold. The rule it would enforce concerns an edge
+                # ONTOLOGY itself calls dead structure (no EP factor addresses a
+                # non-operator), so the fold keeps its parity and the rule stays
+                # with the SDK writer. Recorded on #5048 with the measurement.
+                if (rel_type == "IMPL" and is_non_operator_payload(p)
+                        and has_usable_mitigation_strength(p)):
+                    self.g.query(
+                        "MATCH (o:Point {id:$oid}), (s) "
+                        "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                        "MERGE (s)-[:mitigated_by]->(o)",
+                        params={"oid": p["id"], "sid": src},
+                    )
             else:
                 # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
