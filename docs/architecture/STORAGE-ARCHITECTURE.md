@@ -409,7 +409,7 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 | **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** ⚠️ **No measurement of the journal's growth exists yet (§15 lists none).** |
 | **egress + IOPS** | a cold, disk-resident design **reads from disk on every cache miss.** The cost moves from *storage* to *requests* — and egress is the line that punishes a read-heavy pattern. **Not modelled.** ⚠️ **No measurement covers egress or IOPS yet (§15 lists none).** |
 
-✅ **Both omitted lines are now PRICED and carried as rows of the two-store table — §17.4.** Egress and IOPS are **$0.09/GB** (250 GB included) and **$0.024/IOPS/month** (3,000 included, General Purpose); the journal's *growth* still has **no measurement** and is the one line §17.4 cannot price.
+✅ **One of the two omitted lines — egress + IOPS — is now PRICED and carried as a row of the two-store table (§17.4).** Egress and IOPS are **$0.09/GB** (250 GB included) and **$0.024/IOPS/month** (3,000 included, General Purpose). **The journal is still neither priced nor a row** — its *growth* has **no measurement** and it is the one line §17.4 cannot price.
 
 **⇒ The table answers *"what does the DATA cost?"*. It does not answer *"what does the SYSTEM cost?"* — and §6 is the section that says so. Do not quote this table as a total.**
 
@@ -1515,13 +1515,13 @@ For the record, since two members of the design rest on it:
 
 ### 17.4 A two-store cost model — the existing tables price ONE store
 
-**§5's cost table and §6's multiplier both model a single store.** The hybrid pays **both**: Postgres compute + disk **and** FalkorDB RAM. §6 concedes the gap in its own words — *"the blended total-cost figure is uncomputed; it needs the compute and IOPS lines, and neither has a measurement yet."*
+**§5's cost table and §6's multiplier both model a single store.** The hybrid pays **both**: Postgres compute + disk **and** FalkorDB RAM. §6 conceded that gap in its own words — *"the blended total-cost figure is uncomputed; it needs the compute and IOPS lines, and neither has a measurement yet."* (**That is §6 as it read before this change closed the gap; §6 no longer says it.**)
 
 **This matters because the split's whole justification is arithmetic.** The claim is not *"Postgres is cheaper"* but *"bytes that are never read again stop renting RAM."* **That claim has no table yet.**
 
 **✅ 2026-10-10 (`#7954`) — the table exists, the arithmetic is closed, and it NAMES ITS CONDITION rather than confirming the conclusion.** The **rate cards are published and verified against the vendors' own pages on 2026-10-10**; the **derivation is reproducible** ("Reproduce", end of §17.4); **two magnitudes are still unmeasured** and every figure depending on them is marked `≥` or shown as a sweep. **No part of this is a new decision** — it prices the §2.0 ruling.
 
-**It answers the four things that were missing:** a rate card for **both** stores (§17.4.1), the **compute and IOPS lines** §5 omits (also §17.4.1), the **blended total** §6 calls uncomputed (§17.4.4), and the **RAM-per-node figure with its base and denominator** (§17.4.2).
+**It answers the four things that were missing:** a rate card for **both** stores (§17.4.1), the **IOPS line** §5.1 omits (also §17.4.1), the **blended total** §6 called uncomputed (§17.4.4), and the **RAM-per-node figure with its base and denominator** (§17.4.2).
 
 #### 17.4.1 The two rate cards — one per store
 
@@ -1529,10 +1529,10 @@ For the record, since two members of the design rest on it:
 
 | line | store | published rate | billed on | included | note |
 |---|---|---|---|---|---|
-| **RAM — STARTUP** | **FalkorDB** (cache) | **$73 / 1 GB / month** | provisioned instance memory, **whole GB** | — | the 1 GB tier; the same rate as `$0.10/GB-hour` (§2.1) |
+| **RAM — STARTUP** | **FalkorDB** (cache) | **$73 / 1 GB / month** | provisioned instance memory, **whole GB** | — | the 1 GB tier; the same rate as `$0.10/GB-hour` (§2.0, restated in §16.1) |
 | **RAM — PRO** | **FalkorDB** (cache) | **$350 / 8 GB / month = $43.75 / GB** | same | — | the rate that applies once ≥ 8 GB is provisioned |
 | **disk — General Purpose** | **Postgres** (record) | **$0.125 / GB / month** | stored bytes | 8 GB per project | §5's rate, re-verified |
-| **IOPS — General Purpose** | **Postgres** (record) | **$0.024 / IOPS / month** | provisioned IOPS | 3,000 | ⭐ **the line §5.1 and §6 name as missing — now priced** |
+| **IOPS — General Purpose** | **Postgres** (record) | **$0.024 / IOPS / month** | provisioned IOPS | 3,000 | ⭐ **the line §5.1 names as missing — now priced** |
 | **throughput — GP** | **Postgres** (record) | **$0.095 / MB/s / month** | provisioned throughput | 125 MB/s | couples to IOPS |
 | **disk — High Performance** | **Postgres** (record) | **$0.195 / GB + $0.119 / IOPS / month** | stored bytes + IOPS | none | 99.999%; the IOPS row is **5×** General Purpose |
 | **egress** | **Postgres** (record) | **$0.09 / GB** | bytes read out | 250 GB | ⭐ §5.1's *"egress punishes a read-heavy pattern"* — now priced |
