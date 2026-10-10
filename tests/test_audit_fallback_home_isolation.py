@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tortoise import audit_events
+from tortoise import monitoring
 from tortoise.audit_events import AuditLogger
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -127,21 +127,44 @@ def test_importing_hosted_api_creates_no_home_tortoise(tmp_path):
 # ── #7924 review P2: the READ half of the resolver, and a DROP is counted ──
 
 def test_whitespace_only_env_override_is_treated_as_unset(tmp_path, monkeypatch):
-    """#7924 review P2: `Path(" ")` must never become a CWD-relative base.
+    """#7924 review P2: `Path("   ")` must never become a CWD-relative base.
 
-    Before the fix a whitespace-only override was truthy, so the fallback
-    resolved to the RELATIVE path ``""/audit_fallback.jsonl`` and the event
-    was written into the process CWD (and orphaned from ``$HOME``).
+    A whitespace-only override is TRUTHY, so before the fix the fallback
+    resolved to the RELATIVE path ``"   "/audit_fallback.jsonl`` and the event
+    was written into the process CWD (orphaned from ``$HOME``). The CWD is
+    snapshotted so the assertion cannot go vacuous on a mismatched name.
     """
     home = tmp_path / "home"
     home.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "   ")
-    monkeypatch.chdir(tmp_path)  # a relative fallback would land visibly HERE
+    monkeypatch.chdir(cwd)
+    before = {p.name for p in cwd.iterdir()}
     AuditLogger(dsn=None).append("org-1", None, "op")
     assert (home / ".tortoise" / "audit_fallback.jsonl").exists()
-    assert not (tmp_path / " ").exists(), (
-        "a whitespace-only override created a relative fallback dir")
+    assert {p.name for p in cwd.iterdir()} == before, (
+        "a whitespace-only override created a relative fallback dir in the CWD")
+
+
+def test_whitespace_only_home_is_refused_as_a_drop(tmp_path, monkeypatch):
+    """#7924 review round 2: the RESOLVED base must be absolute.
+
+    ``$HOME`` is not normalized, so ``HOME="   "`` makes ``Path.home()``
+    relative (``PosixPath('   ')``) — the same CWD hazard one level down from
+    the override leg. It must be refused (and counted as a drop), never
+    materialized under the CWD.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", "   ")
+    monkeypatch.chdir(tmp_path)
+    before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    AuditLogger(dsn=None).append("org-1", None, "op")  # must NOT raise
+    after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    assert after == before + 1, "a non-absolute resolved base must be counted"
+    assert not (tmp_path / "   ").exists(), (
+        "a relative base must never be materialized under the CWD")
 
 
 def test_replay_resolves_env_and_does_not_create_the_dir(tmp_path, monkeypatch):
@@ -208,13 +231,13 @@ def test_unresolvable_home_is_counted_as_a_drop(tmp_path, monkeypatch):
 
     ``Path.home()`` raises for a malformed ``$HOME``; the event reached no
     durable sink. The flow must still not break (non-fatal audit doctrine),
-    but the loss must be visible in ``audit_fallback_drop_count()``.
+    but the loss must be visible in the monitoring drop counter.
     """
     _no_override(monkeypatch)
     monkeypatch.setenv("HOME", "~")  # Path.home() -> RuntimeError
-    before = audit_events.audit_fallback_drop_count("unresolvable_path")
+    before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
     logger = AuditLogger(dsn=None)
-    assert logger._write_fallback({"id": "e1"}) is False
-    assert audit_events.audit_fallback_drop_count("unresolvable_path") == before + 1
-    assert audit_events.audit_fallback_drop_count() >= before + 1
     logger.append("org-1", None, "op")  # must NOT raise (non-fatal by design)
+    after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    assert after == before + 1, (
+        "an audit event that reached no durable sink must be counted as a drop")
