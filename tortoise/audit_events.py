@@ -46,17 +46,19 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
 # #7924 review P2/round-2: a fallback event that reached NO durable location
 # used to be indistinguishable in-process from a persisted one (the ERROR log
 # was the only evidence). Count the DROPs by cause in the shared monitoring
-# substrate so the loss is SCRAPABLE, not merely logged — the same shape as
-# that substrate's journal-write-failure counter
+# substrate so the loss rides the surface the fleet actually serves, not merely
+# a log line — the same shape as that substrate's journal-write-failure counter
 # (monitoring.JOURNAL_WRITE_FAILURE_COUNT, #4240: "a log line nothing
-# watches"). Still NON-FATAL by design: audit failure must never break the
-# serving flow (see hosted_api._audit_auth_failure), so neither may this
-# counter.
+# watches"), which is carried by ``monitoring.metrics()`` as
+# ``journal_write_failures``; this family likewise rides it as
+# ``audit_fallback_drops`` (the hosted app serves no ``/metrics`` route).
+# Still NON-FATAL by design: audit failure must never break the serving flow
+# (see hosted_api._audit_auth_failure), so neither may this counter.
 def _note_fallback_drop(reason: str) -> None:
     """Count a dropped audit event; NEVER raises (#3820 counter doctrine).
 
     Read it back with ``tortoise.monitoring.audit_fallback_drop_counts()`` or
-    the ``tortoise_audit_fallback_drops_total`` series on ``/metrics``.
+    ``tortoise.monitoring.metrics()["audit_fallback_drops"]``.
     """
     try:
         from tortoise.monitoring import record_audit_fallback_drop
