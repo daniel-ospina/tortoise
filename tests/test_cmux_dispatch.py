@@ -1393,6 +1393,7 @@ class TestDispatcherRecovery(unittest.TestCase):
         fake = FakeCmux(submit_lag_polls=2)
         result = self._send(fake, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
+        self.assertTrue(result.delivered, result.detail)
         self.assertIn("grace window", result.detail)
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
 
@@ -1406,8 +1407,28 @@ class TestDispatcherRecovery(unittest.TestCase):
         fake = FakeCmux(submit_lag_polls=15)
         result = self._send(fake, consume_timeout=20.0)
         self.assertTrue(result.ok, result.detail)
+        self.assertTrue(result.delivered, result.detail)
         self.assertIn("grace window", result.detail)
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
+
+    def test_ok_always_implies_delivered_on_every_success_path(self):
+        """#7885's field contract: `delivered` = the bytes reached pi's hands, so
+        `ok ⇒ delivered` must hold on EVERY success path. The pre-recovery grace
+        window once set `ok`/`status="consumed"` without `delivered`, so a consumed
+        send carried `delivered=False` and invited the duplicate re-send #5979
+        forbids. This walks all three outcomes."""
+        # the grace-window CONSUMED path (the one that was wrong)
+        lag = self._send(FakeCmux(submit_lag_polls=2), consume_timeout=0.0)
+        self.assertTrue(lag.ok, lag.detail)
+        self.assertTrue(lag.delivered, lag.detail)
+        # the QUEUED path: delivered WITHOUT ok
+        queued = self._send(FakeCmux(queued_turn=True), consume_timeout=0.0)
+        self.assertFalse(queued.ok, queued.detail)
+        self.assertTrue(queued.delivered, queued.detail)
+        # a failure is NEITHER
+        failed = self._send(FakeCmux(never_consumes=True), consume_timeout=0.0)
+        self.assertFalse(failed.ok, failed.detail)
+        self.assertFalse(failed.delivered, failed.detail)
 
     def test_never_consumed_fails_closed(self):
         # The message never becomes a turn AND never enters pi's pending queue:
@@ -2181,9 +2202,13 @@ class TestCliExitCodes(unittest.TestCase):
         # pi's hands), 1 not consumed. A change that collapses any pair breaks an
         # orchestration caller silently.
         self.assertEqual(cd._EXIT_FOR_STATUS["queued"], 4)
-        self.assertEqual(cd._EXIT_FOR_STATUS.get("sent-but-not-consumed", 1), 1)
         self.assertNotEqual(cd._EXIT_FOR_STATUS["queued"], 1)
         self.assertNotEqual(cd._EXIT_FOR_STATUS["queued"], 3)
+        # An UNMAPPED status (sent-but-not-consumed / never-became-ready) must fall
+        # to the default 1 — the DEFAULT is the contract, not a table entry, so
+        # assert the absence rather than `.get(..., 1) == 1` (which is a tautology
+        # that passes for any unknown key).
+        self.assertNotIn("sent-but-not-consumed", cd._EXIT_FOR_STATUS)
 
     def test_json_carries_delivered_and_not_ok_for_a_queued_send(self):
         # `--json` is the machine-readable contract: a queued send is

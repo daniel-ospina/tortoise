@@ -1169,10 +1169,12 @@ class DispatchResult:
     #: recorded anywhere), `""` = nothing was transmitted (usage/readiness refusal).
     #: Orthogonal to `status`, which carries whether the notification CONSUMED.
     channel: str = ""
-    #: The bytes reached pi's hands (consumed OR queued). `ok` is the STRONGER
-    #: claim — `consumed` only. A caller that must not DUPLICATE a delivery keys
-    #: on `delivered`; a caller that must know the turn STARTED keys on `ok`/
-    #: exit 0. This is the #7743 distinction between delivery and success.
+    #: The bytes were CONFIRMED in pi's hands — consumed OR queued. True means
+    #: never re-send (a re-send would DUPLICATE): that is #5979's finding. False is
+    #: NOT a licence to re-send either — a transport failure can leave the bytes in
+    #: pi's composer, so no non-success outcome is blindly retryable; read `status`.
+    #: `ok` is the STRONGER claim — `consumed` only: a caller that must know the
+    #: turn STARTED keys on `ok`/exit 0 (#7743). Invariant: `ok` ⇒ `delivered`.
     delivered: bool = False
 
     def as_json(self) -> dict:
@@ -1719,6 +1721,7 @@ class Dispatcher:
                     )
                 if late_consumed:
                     result.ok = True
+                    result.delivered = True
                     result.status = "consumed"
                     result.detail = (
                         f"{tag}{workspace} confirmed: message became a conversation "

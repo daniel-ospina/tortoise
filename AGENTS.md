@@ -336,7 +336,7 @@ only dispatch path that confirms the ARTIFACT rather than the send:
 
 ```bash
 uv run python tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
-    --label <lane> --file <brief.txt>        # 0 consumed · 4 delivered-into-queue · 1 not delivered
+    --label <lane> --file <brief.txt>        # 0 consumed · 4 queued (delivered) · 1 not consumed · 2 usage · 3 transport
 ```
 
 `cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the

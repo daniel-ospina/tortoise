@@ -202,6 +202,19 @@ def test_a_long_test_run_with_a_live_child_is_not_a_stall() -> None:
     assert not busy.pane_stalled_turn
 
 
+def test_the_stall_bound_is_inclusive_at_the_threshold() -> None:
+    """The bound is `>=`, so the threshold itself is pinning: a regression that
+    flipped it to `>` (or moved the constant) must fail here, not pass silently."""
+    at_bound = fs.Liveness(
+        **{**WEDGED, "transcript_age_seconds": fs.STALLED_TURN_SECONDS}
+    )
+    assert at_bound.pane_stalled_turn
+    just_under = fs.Liveness(
+        **{**WEDGED, "transcript_age_seconds": fs.STALLED_TURN_SECONDS - 0.001}
+    )
+    assert not just_under.pane_stalled_turn
+
+
 def test_free_reasons_surfaces_a_stalled_turn_as_recoverable() -> None:
     lv = fs.Liveness(**WEDGED, cpu_sample_seconds=3.0)
     reasons = " ".join(fs.free_reasons(lv, 0, 0))

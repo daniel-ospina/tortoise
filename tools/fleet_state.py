@@ -491,9 +491,12 @@ class Liveness:
         when the process table was read, so an unreadable ``ps`` cannot be mistaken
         for "the child is gone".
 
-        Reporting only — it changes no verdict and kills nothing. Recovery is a
-        session resume (``cmux respawn-pane … pi --session <sid>``), which the lane
-        record already carries as ``session.sid``.
+        The conjunction is NECESSARY, not sufficient: a childless model call that
+        outlives the bound satisfies it too. That residual is accepted because the
+        detector is REPORTING ONLY — it kills nothing, so a false flag costs a look,
+        not a lane — and the bound sits far above normal model latency. Recovery is
+        a session resume (``cmux respawn-pane … pi --session <sid>``), which the
+        lane record already carries as ``session.sid``.
         """
         return (
             self.pid_alive
