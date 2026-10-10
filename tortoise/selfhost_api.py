@@ -361,7 +361,12 @@ async def dream(full: bool = False, mode: str | None = None,
         elif full:
             result = sdk.dream(full=True)
         else:
-            result = sdk.dream(dirty_only=True)
+            # #3698: pin the mode this arm documents ("Incremental (default)").
+            # `dirty_only=True` is a DEPRECATED no-op (`tortoise/sdk.py:14910`),
+            # so the router auto-selected and silently ran a FULL pass on a
+            # graph below the 50-operator threshold — the same root as the
+            # hosted `/v1/dream` default arm, which this endpoint mirrors.
+            result = sdk.dream(mode="local")
         return {"status": "ok", "result": result}
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost dream failed")

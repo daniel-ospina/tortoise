@@ -2711,7 +2711,9 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                sdk.dream(dirty_only=True, mode="local")
+                # #3698: `dirty_only=True` dropped — a deprecated no-op
+                # (`sdk.py:14910`); the explicit mode is the whole selector.
+                sdk.dream(mode="local")
 
         await _run_dream_on_pool(_drain, _open_sdk)
     except Exception as exc:
@@ -8577,7 +8579,17 @@ async def dream(
                 return sdk.dream(full=True)
             if queued_roots:
                 sdk._mark_dirty(queued_roots)
-            return sdk.dream(dirty_only=True)
+            # #3698: pin the mode this arm documents. `dirty_only=True` is a
+            # DEPRECATED no-op (`sdk.py:14910`), so the mode router
+            # auto-selected — and with no dirty roots a graph under
+            # `_AUTO_FULL_OPERATOR_THRESHOLD` (50 operators) silently ran a
+            # FULL pass. That made this "incremental (default)" arm return the
+            # full key set (`converged_all`, no `converged`/`iterations`) on
+            # small graphs, and it bypassed the #329 full-mode budget
+            # (`effective_full` above reads full/mode only). `_dream_worker`
+            # already pins `mode="local"` for the same reason (never silently
+            # full).
+            return sdk.dream(mode="local")
 
     return await _run_dream_on_pool(_run_dream, lambda: sdk)
 
