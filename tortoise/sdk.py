@@ -12400,6 +12400,7 @@ class TortoiseSDK:
         # "source-only"). A point that is neither source nor target is a
         # standalone point: no status is injected at all, so create_point's
         # (live) default supplies it.
+        _auto_sources: set[str] = set()
         _auto_targets: set[str] = set()
         if promotion_policy == "auto":
             for _conn in bundle.get("connections") or []:
@@ -12411,6 +12412,19 @@ class TortoiseSDK:
                 # below.
                 if not (isinstance(_conn, dict) and "operator" in _conn):
                     continue
+                # #1088: SOURCE WINS. A dual-role point — the `to` of one
+                # operator connection AND the `from` of another — must not
+                # be classified as a target. The three promotion clauses were
+                # narrowed by this PR to fill only a NEVER-SET status
+                # (`WHERE s.status IS NULL`), so an injected draft on a
+                # connection SOURCE is never overwritten by the later
+                # promote: the point would stay draft forever and be
+                # silently EP-inert. A source is born live by create_point's
+                # default, so collect the sources and subtract them from the
+                # targets below.
+                _from = _conn.get("from")
+                if isinstance(_from, str):
+                    _auto_sources.add(_from)
                 # #3263 parity: `to` is a LIST on a many-to-many operator
                 # connection (the same shape _resolve_ref_field and the
                 # extractedFrom branch above handle element-wise). Collecting
@@ -12423,6 +12437,9 @@ class TortoiseSDK:
                 elif isinstance(_to, list):
                     _auto_targets.update(
                         t for t in _to if isinstance(t, str))
+            # #1088 SOURCE WINS: a dual-role point is a source first, so it is
+            # never treated as a target (see the rationale above).
+            _auto_targets -= _auto_sources
 
         def _bundle_item_has_status(it: dict) -> bool:
             """True when a point item carries a status key top-level OR in a
@@ -12490,7 +12507,10 @@ class TortoiseSDK:
                     # #131 "source-only": an operator-connection TARGET keeps
                     # the draft→live lifecycle. Everything else under auto is
                     # left with NO status, so create_point's default supplies
-                    # it — live, per the #1088 ruling.
+                    # it — live, per the #1088 ruling. A dual-role point was
+                    # already subtracted from _auto_targets (SOURCE WINS), so
+                    # nothing is injected for it and it is born live; no
+                    # `live` branch is injected anywhere — the default is it.
                     write_item = {**item, "status": "draft"}
             # #7856: a COPY, never a mutation of `item`. Granular
             # `results[].item` echoes the item's remaining props

@@ -313,6 +313,35 @@ class TestPromotionPolicy:
         pA, _ = res["ids"]["points"]
         assert sdk.get_point(pA)["status"] == "live"
 
+    def test_auto_dual_role_point_source_wins(self, sdk):
+        """A point that is the `to` of one operator connection AND the
+        `from` of another must be born LIVE under auto (SOURCE WINS).
+
+        Prevents the #1088 defect where the target-draft injection stranded
+        a dual-role point in draft forever: the promotion clauses were
+        narrowed to fill only a NEVER-SET status (`WHERE s.status IS NULL`),
+        so the later `from` promotion can never overwrite the injected draft
+        and the point is silently EP-inert. Mutation that reds this test:
+        making a connection source also count as a target (dropping the
+        `_auto_targets -= _auto_sources` subtraction) — pB then reads draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+                {"ref": "pC", "kind": "claim", "content": "C"},
+            ],
+            "connections": [
+                {"from": "pA", "to": "pB", "operator": "IMPL"},
+                {"from": "pB", "to": "pC", "operator": "IMPL"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, pB, pC = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "live"   # pure source
+        assert sdk.get_point(pB)["status"] == "live"   # dual-role: source wins
+        assert sdk.get_point(pC)["status"] == "draft"  # pure target
+
     def test_auto_relation_only_source_is_born_live(self, sdk):
         # #1088 owner ruling: a relation-only source is NEITHER an
         # operator-connection source nor an operator-connection TARGET, so
@@ -320,8 +349,13 @@ class TestPromotionPolicy:
         # is born live by create_point's default.
         #
         # The surviving `"operator" in conn` guard is what keeps a
-        # relation-only source out of the TARGET set; the target path itself
-        # is covered by tests/test_mcp_server.py's source-only pin
+        # relation-only connection from contributing to EITHER set: nothing
+        # is injected, so create_point's live default supplies the status.
+        # (It does NOT keep `p1` out of the TARGET set — this connection's
+        # `to` is `src1`, not `p1`, so removing the guard would not red this
+        # test.) The mutation that reds this test is reverting that default
+        # to `draft`. The target path itself is covered by
+        # tests/test_mcp_server.py's source-only pin
         # (test_mcp_auto_promotes_source_live: source live, target draft).
         bundle = {
             "points": [
