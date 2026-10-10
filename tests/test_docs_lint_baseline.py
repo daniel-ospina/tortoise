@@ -130,6 +130,10 @@ def _baseline(markdownlint: list[str], lychee: list[str]) -> dict:
         "linter_config": {},
         "markdownlint": markdownlint,
         "lychee": lychee,
+        # #7919: the tracked-tree relative-link half is REQUIRED like the other
+        # two (`load_baseline` refuses a snapshot that omits any of them) — a
+        # baseline without it would silently disable the sweep.
+        "relative_links": [],
     }
 
 
@@ -777,6 +781,10 @@ def test_update_writes_a_valid_snapshot(tmp_path: Path, monkeypatch):
             {"docs/x.md": [_file_entry(f"file://{root}/docs/missing.md")]}
         ),
     )
+    # #7919: the relative-link half is `git ls-files` + a path resolution, so this
+    # test needs it stubbed to stay hermetic (it asserts the two LINTER halves).
+    # Its own behaviour is covered by the sweep tests below.
+    monkeypatch.setattr(dlb, "relative_link_findings", lambda root, files: [])
     files = _write(tmp_path, "files.txt", "docs/x.md\ndocs/y.md\n")
     out = tmp_path / "baseline.json"
     rc = dlb.main(["update", "--files-from", str(files), "--baseline", str(out)])
@@ -786,6 +794,7 @@ def test_update_writes_a_valid_snapshot(tmp_path: Path, monkeypatch):
     assert written["snapshot"]["counts"] == {
         "markdownlint": len(written["markdownlint"]),
         "lychee": len(written["lychee"]),
+        "relative_links": len(written["relative_links"]),
     }
     assert written["end_state"]["issue"] == 7534
     assert "CEILING, never a floor" in written["end_state"]["rule"]
@@ -813,6 +822,7 @@ def test_update_deduplicates_the_lychee_half(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(ROOT)
     monkeypatch.setattr(dlb, "_require_lychee_binary", lambda binary: None)
     monkeypatch.setattr(dlb, "_run_markdownlint", lambda files, root: (0, NO_FINDINGS_REPORT))
+    monkeypatch.setattr(dlb, "relative_link_findings", lambda root, files: [])
     monkeypatch.setattr(
         dlb,
         "_run_lychee",
@@ -1591,6 +1601,7 @@ def test_snapshot_exists_is_consistent_and_announces_its_end_state():
     counts = baseline["snapshot"]["counts"]
     assert counts["markdownlint"] == len(baseline["markdownlint"]) > 0
     assert counts["lychee"] == len(baseline["lychee"])
+    assert counts["relative_links"] == len(baseline["relative_links"])
     assert baseline["snapshot"]["base_sha"]
     assert baseline["end_state"]["issue"] == 7534
     assert "NOT AN AMNESTY" in baseline["note"]
@@ -1646,17 +1657,25 @@ def test_snapshot_is_a_ceiling_never_a_floor():
     # touches one is charged for debt the base snapshot already knew).
     # The lychee half also checks REMOTE links, whose occurrence count drifts
     # between RUNS for reasons no author controls, so it is a SET (deduplicated)
-    # and its ceiling is the MAXIMUM OBSERVED set size — 52 after the vendored
-    # population fix (#7534; it was 151-160 across the pre-fix generations). The
-    # 2 keys above the 50 a single host's egress observed are the `dl.acm.org`
-    # links main's canonical snapshot holds for `prior-art-scan.md`: they were
-    # dropped when the snapshot was regenerated from a host that could not reach
-    # them, and restored here so the half equals `main` minus the vendored
-    # entries (a host-dependent loss, filed as #7697 — never a hand-added key).
+    # and its ceiling is the MAXIMUM OBSERVED set size — 46 after #7919 drained
+    # the six LOCAL targets this change repairs out of the 52 the vendored
+    # population fix left (#7534; it was 151-160 across the pre-fix generations).
+    # The 2 keys above the 44 `dl.acm.org`-free remainder a single host's egress
+    # observed are the `dl.acm.org` links main's canonical snapshot holds for
+    # `prior-art-scan.md`: they were dropped when the snapshot was regenerated
+    # from a host that could not reach them, and restored here so the half equals
+    # `main` minus the vendored entries (a host-dependent loss, filed as #7697 —
+    # never a hand-added key).
     # It is not a round number: slack above the observed range is an amnesty
     # window, so any re-baseline above it must raise this row out loud.
     # The asymmetry is deliberate.
-    ceilings = {"markdownlint": 3300, "lychee": 52}
+    #
+    # `relative_links` is the class the sweep (#7919) measures, and it is the ONE
+    # half with no variance at all: `git ls-files` + a path resolution — no
+    # linter, no network, no filesystem — so its ceiling is EXACT and zero is the
+    # healthy state. It only ever grows because a genuinely dead relative link
+    # was added, which is a failure, not a re-baseline.
+    ceilings = {"markdownlint": 3300, "lychee": 46, "relative_links": 0}
     for kind, ceiling in ceilings.items():
         assert counts[kind] <= ceiling, (
             f"the {kind} snapshot grew to {counts[kind]} (ceiling {ceiling}). A snapshot is a "
@@ -1697,8 +1716,14 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
         "9236d7c46202671a9162f48dc7599c7ccf01bbf019a4ebc13b918c79620ca8fa"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
-        "f605204128fee73d5d5ad97552a5f0047f4485b0822c0dec8e0462d5385e0ed7"
+        "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"
     ), "the lychee snapshot contents changed — a swap is not a re-baseline"
+    # `relative_links` (#7919) is EMPTY, so this digest is the empty-list digest:
+    # it still catches the shape this test exists for — an entry ADDED to the
+    # bucket by the same change that introduces the link it excuses.
+    assert _canonical_digest(baseline["relative_links"]) == (
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ), "the relative-link snapshot contents changed — a swap is not a re-baseline"
     assert hashlib.sha256(
         json.dumps(baseline["linter_config"], sort_keys=True).encode("utf-8")
     ).hexdigest() == "bf9d46866af0dff458c4e13cfddefe1e031d1a9389650e9feeae2f722f4922e2", (
@@ -1722,3 +1747,184 @@ def test_every_mapped_generator_exists_and_its_doc_is_tracked():
     for document, generator in dlb.GENERATED_DOCS.items():
         assert (ROOT / generator).is_file(), f"{generator} does not exist"
         assert document in tracked, f"{document} is not a tracked docs/product file"
+
+
+# ── the tracked-tree relative-link sweep (#7919) ─────────────────────────────
+
+
+def _link_repo(tmp_path: Path, documents: dict[str, str], untracked: dict[str, str] | None = None) -> Path:
+    """A real git repo holding `documents`, with optional UNTRACKED files on disk.
+
+    A real repository, not a stub: the property under test is that the sweep
+    reads `git ls-files` rather than the working tree, and only real git state
+    can distinguish the two.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name, text in documents.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for name, text in (untracked or {}).items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for args in (("init", "-q"), ("config", "user.email", "t@example.invalid"),
+                 ("config", "user.name", "t"), ("add", "-A"), ("commit", "-qm", "base")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def _sweep(tmp_path: Path, repo: Path, names: list[str], known: list[str] | None = None) -> int:
+    files = _write(tmp_path, "files.txt", "".join(f"{name}\n" for name in names))
+    baseline = _baseline([], [])
+    baseline["relative_links"] = known or []
+    return dlb.main([
+        "sweep",
+        "--files-from", str(files),
+        "--repo-root", str(repo),
+        "--baseline", str(_write(tmp_path, "b.json", json.dumps(baseline))),
+    ])
+
+
+def test_relative_link_key_shares_lychee_identity_for_a_local_target():
+    """One failure, one identity — the sweep and lychee must agree on the key.
+
+    The two detectors reach a local finding by different routes (filesystem vs
+    `git ls-files`), and `update` writes one ledger for both. If their keys
+    diverged, the same dead link would be new to each forever.
+    """
+    finding = ("docs/a.md", "docs/missing.md")
+    assert dlb.relative_link_key(finding) == dlb.lychee_key(finding) == "docs/a.md|docs/missing.md"
+
+
+def test_sweep_reports_a_relative_link_absent_from_the_tracked_tree(tmp_path: Path, capsys):
+    repo = _link_repo(tmp_path, {"docs/a.md": "[gone](missing.md)\n"})
+    assert _sweep(tmp_path, repo, ["docs/a.md"]) == 1
+    out = capsys.readouterr().out
+    assert "docs/missing.md" in out and "docs/a.md" in out
+
+
+def test_sweep_is_green_when_the_finding_is_in_the_baseline(tmp_path: Path, capsys):
+    repo = _link_repo(tmp_path, {"docs/a.md": "[gone](missing.md)\n"})
+    assert _sweep(tmp_path, repo, ["docs/a.md"], ["docs/a.md|docs/missing.md"]) == 0
+    assert "0 new, 1 known" in capsys.readouterr().out
+
+
+def test_sweep_reads_the_tracked_set_not_the_working_tree(tmp_path: Path, capsys):
+    """The defect the whole step exists for (#7876).
+
+    `skills/` and `scripts/` are UNTRACKED symlinks into `agent-infra`, so a
+    target behind one is present for anything that asks the filesystem — which
+    is how a filesystem-based detector both fails to record the finding and
+    lets it red an unrelated PR in CI. The file below is on disk and NOT in
+    `git ls-files`, which is exactly the shape.
+    """
+    repo = _link_repo(
+        tmp_path,
+        {"docs/a.md": "[skill](skills/thing.md)\n"},
+        untracked={"skills/thing.md": "# present locally, absent from the tree\n"},
+    )
+    assert (repo / "skills" / "thing.md").is_file(), "the working tree really does resolve it"
+    assert _sweep(tmp_path, repo, ["docs/a.md"]) == 1
+    assert "docs/skills/thing.md" in capsys.readouterr().out
+
+
+def test_sweep_ignores_links_in_code_spans_and_fenced_blocks(tmp_path: Path):
+    """lychee reads markdown with verbatim sections OFF, so the sweep must too.
+
+    Measured on this tree: the plan docs carry `UNIVERSAL_COMMAND[harness](key)`
+    inside backticks and a fenced snippet with `[Hosted Cloud](quickstart-cloud.md)`,
+    and NEITHER appears in the snapshot's lychee half. A scanner that reported
+    them would be a false-positive machine on every plan doc.
+    """
+    repo = _link_repo(
+        tmp_path,
+        {
+            "docs/a.md": (
+                "Prose with `[x](missing.md)` inline.\n\n"
+                "```markdown\n[y](also-missing.md)\n```\n\n"
+                "<!-- [z](commented-out.md) -->\n\n"
+                "[real](kept.md) and ![img](diagram.png)\n"
+            ),
+            "docs/kept.md": "# kept\n",
+            "docs/diagram.png": "not really a png\n",
+        },
+    )
+    assert _sweep(tmp_path, repo, ["docs/a.md"]) == 0
+
+
+def test_sweep_ignores_remote_fragment_and_directory_targets(tmp_path: Path):
+    """Only a missing TRACKED path is a finding; everything else is not ours."""
+    repo = _link_repo(
+        tmp_path,
+        {
+            "docs/a.md": (
+                "[remote](https://example.invalid/x)\n"
+                "[proto](//example.invalid/y)\n"
+                "[anchor](#section)\n"
+                "[mail](mailto:t@example.invalid)\n"
+                "[dir](sub/)\n"
+                "[file](sub/real.md)\n"
+                "Prose placeholders the loose forms caught as links: <key>, <HARD-GATE>, <br>, <a@b.invalid>.\n"
+            ),
+            "docs/sub/real.md": "# real\n",
+        },
+    )
+    assert _sweep(tmp_path, repo, ["docs/a.md"]) == 0
+
+
+def test_sweep_resolves_root_relative_targets_against_the_repository(tmp_path: Path, capsys):
+    repo = _link_repo(tmp_path, {"docs/a.md": "[root](/docs/there.md)\n"})
+    assert _sweep(tmp_path, repo, ["docs/a.md"]) == 1
+    assert "docs/there.md" in capsys.readouterr().out
+
+
+def test_sweep_fails_closed_when_a_listed_document_cannot_be_read(tmp_path: Path, capsys):
+    """A document the sweep never looked at must not read as clean."""
+    repo = _link_repo(tmp_path, {"docs/a.md": "[x](b.md)\n", "docs/b.md": "# b\n"})
+    rc = _sweep(tmp_path, repo, ["docs/a.md", "docs/absent.md"])
+    assert rc == 2
+    assert "cannot read docs/absent.md" in capsys.readouterr().err
+
+
+def test_sweep_fails_closed_outside_a_git_repository(tmp_path: Path, capsys):
+    """No tracked tree, no verdict — never a silent pass over an unread tree."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("[x](b.md)\n", encoding="utf-8")
+    assert _sweep(tmp_path, tmp_path, ["docs/a.md"]) == 2
+    assert "git ls-files" in capsys.readouterr().err
+
+
+def test_baseline_without_the_relative_links_list_fails_closed(tmp_path: Path, capsys):
+    """The snapshot must attest the half that is read — optional would disable it."""
+    repo = _link_repo(tmp_path, {"docs/a.md": "[x](b.md)\n"})
+    files = _write(tmp_path, "files.txt", "docs/a.md\n")
+    baseline = _baseline([], [])
+    del baseline["relative_links"]
+    rc = dlb.main([
+        "sweep",
+        "--files-from", str(files),
+        "--repo-root", str(repo),
+        "--baseline", str(_write(tmp_path, "b.json", json.dumps(baseline))),
+    ])
+    assert rc == 2
+    assert "relative_links" in capsys.readouterr().err
+
+
+def test_committed_relative_links_bucket_matches_the_tree():
+    """The recorded bucket must equal what the deterministic sweep measures NOW.
+
+    This is the positive control for the class: the sweep cannot see the working
+    tree, and the bucket cannot disagree with it. A dead relative link added
+    anywhere in the tracked markdown fails THIS test as well as the `docs` job,
+    which is what makes "record it in the same change, and say why" auditable.
+    """
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    files = dlb._population(ROOT, None)
+    measured = [dlb.relative_link_key(f) for f in dlb.relative_link_findings(ROOT, files)]
+    assert measured == baseline["relative_links"], (
+        "the committed `relative_links` bucket is not what `git ls-files` yields — "
+        "either a relative link in the tracked tree is dead (fix it, or record it "
+        "with `update` and say why) or the bucket was hand-edited"
+    )

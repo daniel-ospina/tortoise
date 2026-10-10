@@ -135,6 +135,40 @@ data, not chosen for convenience.
     count to compare against, so the baseline stores and compares a key set, and
     ``update`` deduplicates this half.
 
+``sweep`` — THE SAME LINK CLASS, MEASURED AGAINST THE TRACKED TREE (#7919)
+
+A relative link whose target is not in the tree CI builds is dead for everyone
+who checks out the repository, and the lychee half above can only see it through
+the FILESYSTEM — which lies about this repo in exactly the two ways that make
+the finding unrecordable and therefore permanently red on somebody else's PR:
+
+  * ``skills/`` and ``scripts/`` are UNTRACKED SYMLINKS into ``agent-infra``
+    (they are in the working tree here and in no checkout CI builds), so a
+    relative link through one RESOLVES for ``update`` and 404s in CI. Measured
+    on #7876: a docs-only PR was failed for a pre-existing
+    ``skills/how-to-use-tortoise/SKILL.md`` link in ``docs/INGEST_CONTRACT.md``,
+    a file it never touched — and ``update`` could not have recorded it, because
+    locally the target is right there.
+  * a change that DELETES a file breaks the inbound relative links in files it
+    never touched, and the changed-file lychee set never sees them.
+
+``sweep`` is that class measured with ``git ls-files`` instead: no network, no
+filesystem, no linter, so it is deterministic where the lychee half is not. Its
+findings ARE lychee's local-target failures, keyed the same way (``path|target``)
+— measured on the tree that added it, the six keys it reported were EXACTLY the
+six local-target keys in this snapshot's lychee half, so the two detectors agree
+today. The sweep is what keeps them agreeing once the filesystem stops telling
+the truth.
+
+It is a SEPARATE baseline key (``relative_links``), not a view over the lychee
+half, because the two have different VARIANCE: lychee's half is a run property
+(remote status, egress, cache — see #7697), while a target's absence from the
+tracked tree is a property of the TREE alone. Sharing one key would let a
+regeneration on a differently-connected host silently shrink the allowlist of a
+class that has no such variance — the unrelated-red failure this program exists
+to remove. Because it is tree-determined, this half can be compared EXACTLY (a
+set, like lychee, but with none of lychee's variance).
+
 END STATE — THIS IS A SNAPSHOT, NOT AN AMNESTY (#7534)
 
 This file records debt; it does not repair any of it. It is a **ceiling, never a
@@ -173,6 +207,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
 import tempfile
@@ -283,6 +318,10 @@ LYCHEE_CARRIERS: dict[str, tuple[tuple[str, ...], ...]] = {
 _NO_LYCHEE_SECTION = hashlib.sha256(b"<no lychee section>").hexdigest()
 
 BASELINE_SCHEMA = 1
+# EVERY list the snapshot carries, and every list `load_baseline` requires. A
+# snapshot that omits one would silently disable the comparison that reads it —
+# the same "required, not optional" rule `linter_config` follows below.
+BASELINE_LISTS = ("markdownlint", "lychee", "relative_links")
 DEFAULT_BASELINE = "config/docs-lint-baseline.json"
 
 # Vendored markdown is NOT OURS: a vendored re-install REWRITES it, so a finding
@@ -480,6 +519,262 @@ def lychee_key(finding: tuple[str, str, str]) -> str:
         # No target AND only a cache marker: nothing portable to key on.
         return f"{path}|{target}"
     return f"{path}|{target}|{status}"
+
+
+# ── the tracked-tree relative-link sweep (#7919) ─────────────────────────────
+
+# A fenced code block: up to three spaces of indent, then three or more
+# backticks or tildes. lychee reads markdown with `include_verbatim` off, so a
+# link inside one is NOT a finding and must not be reported here either.
+# Measured: `docs/plans/2026-08-11-942-selfhost-trust.md` shows a fenced snippet
+# containing `[Hosted Cloud](quickstart-cloud.md)`, and that target appears in
+# this snapshot's lychee half NOT AT ALL.
+FENCED_BLOCK = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+# An HTML comment is not rendered, so a link inside one is not a link. Without
+# this, a comment that merely QUOTES a dead link is reported as one.
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# `[text](target)` and `![alt](target)`, with an optional `<…>` target and an
+# optional title. The link TEXT may not span a line: allowing it made the
+# pattern match a `[…]` on one line and a `(…)` far below on another, which
+# reported ordinary prose parentheses as links.
+INLINE_LINK = re.compile(
+    r"!?\[(?:[^\[\]\\\n]|\\.)*?\]\(\s*(?:<(?P<angle>[^<>\n]*)>|(?P<plain>[^)\s]+))"
+    r"(?:\s+[\"'][^\"']*[\"'])?\s*\)"
+)
+# A reference DEFINITION (`[label]: target`). The trailing group is what makes
+# this distinguishable from a memo line that merely BEGINS `[category]: text` —
+# measured on `MEMORY.md`, whose gotcha lines (`[test]: A test that …`) matched a
+# looser form and produced 20 findings that are not links at all. A real
+# definition is the target, optionally a title, and then end-of-line.
+REFERENCE_DEFINITION = re.compile(
+    r"""^ {0,3}\[[^\]\n]+\]:[ \t]*<?([^\s>]+)>?[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$""",
+    re.M,
+)
+# `<a href>` / `<img src>`. lychee extracts these too, so a local target hidden
+# in one is the same defect. Checked here, found nowhere in the tree — kept
+# because "not present today" is not a reason for a detector to be blind.
+HTML_ATTRIBUTE = re.compile(r"""\b(?:href|src)\s*=\s*["']([^"']+)["']""", re.I)
+# A target carrying a scheme (`https:`, `mailto:`, `data:`, …) is not a path in
+# this tree. `//` is protocol-relative and a bare `#` is same-page.
+LINK_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def _blank_to_spaces(match: re.Match) -> str:
+    """Replace a match with spaces, PRESERVING newlines so lines stay aligned."""
+    return "".join("\n" if char == "\n" else " " for char in match.group(0))
+
+
+def _strip_fenced_blocks(text: str) -> str:
+    """Blank every fenced code block, keeping its line count."""
+    out: list[str] = []
+    fence_char: str | None = None
+    fence_len = 0
+    for line in text.split("\n"):
+        match = FENCED_BLOCK.match(line)
+        if fence_char is None:
+            if match is not None:
+                fence_char = match.group("fence")[0]
+                fence_len = len(match.group("fence"))
+                out.append("")
+                continue
+            # A line OUTSIDE a fence is kept: this branch used to blank it too,
+            # which made the sweep report nothing at all — the positive tests in
+            # `tests/test_docs_lint_baseline.py` caught it.
+            out.append(line)
+            continue
+        # A closing fence is the opener's character, at least as long, and
+        # carries no info string (CommonMark); a ```` ```python ```` inside a
+        # ```` ``` ```` block is content, not a close.
+        if (
+            match is not None
+            and match.group("fence")[0] == fence_char
+            and len(match.group("fence")) >= fence_len
+            and not match.group("info").strip()
+        ):
+            fence_char = None
+        out.append("")
+    return "\n".join(out)
+
+
+def _strip_code_spans(text: str) -> str:
+    """Blank every inline code span — lychee does not read links inside one.
+
+    Measured, and this is the whole reason the function exists: the plan docs
+    carry ``UNIVERSAL_COMMAND[harness](key)`` INSIDE backticks, and none of those
+    appears in the snapshot's lychee half — so a scanner that ignores code spans
+    is the one that agrees with the checker CI runs. A run of N backticks opens a
+    span the next run of EXACTLY N closes; an unclosed run is literal text and is
+    left blank-run for the link patterns to ignore.
+    """
+    out = list(text)
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] != "`":
+            index += 1
+            continue
+        run_end = index
+        while run_end < length and text[run_end] == "`":
+            run_end += 1
+        run = run_end - index
+        cursor = run_end
+        while cursor < length:
+            if text[cursor] != "`":
+                cursor += 1
+                continue
+            close_end = cursor
+            while close_end < length and text[close_end] == "`":
+                close_end += 1
+            if close_end - cursor == run:
+                for position in range(index, close_end):
+                    if text[position] != "\n":
+                        out[position] = " "
+                index = close_end
+                break
+            cursor = close_end
+        else:
+            index = run_end
+    return "".join(out)
+
+
+def _link_targets(text: str) -> list[str]:
+    """Every link target in a markdown document, comments/fences/spans removed."""
+    cleaned = _strip_code_spans(_strip_fenced_blocks(HTML_COMMENT.sub(_blank_to_spaces, text)))
+    targets = [
+        match.group("angle") if match.group("angle") is not None else match.group("plain")
+        for match in INLINE_LINK.finditer(cleaned)
+    ]
+    targets += [match.group(1) for match in REFERENCE_DEFINITION.finditer(cleaned)]
+    targets += [match.group(1) for match in HTML_ATTRIBUTE.finditer(cleaned)]
+    return targets
+
+
+def _tracked_tree(repo_root: Path) -> tuple[set[str], set[str]]:
+    """The TRACKED files, plus every ancestor directory they imply.
+
+    The tracked set, never the working tree: `skills/` and `scripts/` are
+    UNTRACKED symlinks here, so `Path.exists()` answers yes for a target that is
+    absent from the tree CI builds — the #7876 misreport, and the reason a
+    filesystem-based detector could not record it. The directory set makes a link
+    to a tracked DIRECTORY (`tests/`, `graph-scripts/`) resolve: the prefix test
+    a naive membership check would need is precomputed once per run.
+    """
+    proc = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=repo_root, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise FailClosed(
+            f"`git ls-files` failed in {repo_root} (rc {proc.returncode}) — the tracked "
+            "tree cannot be read, so a relative link's target cannot be resolved"
+        )
+    files = {normalize_path(path) for path in proc.stdout.split("\0") if path}
+    directories: set[str] = set()
+    for path in files:
+        parent = PurePosixPath(path).parent
+        while parent != PurePosixPath("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return files, directories
+
+
+def resolve_relative_target(path: str, target: str) -> str | None:
+    """The repo-relative path a link target points at, or None if not local.
+
+    None means "not this program's business": an absolute URL (`https:`, `mailto:`,
+    `data:`), a protocol-relative one, a same-page fragment, an empty target, or a
+    target that climbs out of the repository — which has no repo-relative spelling
+    and is therefore not a defect of THIS tree. `posixpath.normpath` (not
+    `os.path`) so the answer does not change with the host's separator.
+    """
+    if not target or target.startswith(("//", "#")):
+        return None
+    if LINK_SCHEME.match(target):
+        return None
+    raw = unquote(target.split("#", 1)[0].split("?", 1)[0])
+    if not raw:
+        return None
+    joined = (
+        PurePosixPath(raw.lstrip("/"))
+        if raw.startswith("/")
+        else PurePosixPath(path).parent / raw
+    )
+    normalized = PurePosixPath(posixpath.normpath(joined.as_posix())).as_posix()
+    if normalized in (".", "") or normalized.startswith(".."):
+        return None
+    return normalized
+
+
+def relative_link_key(finding: tuple[str, str]) -> str:
+    """`path|resolved_target` — the identity `lychee_key` gives a local finding.
+
+    The same key deliberately, because it is the same failure: a link whose
+    LOCAL target does not exist. One identity lets the two detectors be compared
+    on one tree without a translation layer (see the module docstring).
+    """
+    return "|".join(finding)
+
+
+def relative_link_findings(repo_root: Path, files: list[str]) -> list[tuple[str, str]]:
+    """`(path, resolved_target)` for every relative link absent from the tracked tree.
+
+    A path in `files` that cannot be read fails CLOSED: a sweep that silently
+    skipped it would report clean over a document it never looked at, which is
+    the silent-green trap the rest of this program refuses.
+    """
+    tracked, directories = _tracked_tree(repo_root)
+    findings: set[tuple[str, str]] = set()
+    for path in files:
+        try:
+            text = (repo_root / path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise FailClosed(f"cannot read {path} to resolve its relative links: {exc}") from exc
+        for target in _link_targets(text):
+            resolved = resolve_relative_target(path, target)
+            if resolved is None:
+                continue
+            if resolved in tracked or resolved in directories:
+                continue
+            findings.add((path, resolved))
+    return sorted(findings)
+
+
+def run_sweep(args: argparse.Namespace) -> int:
+    """Whole tracked tree, no linter: the class the changed-file check cannot see.
+
+    Takes NO changed-set input on purpose. A link can go stale in a file a change
+    never touched (the file it pointed at was deleted), and it can point through
+    an untracked symlink that resolves locally — the two shapes the
+    filesystem-based lychee half structurally cannot adjudicate. Wiring it to a
+    changes list would make the class invisible exactly when it matters, which is
+    why a caller should run it ungated.
+    """
+    repo_root = Path(args.repo_root).resolve()
+    baseline = load_baseline(Path(args.baseline))
+    known = set(baseline["relative_links"])
+    files = _population(repo_root, Path(args.files_from) if args.files_from else None)
+    findings = relative_link_findings(repo_root, files)
+    new = [finding for finding in findings if relative_link_key(finding) not in known]
+    print(
+        f"docs-lint relative links: {len(new)} new, {len(findings) - len(new)} known "
+        f"(baseline), {len(files)} file(s) swept of the tracked tree"
+    )
+    if not new:
+        return 0
+    print("")
+    print("NEW relative-link findings — the target is not in `git ls-files`:")
+    for path, target in new[:MAX_REPORTED]:
+        print(f"  {path}\n      {target}")
+    if len(new) > MAX_REPORTED:
+        print(f"  … and {len(new) - MAX_REPORTED} more new finding(s)")
+    print("")
+    print(
+        "A relative link whose target is not in the tracked tree is dead in every "
+        "checkout CI builds. Fix the path, or remove the link and say why. If the "
+        "target is legitimately untracked (an on-demand symlink, a page that will "
+        "land later), record it with `uv run python "
+        "tools/docs_lint_baseline.py update` in a change that explains why."
+    )
+    return 1
 
 
 # ── generated-file detection ─────────────────────────────────────────────────
@@ -861,14 +1156,14 @@ def load_baseline(path: Path) -> dict:
             f"baseline {path} has schema_version {baseline.get('schema_version')!r}, "
             f"expected {BASELINE_SCHEMA}"
         )
-    for key in ("markdownlint", "lychee"):
+    for key in BASELINE_LISTS:
         if not isinstance(baseline.get(key), list):
             raise FailClosed(f"baseline {path} has no {key!r} list")
     # The snapshot's own counts must describe its own lists. A silently truncated
     # or inflated file would mis-scope every later diff, and an inflated one could
     # mask a genuinely new occurrence.
     counts = (baseline.get("snapshot") or {}).get("counts") or {}
-    for key in ("markdownlint", "lychee"):
+    for key in BASELINE_LISTS:
         recorded = counts.get(key)
         if recorded is not None and recorded != len(baseline[key]):
             raise FailClosed(
@@ -1123,6 +1418,16 @@ def run_update(args: argparse.Namespace) -> int:
     # duplicates would advertise a count the check deliberately does not compare.
     lychee = sorted({lychee_key(f) for f in parse_lychee(lychee_document, repo_root)})
 
+    # The tracked-tree half needs NEITHER linter: it is `git ls-files` and a path
+    # resolution, so it is the one half of this snapshot that is fully
+    # reproducible on any host — and the one the lychee-only producer above
+    # cannot write, because a target behind an UNTRACKED SYMLINK resolves for
+    # lychee here and is absent from every checkout CI builds (#7876).
+    # Deduplicated and sorted: a link is either dead or it is not.
+    relative_links = sorted(
+        relative_link_key(f) for f in relative_link_findings(repo_root, files)
+    )
+
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True
     ).stdout.strip()
@@ -1158,7 +1463,11 @@ def run_update(args: argparse.Namespace) -> int:
             "markdownlint": MARKDOWNLINT_VERSION,
             "lychee": f"lychee {LYCHEE_PIN}",
             "population": f"git ls-files '*.md' (minus vendored) — {len(files)} files",
-            "counts": {"markdownlint": len(markdownlint), "lychee": len(lychee)},
+            "counts": {
+                "markdownlint": len(markdownlint),
+                "lychee": len(lychee),
+                "relative_links": len(relative_links),
+            },
             "variance": (
                 "markdownlint findings are deterministic and occurrence-counted. The "
                 "lychee half also checks REMOTE links, whose occurrence count varies "
@@ -1167,18 +1476,23 @@ def run_update(args: argparse.Namespace) -> int:
                 "keys, not a count — its pinned ceiling in "
                 "tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size "
                 "(a re-baseline above it must raise that row out loud) while the "
-                "markdownlint one is exact. Regenerate with `update`; never hand-edit."
+                "markdownlint one is exact. `relative_links` is the ONE half with "
+                "no such variance: it is measured with `git ls-files` and a path "
+                "resolution — no linter, no network, no filesystem — so it is "
+                "compared as an exact set (#7919). Regenerate with `update`; never "
+                "hand-edit."
             ),
         },
         "markdownlint": markdownlint,
         "lychee": lychee,
+        "relative_links": relative_links,
     }
     Path(args.baseline).write_text(
         json.dumps(baseline, indent=2, sort_keys=False) + "\n", encoding="utf-8"
     )
     print(
-        f"wrote {args.baseline}: {len(markdownlint)} markdownlint, {len(lychee)} lychee "
-        "entries"
+        f"wrote {args.baseline}: {len(markdownlint)} markdownlint, {len(lychee)} lychee, "
+        f"{len(relative_links)} relative-link entries"
     )
     return 0
 
@@ -1225,6 +1539,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"lychee {LYCHEE_PIN} binary (default: lychee on PATH)",
     )
     update.set_defaults(func=run_update)
+
+    sweep = sub.add_parser(
+        "sweep",
+        parents=[common],
+        help=(
+            "whole tracked tree: relative links whose target is not in `git ls-files` "
+            "(#7919)"
+        ),
+    )
+    sweep.add_argument(
+        "--files-from",
+        default=None,
+        help="file listing markdown paths (default: git ls-files '*.md')",
+    )
+    sweep.set_defaults(func=run_sweep)
     return parser
 
 
