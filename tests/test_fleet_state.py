@@ -588,7 +588,8 @@ def test_live_sources_degrade_to_empty_on_null_json(monkeypatch) -> None:
 # #7738 — a ghost lane gets a TERMINAL verdict, never an eternal live/unmeasured one
 # ---------------------------------------------------------------------------
 
-def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=None, by_sid=None):
+def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=None,
+                 by_sid=None, prs=()):
     monkeypatch.setattr(fs, "load_registry", lambda: list(registry))
     monkeypatch.setattr(
         fs, "cmux_workspaces",
@@ -599,7 +600,7 @@ def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=N
     monkeypatch.setattr(fs, "load_overrides", lambda: dict(overrides or {}))
     monkeypatch.setattr(fs, "session_index", lambda: (dict(by_sid or {}), {}))
     monkeypatch.setattr(fs, "worktrees", lambda _root: {})
-    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: [])
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: list(prs))
     monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: [])
     return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
 
@@ -632,6 +633,38 @@ def test_ghost_with_a_surviving_session_is_recoverable(monkeypatch) -> None:
     assert lane["terminal"]["resume_command"] == f"pi --session {sid}"
     assert sid in lane["terminal"]["reason"]
     assert st["summary"]["recoverable"] == 1
+
+
+def test_a_terminal_ghost_owning_a_pr_is_reported_as_an_orphan(monkeypatch, tmp_path) -> None:
+    """#7738: a terminal lane that OWNS an open PR must surface that PR as an
+    orphan owned by a lane with NO live pi process.
+
+    The build-time ``lane_live`` map (the terminal special-case) is the only thing
+    that turns a ghost-owned PR into an orphan: ``orphan_report`` reads
+    ``lane_live[owner]``. Without that special-case an unmeasured ghost maps to the
+    anti-false-orphan default ``True`` and holds its PR forever — the exact #7738 bug.
+    """
+    sid = "b" * 36
+    sess = tmp_path / f"2026-01-01T00-00-00-000Z_{sid}.jsonl"
+    sess.write_text(json.dumps({"type": "user", "content": "dispatch for #4242 owner"}) + "\n")
+    pr = {"number": 4242, "title": "ghost-owned PR", "headRefName": "feat/ghost",
+          "headRefOid": "deadbeef"}
+    st = _fleet_build(
+        monkeypatch,
+        registry=[("GHOST", "WS-GONE", "")],
+        live={"WS-ALIVE": {"cwd": "/tmp/a"}}, measured=True,
+        overrides={"GHOST": sid},
+        by_sid={sid: str(sess)},
+        prs=[pr],
+    )
+    lane = st["lanes"][0]
+    assert lane["terminal"]["state"] == "RECOVERABLE"
+    assert 4242 in lane["claim"]["prs"], "the ghost owns the PR"
+    owns = [o for o in st["orphans"] if o.get("number") == 4242]
+    assert len(owns) == 1, st["orphans"]
+    assert owns[0]["kind"] == "PR"
+    assert owns[0]["lane"] == "GHOST"
+    assert "no live pi process" in owns[0]["reason"]
 
 
 def test_an_unreadable_workspace_list_retires_nothing(monkeypatch) -> None:
