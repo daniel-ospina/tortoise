@@ -268,6 +268,48 @@ def test_a_torn_snapshot_rolls_back_the_journal_db_and_both_aof_dirs(
     assert _asides(tmp_path) == [], "rollback asides were left behind"
 
 
+def test_a_staging_failure_rolls_back_what_was_already_staged(
+        tmp_path, rdb_snapshot, monkeypatch):
+    """FAILS IF: the destination staging renames sit OUTSIDE the guarded
+    region, so a failure on a LATER stage escapes before any rollback runs —
+    the journal has already been renamed aside and is never put back, which is
+    the #7767 shape surviving in the staging phase (found in review, and
+    reproduced there with an injected ``os.replace``).
+    REACHABLE: a destination holding BOTH a journal and a DB, with the DB's
+    rename made to fail — ``events_path`` and ``db_path`` are routinely
+    different paths, so a failure on one must not strand the other. The DB is
+    staged only when the backup carries a snapshot (``replace_db``), so this
+    uses the snapshot-present path."""
+    import tortoise.backup as backup_mod
+
+    dest_events, dest_db = _dest(tmp_path)
+    dest_events.write_text('{"type":"PointAdded","point":{"id":"dest-p1"}}')
+    dest_db.write_bytes(b"ORIGINAL-DB-BYTES")
+    src = _backup_dir(tmp_path, "[]\n", snapshot=rdb_snapshot)
+    before = dest_events.read_bytes()
+
+    real_replace = backup_mod.os.replace
+
+    def _flaky_replace(source, target):
+        # Only the DB's stage fails, and only after the journal's stage has
+        # already renamed the journal aside (it runs first).
+        if str(source) == str(dest_db) and "restore-aside" in str(target):
+            raise PermissionError("injected: the DB stage cannot rename (review)")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(backup_mod.os, "replace", _flaky_replace)
+
+    with pytest.raises(PermissionError):
+        restore(str(src), db_path=str(dest_db), events_path=str(dest_events),
+                into_falkor=True)
+
+    assert dest_events.read_bytes() == before, (
+        "the already-staged journal was not restored")
+    assert dest_db.read_bytes() == b"ORIGINAL-DB-BYTES", (
+        "the destination DB was disturbed by a failed stage")
+    assert _asides(tmp_path) == [], "a staging failure left an aside behind"
+
+
 # ── the AOF dir rule has one home ────────────────────────────────────────
 
 

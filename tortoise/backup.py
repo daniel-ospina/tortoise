@@ -95,6 +95,17 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
     O(1) rename — tracked by #7928, with the measurement. A destination DB the
     replay newly CREATED is removed, so the common shape is covered here.
     The adjacent `_recover_or_raise` leg of the issue is #7929.
+
+    CONCURRENCY (stated, not fixed): the aside-then-restore protocol assumes
+    exclusive ownership of the destination, and `restore` takes no lock of its
+    own — the store's writer flock is not acquired until the projection is
+    constructed, after every rename here. Two restores into the SAME
+    destination can therefore interleave (one rollback discarding another's
+    committed result). That is outside the supported posture rather than a new
+    contract: an embedded store is a single-writer store
+    (docs/durability-posture.md), so callers must not run two restores against
+    one destination concurrently. Closing it needs a destination-wide lock
+    (tracked with the #7928 residual, not widened here).
     """
     token = uuid.uuid4().hex[:12]
     staged: list[tuple[Path, Path]] = []
@@ -114,19 +125,30 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path, ignore_errors=True)
         else:
-            with suppress(FileNotFoundError):
+            # OSError, not FileNotFoundError: cleanup is best-effort and must
+            # never raise — a single undeletable entry may not abort the
+            # unwind loop (see the `except` branch below).
+            with suppress(OSError):
                 os.remove(path)
 
-    _stage(Path(events_path), overwrite=True)
-    if (db_path is not None and str(db_path) != ":memory:"
-            and not is_db_uri(str(db_path))):
-        from tortoise.projection import stale_aof_dirs
-        _stage(Path(db_path), overwrite=replace_db)
-        # The AOF dirs go with the DB: `remove_stale_aof` deletes them, so a
-        # refused restore must not take the destination's unflushed data too.
-        for aof in stale_aof_dirs(db_path):
-            _stage(aof, overwrite=replace_db)
+    # The staging renames live INSIDE the guarded region. `os.replace` is not
+    # infallible (a read-only parent dir, ENOSPC, or the exists()->replace
+    # race), and a raise from a LATER stage used to escape before any handler
+    # ran: the journal was already renamed aside and was never put back, so a
+    # failed restore destroyed the destination — the exact #7767 shape, in the
+    # staging phase. events_path and db_path are frequently different
+    # directories, so a failure on one must not strand the other.
     try:
+        _stage(Path(events_path), overwrite=True)
+        if (db_path is not None and str(db_path) != ":memory:"
+                and not is_db_uri(str(db_path))):
+            from tortoise.projection import stale_aof_dirs
+            _stage(Path(db_path), overwrite=replace_db)
+            # The AOF dirs go with the DB: `remove_stale_aof` deletes them, so
+            # a refused restore must not take the destination's unflushed data
+            # too.
+            for aof in stale_aof_dirs(db_path):
+                _stage(aof, overwrite=replace_db)
         yield
     except BaseException:
         for original, _side in staged:
@@ -134,7 +156,12 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
         for path in created:
             _discard(path)
         for original, side in reversed(staged):
-            os.replace(side, original)
+            # The unwind must not itself raise: an un-restorable entry would
+            # otherwise abandon every remaining one AND replace the caller's
+            # original exception with the rollback's. Each restore is attempted
+            # independently; `_discard` above is likewise non-raising.
+            with suppress(OSError):
+                os.replace(side, original)
         raise
     else:
         for _original, side in staged:
