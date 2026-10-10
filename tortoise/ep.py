@@ -14,6 +14,7 @@ import random
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
+    EPISTEMIC_LABELS,
     _live_only,
     _terminal_excluded,
     epistemic_disjunction,
@@ -139,11 +140,8 @@ class TortoiseEP:
         if affected_claims:
             rows: list = []
             # #7853: id-anchored read — keep the label and sweep the four
-            # epistemic labels. Point/Subject/Object each carry an ``id``
-            # RANGE index, so those probes are index-anchored; Event carries
-            # one on ``eventId`` only, so its ``id`` probe scans (the same
-            # bound ``tortoise/live.py`` states — a bare `MATCH (n)` drops the
-            # anchor on EVERY label).
+            # epistemic labels so the per-(label, property) id index anchors
+            # each probe (a bare `MATCH (n) WHERE n.id IN $ids` full-scans).
             for _q in epistemic_label_queries(
                 "MATCH (n:{label}) WHERE n.id IN $ids "
                 "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
@@ -176,13 +174,12 @@ class TortoiseEP:
 
         if affected_claims:
             # #7853/#7902: back-messages live on DIRECT edges
-            # (a)-[:IMPL|NAND]->(b). Both endpoints are id-anchored, so sweep
-            # the epistemic labels on the TARGET side (keep the per-(label,id)
-            # index). #7853 widened the operator-path reads; #7902 widened the
-            # direct-edge WRITE path, so the direct-edge endpoints may now be
-            # any of the four labels on the SOURCE side too — the disjunction
-            # on `a` is the traversal-position widening
-            # (live.epistemic_disjunction).
+            # (a)-[:IMPL|NAND]->(b). Both endpoints are id-anchored by the
+            # write path (#7902 widened create_direct_edge to the four
+            # epistemic labels), so sweep the TARGET label for the index and
+            # widen the SOURCE traversal position with the disjunction
+            # (live.epistemic_disjunction) — a :Subject/:Object/:Event source
+            # direct edge must load its back-message slot.
             back_rows: list = []
             for _q in epistemic_label_queries(
                 "MATCH (a)-[r:IMPL|NAND]->(b:{label}) "
@@ -234,10 +231,9 @@ class TortoiseEP:
             ]
             result = None
             written: set = set()
-            # #7853: id-anchored batch write — sweep the epistemic labels
-            # (Point first, the hot indexed probe). Point/Subject/Object are
-            # index-anchored on ``id``; Event has no ``Event(id)`` range index
-            # (its index is on ``eventId``), so that arm scans.
+            # #7853: id-anchored batch write — sweep the epistemic labels so
+            # each node is written through its own label's id index (the
+            # Point arm stays the hot, indexed first probe).
             for _q in epistemic_label_queries(
                 "UNWIND $params AS p "
                 "MATCH (n:{label} {id: p.id}) "
@@ -298,15 +294,18 @@ class TortoiseEP:
                     if r == rel
                 ]
                 if params_list:
-                    # #7853: widen the target side of the direct edge.
-                    self.g.query(
+                    # #7902: both endpoints of a direct edge may carry any
+                    # epistemic label. Sweep the SOURCE label (id index kept)
+                    # and widen the TARGET traversal position — a non-Point
+                    # direct-edge back-message must persist.
+                    for _q in epistemic_label_queries(
                         f"UNWIND $params AS p "
-                        f"MATCH (o:Point {{id:p.src}})-[r:{rel}]->(c) "
+                        f"MATCH (o:{{label}} {{id:p.src}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.tgt "
-                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b",
-                        params={"params": params_list},
-                    )
+                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b"
+                    ):
+                        self.g.query(_q, params={"params": params_list})
         return True
 
     def _clear_caches(self) -> None:
@@ -408,12 +407,18 @@ class TortoiseEP:
         _cache = getattr(self, '_back_cache', None)
         if _cache is not None and key in _cache:
             return _cache[key]
-        rows = self.g.query(
-            f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c) "
+        rows = []
+        # #7902: the SOURCE endpoint of a direct edge may be any epistemic
+        # label — sweep it (id index) and widen the target by traversal.
+        for _q in epistemic_label_queries(
+            f"MATCH (o:{{label}} {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "RETURN coalesce(r.back_msg_alpha, 0.0), coalesce(r.back_msg_beta, 0.0)",
-            params={"oid": src_id, "cid": tgt_id},
-        ).result_set
+            "RETURN coalesce(r.back_msg_alpha, 0.0), coalesce(r.back_msg_beta, 0.0)"
+        ):
+            rows = self.g.query(
+                _q, params={"oid": src_id, "cid": tgt_id}).result_set
+            if rows:
+                break
         return (float(rows[0][0]), float(rows[0][1])) if rows else (0.0, 0.0)
 
     def _write_back_message(self, src_id: str, tgt_id: str,
@@ -424,12 +429,14 @@ class TortoiseEP:
         if _cache is not None:
             _cache[key] = (msg_alpha, msg_beta)
             return
-        self.g.query(
-            f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c) "
+        # #7902: sweep the SOURCE label (id index); widen the target traversal.
+        for _q in epistemic_label_queries(
+            f"MATCH (o:{{label}} {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b",
-            params={"oid": src_id, "cid": tgt_id, "a": msg_alpha, "b": msg_beta},
-        )
+            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b"
+        ):
+            self.g.query(_q, params={
+                "oid": src_id, "cid": tgt_id, "a": msg_alpha, "b": msg_beta})
 
     # ── Natural parameter helpers ─────────────────────────────────
 
@@ -789,15 +796,36 @@ class TortoiseEP:
         live_b = _live_only("b.status", include_draft)
         affected: set[str] = set()
         for seed_id in operator_ids:
+            # #7902 perf: a seed already reached by an earlier seed (or by its
+            # 1-hop expansion) needs no re-expansion — the BFS frontier starts
+            # from the WHOLE initial set, so a skipped seed keeps the same
+            # depth and the same neighbors. Without this, seeding every dirty
+            # root of an N-claim zone issues N label sweeps per phase (the
+            # interactive-latency regression the #7853 widening introduced on
+            # the #395 ≤1s budget).
+            if seed_id in affected:
+                continue
             is_op: list = []
-            # #7853: the seed may be any epistemic label — id-anchored sweep.
-            for _q in epistemic_label_queries(
-                "MATCH (n:{label} {id:$id}) "
-                "RETURN (n.is_operator = true), n.status"
-            ):
-                is_op = self.g.query(_q, params={"id": seed_id}).result_set
+            seed_label: str | None = None
+            # #7853/#7902: the seed may be any epistemic label. Sweep the
+            # labels but STOP at the first that resolves — a node carries one
+            # epistemic label, so a Point seed costs ONE query, not four (the
+            # #395 interactive-latency budget depends on this). The resolved
+            # label is reused for the seed's direct-edge probe and the
+            # operator-mediated hop below, so those do not re-sweep.
+            for _label in EPISTEMIC_LABELS:
+                is_op = self.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) "
+                    "RETURN (n.is_operator = true), n.status",
+                    params={"id": seed_id},
+                ).result_set
                 if is_op:
+                    seed_label = _label
                     break
+            if seed_label is None:
+                # The seed does not exist (or is not an epistemic node) — it
+                # contributes nothing, matching the pre-widening Point probe.
+                continue
             seed_is_draft = bool(
                 is_op and is_op[0][1] == "draft" and not include_draft
             )
@@ -819,20 +847,23 @@ class TortoiseEP:
                     params={"oid": seed_id},
                 ).result_set
             else:
-                # Plain-point seed (#888 W5): direct edges in BOTH directions
+                # Plain seed (#888 W5): direct edges in BOTH directions
                 # (an operator-less edge is a factor shared by its endpoints),
                 # plus the seed's operator-mediated neighborhood via
                 # _neighbors so a seed whose only connections are
                 # operator-mediated still runs its incident factors. Draft
                 # endpoints are excluded (#780) — a draft seed runs nothing.
-                conds = ["b.id <> $id"]
+                # #7902: the seed may be any epistemic label (the write path
+                # admits non-Point direct edges) — anchor on the resolved
+                # label (one query) and widen the far endpoint by traversal.
+                conds = ["b.id <> $id", epistemic_disjunction("b")]
                 if live_b:
                     conds.append(live_b)
                 if live_a:
                     conds.append(live_a)
                 where = " WHERE " + " AND ".join(conds)
                 rows = self.g.query(
-                    "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
+                    f"MATCH (a:{seed_label} {{id:$id}})-[r:IMPL|NAND]-(b) "
                     f"{where} "
                     # #3139/#3154: index-independent non-operator predicate
                     # (a bare `= false` is emptied by a GRAPH.COPY'd index).
@@ -842,7 +873,8 @@ class TortoiseEP:
                     params={"id": seed_id},
                 ).result_set
                 if not seed_is_draft:
-                    for nid in self._live_neighbors(seed_id, include_draft):
+                    for nid in self._live_neighbors(
+                            seed_id, include_draft, label=seed_label):
                         affected.add(nid)
             affected.update(r[0] for r in rows)
 
@@ -926,30 +958,27 @@ class TortoiseEP:
                     # Operator-less hops (#888 W5): direct IMPL/NAND edges
                     # between plain Points (operator-mediated hops above).
                     # Draft endpoints never propagate (#780).
-                    conds = ["a.id IN $ids", "b.id <> a.id"]
+                    conds = ["a.id IN $ids", "b.id <> a.id",
+                             epistemic_disjunction("b")]
                     if live_a:
                         conds.append(live_a)
                     if live_b:
                         conds.append(live_b)
-                    # #7853: NOT widened. The operator-less direct-edge write
-                    # path only ever creates `:Point`→`:Point` edges, and
-                    # `_affected_factors` Batch 3 reads this factor as
-                    # `(a:Point)-[r:IMPL|NAND]->(b:Point)` — so admitting a
-                    # non-Point endpoint here would put the two sides out of
-                    # lockstep and let `_update_claim_posterior` recompute the
-                    # node from empty natural parameters, overwriting its
-                    # persisted prior with Beta(1,1). Widen BOTH or neither.
-                    dir_rows = self.g.query(
-                        "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                    dir_rows: list = []
+                    # #7853: a is the id-anchored frontier — sweep its labels;
+                    # b is widened by traversal.
+                    for _qa in epistemic_label_queries(
+                        "MATCH (a:{label})-[r:IMPL|NAND]-(b) "
                         "WHERE " + " AND ".join(conds) + " "
                         # #3139/#3154: index-independent non-operator form.
                         "AND (a.is_operator IS NULL OR a.is_operator = false) "
                         "AND a.op_type IS NULL "
                         "AND (b.is_operator IS NULL OR b.is_operator = false) "
                         "AND b.op_type IS NULL "
-                        "RETURN DISTINCT a.id, b.id",
-                        params={"ids": list(frontier)},
-                    ).result_set
+                        "RETURN DISTINCT a.id, b.id"
+                    ):
+                        dir_rows.extend(self.g.query(
+                            _qa, params={"ids": list(frontier)}).result_set)
                     for _aid, bid in dir_rows:
                         if bid not in affected:
                             affected.add(bid)
@@ -1036,7 +1065,8 @@ class TortoiseEP:
             rows.extend(self.g.query(_q, params={"ids": list(ids)}).result_set)
         return {r[0] for r in rows}
 
-    def _live_neighbors(self, node_id: str, include_draft: bool) -> list[str]:
+    def _live_neighbors(self, node_id: str, include_draft: bool,
+                        label: str | None = None) -> list[str]:
         """Operator-mediated neighborhood hop that never crosses drafts (#780).
 
         Operator-mediated neighborhood hop for the affected-set expansion —
@@ -1052,35 +1082,16 @@ class TortoiseEP:
         reverse-only `IMPL` (the mitigation back-link `(m)-[:IMPL]->(op)`) —
         neither forms a factor, so neither may admit its far endpoint into the
         affected set.
+
+        ``label`` (#7902 perf): the node's already-resolved epistemic label.
+        When supplied, the id-anchored hop runs ONCE on that label instead of
+        sweeping all four — the #395 interactive-latency budget. Omit it for
+        the standalone sweep.
         """
-        if include_draft:
-            # Escape hatch (#780): drafts ARE allowed as bridge endpoints —
-            # but terminal points never are (#2422). ``_live_only`` with
-            # include_draft=True returns the terminal-exclusion fragment only,
-            # so drafts pass while retracted/superseded/outdated/archived
-            # nodes (and the ``outdated=true`` flag) stay excluded.
-            # #7853: id-anchored n — sweep labels; m widened by traversal.
-            rows = []
-            for _q in epistemic_label_queries(
-                "MATCH (n:{label} {id:$id})<-[r:IMPL|NAND]-(op:Point)"
-                "-[r2:IMPL|NAND]->(m) "
-                "WHERE m.id <> $id "
-                f"AND {epistemic_disjunction('m')} "
-                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                f"AND {_live_only('op.status', include_draft)} "
-                f"AND {_live_only('m.status', include_draft)} "
-                "RETURN DISTINCT m.id"
-            ):
-                rows.extend(self.g.query(
-                    _q, params={"id": node_id}).result_set)
-            return [r[0] for r in rows]
-        # Operator detection matches Batch 1 (_affected_factors): a Point is
-        # an operator when is_operator=true OR op_type is set (legacy nodes —
-        # projection/__init__.py treats bool(is_operator or op_type) as
-        # operator). Matching only {is_operator:true} would leave legacy
-        # operator bridges invisible to the draft exclusion (#943 review).
-        rows = []
-        for _q in epistemic_label_queries(
+        # #7853/#7902: m (the far endpoint) may be any epistemic label —
+        # widened by traversal. The id-anchored n uses the resolved label when
+        # known, else sweeps the four labels.
+        template = (
             "MATCH (n:{label} {id:$id})<-[r:IMPL|NAND]-(op:Point)"
             "-[r2:IMPL|NAND]->(m) "
             "WHERE m.id <> $id "
@@ -1089,7 +1100,15 @@ class TortoiseEP:
             f"AND {_live_only('op.status', include_draft)} "
             f"AND {_live_only('m.status', include_draft)} "
             "RETURN DISTINCT m.id"
-        ):
+        )
+        if label is not None:
+            queries = [template.replace("{label}", label)]
+        else:
+            # include_draft=True allows drafts as bridge endpoints but never
+            # terminal points (#2422) — `_live_only` already encodes that.
+            queries = epistemic_label_queries(template)
+        rows: list = []
+        for _q in queries:
             rows.extend(self.g.query(_q, params={"id": node_id}).result_set)
         return [r[0] for r in rows]
 
@@ -1598,23 +1617,18 @@ class TortoiseEP:
             # `set_point_baseline`): journaling it correctly requires the
             # statement's OUTCOME, not its input params.
             if self._emit is not None:
-                # #7853: this read IS id-anchored (``n.id IN $ids``), so it
-                # takes ``live.py``'s id-anchored shape — a per-label sweep that
-                # keeps the label and its per-(label, id) index — and de-dups in
-                # Python, so a node carrying more than one epistemic label is
-                # still journaled exactly once.
-                _seen_evidence: set[str] = set()
-                for _q in epistemic_label_queries(
-                        "MATCH (n:{label}) WHERE n.id IN $ids "
-                        "AND coalesce(n.baseline_set, false) = false "
-                        "RETURN n.id"):
-                    for row in self.g.query(
-                            _q, params={"ids": list(run_evidence)}).result_set:
-                        if row[0] in _seen_evidence:
-                            continue
-                        _seen_evidence.add(row[0])
-                        self._emit("ConfidenceChanged", id=row[0],
-                                   posterior_alpha=None, posterior_beta=None)
+                # #7853: single disjunction query (not a per-label sweep) so a
+                # multi-labelled node is read — and journaled — exactly once.
+                rows = self.g.query(
+                    "MATCH (n) "
+                    f"WHERE {epistemic_disjunction('n')} AND n.id IN $ids "
+                    "AND coalesce(n.baseline_set, false) = false "
+                    "RETURN n.id",
+                    params={"ids": list(run_evidence)},
+                ).result_set
+                for row in rows:
+                    self._emit("ConfidenceChanged", id=row[0],
+                               posterior_alpha=None, posterior_beta=None)
 
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)
