@@ -1007,6 +1007,12 @@ class TestCmuxTransport(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 
+#: The session id the #7913 fixture files are named after, and the id the fake
+#: panes are resume-bound to. A transcript is evidence only for the pane whose OWN
+#: session id matches (`tools/cmux_dispatch.py::session_file_for`).
+SESSION_7913 = "00000000-0000-4000-8000-000000000000"
+
+
 class FakeCmux:
     """A cmux whose `send` ALWAYS returns 0, exactly like the real one.
 
@@ -1034,6 +1040,7 @@ class FakeCmux:
         menu_open: bool = False,
         pre_typed: str = "",
         cwd: str = "",
+        session_id: str = SESSION_7913,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -1081,9 +1088,14 @@ class FakeCmux:
         #: NEVER submits. Escape dismisses it; Ctrl-U clears the line but does NOT
         #: close the menu (verified against the installed pi-tui editor).
         self.menu_open = menu_open
-        #: The workspace cwd `cmux list-workspaces --json` reports. It is what the
-        #: non-pane session-mtime probe (#7913) resolves a session directory from.
+        #: The workspace cwd `cmux list-workspaces --json` reports. It is the FAST
+        #: path the non-pane session-mtime probe (#7913) searches, but it is never a
+        #: substitute for the pane's own session id: a transcript is evidence only
+        #: when its filename carries THIS pane's binding.
         self.cwd = cwd
+        #: The id `cmux surface resume show` reports as the pane's
+        #: `resume_binding.checkpoint_id`; `""` models an unbindable pane.
+        self.session_id = session_id
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
@@ -1104,6 +1116,9 @@ class FakeCmux:
                 self.state = "ready"
 
     # -- cmux surface ------------------------------------------------------- #
+
+    def pane_session_id(self, workspace: str) -> str | None:
+        return self.session_id or None
 
     def list_workspaces_json(self) -> cd.CmuxResult:
         self.list_calls += 1
@@ -2839,12 +2854,10 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
             os.environ[cd.SESSIONS_ROOT_ENV] = self._saved
         shutil.rmtree(self._dir, ignore_errors=True)
 
-    def _session(self, cwd: str, age_s: float) -> Path:
+    def _session(self, cwd: str, age_s: float, sid: str = SESSION_7913) -> Path:
         session_dir = self._dir / cd.mangle_cwd(cwd)
         session_dir.mkdir(parents=True, exist_ok=True)
-        path = session_dir / (
-            "2026-10-10T00-00-00-000Z_00000000-0000-4000-8000-000000000000.jsonl"
-        )
+        path = session_dir / f"2026-10-10T00-00-00-000Z_{sid}.jsonl"
         path.write_text('{"type":"user","message":"x"}\n')
         stamp = time.time() - age_s
         os.utime(path, (stamp, stamp))
@@ -2883,6 +2896,56 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
         result, _ = self._send(fake, ready_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+
+    def test_a_fresh_transcript_for_ANOTHER_pane_is_not_evidence_for_this_one(self):
+        # #7913 review P1: the transcript must be attributable to the PANE. Lanes
+        # sharing one cwd is the measured norm (13 of 22 workspaces, 245
+        # transcripts in that bucket), so a SIBLING lane's fresh transcript must
+        # not green-light a write into a dead lane's bare shell — that is exactly
+        # how #7158's harm returns through a new door.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0, sid="11111111-1111-4111-8111-111111111111")
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a sibling lane's transcript is not evidence")
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "unreadable-pane")
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+
+    def test_an_unbindable_pane_is_refused_even_with_a_fresh_transcript(self):
+        # No resume binding -> the transcript cannot be attributed -> UNKNOWN.
+        # fleet_state.refresh refuses an ambiguous candidate set for the same
+        # reason: a guess here writes into whatever pane happens to share the cwd.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd, session_id="")
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [], "no bytes may be written blind")
+        self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_zero_byte_session_file_is_not_a_liveness_signal(self):
+        # A transcript created but never written is a pi with no turn, and an
+        # EMPTY file cannot have “advanced”: it must not certify liveness.
+        cwd = "/private/tmp"
+        path = self._session(cwd, age_s=5.0)
+        path.write_text("")
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [])
+        self.assertEqual(result.condition, "unreadable-pane")
+
+    def test_a_future_mtime_is_unmeasurable_and_fails_closed(self):
+        # Clamping a future mtime to age 0 made a lane look maximally fresh
+        # forever. An age that cannot be measured must refuse.
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=-3600.0)  # an hour AHEAD of the clock
+        fake = FakeCmux(screen_unreadable=True, cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(fake.sent_log, [])
+        self.assertEqual(result.condition, "unreadable-pane")
 
     def test_empty_read_with_a_STALE_session_is_still_refused(self):
         cwd = "/private/tmp"
@@ -2939,11 +3002,27 @@ class TestIssue7913ReadinessClassification(unittest.TestCase):
         self.assertEqual(cd.readiness_state(SCREEN_IDLE_READY), cd.ST_READY)
         self.assertEqual(cd.readiness_state(SCREEN_BARE_SHELL), cd.ST_NOT_READY)
 
-    def test_unreadable_is_distinct_from_every_lane_state(self):
-        # The vocabulary itself: UNREADABLE must not collide with the beat's
-        # lane states, which are what feed WEDGED/STALL/IDLE dispatch advice.
+    def test_unreadable_cannot_be_read_as_a_lane_state(self):
+        # The vocabulary is load-bearing: it is what the beat branches on. Drive
+        # the CLASSIFIER on the real renders rather than asserting a constant
+        # against a literal, so a collision introduced in `readiness_state` is
+        # caught here (#7913 review).
+        self.assertEqual(cd.readiness_state(""), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(None), cd.ST_UNREADABLE)
+        self.assertEqual(cd.readiness_state(SCREEN_BARE_SHELL), cd.ST_NOT_READY)
+        self.assertEqual(cd.readiness_state(SCREEN_IDLE_READY), cd.ST_READY)
         for lane_state in ("WEDGED", "STALL", "IDLE", "WIP"):
-            self.assertNotEqual(cd.ST_UNREADABLE, lane_state)
+            self.assertNotIn(
+                lane_state,
+                {
+                    cd.readiness_state(""),
+                    cd.readiness_state(None),
+                    cd.readiness_state(SCREEN_BOOT_BLOCK),
+                    cd.readiness_state(SCREEN_IDLE_READY),
+                    cd.readiness_state(SCREEN_BARE_SHELL),
+                },
+                "an instrument state must never collide with a lane state",
+            )
 
     def test_completion_menu_is_detected_from_the_renderer_shape(self):
         screen = SCREEN_IDLE_READY.replace(

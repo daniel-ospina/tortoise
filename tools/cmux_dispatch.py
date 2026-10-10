@@ -145,15 +145,24 @@ assertions about the lane. `UNREADABLE` must never feed the beat's
 dispatch advice (`wait-ready --json` exposes it as `state`).
 
 Second, an `UNREADABLE` read is no longer the end of the decision: before
-refusing, the tool consults a NON-PANE signal — the pi session transcript
-(`~/.pi/agent/sessions/…`) resolved from the workspace's `current_directory`, as
-`fleet_state.py` already does. A transcript whose mtime advanced within
-`DEFAULT_SESSION_FRESH_S` can only be advancing because a live pi owns the lane,
-so the send proceeds and the log line names the evidence used
-(`session-mtime` vs `screen`). The fallback fires ONLY for `UNREADABLE`: a
-READABLE pane that lacks a footer is still refused (#7158), because that is a
-real claim about the lane and a sibling lane sharing the cwd could hold a fresh
-transcript while this pane sits at a shell.
+refusing, the tool consults a NON-PANE signal — the pi session transcript of the
+PANE'S OWN session, resolved from the workspace's resume binding
+(`cmux surface resume show`, the authoritative binding `fleet_state.py` also
+uses). A transcript whose mtime advanced within `DEFAULT_SESSION_FRESH_S` means a
+live pi owns THIS pane, so the send proceeds and the log line names the evidence
+used (`session-mtime` vs `screen`).
+
+⚠ The transcript must be attributable to the pane, NEVER to its cwd. A
+cwd-scoped glob is not evidence about a pane: measured 2026-10-10, 13 of 22 live
+workspaces shared one `current_directory` and its session bucket held 245
+transcripts, so a sibling lane kept a dead lane reading “live” — and an empty
+read over a bare shell would have been executed. A workspace whose resume
+binding does not resolve is UNKNOWN and the tool REFUSES, exactly as
+`fleet_state.resolve_sessions` refuses an ambiguous candidate set rather than
+guessing.
+
+The fallback fires ONLY for `UNREADABLE`: a READABLE pane that lacks a footer is
+still refused (#7158), because that is a real claim about the lane.
 
 COMPOSER HYGIENE, AND THE MENU THAT EATS ENTER (#7913)
 ------------------------------------------------------
@@ -259,7 +268,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -790,16 +799,14 @@ def mangle_cwd(cwd: str) -> str:
     return "--" + re.sub(r"[/.]", "-", cwd.strip("/")) + "--"
 
 
-def newest_session_file(session_dir: Path) -> Path | None:
-    """The most recently modified `*.jsonl` in a session directory, or None."""
-    try:
-        candidates = [p for p in session_dir.glob("*.jsonl") if p.is_file()]
-    except OSError:
-        return None
+def _newest(paths: Iterable[Path]) -> Path | None:
+    """The most recently modified regular file among `paths`, or None."""
     newest: Path | None = None
     newest_mtime = -1.0
-    for path in candidates:
+    for path in paths:
         try:
+            if not path.is_file():
+                continue
             mtime = path.stat().st_mtime
         except OSError:
             continue
@@ -808,17 +815,47 @@ def newest_session_file(session_dir: Path) -> Path | None:
     return newest
 
 
-def default_session_probe(workspace: str, entry: dict | None) -> Path | None:
-    """Resolve a workspace to its newest session transcript via the pane's cwd.
-
-    `current_directory` is what `cmux list-workspaces --json` already carries (the
-    same field `fleet_state.py` joins on), so the workspace -> session mapping
-    needs no extra cmux call. No cwd -> no resolution -> the caller must refuse.
-    """
-    cwd = str((entry or {}).get("current_directory") or "").strip()
-    if not cwd:
+def newest_session_file(session_dir: Path) -> Path | None:
+    """The most recently modified `*.jsonl` in a session directory, or None."""
+    try:
+        candidates = list(session_dir.glob("*.jsonl"))
+    except OSError:
         return None
-    return newest_session_file(sessions_root() / mangle_cwd(cwd))
+    return _newest(candidates)
+
+
+def session_file_for(session_id: str | None, entry: dict | None) -> Path | None:
+    """The transcript belonging to `session_id`, or None — NEVER a guess.
+
+    A pane's own transcript is named `<timestamp>_<session-id>.jsonl`, so the
+    session id — not the cwd — is what attributes a file to a pane (#7913: a
+    cwd-scoped glob let a sibling lane's fresh transcript stand in for a dead
+    lane's, measured 13-of-22 workspaces sharing one cwd and 245 transcripts in
+    its bucket).
+
+    The mangled-`current_directory` bucket is the fast path; the whole store is
+    the fallback, for a pane whose cwd changed after its session started. The
+    session id is unique, so the fallback cannot pick up a sibling's file.
+
+    A missing `session_id` is UNKNOWN, never “no evidence against”: the caller
+    must refuse.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    cwd = str((entry or {}).get("current_directory") or "").strip()
+    lookups: list[tuple[Path, str]] = []
+    if cwd:
+        lookups.append((sessions_root() / mangle_cwd(cwd), f"*_{sid}.jsonl"))
+    lookups.append((sessions_root(), f"**/*_{sid}.jsonl"))
+    for root, pattern in lookups:
+        try:
+            best = _newest(root.glob(pattern))
+        except OSError:
+            continue
+        if best is not None:
+            return best
+    return None
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -1307,6 +1344,39 @@ class Cmux:
         # `both` emits ref AND id so either form resolves.
         return self.run(["list-workspaces", "--json", "--id-format", "both"])
 
+    def pane_session_id(self, workspace: str) -> str | None:
+        """The pane's resume-bound session id, or None when it has none.
+
+        `resume_binding` is the AUTHORITATIVE field — NOT
+        `restore_record.checkpoint_id`. Measured 2026-10-08: a workspace printed
+        “No resume binding” from the text form while `restore_record` still
+        carried a STALE id, so reading the stale field is exactly the class of
+        defect this tool exists to remove (see `fleet_state.pane_bindings`).
+
+        None == no binding == UNKNOWN, and the caller must refuse (#7913).
+        """
+        result = self.run(
+            ["surface", "resume", "show", "--workspace", workspace, "--json"],
+            timeout=min(self.timeout, 15.0),
+        )
+        if result.rc != 0:
+            return None
+        try:
+            data = json.loads(result.out)
+        except Exception:  # a malformed reply is “unknown”
+            return None
+        if not isinstance(data, dict):
+            return None
+        rb = data.get("resume_binding")
+        if isinstance(rb, dict):
+            sid = rb.get("checkpoint_id") or rb.get("session_id") or rb.get("id")
+        elif isinstance(rb, str):
+            sid = rb
+        else:
+            sid = None
+        sid = str(sid).strip() if sid else ""
+        return sid or None
+
     def read_screen(
         self, workspace: str, lines: int = 80, surface: str | None = None
     ) -> CmuxResult:
@@ -1362,11 +1432,17 @@ class DispatchResult:
     recoveries: list[str] = field(default_factory=list)
     fingerprint: str = ""
     reason: str = ""
-    #: The OBSERVED delivery condition behind a failure (#7913): `unreadable-pane`
-    #: (the instrument failed), `composer-not-submitted` (our text is visibly still
-    #: in the composer), `unparsed-queue`, or `not-observed`. Reported so a
-    #: `sent-but-not-consumed` log names WHICH failure was seen rather than only the
-    #: umbrella status — the dispatcher's recovery is chosen from this condition.
+    #: The OBSERVED delivery condition behind a failure (#7913). The full value
+    #: set is: `unreadable-pane` (the instrument failed — no bytes written),
+    #: `composer-not-submitted` (our text is visibly still in the composer),
+    #: `unparsed-queue` (a queue marker we could not parse), `not-observed` (we
+    #: could not confirm the turn), `boot-blocked` (the pane sat on a boot-block
+    #: prompt past the budget) and `not-ready` (the pane never reached READY).
+    #: `not-ready`/`boot-blocked` accompany `never-became-ready`; the others
+    #: accompany `sent-but-not-consumed`. `""` means a transport failure, where
+    #: no delivery condition was ever observed. Reported so a log names WHICH
+    #: failure was seen rather than only the umbrella status — the dispatcher's
+    #: recovery is chosen from this condition.
     condition: str = ""
     #: Which channel carried the bytes — the question a transport failure makes
     #: ambiguous (#4842). `transport` = the text send reached cmux, `inbox` = the
@@ -1397,7 +1473,7 @@ class Dispatcher:
         now: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] | None = None,
         poll: float = DEFAULT_POLL,
-        session_probe: Callable[[str, dict | None], Path | None] | None = None,
+        session_probe: Callable[[str | None, dict | None], Path | None] | None = None,
         session_fresh_s: float = DEFAULT_SESSION_FRESH_S,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -1405,7 +1481,11 @@ class Dispatcher:
         self.sleep = sleep
         self.now = now
         self.poll = poll
-        self._session_probe = session_probe or default_session_probe
+        #: `(session_id, entry) -> Path | None`. The PROBE is pane-attributable:
+        #: it receives the pane's resume-bound session id, never a bare cwd
+        #: (#7913). An unresolvable id reaches it as None and it must return
+        #: None — the caller then refuses.
+        self._session_probe = session_probe or session_file_for
         self.session_fresh_s = session_fresh_s
         #: Wall clock (NOT the monotonic deadline clock): freshness is a property
         #: of a file's mtime, which is wall-clock. Injected so tests are
@@ -1418,25 +1498,65 @@ class Dispatcher:
 
     # -- non-pane liveness (#7913) ------------------------------------------- #
 
+    def pane_session_id(self, workspace: str) -> str | None:
+        """The pane's own resume-bound session id, or None (never a guess)."""
+        getter = getattr(self.cmux, "pane_session_id", None)
+        if getter is None:
+            return None
+        try:
+            return getter(workspace)
+        except Exception:  # broad by design: a probe is best-effort
+            return None
+
     def session_liveness(self, workspace: str, entry: dict | None) -> tuple[bool, str]:
-        """Is a live pi advancing this workspace's session transcript?
+        """Is a live pi advancing THIS pane's session transcript?
 
         Returns `(fresh, detail)`; `detail` is always a human sentence suitable
         for the evidence log line, whether or not the signal fired. NEVER raises:
         a probe failure is a diagnostic and degrades to `(False, ...)` so the
         caller can refuse (fail-closed) rather than crash.
+
+        The signal is PANE-attributable by construction: the transcript is
+        selected by the pane's resume-bound session id, so a sibling lane
+        sharing the cwd cannot stand in for this one (#7913). Three states are
+        refusal, not evidence: no binding, no matching transcript, and an age
+        that cannot be measured (an empty file, or a mtime ahead of the clock) —
+        an unmeasurable age fails CLOSED.
         """
+        session_id: str | None = None
         try:
-            resolved = self._session_probe(workspace, entry)
+            session_id = self.pane_session_id(workspace)
+            resolved = self._session_probe(session_id, entry)
         except Exception as exc:  # broad by design: a probe is best-effort
             return False, f"session probe failed: {exc}"
         if resolved is None:
-            return False, "no session file could be resolved"
+            if not session_id:
+                return False, (
+                    "no resume binding for this pane — its transcript cannot be "
+                    "attributed, so it is UNKNOWN and the send is refused"
+                )
+            return False, (
+                f"no transcript for this pane's session {session_id[:8]} — "
+                "refusing rather than guessing from the cwd"
+            )
+        path = Path(resolved)
         try:
-            path = Path(resolved)
-            age = max(0.0, self.wall_clock() - path.stat().st_mtime)
+            st = path.stat()
         except OSError as exc:
             return False, f"session file unreadable: {exc}"
+        if st.st_size <= 0:
+            # A freshly-created, still-empty transcript is a pi that has written
+            # no turn: it is not evidence that a live pi owns the lane.
+            return False, f"session {path.name} is empty — not a liveness signal"
+        age = self.wall_clock() - st.st_mtime
+        if age < 0:
+            # A mtime AHEAD of the clock cannot be measured (clock step, a
+            # restored/copied file). Clamping it to 0 would make the lane look
+            # maximally fresh forever, so an unmeasurable age refuses.
+            return False, (
+                f"session {path.name} has a mtime {-age:.0f}s ahead of the clock "
+                "— age unmeasurable, refusing"
+            )
         fresh = age <= self.session_fresh_s
         return fresh, f"session {path.name} advanced {age:.0f}s ago"
 
@@ -1471,12 +1591,12 @@ class Dispatcher:
 
         Returns `(allowed, evidence_note, refusal_reason)`. A live footer passes on
         `screen`. The ONE non-ready case that passes is UNREADABLE (a failed or
-        empty read) *with* a fresh session transcript — and only when the gate also
-        accepted the pane on that same signal, so a transiently blind read cannot
-        smuggle a send past a gate that itself refused. A READABLE pane with no
-        footer is still refused: session-mtime is weaker evidence than a screen that
-        explicitly shows no pi, and a sibling lane sharing the cwd could hold a
-        fresh transcript while this pane sits at a shell (#7158).
+        empty read) *with* a fresh transcript OF THIS PANE'S OWN SESSION — and only
+        when the gate also accepted the pane on that same signal, so a transiently
+        blind read cannot smuggle a send past a gate that itself refused. A
+        READABLE pane with no footer is still refused: session-mtime is weaker
+        evidence than a screen that explicitly shows no pi, and this pane's own
+        transcript advancing does not say the pane is at a pi prompt (#7158).
         """
         if screen_ready(screen):
             return True, "screen", ""
@@ -1653,8 +1773,8 @@ class Dispatcher:
 
         Returns `(ready, blocked_now, last_screen, evidence)`. `evidence` is
         `"screen"` when a LIVE pi footer was read, `"session-mtime"` when the
-        pane read returned nothing but a fresh session transcript proves a live pi
-        owns the workspace (#7913), and `""` on refusal.
+        pane read returned nothing but a fresh transcript of the PANE'S OWN
+        session proves a live pi owns it (#7913), and `""` on refusal.
 
         `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
         is PROVABLY not accepting input, so the caller must refuse. `ready=False`
@@ -1666,8 +1786,8 @@ class Dispatcher:
         The non-pane fallback fires ONLY for `UNREADABLE` (a failed or empty
         read). A READABLE pane that lacks a footer stays a refusal: session-mtime
         is weaker evidence about the LANE than a readable screen that explicitly
-        shows no pi, and a sibling lane sharing the cwd could hold a fresh
-        transcript while this pane is at a shell.
+        shows no pi, and a live transcript says the lane's pi is working — not
+        that this pane is at a prompt that can accept input.
         """
         deadline = self.now() + timeout
         screen: str | None = ""
@@ -2236,9 +2356,15 @@ def _cmd_wait_ready(args: argparse.Namespace) -> int:
         "ready": ready,
         # #7913: the CLASSIFICATION, first-class. `UNREADABLE` is a fact about the
         # instrument (the read returned nothing), NOT about the lane — a beat that
-        # consumes this must never feed it to WEDGED/STALL/IDLE advice. `ready` may
-        # still be true on `UNREADABLE` via session-mtime evidence; the two answer
-        # different questions ("may I dispatch?" vs "what did the read show?").
+        # consumes this must never INTERPRET it as a lane state (WEDGED/STALL/
+        # IDLE/WIP). `ready` may still be true on `UNREADABLE` via the pane's
+        # session-mtime evidence; the two answer different questions ("may I
+        # dispatch?" vs "what did this read show?").
+        #
+        # `screen_readable` is the READ's success — `screen is not None` before
+        # #7913; it is now "the capture carried text", so a whitespace-only
+        # rc==0 read is `false`, like a failed one. `state` is the classification
+        # to branch on; `screen_readable` is retained for read diagnostics only.
         "state": readiness_state(screen),
         "readiness_evidence": evidence,
         "boot_blocked_now": blocked_now,
