@@ -73,6 +73,11 @@ MUTATIONS THAT MUST RED:
 - re-anchor that fold on ``skip_content`` → the superseded-bare-creation case
   reverts to the first strength (the write, not the supersession, is the
   boundary — see ``test_strength_boundary_is_the_write``);
+- replace the ``"mitigation_strength" in persisted_extra_keys`` anchor with a
+  hand-spelled ``p.get("mitigation_strength") is not None`` → a creation the
+  writer DROPPED (an undeclared list) counts as a write, over-suppresses the
+  later ``PointRevised`` and reverts the node to its first strength; see
+  ``test_dropped_strength_creation_still_folds_a_later_revision``;
 - restore the unconditional ``op_type`` derivation in
   ``consistency._canonical_point_fields`` → ``check_consistency`` reports a
   false content divergence on a faithful rebuild (see
@@ -451,19 +456,28 @@ class TestMitigatedBySurvivesRebuild:
             sdk.close()
 
     def test_non_operator_origin_still_mints_the_edge_for_parity(self, tmp_path):
-        """NOT gated on the origin: ONTOLOGY §3.9's rule must not cost parity.
+        """NOT gated on the origin — this GUARDS the revert, it is not a
+        parity measurement.
 
-        §3.9's hard rule (#2315) is that ``mitigated_by`` originates only from
-        an ``is_operator:true`` Point, and ``mitigate_operator`` enforces it.
-        The fold does NOT, deliberately, and this test pins that: gating the
-        MERGE on ``s.is_operator = true`` was measured to make ``rebuild_all``
-        mint the edge for a `#329`-stub origin (``is_operator=false``, created
-        for a short ``src`` that does not resolve yet) where ``apply()`` minted
-        nothing — apply folds the mitigation before the operator exists and
-        never re-attempts the edge, while rebuild pass-1a hoists it first. That
-        is a live!=replay divergence, the exact invariant this fold exists to
+        ONTOLOGY §3.9's hard rule (#2315) is that ``mitigated_by`` originates
+        only from an ``is_operator:true`` Point, and ``mitigate_operator``
+        enforces it. The fold must NOT re-enforce it: adding ``AND
+        s.is_operator = true`` was measured to make ``rebuild_all`` mint the
+        edge for a `#329`-stub origin (``is_operator=false``, created when a
+        short ``src`` does not resolve yet) where ``apply()`` minted nothing —
+        and for a long unresolved ``src`` the two engines disagree in the same
+        direction, because ``_create_edges`` skips the whole typed block at
+        apply time and pass-1a hoisting resolves the origin at rebuild time.
+        That is a live!=replay divergence, the invariant this fold exists to
         establish, traded for an edge ONTOLOGY itself calls dead structure (no
-        EP factor addresses a non-operator). Recorded on #5048.
+        EP factor addresses a non-operator). Recorded on #5048 with both
+        measurements, together with the root: those two shapes diverge for the
+        PRE-EXISTING ``IMPL``/``INPUT`` MERGEs as well, so the fold inherits the
+        divergence rather than creating it.
+
+        What THIS test pins is only that the fold accepts the record, so a
+        future re-addition of the origin predicate reds it: the sibling
+        ``…from_an_operator_origin_mints_the_edge`` is the non-vacuity control.
         """
         sdk, _events = _fresh_sdk(tmp_path)
         try:
@@ -524,6 +538,58 @@ class TestMitigatedBySurvivesRebuild:
             assert compute_operator_weight(
                 sdk._get_proj(), op_id) < BASE_WEIGHT, (
                 "the minted edge did not dampen the operator it names"
+            )
+        finally:
+            sdk.close()
+
+    def test_dropped_strength_creation_still_folds_a_later_revision(
+            self, tmp_path):
+        """The anchor is the WRITER'S OUTCOME, not a hand-spelled guess.
+
+        ``_persist_extra_props`` also drops undeclared list/tuple values
+        (``_POINT_LIST_PROPS`` is EMPTY), so a creation whose payload says
+        ``mitigation_strength: [0.5]`` writes NOTHING to the node — while a
+        hand-spelled ``p.get("mitigation_strength") is not None`` test would
+        count it as a write and anchor the skip on it, over-suppressing the
+        later ``PointRevised`` that follows. Only the writer's reported outcome
+        (``"mitigation_strength" in persisted_extra_keys``) tells the two
+        apart, so that is what this pins: the revision must still fold.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            src, _claim, op_id = _impl_chain(sdk)
+            mid = sdk.mitigate_operator(op_id, "revise me", 0.10)["id"]
+            sdk.mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
+            records = _journal(events)
+            # A LATER same-file creation that NAMES the prop in a form the
+            # writer drops. ``superseded`` is true for the revision because a
+            # creation follows it, so the anchor decides whether the revision
+            # still folds — and only the writer's outcome knows that this
+            # creation wrote nothing.
+            records.append({
+                "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+                "type": "PointAdded", "initiated_by": "raw-producer",
+                "projection_version": 2,
+                "point": {"id": mid, "content": "[MITIGATION] revise me",
+                          "pointKind": "statement", "status": "live",
+                          "is_operator": False, "mitigation_strength": [0.5],
+                          "operator": {"op_type": "IMPL", "inputs": [src]}},
+            })
+            (events / "events.jsonl").write_text(
+                "".join(json.dumps(r) + "\n" for r in records))
+
+            applied = _oracle_strength(tmp_path, records, mid)
+            assert applied == pytest.approx(0.50), (
+                "oracle setup drifted — the live path must end at the "
+                f"revision's strength, got {applied!r}"
+            )
+
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            assert rebuilt == pytest.approx(applied), (
+                "a creation whose strength the writer DROPPED must not anchor "
+                f"the skip: live={applied!r}, rebuilt={rebuilt!r}"
             )
         finally:
             sdk.close()
