@@ -2278,7 +2278,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
             after = _node_count()
             return _roll_back_declined_replay(
                 {"recovered": False, "log_points": 0,
-                 "db_points": after if after is not None else 0,
+                 # `db_points` reports the MEASURED count, not a hard-coded 0,
+                 # and `None` reports it as UNMEASURABLE — the comment above
+                 # said this while the code flattened None to 0 (#7929
+                 # review). `_node_count` returns None on a dead backend, and
+                 # flattening it asserted an empty store that was never
+                 # observed.
+                 "db_points": after,
                  "reason": ("rebuild from the pending pre-wipe snapshot "
                             f"failed: {e}")}, after,
                 source_durable=os.path.exists(snapshot_path))

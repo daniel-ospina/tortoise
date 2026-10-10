@@ -1365,6 +1365,52 @@ def test_an_unmeasurable_post_replay_count_is_not_reported_as_empty(monkeypatch)
         proj.close()
 
 
+def test_a_clean_replay_whose_count_fails_is_not_reported_as_empty(monkeypatch):
+    """#7929 review: the FINAL leg — a replay that REFUSED nothing but whose
+    post-replay measurement failed — must not flatten the unmeasurable count to
+    0 either, and must not describe the replay as producing an empty graph.
+
+    This is the `ok is False` leg: `ok` is False because the graph could not be
+    measured, NOT because nothing landed. The replayed nodes are still there.
+
+    FAILS IF: the final leg reports `db_points: 0` / "empty graph" for a graph
+    it never managed to measure.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "cleanfinal.db")
+    proj = _lost_store(db_path)
+    # A CLEAN journal: every record folds, so there is no non-folded refusal and
+    # the run reaches the final leg rather than the non-folded one.
+    log = EventLog(os.path.join(tmp, "events.jsonl"))
+    for i in range(4):
+        log.append(_point_event(i))
+
+    real_query = proj.query
+    counts = {"n": 0}
+
+    def _query(q, *a, **k):
+        if "count(n)" in q:
+            counts["n"] += 1
+            if counts["n"] >= 2:
+                raise RuntimeError("injected: backend died before the count")
+        return real_query(q, *a, **k)
+
+    monkeypatch.setattr(proj, "query", _query)
+    try:
+        r = recover_from_log(tmp, proj)
+        assert counts["n"] >= 2, (
+            "the post-replay count was never taken — this fixture is not "
+            "exercising the final leg")
+        assert r["recovered"] is False, r
+        assert r["db_points"] is None, (
+            f"an unmeasurable count was reported as {r['db_points']!r}; 0 "
+            f"asserts an empty store that was never observed")
+        assert "could not be measured afterwards" in r["reason"], r["reason"]
+        assert "empty graph" not in r["reason"], r["reason"]
+    finally:
+        proj.close()
+
+
 def test_the_rollback_wipe_uses_the_rebuild_lane_token(monkeypatch):
     """#2944 reciprocity: a non-empty wipe ADDED to `recover_from_log` must
     route through the REBUILD-LANE path (`_wipe_all_nodes`), which owns the
