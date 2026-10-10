@@ -11852,7 +11852,15 @@ class SessionRequest(BaseModel):
     # what the floor is about (piece 12).
     client_captured_at: float | None = None
     client_captured_at_source: str | None = None
-    source: str | None = None
+    # #3516 §D: `source` is the transcript stem (both producers send it — the
+    # Pi seam declares it REQUIRED, the claude CLI fills `transcript_path.stem`,
+    # and the spool forwards `meta["source"]`). It was accepted here and then
+    # DROPPED: `body.source` had no reader and `_write_session_and_turns` had no
+    # parameter for it, so the property the comment above claims never reached
+    # the store. Capped at 256 like its siblings `session_id`/`machine_id`
+    # (same N x len amplification argument the `session_id` note makes), and
+    # persisted with set-if-absent semantics in the write primitive.
+    source: str | None = Field(None, max_length=256)
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
     # actor_user_id. Supplied by the capture hook/harness; stored verbatim as
@@ -12729,6 +12737,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         capture_lane=body.capture_lane,
         client_captured_at=body.client_captured_at,
         client_captured_at_source=body.client_captured_at_source,
+        source=body.source,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(

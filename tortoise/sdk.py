@@ -2170,6 +2170,7 @@ def _write_session_and_turns(
     capture_lane: str | None = None,
     client_captured_at: float | None = None,
     client_captured_at_source: str | None = None,
+    source: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2303,6 +2304,16 @@ def _write_session_and_turns(
         # have (piece 12 — 'unknown' must be excludable from a pass).
         if client_captured_at_source:
             session_record["client_captured_at_source"] = client_captured_at_source
+    # #3516 §D: the transcript stem the capture came from. Set-only-when-present
+    # AND set-if-absent (``coalesce``), the machine_id/model rule below rather
+    # than the harness rule: the store-sync backstop ships the SAME session
+    # after the hook, and a backstop entry that carries a different (or no)
+    # transcript stem must never overwrite the stem the hook observed — a
+    # plain SET would let the weaker, later producer relabel the record.
+    if source:
+        merge_sets.append("s.source=coalesce(s.source, $src)")
+        merge_params["src"] = source
+        session_record["source"] = source
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
