@@ -3326,9 +3326,10 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
         return []
     # #1088 review P2: the selector keys on the EP MARKERS, never on status.
     # A folded explicit draft is never promoted (only minted ids are, above)
-    # and the EP pass excludes drafts (``include_draft=False``), so a
-    # ``status='draft'`` disjunct could only nominate a target that can
-    # never be refreshed — dead weight, not a rescue.
+    # and the EP pass excludes drafts (``include_draft=False``). An
+    # uncalibrated draft (markers null) is already nominated by the markers
+    # arm, so a ``status='draft'`` disjunct could add ONLY drafts that
+    # already carry EP markers — already calibrated, so nothing to refresh.
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND "
         "n.posterior_alpha IS NULL AND n.ep_alpha IS NULL "

@@ -58,9 +58,10 @@ def fresh_sdk(graph_name=None):
 
 
 def make_point(sdk, content, kind="statement"):
-    # #943: create_point defaults to status='draft'; the #780 draft filter
-    # strips draft inputs, degenerating IMPL factors (<2 live inputs) → zero
-    # cascade (#992). The #1000/#1004 sweep migrated 11 EP test cases in
+    # #943: the #780 draft filter strips draft inputs, degenerating IMPL
+    # factors (<2 live inputs) → zero cascade (#992); status="live" below is
+    # explicit for intent (create_point's implicit status is live since #1088,
+    # it was draft from #943). The #1000/#1004 sweep migrated 11 EP test cases in
     # decide/dream/file_human_approval/source_inheritance_own to create live
     # points; this file was missed. Target conclusions (C1/C2) are never
     # operator sources, so they were never auto-promoted to live — mark

@@ -13517,8 +13517,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (byte-parity with the mirror) — minted ids calibrate; folded entries
     # resolved to nodes already calibrated at their original ingest are
     # never re-calibrated (no EP churn on re-ingest); a folded canonical
-    # still draft/uncalibrated from a fail-open first ingest gets its
-    # FIRST calibration here.
+    # still UNCALIBRATED from a fail-open first ingest keeps being nominated
+    # for its FIRST calibration here. A folded EXPLICIT draft is
+    # intentionally left uncalibrated: #1088 never retro-promotes a folded
+    # id, and the local EP pass excludes drafts (``include_draft=False``).
     ep_ids = _capture_ep_target_ids(extracted, proj)
     if ep_ids:
         # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
