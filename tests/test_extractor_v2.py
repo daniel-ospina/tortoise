@@ -3513,7 +3513,7 @@ class TestClassifyStage:
 
     def test_pack_object_kind_survives_execute_embed(self):
         """FIX M candidate/write-gate alignment: a classifier-assigned pack
-        object/document kind (dev:apiSpec, pm:milestone, marketing:keyword —
+        object/document kind (dev:apiSpec, pm:kanbanBoard, marketing:keyword —
         declared but kindDefs-less, synthesized into the index's "objects"
         section) is writable at execute_embed — it survives un-repaired and
         is not flagged minted, while a genuinely minted kind still repairs
@@ -3521,7 +3521,7 @@ class TestClassifyStage:
         embed = {"entities": [
             {"name": "the api spec", "kind": "dev:apiSpec",
              "lifecycle": "created", "supersedes": None, "note": None},
-            {"name": "the milestone", "kind": "pm:milestone",
+            {"name": "the kanban board", "kind": "pm:kanbanBoard",
              "lifecycle": "created", "supersedes": None, "note": None},
             {"name": "the keyword", "kind": "marketing:keyword",
              "lifecycle": "created", "supersedes": None, "note": None},
@@ -3533,18 +3533,18 @@ class TestClassifyStage:
         kinds = {e["name"]: e["kind"] for e in res["payload"]["entities"]}
         assert kinds["the api spec"] == "dev:apiSpec", \
             "synthesized object kind survives execute_embed un-repaired"
-        assert kinds["the milestone"] == "pm:milestone"
+        assert kinds["the kanban board"] == "pm:kanbanBoard"
         assert kinds["the keyword"] == "marketing:keyword"
         assert kinds["totally minted"] == "core:other"
         assert not any(m for m in res["minted_kinds"]
-                       if "dev:apiSpec" in m or "pm:milestone" in m
+                       if "dev:apiSpec" in m or "pm:kanbanBoard" in m
                        or "marketing:keyword" in m), \
             "the writable pack object kinds are not flagged minted"
         assert any("totally:madeup" in m for m in res["minted_kinds"])
         # the report alone agrees: only the genuine minted kind is flagged
         clean = {"entities": [
             {"name": "the api spec", "kind": "dev:apiSpec"},
-            {"name": "the milestone", "kind": "pm:milestone"},
+            {"name": "the kanban board", "kind": "pm:kanbanBoard"},
             {"name": "the keyword", "kind": "marketing:keyword"},
         ], "events": [], "points": []}
         assert v2._minted_kind_report(clean) == []

@@ -353,7 +353,7 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
                        "synonyms": syns, "examples": exs,
                        "nearMisses": nms}
         # FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,
-        # marketing:keyword, pm:milestone, ALL 8 pm eventKinds, ...) are
+        # marketing:keyword, pm:kanbanBoard, ALL 8 pm eventKinds, ...) are
         # never in the index → the classifier can't assign them and
         # nearMisses refs to them resolve to ∅. Synthesize name-only spec
         # entries (section derived from the declaration; pointKinds already

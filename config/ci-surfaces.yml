@@ -1061,6 +1061,7 @@ surfaces:
   - test_bfs_audit.py
   - test_boot_regressions.py
   - test_collision_preflight.py
+  - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
   # #4290: the finding-provenance gate — a finding must name the tree it was
   # measured against, and a stale measurement fails (ancestry, not equality).
   # Hermetic (temp git repo; no DB), so it pins no api/engine surface: `core`
@@ -2206,6 +2207,10 @@ surfaces:
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
   - test_client_surface.py
+  # #6869: `commit_session(base_url=..., api_key=...)` configures the Tortoise
+  # API POST only — this pins that it does NOT select the extraction provider
+  # (warning matrix + docstring contract); sdk surface owns tortoise/sdk.py.
+  - test_commit_session_extraction_provider_6869.py
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
@@ -3076,6 +3081,7 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 5.8
   test_collision_preflight.py: 13.1
+  test_who_is_on.py: 6.0  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
   test_engine_probe.py: 2.0  # unmeasured — new file (#7017); no CI junit yet, flat default

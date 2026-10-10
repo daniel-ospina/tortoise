@@ -303,8 +303,9 @@ EXCLUDED_THING_TYPES = {
     "roleOpening": "hris",
     "candidate": "hris",
     "interview": "hris",
-    # Collides with pm:milestone + a legacy point kind + a miner event kind.
-    "milestone": "pm",
+    # #2767: `milestone` is a CORE event kind (reached at a moment), so it is
+    # owned by core — neither venture nor pm declares it.
+    "milestone": "core",
 }
 
 
@@ -600,7 +601,7 @@ class TestPackWiringGuards:
         ``objectKinds``/``documentKinds``/``eventKinds`` (no ``kindDefs``)
         contributes no ``pack_kinds`` key yet IS classifier-assignable — measured
         on this tree, `dev:apiSpec` (a `documentKind`), `marketing:keyword` and
-        `pm:milestone` are all in ``compile_kind_index_spec()`` while absent from
+        `pm:kanbanBoard` are all in ``compile_kind_index_spec()`` while absent from
         ``pack_kinds``. So the documented direction is the narrower one: absent
         here means the prompt cannot offer it, NOT that the pack ships inert. The
         other direction (a namespace present in the brief but dropped by the

@@ -16,7 +16,13 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.pack_registry import CANONICAL_OBJECT_KINDS, PackManifest, PackRegistry
+from tortoise.pack_registry import (
+    CANONICAL_EVENT_KINDS,
+    CANONICAL_OBJECT_KINDS,
+    CORE_KINDS,
+    PackManifest,
+    PackRegistry,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1406,3 +1412,131 @@ class TestCanonicalObjectKindAlignment:
         assert canonical_lower - _OBJECT_KIND_VOCAB == {
             "strategy", "plan", "goal", "target",
         }
+
+
+class TestMilestoneCanonicalEventKind:
+    """#2767: `milestone` has ONE canonical identity — a core EVENT kind.
+
+    Pre-fix the bare name was simultaneously a pm ``objectKind``, a legacy base
+    point/event kind, and the miner's event kind. Once a second pack DECLARED
+    the bare name, a ``nearMisses`` reference to it became ambiguous and failed
+    pack install. These are the drift guards: they fail if any layer moves
+    without the others.
+    """
+
+    def test_cross_pack_reference_with_a_declaring_pack_resolves(self, tmp_path):
+        """#2767 indicator (2): a fixture that *declares* `milestone` on a pack
+        axis, plus a second pack that references it in `nearMisses`, must load
+        cleanly. This is the half the reported failure needed: pre-fix the bare
+        name was simultaneously a pm `objectKind`, a legacy base point/event
+        kind and the miner's event kind, so once a second pack declared it the
+        reference became ambiguous. Post-fix core owns `milestone` on the EVENT
+        axis, so the referencing pack resolves without an ambiguity error.
+
+        Pinned separately from `test_cross_pack_bare_reference_resolves_to_core`
+        so that BOTH shapes stay covered: that test pins the no-declaration
+        shape (`pm`'s `sprint`), this one pins the declaring shape."""
+        _write_pack(str(tmp_path), "alpha", {
+            "namespace": "alpha", "name": "Alpha", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["milestone"],
+                "kindDefs": {"milestone": {"description": "m"}},
+            },
+        })
+        # a SECOND declaring pack is what made the pre-fix reference ambiguous
+        # ("is ambiguous — declared by multiple packs") — the reported failure.
+        _write_pack(str(tmp_path), "delta", {
+            "namespace": "delta", "name": "Delta", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["milestone"],
+                "kindDefs": {"milestone": {"description": "m"}},
+            },
+        })
+        _write_pack(str(tmp_path), "beta", {
+            "namespace": "beta", "name": "Beta", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        registry.load_all()
+        assert not registry.errors, registry.errors
+
+    def test_both_kind_paths_agree_on_the_removed_set(self):
+        """`known_kinds('pointKind')` (the hosted write validator) and
+        `domain_kinds(...'pointKind')` (the extractor prompt vocabulary) must
+        resolve the legacy registry identically. They diverged once: the generic
+        `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]` subtraction stayed in
+        `domain_kinds` and went on dropping `meeting` after `known_kinds` had
+        been scoped to the ruling's one kind. Both now read the single
+        `_legacy_point_kinds()` definition.
+        """
+        from tortoise.domain_loader import domain_kinds, known_kinds
+        known = known_kinds("pointKind")
+        dk = set(domain_kinds("core", "pointKind"))
+        assert "meeting" in known and "meeting" in dk, \
+            "`meeting` must survive the #2767 change on BOTH paths"
+        assert "milestone" not in known and "milestone" not in dk, \
+            "`milestone` must be gone from pointKind on BOTH paths"
+        # NOTE: a full `dk >= known` comparison is deliberately NOT asserted —
+        # the two sets have different SCOPE (known_kinds unions every loaded
+        # pack's kinds; domain_kinds is one domain's). The divergence that
+        # actually happened is caught by the two membership assertions above:
+        # reverting domain_kinds to the generic subtraction drops `meeting`
+        # from `dk` and fails here.
+
+    def test_milestone_is_canonical_event_not_object(self):
+        assert "milestone" in CANONICAL_EVENT_KINDS
+        assert "milestone" not in CANONICAL_OBJECT_KINDS
+        assert "milestone" in CORE_KINDS
+
+    def test_repo_pack_catalog_declares_no_milestone(self):
+        registry = PackRegistry(REPO_PACKS_DIR)
+        assert registry.load_all() >= 1
+        assert not registry.errors, registry.errors
+        for ns, pack in registry.packs.items():
+            assert "milestone" not in pack.object_kinds, ns
+            assert "milestone" not in pack.event_kinds, ns
+
+    def test_legacy_base_vocabulary_is_event_not_point(self):
+        from tortoise.domain_loader import known_kinds
+        assert "milestone" in known_kinds("eventKind")
+        assert "milestone" not in known_kinds("pointKind")
+        assert "milestone" in known_kinds()  # flat legacy view keeps it known
+        # The fix removed a regression without leaving a guard: pin the
+        # RETENTION, so a future change to the subtraction cannot quietly drop
+        # `meeting` again. `meeting` is a core EVENT kind, but it keeps its
+        # legacy pointKind identity — the #2767 ruling moved only `milestone`.
+        assert "meeting" in known_kinds("pointKind")
+        assert "meeting" in known_kinds("eventKind")
+
+    def test_miner_event_kind_is_declared(self):
+        from tortoise.commit_schema import EVENT_KINDS, compile_vocab
+        assert "milestone" in EVENT_KINDS
+        assert "milestone" in compile_vocab().event_kinds
+
+    def test_cross_pack_bare_reference_resolves_to_core(self, tmp_path):
+        """The cross-pack pass resolves a bare `milestone` `nearMisses`
+        reference to CORE — the shape `pm`'s `sprint` uses, and the thing the
+        fix has to preserve. The fixture pins the load-bearing half: ONE pack,
+        no `milestone` declaration on any axis, and the reference still
+        resolves. (#2767's reported *failure* additionally needed a second
+        pack declaring the bare name; with core owning it, no pack
+        declaration is involved at all.)"""
+        _write_pack(str(tmp_path), "gamma", {
+            "namespace": "gamma", "name": "Gamma", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        registry.load_all()
+        assert not registry.errors, registry.errors
