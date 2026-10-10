@@ -161,6 +161,21 @@ class WhoIsOnTest(unittest.TestCase):
         self.local_branch(name, ahead=0)
         self._git(self.repo, "update-ref", f"refs/remotes/origin/{name}", "HEAD")
 
+    def add_nested_remote(self, name: str, url: str) -> None:
+        """Register a remote by writing git config directly — NOT `git remote add`.
+
+        The ambiguity these two tests need is a remote named `foo/bar` ALONGSIDE
+        `foo`, and `git remote add foo/bar` exits 128 on the CI runner's git
+        while succeeding on git 2.50.1 locally, so the fixture cannot depend on
+        that name passing git's validation (the exact CI stderr is not surfaced
+        by the short traceback, and the failure was not reproducible here).
+        These config keys are precisely what `git remote` enumerates, with no
+        name-validation step in the way — and `git remote` reading them IS the
+        behaviour under test."""
+        self._git(self.repo, "config", f"remote.{name}.url", url)
+        self._git(self.repo, "config", f"remote.{name}.fetch",
+                  f"+refs/heads/*:refs/remotes/{name}/*")
+
     def add_worktree(self, dirname: str, branch: str) -> Path:
         path = self.tmp / "wt" / dirname
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,8 +419,8 @@ exec {real} "$@"
         """With remotes `foo` and `foo/bar`, `refs/remotes/foo/bar/qux` must strip
         `foo/bar` (-> qux), not `foo` (-> bar/qux) — a shortest-first match hid a
         never-pushed branch named `bar/qux` from every surface."""
-        self._git(self.repo, "remote", "add", "foo", "https://github.com/acme/foo.git")
-        self._git(self.repo, "remote", "add", "foo/bar", "https://github.com/acme/bar.git")
+        self.add_nested_remote("foo", "https://github.com/acme/foo.git")
+        self.add_nested_remote("foo/bar", "https://github.com/acme/bar.git")
         self._git(self.repo, "update-ref", "refs/remotes/foo/bar/qux", "HEAD")
         self.local_branch("bar/qux")  # never pushed; collides with a remote prefix
         rc, out = self.run_tool("--inventory")
@@ -559,8 +574,8 @@ exit 0
         `git remote` alone cannot say which. Crediting the longest prefix
         declared a never-pushed local branch named `qux` PUSHED and hid it from
         every surface — stranded work reported FREE."""
-        self._git(self.repo, "remote", "add", "foo", "https://github.com/acme/foo.git")
-        self._git(self.repo, "remote", "add", "foo/bar", "https://github.com/acme/bar.git")
+        self.add_nested_remote("foo", "https://github.com/acme/foo.git")
+        self.add_nested_remote("foo/bar", "https://github.com/acme/bar.git")
         self._git(self.repo, "update-ref", "refs/remotes/foo/bar/qux", "HEAD")
         self.local_branch("qux")          # never pushed; the ambiguous ref is not it
         rc, out = self.run_tool("--inventory")
