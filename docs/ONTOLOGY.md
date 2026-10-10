@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-09
+updated: 2026-10-10
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -32,6 +32,14 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
+> §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
+> as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,
+> which made a second pack declaring it fail the cross-pack `nearMisses` check. Owner ruling (on
+> #2767, 2026-10-09): **use core → event** — a milestone is *reached* at a moment. §5 now lists
+> `milestone` among the core event kinds, and `project-management` no longer declares it. **No new
+> vocabulary:** the packs had the category wrong and core already dissolved it.
 >
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path

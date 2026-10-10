@@ -1448,11 +1448,13 @@ class TestMilestoneCanonicalEventKind:
         assert "milestone" in compile_vocab().event_kinds
 
     def test_cross_pack_bare_reference_resolves_to_core(self, tmp_path):
-        """A pack naming the bare `milestone` in `nearMisses` resolves, because
-        core owns the name — this is `pm`, whose `sprint` nearMisses names it.
-        Pre-fix the bare name was `pm`'s objectKind *and* a base event kind, so
-        a second pack declaring it made the reference fail the install with
-        'ambiguous — declared by multiple packs'."""
+        """The cross-pack pass resolves a bare `milestone` `nearMisses`
+        reference to CORE — the shape `pm`'s `sprint` uses, and the thing the
+        fix has to preserve. The fixture pins the load-bearing half: ONE pack,
+        no `milestone` declaration on any axis, and the reference still
+        resolves. (#2767's reported *failure* additionally needed a second
+        pack declaring the bare name; with core owning it, no pack
+        declaration is involved at all.)"""
         _write_pack(str(tmp_path), "gamma", {
             "namespace": "gamma", "name": "Gamma", "version": "0.1.0",
             "tier": "free",
