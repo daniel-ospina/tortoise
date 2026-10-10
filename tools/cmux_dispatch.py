@@ -861,6 +861,22 @@ def _newest(paths: Iterable[Path]) -> Path | None:
 _SESSION_ID_RE = re.compile(r"[0-9A-Za-z_-]+")
 
 
+class _ProbeUnavailable:
+    """Sentinel: the binding probe could not be ASKED — distinct from "no binding".
+
+    `None` is cmux's answer that the pane has no binding; this is the absence of
+    an answer. Only the first is safe to memoize for a dispatch (#7913 review).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "PROBE_UNAVAILABLE"
+
+
+PROBE_UNAVAILABLE = _ProbeUnavailable()
+
+
 def session_file_for(session_id: str | None, entry: dict | None) -> Path | None:
     """The transcript belonging to `session_id`, or None — NEVER a guess.
 
@@ -1381,8 +1397,8 @@ class Cmux:
         # `both` emits ref AND id so either form resolves.
         return self.run(["list-workspaces", "--json", "--id-format", "both"])
 
-    def pane_session_id(self, workspace: str) -> str | None:
-        """The pane's resume-bound session id, or None when it has none.
+    def pane_session_id(self, workspace: str) -> str | object | None:
+        """The pane's resume-bound session id, `None`, or `PROBE_UNAVAILABLE`.
 
         `resume_binding` is the AUTHORITATIVE field — NOT
         `restore_record.checkpoint_id`. Measured 2026-10-08: a workspace printed
@@ -1390,27 +1406,34 @@ class Cmux:
         carried a STALE id, so reading the stale field is exactly the class of
         defect this tool exists to remove (see `fleet_state.pane_bindings`).
 
-        None == no binding == UNKNOWN, and the caller must refuse (#7913).
+        The two negative outcomes are DELIBERATELY distinct, because they mean
+        opposite things downstream (#7913 review):
+
+        - `None` — cmux ANSWERED, and this pane has no binding. A definitive
+          fact, safe to memoize for the dispatch, and the caller refuses.
+        - `PROBE_UNAVAILABLE` — the probe could not be ASKED (non-zero exit, a
+          timeout, a malformed reply). TRANSIENT: under fleet load a cmux call
+          does time out, and caching this would let one flaky poll disable the
+          #7913 fallback for the whole dispatch while reporting the wrong cause.
         """
         result = self.run(
             ["surface", "resume", "show", "--workspace", workspace, "--json"],
             timeout=min(self.timeout, 15.0),
         )
         if result.rc != 0:
-            return None
+            return PROBE_UNAVAILABLE
         try:
             data = json.loads(result.out)
-        except Exception:  # a malformed reply is “unknown”
-            return None
+        except Exception:  # a malformed reply is not an answer about the pane
+            return PROBE_UNAVAILABLE
         if not isinstance(data, dict):
-            return None
+            return PROBE_UNAVAILABLE
         rb = data.get("resume_binding")
-        if isinstance(rb, dict):
-            sid = rb.get("checkpoint_id") or rb.get("session_id") or rb.get("id")
-        elif isinstance(rb, str):
-            sid = rb
-        else:
-            sid = None
+        # ONLY the dict form's `checkpoint_id`: a bare string is not a shape cmux
+        # emits, and accepting extra shapes here would let this tool and
+        # `fleet_state.pane_bindings` — which reads `checkpoint_id` only —
+        # disagree about whether a pane is bound at all (#7913 review).
+        sid = rb.get("checkpoint_id") if isinstance(rb, dict) else None
         sid = str(sid).strip() if sid else ""
         return sid or None
 
@@ -1476,14 +1499,19 @@ class DispatchResult:
     #: turn), `boot-blocked` (the pane sat on a boot-block prompt past the
     #: budget) and `not-ready` (the pane never reached READY).
     #:
-    #: `condition` and `status` are INDEPENDENT: `unreadable-pane`/`boot-blocked`/
-    #: `not-ready` ride both `never-became-ready` (nothing was written) and
-    #: `sent-but-not-consumed` (the bytes went, the turn did not), so a consumer
-    #: must read `condition` as "why", never as "when". `""` means NO delivery
-    #: condition was observed: a transport failure, an unknown workspace, or a
-    #: refusal raised before any read happened. Reported so a log names WHICH
-    #: failure was seen rather than only the umbrella status — the dispatcher's
-    #: recovery is chosen from this condition.
+    #: `condition` and `status` are INDEPENDENT, but the mapping is NOT
+    #: symmetric: only `unreadable-pane` rides BOTH `never-became-ready` (the
+    #: pre-send and recovery re-asserts refuse a read that went blind) and
+    #: `sent-but-not-consumed` (the bytes went and the pane went unreadable
+    #: after). `boot-blocked` and `not-ready` ride `never-became-ready` only;
+    #: `composer-not-submitted`/`unparsed-queue`/`not-observed` ride
+    #: `sent-but-not-consumed` only. So a consumer must read `condition` as
+    #: "why", never as "when". `""` means NO delivery condition was observed: a
+    #: transport failure, an unknown workspace, a refusal raised before any read
+    #: happened, or the submit-Enter leg failing after a text send that was
+    #: confirmed in no other way. Reported so a log names WHICH failure was seen
+    #: rather than only the umbrella status — the dispatcher's recovery is chosen
+    #: from this condition.
     condition: str = ""
     #: Which channel carried the bytes — the question a transport failure makes
     #: ambiguous (#4842). `transport` = the text send reached cmux, `inbox` = the
@@ -1553,22 +1581,34 @@ class Dispatcher:
 
     # -- non-pane liveness (#7913) ------------------------------------------- #
 
-    def pane_session_id(self, workspace: str) -> str | None:
-        """The pane's own resume-bound session id, or None (never a guess).
+    def pane_binding(self, workspace: str) -> tuple[bool, str | None]:
+        """`(probe_answered, session_id)` for a pane — see `self._session_ids`.
 
-        Memoized for the Dispatcher's lifetime — see `self._session_ids`.
+        `probe_answered=False` means the binding could not be determined (cmux
+        unreachable, timed out, or an unparseable reply); it is NOT memoized, so
+        the next poll re-asks. `None` with `probe_answered=True` is a definitive
+        "this pane has no binding" and IS memoized — one dispatch must not spawn
+        a `cmux surface resume show` per poll (measured 91 at the 180 s/2 s
+        defaults), and a definitive absence cannot change mid-dispatch.
         """
         if workspace in self._session_ids:
-            return self._session_ids[workspace]
+            return True, self._session_ids[workspace]
         getter = getattr(self.cmux, "pane_session_id", None)
-        session_id: str | None = None
+        raw: object = None
         if getter is not None:
             try:
-                session_id = getter(workspace)
+                raw = getter(workspace)
             except Exception:  # broad by design: a probe is best-effort
-                session_id = None
+                raw = PROBE_UNAVAILABLE
+        if raw is PROBE_UNAVAILABLE:
+            return False, None
+        session_id = raw if isinstance(raw, str) and raw else None
         self._session_ids[workspace] = session_id
-        return session_id
+        return True, session_id
+
+    def pane_session_id(self, workspace: str) -> str | None:
+        """The pane's session id, or None when it is absent OR not determinable."""
+        return self.pane_binding(workspace)[1]
 
     def session_liveness(self, workspace: str, entry: dict | None) -> tuple[bool, str]:
         """Is a live pi advancing THIS pane's session transcript?
@@ -1594,7 +1634,13 @@ class Dispatcher:
         """
         session_id: str | None = None
         try:
-            session_id = self.pane_session_id(workspace)
+            answered, session_id = self.pane_binding(workspace)
+            if not answered:
+                return False, (
+                    "the binding probe could not be asked (cmux unreachable, timed "
+                    "out, or an unparseable reply) — it is re-probed on the next "
+                    "poll, and this refusal is a refusal to GUESS"
+                )
             resolved = self._session_probe(session_id, entry)
         except Exception as exc:  # broad by design: a probe is best-effort
             return False, f"session probe failed: {exc}"
@@ -1603,6 +1649,11 @@ class Dispatcher:
                 return False, (
                     "no resume binding for this pane — its transcript cannot be "
                     "attributed, so it is UNKNOWN and the send is refused"
+                )
+            if not _SESSION_ID_RE.fullmatch(session_id):
+                return False, (
+                    f"this pane's binding is not a session id ({session_id[:24]!r}) "
+                    "— refusing rather than widening the search to its cwd"
                 )
             return False, (
                 f"no transcript for this pane's session {session_id[:8]} — "
@@ -2079,9 +2130,10 @@ class Dispatcher:
             workspace, before, gate_window, gate_evidence
         )
         if not allowed:
-            condition = (
-                "unreadable-pane" if not (gate_window or "").strip() else "not-ready"
-            )
+            # `condition_for`, not a hand-rolled if/else: a window that is READABLE
+            # but sitting on the boot-block prompt (`BLOCKED`) is not `not-ready`,
+            # and the two have different remedies (#7913 review).
+            condition = condition_for(gate_window)
             return DispatchResult(
                 False,
                 "never-became-ready",
@@ -2291,8 +2343,6 @@ class Dispatcher:
                     # refused on it, so `condition` must say WHICH refusal — an
                     # empty `condition` reads as a lost transport (#7913 review).
                     result.condition = condition_for(recovery_screen)
-                    if recovery_blocked:
-                        result.condition = "boot-blocked"
                     result.detail = (
                         f"{tag}{workspace} could not be recovered into a safe, "
                         f"READABLE state (blocked={recovery_blocked}, "
@@ -2357,11 +2407,7 @@ class Dispatcher:
                     if not allowed:
                         result.ok = False
                         result.status = "never-became-ready"
-                        result.condition = (
-                            "unreadable-pane"
-                            if not (fresh_window or "").strip()
-                            else "not-ready"
-                        )
+                        result.condition = condition_for(fresh_window)
                         result.detail = (
                             f"{tag}{workspace} was not ready immediately before the "
                             f"recovery re-send ({refusal}) — the re-send was REFUSED "
@@ -2482,8 +2528,8 @@ def _cmd_wait_ready(args: argparse.Namespace) -> int:
         "state": readiness_state(screen),
         "readiness_evidence": evidence,
         # The PROBE'S OWN diagnosis on a refusal, so a beat can tell "no resume
-        # binding" from "stale transcript" from "cmux broken" without re-deriving
-        # it — six causes, six different remedies (#7913 review). Empty when
+        # binding" from "stale transcript" from "the probe could not be asked"
+        # without re-deriving it (#7913 review). Empty when
         # `ready` is true, or when the refusal had no probe to diagnose.
         "readiness_refusal": refusal,
         "boot_blocked_now": blocked_now,

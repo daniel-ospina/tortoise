@@ -1045,23 +1045,37 @@ class TestPaneSessionIdTransport(unittest.TestCase):
         cmux = self._stub('{"restore_record": {"checkpoint_id": "stale-1111"}}')
         self.assertIsNone(cmux.pane_session_id("workspace:79"))
 
-    def test_a_plain_string_binding_is_accepted(self):
+    def test_a_plain_string_binding_is_not_an_answer(self):
+        # Strict on purpose: cmux does not emit a bare string, and accepting extra
+        # shapes here would let this tool and `fleet_state.pane_bindings` — which
+        # reads `checkpoint_id` only — disagree about whether a pane is bound
+        # (#7913 review). An unrecognised shape is not an answer.
         cmux = self._stub('{"resume_binding": "cccc-dddd"}')
-        self.assertEqual(cmux.pane_session_id("workspace:79"), "cccc-dddd")
+        self.assertIsNone(cmux.pane_session_id("workspace:79"))
 
-    def test_every_unresolvable_reply_is_none(self):
-        for payload in (
-            '{"resume_binding": null}',
-            '{"resume_binding": {}}',
-            "{}",
-            "not json",
-            "[]",
-        ):
+    def test_a_reply_that_is_an_answer_but_carries_no_id_is_None(self):
+        # cmux ANSWERED and the pane has no binding — a definitive fact, and the
+        # only negative outcome that is safe to memoize for the dispatch.
+        for payload in ('{"resume_binding": null}', '{"resume_binding": {}}', "{}"):
             with self.subTest(payload=payload):
                 self.assertIsNone(self._stub(payload).pane_session_id("workspace:79"))
 
-    def test_a_nonzero_exit_is_none_not_a_guess(self):
-        self.assertIsNone(self._stub("", rc=1).pane_session_id("workspace:79"))
+    def test_an_unaskable_probe_is_NOT_the_same_as_no_binding(self):
+        # Distinct because they mean opposite things downstream: one is a fact,
+        # the other is a transient failure that must be re-asked (#7913 review).
+        for payload in ("not json", "[]"):
+            with self.subTest(payload=payload):
+                self.assertIs(
+                    self._stub(payload).pane_session_id("workspace:79"),
+                    cd.PROBE_UNAVAILABLE,
+                )
+
+    def test_a_nonzero_exit_is_unaskable_not_a_guess(self):
+        # The payload is deliberately PARSEABLE: with an empty one the JSON guard
+        # would return the same value, and the rc check would have no guard at all
+        # (#7913 review — this test used to pass with the rc check deleted).
+        cmux = self._stub('{"resume_binding": {"checkpoint_id": "aaaa-bbbb"}}', rc=1)
+        self.assertIs(cmux.pane_session_id("workspace:79"), cd.PROBE_UNAVAILABLE)
 
 
 # --------------------------------------------------------------------------- #
@@ -3176,6 +3190,101 @@ class TestIssue7913UnreadablePaneFallback(unittest.TestCase):
             1,
             "the binding is a per-dispatch fact, not a per-poll subprocess",
         )
+
+    def test_a_transient_probe_failure_does_not_disable_the_fallback(self):
+        # A cmux call DOES time out under load (#4842). Memoizing "probe failed"
+        # as "no binding" let one flaky poll refuse the lane for the whole
+        # dispatch AND report the wrong cause (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class FlakyProbeCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.probe_calls = 0
+
+            def pane_session_id(self, workspace):
+                self.probe_calls += 1
+                if self.probe_calls == 1:
+                    return cd.PROBE_UNAVAILABLE
+                return super().pane_session_id(workspace)
+
+        fake = FlakyProbeCmux(screen_unreadable=True, cwd=cwd)
+        result, logs = self._send(fake, ready_timeout=10.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertGreaterEqual(fake.probe_calls, 2, "a failed probe must be re-asked")
+        self.assertIn("session-mtime", "\n".join(logs))
+
+    def test_a_definitive_absence_is_resolved_once_per_dispatch(self):
+        # `None` IS an answer, so it is memoized: resolution stays at one cmux
+        # call even though the gate polls (the load the memo exists for).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class CountingCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.binding_calls = 0
+
+            def pane_session_id(self, workspace):
+                self.binding_calls += 1
+                return super().pane_session_id(workspace)
+
+        fake = CountingCmux(screen_unreadable=True, cwd=cwd, session_id="")
+        dispatcher = cd.Dispatcher(
+            fake, sleep=self._clock.sleep, now=self._clock.now
+        )
+        result = dispatcher.send_message(
+            "workspace:99", PROBE, label="B4", ready_timeout=10.0
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("no resume binding for this pane", result.detail)
+        self.assertEqual(fake.binding_calls, 1)
+
+    def test_a_pane_stuck_on_the_boot_block_prompt_reports_boot_blocked(self):
+        # The `boot-blocked` value had NO test at all: mutating it to `not-ready`
+        # (or `""`) left the whole file green, so the diagnosis could regress
+        # silently (#7913 review).
+        fake = FakeCmux(boot_block=True)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(result.condition, "boot-blocked")
+        self.assertNotIn(
+            PROBE, fake.sent_log, "the brief must never be typed at that prompt"
+        )
+
+    def test_a_boot_blocked_RE_READ_is_reported_as_boot_blocked(self):
+        # The two re-assert sites used to hand-roll this mapping, so a window that
+        # was READABLE but sitting on the boot-block prompt was labelled
+        # `not-ready` — a different remedy, and the exact disagreement
+        # `condition_for` exists to prevent (#7913 review).
+        cwd = "/private/tmp"
+        self._session(cwd, age_s=5.0)
+
+        class EmptyGateThenBlockedCmux(FakeCmux):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.reads = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                self.reads += 1
+                if self.reads == 1:
+                    # The gate: UNREADABLE, rescued by this pane's transcript.
+                    return cd.CmuxResult(0, "")
+                # The pre-send re-assert: READABLE, but blocked.
+                return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
+
+        fake = EmptyGateThenBlockedCmux(cwd=cwd)
+        result, _ = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok, "a blocked re-read must not be rescued")
+        self.assertEqual(
+            result.condition,
+            cd.condition_for(SCREEN_BOOT_BLOCK),
+            "the condition must agree with the classification it came from",
+        )
+        self.assertEqual(result.condition, "boot-blocked")
 
     def test_empty_read_with_a_STALE_session_is_still_refused(self):
         cwd = "/private/tmp"
