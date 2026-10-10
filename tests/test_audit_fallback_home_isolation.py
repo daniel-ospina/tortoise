@@ -473,6 +473,35 @@ def test_root_resolving_home_spellings_are_refused_and_counted(
         assert after == before + 1, f"HOME={bad!r} must be a counted path drop"
 
 
+def test_unset_home_with_a_root_passwd_entry_is_refused(tmp_path, monkeypatch):
+    """#7924 review round 5: UNSET ``$HOME`` is not a licence to skip the check.
+
+    With ``$HOME`` absent, ``Path.home()`` falls back to the PASSWORD DATABASE
+    entry, and that entry can itself be the filesystem root (a minimal
+    container). The fallback then resolved to
+    ``/.tortoise/audit_fallback.jsonl`` with no refusal and no drop — the same
+    silent loss, reached by leaving the variable unset rather than by setting
+    it to a root spelling.
+
+    ``Path.home`` is patched to stand in for that passwd entry; the real
+    ``pwd`` database cannot be changed in a unit test.
+
+    Mutation that reds this test: restore the early `return` for
+    ``home is None`` — the fallback is accepted and no drop is counted.
+    """
+    _no_override(monkeypatch)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/")))
+    logger = AuditLogger(dsn=None)
+    with pytest.raises(RuntimeError, match="passwd-derived home"):
+        logger._fallback_file()
+    before = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    logger.append("org-1", None, "op")  # must NOT raise
+    after = monitoring.audit_fallback_drop_counts().get("unresolvable_path", 0)
+    assert after == before + 1, (
+        "a root passwd-derived home must be a counted path drop")
+
+
 def test_replay_resolution_failure_warns_once_not_per_successful_append(
         tmp_path, monkeypatch, caplog):
     """#7924 review round 3: the READ leg must not flood the log on the HEALTHY path.

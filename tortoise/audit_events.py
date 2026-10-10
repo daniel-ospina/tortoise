@@ -132,12 +132,27 @@ def _refuse_unusable_home() -> None:
       ``/.tortoise/audit_fallback.jsonl`` — the SAME file the empty spelling is
       refused for — with the mkdir+append succeeding and no drop counted.
 
-    Both results ARE absolute, so the absolute-path check cannot see them.
-    An UNSET ``$HOME`` is fine: every consumer then falls back to the pwd
-    entry, which is an absolute path.
+    * An UNSET ``$HOME`` whose PASSWORD-DATABASE entry is the root (#7924
+      review round 5): ``Path.home()`` then returns ``/`` from ``pwd``, so
+      treating "unset" as "fine" reopened the hole for a minimal container.
+      The pwd-derived home is resolved and checked here too.
+
+    All of these ARE absolute, so the absolute-path check cannot see them.
     """
     home = os.environ.get("HOME")
     if home is None:
+        # `$HOME` absent: `Path.home()` falls back to the PASSWD entry, and
+        # that entry can itself be the root. Resolve and check THAT — "unset"
+        # is not a licence to skip the invariant. (`Path.home()` may itself
+        # raise when there is no passwd entry; that propagates and the caller
+        # counts it as a drop, the same outcome as any unusable home.)
+        resolved_home = Path(os.path.realpath(Path.home()))
+        if resolved_home == Path(resolved_home.anchor):
+            raise RuntimeError(
+                "the passwd-derived home resolves to the filesystem root "
+                f"({resolved_home!r}) with $HOME unset — refusing to write the "
+                "audit fallback at the root; set HOME or "
+                "TORTOISE_AUDIT_FALLBACK_DIR to an absolute path")
         return
     if not home.strip():
         raise RuntimeError(
@@ -152,13 +167,6 @@ def _refuse_unusable_home() -> None:
             f"{resolved_home!r}) — refusing to write the audit fallback at "
             "the root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute path "
             "or fix $HOME")
-    home = os.environ.get("HOME")
-    if home is not None and not home.strip():
-        raise RuntimeError(
-            "$HOME is set but empty/whitespace — refusing to "
-            "resolve the audit fallback against the filesystem "
-            "root; set TORTOISE_AUDIT_FALLBACK_DIR to an absolute "
-            "path or fix $HOME")
 
 
 def _refuse_a_root_location(path: Path) -> None:
@@ -331,11 +339,11 @@ class AuditLogger:
         # root — so `TORTOISE_AUDIT_FALLBACK_DIR=/..` used to write
         # `/audit_fallback.jsonl` while the guard saw a non-root path.
         #
-        # This cannot fire on the $HOME legs (`<home>/.tortoise` is never the
-        # root, even when `<home>` resolves there); those are protected by
-        # `_refuse_unusable_home()`, which refuses a $HOME that RESOLVES to the
-        # root (#7924 review round 4). Kept uniform across every leg because
-        # it IS load-bearing for the override and explicit-path legs.
+        # This IS load-bearing on the override and explicit-path legs, and it
+        # is the SECOND line of defence on the $HOME legs: it fires when
+        # `<home>/.tortoise` itself resolves to the root (e.g. that path is a
+        # symlink to `/`). The ordinary root-resolving $HOME spellings are
+        # refused earlier, by `_refuse_unusable_home()`.
         _refuse_a_root_location(base / "audit_fallback.jsonl")
         return base / "audit_fallback.jsonl"
 
