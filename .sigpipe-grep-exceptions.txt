@@ -12,17 +12,12 @@
 #
 # These three are TEST ASSERTION HELPERS. Their haystacks are captured test output — measured
 # at most ~3.5 KB — far below the ~64 KiB pipe buffer the race needs, so the false negative
-# cannot fire on them. The guard's own suite draws the same distinction, keeping `tests/`
-# deliberately outside its scan set because a test file must be able to CONTAIN the idiom in
-# order to prove detection.
+# cannot fire on them.
 #
-# Tracked by the guard's own issue, agent-infra#841. NOTE the declaration hash covers the
-# guard's reported LINE NUMBERS, so inserting any line above an occurrence reds this as
-# "CONTENT changed" and the declaration must be re-cut: a mechanical here-string conversion
-# at each site would remove that brittleness, and is the better fix if these helpers are
-# touched again.
+# CONVERTED, not declared: they were declared here while the PR that wired the guard in was
+# pending, and are now here-strings (`grep -qF -- "$2" <<<"$GATE_OUT"`). That removes the race
+# rather than blessing it, and it removes this file's brittleness — the declaration hash covered
+# the guard's reported LINE NUMBERS, so inserting any line above an occurrence redded it as
+# CONTENT changed.
 #
 # Hash = shasum -a 256 of the guard's own reported hit lines (LC_ALL=C sorted), first 16 hex.
-.github/scripts/ai-review-gate.test.sh 8 e2dc4ab79be7fd73 #841
-.github/scripts/auto-file-issue.test.sh 1 8eb90c353599768f #841
-.github/scripts/registry-cron.test.sh 9 a0c318d61d6896a6 #841
