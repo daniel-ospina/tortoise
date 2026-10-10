@@ -33,6 +33,31 @@ from tortoise.source_identity import normalize_source_url, resolve_source_key
 logger = logging.getLogger(__name__)
 
 
+def is_mitigation_payload(payload: dict) -> bool:
+    """True when a journal Point payload is a MITIGATION record (#5048).
+
+    A mitigation is a NON-operator Point that still carries an ``operator``
+    EDGE descriptor (``#4937``) solely so the replay fold can rebuild its
+    ``(m)-[:IMPL]->(op)`` half — the live writer
+    (``sdk.py::mitigate_operator``) states ``is_operator: false`` explicitly on
+    the node it journals.
+
+    ONE home for that identity, because the record's replay is split across two
+    modules: ``_upsert_point_props`` (here) decides what the node IS, and
+    ``edges._create_edges`` decides whether to rebuild the canonical reverse
+    ``(op)-[:mitigated_by]->(m)``. Two hand-spelled copies of it would drift —
+    and did: the two halves of this one record's replay must agree by
+    construction, not by review.
+
+    The polarity is load-bearing. ``not payload.get("is_operator")`` is ALSO
+    true when the key is ABSENT, and the EventAPI / extractor / ingest producer
+    (``api.py::_point``) emits an ``OperatorAdded`` with no flag at all — that
+    form would treat every generic IMPL operator on the main write path as a
+    mitigation and dampen each of its inputs.
+    """
+    return payload.get("is_operator") is False
+
+
 def _terminal_object_statuses() -> list:
     """The canonical Object TERMINAL status list, for a Cypher ``excluded``
     parameter (#3309).
@@ -1123,8 +1148,11 @@ class _EntityHandlers:
         # mitigation: a systematic ``derived = replay(journal)`` divergence, and
         # the identity half of the record this PR's edge fold repairs. Scoped to
         # the explicit-False case, so every operator record (and every legacy
-        # record that omits the flag) is byte-for-byte unchanged.
-        _mitigation_record = p.get("is_operator") is False and bool(op)
+        # record that omits the flag) is byte-for-byte unchanged. The predicate
+        # is shared with ``edges._create_edges`` (``is_mitigation_payload``), so
+        # the identity half and the edge half of this record's replay agree by
+        # construction.
+        _mitigation_record = is_mitigation_payload(p) and bool(op)
         params = {
             "id": p["id"], "content": p.get("content", ""),
             "isop": bool(op) and not _mitigation_record,

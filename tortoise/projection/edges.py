@@ -5,6 +5,11 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+# #5048: the ONE home for the mitigation identity predicate, shared with
+# `_upsert_point_props` in this package (imported before this module by
+# `projection/__init__.py`). See `entities.is_mitigation_payload` for why the
+# polarity is ``is False`` and not a falsy test.
+from tortoise.projection.entities import is_mitigation_payload
 from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
@@ -648,25 +653,30 @@ class _EdgeHandlers:
                 # undecayed base (measured 0.5 -> 1.0, 1 -> 0 edges).
                 #
                 # The gate is the point's OWN journaled ``is_operator``,
-                # explicitly FALSE: a mitigation is a NON-operator Point that
-                # carries an operator EDGE descriptor solely so this fold can
-                # rebuild ``(m)-[:IMPL]->(op)`` (`#4937` — ``mitigated_by`` is
-                # canonical only from a mitigation Point, NEVER a generic
-                # operator). The polarity matters: ``not p.get("is_operator")``
-                # is ALSO true when the key is ABSENT, and the EventAPI /
-                # extractor / ingest producer (`api.py::_point`) emits an
-                # ``OperatorAdded`` with no ``is_operator`` at all — so that
-                # widened every generic IMPL operator on the main ingest path.
-                # ``is False`` also excludes the SDK's generic operator
-                # (``is_operator: true``) and ``rebuild_all``'s #548 graph-only
-                # synthesis, whose ``op_type``-bearing node may carry no flag.
+                # explicitly FALSE (``entities.is_mitigation_payload`` — the
+                # shared predicate, so the identity half and the edge half of
+                # this record's replay agree by construction): a mitigation is
+                # a NON-operator Point that carries an operator EDGE descriptor
+                # solely so this fold can rebuild ``(m)-[:IMPL]->(op)``
+                # (`#4937` — ``mitigated_by`` is canonical only from a
+                # mitigation Point, NEVER a generic operator). The polarity
+                # matters: ``not p.get("is_operator")`` is ALSO true when the
+                # key is ABSENT, and the EventAPI / extractor / ingest producer
+                # (`api.py::_point`) emits an ``OperatorAdded`` with no
+                # ``is_operator`` at all — so that widened every generic IMPL
+                # operator on the main ingest path. ``is False`` also excludes
+                # the SDK's generic operator (``is_operator: true``) and
+                # ``rebuild_all``'s #548 graph-only synthesis, whose
+                # ``op_type``-bearing node may carry no flag.
                 # ``mitigation_strength`` alone is wrong too: a legacy
                 # mitigation may omit it (``weights.py`` falls back), and the
                 # #548 path can hand the property to a generic operator.
-                # `o` is the mitigation Point, `s` the operator it damps —
-                # matching the live writer's direction, and the SAME identity
-                # predicate ``entities._upsert_point_props`` uses.
-                if rel_type == "IMPL" and p.get("is_operator") is False:
+                # ``rel_type == "IMPL"`` pins WHICH relation the record names
+                # (the live writer hardcodes IMPL); the identity pins whether
+                # its source is a mitigation. `o` is the mitigation Point, `s`
+                # the operator it damps — matching the live writer's
+                # direction.
+                if rel_type == "IMPL" and is_mitigation_payload(p):
                     self.g.query(
                         "MATCH (o:Point {id:$oid}), (s) "
                         "WHERE (s:Point OR s:Event) AND s.id = $sid "

@@ -412,7 +412,19 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         value;
       * nested ``provenance.source_id`` → the graph's flat ``provenanceSource``;
         nested ``operator.op_type`` → the graph's flat ``op_type``, plus the
-        graph's derived ``is_operator``.
+        graph's derived ``is_operator`` — EXCEPT for a point whose own payload
+        states ``is_operator: false`` (a mitigation, see below).
+
+    ``#5048``: a MITIGATION is a NON-operator Point that still carries an
+    ``operator`` EDGE descriptor (``#4937``) solely so the replay fold can
+    rebuild its ``(m)-[:IMPL]->(op)`` half. Reading that descriptor back as a
+    flat ``op_type`` re-typed the mitigation's JOURNAL view as an operator
+    while the (faithfully replayed) GRAPH node carries no ``op_type`` — so
+    ``check_consistency`` reported a FALSE ``divergence="content"`` on
+    ``op_type`` for a rebuild that was in fact byte-faithful, and its advice
+    ("reconcile by replaying the journal") could never clear it. The point's
+    OWN explicit-False identity therefore outranks the descriptor, exactly as
+    it does in ``projection/entities.py::_upsert_point_props``.
 
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
@@ -428,11 +440,18 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
     op = props.get("operator")
+    # Read the identity from the RAW payload, not from ``out``: ``skip`` may
+    # legitimately exclude ``is_operator``, and reading it back out of ``out``
+    # would then re-derive it from the descriptor (True) and undo this fix.
+    explicit_non_operator = props.get("is_operator") is False
     if "is_operator" not in out:
         # A flat operator snapshot (OperatorPromoted) already carries the key;
         # never clobber it — only the nested payload needs the derivation.
-        out["is_operator"] = bool(op) if isinstance(op, dict) else False
-    if isinstance(op, dict) and op.get("op_type"):
+        out["is_operator"] = (
+            False if explicit_non_operator
+            else (bool(op) if isinstance(op, dict) else False))
+    if (isinstance(op, dict) and op.get("op_type")
+            and not explicit_non_operator):
         out["op_type"] = op["op_type"]
     return out
 

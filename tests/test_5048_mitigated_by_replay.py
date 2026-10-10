@@ -37,24 +37,34 @@ MUTATIONS THAT MUST RED:
 - drop the ``mitigated_by`` MERGE in ``edges.py::_create_edges`` → post-rebuild
   weight reads the undecayed base;
 - weaken its gate to ``not p.get("is_operator")`` (true on an ABSENT key) →
-  every EventAPI / extractor IMPL operator gains edges, reding the graph-wide
-  count in both the EventAPI and generic-operator cases;
+  the EventAPI case reds (that payload carries no ``is_operator`` at all). The
+  SDK's generic operator stays green under that weakening because its payload
+  states ``is_operator: True`` — the absent-key case is the load-bearing one;
 - drop the ``is_operator`` arm in ``entities.py::_upsert_point_props`` → the
   identity parity assertion fails;
 - drop the ``mitigation_strength`` fold in ``_revise_point`` → the
-  re-mitigation weight reverts to the first strength.
+  re-mitigation weight reverts to the first strength;
+- re-anchor that fold on ``skip_content`` → the superseded-bare-creation case
+  reverts to the first strength (the write, not the supersession, is the
+  boundary — see ``test_strength_boundary_is_the_write``);
+- restore the unconditional ``op_type`` derivation in
+  ``consistency._canonical_point_fields`` → ``check_consistency`` reports a
+  false content divergence on a faithful rebuild (see
+  ``test_check_consistency_agrees_after_rebuild``).
 
 Runs on the ambient ``TORTOISE_DB_URI`` when set (the docker lane) and falls
 back to an embedded db, so both the default and the carve-out lane cover it.
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
 import pytest
 
 from tortoise.api import EventAPI, provenance
+from tortoise.consistency import check_consistency
 from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 from tortoise.weights import (
@@ -113,6 +123,32 @@ def _mitigation_row(sdk):
         "RETURN m.is_operator, m.op_type, m.mitigation_strength"
     ).result_set
     return rows[0] if rows else None
+
+
+def _journal(events) -> list[dict]:
+    path = events / "events.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()
+            if line.strip()]
+
+
+def _oracle_strength(tmp_path, records: list[dict], mid: str):
+    """Replay ``records`` chronologically through the live ``apply()`` path.
+
+    The oracle is an UNJOURNALED SDK, so replaying a hand-edited journal here
+    cannot append to the file under test.
+    """
+    ns = f"test_5048o_{uuid.uuid4().hex[:8]}"
+    if os.environ.get("TORTOISE_DB_URI"):
+        oracle = TortoiseSDK(db_path=None, namespace=ns)
+    else:
+        oracle = TortoiseSDK(db_path=str(tmp_path / "t5048_oracle.db"),
+                             namespace=ns)
+    try:
+        for r in records:
+            oracle._get_proj().apply(r)
+        return oracle.get_point(mid).get("mitigation_strength")
+    finally:
+        oracle.close()
 
 
 class TestMitigatedBySurvivesRebuild:
@@ -207,6 +243,89 @@ class TestMitigatedBySurvivesRebuild:
                 "a rebuild reverted the revised mitigation strength: "
                 f"before={before}, after={after}"
             )
+        finally:
+            sdk.close()
+
+    def test_check_consistency_agrees_after_rebuild(self, tmp_path):
+        """The durability GATE must not call a faithful rebuild diverged.
+
+        ``consistency._canonical_point_fields`` reads a nested ``operator``
+        descriptor back as a flat ``op_type``. For a mitigation — a
+        NON-operator whose payload carries that descriptor only as an edge
+        carrier — that re-typed the JOURNAL side as an operator while the
+        faithfully replayed graph node has no ``op_type``, so
+        ``check_consistency`` reported a false ``divergence="content"`` and
+        advised a "replay the journal" repair that could never converge.
+        The point's explicit ``is_operator: false`` must outrank the
+        descriptor here, exactly as it does in ``_upsert_point_props``.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            _src, _claim, op_id = _impl_chain(sdk)
+            sdk.mitigate_operator(op_id, "gate parity", 0.50)
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            result = check_consistency(str(events / "events.jsonl"),
+                                       sdk._get_proj())
+            assert result["ok"], (
+                "check_consistency flagged a faithful rebuild as diverged: "
+                f"divergence={result.get('divergence')!r}, "
+                f"points={result.get('divergent_points')!r}"
+            )
+        finally:
+            sdk.close()
+
+    def test_strength_boundary_is_the_write(self, tmp_path):
+        """A later same-file creation that OMITS the prop is not a boundary.
+
+        ``mitigation_strength`` is an open-set prop written CONDITIONALLY by
+        ``_persist_extra_props`` (a ``None``/absent value is skipped), so a
+        creation that merely omits it never cleared it live. The correct
+        suppression boundary is therefore the ``skip_hash`` one — the creation
+        that actually WROTE it (or a hard delete→recreate that cleared it) —
+        never ``skip_content``'s unconditional supersession. Anchoring on
+        ``skip_content`` reverts the node to its FIRST strength here, measured
+        against the chronological ``apply()`` oracle.
+        """
+        sdk, events = _fresh_sdk(tmp_path)
+        try:
+            src, _claim, op_id = _impl_chain(sdk)
+            mid = sdk.mitigate_operator(op_id, "revise me", 0.10)["id"]
+            sdk.mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
+
+            # A LATER same-file creation for the same id that does NOT carry
+            # ``mitigation_strength`` — a bare re-emit shape no SDK producer
+            # emits, and exactly the case that tells the two anchors apart.
+            records = _journal(events)
+            records.append({
+                "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+                "type": "PointAdded", "initiated_by": "raw-producer",
+                "projection_version": 2,
+                "point": {"id": mid, "content": "[MITIGATION] revise me",
+                          "pointKind": "statement", "status": "live",
+                          "is_operator": False,
+                          "operator": {"op_type": "IMPL", "inputs": [src]}},
+            })
+            (events / "events.jsonl").write_text(
+                "".join(json.dumps(r) + "\n" for r in records))
+
+            applied = _oracle_strength(tmp_path, records, mid)
+            assert applied == pytest.approx(0.50), (
+                "oracle setup drifted — the live path must keep the revision's "
+                f"strength, got {applied!r}"
+            )
+
+            sdk._get_proj().rebuild_all(events, confirm_destructive=True)
+
+            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            assert rebuilt == pytest.approx(applied), (
+                "a superseding creation that never wrote mitigation_strength "
+                f"must not suppress the revision: live={applied!r}, "
+                f"rebuilt={rebuilt!r}"
+            )
+            after = compute_operator_weight(sdk._get_proj(), op_id)
+            assert after == pytest.approx(
+                BASE_WEIGHT * mitigation_dampening_factor(0.50))
         finally:
             sdk.close()
 
