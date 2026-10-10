@@ -257,10 +257,12 @@ def _sanitize_for_log(value: str) -> str:
 # This reads the embedder's own one-time-load state (``embeddings.EmbeddingModel``)
 # only when a deadline has ALREADY fired, so the ordinary path pays nothing.
 # ``TORTOISE_EMBEDDER_WARMUP`` does NOT gate this path, and that is the point:
-# the hosted lifespan pre-warm (``hosted_api._prewarm_embeddings``) never
-# consults the flag — only ``EmbeddingModel.warm_up`` does — so a process that
-# runs the hosted lifespan can hold a load no request asked for. Background
-# pre-warms are excluded at the source (``background_load``), so this exemption
+# the exemption reads the embedder's load state, not the flag. A hosted
+# lifespan pre-warm that DOES run (``hosted_api._prewarm_embeddings`` — itself
+# gated on the flag as of #7809, so ``=0`` skips it entirely) is process setup
+# no request owns: it stamps no setup clock (``EmbeddingModel.background_load``),
+# so a process that runs the hosted lifespan can hold a load no request asked
+# for. Background pre-warms are excluded at the source, so this exemption
 # fires for the REQUEST that triggered a load and nothing else.
 #
 # ⚠️ OPEN (measured, #4055) — this exemption does NOT close that issue:

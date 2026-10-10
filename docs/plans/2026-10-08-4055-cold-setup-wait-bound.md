@@ -87,9 +87,11 @@ on shards that never embed).
 - No load for requests that never embed — the reverse of a route allowlist, which would have to
   be kept in sync with 126 routes / ~80 tools and would load a model on shards that never embed.
 - `TORTOISE_EMBEDDER_WARMUP=0` (the test-lane opt-out, #7015) does **not** gate this path, and no
-  claim here rests on it: the hosted lifespan pre-warm (`hosted_api._prewarm_embeddings`) never
-  consults the flag — only `EmbeddingModel.warm_up` does — so a hosted process can hold a
-  background load that no request asked for. The change is *when* a request-triggered load is
+  claim here rests on it: the exemption reads the embedder's load state, not the flag. (The
+  hosted lifespan pre-warm (`hosted_api._prewarm_embeddings`) also consults the flag as of
+  PR #7884 (#7809), which widens the flag to gate it, so `=0` skips the pre-warm entirely;
+  when it does run, `background_load` still leaves it unowned, so a hosted process can hold a
+  background load that no request asked for.) The change is *when* a request-triggered load is
   charged, not *whether* it runs.
 
 ## Acceptance criteria
