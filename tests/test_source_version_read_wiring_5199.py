@@ -27,6 +27,16 @@ not be exercised in production at all. It goes to the read-path item on #5038
 with #5256's arrival. ``test_search_hit_makes_no_version_claim`` pins that cut,
 so re-adding it has to face §4.6.
 
+**#5581 update (the read-path item this module hands off to).** #5256 has
+arrived, and the Point-level verdict is now shipped: the search hit reports the
+**§4.6 AGGREGATE** of its own ``extractedFrom`` links (plus the sourced
+disclosure) **inside the flag-gated ``provenance`` block**, so an unflagged row
+is still byte-identical. ``test_search_hit_makes_no_version_claim`` keeps its
+assertion untouched — a bare ``SearchResult`` must still carry no version claim
+— but read it as the shape it is: the ban is on a **per-link** verdict (or an
+unaggregated key) speaking for the Point, NOT on §4.6's aggregate. The aggregate
+and its guard live in ``tests/test_source_currency_5581.py``.
+
 Every test below names the input that makes it FAIL.
 """
 from __future__ import annotations
@@ -696,7 +706,14 @@ def test_search_hit_makes_no_version_claim():
 
     FAILS IF a version/currency claim is re-added to the hit — at the TOP level of
     `to_dict()` or inside its `provenance` block — without the §4.6 aggregation.
-    Read this test's module docstring before "fixing" it."""
+    Read this test's module docstring before "fixing" it.
+
+    NOT superseded by #5581: the read-path item now ships a Point-level
+    `provenance.currency`, but it is §4.6's AGGREGATE over the Point's own
+    `extractedFrom` links (and flag-gated, so this bare hit is unchanged). The
+    ban this test states is on a verdict DERIVED FROM ONE LINK — or an
+    unaggregated key — speaking for the Point; that is still the
+    false-current, and its guard is `tests/test_source_currency_5581.py`."""
     def _banned(d: dict) -> set:
         # A `currency` at the top level is the same per-link-speaks-for-the-Point
         # conflation, one nesting level up.

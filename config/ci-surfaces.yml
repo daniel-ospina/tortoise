@@ -1140,6 +1140,23 @@ surfaces:
   # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
   # selects this surface too, so the wiring's guard runs with the code it guards.
   - test_source_version_read_wiring_5199.py
+  # #5581 (the #5038 READ-path half): the Point-level §4.6 currency verdict —
+  # the AGGREGATE over a Point's `extractedFrom` links (stale if ANY is behind,
+  # current only when EVERY is, `unknown` for an unfillable pair AND for an
+  # empty link set) — plus the sourced disclosure the owner's 2026-09-26 ruling
+  # requires. Registered under `core` because the changed source files select it
+  # (`tortoise/search_engine.py` falls through to `core`; `tortoise/sdk.py` is a
+  # SHARED_MODULE and already forces the full matrix) and because
+  # `tools/source_currency.py` is a CORE_ALSO path — so a helper-only change
+  # selects this surface rather than dropping to tier-1 smoke.
+  #
+  # Lane: the file is URI-less-runnable (embedded FalkorDBLite per test, the
+  # `test_source_version_read_wiring_5199.py` shape), so `TORTOISE_TEST_CARVE_OUT=1`
+  # runs it locally; under a URI lane the #1647 test-mode redirect sends it to the
+  # docker server as a per-path derived graph. Deliberately NOT carve_out-registered:
+  # it is not embedded-ONLY, and it exercises the real project-search path
+  # (`tortoise_fts_query`, full-scan mode), which is the docker lane's subject.
+  - test_source_currency_5581.py
   # #5256 (extracted from #5038): the `extractedFrom` READ-VERSION anchor —
   # `sourceVersion` on the Point's provenance edge, carried in the node's own
   # journaled snapshot. Registered under `core` because every changed source
@@ -3599,6 +3616,7 @@ durations:
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_source_change_notice_5516.py: 65.0  # #5516: 12 tests; docker lane (#1647 default) — locally measured (64s docker, 66s embedded)
+  test_source_currency_5581.py: 133.0  # #5581: 12 tests; locally measured on the embedded (TORTOISE_TEST_CARVE_OUT=1) lane — the project-search case dominates (embedder/engine warmup + a full scan per assertion)
   test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

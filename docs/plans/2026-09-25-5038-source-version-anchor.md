@@ -103,6 +103,38 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 **Acceptance:** per Point/per link `current`/`stale`/`unknown`, **`unknown` when either side is `NULL`/`''`**; never nested under `tortoise_stale`; and the **decided enforcement form** (owner, 2026-09-26T11:17:30Z, `#5038` comment `5845802608`): **when a newer fact exists, the out-of-date fact is NOT returned as an answer — it is disclosed as an FYI carrying its source** (*"We should not return an out-of-date fact when we have a newer one"* … *"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). Reporting stays on the **existing** result row (no new tool, no new SDK method) and no `status` field is stored. This is a **deliberate departure** from the field's flag-alongside practice — see the `OVERRIDES:` line in §8 O3. The **write-time** notice the owner also asked for is **`lane:c1-capture`'s**, not this task's.
 **Files:** Create `tools/source_currency.py` as the shared derivation helper (the read path consumes it; it is not a separate user-facing surface). Test: unit + integration.
 
+**STATUS (2026-10-10, #5581).** Both gates in the issue's list are now cleared: PR #5288 (the
+per-link anchor) and PR #5207 are MERGED, and O3 is fully resolved, so no `#4282` approval is
+engaged — this ships **no new MCP tool and no new SDK method**. Delivered:
+
+* `tortoise/search_engine.py` — `aggregate_currency` (the §4.6 aggregate; **zero links ⇒
+  `unknown`, never the vacuously-`current` an empty link set would produce**) and
+  `read_currency_links` (the one-query batch read of the Points' `extractedFrom` links, edge
+  `sourceVersion` vs Source `contentHash`). ⚠ The pure semantics sit HERE, not in `tools/`:
+  the SDK core must not import `tools.*` (it is not in the wheel — the rule `sdk.py`'s #4106
+  note states for `subgraph_render`), so `tools/source_currency.py` holds the graph read's
+  single-Point wrapper, the sourced disclosure, the eligibility term and a CLI, and imports
+  the vocabulary from its ONE home above.
+* **The read-surface REPORTING** — `SearchResult.provenance.currency` (the §4.6 verdict) and
+  `provenance.fyi` (the sourced disclosure), both INSIDE the existing, off-by-default
+  `TORTOISE_SEARCH_PROVENANCE` block, recorded in `config/surface-manifest.yml` and
+  re-rendered into `docs/product/mcp-sdk-surface.md`. This is the “reporting stays on the
+  existing result row” clause, and it answers the handoff `tests/
+  test_source_version_read_wiring_5199.py` wrote (“It goes to the read-path item on #5038
+  with #5256's arrival”); that file's `test_search_hit_makes_no_version_claim` is untouched.
+* ⚠ **The ENFORCEMENT half is derived, not yet composed.** Nothing is *withheld* from a result
+  set by this change: `tools/source_currency.answer_eligible` states O9's term —
+  `NOT (stale ∧ a-newer-fact-exists)` — and is tested, but it is not composed into the read
+  path's participation gate (`search_engine.py`'s `has_ep`). That composition needs *“a newer
+  fact exists”* to be defined at the read path, and today the only writer of a successor is
+  supersession: a superseded Point is **already** withheld by the existing
+  `NOT terminal` term, so the currency term adds nothing for that case, and #5422's
+  re-inference successors are what will make it bite. **In the window this issue owns — before a
+  successor exists — the correct read behaviour is the one that now ships**: the fact still
+  ANSWERS (withholding it there would leave the graph asserting nothing, the loss §4.6's *“a
+  stale belief is strictly better than no belief”* forbids), reported `stale` and disclosed with
+  its source. `#5581` stays OPEN for the composition.
+
 ### Task 4: Close the loop on the residuals  — ✅ DONE on the residuals it OWNS (2026-09-25); ⚠️ O5 remains outstanding by design
 
 **Intent:** make the deferred decisions and gaps visible where the next lane reads.
