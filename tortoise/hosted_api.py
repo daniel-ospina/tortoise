@@ -6565,6 +6565,15 @@ class CreatePointRequest(BaseModel):
     # tool use. A value the store cannot hold is a 422, never a silent drop.
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1088: a no-status write is LIVE, and the fail-closed calibration gate
+    # (#344/#1157) demands an authored baseline before an EP surface (dream)
+    # runs — so the REST write surface must be able to AUTHOR one, exactly as
+    # the MCP ``tortoise_create_point`` tool already can (it has carried
+    # ``credibility`` since before this endpoint existed). Without this a
+    # hosted client could write a live point that ``/v1/dream`` then refuses
+    # and never make it EP-able through this surface. Forwarded as a prop,
+    # the same posture as confidence/authoredBy above.
+    credibility: str | int | float | None = None
 
     @field_validator("kind")
     @classmethod
@@ -8283,6 +8292,8 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["confidence"] = body.confidence
             if body.authoredBy is not None:
                 _author_props["authoredBy"] = body.authoredBy
+            if body.credibility is not None:
+                _author_props["credibility"] = body.credibility
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
@@ -13552,6 +13563,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 _apply_capture_ingest_ep(
                     sdk, ep_ids,
                     promotion_ids=_capture_minted_ids(extracted),
+                    operator_ids=list(meta.get("operator_ids") or []),
                     warn=extraction_warnings.append)
 
         await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)

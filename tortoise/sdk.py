@@ -3343,6 +3343,7 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
 @phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                              promotion_ids: list[str],
+                             operator_ids: list[str],
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
 
@@ -3357,12 +3358,17 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
 
     FIX — capture-scoped ONLY (the #780 draft-operator semantics of
     NON-capture extraction paths, EP semantics, and global dream routing are
-    all untouched). ``promotion_ids`` (REQUIRED) is the set of points this
-    call may PROMOTE; the EP/dirty pass still runs over the full
+    all untouched). ``promotion_ids`` (REQUIRED) is the set of CLAIM points
+    this call may PROMOTE; the EP/dirty pass still runs over the full
     ``claim_ids``. Callers pass the capture's MINTED ids (see
     ``_capture_minted_ids``) so a FOLDED, pre-existing canonical — which an
     agent may have explicitly created draft — is calibrated if it needs it
-    but never retro-promoted (#1088):
+    but never retro-promoted (#1088). ``operator_ids`` (REQUIRED) is the set
+    of operator Points THIS capture created — a folded-only capture mints no
+    claim (``promotion_ids == []``) yet can still wire a new operator, and
+    keying the operator-promotion arm on claims alone left that operator
+    draft and the folded claim's first calibration unable to propagate
+    through it (#4936's create-then-rekey class):
       1. every MINTED extracted (non-episodic) claim of THIS capture is
          promoted draft->live (the DM-2/§4.4 status branch: draft -> live on
          the capture write path; the episodic turn stream STAYS draft — it is
@@ -3429,12 +3435,19 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
         # projection/__init__.py:1082 restores live on replay). Mirror
         # promote_point's _promote_incident_operators event exactly.
+        # #1088: promote the operators THIS capture created (operator_ids) as
+        # well as those wired to a promoted claim (promote_ids). The CLAIM
+        # arm above stays minted-only (a folded explicit draft is never
+        # retro-promoted), but a draft operator this call minted over a
+        # FOLDED claim must go live or that claim's first calibration cannot
+        # propagate through it — and a folded-only capture mints no claim,
+        # so promotion_ids is empty and the claim join alone reaches nothing.
         op_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-            "WHERE c.id IN $ids "
+            "WHERE (c.id IN $ids OR o.id IN $op_ids) "
             "AND (o.status IS NULL OR o.status = 'draft') "
             "RETURN DISTINCT o.id",
-            params={"ids": promote_ids},
+            params={"ids": promote_ids, "op_ids": operator_ids},
         ).result_set
         promoted_ops = []
         for (oid,) in op_rows:
@@ -7113,6 +7126,7 @@ class TortoiseSDK:
                 _apply_capture_ingest_ep(
                     self, ep_ids,
                     promotion_ids=_capture_minted_ids(extracted),
+                    operator_ids=list(meta.get("operator_ids") or []),
                     warn=extraction_warnings.append,
                 )
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
