@@ -160,6 +160,23 @@ class TestPointsCRUD:
             assert r.status_code == 422, r.text
 
 
+class TestDream:
+    def test_incremental_default_is_local_mode(self, monkeypatch, tmp_path):
+        """#3698: `/v1/dream` with no args documents "Incremental (default)",
+        so it must run (and report) local mode. Before the fix it called
+        ``sdk.dream(dirty_only=True)`` — a deprecated no-op — and the mode
+        router auto-selected FULL on a graph below the 50-operator threshold,
+        returning the whole-graph key set (`converged_all`, no `converged`).
+        """
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post("/v1/dream")
+            assert r.status_code == 200, r.text
+            result = r.json()["result"]
+        assert result["mode"] == "local", result
+        assert "converged" in result and "iterations" in result, result
+
+
 class TestSearch:
     def test_search_finds_point(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path)
