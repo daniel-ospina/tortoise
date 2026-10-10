@@ -76,6 +76,17 @@ to act on another uid's directory — a root-run scheduled sweep therefore
 reaps nothing (not the documented deployment; see
 docs/infra/embedded-reaper-cron.md). Fail closed: when ownership cannot be
 determined the destruction is skipped, never attempted.
+
+SPELLING (#4237). `O_NOFOLLOW` protects the FINAL component, and a trailing
+separator (or its POSIX-identical `/.` form) makes the kernel resolve that
+component AS a directory — so `os.open("<link>/", O_NOFOLLOW|O_DIRECTORY)`
+returns the TARGET's fd and `fstat` reads the TARGET's uid, while
+`os.path.islink("<link>/")` is False so `shutil.rmtree`'s own symlink refusal
+is defeated too. Every path therefore goes through
+`_normalize_candidate_dir` FIRST, and the SAME normalized string is what is
+guarded and what is acted on; a path that is only separators is the
+filesystem root and fails closed. This is a spelling fix, not a scope
+change — the INTERMEDIATE-component swap remains out of scope.
 """
 from __future__ import annotations
 
@@ -318,6 +329,55 @@ def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
     return any(part.startswith(EPHEMERAL_PREFIXES) for part in rel.parts)
 
 
+def _normalize_candidate_dir(path: str | None) -> str | None:
+    """Normalize the SPELLING of a candidate dir so the guarded path and the
+    acted-on path are one string (#4237).
+
+    `O_NOFOLLOW` refuses a FINAL component that is a symlink — but only when
+    the kernel resolves that component AS the basename. A trailing separator
+    (or its POSIX-identical `/.` form) makes the kernel resolve the component
+    as a directory, so `os.open("<link>/", O_RDONLY|O_DIRECTORY|O_NOFOLLOW)`
+    SUCCEEDS and `fstat` reports the TARGET's `st_uid`: the guard then
+    authorizes, on a directory the record never proved ours, both the action
+    it gates and every predicate that reads the same verdict. `shutil.rmtree`
+    is defeated identically — it raises on a symlink only when
+    `os.path.islink` can see one, and that is False for `"<link>/"` — so the
+    removal follows the target too.
+
+    Stripping those trailing spellings restores the no-follow contract WITHOUT
+    changing the resolved inode (POSIX: `<dir>/` and `<dir>/.` ARE `<dir>`),
+    which keeps legitimate `dir=<tmpdir>/` registry values reapable instead of
+    stranding them. A path that is only separators IS the filesystem root and
+    returns None — fail closed; no destruction path may target `/`.
+
+    `..` components are deliberately NOT collapsed: `<link>/..` resolves to
+    the PARENT of the link's target, which is a different inode from the
+    textual parent of `<link>` — and it is not a spelling of the symlink
+    itself, so the final-component refusal is already in force there.
+
+    Scope: this module is POSIX-only (`fcntl`, unix sockets, `O_DIRECTORY`),
+    so the Windows drive-root spelling (a bare drive prefix followed by a
+    separator, which would strip to a drive-RELATIVE path) is outside its
+    domain; `os.altsep` is folded in only for completeness and is a no-op on
+    POSIX.
+    """
+    if not path:
+        return None
+    seps = os.sep + (os.altsep or "")
+    normalized = path
+    while True:
+        trimmed = normalized.rstrip(seps)
+        for sep in seps:
+            if trimmed.endswith(sep + "."):
+                trimmed = trimmed[:-2]
+                break
+        if not trimmed:
+            return None  # only separators -> the root; fail closed
+        if trimmed == normalized:
+            return trimmed
+        normalized = trimmed
+
+
 def _dir_owned_by_euid(path: str | None) -> bool:
     """PROVENANCE guard (#4136): True only when `path` is a directory owned
     by the invoking effective uid.
@@ -336,15 +396,23 @@ def _dir_owned_by_euid(path: str | None) -> bool:
     action is about to touch and a path swapped for a symlink in the
     discovery↔action window is refused (T4 of #4098's threat model).
 
-    Fail closed: a missing path, a non-directory, an unopenable dir, or an
-    unreadable owner returns False. No override exists by decision (#4136).
+    #4237 — the path is NORMALIZED first (`_normalize_candidate_dir`). A
+    trailing separator silently defeats `O_NOFOLLOW` (`os.open("<link>/")`
+    opens the TARGET on macOS, and on Linux too), which would hand the
+    verdict to whatever the symlink resolves to. Normalizing means this
+    guard and the action it gates (`_cleanup_tempdir`) address one string.
+
+    Fail closed: a missing path, a non-directory, an unopenable dir, an
+    unreadable owner, or a path spelling that normalizes to the filesystem
+    root returns False. No override exists by decision (#4136).
     """
-    if not path:
+    normalized = _normalize_candidate_dir(path)
+    if not normalized:
         return False
     flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
              | getattr(os, "O_NOFOLLOW", 0))
     try:
-        fd = os.open(path, flags)
+        fd = os.open(normalized, flags)
     except OSError:
         return False
     try:
@@ -2840,19 +2908,34 @@ def _cleanup_tempdir(dbdir: str | None) -> bool:
     refused LOUDLY and never handed to `shutil.rmtree`. Returns True when
     the path was handed to rmtree (removal may still have partially
     failed — that converges next sweep), False when the guard refused it.
+
+    #4237: the path is normalized ONCE (`_normalize_candidate_dir`) and that
+    SAME string is both guarded and passed to `shutil.rmtree`. rmtree's own
+    top-level symlink refusal — the second line of defence behind the guard
+    — reads `os.path.islink`, which is False for `"<link>/"`, so a trailing
+    separator would otherwise defeat it as well: the guarded path and the
+    acted-on path must never be two spellings of the same name.
     """
     if not dbdir:
         return False
-    if not _dir_owned_by_euid(dbdir):
+    normalized = _normalize_candidate_dir(dbdir)
+    if not normalized:
         logger.warning(
-            "refusing to remove %r: not a directory owned by euid %d "
-            "(owner %s) — provenance guard (#4136)", dbdir, os.geteuid(),
-            _dir_owner_of(dbdir))
+            "refusing to remove %r: not a directory path the provenance "
+            "guard can resolve (euid %d) — #4136/#4237", dbdir,
+            os.geteuid())
+        return False
+    if not _dir_owned_by_euid(normalized):
+        logger.warning(
+            "refusing to remove %r%s: not a directory owned by euid %d "
+            "(owner %s) — provenance guard (#4136)", dbdir,
+            "" if normalized == dbdir else f" (normalized {normalized!r})",
+            os.geteuid(), _dir_owner_of(normalized))
         return False
     try:
-        shutil.rmtree(dbdir, ignore_errors=True)
+        shutil.rmtree(normalized, ignore_errors=True)
     except OSError:
-        logger.warning("could not remove tempdir %s", dbdir)
+        logger.warning("could not remove tempdir %s", normalized)
     return True
 
 
