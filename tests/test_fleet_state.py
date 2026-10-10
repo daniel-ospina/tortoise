@@ -166,10 +166,15 @@ WEDGED = dict(
 )
 
 
-def test_stalled_turn_is_the_three_way_conjunction() -> None:
+def test_stalled_turn_requires_every_clause_of_the_conjunction() -> None:
     """Every signal ALONE is ambiguous; only their conjunction is the wedge (#7743).
     Dropping any one must clear the flag, so this fails if the detector keys on a
-    single signal and would then fire on healthy lanes."""
+    single signal and would then fire on healthy lanes.
+
+    The conjunction has SIX clauses: the three semantic signals (pane Working, no
+    backing child, frozen transcript) and three fail-closed guards (the parent is
+    alive, and both the descendant tree and the transcript age were MEASURED).
+    """
     assert fs.Liveness(**WEDGED).pane_stalled_turn
 
     # 1. spinner not animating -> not the wedge (a stalled turn spins).
