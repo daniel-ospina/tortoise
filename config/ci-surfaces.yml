@@ -147,8 +147,10 @@ surfaces:
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
-  # that REPLACES the `core` fallback — so a hosted_api.py-only revert of the
-  # eager ``Path.home()`` binding would otherwise run no guard at all.
+  # that REPLACES the `core` fallback — so a hosted_api.py-only change to its
+  # import-time logger construction would otherwise run no guard at all. (The
+  # `core` arm covers the same defect in tortoise/audit_events.py, where the
+  # eager `Path.home()` binding actually lived.)
   - test_audit_fallback_home_isolation.py
   # #3718: the REST graph-write handlers must not run synchronous FalkorDB I/O
   # on the event loop. Same dual registration as the two guards above and for
