@@ -30,12 +30,24 @@ class NonEmptyDestinationError(RuntimeError):
     AFTER the earlier records have been folded — a destination graph that
     already held nodes keeps the partially-folded ones, and a rename cannot
     un-apply an in-place fold. Such a restore therefore requires a FRESH
-    destination and refuses BEFORE it mutates anything.
+    destination and refuses BEFORE it folds anything (see the scope note
+    below: the probe itself reads the destination by opening it).
 
-    The refusal is taken before the journal copy, so the caller's store is
-    untouched and the remedy is exact: restore into a fresh destination, or
-    restore a backup that carries a snapshot (the snapshot path REPLACES the
-    destination, so a populated one is not a hazard there).
+    The refusal is taken before the journal copy, so no backup record is
+    folded into the destination and the destination's JOURNAL is left
+    byte-identical. The remedy is therefore exact: restore into a fresh
+    destination, or restore a backup that carries a snapshot (the snapshot
+    path REPLACES the destination, so a populated one is not a hazard there).
+
+    SCOPE OF "UNTOUCHED" (stated, not claimed away — review of #7928): the
+    pre-flight reads the destination by OPENING it, and an open auto-recovers
+    the destination's OWN journal, so the probe can persist the destination's
+    own state before the refusal — on an AOF-only destination it may create an
+    empty RDB beside the AOF dir. No backup data is involved, and the hazard
+    this refusal exists for (a partial fold of the BACKUP journal, which a
+    rename cannot un-apply) cannot occur because the fold never starts. The
+    guarantee is "no fold and no journal replacement", not "not one byte on
+    disk changes".
     """
 
     def __init__(self, node_count: int, db_path: str):
@@ -287,8 +299,11 @@ def restore(backup_dir: str, db_path: str,
     refusal it can only take mid-replay would leave a partial fold in a
     pre-existing destination graph (a rename cannot un-apply an in-place
     fold). A snapshot-less ``into_falkor`` restore therefore requires a fresh
-    destination and raises :class:`NonEmptyDestinationError` BEFORE it mutates
-    anything when the destination already holds nodes. The snapshot path is
+    destination and raises :class:`NonEmptyDestinationError` BEFORE it folds
+    anything when the destination already holds nodes (see `SCOPE OF
+    "UNTOUCHED"` on that class: the probe reads the destination by opening it,
+    so the guarantee is "no fold and no journal replacement", not "not a byte
+    changes"). The snapshot path is
     exempt: the snapshot is copied OVER the destination, so the replay starts
     from the backup's own DB.
     """
@@ -372,13 +387,24 @@ def restore(backup_dir: str, db_path: str,
     # verdict before the destructive half). Skipped when a snapshot exists:
     # the snapshot is copied OVER the destination, so no fold into the
     # caller's graph happens. The probe is the same RDB read the snapshot path
-    # uses; a store that cannot be opened raises here, before any mutation.
+    # uses; a store that cannot be opened raises here, before the fold starts.
     if (into_falkor and not db_file.exists()
             and db_path is not None and str(db_path) != ":memory:"
             and not is_db_uri(str(db_path))):
         _dest_path = Path(db_path)
-        if _dest_path.exists():
-            from tortoise.projection import FalkorProjection
+        # #7928 review (P1): probe on the RDB alone and an AOF-only destination
+        # reads as EMPTY. Under `TORTOISE_EMBEDDED_AOF=1` (the #915 durability
+        # posture) the live graph can live entirely in `<db>-appendonlydir/`
+        # with no RDB beside it, so the snapshot-less fold would land on a
+        # populated graph and a mid-replay refusal would leave the partial
+        # fold — the exact #7928 hazard, on the posture where durability is
+        # most relied on. `stale_aof_dirs` already enumerates both the
+        # `<db>-appendonlydir` suffix and the legacy literal `appendonlydir`,
+        # so reuse it rather than re-deriving the path here.
+        from tortoise.projection import FalkorProjection, stale_aof_dirs
+        _aof_populated = any(
+            d.is_dir() and any(d.iterdir()) for d in stale_aof_dirs(db_path))
+        if _dest_path.exists() or _aof_populated:
             _dest_probe = FalkorProjection(str(db_path))
             try:
                 _dest_rows = _dest_probe.g.query(
