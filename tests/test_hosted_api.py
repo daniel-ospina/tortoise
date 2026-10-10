@@ -2597,9 +2597,17 @@ class TestDreamEndpoint:
         assert "converged_all" in body or "converged" in body
 
     def test_dream_after_writes(self, client):
-        """Writes then dream → stabilization without explicit EP (O/I/T #85)."""
-        client.post("/v1/points", json={"content": "claim A"})
-        client.post("/v1/points", json={"content": "claim B"})
+        """Writes then dream → stabilization without explicit EP (O/I/T #85).
+
+        #1088: a no-status write lands LIVE, and the fail-closed calibration
+        gate (#344/#1157) demands a baseline before an EP surface runs — so
+        the writes carry an explicit ``credibility`` here. The gate itself is
+        test_calibration.py's subject; this test is the dream endpoint's
+        stabilization path."""
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        sdk.create_point("statement", "claim A", credibility="gold")
+        sdk.create_point("statement", "claim B", credibility="gold")
         r = client.post("/v1/dream?full=true")
         assert r.status_code == 200, r.text
         body = r.json()
