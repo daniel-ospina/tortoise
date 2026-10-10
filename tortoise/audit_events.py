@@ -136,21 +136,42 @@ class AuditLogger:
         events there. The peer knobs (``TORTOISE_PACKS_DIR``,
         ``TORTOISE_DB_PATH``) normalize the same way.
 
-        The RESOLVED base is then required to be ABSOLUTE (#7924 review
+        ``~`` is expanded before the absolute check, exactly as those peer
+        knobs do (``tortoise/pack_registry.py``, ``tortoise/config.py``): a
+        literal ``~/.audit`` is otherwise a RELATIVE path and would raise
+        below, dropping EVERY fallback event for the whole duration of a
+        Postgres outage — the opposite of what a relocation knob is for
+        (#7924 review P1/P2).
+
+        The RESOLVED path is then required to be ABSOLUTE (#7924 review
         P2): a whitespace-only ``$HOME`` still makes ``Path.home()``
         relative (``PosixPath('   ')``), which is the same CWD-relative hazard
-        one level down, so it is refused here rather than materialized.
+        one level down, so it is refused here rather than materialized. The
+        two override legs are held to the same invariant — returning them
+        unchecked would make a post-construction relative ``_fallback_dir``
+        (inert in the eager version, where only ``_fallback_path`` was read)
+        the winning path and mkdir it in the CWD.
 
         Raises whatever ``Path.home()`` raises (``RuntimeError`` for a
-        malformed ``$HOME``), and ``RuntimeError`` for a base that is not
+        malformed ``$HOME``), and ``RuntimeError`` for a path that is not
         absolute; callers that must not raise wrap the call.
         """
         if self._fallback_path is not None:
-            return self._fallback_path
+            path = self._fallback_path
+            if not path.is_absolute():
+                raise RuntimeError(
+                    f"audit fallback path is not absolute: {path!r}")
+            return path
         if self._fallback_dir is not None:
-            return self._fallback_dir / "audit_fallback.jsonl"
-        override = (os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR") or "").strip()
-        base = Path(override) if override else Path.home() / ".tortoise"
+            base = self._fallback_dir
+        else:
+            override = (os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR") or "").strip()
+            if not override and os.environ.get("TORTOISE_AUDIT_FALLBACK_DIR"):
+                _logger.warning(
+                    "AuditLogger: TORTOISE_AUDIT_FALLBACK_DIR is whitespace-only — "
+                    "treating it as unset and using the $HOME default")
+            base = (Path(override).expanduser() if override
+                    else Path.home() / ".tortoise")
         if not base.is_absolute():
             raise RuntimeError(
                 f"audit fallback base is not an absolute path: {base!r} "
@@ -337,6 +358,11 @@ class AuditLogger:
         try:
             path = self._fallback_file()
         except Exception as e:
+            # #7924 review P2: the READ leg counts the same root failure the
+            # write leg does — otherwise an unresolvable location keeps
+            # stranding already-pending events with no counter movement (the
+            # "log line nothing watches" gap this counter exists to close).
+            _note_fallback_drop("unresolvable_path")
             _logger.error("AuditLogger: fallback path resolution failed: %s", e)
             return
         if not path.exists():

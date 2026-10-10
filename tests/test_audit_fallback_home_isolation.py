@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tortoise import monitoring
 from tortoise.audit_events import AuditLogger
 
@@ -51,6 +53,33 @@ def test_documented_default_resolves_to_home_tortoise(tmp_path, monkeypatch):
     logger = AuditLogger(dsn=None)
     logger.append("org-1", None, "op")
     assert (tmp_path / ".tortoise" / "audit_fallback.jsonl").exists()
+
+
+def test_tilde_env_override_is_expanded_to_an_absolute_path(tmp_path, monkeypatch):
+    """#7924 review P2: the relocation knob expands ``~`` like its peer knobs
+    (``TORTOISE_PACKS_DIR`` / ``TORTOISE_DB_PATH``).
+
+    Mutation that reds this test: drop the ``.expanduser()`` — a literal
+    ``~/.audit`` is then RELATIVE, the absolute check raises, and EVERY
+    fallback event is dropped for the whole duration of a Postgres outage.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", "~/.audit")
+    logger = AuditLogger(dsn=None)
+    assert logger._fallback_file() == (
+        tmp_path / ".audit" / "audit_fallback.jsonl")
+
+
+def test_relative_override_seam_is_refused_not_materialized(tmp_path, monkeypatch):
+    """#7924 review P2: the override legs are held to the same ABSOLUTE
+    invariant as the env/``$HOME`` legs, so a relative ``_fallback_dir``
+    cannot quietly mkdir a directory in the CWD and drop events there."""
+    _no_override(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    logger = AuditLogger(dsn=None)
+    logger._fallback_dir = Path("relative-fb")
+    with pytest.raises(RuntimeError, match="is not an absolute"):
+        logger._fallback_file()
 
 
 def test_fallback_resolves_home_at_write_time_not_construction(
