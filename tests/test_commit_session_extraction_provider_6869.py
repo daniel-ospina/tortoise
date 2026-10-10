@@ -97,6 +97,24 @@ def test_warns_when_post_credentials_meet_ambient_extraction(ambient_model, kwar
         _commit(**kwargs)
 
 
+@pytest.mark.parametrize("falsy_model", ["", False, 0])
+def test_warns_for_a_falsy_extractor_model_that_takes_the_ambient_path(
+        ambient_model, falsy_model):
+    """The guard must mirror the CALL SITES' truthiness selection, not identity.
+
+    Every selection site is ``extractor_model or _default_byok_model()``, so a
+    falsy-but-not-None adapter still reaches the ambient path — the exact
+    divergence #6869 surfaces. An `is None` predicate stayed silent on it and
+    built the ambient model anyway (measured in review of #7938).
+    """
+    with pytest.warns(UserWarning, match=r"does NOT select the extraction provider"):
+        out = _commit(extractor_model=falsy_model, base_url="http://unused",
+                      api_key="k")
+
+    assert ambient_model, "a falsy adapter must fall through to the ambient model"
+    assert out["ok"] is True, out
+
+
 def test_no_warning_when_extractor_model_is_supplied(ambient_model):
     """An explicit adapter IS the control — nothing is silent about it."""
     with warnings.catch_warnings():

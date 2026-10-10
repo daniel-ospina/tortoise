@@ -5992,7 +5992,15 @@ class TortoiseSDK:
         # (tests/test_value_extractor.py::test_commit_session_warn_mode_reaches
         # _payload) — so surface it at the entry point. Placed AFTER the
         # consent gate: a declined call spends nothing and needs no notice.
-        if (base_url or api_key) and extractor_model is None:
+        #
+        # The predicate is TRUTHINESS (`not extractor_model`), matching how
+        # every call site actually selects the model (`extractor_model or
+        # _default_byok_model()`: v2 and both v1 branches). An identity test
+        # (`is None`) would stay silent on a falsy-but-not-None adapter
+        # (``""``/``False``/``0`` from a config default) that still takes the
+        # ambient path — the same silent divergence this notice exists to
+        # surface (review of #7938).
+        if (base_url or api_key) and not extractor_model:
             import warnings
             warnings.warn(
                 "commit_session(base_url=..., api_key=...) configures the "
