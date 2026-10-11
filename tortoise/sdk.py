@@ -48,6 +48,10 @@ from .cross_lens import DEFAULT_THRESHOLD
 # filter never re-literals it (a copy is how the read surface drifts from
 # search).
 from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
+# #1423 (review P1): the DECLARED, writable Subject lifecycle (ONTOLOGY §4.2),
+# used by the Subject `status` write guards in `create_entity` and
+# `_update_entity`. Imported so neither surface re-literals the vocabulary.
+from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -23200,6 +23204,36 @@ class TortoiseSDK:
                         state={"status": _status})
                 props = {k: v for k, v in props.items() if k != "status"}
 
+        # #1423 (review P1): the `status` guard above is POINT-gated (its
+        # predicate is `MATCH (n:Point {id:$id})`), so a `:Subject` `status`
+        # travelled the unvalidated non-Point branch (`SET n += $p`), was
+        # STORED, and was then served on all four retrieval legs — reproduced
+        # for `status="retracted"` AND for any undeclared value (e.g.
+        # `"dead"`). The Subject read vocabulary cannot cover that: it is a
+        # denylist of KNOWN terminal states, so an unknown one reads as
+        # CURRENT. Validate against ONTOLOGY §4.2's declared Subject lifecycle
+        # and REFUSE anything outside it BEFORE any write — the Point guard's
+        # shape, applied to the Subject family (`SUBJECT_STATUS_VALUES`).
+        #
+        # A node carrying BOTH `:Point` and `:Subject` cannot reach this block
+        # with a status: the Point arm above already validated it against the
+        # Point vocabulary and dropped the key from `props` (the Point-
+        # precedence rule #3311 established).
+        if "status" in props:
+            _subj_hits = proj.g.query(
+                "MATCH (n:Subject {id:$id}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _subj_hits:
+                _status = props["status"]
+                if (not isinstance(_status, str)
+                        or _status not in _SUBJECT_STATUS_VALUES):
+                    raise ValueError(
+                        f"Invalid status {_status!r} for a :Subject. "
+                        f"Must be one of: "
+                        f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
+                    )
+
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT
@@ -23545,6 +23579,19 @@ class TortoiseSDK:
                 "via props.")
         t = (type or "").strip().lower()
         if t == "subject":
+            # #1423 (review P1): `status` arrives through `**props` below and
+            # OVERRIDES the `"status": "live"` default, so this surface is a
+            # SECOND door onto an undeclared Subject status. Validate against
+            # ONTOLOGY §4.2's declared lifecycle and fail closed, exactly as
+            # `_update_entity` does.
+            _subj_status = props.get("status", "live")
+            if (not isinstance(_subj_status, str)
+                    or _subj_status not in _SUBJECT_STATUS_VALUES):
+                raise ValueError(
+                    f"Invalid status {_subj_status!r} for a :Subject. "
+                    f"Must be one of: "
+                    f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
+                )
             node = self._create_entity(
                 "Subject", _entity_name_id("Subject", name),
                 {"name": name, "subjectKind": props.pop("subjectKind", "other"),

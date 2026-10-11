@@ -55,11 +55,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests import _live_utils  # noqa: E402
-from tortoise.embeddings import EMBEDDING_DIM  # noqa: E402
-from tortoise.log import EventLog  # noqa: E402
-from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
-from tortoise.search_engine import (  # noqa: E402
+from tests import _live_utils
+from tortoise.embeddings import EMBEDDING_DIM
+from tortoise.log import EventLog
+from tortoise.sdk import TortoiseSDK, _entity_name_id
+from tortoise.search_engine import (
     reset_circuit_breakers,
     run_fts_query,
     run_structural_query,
@@ -67,8 +67,14 @@ from tortoise.search_engine import (  # noqa: E402
 )
 
 #: The canonical Subject terminal vocabulary, HARD-CODED (an expectation
-#: imported from the code under test is not an expectation).
-CANONICAL_SUBJECT_TERMINAL = frozenset({"superseded", "deprecated", "archived"})
+#: imported from the code under test is not an expectation). ``retracted`` is
+#: a member even though ONTOLOGY §4.2 does not declare it — the Object
+#: family's own precedent (#2977): a READ vocabulary names every stored state
+#: that is dead, including one a legacy/pre-fix SDK or a raw producer can have
+#: written, regardless of whether the (now guarded) generic write surface may
+#: mint it. The write guard is asserted separately below.
+CANONICAL_SUBJECT_TERMINAL = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
 _VEC = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
 _SB_PREFIX = "sub-"
 
@@ -265,6 +271,93 @@ class TestKeepFirstAndNeverGuess:
         assert applied == 0
         assert skips[0]["reason"] == "self-supersession"
 
+    def test_object_shadow_of_a_subject_successor_routes_to_the_subject_lane(
+            self, env):
+        """#1423 review P2 (#5365): the SUCCESSOR probe is Object-first, so a
+        successor name carried by BOTH families routed a Subject-ref record
+        into the Object lane. The Object-only ref probe then found nothing and
+        the pre-fix code warned "ref not found" and `continue`d — DROPPING a
+        fold that IS representable and reporting it NOWHERE in `skipped`.
+
+        MUTATION: reverting the Subject-lane dispatch at that site reds this
+        on `applied` (0, not 1) and on the empty `skips`.
+        """
+        sdk, proj, _events, _journal_path = env
+        proj.g.query(
+            "CREATE (o:Object {id:'obj-shadow-beta', name:'Team Beta', "
+            "objectKind:'other', status:'live'})")
+        applied, warns, skips = _apply(proj, sdk, [RECORD])
+        assert applied == 1, (warns, skips)
+        assert skips == [], skips
+        (_status, by, _at), = _subject_row(proj, "Team Alpha")
+        assert (_status, by) == ("superseded", "Team Beta"), (warns, skips)
+
+    def test_unresolvable_object_ref_is_reported_in_skipped(self, env):
+        """The other half of that site: when the successor routes the record
+        into the Object lane but the ref is not a Subject either, the drop must
+        still reach `skipped` (one entry per unapplied record — the #5365
+        contract), not only the warn stream.
+
+        MUTATION: reverting the Subject-lane fallback at that site reds this —
+        the pre-fix code `continue`d with `skips == []`.
+        """
+        sdk, proj, _events, _journal_path = env
+        # The OBJECT-lane site is reached only when the successor probe hits
+        # an Object (a Subject-only successor takes the Subject lane first).
+        proj.g.query(
+            "CREATE (o:Object {id:'obj-beta-1423', name:'Team Beta', "
+            "objectKind:'other', status:'live'})")
+        applied, warns, skips = _apply(
+            proj, sdk, [{"superseded": "Nobody At All",
+                         "supersedes_by": "Team Beta"}])
+        assert applied == 0, warns
+        assert [s["reason"] for s in skips] == ["ref is not a Subject"], skips
+        assert any("as a :Subject" in w for w in warns), warns
+
+    def test_ambiguous_subject_name_records_a_non_folded_entry(self, env):
+        """#1423 review P2: the Object twin records the refusal durably
+        (`entity_identity.record_non_folded` — the ENTRY is the record, the
+        log line is only visibility); the Subject read only warned.
+
+        MUTATION: removing the `record_non_folded` call reds this on the
+        empty entry tuple.
+        """
+        from tortoise.entity_identity import clear_non_folded_entries, non_folded_entries
+        sdk, proj, _events, _journal_path = env
+        clear_non_folded_entries()
+        try:
+            proj.g.query(
+                "CREATE (s:Subject {id:'sub-dup-1423', name:'Team Alpha', "
+                "subjectKind:'core:team', status:'live'})")
+            applied, _warns, _skips = _apply(proj, sdk, [RECORD])
+            assert applied == 0
+            entries = non_folded_entries()
+            assert [e.shape for e in entries] == ["ambiguous-name"], entries
+            assert entries[0].label == "Subject", entries
+        finally:
+            clear_non_folded_entries()
+
+    def test_duplicate_subject_id_records_a_non_folded_entry(self, env):
+        """The id-form twin of the entry above (`shape="duplicate-id"`)."""
+        from tortoise.entity_identity import clear_non_folded_entries, non_folded_entries
+        sdk, proj, _events, _journal_path = env
+        clear_non_folded_entries()
+        try:
+            for suffix in ("A", "B"):
+                proj.g.query(
+                    "CREATE (s:Subject {id:'sub-dup-1423', "
+                    f"name:'Team Alpha {suffix}', "
+                    "subjectKind:'core:team', status:'live'})")
+            applied, _warns, _skips = _apply(
+                proj, sdk, [{"superseded": "sub-dup-1423",
+                             "supersedes_by": "Team Beta"}])
+            assert applied == 0
+            entries = non_folded_entries()
+            assert [e.shape for e in entries] == ["duplicate-id"], entries
+            assert entries[0].label == "Subject", entries
+        finally:
+            clear_non_folded_entries()
+
     def test_successor_that_is_itself_terminal_is_refused(self, env):
         """No VISIBLE successor ⇒ burying the target would leave nothing a
         recall surface can show. Mirrors the Object lane's gate."""
@@ -275,6 +368,52 @@ class TestKeepFirstAndNeverGuess:
         assert applied == 0
         assert any("no visible successor" in w for w in warns), warns
         assert skips[0]["reason"] == "no visible successor"
+
+
+# ── 1b. the write guard: an undeclared Subject status must not be STORABLE ─
+
+class TestSubjectStatusWriteIsValidated:
+    """#1423 review P1 — the ROOT hole, not just the word ``retracted``.
+
+    The `status` guard in `_update_entity` was Point-PREDICATED, so any value
+    reached a `:Subject` and the read vocabulary (a denylist) then read an
+    unknown one as CURRENT. MUTATION: reverting the two guards reds every case
+    here — the write succeeds where a `ValueError` is required — for
+    ``retracted`` (the instance the review found) and ``dead`` (the general
+    class). The declared lifecycle still writes.
+    """
+
+    @pytest.mark.parametrize("bad", ["retracted", "dead"])
+    def test_update_entity_refuses_an_undeclared_subject_status(
+            self, env, bad):
+        sdk, proj, _events, _journal_path = env
+        sid = _entity_name_id("Subject", "Team Alpha")
+        with pytest.raises(ValueError, match="Invalid status"):
+            sdk.update_entity(sid, status=bad)
+        # refused BEFORE any write: the stored value is untouched.
+        (status,), = _subject_row(proj, "Team Alpha", "status")
+        assert status == "live", status
+
+    @pytest.mark.parametrize("bad", ["retracted", "dead"])
+    def test_create_entity_refuses_an_undeclared_subject_status(
+            self, env, bad):
+        """The SECOND door: `status` reaches `_upsert_subject` through
+        `**props`, overriding the `'live'` default — so a guard on
+        `_update_entity` alone leaves this writable."""
+        sdk, _proj, _events, _journal_path = env
+        with pytest.raises(ValueError, match="Invalid status"):
+            sdk.create_entity("subject", "Team New", subjectKind="core:team",
+                              status=bad)
+
+    def test_the_declared_subject_lifecycle_still_writes(self, env):
+        """Anti-vacuity: the guard refuses only UNDECLARED values, so the
+        §4.2 lifecycle (including the terminal members) still writes."""
+        sdk, proj, _events, _journal_path = env
+        sid = _entity_name_id("Subject", "Team Alpha")
+        for st in ("draft", "live", "superseded", "deprecated", "archived"):
+            sdk.update_entity(sid, status=st)
+            (got,), = _subject_row(proj, "Team Alpha", "status")
+            assert got == st, (st, got)
 
 
 # ── 3. the clobber guard (#1350/#2194 ported to Subject) ─────────────────
@@ -408,10 +547,17 @@ def test_subject_family_has_its_own_declared_terminal_vocabulary():
     vocab, include_outdated_flag = _status_vocab_for("Subject")
     assert vocab is commit_ops.SUBJECT_TERMINAL_STATUSES
     assert include_outdated_flag is False
-    # the vocabulary is the TERMINAL subset of ONTOLOGY §4.2's declared
-    # Subject lifecycle; `draft` is retrievable and `retracted` names no
-    # Subject write path.
-    assert "draft" not in vocab and "retracted" not in vocab
+    # the vocabulary is the TERMINAL set for the Subject read surface. `draft`
+    # is retrievable (not terminal); `retracted` IS terminal by the Object
+    # family's precedent (#2977) — a READ vocabulary must hold a dead state the
+    # graph can contain even when the write guard refuses to mint it.
+    assert "draft" not in vocab and "retracted" in vocab
+    # ONE declaration wide, not two drifting copies: the writable lifecycle
+    # (ONTOLOGY §4.2) plus the read-only legacy member IS the terminal set plus
+    # the current members. `retracted` is read-terminal but NOT writable.
+    assert commit_ops.SUBJECT_STATUS_VALUES | {"retracted"} == (
+        commit_ops.SUBJECT_TERMINAL_STATUSES | {"draft", "live"})
+    assert "retracted" not in commit_ops.SUBJECT_STATUS_VALUES
     # the gate that was the actual defect: every retrieval leg read a per-site
     # `("Point", "Object")` literal, so :Subject was never filtered at all.
     assert "Subject" in _STATUS_FILTERED_LABELS
@@ -456,6 +602,22 @@ def test_bruteforce_vector_leg_hides_every_terminal_subject(subject_graph):
         limit=50)) == {"sub-live"}
 
 
+def test_retracted_subject_is_hidden_like_a_retracted_object(subject_graph):
+    """The P2 defect: a ``retracted`` Subject leaked on every leg while a
+    ``retracted`` Object was hidden. Hard-coded ids (not the constant under
+    test), with the live control present so a filter that hides everything
+    cannot pass vacuously."""
+    ids = _ids(run_structural_query(
+        subject_graph, "core:team", entity_type="subject", limit=50))
+    assert "sub-retracted" not in ids, ids
+    assert "sub-live" in ids, ids
+    vids = _ids(run_vector_query(
+        subject_graph, _VEC, entity_type="subject", is_embedded=True,
+        limit=50))
+    assert "sub-retracted" not in vids, vids
+    assert "sub-live" in vids, vids
+
+
 def test_audit_opt_out_still_sees_the_terminal_subjects(subject_graph):
     """``excluded_statuses=()`` (the audit/history opt-in) must still return
     them — the exclusion is a per-leg DEFAULT, not a data filter."""
@@ -485,7 +647,7 @@ def _probe(candidates):
             proj = FalkorProjection.from_uri(uri)
             proj.g.query("RETURN 1")
             return True, uri
-        except Exception:  # noqa: BLE001
+        except Exception:
             if uri == env_uri:
                 break
             continue

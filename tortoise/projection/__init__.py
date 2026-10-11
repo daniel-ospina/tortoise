@@ -12540,7 +12540,8 @@ class FalkorProjection(
 
         if op != "delete":
             # Outside the recorded vocabulary, or recorded-but-unimplemented
-            # (`retract`/`supersede`). LOUD: a silently dropped mutation is
+            # (`retract` — #1423 moved `supersede` into the IMPLEMENTED set,
+            # so only `retract` remains pending). LOUD: a silently dropped mutation is
             # exactly this class's defect. The two are distinguished so a
             # future extender is not told its sanctioned op is "unknown".
             # #3585 (R8): both are non-folded and NOT exempt — the run fails,

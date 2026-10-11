@@ -69,12 +69,35 @@ _RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
 # ONTOLOGY §4.2 declares the Subject lifecycle vocabulary as draft / live /
 # superseded / deprecated / archived. The TERMINAL members are the read-surface
 # exclusion; ``draft`` is NOT terminal (a draft Subject is retrievable, exactly
-# as a draft Point is), and ``retracted`` is deliberately absent because the
-# §4.2 vocabulary has no Subject retraction verb — declaring it would name a
-# state nothing can write (the mirror of the #2977 finding that the Object
-# family DID have a ``retracted`` vocabulary and only lacked its writer).
+# as a draft Point is).
+#
+# ``retracted`` is NOT declared in §4.2, and ``SUBJECT_STATUS_VALUES`` below
+# refuses it on WRITE — yet it IS excluded here, deliberately, on the Object
+# family's own precedent (#2977): a read vocabulary answers "which STORED
+# states are dead", not "which states a writer may mint". The Object read set
+# kept ``retracted`` while no in-tree writer produced it, because a graph can
+# hold one from a legacy/pre-fix SDK, a raw Cypher producer, or a JSONL replay
+# of either. Before #1423 the leg gate skipped ``:Subject`` entirely, so such
+# a node was served as CURRENT state on all four retrieval legs. The read set
+# is the NET; ``SUBJECT_STATUS_VALUES`` is the DOOR. The set matches
+# ``OBJECT_TERMINAL_STATUSES``.
 SUBJECT_TERMINAL_STATUSES = frozenset(
-    {"superseded", "deprecated", "archived"})
+    {"superseded", "deprecated", "archived", "retracted"})
+
+# #1423 (review P1) — the DECLARED, WRITABLE Subject lifecycle, ONTOLOGY §4.2.
+# ``retracted`` is deliberately ABSENT: §4.2 declares no Subject retraction
+# verb, and adopting a vocabulary that a recorded decision does not carry is
+# not a fix (the contradiction test). The generic entity write surface
+# (``create_entity("subject", ...)`` and ``update_entity``) validates a
+# Subject ``status`` against THIS set and raises for anything else, so an
+# undeclared value (``"dead"``) can no longer be STORED and leak on every
+# read leg — the general hole the ``retracted`` observation is one instance
+# of. Points carry the same guard (``sdk.POINT_STATUS_VALUES``). The OBJECT
+# family has no write-side guard yet: ``update_entity(<object>, status=...)``
+# is still unvalidated, which is a PRE-EXISTING hole outside this lane's
+# scope (#1423 is the Subject family).
+SUBJECT_STATUS_VALUES = frozenset(
+    {"draft", "live", "superseded", "deprecated", "archived"})
 
 
 def _op_attr(op, name, default=None):
@@ -767,6 +790,12 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
         params={"ref": ref},
     ).result_set
     if len(by_id) > 1:
+        # #1423 review P2: the Object twin records this refusal durably
+        # (``record_non_folded``) as well as warning — the entry IS the
+        # record, the log line is only operator visibility
+        # (``entity_identity``'s own doctrine). Mirror it, ``label="Subject"``.
+        record_non_folded("Subject", ref, [r[1] for r in by_id],
+                          shape="duplicate-id")
         warn(f"subject supersession {ref!r} matches {len(by_id)} Subjects "
              f"by id — skipped (never-guess)")
         _skip(ref, supersedes_by, "ambiguous subject id")
@@ -780,6 +809,11 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
             params={"ref": ref},
         ).result_set
         if len(by_name) > 1:
+            # #1423 review P2: durable record, not just a log line — the
+            # Object twin's `:1184` call mirrored with `label="Subject"`.
+            record_non_folded("Subject", ref,
+                              display_holder_ids([r[1] for r in by_name]),
+                              shape="ambiguous-name")
             warn(f"subject supersession {ref!r} matches {len(by_name)} "
                  f"Subjects by name — skipped (never-guess)")
             _skip(ref, supersedes_by, "ambiguous subject name")
@@ -841,7 +875,7 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
             "RETURN [k IN $keys | properties(s)[k]] AS vals",
             params={"id": target_id, "s": state, "keys": keys},
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         warn(f"subject supersession write failed for {target_name!r}: {exc}")
         _skip(ref, supersedes_by, f"write failed: {exc}")
         return False
@@ -871,7 +905,7 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
             "Subject", target_id, "supersede",
             state=dict(zip(keys, vals, strict=False)),
             provenance=provenance or None)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # The live write LANDED and the journal append did not. Report it as
         # such (the divergence is real until the next write) instead of
         # counting an applied supersession whose replay will not reproduce it.
@@ -1155,8 +1189,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             _seen_nodes.add(_row[0])
             rows.append(list(_row[1:]))
         if not rows:
-            warn(f"supersession ref {ref!r} not found in the graph — "
-                 f"skipped (fail-open)")
+            # #1423 review P2: the SUCCESSOR probe above is Object-FIRST, so a
+            # successor name carried by BOTH families routes this record into
+            # the Object lane even when the REF is a Subject (`Subject(A)`,
+            # `Subject(B)`, `Object(B)`). This ref probe is Object-only, so it
+            # finds nothing and the pre-fix code warned "ref not found" and
+            # `continue`d — DROPPING a fold that IS representable, and
+            # reporting it nowhere in `skipped` (against
+            # `apply_supersessions`' one-entry-per-unapplied-record contract,
+            # #5365). Hand the record to the SUBJECT lane instead: it resolves
+            # the ref inside its own family and `_skip`s with
+            # "ref is not a Subject" when the ref is not one, so a miss is
+            # reported exactly once rather than silently dropped. The ref
+            # looks the same either way — the successor probe is what chose
+            # the lane, and the successor is the family's identity.
+            subj_rows = proj.g.query(
+                "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status",
+                params={"sb": supersedes_by},
+            ).result_set
+            if _apply_subject_supersession(
+                    proj, sdk, ref, supersedes_by, subj_rows,
+                    session_id=session_id, evidence=evidence,
+                    warn=warn, _skip=_skip):
+                applied += 1
             continue
         # #2164 review (P2-2): rows[0] was backend-order-dependent — the OR
         # probe can return BOTH an id-match row (ref == an Object's id) AND a

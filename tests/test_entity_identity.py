@@ -845,7 +845,17 @@ _ALLOWED_KEYED = {
         # the journaled fold itself is id-keyed (`MATCH (s:Subject {id:$id})`).
         # The retired count-only read (`_subj = ... RETURN count(s)`) is REMOVED
         # with it, not left stale below.
-        'subj_rows = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status", params={"sb": supersedes_by}, ).result_set': 1,
+        #
+        # TWO occurrences (#1423 review P2): the Subject lane's own successor
+        # probe AND the Object lane's ref-miss fallback. The successor probe is
+        # Object-FIRST, so a successor name carried by BOTH families routes the
+        # record into the Object lane; when the ref then does not resolve as an
+        # Object, this same probe supplies the Subject lane's successor rows
+        # rather than dropping the record with no `skipped` entry (#5365).
+        # Both sites feed `_apply_subject_supersession`, which refuses on an
+        # ambiguous ref and requires a VISIBLE DISTINCT non-terminal successor
+        # before any journaled write.
+        'subj_rows = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status", params={"sb": supersedes_by}, ).result_set': 2,
     },
     'tortoise/hosted_api.py': {
         # §A hosted session-capture about-edge anchor (S1).
