@@ -87,13 +87,12 @@ BACKLOG_DIR_LEAF = "capture-backlog"
 
 #: The policy record lives in its OWN subdirectory.  ``sessions()`` globs the
 #: ledger's TOP level only, so no session id — free-form text, sanitised by
-#: substitution rather than by encoding — can address the policy record, and the
-#: id-to-path mapping stays INJECTIVE.  The relocating rule this replaced
-#: ("prefix a reserved stem") was neither: `policy` and `_policy` collided on a
-#: session record, and a case-insensitive filesystem (macOS APFS) collapsed
-#: `POLICY` onto `policy.json`.  A subdirectory cannot be spelled from a session
-#: id at all, because :func:`_session_path` always yields a top-level
-#: ``<name>.json``.
+#: substitution rather than by encoding — can address the policy record.  The
+#: relocating rule this replaced ("prefix a reserved stem") could not say that:
+#: `policy` and `_policy` collided on a session record, and a case-insensitive
+#: filesystem (macOS APFS) collapsed `POLICY` onto `policy.json`.  A
+#: subdirectory cannot be spelled from a session id at all, because
+#: :func:`_session_path` always yields a top-level ``<name>.json``.
 _POLICY_DIR = "policy"
 _POLICY_FILE = "choice.json"
 
@@ -151,7 +150,7 @@ def _policy_path() -> Path:
 
 
 def _session_path(session_id: str) -> Path:
-    """The record path for one ``session_id`` — and an INJECTIVE map.
+    """The record path for one ``session_id`` — one id, ONE record.
 
     ``session_id`` reaches this from a CLI argument and from a server response,
     so it is a path segment derived from untrusted text: the separator, dot
@@ -165,19 +164,23 @@ def _session_path(session_id: str) -> Path:
     a previously recorded transcript path, so two colliding ids would share one
     record and the second would inherit the first's ``file``, making
     ``--process`` re-import one session's transcript under a DIFFERENT session
-    id. A digest of the RAW id is therefore part of the name whenever the
-    sanitiser changed it, which keeps an ordinary (UUID-shaped) id's filename
-    readable and gives two distinct ids distinct records.
+    id.  A digest of the RAW id is therefore ALWAYS part of the name.
+
+    That makes the map injective for every spelling: two distinct ids can share
+    a name only by colliding in the sanitised stem AND in the 32-bit digest of
+    the raw id — a hash collision, not a spelling collision.  Appending the
+    digest only when the sanitiser CHANGED the id would not do: a raw id
+    spelled like another's suffixed name (`a_b-c14cddc0` against `a/b`) would
+    map back onto it, which is the very collision this closes.  The stem stays
+    readable for an ordinary (UUID-shaped) id.
     """
     raw = str(session_id)
     safe = raw.strip()
     for bad in ("/", "\\"):
         safe = safe.replace(bad, "_")
     safe = safe.replace("..", "_") or "_unnamed"
-    if safe != raw:
-        digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
-        safe = f"{safe}-{digest[:8]}"
-    return backlog_dir() / f"{safe}.json"
+    digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    return backlog_dir() / f"{safe}-{digest[:8]}.json"
 
 
 def _write_json(path: Path, record: dict) -> bool:

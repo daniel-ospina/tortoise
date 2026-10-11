@@ -5604,9 +5604,11 @@ def _cmd_sessions_import(args) -> int:
     EXCEPT every DEFERRING 2xx, which writes NO local receipt (and no
     retirement) so an explicit re-import can still re-attempt extraction: a
     store-only capture (`extraction_mode` `no-provider` #4188, or the team's
-    extraction-disabled setting #4258) and a DEGRADED one (extraction
+    extraction-disabled setting #4258), a DEGRADED one (extraction
     error/empty, or a non-empty `errors` list — see
-    :func:`_degraded_extraction`). Each also records the session in the
+    :func:`_degraded_extraction`), and a `replayed` receipt carrying an
+    upgrade-refused warning (`_upgrade_refused`, whose mode is neither
+    store-only nor degraded). Each also records the session in the
     saved-backlog ledger. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported). A re-POST of
     an already-extracted session converges server-side (same session_id ⇒ no

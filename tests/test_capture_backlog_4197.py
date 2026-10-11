@@ -1280,6 +1280,28 @@ def test_colliding_session_ids_never_share_a_record(places):
     assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 3
 
 
+def test_a_session_id_spelled_like_another_records_name_does_not_collide(places):
+    """Appending the digest ONLY when the sanitiser changed the id leaves the
+    collision open in the other direction: a raw id spelled like another's
+    suffixed name maps back onto it. The digest is therefore ALWAYS present, so
+    no SPELLING can reproduce a name.
+
+    MUTATION THAT REDS THIS: restore the `if safe != raw` guard around the
+    digest.
+    """
+    doomed = backlog._session_path("a/b").name
+    crafted = doomed[: -len(".json")]
+
+    assert backlog.record_not_processed(session_id="a/b", turns=4) is True
+    assert backlog.record_not_processed(session_id=crafted, turns=9) is True
+
+    records = {r["session_id"]: r for r in backlog.sessions()}
+    assert set(records) == {"a/b", crafted}, \
+        "no id spelling may reproduce another record's name"
+    assert records["a/b"]["turns"] == 4
+    assert records[crafted]["turns"] == 9
+
+
 def test_a_session_id_can_never_be_written_outside_the_ledger(places):
     """The injectivity digest must not weaken the traversal guard it joined: a
     `../..` id still lands INSIDE the ledger, and still lands somewhere the
