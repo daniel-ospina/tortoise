@@ -1,7 +1,7 @@
 # GitHub wire fixtures — what the producers ACTUALLY receive
 
 These JSON files are **captures**, not hand-built dicts. They exist because
-#8019's producer-agreement test previously hand-built a REST `rest_pr` with a
+Issue #8019's producer-agreement test previously hand-built a REST `rest_pr` with a
 top-level `merged_at` **the `GET /repos/{owner}/{repo}/issues` endpoint never
 returns**, and a `url` the producer would not prefer. The fixture encoded the
 same assumption as the buggy code, so the test agreed with the bug and three

@@ -533,9 +533,9 @@ def test_a_non_canonicalizable_payload_returns_the_honest_absent_digest():
     )
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = (
-        "import sys; sys.path.insert(0, %r);"
+        f"import sys; sys.path.insert(0, {repo_root!r});"
         "from tortoise.projection.entities import _connector_content_hash as h;"
-        "print(h({'payload': {'alpha', 'beta', 'gamma', 'delta'}}))" % repo_root
+        "print(h({'payload': {'alpha', 'beta', 'gamma', 'delta'}}))"
     )
     digests = set()
     for seed in ("1", "2", "3"):
