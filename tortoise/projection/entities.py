@@ -2537,13 +2537,16 @@ class _EntityHandlers:
         # #7853 P2 divergence: the LIVE writers (``TortoiseEP._write_node`` /
         # ``_flush_cache``, ``TortoiseSDK.compute_confidence``,
         # ``Dreamer._ep_run_batch``) all sweep ALL FOUR labels and never stop
-        # at the first match, so a node carrying more than one epistemic label
-        # (``:Point:Object``) is written under every one of them. The replay
-        # fold used to ``break`` after the first non-empty result, so replay
-        # updated only that first label — silently disagreeing with live on
-        # exactly that node. The SET is idempotent, so sweep them all and
-        # ACCUMULATE the count (never overwrite with a later empty label's 0,
-        # which would manufacture a false ``point-belief-miss``).
+        # at the first match, so TWO SEPARATE NODES sharing one ``id`` — a
+        # ``:Point`` and a distinct ``:Object``, the shape the regression test
+        # builds — are both written. The replay fold used to ``break`` after the
+        # first non-empty result, so replay updated only the first label and
+        # silently disagreed with live on exactly that pair. (A SINGLE node
+        # carrying both labels is matched by each label's ``MATCH`` and written
+        # identically either way, so it is not the shape that diverges.) The SET
+        # is idempotent, so sweep them all and ACCUMULATE the count (never
+        # overwrite with a later empty label's 0, which would manufacture a
+        # false ``point-belief-miss``).
         matched = 0
         for _q in epistemic_label_queries(
                 "MATCH (n:{label} {id:$id}) SET " + ", ".join(set_parts) +

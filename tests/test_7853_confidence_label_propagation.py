@@ -13,9 +13,14 @@ moved. ``:Subject``/``:Object`` operator endpoints are forward-looking (the
 write path does not admit them yet, tracked separately), so those tests wire
 the operator edge directly and exercise the ENGINE read widening.
 
-These tests go RED when the widening is reverted: with a ``:Point``-only read
-the non-Point input is absent from the factor, the factor degenerates to <2
-inputs, and the node's posterior stays null (never written).
+The EP-widening tests in the first two sections go RED when the widening is
+reverted: with a ``:Point``-only read the non-Point input is absent from the
+factor, the factor degenerates to <2 inputs, and the node's posterior stays null
+(never written). The reference-fold, consistency, boundary-matrix and promotion
+sections further down do NOT depend on that widening — they exercise
+``projection.journal_epistemic_existence``, ``fold()``, ``_fold_journal`` and
+``_promote_incident_operators``, which read the journal directly, and stay green
+with ``ep.py`` reverted.
 """
 from __future__ import annotations
 
