@@ -19,6 +19,23 @@ import tempfile
 import pytest
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._provider_env import pin_provider_routing_env
+
+
+@pytest.fixture(autouse=True)
+def _pinned_provider_routing_env(monkeypatch):
+    """#3699: remove the AMBIENT provider-routing env for every test in this
+    module (canonical derivation: `tests/_provider_env.py`).
+
+    ``test_openai_only_key_v2_503_not_500`` asserts the fail-closed 503 detail
+    NAMES the routing keys, but its hand-listed delenv pair omits
+    ``TORTOISE_EXTRACTOR_PROVIDER`` and ``VENICE_API_KEY``: an ambient
+    ``TORTOISE_EXTRACTOR_PROVIDER=openrouter`` makes the gate raise on the
+    selector instead, and an ambient ``VENICE_API_KEY`` makes it not raise at
+    all — the same false-red class #3699 filed on the SDK-path twin. A test
+    that needs a provider still sets one explicitly.
+    """
+    pin_provider_routing_env(monkeypatch)
 
 
 def _provider_available():
