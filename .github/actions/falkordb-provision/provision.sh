@@ -32,19 +32,30 @@ HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 # before pytest ran, so the run carried no `FAILED <nodeid>` line and the merge
 # rail correctly refused it with no attributable failure identity.
 #
-# Fix direction B from the issue — the one that needs NOTHING from the owner:
-# mirror these images into GHCR, which authenticates with `GITHUB_TOKEN`, so
-# there is no anonymous Docker Hub quota to exhaust and no credential to
-# provision (direction A would need a DOCKERHUB_USERNAME/TOKEN secret).
-# `docker/login-action` is a step in this action, and
-# .github/workflows/mirror-images.yml populates the mirror.
+# Fix direction B — the one that needs NOTHING from the owner: a first-party
+# GHCR copy, which authenticates with `GITHUB_TOKEN`, so there is no anonymous
+# Docker Hub quota to exhaust and no credential to provision (direction A would
+# need a DOCKERHUB_USERNAME/TOKEN secret). .github/workflows/mirror-images.yml
+# populates it.
 #
 # Candidate order, most-preferred first. Every tier is a PREFERENCE rather than
-# a replacement, so no single registry can darken this surface again:
-#   1. GHCR           — first-party, GITHUB_TOKEN-authenticated.
-#   2. mirror.gcr.io  — Google's Docker Hub pull-through cache; it serves before
-#                       the GHCR mirror has been populated.
+# a replacement, so no single registry can darken this surface again. The
+# ordering is deliberate and was corrected once: a tier that CANNOT SERVE YET
+# must never lead, because then it fails the pull for a new reason and the matrix
+# stays dark — the fix cannot validate itself while it prefers an empty mirror.
+# GHCR is the durable sanctioned home, but on the very PR that adds the mirror it
+# is empty (a workflow_dispatch workflow is dispatchable only from the default
+# branch), so the pull-through cache leads until the mirror is populated.
+#   1. mirror.gcr.io  — Google's Docker Hub pull-through cache; NOT subject to
+#                       the anonymous Docker Hub quota, so it serves today.
+#   2. GHCR           — first-party, the durable home; authenticated when the
+#                       action's best-effort login succeeds, so an unpopulated,
+#                       private or unreachable mirror costs one failed attempt,
+#                       never a job.
 #   3. as given       — the Docker Hub upstream (today's behaviour).
+log() { printf '#6673 %s\n' "$*" >&2; }
+annotate_error() { printf '::error::%s\n' "$*"; }
+
 GHCR_OWNER="${FALKORDB_GHCR_OWNER:-daniel-ospina}"
 MIRROR_HOST="${FALKORDB_MIRROR_HOST:-mirror.gcr.io}"
 
@@ -57,8 +68,8 @@ image_candidates() {
   case "${1%%/*}" in
     *.*|*:*|localhost) printf '%s' "$1" ;;
     *) printf '%s\n%s\n%s' \
-         "ghcr.io/$GHCR_OWNER/${1##*/}" \
          "$MIRROR_HOST/$1" \
+         "ghcr.io/$GHCR_OWNER/${1##*/}" \
          "$1" ;;
   esac
 }
@@ -90,18 +101,15 @@ if [ -z "$RUN_IMAGE" ]; then
   done
 fi
 if [ -z "$RUN_IMAGE" ]; then
-  annotate_error "could not obtain '$IMAGE' from the mirror ('$IMAGE_PRIMARY') or upstream — no container can start, so no test in this job can run (#7867)"
+  annotate_error "could not obtain '$IMAGE' from '$MIRROR_HOST/$IMAGE' or the Docker Hub upstream — no container can start, so no test in this job can run (#7867)"
   exit 1
 fi
 
-# The two log helpers are used from the first validation below, so they are
-# defined before it.
-# Logging goes to STDERR: stdout is reserved for GitHub workflow commands (the
-# `::error::` annotation must be the first thing on its line — a `#6673 `
-# prefix would make it plain text). The port does not travel on this stream at
-# all; it goes through $PORT_FILE.
-log() { printf '#6673 %s\n' "$*" >&2; }
-annotate_error() { printf '::error::%s\n' "$*"; }
+# log/annotate_error are defined ABOVE, before their first use: this block
+# reports through them, and defining them below it aborted the whole action
+# under `set -e` (127: command not found) on every path — no container started,
+# no port was exported, and the matrix went dark for a reason that had nothing to
+# do with any registry.
 
 # Fail closed on a graph name that is not a plain identifier, BEFORE anything
 # is created: it is written verbatim into $GITHUB_ENV, which is

@@ -44,13 +44,12 @@ inputs:
 runs:
   using: composite
   steps:
-    # #7867 direction B: GHCR authenticates with the workflow token, so the
-    # images this action needs can be pulled without spending the fleet's shared
-    # ANONYMOUS Docker Hub quota. `github.token` (not `secrets.GITHUB_TOKEN`) is
-    # the form that is readable from inside a composite action. The login is
-    # best-effort on purpose: if it fails — or the GHCR mirror is not populated
-    # yet, which is the state on the very PR that adds this file — provision.sh
-    # still resolves the image from its other candidates.
+    # #7867: the image chain (see provision.sh image_candidates) tries
+    # mirror.gcr.io, then GHCR, then the Docker Hub reference as given, falling
+    # through on any failure — so no unpopulated, unreachable or rate-limited
+    # registry can fail this job. The login below is best-effort (composite steps
+    # do support continue-on-error) and exists so the GHCR tier can serve even
+    # when the package is not public; provision.sh does not depend on it.
     - name: Log in to GHCR (best effort)
       continue-on-error: true
       uses: docker/login-action@v3
