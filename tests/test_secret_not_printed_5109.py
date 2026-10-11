@@ -1,4 +1,11 @@
-"""#5109 — the CLI must never print a literal API key to stdout.
+"""#5109 — the CLI must not interpolate a credential into printed output.
+
+The invariant is NOT "no key is ever printed". `tortoise signup` (its success
+path and `--claim`) and `tortoise team keys create` still echo a freshly minted
+value — deliberately, and with a `#5109 NOTE` saying why. What this gate
+enforces is that no print SITE interpolates a value by accident: every
+remaining one is labelled and owner-visible, and what the onboarding
+instructions emit is the resolution expression, not the value.
 
 WHY THIS GATE EXISTS (the mechanism, measured 2026-10-11)
 =========================================================
@@ -20,8 +27,8 @@ from its 0600 config at use time. A user pasting it still gets a working
 ``$TORTOISE_API_KEY``; a process that merely captures stdout gets no credential.
 
 The failure this prevents has already happened. Deleting this test would harm
-the PRODUCT, not the process: it is the only check standing between a one-line
-``print(...)`` and another leaked copy.
+the PRODUCT, not the process: it is the only check standing between an
+interpolated ``print(...)`` and another leaked copy.
 """
 
 from __future__ import annotations
@@ -141,6 +148,12 @@ _LIVE_VALUE_PATTERNS = (
     "key['api_key']",
     "{new_token}",
     "{orphan_token}",
+    # The `init` family prints from `args.api_key` / a local `api_key`. Those
+    # forms were absent from this list, so a new leak in `_cmd_init` — the
+    # function that held the original one — would have been invisible here.
+    "{api_key}",
+    "{args.api_key}",
+    "args.api_key",
 )
 
 
@@ -367,3 +380,39 @@ def test_the_printed_resolution_carries_the_config_path_it_was_given() -> None:
     assert all(cfg in ln for ln in printed), (
         f"the codex setter must name the config path it was given: {printed}"
     )
+
+
+def test_init_threads_the_config_path_into_the_printed_resolution(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#5109: the CALL SITE — not the helper — must supply the path.
+
+    `init --api-key` saves to `<cwd>/.tortoise`, so a call that drops
+    `config_path` prints a resolution against the global
+    `~/.tortoise/credentials.json` and silently exports the wrong key (or
+    nothing). The helper test above cannot see that — it passes the path
+    itself. Driving the real `init` command is what pins `_cmd_init`'s
+    threading; without it, removing the `config_path` argument at
+    `tortoise/__main__.py`'s `_print_mcp_configs` call leaves every test green.
+    """
+    from unittest import mock
+
+    from tortoise.__main__ import main as cli_main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://api.premiselabs.co")
+
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps({"org_id": "team5109"}).encode()
+    resp.__enter__.return_value = resp
+
+    with mock.patch("urllib.request.urlopen", return_value=resp):
+        rc = cli_main(["init", "--api-key", "tt_" + "12" * 16, "--harness", "claude"])
+    assert rc == 0
+    printed = [ln for ln in capsys.readouterr().out.splitlines() if "python3 -c" in ln]
+    assert printed, "init printed no resolution instruction"
+    assert all(str(tmp_path / ".tortoise") in ln for ln in printed), (
+        "the printed resolution must name <cwd>/.tortoise — the file init just "
+        f"wrote. A dropped config_path resolves the global store instead: {printed}"
+    )
+    assert all("credentials.json" not in ln for ln in printed), printed
