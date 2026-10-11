@@ -53,10 +53,13 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
+from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
     RAW_PRESENT,
@@ -2557,6 +2560,115 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #7951 — THE JOURNAL ORDERING CONTRACT. Read this before adding a writer.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# THE RULE:  **journal first, then project.**
+#
+#   A live write appends its record to the TRUTH journal and only THEN folds it
+#   into the DERIVED graph. **The append is the COMMIT POINT:** if it fails,
+#   the write is not committed and the fold must NOT run. `docs/architecture/
+#   STORAGE-ARCHITECTURE.md` §3 states the protocol — *"Writes go to the truth
+#   first, then project"* — and §17.1 mechanism (1) names its endpoint: journal
+#   + projection in ONE atomic write (the #7951 chokepoint). Until that
+#   transaction exists, the ORDER is the contract, and it is fixed here once
+#   for the whole codebase so that no remaining site has to choose for itself.
+#
+# WHY — the failure-mode argument, not a preference. The design invariant is
+# `derived = replay(journal)` (§3). A crash leaves exactly one of two windows:
+#
+#   (a) APPLY-FIRST — the process dies between the graph write and the append.
+#       The DERIVED store now holds a node the journal — the TRUTH — never
+#       recorded. `rebuild_all` replays the journal, does NOT reproduce the
+#       node, and the write is GONE. No replay can recover it; only an
+#       out-of-band repair that reconstructs the record from the graph could,
+#       and none exists. The loss is SILENT (rebuild reports success), and it
+#       compounds: a later mutation of the orphan journals a record whose
+#       target the journal never created, i.e. a journal that is not itself
+#       replayable (the "input source … does not resolve" class).
+#
+#   (b) JOURNAL-FIRST — the process dies between the append and the fold. The
+#       journal holds the record; the derived store merely LAGS. The next
+#       `rebuild_all` applies the record and the graph catches up. **Replay
+#       heals it** — and healing a lagging derived store is the entire reason
+#       the recovery path exists. Nothing is lost, and `derived =
+#       replay(journal)` is restored by the recovery path itself.
+#
+#   ⇒ Choose the order whose residual window is replay-healable. Apply-first
+#     leaves the DERIVED store AHEAD of the TRUTH — exactly "a derived cache
+#     that is also written to directly is not derived" — and no recovery path
+#     can undo it.
+#
+# THE CONSTRAINT THAT PUTS THE DECISION IN THE CALLER — `FalkorProjection.apply`
+# (`tortoise/projection/__init__.py`) is ALSO the REPLAY TARGET: `rebuild_all`,
+# `recover_from_log`, `rebuild` and `backup` drive it once per journal record.
+# It can therefore NEVER journal itself — a replayed record would journal
+# itself, grow the log on every rebuild, and make replay non-idempotent at the
+# log level. The fold cannot know whether it is live or a replay; only the
+# CALLER does. So the order is drawn at the caller-side live doors. The two
+# that state it explicitly are:
+#   * `EventAPI._emit`                      (tortoise/api.py)
+#   * `TortoiseSDK._apply_and_journal` / `_journal_entity_event` (this module)
+# The live doors that do NOT yet conform are listed under KNOWN DEVIATIONS at
+# the end of this block.
+#
+# THE ONLY TWO PERMITTED EXCEPTIONS — neither is "apply-first by preference":
+#
+#   1. REPLAY (apply-only — it must not journal at all). A fold driven by
+#      READING the journal — `rebuild_all`, `recover_from_log`, `rebuild`,
+#      `tortoise reconcile` (`__main__.py`), `backup`, `consistency` — applies
+#      and does NOT journal. This is not the other order; it is the ABSENCE of
+#      a write. Routing one of these through a live door is a BUG: it would
+#      append to the journal the very record it just read from it.
+#
+#   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
+#      cannot be constructed until the fold has produced it, there is no
+#      pre-fold record to append. The dominant case is `create_point`, whose
+#      `PointAdded` payload IS `get_point(pid)` — the applied node — and whose
+#      canonical id can be an apply result (dedup / name MERGE). Such a site
+#      applies first and inherits window (a); the window closes only at §17.1's
+#      one atomic write. A site that CAN form its record before the fold MUST
+#      NOT take this exception.
+#
+# KNOWN DEVIATIONS in this tree (recorded, not concealed):
+# `TortoiseSDK._create_entity`'s Object/Subject/Event registration blocks are
+# apply-first although their payload (`event`) is fully built BEFORE the fold,
+# so they qualify for neither exception; they also fold after a FAILED append
+# (`_emit_event` is best-effort). They are left as-is in this increment because
+# reordering them rides the #2194/#2295/#2309 first-registration hardening and
+# its pinned tests; `create_point`'s payload is genuinely post-apply
+# (exception 2). The chokepoint's atomic write removes both windows by
+# construction. Every OTHER live door reaches the journal FIRST and treats the
+# append as the commit point (`_apply_and_journal` does).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
+# from an already-built event dict must not carry its own copy of these — a
+# caller prop of the same name would shadow the envelope on replay (see
+# ``_emit_event``'s ``event.update(extra)``). Kept as one tuple so the live
+# entity doors cannot drift from each other.
+_JOURNAL_ENVELOPE_KEYS = (
+    "type", "id", "point", "payload",
+    "event_id", "ts", "initiated_by", "projection_version",
+)
+
+#: The canonical record types a live entity door may journal.
+_JOURNALED_ENTITY_EVENT_TYPES = (
+    "ObjectRegistered", "SubjectAdded", "EventRecorded",
+)
+
+
+def _journal_record_payload(event: dict) -> dict:
+    """``event``'s payload minus the keys ``_emit_event`` owns.
+
+    THE single source of the rule every entity-door journal call uses
+    (``_create_entity`` and ``_journal_entity_event``), so live and replay
+    fold a byte-identical record — ``derived = replay(journal)``.
+    """
+    return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
+
+
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
 # _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
 # NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
@@ -3456,13 +3568,28 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # FOLDED claim must go live or that claim's first calibration cannot
         # propagate through it — and a folded-only capture mints no claim,
         # so promotion_ids is empty and the claim join alone reaches nothing.
-        op_rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+        op_rows: list = []
+        _seen_op_ids: set = set()
+        # #7853: c is id-anchored — sweep the epistemic labels so an operator
+        # whose live endpoint is an Event/Subject/Object is promoted too. A
+        # multi-labelled endpoint (``:Point:Object``) matches MORE than one
+        # sweep, so collapse on ``o.id`` before the emit loop: the promoted
+        # set must equal the journalled set (#395), and the loop below emits
+        # one ``OperatorPromoted`` per row. The ``o.id IN $op_ids`` arm keeps
+        # #1088's created-operator promotion inside this same sweep, so a
+        # capture-minted operator over a FOLDED claim still goes live.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:{label}) "
             "WHERE (c.id IN $ids OR o.id IN $op_ids) "
             "AND (o.status IS NULL OR o.status = 'draft') "
-            "RETURN DISTINCT o.id",
-            params={"ids": promote_ids, "op_ids": operator_ids},
-        ).result_set
+            "RETURN DISTINCT o.id"
+        ):
+            for row in proj.g.query(
+                    _q, params={"ids": promote_ids,
+                                "op_ids": operator_ids}).result_set:
+                if row[0] not in _seen_op_ids:
+                    _seen_op_ids.add(row[0])
+                    op_rows.append(row)
         promoted_ops = []
         for (oid,) in op_rows:
             proj.g.query(
@@ -5258,12 +5385,16 @@ class TortoiseSDK:
             if stamp_journal_embedding is not None:
                 clean = stamp_journal_embedding(
                     clean, creating=type_ in ("PointAdded", "OperatorAdded"))
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # #5089: NO content synthesis here. Operators store no 'content' as
+            # a node property, so synthesizing the `IMPL(inputs)` label put a
+            # value in the record that NO writer ever stored — and the replay
+            # persisted it, so a rebuilt operator carried a label live never had.
+            # What the live SDK door actually produces is an omitted key; the
+            # replay writer's `_WRITER_DEFAULTS` empty string is the journal-side
+            # asymmetry `consistency` already models for operators, and this no
+            # longer fabricates a label on top of it. (The display label is
+            # derived at the point of display, `api._point`; nothing reads an
+            # operator's content back off the node.)
             # Similarly, operators may lack 'pointKind' — default to empty.
             if "pointKind" not in clean:
                 clean["pointKind"] = ""
@@ -5313,6 +5444,99 @@ class TortoiseSDK:
                 "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
+
+    def _journal_entity_event(self, event: dict) -> None:
+        """Append a canonical entity record to the journal (the WRITE half).
+
+        The emission half of :meth:`_apply_and_journal`; split out so a
+        caller that must fold through a different path can still record. It
+        obeys THE JOURNAL ORDERING CONTRACT (module top): appending is the
+        COMMIT POINT of a live write, so this runs BEFORE the fold. No-ops for
+        a non-entity record type, a missing id, or an unconfigured journal —
+        ``_emit_event`` owns the last case.
+
+        ⛔ This is for a LIVE write. A REPLAY engine must never call it: the
+        record being folded came FROM the journal, so journalling it again
+        would grow the log on every rebuild and (worse) make replay
+        non-idempotent at the log level.
+        """
+        type_ = event.get("type")
+        if type_ not in _JOURNALED_ENTITY_EVENT_TYPES:
+            return
+        id_ = event.get("id") or event.get("eventId")
+        if id_ is None:
+            return
+        self._emit_event(type_, id=id_, **_journal_record_payload(event))
+
+    def _apply_and_journal(self, proj, event: dict, *,
+                           journal: bool = True) -> None:
+        """THE live-write door for a pre-built Object/Subject/Event record.
+
+        Obeys THE JOURNAL ORDERING CONTRACT (module top): **append first, then
+        fold.** `proj.apply` is the fold the REPLAY engines drive —
+        `rebuild_all` / `recover_from_log` call it once per journal record — so
+        it must NEVER journal itself (a replayed record would journal itself
+        and double-apply). This is that fold's LIVE twin: a caller holding a
+        record it means to PERSIST comes through here instead of calling
+        `proj.apply` directly.
+
+        Journal-first is not a preference — it is the order whose crash window
+        is replay-healable. If the process dies after the append and before
+        the fold, the journal (TRUTH) holds the record and the graph (DERIVED)
+        merely lags; the next `rebuild_all` materialises it. Apply-first would
+        die with the derived store AHEAD of truth, where a replay silently
+        LOSES the write and no repair can recover it. §3: *"Writes go to the
+        truth first, then project."* `docs/architecture/STORAGE-ARCHITECTURE.md`
+        §17.1 mechanism (1) closes even this window with one atomic write.
+
+        A record whose payload cannot exist before the fold (`create_point`'s
+        post-apply snapshot) is the ONE permitted apply-first case — see the
+        contract's exception 2; it does NOT come through this door's normal
+        mode.
+
+        ``journal=False`` folds WITHOUT appending: for a replay-safe
+        RE-application of an already-registered record (the GitHub indexer's
+        poll re-runs), which must not grow the journal once per run.
+
+        The APPEND IS THE COMMIT POINT. `_emit_event` is deliberately
+        best-effort (it logs ERROR + counts the failure instead of raising, so
+        a log-write failure never crashes a write that DID persist — #4240),
+        so this door reads the failure counter and does NOT fold when the
+        append failed. Folding anyway would put the DERIVED store ahead of the
+        journal on a failed append — window (a) of the contract, the one a
+        replay cannot undo.
+        """
+        if journal:
+            # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
+            # the journaling path, BEFORE the append (so the record and the
+            # fold carry the SAME instant). `_create_entity` stamps
+            # `event["createdAt"] = now_iso()` exactly to close the #2164-P4
+            # "a replay stamps rebuild time" class: without it a journaled
+            # record carries no create instant, so `_upsert_subject` /
+            # `_upsert_object`'s `coalesce($ca, $now)` stamps the REBUILD
+            # time on replay and live != replayed for the same journal.
+            # `_journal_record_payload` shares the payload-KEY rule between
+            # the two doors; this shares the value-SYNTHESIS rule, which the
+            # reviewer found had drifted (the Subject payloads the indexer
+            # mints carry no `createdAt` of their own).
+            #
+            # Gate on is-None (not key-absence), exactly like `_create_entity`:
+            # an explicit `createdAt=None` caller prop must not slip a NULL
+            # onto the journal line (replay ON CREATE would stamp rebuild
+            # time). A producer-supplied instant (`issue_to_object` carries
+            # one) is kept verbatim.
+            if (event.get("type") in _JOURNALED_ENTITY_EVENT_TYPES
+                    and event.get("createdAt") is None):
+                from .ids import now_iso
+                event["createdAt"] = now_iso()
+            _failures_before = self._journal_write_failures
+            self._journal_entity_event(event)
+            if self._journal_write_failures > _failures_before:
+                # Append failed → not committed → do not fold (contract).
+                # `_emit_event` already logged at ERROR and incremented
+                # `tortoise_journal_write_failures_total`.
+                return
+        proj.apply(event)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -6765,19 +6989,23 @@ class TortoiseSDK:
                     # journal record; OperatorPromoted is its only durable
                     # record).
                     if minted_ids:
-                        proj.g.query(
+                        # #7853: c is id-anchored — sweep the epistemic labels.
+                        # The SET is idempotent, so a multi-labelled endpoint is
+                        # stamped under each matching label harmlessly.
+                        for _q in epistemic_label_queries(
                             "MATCH (o:Point {is_operator:true})-"
-                            "[:IMPL|NAND]->(c:Point) "
+                            "[:IMPL|NAND]->(c:{label}) "
                             "WHERE c.id IN $ids "
                             "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
                             "SET o.eventId=$eid, o.source_session=$sid, "
                             "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing",
-                            params={"ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
-                        )
+                            "    o.ingested_at=$ing"
+                        ):
+                            proj.g.query(_q, params={
+                                "ids": minted_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now})
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
                     # graph node (#4716 Part 1): the payload point resolved
@@ -9892,21 +10120,30 @@ class TortoiseSDK:
 
         An operator is promoted only when it carries EXPLICIT status 'draft'
         (the post-#780 `create_operator(promote_source=False)` shape) AND
-        every endpoint Point is live — otherwise the draft endpoints would
-        inherit a live edge (the exact pollution the draft lifecycle
-        prevents). Unset-status operators are LIVE under the canonical read
-        model (projection coalesce default; #944 review) and are skipped —
-        never re-promoted into the event stream.
+        every endpoint is live — otherwise a draft endpoint would inherit a
+        live edge (the exact pollution the draft lifecycle prevents). The
+        endpoint read is NOT Point-only: #7853 widened it to
+        `epistemic_disjunction('s')`, so it covers all four epistemic labels
+        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
+        blocks promotion just as a draft `:Point` does. Unset-status operators
+        are LIVE under the canonical read model (projection coalesce default;
+        #944 review) and are skipped — never re-promoted into the event
+        stream.
         """
-        rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
-            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
-            params={"id": point_id},
-        ).result_set
+        rows: list = []
+        # #7853: n is id-anchored — sweep the epistemic labels so a draft
+        # operator incident to an Event/Subject/Object endpoint is promoted.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:{label} {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id"
+        ):
+            rows.extend(proj.g.query(
+                _q, params={"id": point_id}).result_set)
         promoted = []
         for (oid,) in rows:
             eps = proj.g.query(
-                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "MATCH (o:Point {id:$oid})-[r]->(s) "
+                f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status",
                 params={"oid": oid},
             ).result_set
@@ -10495,11 +10732,19 @@ class TortoiseSDK:
         # silently) — then emit, then mutate. P1 (code-review): emitting
         # before validation produced phantom OperatorAdded events on missing
         # inputs, visible to subscription poll consumers.
-        existing = proj.g.query(
-            "MATCH (n) WHERE (n:Point OR n:Event) AND n.id IN $ids RETURN n.id",
-            params={"ids": inputs},
-        ).result_set
-        existing_ids = {row[0] for row in existing}
+        #
+        # #7902: an operator endpoint may carry ANY of :Point/:Subject/
+        # :Object/:Event (owner ruling, #7813 — the WRITE half of #7853's
+        # read widening). The probe is id-anchored, so it sweeps the labels
+        # once each to keep the per-(label, property) index rather than
+        # full-scanning (live.epistemic_label_queries).
+        existing_ids: set[str] = set()
+        for _q in epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"
+        ):
+            existing_ids.update(
+                row[0] for row in
+                proj.g.query(_q, params={"ids": inputs}).result_set)
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
@@ -10523,6 +10768,9 @@ class TortoiseSDK:
         )
         # Ontology v2.1: map part/whole ops to hasPart.
         # A1b (#1272): operator endpoints may be Point OR Event nodes.
+        # #7902: widened to every epistemic label (:Point/:Subject/:Object/
+        # :Event) — the endpoint is a traversal position, so the label
+        # disjunction goes in the WHERE clause (see live.epistemic_disjunction).
         # #1919 (P2-10): the typed edge is mirrored by a reverse
         # (s)-[:INPUT]->(o) edge — the same shape the OperatorAdded replay
         # MERGEs (projection/edges.py), so live graphs and rebuilt graphs
@@ -10530,8 +10778,8 @@ class TortoiseSDK:
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s) WHERE (s:Point OR s:Event) "
-                f"AND s.id = $sid "
+                f"MATCH (o:Point {{id:$oid}}), (s) "
+                f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
                 f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
                 params={"oid": pid, "sid": inp_id, "i": i},
@@ -12798,15 +13046,16 @@ class TortoiseSDK:
                         # bare Point instead of the operator. Use the TWO-STEP
                         # pattern: MATCH both endpoints, then edge-only MERGE
                         # (with idx parity for create_operator's edge shape).
-                        # #1919 (P1, review gate): the completion endpoints are
-                        # Point OR Event (A1b #1272) — a Point-only MATCH would
-                        # silently drop the typed edge for an absorbed Event
-                        # input (never converging to the dedup key). The
-                        # reverse INPUT edge mirrors create_operator + the
-                        # replay convention (fold-parity).
+                        # #1919 (P1, review gate): the completion endpoints
+                        # may be any of the four epistemic labels (#7902) — a
+                        # Point-only MATCH would silently drop the typed edge
+                        # for an absorbed Subject/Object/Event input (never
+                        # converging to the dedup key). The reverse INPUT edge
+                        # mirrors create_operator + the replay convention
+                        # (fold-parity).
                         proj.g.query(
                             f"MATCH (o:Point {{id:$oid}}), (t) "
-                            f"WHERE (t:Point OR t:Event) AND t.id = $inp "
+                            f"WHERE {epistemic_disjunction('t')} AND t.id = $inp "
                             f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
                             f"SET r.idx = $idx "
                             f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
@@ -13106,9 +13355,17 @@ class TortoiseSDK:
             "ORDER BY n.id",
             params={"bid": batch_id},
         ).result_set
+        # #7902: a direct IMPL/NAND edge may connect ANY two plain epistemic
+        # nodes (:Point/:Subject/:Object/:Event). `list_batches` counts the
+        # edge label-agnostically (`MATCH ()-[r:IMPL|NAND]->()`), so a
+        # hand-spelled (a:Point)/(b:Point) here made the two surfaces
+        # disagree: the batch summary reported the edge and this audit detail
+        # reported none.
         edge_rows = proj.g.query(
-            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE r.batch_id = $bid "
+            "MATCH (a)-[r:IMPL|NAND]->(b) "
+            f"WHERE {epistemic_disjunction('a')} "
+            f"AND {epistemic_disjunction('b')} "
+            "AND r.batch_id = $bid "
             "AND coalesce(a.is_operator, false) = false "
             "AND a.op_type IS NULL "
             "AND coalesce(b.is_operator, false) = false "
@@ -13188,7 +13445,7 @@ class TortoiseSDK:
                            label: str | None = None,
                            batch_id: str | None = None,
                            promote_source: bool = True) -> dict:
-        """Create an OPERATOR-LESS direct IMPL/NAND Point→Point edge (plan §5.3).
+        """Create an OPERATOR-LESS direct IMPL/NAND epistemic edge (plan §5.3).
 
         Ontology v3.5 §8 / v3.8: plain IMPL/NAND connections are direct edges
         (edge-carried direction/confidence/weight/label/batch_id; NO operator
@@ -13197,8 +13454,14 @@ class TortoiseSDK:
         (MERGE-with-attributes would create a parallel edge on attribute
         change, violating EP's no-parallel-direct-edges contract).
 
+        #7902: endpoints may carry ANY of the four epistemic labels —
+        :Point/:Subject/:Object/:Event (owner ruling #7813; direct edges are
+        the operator-less half of the same epistemic layer the operator path
+        bridges, so the label set is identical). The resolved label anchors
+        each id-filtered query so the per-(label, id) index is kept.
+
         Guards (shared with #901, E2E-11.7):
-          - endpoints exist AND are plain Points (a Source/Subject/event/
+          - endpoints exist AND are plain epistemic nodes (a Source or an
             operator endpoint is a typed error);
           - terminal-endpoint guard: `status NOT IN {superseded, retracted}`
             (a direct edge incident to a terminal point would recreate the
@@ -13246,29 +13509,40 @@ class TortoiseSDK:
         _reject_unrepresentable_number("weight", weight)
 
         proj = self._get_proj()
-        # Endpoint validation: exist, plain Points, non-terminal.
+        # Endpoint validation: exist, plain epistemic nodes, non-terminal.
         # #2422 (second-model gate): the terminal set derives from the shared
         # EP/read vocabulary AND the legacy outdated=true flag is rejected —
         # a flag-outdated point (status untouched by invalidate_point) must
         # equally refuse new direct edges.
-        rows = proj.g.query(
-            "MATCH (p:Point) WHERE p.id IN $ids "
-            "RETURN p.id, coalesce(p.is_operator, false), p.status, "
-            "coalesce(p.outdated, false)",
-            params={"ids": [source_id, target_id]},
-        ).result_set
-        found = {r[0]: (bool(r[1]), r[2], bool(r[3])) for r in rows}
+        #
+        # #7902: the endpoint may carry ANY of :Point/:Subject/:Object/:Event
+        # (owner ruling #7813 — direct edges are the operator-less epistemic
+        # edge shape, so the same four labels apply). The probe is id-anchored:
+        # sweep the labels once each (index-preserving) and remember WHICH
+        # label resolved each id so the MERGE below can anchor on it.
+        found: dict[str, tuple[str, bool, str | None, bool]] = {}
+        for _label in EPISTEMIC_LABELS:
+            rows = proj.g.query(
+                f"MATCH (p:{_label}) WHERE p.id IN $ids "
+                "RETURN p.id, coalesce(p.is_operator, false), p.status, "
+                "coalesce(p.outdated, false)",
+                params={"ids": [source_id, target_id]},
+            ).result_set
+            for r in rows:
+                # First label wins for a (hypothetical) multi-labelled node;
+                # the terminal/operator guards below are label-independent.
+                found.setdefault(r[0], (_label, bool(r[1]), r[2], bool(r[3])))
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} does not exist or "
-                    f"is not a Point"
+                    f"is not an epistemic node (Point/Subject/Object/Event)"
                 )
-            is_op, status, outdated = found[pid]
+            _label, is_op, status, outdated = found[pid]
             if is_op:
                 raise ValueError(
                     f"create_direct_edge: endpoint {pid!r} is an operator — "
-                    f"direct edges connect plain Points only"
+                    f"direct edges connect plain epistemic nodes only"
                 )
             if status in TERMINAL_EXCLUDED_STATUSES or outdated:
                 marker = "outdated" if outdated and (
@@ -13279,6 +13553,11 @@ class TortoiseSDK:
                     f"point is rejected (terminal-point propagation hazard, "
                     f"#2422)"
                 )
+        # The resolved labels anchor the id-filtered edge queries (#7902) so
+        # the per-(label, id) index is kept — a bare `MATCH (a {id:$x})` would
+        # full-scan. See live.epistemic_label_queries.
+        label_src = found[source_id][0]
+        label_tgt = found[target_id][0]
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
         # edge per (src,tgt,type)). `created` is detected by a pre-count
@@ -13286,7 +13565,8 @@ class TortoiseSDK:
         # post-MERGE count always sees 1).
         rel_type = op_type  # IMPL / NAND
         pre = proj.g.query(
-            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}})-[r:{rel_type}]->"
+            f"(b:{label_tgt} {{id:$tgt}}) "
             f"RETURN count(r)",
             params={"src": source_id, "tgt": target_id},
         ).result_set
@@ -13297,7 +13577,7 @@ class TortoiseSDK:
         # existing nodes first, then MERGE the edge BETWEEN them — exactly one
         # edge per (src,tgt,type), no duplicate nodes.
         proj.g.query(
-            f"MATCH (a:Point {{id:$src}}), (b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}}), (b:{label_tgt} {{id:$tgt}}) "
             f"MERGE (a)-[r:{rel_type}]->(b)",
             params={"src": source_id, "tgt": target_id},
         )
@@ -13312,7 +13592,8 @@ class TortoiseSDK:
             attrs["batch_id"] = batch_id
         # SET r += $attrs (additive — never clobbers EP-managed msg_* fields)
         proj.g.query(
-            f"MATCH (a:Point {{id:$src}})-[r:{rel_type}]->(b:Point {{id:$tgt}}) "
+            f"MATCH (a:{label_src} {{id:$src}})-[r:{rel_type}]->"
+            f"(b:{label_tgt} {{id:$tgt}}) "
             f"SET r += $attrs",
             params={"src": source_id, "tgt": target_id, "attrs": attrs},
         )
@@ -13411,7 +13692,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status LIMIT 1",
@@ -13439,7 +13720,7 @@ class TortoiseSDK:
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
-            f"WHERE (t:Point OR t:Event) "
+            f"WHERE {epistemic_disjunction('t')} "
             f"WITH o, collect(t.id) AS targets "
             f"WHERE {' AND '.join(pcond)} "
             f"RETURN o.id, o.status, targets",
@@ -15169,6 +15450,19 @@ class TortoiseSDK:
     #: reason to window a graph this small; one pass drains it). Simple,
     #: documented count-query heuristic: ``MATCH (n:Point
     #: {is_operator:true}) RETURN count(n)`` — cheap and deterministic.
+    #:
+    #: #1338 verification (indicator 3): this is a SMALL-GRAPH rule, not a
+    #: production routing rule. With the recorded production range being
+    #: 5k-500k operators — 100x-10,000x this threshold — auto-select routes a
+    #: production graph to ``local`` from BOTH branches that can fire:
+    #: dirty roots present (write context, W1) → local, and no dirty roots →
+    #: operator count >= this threshold → local. Auto-select therefore never
+    #: picks ``stale-first``; the production window strategy is reachable ONLY
+    #: by an explicit ``mode="stale-first"``, which is exactly what the
+    #: scheduled path must pass (903-C8 wiring). Raising this threshold would
+    #: turn a 5k-operator production graph into a whole-graph full pass on a
+    #: plain ``dream()`` call — i.e. the O(whole-graph) pass the epic exists to
+    #: avoid — so it must stay far below the production floor.
     _AUTO_FULL_OPERATOR_THRESHOLD = 50
 
     def dream(self, dirty_only: bool = True, full: bool = False,
@@ -15224,14 +15518,28 @@ class TortoiseSDK:
                   censoring. False → a from-scratch pass (the fast path /
                   oracle captures, e.g. F4's frozen ground truth, which must
                   be bit-reproducible without censoring).
-            budget: per-pass operator cap. None → the existing 200-op
-                  selector cap (every pass bounded by construction); an
+            budget: per-pass operator cap — ALSO the claim-window size the
+                  scheduler walks, which is what bounds the pass's cost.
+                  None → the CONFIGURED default
+                  (``TORTOISE_DREAM_WINDOW_BUDGET`` when set, else
+                  ``dream.DEFAULT_WINDOW_BUDGET``); every pass is bounded by
+                  construction. The shipped value is deliberately
+                  conservative — #1338 measured a 5,000-claim window raising
+                  the engine's query timeout on a 5k-claim graph while
+                  windows <= 2,000 completed, so raising it is an operator
+                  decision taken against their own deployment's numbers
+                  (passes per coverage cycle = ceil(operators / budget):
+                  25/2,500 at the default for 5k/500k operators). An
                   explicit budget overrides it; budget=0 → no-op result
                   (not an error — exact key-set, all zeros, no stamps).
                   An explicit budget a full pass cannot satisfy raises
                   BudgetExceededError (tortoise/exceptions.py) — full is
                   complete-in-one-pass by contract; stale-first never
-                  raises (deferral is its design).
+                  raises (deferral is its design). A DEFAULT-budget full
+                  pass whose graph exceeds the 200_000-operator DoS cap is
+                  truncated and reports ``converged_all=False`` — an
+                  incomplete pass, never a silent success (#1338; full mode
+                  is non-viable above the cap: use mode="stale-first").
 
         Returns (per-mode key-sets, pinned per I1 — exact):
             local: {mode, iterations, converged, affected_claims,
@@ -15602,11 +15910,21 @@ class TortoiseSDK:
         An explicit budget the graph cannot satisfy raises
         BudgetExceededError inside dream_all (full is complete-in-one-pass
         by contract — never silently truncate an explicit budget).
+
+        #1338: a default-budget pass that the 200_000-operator DoS cap
+        truncates comes back ``converged_all=False`` (incomplete, not a
+        success) with no freshness stamped on the uncovered regions; the
+        Dreamer's internal ``truncated`` flag is dropped here because the
+        I1 full key-set is pinned — the failure is visible through
+        ``converged_all``, the WARNING log, and the failure_rate the
+        ``_record_dream_metrics`` call below records.
         """
         result = dreamer.dream_all(
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget, warm_start=warm_start,
         )
+        # #1338: scheduler-internal — not part of the pinned I1 full key-set.
+        result.pop("truncated", None)
         # #3139: fail closed before the dirty-root sweep — a full pass that
         # scanned zero anchors over a populated graph must not report success.
         self._guard_dream_progress(dreamer, "full", result, window=None)
@@ -15627,7 +15945,7 @@ class TortoiseSDK:
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
-        reachable = self._reachable_claim_count()
+        reachable = self._reachable_claim_count(max_hops)
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
         result["coverage"] = coverage
@@ -15641,7 +15959,12 @@ class TortoiseSDK:
 
         Mirrors ``TortoiseEP._affected_claims``'s reach so that
         ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
-        (#6597). The window members themselves are reachable at 0 claim-hops
+        (#6597). #7853: the reach is widened with ``_affected_claims`` — the
+        id-anchored seeds sweep every epistemic label and the operator hop's
+        far endpoint is a label-disjunction, so a non-`:Point` operator input
+        is in the denominator too. The operator-less DIRECT-edge hop stays
+        ``:Point``→``:Point``, exactly as ``_affected_claims`` keeps it. The
+        window members themselves are reachable at 0 claim-hops
         (an operator-less isolated claim is its own window); then, exactly as
         ``_affected_claims`` seeds its own expansion, the plain window
         members are expanded by ONE claim-hop (direct edges + operator
@@ -15670,12 +15993,18 @@ class TortoiseSDK:
         # terminal window claims must remain seeds so the operator siblings
         # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        # #7853: the seed is ID-ANCHORED — sweep the epistemic labels so a
+        # non-`:Point` window member is a closure seed too. The widened
+        # `_affected_claims` admits one, so the denominator must, or
+        # `coverage = affected / closure` exceeds the 1.0 bound.
+        rows: list = []
+        for _qn in epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
-            f"AND {live} RETURN n.id",
-            params={"ids": list(window)},
-        ).result_set
+            f"AND {live} RETURN n.id"
+        ):
+            rows.extend(proj.g.query(
+                _qn, params={"ids": list(window)}).result_set)
         closure: set[str] = {r[0] for r in rows}
 
         live_op = _live_only("op.status")
@@ -15698,32 +16027,47 @@ class TortoiseSDK:
             new_frontier: list[str] = []
             if not frontier:
                 return new_frontier
-            nbr_rows = proj.g.query(
-                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                "-[r2:IMPL|NAND]->(m:Point) "
+            # #7853: n is the id-anchored frontier — sweep its labels; the
+            # far endpoint m is widened by traversal. Mirrors
+            # `_affected_claims`'s widened operator hop, so the closure can
+            # hold every claim the pass admits.
+            nbr_rows: list = []
+            for _qn in epistemic_label_queries(
+                "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m) "
                 "WHERE n.id IN $ids AND m.id <> n.id "
+                f"AND {epistemic_disjunction('m')} "
                 "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 f"AND {live_op} AND {live_m} "
-                "RETURN DISTINCT n.id, m.id",
-                params={"ids": frontier},
-            ).result_set
+                "RETURN DISTINCT n.id, m.id"
+            ):
+                nbr_rows.extend(proj.g.query(
+                    _qn, params={"ids": frontier}).result_set)
             for _nid, mid in nbr_rows:
                 if mid not in closure:
                     closure.add(mid)
                     new_frontier.append(mid)
-            dir_rows = proj.g.query(
-                "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
-                "WHERE a.id IN $ids AND b.id <> a.id "
-                f"AND {live_a} AND {live_b} "
-                # #3139/#3154: index-independent non-operator predicate
-                # (the `= false` form is emptied by a GRAPH.COPY'd index).
+            # #7902: a is the id-anchored frontier (sweep its labels) and b is
+            # widened by traversal — the direct-edge half of the same
+            # widening `_affected_claims` and `_live_neighbors_many` use.
+            dir_conds = ["a.id IN $ids", "b.id <> a.id",
+                         epistemic_disjunction("b")]
+            if live_a:
+                dir_conds.append(live_a)
+            if live_b:
+                dir_conds.append(live_b)
+            dir_rows: list = []
+            for _qa in epistemic_label_queries(
+                "MATCH (a:{label})-[r:IMPL|NAND]-(b) "
+                "WHERE " + " AND ".join(dir_conds) + " "
                 "AND (a.is_operator IS NULL OR a.is_operator = false) "
                 "AND a.op_type IS NULL "
                 "AND (b.is_operator IS NULL OR b.is_operator = false) "
                 "AND b.op_type IS NULL "
-                "RETURN DISTINCT a.id, b.id",
-                params={"ids": frontier},
-            ).result_set
+                "RETURN DISTINCT a.id, b.id"
+            ):
+                dir_rows.extend(proj.g.query(
+                    _qa, params={"ids": frontier}).result_set)
             for _aid, bid in dir_rows:
                 if bid not in closure:
                     closure.add(bid)
@@ -15744,9 +16088,13 @@ class TortoiseSDK:
         # denominator bug reached through the SEED rather than the hop. Mirrors
         # `_affected_claims`'s operator-seed branch, which admits an operator
         # seed's outgoing `IMPL|NAND` targets.
+        # #7853: an operator's INPUT may be any epistemic label (mirrors
+        # `_affected_claims`'s operator-seed branch, which admits a non-Point
+        # operator target).
         op_input_rows = proj.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
+            f"AND {epistemic_disjunction('c')} "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
             f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
@@ -15777,15 +16125,27 @@ class TortoiseSDK:
             frontier = _hop(frontier)
         return closure
 
-    def _reachable_claim_count(self) -> int:
+    def _reachable_claim_count(self, max_hops: int) -> int:
         """Live non-operator claims reachable from EP (full-mode coverage
         denominator: total_affected / reachable non-operator claims).
 
         Reachable = claims participating in ≥1 IMPL|NAND edge (operator-
-        mediated or direct) — the EP-run universe. Operator-less claims with
-        no edges are reported separately via ``scanned_count`` and are NOT
-        in the denominator (EP cannot reach them; DE2E-1 keeps
-        total_affected reachable-only).
+        mediated or direct) that the FULL pass can actually reach. The full
+        pass anchors at the non-operator Points (`dream_all`'s scan), so its
+        universe is bounded by the claim-hop closure of those anchors —
+        `_window_closure`, the same superset the local/stale-first passes use
+        as their denominator (#6597). Intersecting with the edged set keeps
+        two exclusions the ratio depends on:
+
+        - Operator-less claims with no edges are reported separately via
+          ``scanned_count`` and are NOT in the denominator (EP cannot reach
+          them; DE2E-1 keeps total_affected reachable-only).
+        - A component with NO Point anchor — e.g. an isolated
+          ``:Subject-[:IMPL]->:Object`` — is not reachable by the full pass,
+          so it must not inflate the denominator either. #7902 makes such a
+          component writable, but the full-mode anchor scan is still
+          Point-only (#7927); the closure is what keeps the two sides of the
+          ratio consistent in the meantime.
 
         P2-review (#1244): the FAR endpoint is draft-filtered too — a live
         claim whose only IMPL edge connects to a draft cannot be affected by
@@ -15794,14 +16154,30 @@ class TortoiseSDK:
         converged pass reports coverage < 1.0 forever).
         """
         proj = self._get_proj()
+        # The anchors are dream_all's own scan (drafts included; the closure
+        # seed applies the live predicate).
         rows = proj.g.query(
-            "MATCH (n:Point)-[r:IMPL|NAND]-(m:Point) "
+            "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id"
+        ).result_set
+        anchors = [r[0] for r in rows]
+        if not anchors:
+            return 0
+        closure = self._window_closure(anchors, max_hops)
+        # The EP-run universe: claims with ≥1 IMPL|NAND edge, any epistemic
+        # label on either endpoint (#7902).
+        edged_rows = proj.g.query(
+            "MATCH (n)-[r:IMPL|NAND]-(m) "
+            f"WHERE {epistemic_disjunction('n')} "
+            f"AND {epistemic_disjunction('m')} "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status <> 'draft') "
             "AND (m.status IS NULL OR m.status <> 'draft') "
-            "RETURN count(DISTINCT n)"
+            "RETURN DISTINCT n.id"
         ).result_set
-        return int(rows[0][0])
+        edged = {r[0] for r in edged_rows}
+        return len(closure & edged)
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
@@ -15998,12 +16374,23 @@ class TortoiseSDK:
         if confidences:
             params_list = [{"id": cid, "c": conf["mean"]}
                            for cid, conf in confidences.items()]
-            written = proj.g.query(
-                "UNWIND $params AS p "
-                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c "
-                "RETURN n.id",
-                params={"params": params_list},
-            ).result_set
+            # #7853: the run set spans all four epistemic labels, so sweep ONE
+            # query per label to keep the id index-anchored (a label predicate
+            # over the UNWIND drops the per-(label, property) anchor —
+            # ``tortoise/live.py``). A multi-labelled node (``:Point:Object``)
+            # is returned by more than one sweep, so collapse on id: the
+            # journal set must equal the committed set (#395).
+            written: list = []
+            seen_ids: set = set()
+            for _q in epistemic_label_queries(
+                    "UNWIND $params AS p "
+                    "MATCH (n:{label} {id: p.id}) SET n.confidence = p.c "
+                    "RETURN n.id"):
+                for row in proj.g.query(
+                        _q, params={"params": params_list}).result_set:
+                    if row[0] not in seen_ids:
+                        seen_ids.add(row[0])
+                        written.append(row)
             # #2884 D3: this full-precision mean is the last confidence
             # writer on the fast path (the EP flush already journaled its
             # 4-dp rounded mirror) — journal it too, or a rebuild loses the
@@ -16923,9 +17310,16 @@ class TortoiseSDK:
             )
             # GAP-07 (partially closed by #432 _emit_event — graph mutations
             # now emit :GraphEvent; this EventRecorded path is session-capture
-            # provenance and stays separate)
+            # provenance and stays separate).
+            # #7951: this provenance Event went through a bare ``proj.apply`` —
+            # the projection's REPLAY fold — so it never reached the journal
+            # and a rebuild LOST it. It now goes through
+            # ``_apply_and_journal`` (the sanctioned live door; journal first,
+            # then fold), which is added to the same try/except for the same
+            # reason the fold already was: a provenance-record failure must not
+            # fail the checkpoint batch.
             try:
-                proj.apply({
+                self._apply_and_journal(proj, {
                     "type": "EventRecorded",
                     "id": ulid(),
                     "eventKind": "pointAdded",
@@ -19838,6 +20232,17 @@ class TortoiseSDK:
         - Uncalibrated points fall back to documented neutral confidence 0.5
           (absence of measurement is NOT low support).
 
+        #2598 — drafts render honestly. A DRAFT is EP-inert (``live._live_only``
+        excludes it at every factor-extraction call site), so when EP has not
+        measured the claim its ``recall_ranking`` carries ``confidence: None``
+        and ``confidence_source: "uncomputed"`` plus ``draft: True`` — "no
+        belief computed", never the fabricated 0.5 that used to outrank
+        measured live claims below 0.5. Drafts are still RECALLED (never
+        hidden), and the ranker places them after every live row via an explicit
+        status tiebreaker. The ``min_confidence`` floor therefore refuses an
+        uncomputed draft for any positive floor (no measured belief to meet it)
+        while the default 0.0 keeps it. Live rows are unchanged.
+
         Returns the same SearchResult shape as ``tortoise_fts_query`` (list
         of dicts), each annotated with ``entity_type``, ``recall_ranking``
         (score breakdown), and state-context keys (``contested``,
@@ -19974,10 +20379,21 @@ class TortoiseSDK:
         ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
-        ranked = [
-            r for r in ranked
-            if r["recall_ranking"]["confidence"] >= min_confidence
-        ][:limit]
+        # #2598: a DRAFT whose belief EP has not measured carries
+        # ``confidence: None`` ("no belief computed" — never the fabricated
+        # neutral 0.5). It cannot satisfy a POSITIVE belief floor, because there
+        # is no measured belief to meet it; the default 0.0 floor means "no
+        # floor" and therefore keeps drafts (they stay recallable, ranked after
+        # every live row by the ranker's status tiebreaker). A bare
+        # ``None >= min_confidence`` would raise TypeError, so the two cases are
+        # decided explicitly rather than left to comparison semantics.
+        def _passes_floor(row: dict) -> bool:
+            conf = row["recall_ranking"]["confidence"]
+            if conf is None:
+                return min_confidence <= 0.0
+            return conf >= min_confidence
+
+        ranked = [r for r in ranked if _passes_floor(r)][:limit]
 
         # 5. State context surfacing (batched, not N+1).
         point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
@@ -21741,13 +22157,25 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+org
+        # Reject duplicate pending invitations for same email+org.
+        #
+        # #1890: expiry is a DERIVED terminal state — an invite whose
+        # ``expires_at`` has passed is dead even though nothing ever writes
+        # ``status`` (this method does not even set it). Without the
+        # ``expires_at`` arm an expired invite blocks the re-invite FOREVER,
+        # exactly as the hosted registry mint did (hosted_api.py). The
+        # predicate matches the hosted dup-check and
+        # ``cleanup_expired_invitations``, so the three cannot disagree about
+        # whether an invite is live.
         reg = self._get_registry()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i) > 0",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -21757,7 +22185,6 @@ class TortoiseSDK:
         token = str(uuid.uuid4())
         token_hash = hash_api_key(token)
         iid = ulid()
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(
@@ -22235,10 +22662,7 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -22261,10 +22685,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Subject" and _journal_subject_registration:
             # (#2295) Subject mirror of the ObjectRegistered block above —
@@ -22282,10 +22703,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the
@@ -26610,8 +27028,13 @@ class TortoiseSDK:
                     "outcomes": []}
         match_clause = "s.id = $sid"
 
-        # Direct: Event connects directly to claim Points via IMPL/NAND
-        # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
+        # Direct: Event connects directly to claim Points via IMPL/NAND.
+        # ONTOLOGY.md §8: operators connect only epistemic targets
+        # (:Point/:Subject/:Object/:Event). ⚠️ this reader is still
+        # `:Point`-only — the #7853 read widening covers the EP/confidence
+        # path, not reputation; widening it to the other three labels is
+        # tracked by #7902 (the write path admits :Point/:Event only until
+        # then, so a :Subject/:Object endpoint is spec-only here too).
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "

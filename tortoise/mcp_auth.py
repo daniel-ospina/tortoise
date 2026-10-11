@@ -96,7 +96,21 @@ def _get_org_sdk() -> TortoiseSDK:
     ns = _current_graph_namespace.get()
     if gid and ns:
         return TortoiseSDK(graph_name=ns)
-    return TortoiseSDK(namespace=org_id)
+    sdk = TortoiseSDK(namespace=org_id)
+    if org_id == SELFHOST_ORG_ID:
+        # #2007 (W12): the selfhost SDK-init seam — the selfhost MCP transport
+        # (`tortoise/selfhost.py`'s mounted /mcp, and `serve --http --auth
+        # static|none`) reaches the graph ONLY through here, so this is where
+        # the selfhost OnboardingState node must exist from. ONE owned write
+        # point (`onboarding/selfhost.py`), memoized per target, best-effort —
+        # a graph failure must never fail the tool call that triggered it.
+        from tortoise.onboarding.selfhost import (
+            ensure_selfhost_onboarding_once,
+        )
+        _target = (os.environ.get("TORTOISE_DB_URI")
+                   or os.environ.get("TORTOISE_DB_PATH") or "default")
+        ensure_selfhost_onboarding_once(sdk, target=_target)
+    return sdk
 
 
 # ── HTTP tool allow-list (derived from registry; #454) ────────────────

@@ -366,7 +366,15 @@ def test_tool_and_dashboard_enable_write_same_keys(client, monkeypatch):
     """#3540: enabling the session-recording integration from the MCP tool
     (``tortoise_onboarding_session_recording``) and from the dashboard PATCH
     write IDENTICAL state keys for the same intent — one state path, no
-    cross-surface divergence (mirrors #3517's prompt/dashboard parity)."""
+    cross-surface divergence (mirrors #3517's prompt/dashboard parity).
+
+    #3517: the PATCH body below is the body the dashboard ACTUALLY sends
+    (`main.jsx::toggleSessionRecording` → `{session_recording: next}`). It used
+    to hand-send `capture_revised` too, which made this assertion pass while the
+    real surface wrote one key — a fixture that models a caller the product does
+    not have. The companion key is now written by the state ROUTER, so parity
+    holds for the real body.
+    """
     from tortoise import mcp_server
     from tortoise.mcp_auth import _current_org_id
 
@@ -380,7 +388,7 @@ def test_tool_and_dashboard_enable_write_same_keys(client, monkeypatch):
     assert "error" not in result, result
 
     r = client.patch("/v1/onboarding/state",
-                     json={"session_recording": True, "capture_revised": True})
+                     json={"session_recording": True})
     assert r.status_code == 200, r.text
 
     tool_keys = captured.get("team-3540-tool")
