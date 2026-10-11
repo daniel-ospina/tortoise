@@ -1191,7 +1191,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:212e8c7865fe39e7
+  served_from: tortoise/mcp_server.py:6c29f64c0b80b4f3
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
