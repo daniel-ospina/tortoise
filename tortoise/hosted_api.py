@@ -48,6 +48,14 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
+
+# #3514: the coming-soon demand capture's policy half (pinned literals, key
+# validation, server-derived org key, the bounded markers). Imported as a
+# module attribute so a test override reaches BOTH surfaces instead of leaving
+# a stale copy here.
+from tortoise import (
+    demand as _demand,
+)
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
@@ -27468,6 +27476,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     # Registering them here repairs that shipped, silent loss; the structural
     # registration test is what keeps the two sets from drifting again.
     "plan", "tier",
+    # #3514 (epic #1714 J4): the coming-soon demand record. These four keys are
+    # the row's WHOLE payload — `integration_key` (which tile), `action`,
+    # `surface` (which UI) and the SERVER-derived `org_key` (which team, at
+    # ranking granularity). An unregistered prop is stripped here in silence,
+    # and a stripped `integration_key`/`org_key` under-counts demand with no
+    # diagnostic — which is why the registration test is parametrized over
+    # `demand.DEMAND_PROPS` rather than merely asserting "a row was written".
+    # `action` and `surface` are deliberately NOT reused names: nothing else in
+    # the flat allowlist emits them, so a drift cannot be masked by a sibling.
+    "integration_key", "action", "surface", "org_key",
     # #3834: the transport-level wait bound's breach event. `method` and
     # `latency_ms` are already registered above; `path` is the one new key.
     # Without it the refusal would be counted but the ROUTE would be stripped
@@ -28117,8 +28135,31 @@ async def _analytics_canary_loop() -> None:
 
 
 
+def _analytics_fallback_path() -> str | None:
+    """Resolve (and cache) the local analytics JSONL path; ``None`` if unusable.
+
+    ONE resolver for both the writer (``_track_analytics_event``) and the
+    #3514 demand reader, so the file a self-hosted click is written to and the
+    file the operator's demand query reads cannot drift to two different paths.
+    Directory creation belongs inside the best-effort guard: it used to sit
+    outside it, so a read-only HOME raised straight out of a function documented
+    never to raise (and into the GitHub OAuth callback).
+    """
+    global _ANALYTICS_FALLBACK_PATH
+    if _ANALYTICS_FALLBACK_PATH is None:
+        try:
+            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+            os.makedirs(fallback_dir, exist_ok=True)
+            _ANALYTICS_FALLBACK_PATH = os.path.join(
+                fallback_dir, "analytics_fallback.jsonl")
+        except Exception:
+            return None
+    return _ANALYTICS_FALLBACK_PATH
+
+
 def _track_analytics_event(org_id: str, event_name: str,
-                           properties: dict | None = None) -> str:
+                           properties: dict | None = None, *,
+                           local_fallback: bool = True) -> str:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
     Writes to Supabase analytics_events when SUPABASE_URL + a service key are
@@ -28158,6 +28199,16 @@ def _track_analytics_event(org_id: str, event_name: str,
     * ``"dropped"``      — the event reached NO sink (no writable fallback
                            directory, or the JSONL append itself failed). This
                            is #3677's loss class, and it is unrecoverable.
+
+    ``local_fallback=False`` (#3514) suppresses ONLY the JSONL arm. The default
+    is ``True`` — every pre-#3514 caller is byte-identical. The demand record
+    (#3514 / epic #1714 R2) requires the opposite of the fallback-everything
+    posture: on HOSTED a failed write must SURFACE and must write **no local
+    file** (the JSONL is the SELF-HOSTED degradation, taken only when Supabase
+    is unconfigured — pinned by a test, never read from a module global). So
+    with the sink configured-but-failing this returns ``dropped`` — the event
+    reached no sink, which is exactly what happened — instead of quietly
+    diverting it to an ephemeral VM's disk.
 
     ``fallback``/``dropped`` additionally increment
     ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
@@ -28254,27 +28305,23 @@ def _track_analytics_event(org_id: str, event_name: str,
             except Exception as e:  # bookkeeping is best-effort
                 _logger.warning("analytics success bookkeeping failed: %s", e)
                 return "supabase"
+    if not local_fallback:
+        # #3514: the caller owns the failure surface (`_demand_record_write`
+        # answers 503 and sends no ping), so on hosted there is no local file —
+        # the JSONL arm is the SELF-HOSTED sink, never a hosted safety net.
+        return _analytics_sink_dropped("hosted_write_failed")
     # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
-    global _ANALYTICS_FALLBACK_PATH
-    if _ANALYTICS_FALLBACK_PATH is None:
-        # Directory creation belongs INSIDE the best-effort guard: it used to
-        # sit outside it, so a read-only HOME raised straight out of a function
-        # documented never to raise (and into the GitHub OAuth callback).
-        try:
-            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
-            os.makedirs(fallback_dir, exist_ok=True)
-            _ANALYTICS_FALLBACK_PATH = os.path.join(
-                fallback_dir, "analytics_fallback.jsonl")
-        except Exception:
-            # #3820: the FOURTH silent path — the issue's table names three.
-            # Pre-#3820 this was a bare `return`: the event was dropped with no
-            # fallback line, no counter and no log — the same loss class as the
-            # append failure below, and the reason this exit now routes through
-            # the shared `_analytics_sink_dropped` helper.
-            return _analytics_sink_dropped("fallback_dir_unavailable")
+    fallback_path = _analytics_fallback_path()
+    if fallback_path is None:
+        # #3820: the FOURTH silent path — the issue's table names three.
+        # Pre-#3820 this was a bare `return`: the event was dropped with no
+        # fallback line, no counter and no log — the same loss class as the
+        # append failure below, and the reason this exit routes through the
+        # shared `_analytics_sink_dropped` helper.
+        return _analytics_sink_dropped("fallback_dir_unavailable")
     try:
         import json as _json
-        with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
+        with open(fallback_path, "a") as f:
             f.write(_json.dumps(event) + "\n")
     except Exception:
         # #3677 swallowed this; #3820 swallows it AND counts it — the event
@@ -34778,6 +34825,469 @@ async def oauth_dcr_register(request: Request):
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/register")
     return JSONResponse(status_code=201, content=reg)
+
+
+# ── #3514 (epic #1714 J4): coming-soon demand capture ─────────────────
+#
+# A click on an unshipped integration tile IS the demand signal (epic #1714
+# decision #3). The click is RECORDED, never DELIVERED: one
+# `data_source_demand` row in the canonical append-only analytics store (R2),
+# one operator Telegram ping per `(integration_key, team)` inside the dedupe
+# window, and NOTHING else — no notify-intent state, no `Requested/Planned/
+# Shipped` lifecycle, no ship-time task. The operator emails interested teams
+# by hand.
+#
+# The policy half (pinned literals, validation, `org_key`, markers) lives in
+# `tortoise/demand.py`. This block is only the wiring: the record sink is the
+# EXISTING analytics path (no new table, no new transport), the ping is the
+# EXISTING `telegram_push.send_message`, and the markers are the existing
+# off-loop executor pattern.
+
+#: Dedicated pool for the ops ping. Deliberately NOT the loop's shared default
+#: executor (the #3060 starvation doctrine) and NOT the telemetry pool: a hung
+#: Telegram socket parks its worker for the transport timeout, and parking a
+#: telemetry worker would delay the RECORD writes this feature depends on.
+_DEMAND_PING_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_DEMAND_PING_WORKERS", 4), 8)),
+    thread_name_prefix="demand-ping")
+
+
+def _dispose_demand_ping_executor() -> None:
+    """Cancel queued pings and release the pool during thread shutdown.
+
+    Mirror of ``_dispose_capture_executor`` (including the ordering caveat: a
+    worker already inside ``send_message`` is not interruptible, and the only
+    thing bounding that wait is the worker's OWN timeout —
+    ``demand.DEMAND_SEND_TIMEOUT_S``).
+    """
+    with contextlib.suppress(Exception):
+        _DEMAND_PING_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_demand_ping_executor)
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_demand_ping_executor)
+
+
+def _demand_telegram_credentials() -> tuple[str, str]:
+    """(bot_token, chat_id) from the environment — empty strings when unset.
+
+    Same two names the alert channel reads (``backup_config``). Read at CALL
+    time, never captured at import: the self-hosted degradation is "Telegram is
+    skipped when ``TELEGRAM_*`` is unset", and a module-global read would make
+    that untrue for a process whose env changed after import.
+    """
+    return (os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
+            os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+
+
+def _demand_send_ping(text: str) -> bool:
+    """Send one Telegram ping. True only on a 2xx send. NEVER raises.
+
+    ``TelegramPushError`` (and every other failure) is swallowed here: R3 says
+    a transport error CANNOT fail the user's request, and this is the only
+    place that could have failed it. The timeout is passed EXPLICITLY from the
+    pinned constant rather than inherited from ``send_message``'s default, so
+    the hung-transport row has a pinned value to assert.
+    """
+    token, chat_id = _demand_telegram_credentials()
+    if not token or not chat_id:
+        # The self-hosted degradation: no operator channel configured, so the
+        # ping is SKIPPED — counted and logged, never a silent no-op that
+        # reads like a successful send.
+        _logger.info(
+            "demand ping skipped: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID unset")
+        return False
+    try:
+        from tortoise.telegram_push import send_message
+
+        send_message(token, chat_id, text,
+                     timeout=_demand.DEMAND_SEND_TIMEOUT_S)
+        return True
+    except Exception as exc:  # noqa: BLE001, RUF100 — R3: cannot fail the request
+        _logger.warning("demand ping failed (non-fatal): %s", exc)
+        return False
+
+
+def _demand_dispatch_ping(text: str, *, org_key: str,
+                          integration_key: str) -> bool:
+    """Fire-and-forget the ops ping. Returns True when it was DISPATCHED.
+
+    The click request NEVER waits for Telegram: this function returns before
+    the send runs, so a transport that neither returns nor raises cannot delay
+    the response (the epic's cycle-7 finding — an exception is not how "never
+    blocking" is violated; a send that never returns is). The only bound on the
+    parked worker is ``DEMAND_SEND_TIMEOUT_S``.
+
+    Exactly ONE send per ``(integration_key, team)`` inside
+    ``DEMAND_DEDUPE_WINDOW_S``, including under concurrency: the window is taken
+    with the ATOMIC ``claim`` (check-and-set in one step), not a check-then-set,
+    and the claim is RELEASED when the send does not return 2xx. So the marker
+    is retained only on a 2xx send (a failed send is never deduped) while two
+    simultaneous clicks for one integration still produce one send.
+
+    The marker is PROCESS-LOCAL: hosted runs a single uvicorn worker (the same
+    invariant the key rate limiter rests on), and two processes would each keep
+    their own window — the residual recorded on #3514.
+    """
+    key = _demand.marker_key(org_key=org_key,
+                             integration_key=integration_key)
+    if not _demand.DEMAND_MARKERS.claim(
+            _demand.MARK_SENT, key, _demand.DEMAND_DEDUPE_WINDOW_S):
+        # Inside the dedupe window: no second send. The click RECORD was still
+        # written — only the send is deduped.
+        return False
+
+    def _worker() -> None:
+        if _demand_send_ping(text):
+            return
+        # Not delivered (transport error, Telegram error, or no channel
+        # configured): DROP the claim so a later click re-attempts. Keeping it
+        # would make one transient failure silently suppress the demand signal
+        # for the whole window.
+        _demand.DEMAND_MARKERS.release(_demand.MARK_SENT, key)
+
+    _submit_off_loop(_DEMAND_PING_EXECUTOR, _worker)
+    return True
+
+
+async def _demand_record_write(org_id: str, *, integration_key: str,
+                               action: str, surface: str,
+                               org_key: str) -> str:
+    """Write the demand record and RETURN the sink outcome (#3514).
+
+    ``_emit_analytics_off_loop`` is the wrong seam here: it is ``best_effort``
+    and returns ``None``, so neither the outcome nor a failure could reach this
+    caller. R2 requires the opposite — the write's response is CHECKED and its
+    failure SURFACES — so the record rides the same off-loop path with the
+    result returned.
+
+    The props dict is written as a LITERAL at the emit site (rather than built
+    by the caller and forwarded) so `tests/test_telemetry_registration.py`'s
+    AST walk resolves this site's key set: a parameter would resolve to
+    ``keys=None`` and the site would fall out of the #3675 allowlist guard —
+    the exact silent hole that guard exists to close.
+
+    ``local_fallback=not intended`` pins the hosted/self-hosted split: the JSONL
+    is the SELF-HOSTED sink, taken only when no Supabase sink was intended, so a
+    hosted write that fails writes NO local file and answers 503 instead of
+    quietly diverting the record to an ephemeral VM's disk.
+    """
+    _url, _key, _configured, intended = _analytics_sink_probe()
+    try:
+        return await _cp_offload(
+            lambda: _track_analytics_event(
+                org_id, _demand.DEMAND_EVENT_NAME,
+                {"integration_key": integration_key, "action": action,
+                 "surface": surface, "org_key": org_key},
+                local_fallback=not intended),
+            op="demand_record", pool="telemetry")
+    except UnregisteredTelemetryKey:
+        raise  # #3821: the strict-mode registration guard must propagate
+    except Exception as exc:  # noqa: BLE001, RUF100 — a bound miss is a failed write
+        _logger.warning("demand record write failed: %s", exc)
+        return "dropped"
+
+
+def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
+    """Read demand rows. ``(rows, source)``; ``rows is None`` = unreadable.
+
+    ``source`` is one of ``supabase`` / ``local_jsonl`` / ``unavailable``.
+
+    `org_id=None` is the CROSS-ORG read, which the internal (operator) route is
+    the only caller of. The per-team read passes the auth-resolved ``org_id``
+    and filters on the ``org_id`` COLUMN — the tenancy anchor — so a team can
+    only ever read its own records; the filter is not derived from anything the
+    client sent.
+    """
+    url, key, configured, intended = _analytics_sink_probe()
+    if intended:
+        if not configured:
+            # Half-configured (URL without key, or the #3677 empty-string key):
+            # a sink was INTENDED and cannot serve, so this is not the
+            # self-hosted branch — the read is simply unavailable.
+            return None, "unavailable"
+        try:
+            response = _analytics_http_client(url, key).get(
+                f"{url}/rest/v1/analytics_events",
+                params={
+                    "select": "org_id,properties,created_at",
+                    "event_name": f"eq.{_demand.DEMAND_EVENT_NAME}",
+                    "order": "created_at.desc",
+                    "limit": str(_demand.DEMAND_READ_LIMIT),
+                    **({"org_id": f"eq.{org_id}"} if org_id else {}),
+                },
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            if not 200 <= response.status_code < 300:
+                return None, "unavailable"
+            # #3514 review P2: a 2xx is not a promise that the body is a list of
+            # row objects. A dict/string body previously escaped as `list(body)`
+            # and blew up later in `_demand_aggregate`/`_demand_click_count`
+            # (`row.get(...)`) — AFTER the record was written and the ping sent,
+            # so a malformed store answer turned a successful write into a 500.
+            # The local branch below is defensive about the same shape; this
+            # one now is too.
+            body = response.json()
+            if not isinstance(body, list):
+                _logger.warning(
+                    "demand read: store returned a non-list body (%s)",
+                    type(body).__name__,
+                )
+                return None, "unavailable"
+            return [row for row in body if isinstance(row, dict)], "supabase"
+        except Exception as exc:  # noqa: BLE001, RUF100 — a read failure is not a 500
+            _logger.warning("demand read failed: %s", exc)
+            return None, "unavailable"
+    path = _analytics_fallback_path()
+    if path is None:
+        return None, "unavailable"
+    rows: list[dict] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = _json.loads(line)
+                except Exception:
+                    continue  # a torn line is not a reason to lose the rest
+                if event.get("event_name") != _demand.DEMAND_EVENT_NAME:
+                    continue
+                if org_id and event.get("org_id") != org_id:
+                    continue
+                rows.append(event)
+    except FileNotFoundError:
+        return [], "local_jsonl"
+    except Exception as exc:  # noqa: BLE001, RUF100
+        _logger.warning("demand local read failed: %s", exc)
+        return None, "unavailable"
+    return rows, "local_jsonl"
+
+
+def _demand_aggregate(rows: list[dict]) -> tuple[list[dict], bool]:
+    """Per-integration demand: distinct orgs × clicks, deduped per (key, team).
+
+    The two halves answer the two questions the operator actually asks: HOW MANY
+    DISTINCT TEAMS want it (``org_count`` — the N=5 trigger that turns a demand
+    into a scoping issue, epic #1714 §6), and how loudly (``click_count``).
+    Deduping per ``(integration_key, org)`` is what stops one enthusiastic team
+    from reading as five. Returns ``(demand, truncated)``.
+    """
+    per: dict[str, dict] = {}
+    for row in rows:
+        props = row.get("properties") or {}
+        key = props.get("integration_key")
+        if not key:
+            continue  # a row without a key cannot be ranked; never guessed
+        org = row.get("org_id") or ""
+        entry = per.get(key)
+        if entry is None:
+            entry = per[key] = {
+                "integration_key": key, "click_count": 0, "_orgs": set(),
+                "first_clicked_at": None, "last_clicked_at": None}
+        entry["click_count"] += 1
+        if org:
+            entry["_orgs"].add(org)
+        stamp = row.get("created_at")
+        if stamp:
+            if entry["first_clicked_at"] is None or stamp < entry["first_clicked_at"]:
+                entry["first_clicked_at"] = stamp
+            if entry["last_clicked_at"] is None or stamp > entry["last_clicked_at"]:
+                entry["last_clicked_at"] = stamp
+    demand = [
+        {"integration_key": e["integration_key"],
+         "click_count": e["click_count"],
+         "org_count": len(e["_orgs"]),
+         "first_clicked_at": e["first_clicked_at"],
+         "last_clicked_at": e["last_clicked_at"]}
+        for e in per.values()
+    ]
+    # Ranked by distinct orgs × clicks — the review's ordering, so the operator
+    # reads the top of the list as the answer rather than re-sorting by hand.
+    demand.sort(key=lambda d: (-d["org_count"], -d["click_count"],
+                               d["integration_key"]))
+    return demand, len(rows) >= _demand.DEMAND_READ_LIMIT
+
+
+class DataSourceDemandRequest(BaseModel):
+    """The pinned request body: ``{integration_key, action, surface}``.
+
+    ``org_key`` is deliberately ABSENT: it is server-derived from the
+    authenticated team (a client-supplied one would corrupt the demand
+    ranking). An unknown field is ignored rather than rejected so a future
+    client's extra field cannot break capture — the demand signal is not a
+    surface to be strict about.
+    """
+
+    integration_key: str = ""
+    action: str = "click"
+    surface: str = ""
+
+
+@app.post("/v1/data-sources/demand")
+async def record_data_source_demand(
+        request: Request,
+        body: DataSourceDemandRequest,
+        org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """Record one click on an unshipped integration tile (epic #1714 R2/R3).
+
+    Dual-auth (session JWT OR ``tt_`` key), the established ``list_sessions``
+    precedent: the dashboard posts on the signed-in session, and an agent path
+    keeps working with its key. Ungated — this is not a management surface.
+
+    Ordering is load-bearing: the RECORD is written first and the ping is
+    dispatched only AFTER a successful write, so the ping can never announce a
+    click that was not recorded. A failed write answers 503 with
+    ``recorded: false`` and sends NOTHING — the caller must not render the
+    confirmation state for a click that was lost (R2, J4).
+
+    ``org_key`` in the response is the server-derived value the record carries,
+    so the client's inline "recorded" state is about the same fact the store
+    holds.
+    """
+    _reject_graph_bound_org_surface(org, "data-source demand")
+    org_id = org["org_id"]
+    org_key = _demand.derive_org_key(org_id)
+
+    error = (_demand.validate_integration_key(body.integration_key)
+             or _demand.validate_action(body.action)
+             or _demand.validate_surface(body.surface))
+    if error:
+        # 422 and NOTHING happens: no record, no ping (the epic's permitted
+        # reject arm). An unvalidated key would land in a queryable store and
+        # drive the operator's ping.
+        raise HTTPException(status_code=422, detail=error)
+    integration_key = body.integration_key.strip()
+    surface = (body.surface or "").strip()
+
+    allowed, retry_after = _demand.DEMAND_MARKERS.rate_ok(
+        org_id, cap=_demand.DEMAND_RATE_CAP_PER_MINUTE,
+        window=_demand.DEMAND_RATE_WINDOW_S)
+    if not allowed:
+        # The rate cap bounds RATE. 429 + Retry-After is the repo's convention
+        # for it; the record is not written, so the cap cannot be evaded by
+        # splitting a burst across integrations.
+        raise HTTPException(
+            status_code=429,
+            detail="demand rate cap exceeded — retry shortly (see Retry-After)",
+            headers={"Retry-After": str(max(1, int(retry_after + 0.999)))})
+    if not _demand.DEMAND_MARKERS.key_allowed(
+            org_id, integration_key,
+            cap=_demand.DEMAND_MAX_DISTINCT_KEYS_PER_TEAM):
+        # The CARDINALITY bound (the rate cap does not bound it): every novel
+        # key is a permanent store entry, so one caller could otherwise mint
+        # unbounded distinct demand keys. Same 429 + Retry-After shape.
+        raise HTTPException(
+            status_code=429,
+            detail=("integration-key cardinality cap reached for this team "
+                    "— retry shortly"),
+            headers={"Retry-After": str(int(_demand.DEMAND_RATE_WINDOW_S))})
+
+    # Replay safety lives on the client-supplied idempotency key, and ONLY on
+    # it. The pinned body has no field for one, so a header is the one channel
+    # that does not change the body contract. Without a key no server can tell
+    # a lost-response retry from a second genuine click, and R4 pins the store
+    # at ONE RECORD PER CLICK — so an unkeyed request always records.
+    idem = (request.headers.get("X-Idempotency-Key") or "").strip()
+    idem_key = f"{org_key}:{integration_key}:{idem}" if idem else ""
+    if idem_key and not _demand.DEMAND_MARKERS.claim(
+            _demand.MARK_RECORD, idem_key, _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
+        rows, source = _demand_store_rows(org_id)
+        return {"ok": True, "integration_key": integration_key,
+                "replayed": True, "org_key": org_key,
+                "click_count": _demand_click_count(rows, integration_key),
+                "source": source}
+
+    outcome = await _demand_record_write(
+        org_id, integration_key=integration_key, action=body.action,
+        surface=surface, org_key=org_key)
+    if outcome == "dropped":
+        if idem_key:
+            # The record is not on the sink, so the claim must not make the
+            # client's retry a no-op.
+            _demand.DEMAND_MARKERS.release(_demand.MARK_RECORD, idem_key)
+        raise HTTPException(
+            status_code=503,
+            detail={"recorded": False,
+                    "message": "the click was not recorded — please retry"})
+    _demand.DEMAND_MARKERS.register_key(org_id, integration_key)
+
+    # Recorded. The ping is a SEPARATE, best-effort fact from here on.
+    _demand_dispatch_ping(
+        _demand.format_ping(integration_key=integration_key,
+                            action=body.action, surface=surface,
+                            org_key=org_key),
+        org_key=org_key, integration_key=integration_key)
+
+    rows, source = _demand_store_rows(org_id)
+    return {"ok": True, "integration_key": integration_key,
+            "replayed": False, "org_key": org_key,
+            "click_count": _demand_click_count(rows, integration_key),
+            "source": source}
+
+
+def _demand_click_count(rows: list[dict] | None, integration_key: str) -> int | None:
+    """This team's recorded clicks for one integration; ``None`` when unreadable.
+
+    ``None`` is HONEST: a read that failed must not be rendered as the number
+    zero, which would tell the user their click was not counted when it was.
+    """
+    if rows is None:
+        return None
+    return sum(1 for row in rows
+               if (row.get("properties") or {}).get("integration_key")
+               == integration_key)
+
+
+@app.get("/v1/data-sources/demand")
+async def read_data_source_demand(
+        org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """The demand store's READ half, scoped to the authenticated team.
+
+    Same dual-auth precedent as the write. The filter is the auth-resolved
+    ``org_id``, so "a non-service-role caller cannot read another team's
+    records" holds by construction rather than by a client-supplied argument.
+    """
+    _reject_graph_bound_org_surface(org, "data-source demand")
+    rows, source = _demand_store_rows(org["org_id"])
+    if rows is None:
+        # Unreadable is a 503, never an empty list: "no demand" and "the store
+        # could not be read" must not render the same way.
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "DEMAND_STORE_UNAVAILABLE",
+                    "message": "the demand store could not be read"})
+    demand, truncated = _demand_aggregate(rows)
+    return {"ok": True, "source": source, "truncated": truncated,
+            "org_key": _demand.derive_org_key(org["org_id"]), "demand": demand}
+
+
+@app.get("/v1/internal/data-sources/demand")
+async def operator_data_source_demand(request: Request):
+    """The CROSS-ORG demand count — the operator plane (``FASTAPI_INTERNAL_KEY``).
+
+    This is what the monthly onboarding-cohort review reads and what #3541's
+    deferral trigger (N distinct orgs requesting an integration) evaluates; the
+    receipted ops check that consumes it is
+    ``docs/runbook/3514-demand-capture-ops.md``. It returns the same aggregation
+    over every team's rows, which is exactly why it is behind
+    ``_check_internal`` and not on the tenant surface.
+    """
+    _check_internal(request)
+    rows, source = _demand_store_rows(None)
+    if rows is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "DEMAND_STORE_UNAVAILABLE",
+                    "message": "the demand store could not be read"})
+    demand, truncated = _demand_aggregate(rows)
+    return {"ok": True, "source": source, "truncated": truncated,
+            "distinct_orgs": len({row.get("org_id") for row in rows
+                                  if row.get("org_id")}),
+            "demand": demand}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
