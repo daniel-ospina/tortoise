@@ -401,6 +401,20 @@ def _connector_content_hash(inner: dict) -> str:
     the cases that make it true). Canonical form: sorted keys, no insignificant
     whitespace, UTF-8.
 
+    THE INPUT IS A CANONICAL PROJECTION, NOT THE PRODUCER'S PAYLOAD. When the
+    event carries the shared mapper's ``itemState`` projection
+    (``github_map._item_state``), that projection is the ENTIRE hashed body.
+    The producer-shaped envelope — the record id it minted, the action label it
+    stamped on ``eventKind``, the extra keys it happened to include — is
+    structurally excluded, so no producer can diverge from another by carrying
+    a different envelope. `eventKind` is why this matters: the poll mints
+    `github.issue.open` for the open state a webhook's `reopened` action mints
+    as `github.issue.reopened`, and hashing the label made one unchanged item
+    two versions. The projection carries `state` (and, for PRs, `merged`)
+    instead, so the signal the label used to hold survives the exclusion.
+    Producers that declare no projection (Slack, Linear) keep the generic
+    payload path — their `eventKind` may be the only carrier of a state change.
+
     The encoder is STRICT — deliberately no ``default=str``. Falling back to
     ``str()`` for an arbitrary object makes the digest process-dependent: a
     `set` iterates in hash order, so `PYTHONHASHSEED` alone changes the digest
@@ -414,7 +428,11 @@ def _connector_content_hash(inner: dict) -> str:
     """
     import hashlib
     import json
-    body = {k: v for k, v in inner.items() if k not in _CONNECTOR_HASH_EXCLUDED}
+    projection = inner.get("itemState")
+    if isinstance(projection, dict):
+        body = {"itemState": projection}
+    else:
+        body = {k: v for k, v in inner.items() if k not in _CONNECTOR_HASH_EXCLUDED}
     try:
         blob = json.dumps(body, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False)
@@ -752,6 +770,17 @@ class _EntityHandlers:
         "format", "embedding",
         "aboutSubject", "aboutObject", "objectType", "uses",
         "childEvents", "scopedFacts",
+        # #8019: the connector content carrier. `itemState` is the canonical
+        # projection the version digest reads — it is a dict, so
+        # `_is_persistable_prop_value` would drop it anyway; naming it here
+        # declares that it is an envelope field, not Event content. `labels`
+        # and `assignees` are declared for the same reason (a connector event
+        # that ever emits them top-level must not grow the Event surface).
+        # `title` is deliberately NOT added: meeting Events persist their
+        # title through this same skip set (`sdk._meeting_event_write` →
+        # `_event_guarded_merge`), and `backfill_sources` reads it back — the
+        # connector content fields ride `itemState` instead of the envelope.
+        "itemState", "labels", "assignees",
         # name / eventStatus / createdAt are intentionally NOT here —
         # they were historically dropped by the fixed-field MERGE and
         # are now persisted as arbitrary props via _persist_extra_props.

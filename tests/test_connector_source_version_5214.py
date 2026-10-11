@@ -43,6 +43,7 @@ from tortoise.projection.entities import _connector_content_hash
 from tortoise.sdk import TortoiseSDK
 
 GH_URL = "https://github.com/test/repo/issues/42"
+PR_URL = "https://github.com/test/repo/pull/7"
 SLACK_PERMALINK = "https://ws.slack.com/archives/C01/p1690000000.123456"
 SLACK_CONTAINER = "slack:C01"
 
@@ -62,25 +63,36 @@ def fresh_sdk():
 
 # ── Connector-shaped EventRecorded builders (the producers' own shapes) ──
 
-def gh_issue_event(*, event_id: str = "github-issue-test/repo-42-created",
-                   kind: str = "github.issue.open",
-                   ended_at=None, **over) -> dict:
-    """The `github_map.issue_to_event` shape — ONE vocabulary for the poll
-    path, the webhook path and the entity path. Only the `eventId` and the
-    state fields differ between producers."""
-    ev = {
-        "type": "EventRecorded",
-        "eventId": event_id,
-        "eventKind": kind,
-        "subject": "issue:test/repo#42",
-        "object": "test/repo#42",
-        "startedAt": "2026-07-10T10:00:00Z",
-        "endedAt": ended_at,
-        "source": "github:test/repo",
-        "sourceUrl": GH_URL,
-        "sourceKind": "github_issue",
-        "participants": [],
+def gh_issue_event(*, event_id: str | None = None, kind: str | None = None,
+                   state: str = "open", closed_at=None,
+                   title: str = "Fix login bug",
+                   labels=("bug", "P1"), assignees=("alice",),
+                   source_url: str = GH_URL, **over) -> dict:
+    """A REAL `github_map.issue_to_event` record for the GH_URL item.
+
+    Built through the mapper — never hand-spelled — so it carries the canonical
+    `itemState` projection the digest reads. `event_id`/`kind` model the
+    producer-stamped id and action label a producer would supply WITHOUT
+    touching the item state, which is exactly the point: the digest must ignore
+    them.
+    """
+    issue = {
+        "number": 42,
+        "title": title,
+        "state": state,
+        "created_at": "2026-07-10T10:00:00Z",
+        "closed_at": closed_at,
+        "html_url": source_url,
+        "labels": [{"name": x} for x in labels],
+        "assignees": [{"login": x} for x in assignees],
+        "user": {"login": "alice"},
+        "body": "The bug is in the parser.",
     }
+    ev = gm.issue_to_event(issue, "test/repo")
+    if event_id is not None:
+        ev["eventId"] = event_id
+    if kind is not None:
+        ev["eventKind"] = kind
     ev.update(over)
     return ev
 
@@ -204,7 +216,7 @@ def test_a_url_spelling_variant_does_not_advance_the_version():
         proj.apply(gh_issue_event())
         first = _source(proj, GH_URL)
         assert first[1] == 1
-        proj.apply(gh_issue_event(sourceUrl=GH_URL + "/"))
+        proj.apply(gh_issue_event(source_url=GH_URL + "/"))
         assert _source(proj, GH_URL) == first, (
             "the same item state with a respelled URL must not advance the version"
         )
@@ -226,9 +238,8 @@ def test_a_content_changing_repoll_advances_the_hash_and_the_ordinal():
         proj = sdk._get_proj()
         proj.apply(gh_issue_event())
         open_hash, open_version = _source(proj, GH_URL)
-        proj.apply(gh_issue_event(
-            event_id="github-issue-test/repo-42-created",
-            kind="github.issue.closed", ended_at="2026-07-11T00:00:00Z"))
+        proj.apply(gh_issue_event(state="closed",
+                                  closed_at="2026-07-11T00:00:00Z"))
         closed_hash, closed_version = _source(proj, GH_URL)
         assert closed_hash != open_hash, "a state change is a new version"
         assert closed_version == open_version + 1, (
@@ -249,8 +260,8 @@ def test_the_earlier_derivation_reads_stale_after_a_content_change():
         proj = sdk._get_proj()
         proj.apply(gh_issue_event())
         anchored = _anchor(proj, GH_URL, "github-issue-test/repo-42-created")[0]
-        proj.apply(gh_issue_event(
-            kind="github.issue.closed", ended_at="2026-07-11T00:00:00Z"))
+        proj.apply(gh_issue_event(state="closed",
+                                  closed_at="2026-07-11T00:00:00Z"))
         _point_extracted_from(sdk, GH_URL)
         current = _source(proj, GH_URL)[0]
         assert anchored != current, "the ON CREATE-only anchor must NOT advance"
@@ -292,10 +303,12 @@ def test_one_item_state_hashes_equal_across_the_poll_and_webhook_producers():
     second apply below advances the version and the hash differs."""
     poll_shape = gh_issue_event(
         event_id="github-issue-test/repo-42-created",
-        kind="github.issue.closed", ended_at="2026-07-11T00:00:00Z")
+        kind="github.issue.closed", state="closed",
+        closed_at="2026-07-11T00:00:00Z")
     webhook_shape = gh_issue_event(
         event_id="github-issue-test/repo-42-closed",
-        kind="github.issue.closed", ended_at="2026-07-11T00:00:00Z")
+        kind="github.issue.closed", state="closed",
+        closed_at="2026-07-11T00:00:00Z")
     assert _connector_content_hash(poll_shape) == _connector_content_hash(webhook_shape), (
         "two records of ONE item state must hash equal — the record id is not content"
     )
@@ -659,3 +672,402 @@ def test_a_connector_owned_source_with_no_hash_is_completed_in_place():
         )
         assert _anchor(proj, GH_URL,
                        "github-issue-test/repo-42-created")[0] == hash_
+
+
+# ── 8. producer enumeration (the round-ending decisive pin) ──────────
+#
+# The three review rounds each found a DIFFERENT producer-dependent divergence
+# (missing title; missing labels/assignees; gh-CLI casing + the action label).
+# This block ends that class of discovery: it drives every REAL producer and
+# asserts that ONE item state yields ONE digest, so a future producer that
+# diverges goes red instead of being found by the next review.
+
+class _FakeQueryResult:
+    def __init__(self):
+        self.result_set: list = []
+
+
+class _FakeGraph:
+    def query(self, *args, **kwargs):
+        return _FakeQueryResult()
+
+
+class _RecordingProj:
+    """Records `apply()` calls and no-ops `g.query` — enough to drive the REAL
+    indexer write-path methods (`GitHubIndexer._project_issue`/`_project_pr`)
+    without a database, so the REST producer is exercised, not modelled."""
+
+    def __init__(self):
+        self.applied: list = []
+        self.g = _FakeGraph()
+
+    def apply(self, record):
+        self.applied.append(record)
+
+
+def test_every_github_producer_agrees_on_one_item_state(monkeypatch):
+    """★ THE DECISIVE PIN: every REAL GitHub producer that materializes ONE
+    item state must yield ONE digest, and a genuine content change a DIFFERENT
+    one.
+
+    The producers are driven for real against GitHub's OWN wire shapes:
+    `poll_raw_issues` + `_issue_to_entities` (entity path), `_poll_issues`
+    (legacy poll), `_webhook_to_event` (webhook) and the indexer's own
+    `_project_issue`/`_project_pr` (REST). The gh-CLI fixtures use the
+    UPPERCASE `state` that `gh` actually returns (verified live — the casing
+    the previous rounds' lowercase fixture never caught).
+
+    FAILS IF any producer stops carrying a content field, re-introduces the
+    action `eventKind` into the digest, or fails to normalise state/list
+    order — i.e. it makes producer divergence impossible to land silently.
+    """
+    import json as _json
+    import subprocess as sp
+
+    from tortoise.connectors.github import GitHubConnector
+    from tortoise.indexer.github_indexer import GitHubIndexer
+
+    # ── GitHub's wire shapes for ONE issue state ──
+    ghcli_issue = {
+        "number": 42, "title": "Fix login bug", "state": "OPEN",
+        "createdAt": "2026-07-10T10:00:00Z", "closedAt": None, "url": GH_URL,
+        "labels": [{"name": "P1"}, {"name": "bug"}],
+        "assignees": [{"login": "alice"}],
+        "author": {"login": "alice"},
+    }
+    rest_issue = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL,
+        "labels": [{"name": "bug"}, {"name": "P1"}],
+        "assignees": [{"login": "alice"}],
+        "user": {"login": "alice"},
+    }
+    webhook_issue = {
+        "action": "opened",
+        "issue": {
+            "number": 42, "title": "Fix login bug", "state": "open",
+            "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+            "html_url": GH_URL,
+            "labels": [{"name": "bug"}, {"name": "P1"}],
+            "assignees": [{"login": "alice"}],
+        },
+    }
+    # ── GitHub's wire shapes for ONE PR state ──
+    ghcli_pr = {
+        "number": 7, "title": "Add auth", "state": "OPEN",
+        "createdAt": "2026-07-15T08:00:00Z", "closedAt": None,
+        "mergedAt": None, "url": PR_URL,
+        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+    }
+    rest_pr = {
+        "number": 7, "title": "Add auth", "state": "open",
+        "created_at": "2026-07-15T08:00:00Z", "closed_at": None,
+        "merged_at": None, "html_url": PR_URL,
+        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+    }
+    webhook_pr = {
+        "action": "opened",
+        "pull_request": {
+            "number": 7, "title": "Add auth", "state": "open",
+            "created_at": "2026-07-15T08:00:00Z", "closed_at": None,
+            "merged_at": None, "html_url": PR_URL,
+            "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+        },
+    }
+
+    def fake_run(args, **kwargs):
+        argv = [str(a) for a in args]
+        payload = [ghcli_pr] if argv[:2] == ["gh", "pr"] else [ghcli_issue]
+        return sp.CompletedProcess(args=args, returncode=0,
+                                   stdout=_json.dumps(payload))
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    connector = GitHubConnector(config={"repo": "test/repo"})
+
+    # ── issue producers ──
+    raw = connector.poll_raw_issues()
+    assert raw, "the entity poll must return the item"
+    entity_ev = connector._issue_to_entities(raw[0])["event"]
+    legacy_evs = connector._poll_issues()
+    webhook_ev = connector._webhook_to_event("issues", webhook_issue)
+    indexer_proj = _RecordingProj()
+    GitHubIndexer(token="t")._project_issue(None, indexer_proj, "test/repo",
+                                            rest_issue)
+    indexer_ev = next(r for r in indexer_proj.applied
+                      if r.get("type") == "EventRecorded")
+
+    issue_digests = {_connector_content_hash(e) for e in
+                     [entity_ev, *legacy_evs, webhook_ev, indexer_ev]}
+    assert len(issue_digests) == 1, (
+        f"one issue state must be one digest across every producer: "
+        f"{issue_digests!r}"
+    )
+    assert len(next(iter(issue_digests))) == 64
+
+    # ── PR producers ──
+    pr_evs = connector._poll_prs()
+    webhook_pr_ev = connector._webhook_to_event("pull_request", webhook_pr)
+    pr_proj = _RecordingProj()
+    GitHubIndexer(token="t")._project_pr(pr_proj, "test/repo", rest_pr)
+    pr_indexer_ev = next(r for r in pr_proj.applied
+                         if r.get("type") == "EventRecorded")
+    pr_digests = {_connector_content_hash(e) for e in
+                  [*pr_evs, webhook_pr_ev, pr_indexer_ev]}
+    assert len(pr_digests) == 1, (
+        f"one PR state must be one digest across every producer: {pr_digests!r}"
+    )
+
+    # ── the invariant's OTHER half: a changed item state MUST move the
+    # digest. A fix that made everything hash equal would break this. ──
+    base = _connector_content_hash(entity_ev)
+    for label, changed in (
+        ("title", gm.issue_to_event(dict(rest_issue, title="Changed"),
+                                    "test/repo")),
+        ("state", gm.issue_to_event(
+            dict(rest_issue, state="closed",
+                 closed_at="2026-07-11T00:00:00Z"), "test/repo")),
+        ("label content", gm.issue_to_event(
+            dict(rest_issue, labels=[{"name": "feature"}]), "test/repo")),
+        ("assignee membership", gm.issue_to_event(
+            dict(rest_issue, assignees=[{"login": "bob"}]), "test/repo")),
+    ):
+        assert _connector_content_hash(changed) != base, (
+            f"a changed {label} is a different item state and must change "
+            f"the digest"
+        )
+    assert _connector_content_hash(gm.pr_to_event(
+        dict(rest_pr, labels=[{"name": "feature"}]), "test/repo")) != \
+        _connector_content_hash(pr_indexer_ev), (
+        "a changed PR label content must change the digest"
+    )
+    assert _connector_content_hash(gm.pr_to_event(
+        dict(rest_pr, assignees=[{"login": "bob"}]), "test/repo")) != \
+        _connector_content_hash(pr_indexer_ev), (
+        "a changed PR assignee membership must change the digest"
+    )
+
+
+def test_uppercase_ghcli_state_normalizes_and_the_reopened_state_agrees():
+    """Findings 1 + 2 (#8019 review r3): `gh issue list --json state` returns
+    `OPEN`/`CLOSED` while REST and the webhook return lower case, and the poll
+    mints `github.issue.open` for the open state a webhook's `reopened` action
+    mints as `github.issue.reopened`. The canonical projection normalises the
+    state and the digest excludes the action label, so the same item state
+    agrees and the casing no longer breaks `endedAt`.
+
+    FAILS IF `_norm_issue` keeps the raw casing (digests differ) or if the
+    digest hashes `eventKind` (reopened differs from open)."""
+    # The uppercase fixture is what `gh` actually returns.
+    assert gm._norm_issue({"number": 1, "title": "t", "state": "CLOSED"})["state"] \
+        == "closed"
+
+    connector_prefix = "github.issue."
+    poll_open = gm.issue_to_event(
+        {"number": 42, "title": "Fix login bug", "state": "OPEN",
+         "createdAt": "2026-07-10T10:00:00Z", "closedAt": None, "url": GH_URL},
+        "test/repo")
+    from tortoise.connectors.github import GitHubConnector
+    webhook_reopened = GitHubConnector(config={"repo": "test/repo"}) \
+        ._webhook_to_event("issues", {
+            "action": "reopened",
+            "issue": {"number": 42, "title": "Fix login bug", "state": "open",
+                      "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+                      "html_url": GH_URL},
+        })
+    assert poll_open["eventKind"] == connector_prefix + "open"
+    assert webhook_reopened["eventKind"] == connector_prefix + "reopened"
+    assert _connector_content_hash(poll_open) == \
+        _connector_content_hash(webhook_reopened), (
+        "the reopened action and the open poll observe the SAME item state"
+    )
+
+    gh_closed = gm.issue_to_event(
+        {"number": 42, "title": "Fix login bug", "state": "CLOSED",
+         "createdAt": "2026-07-10T10:00:00Z",
+         "closedAt": "2026-07-11T00:00:00Z", "url": GH_URL}, "test/repo")
+    rest_closed = gm.issue_to_event(
+        {"number": 42, "title": "Fix login bug", "state": "closed",
+         "created_at": "2026-07-10T10:00:00Z",
+         "closed_at": "2026-07-11T00:00:00Z", "html_url": GH_URL}, "test/repo")
+    assert gh_closed["eventKind"] == connector_prefix + "closed"
+    assert gh_closed["endedAt"] == "2026-07-11T00:00:00Z", (
+        "the uppercase gh-CLI close state must set endedAt"
+    )
+    assert _connector_content_hash(gh_closed) == \
+        _connector_content_hash(rest_closed)
+
+
+def test_a_pr_label_or_assignee_change_advances_the_version():
+    """Finding 3 (#8019 review r3): `pr_to_event` carried no labels/assignees
+    and `_poll_prs` fetched none, so a PR label (`bug`→`feature`) or assignee
+    (`alice`→`bob`) change hashed EQUAL and the derivation read `current` on a
+    changed item — the R1-F2 mirror fixed for issues only.
+
+    FAILS IF `pr_to_event` omits the lists from the projection: both changes
+    hash equal and the Source version does not move."""
+    base = {
+        "number": 7, "title": "Add auth", "state": "open",
+        "created_at": "2026-07-15T08:00:00Z", "closed_at": None,
+        "merged_at": None, "html_url": PR_URL,
+    }
+    a = gm.pr_to_event(dict(base, labels=[{"name": "bug"}],
+                            assignees=[{"login": "alice"}]), "test/repo")
+    moved_label = gm.pr_to_event(dict(base, labels=[{"name": "feature"}],
+                                      assignees=[{"login": "alice"}]),
+                                 "test/repo")
+    moved_assignee = gm.pr_to_event(dict(base, labels=[{"name": "bug"}],
+                                         assignees=[{"login": "bob"}]),
+                                    "test/repo")
+    assert _connector_content_hash(a) != _connector_content_hash(moved_label)
+    assert _connector_content_hash(a) != _connector_content_hash(moved_assignee)
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        first = _source(proj, PR_URL)
+        proj.apply(moved_label)
+        second = _source(proj, PR_URL)
+        assert second[0] != first[0]
+        assert second[1] == first[1] + 1, (
+            f"a PR label change must advance the ordinal: {first[1]} -> {second[1]}"
+        )
+
+
+def test_the_poll_fetches_pr_labels_and_assignees(monkeypatch):
+    """Finding 3, fetch layer (#8019 review r3): the digest only covers what
+    the producer fetches, so `_poll_prs` must request the fields the canonical
+    projection reads. Pinned at the argv because the two producer paths share
+    the mapper.
+
+    FAILS IF `_poll_prs`'s `--json` field list omits `labels`/`assignees`."""
+    import subprocess as sp
+
+    from tortoise.connectors.github import GitHubConnector
+
+    seen: list = []
+
+    def fake_run(args, **kwargs):
+        seen.append(list(args))
+        return sp.CompletedProcess(args=args, returncode=0, stdout="[]")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    GitHubConnector(config={"repo": "test/repo"}).poll()
+    pr_cmds = [c for c in seen if "pr" in c]
+    assert pr_cmds, "poll must fetch PRs"
+    fields = " ".join(pr_cmds[0])
+    assert "labels" in fields and "assignees" in fields, (
+        f"the PR poll producer must request the content fields the digest "
+        f"covers: {pr_cmds[0]!r}"
+    )
+
+
+def test_a_merged_pr_is_a_content_field_not_an_eventkind_inference():
+    """Finding 2's warning (#8019 review r3): once `eventKind` is outside the
+    digest, the PR `merged` distinction must be carried by a REAL field or a
+    merged PR and a closed-unmerged PR hash equal. `gh pr list --json state`
+    reports `MERGED`, which is not a state REST ever reports — so the
+    projection folds it onto `closed` and carries `merged` alongside.
+
+    FAILS IF `pr_to_event` hashes only `state`: both PRs are `closed` and the
+    digests collide."""
+    base = {"number": 7, "title": "Add auth",
+            "created_at": "2026-07-15T08:00:00Z",
+            "closed_at": "2026-07-16T10:00:00Z", "html_url": PR_URL}
+    merged = gm.pr_to_event(dict(base, state="closed",
+                                 merged_at="2026-07-16T10:00:00Z"), "test/repo")
+    unmerged = gm.pr_to_event(dict(base, state="closed", merged_at=None),
+                              "test/repo")
+    assert merged["eventKind"] == "github.pr.merged"
+    assert unmerged["eventKind"] == "github.pr.closed"
+    assert _connector_content_hash(merged) != _connector_content_hash(unmerged), (
+        "a merged PR and a closed-unmerged PR are different item states"
+    )
+
+
+def test_ghcli_uppercase_merged_pr_state_folds_onto_rest_closed():
+    """`gh pr list --json state` returns `MERGED` for a merged PR; REST returns
+    `closed` with `merged_at` set. Both describe ONE item state, so the
+    canonical projection must fold `MERGED` onto `closed`.
+
+    FAILS IF `_norm_pr` only lower-cases: the gh-CLI state `merged` differs from
+    REST's `closed` and one merged PR hashes two ways."""
+    gh = gm.pr_to_event({
+        "number": 7, "title": "Add auth", "state": "MERGED",
+        "createdAt": "2026-07-15T08:00:00Z",
+        "closedAt": "2026-07-16T10:00:00Z",
+        "mergedAt": "2026-07-16T10:00:00Z", "url": PR_URL,
+    }, "test/repo")
+    rest = gm.pr_to_event({
+        "number": 7, "title": "Add auth", "state": "closed",
+        "created_at": "2026-07-15T08:00:00Z",
+        "closed_at": "2026-07-16T10:00:00Z",
+        "merged_at": "2026-07-16T10:00:00Z", "html_url": PR_URL,
+    }, "test/repo")
+    assert _connector_content_hash(gh) == _connector_content_hash(rest)
+
+
+def test_github_content_rides_the_projection_not_the_event_envelope():
+    """Finding 4 (#8019 review r3): the content fields must not grow the Event
+    node's property surface. They ride the `itemState` projection — a dict,
+    which `_is_persistable_prop_value` refuses to write — so the Event envelope
+    carries no `title`/`labels`/`assignees` at all.
+
+    FAILS IF a producer puts the content fields back on the Event envelope, or
+    if `_EVENT_HANDLED` stops naming the projection carrier."""
+    issue = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL,
+        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+    }
+    ev = gm.issue_to_event(issue, "test/repo")
+    assert isinstance(ev.get("itemState"), dict)
+    envelope = {"title", "labels", "assignees"} & set(ev)
+    assert not envelope, (
+        f"content must ride the projection, not the Event envelope: {envelope!r}"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(ev)
+        props = proj.g.query(
+            "MATCH (e:Event {eventId: $e}) RETURN properties(e)",
+            params={"e": ev["eventId"]},
+        ).result_set[0][0]
+        leaked = {"itemState", "title", "labels", "assignees"} & set(props)
+        assert not leaked, f"content leaked onto the Event node: {sorted(leaked)}"
+
+
+def test_backfill_legacy_closed_stays_honestly_unanchored():
+    """Producer map (#8019 review r3): `backfill_legacy_closed` re-mints a
+    `-closed` sibling for a pre-existing `-created` Event. It carries no
+    per-item URL, so the Source it materializes is a container-level fallback
+    and stays honestly unanchored — no digest, no version.
+
+    FAILS IF the version write stops being gated on a real per-item URL."""
+    from tortoise.indexer.github_indexer import GitHubIndexer
+
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "eventId": "github-issue-test/repo-42-created",
+            "eventKind": "github.issue.closed",
+            "subject": "issue:test/repo#42",
+            "object": "test/repo#42",
+            "startedAt": "2026-07-10T10:00:00Z",
+            "endedAt": "2026-07-11T00:00:00Z",
+            "source": "github:test/repo",
+            "sourceKind": "github_issue",
+            "participants": [],
+        })
+        minted = GitHubIndexer(token="t").backfill_legacy_closed(proj)
+        assert minted == 1
+        stored = _source(proj, "github:test/repo")
+        assert stored is None or stored == ["", None], (
+            f"a container-level backfill Source must stay version-free, got {stored!r}"
+        )
+        anchored = _anchor(proj, "github:test/repo",
+                           "github-issue-test/repo-42-closed")
+        assert anchored is None or anchored[0] is None, (
+            f"the backfilled derivation must anchor nothing, got {anchored!r}"
+        )

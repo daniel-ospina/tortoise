@@ -59,6 +59,34 @@ _MAX_BODY_CHARS = 5000
 _MAX_CONTENT_CHARS = _MAX_BODY_CHARS * 2
 
 
+def _label_names(labels) -> list[str]:
+    """A label list → SORTED names (the list is semantically unordered).
+
+    REST, GraphQL, `gh --json` and the webhook each return labels in their own
+    order, so canonicalising here (the one place the shapes converge) keeps a
+    mere reorder or a producer switch from advancing the `contentHash` version
+    of an UNCHANGED item.
+    """
+    labels = labels or []
+    if labels and isinstance(labels[0], dict):
+        names = [str(label.get("name", "") or "") for label in labels]
+    else:
+        names = [str(label) for label in labels]
+    names.sort()
+    return names
+
+
+def _assignee_logins(assignees) -> list[str]:
+    """An assignee list → SORTED logins (same ordering contract as labels)."""
+    assignees = assignees or []
+    if assignees and isinstance(assignees[0], dict):
+        logins = [str(a.get("login", "") or "") for a in assignees]
+    else:
+        logins = [str(a) for a in assignees]
+    logins.sort()
+    return logins
+
+
 def _norm_issue(issue: dict) -> dict:
     """Normalize gh-CLI (camelCase) + REST (snake_case) issue shapes.
 
@@ -71,26 +99,8 @@ def _norm_issue(issue: dict) -> dict:
                 return issue[k]
         return default
 
-    labels = _get("labels", default=None) or []
-    if labels and isinstance(labels[0], dict):
-        label_names = [str(label.get("name", "") or "") for label in labels]
-    else:
-        label_names = [str(label) for label in labels]
-
-    assignees = _get("assignees", default=None) or []
-    if assignees and isinstance(assignees[0], dict):
-        assignee_logins = [str(a.get("login", "") or "") for a in assignees]
-    else:
-        assignee_logins = [str(a) for a in assignees]
-
-    # #8019 (P3): a label/assignee list is semantically UNORDERED — REST,
-    # GraphQL, `gh --json` and the webhook each return it in their own order.
-    # Canonicalise to a sorted list here (the one place the shapes converge),
-    # so a reorder or a producer switch cannot advance the `contentHash`
-    # version of an UNCHANGED item — the false stale this digest excludes the
-    # record id for.
-    label_names.sort()
-    assignee_logins.sort()
+    label_names = _label_names(_get("labels", default=None))
+    assignee_logins = _assignee_logins(_get("assignees", default=None))
 
     author = _get("author", "user", default=None)
     if isinstance(author, dict):
@@ -109,7 +119,11 @@ def _norm_issue(issue: dict) -> dict:
     return {
         "number": number,
         "title": str(_get("title", default="") or ""),
-        "state": str(_get("state", default="open") or "open"),
+        # #8019: `gh issue list --json state` returns `OPEN`/`CLOSED` while
+        # REST and the webhook return lower case. Lower-casing here — the one
+        # place the shapes converge — is what lets the digest, the `endedAt`
+        # gate and every closed/reopen transition agree across producers.
+        "state": str(_get("state", default="open") or "open").strip().lower(),
         "created_at": str(_get("createdAt", "created_at", default="") or ""),
         "closed_at": closed_at or None,
         "updated_at": str(_get("updatedAt", "updated_at", default="") or ""),
@@ -136,14 +150,59 @@ def _norm_pr(pr: dict) -> dict:
         number = 0
     closed_at = str(_get("closedAt", "closed_at", default="") or "")
     merged_at = str(_get("mergedAt", "merged_at", default="") or "")
+    # #8019: a PR's `state` is producer-dependent in exactly the same way an
+    # issue's is — `gh pr list --json state` returns `OPEN`/`CLOSED`/`MERGED`
+    # (GraphQL `PullRequestState`) while REST and the webhook return
+    # `open`/`closed` — and `MERGED` is not a state REST ever reports (a merged
+    # PR is `closed` there, distinguished by `merged_at`). Lower-case and fold
+    # the `MERGED` state onto `closed` here, carrying the distinction in the
+    # dedicated `merged` field, so one merged PR hashes the same whichever
+    # producer observed it.
+    raw_state = str(_get("state", default="open") or "open").strip().lower()
+    merged = bool(merged_at) or raw_state == "merged"
+    state = "closed" if merged else raw_state
     return {
         "number": number,
         "title": str(_get("title", default="") or ""),
-        "state": str(_get("state", default="open") or "open"),
+        "state": state,
         "created_at": str(_get("createdAt", "created_at", default="") or ""),
         "closed_at": closed_at or None,
         "merged_at": merged_at or None,
+        "merged": merged,
+        "labels": _label_names(_get("labels", default=None)),
+        "assignees": _assignee_logins(_get("assignees", default=None)),
         "url": str(_get("url", "html_url", default="") or ""),
+    }
+
+
+# ── The canonical item-state projection (the digest's ONLY input) ──
+
+def _item_state(n: dict, *, kind: str) -> dict:
+    """The canonical item-state projection a connector content version is a
+    function of — the ONE definition, in the module where every GitHub
+    producer's shapes converge.
+
+    Every GitHub producer (entity poll, legacy poll, webhook, REST/indexer)
+    builds its Event through `_norm_issue`/`_norm_pr` and these mappers, so the
+    digest (`tortoise.projection.entities._connector_content_hash`) reads THIS
+    projection and never the producer's payload: its extra keys, the action
+    label it stamped on `eventKind`, and the id it minted are structurally
+    unable to reach the version. The projection carries `state` (lower-cased by
+    the normalisers) and, for PRs, `merged` as its own field — the signal that
+    used to ride only in the producer-stamped `eventKind` — so excluding that
+    label cannot make two genuinely different states hash equal.
+    """
+    return {
+        "kind": kind,
+        "number": n["number"],
+        "title": n["title"],
+        "state": n["state"],
+        "labels": n["labels"],
+        "assignees": n["assignees"],
+        "created_at": n["created_at"],
+        "closed_at": n["closed_at"],
+        "merged": bool(n.get("merged")),
+        "merged_at": n.get("merged_at"),
     }
 
 
@@ -217,16 +276,11 @@ def issue_to_event(issue: dict, repo: str,
         # `object` references the pm:issue Object by NAME — the projection's
         # produces-edge wiring matches Object.name (#1155).
         "object": f"{repo}#{n['number']}",
-        # #8019: the item's CONTENT rides the event so the connector Source's
-        # `contentHash` (`_connector_content_hash`) covers it. `object` above is
-        # the Object NAME the produces-edge wires on, not content — so without
-        # these, a title-only or label/assignee change left the digest
-        # unchanged and the derivation reading `current` on a changed item,
-        # while `pr_to_event` (whose title IS its `object`) advanced. The body
+        # #8019: the digest's input is the canonical item-state projection, not
+        # the producer-shaped event envelope — so the title/labels/assignees
+        # content rides HERE and the record id / action label never do. The body
         # is absent on purpose: the poll path does not fetch it (#8010).
-        "title": n["title"],
-        "labels": n["labels"],
-        "assignees": n["assignees"],
+        "itemState": _item_state(n, kind="issue"),
         "startedAt": n["created_at"],
         "endedAt": n["closed_at"] if state == "closed" else None,
         "source": f"github:{repo}",
@@ -241,13 +295,17 @@ def pr_to_event(pr: dict, repo: str) -> dict | None:
     n = _norm_pr(pr)
     if not n["title"] or not n["number"]:
         return None
-    kind = "github.pr.merged" if n["merged_at"] else f"github.pr.{n['state']}"
+    kind = "github.pr.merged" if n["merged"] else f"github.pr.{n['state']}"
     return {
         "type": "EventRecorded",
         "eventId": f"github-pr-{repo}-{n['number']}",
         "eventKind": kind,
         "subject": f"pr:{repo}#{n['number']}",
         "object": n["title"],
+        # #8019: same canonical projection as the issue mapper — the PR's
+        # title/labels/assignees and its `merged` distinction are content, so a
+        # PR label/assignee change (the R1-F2 mirror) now moves the digest.
+        "itemState": _item_state(n, kind="pr"),
         "startedAt": n["created_at"],
         "endedAt": n["merged_at"] or (n["closed_at"] if n["state"] == "closed" else None),
         "source": f"github:{repo}",

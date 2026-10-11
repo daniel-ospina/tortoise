@@ -179,7 +179,8 @@ class GitHubConnector:
                 "--repo", self.repo,
                 "--state", self.state,
                 "--limit", str(self.limit),
-                "--json", "number,title,state,createdAt,closedAt,mergedAt,url",
+                "--json", "number,title,state,createdAt,closedAt,mergedAt,url,"
+                          "labels,assignees",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -431,12 +432,12 @@ class GitHubConnector:
         if event_type == "issues":
             issue = payload.get("issue", {})
             action = payload.get("action", "")
-            # #8019: `labels`/`assignees` ride the event because
-            # `_connector_content_hash` covers them — and the entity/indexer
-            # producers supply the real lists. Omitting them here would default
-            # to `[]` (`_norm_issue`) and hash one unchanged item two ways, so a
-            # poll↔webhook alternation would advance the Source version with no
-            # content change. GitHub includes both in the webhook `issue` object.
+            # #8019: the digest's input is the canonical item-state projection,
+            # and the entity/indexer producers supply the real label/assignee
+            # lists, so the webhook must carry them too — otherwise `_norm_issue`
+            # defaults the absent lists to `[]` and one unchanged item hashes
+            # two ways, advancing the version on a producer switch. GitHub
+            # includes both in the webhook `issue` object.
             content = {
                 "labels": issue.get("labels"),
                 "assignees": issue.get("assignees"),
@@ -471,6 +472,10 @@ class GitHubConnector:
                 "closedAt": pr.get("closed_at"),
                 "mergedAt": pr.get("merged_at"),
                 "html_url": pr.get("html_url", ""),
+                # #8019: carry the PR's label/assignee lists so the webhook's
+                # digest matches the poll/REST producers' for one item state.
+                "labels": pr.get("labels"),
+                "assignees": pr.get("assignees"),
             })
         return None
 
