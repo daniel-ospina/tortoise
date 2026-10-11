@@ -37,13 +37,21 @@ the VET pass, per-item vs per-batch judgment) now moves a **customer-visible met
 reason to prefer measurable steps over inferred ones: §16.2's rule (a claim must be checkable) is now also a billing
 surface.
 
-**⛔ Where the measurement is — PLANNED, not present.** The capture lane does **not** record token counters on `main`
-today: of its capture-lane columns, the per-org ledger carries only `capture_calls` and `capture_cost_usd` (the
-ask-lane counters `ask_calls`/`ask_tokens_in`/`ask_tokens_out` are separate and already present). **`#5045` (PR #5697, unmerged) will
-add `capture_tokens_in`/`capture_tokens_out`**; the **ask** lane already records `ask_tokens_in/out`. When the
-capture columns land, **the spend ceiling stays blind to them by construction** — `metering_cohort_spend` and
-`get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding token counters cannot change the
-cap's behaviour. That separation is deliberate: this ruling is about the **unit**, and the cap is a separate decision.
+**✅ Where the measurement is — PRESENT (this paragraph said PLANNED; re-measured 2026-10-11, `#3840`).** The
+capture lane **does** record token counters on `main` now: the per-org ledger carries `capture_tokens_in` /
+`capture_tokens_out` (added by `supabase/migrations/20261001000001_metering_capture_tokens.sql`) beside
+`capture_calls` / `capture_cost_usd`, written by `metering.record_capture_usage` from the **same** counts the
+analytics row carries — `#5045` / PR #5697, **merged** (commit `d3a0851a0`). The **ask** lane separately records
+`ask_tokens_in/out`. The **spend ceiling stays blind to the token counters by construction** —
+`metering_cohort_spend` and `get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding
+token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
+and the cap is a separate decision.
+
+**⚠️ Residual — the token counters have no production reader.** `get_current_usage` reads write-ops only, so
+"tokens per team per month" is written but not yet readable from code (the `#4493` lesson: a recorded dimension
+with no reader reads as a measurement that does not exist). The metric set itself — the per-call metrics, the
+disclosure counters, the attribution and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md`
+(`#3840`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
