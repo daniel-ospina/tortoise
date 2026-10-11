@@ -533,6 +533,9 @@ def test_semantic_kernel_rendered_prompt_is_bounded():
     "not-a-dict",
     {"messages": [None]},
     {"messages": [_Msg("human", [{"type": "text", "text": None}])]},
+    {"messages": [_Msg("human", [{"type": "text", "text": 123}])]},
+    {"messages": [_Msg("human", [{"type": "text", "text": ["x"]}])]},
+    {"messages": [_Msg("human", 12)]},
     {"messages": [_Msg("human", {"not": "a string"})]},
 ])
 def test_langgraph_malformed_state_never_raises(state):
@@ -553,6 +556,28 @@ def test_adk_model_turns_are_normalized_not_dropped():
                            ("user", "a question")]))
     assert [t["role"] for t in seen["window"]] == ["user", "assistant", "user"]
     assert seen["window"][1]["content"] == "assistant reply"
+
+
+def test_non_string_content_is_coerced_not_raised():
+    """Both window builders are TOTAL: a non-str ``text``/``content`` becomes
+    text rather than a ``TypeError`` reaching the app's turn."""
+    class _BadPart:
+        text: ClassVar[int] = 123
+
+    class _BadContent:
+        role: ClassVar[str] = "user"
+        parts: ClassVar[list] = [_BadPart()]
+
+    class _BadRequest:
+        contents: ClassVar[list] = [_BadContent()]
+
+    reflex, seen = _spy()
+    adk_before_model_callback(reflex)(None, _BadRequest())
+    assert seen["window"] == [{"role": "user", "content": "123"}]
+
+    reflex2, seen2 = _spy()
+    _lg(reflex2)({"messages": [_Msg("human", [{"type": "text", "text": 123}])]})
+    assert seen2["window"] == [{"role": "user", "content": "123"}]
 
 
 def test_empty_window_never_calls_the_reflex():
@@ -618,13 +643,19 @@ class _Redirector(BaseHTTPRequestHandler):
 
 
 class _SinkRecorder(BaseHTTPRequestHandler):
-    """The redirect target: records anything that reaches it."""
+    """The redirect target: records anything that reaches it, ANY method.
+
+    ``do_GET`` matters: urllib rewrites a 302-POST into a **GET** on the
+    redirected request, so a POST-only sink never sees the forwarded request and
+    the leak test passes vacuously against the vulnerable opener.
+    """
 
     seen: ClassVar[list] = []
 
-    def do_POST(self):
+    def _record(self):
         length = int(self.headers.get("Content-Length") or 0)
         type(self).seen.append({
+            "method": self.command,
             "path": self.path,
             "auth": self.headers.get("Authorization"),
             "body": self.rfile.read(length),
@@ -636,6 +667,9 @@ class _SinkRecorder(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    do_POST = _record
+    do_GET = _record
 
     def log_message(self, *args):
         return None
@@ -694,7 +728,9 @@ def test_http_reflex_refuses_a_redirect_and_never_forwards_the_credential():
             thread.join(timeout=5)
 
     assert out == {}, "a redirect must inject nothing, not the target's body"
-    assert _SinkRecorder.seen == [], "the credential was forwarded to another host"
+    assert _SinkRecorder.seen == [], (
+        "the credential was forwarded to another host (note: urllib rewrites the "
+        "redirected request to GET, so the sink must record EVERY method)")
 
 
 # ── Opt-in + dependency-free (W4 user-exposure gate) ───────────────────────

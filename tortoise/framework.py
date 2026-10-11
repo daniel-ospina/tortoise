@@ -246,12 +246,13 @@ def _window_from_adk(llm_request: Any) -> list[dict]:
     ``user`` / ``assistant`` / ``system``, so ``model`` is normalized the same
     way the LangGraph adapter normalizes ``ai``. Without it every assistant turn
     is filtered out by :func:`_bounded_window` and the reflex sees a user-only
-    window.
+    window. A part's ``text`` is coerced with ``str``, so a non-string value
+    yields a turn rather than a raise.
     """
     turns = []
     for content in getattr(llm_request, "contents", None) or []:
         text = "".join(
-            getattr(part, "text", "") or ""
+            str(getattr(part, "text", "") or "")
             for part in (getattr(content, "parts", None) or [])
         )
         role = getattr(content, "role", None) or "user"
@@ -268,11 +269,14 @@ _LANGGRAPH_ROLES = {
 def _window_from_langgraph(state: Any) -> list[dict]:
     """LangGraph state (``{"messages": [...]}``) → window.
 
-    TOTAL by construction: a state that does not match the expected shape
-    yields only the turns it CAN yield and never raises. The caller also keeps
-    this inside its fail-open boundary — the two together are what make the
-    module's "never raises into the app's turn" contract hold for a framework
-    object of any shape, not just the ones with a test.
+    TOTAL by construction: neither a wrong-shaped state (a non-dict state, a
+    non-list ``messages``, a message missing its attributes) nor a malformed
+    content passes through as a raise. Content is flattened with ``str`` for
+    exactly that reason — a multimodal block whose ``text`` is not a string, or
+    a message whose ``content`` is not, becomes text rather than a ``TypeError``.
+    The caller still keeps this inside its fail-open boundary: totality here is
+    what makes the module's "never raises into the app's turn" contract hold for
+    an object of any shape, not just the shapes with a test.
     """
     messages = state.get("messages") if isinstance(state, dict) else None
     if not isinstance(messages, (list, tuple)):
@@ -283,7 +287,7 @@ def _window_from_langgraph(state: Any) -> list[dict]:
         content = getattr(message, "content", None)
         if isinstance(content, list):  # multimodal content blocks
             content = "".join(
-                (block.get("text") or "")
+                str(block.get("text") or "")
                 for block in content if isinstance(block, dict)
             )
         turns.append({
