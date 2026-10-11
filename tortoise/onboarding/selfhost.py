@@ -379,6 +379,15 @@ def observe_selfhost_write(*, decision_observed: bool = False,
         node = _state.read_onboarding_node(proj, org_id)
         if node is not None and node.get("status") == _state.STATUS_COMPLETE:
             return  # already complete — nothing left to observe
+        if node is None:
+            # The node is ABSENT and the step writes below create it on write.
+            # Go through the same seam the seed uses first, so fork='self' is
+            # pinned: a create-on-write birth leaves `fork` unset, and because
+            # `fork` is set-once (`ON CREATE SET`) a later successful init
+            # cannot repair it — the node would stay forked-less forever and
+            # the fork card would render on the mode that must never show it
+            # (#2007). Idempotent no-op when the node exists.
+            ensure_selfhost_onboarding(sdk)
         observed = list(_WRITE_OBSERVED_STEPS)
         if decision_observed:
             observed.append("decide-completed")

@@ -393,6 +393,11 @@ class TestDecide:
         assert set(state["completed_steps"]) == {
             "team-named", "harness-connected", "first-points-filed",
             "decide-completed"}
+        # #2007: this is the node-ABSENT path — no init and no seed ran, so the
+        # step writes are what create the node. It must still be born
+        # fork='self' (the create-on-write seam would otherwise leave `fork`
+        # unset, permanently, since `fork` is set-once).
+        assert state["fork"] == "self"
 
 
 # ── 4. fork='self' / no fork card ───────────────────────────
