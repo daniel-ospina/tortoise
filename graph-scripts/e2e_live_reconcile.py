@@ -24,10 +24,11 @@ Cadence: weekly (Mon 03:00 UTC) via .github/workflows/e2e-live-reconcile.yml
 monitor's ~16 rows/day rate (#2140's 222 in ~14 days) is caught within a week
 of onset at ~1/10th the #2140 scale (~100 rows) instead of weeks-unnoticed.
 On detection the workflow auto-files an issue with the counts (#2144's
-permissions/curl pattern); this script only computes them. Known behavior:
-rc=1/rc=2 auto-file a fresh issue per failing run with no dedup against open
-issues (matches the welcome-e2e-monitor precedent) — a stale-issue cleanup is
-out of scope for #2189.
+permissions/curl pattern); this script only computes them. Known behavior
+(#3907): the workflow files ONE issue per finding — a stable title is the dedupe
+key, and a recurrence is recorded as a `Recurrence #N` comment on the open issue
+rather than a duplicate; a failed dedupe search fails the step loudly. A
+stale-issue cleanup is out of scope for #2189.
 
 SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
 "a deaf monitor is not a detection layer"):
@@ -41,7 +42,7 @@ SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
     The #2146 historical red-window (2026-08-19 -> 2026-09-03) is meaningless
     for detection — a NEW bleed is by definition recent, so any row in the
     test namespace is a signal. Rows deviating from the strict guard shape
-    `^e2e-live-[0-9a-f]{8}@premise-labs.dev$` still fail the check (they are
+    `^e2e-live-[0-9a-f]{8}@premise-labs\\.dev$` still fail the check (they are
     inside the test namespace) and are surfaced as shape_clean=false in the
     --json output — the 2146 cleanup script's DEFAULT delete set is the strict
     shape WITHIN the historical window only, so an operator reviews before
@@ -334,11 +335,10 @@ def main() -> int:
             log(
                 f"[reconcile]   NOTE: {_plural(n_residue, 'row')} in the test namespace "
                 f"{'deviates' if n_residue == 1 else 'deviate'}"
-                " from the 2146 guard email shape "
-                "^e2e-live-[0-9a-f]{8}@premise-labs.dev$ — the cleanup script skips "
-                f"{'it' if n_residue == 1 else 'them'} unless run with --include-residue "
-                "(after reviewing the residue list it prints); --json carries the "
-                "full emails"
+                f" from the 2146 guard email shape {EMAIL_RE.pattern} — the cleanup "
+                f"script skips {'it' if n_residue == 1 else 'them'} unless run with "
+                "--include-residue (after reviewing the residue list it prints); "
+                "--json carries the full emails"
             )
         rc = 1
 

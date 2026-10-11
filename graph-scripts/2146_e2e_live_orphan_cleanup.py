@@ -138,7 +138,8 @@ Only a recurrence that mints Guard-A teams would overwrite it, which is why
 using a separate --manifest is unconditional.
   uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \\
       --phase enumerate --all-e2e-live \\
-      --manifest 2146-recurrence.manifest.json   # review BOTH printed lists
+      --manifest 2146-recurrence.manifest.json   # review the manifest's delete
+                                                 # list AND the printed residue
   rm -f 2146-recurrence.manifest.json.dryrun     # ephemeral (see below)
   # dry-run to a SCRATCH manifest: a dry-run re-enumerates and writes its own
   # --manifest, and for a residue TEAM that write would leave prior_n>0 with
@@ -438,9 +439,9 @@ def phase_enumerate(args: argparse.Namespace, runner) -> dict:
     # #5971: the clobber guard's input is the GUARD-A enumeration, captured BEFORE
     # any promotion. Promoting a residue TEAM makes `teams` non-empty, and a guard
     # that read the promoted list would then overwrite a prior manifest holding
-    # team graph names — silently discarding the FalkorDB companion's only drop
-    # record, which is the failure the guard exists to prevent. So record the
-    # pre-promotion count for `main()` to test.
+    # team graph names — silently discarding the drop record the FalkorDB
+    # companion reads, which is the failure the guard exists to prevent. So
+    # record the pre-promotion count for `main()` to test.
     guard_a_teams = len(teams)
     if args.include_residue:
         # Explicit, review-gated inclusion (the --all-e2e-live shape). The two sets
