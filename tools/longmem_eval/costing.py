@@ -444,8 +444,9 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     disclosures ride it: ``partial_captures`` (the capture's tokens are a
     floor — unmetered, #3824-unrolled, a metered call reporting a charge but
     no token field, or a stored value the reader rejected),
-    ``tokenless_captures`` (calls were metered but carried no token field at
-    all, so the 0 is an absence, not a tiny extraction) and
+    ``tokenless_captures`` (calls were metered yet produced no usable token
+    count — absent, zero, or rejected — so the 0 is an absence, not a tiny
+    extraction) and
     ``invalid_token_captures`` (a negative or non-integral stored count,
     rejected rather than shaped — #5854's reject-don't-shape rule on the
     reader side); ``lower_bound`` is true when any capture's figure is a
@@ -637,13 +638,6 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         # #3840 disclosure, the token-side mirror of ``unpriced``: the token
         # count is a FLOOR whenever we know a call happened that we could not
         # see the tokens of — an unmetered/timeout attempt, an #3824 unrolled
-        # call, or (only when it reported a charge) a usage-less one. A
-        # capture whose calls were all metered but carried no token field is
-        # the same absence wearing a 0, so it is counted separately rather
-        # than left to deflate p50 as if it were a genuinely tiny extraction.
-        # #3840 disclosure, the token-side mirror of ``unpriced``: the token
-        # count is a FLOOR whenever we know a call happened that we could not
-        # see the tokens of — an unmetered/timeout attempt, an #3824 unrolled
         # call, a METERED call that carried a charge but no token field (the
         # mixed case ``_lane_tokens_absent`` finds, which no attempt-based
         # counter can see), or a token value the reader rejected (a negative
@@ -654,9 +648,13 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             tokens_lower_bound += 1
         if sess["invalid_tokens"]:
             invalid_token_captures += 1
-        # A capture whose calls were all metered but carried no token field
-        # at all — an absence wearing a 0, counted separately rather than
-        # left to deflate p50 as a genuinely tiny extraction.
+        # A capture whose calls were all metered yet produced NO usable token
+        # count — absent, an honest zero, or rejected. An absence wearing a 0,
+        # counted separately rather than left to deflate p50 as a genuinely
+        # tiny extraction. It CAN overlap ``invalid_token_captures`` (a
+        # rejected value with no other usable count in the capture is both; a
+        # rejected value beside a usable one is only invalid), so the rendered
+        # wording must not claim "no token field" for a capture that had one.
         if sess["measured"] > 0 and session_tokens == 0:
             tokenless_captures += 1
         if sess["unpriced"]:
@@ -748,9 +746,14 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             # #3824-unrolled attempt, a metered call that reported a charge
             # but no token field, or a value the reader rejected.
             "partial_captures": tokens_lower_bound,
-            # Captures whose calls were all metered but carried no token
-            # field at all — an absence wearing a 0, disclosed rather than
-            # left to deflate p50 as a genuinely tiny extraction.
+            # Captures whose calls were all metered yet produced NO usable
+            # token count (the field was absent, was an honest zero, or was
+            # rejected). An absence wearing a 0, disclosed rather than left
+            # to deflate p50 as a genuinely tiny extraction. A SUBSET of
+            # ``partial_captures``; it CAN overlap ``invalid_token_captures``
+            # (a rejected value with no other usable count is both), which is
+            # why the rendered cause says "no usable token count" and not
+            # "no token field".
             "tokenless_captures": tokenless_captures,
             # Captures carrying a token value the reader REJECTED (a negative
             # or a non-integral float — #5854's reject-don't-shape rule

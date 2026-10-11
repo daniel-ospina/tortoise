@@ -3689,6 +3689,13 @@ def test_a_negative_stored_token_is_rejected_and_disclosed():
     assert tokens["lower_bound"] is True
     # the valid halves still count; the rejected halves are simply absent
     assert tokens["total"] == 400
+    # A rejected value CAN be counted in BOTH disclosure counters (a capture
+    # with no other usable count is tokenless AND invalid) — so the rendered
+    # causes must not contradict each other about the same capture. The report
+    # says "no usable token count" rather than "no token field" for exactly
+    # this reason. A rejected value beside a usable one is only invalid.
+    assert tokens["tokenless_captures"] >= 1
+    assert tokens["partial_captures"] >= 1
 
 
 def test_a_metered_call_with_a_charge_but_no_tokens_is_a_floor():

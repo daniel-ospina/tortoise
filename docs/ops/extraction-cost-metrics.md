@@ -95,8 +95,10 @@ carries the `[NOT additive]` marker.
   Three disclosures ride the token block: `partial_captures` (a call happened
   whose tokens we could not see — an unmetered timeout, an unrolled call, a
   metered call that reported a charge but no token field, or a stored value the
-  reader rejected), `tokenless_captures` (calls were metered but carried no
-  token field at all, so the 0 is an absence rather than a tiny extraction) and
+  reader rejected), `tokenless_captures` (calls were metered yet produced no
+  usable token count — the field was absent, was an honest zero, or was
+  rejected; so the 0 is an absence rather than a tiny extraction, and it
+  overlaps `invalid_token_captures`) and
   `invalid_token_captures` (a negative or non-integral stored count — rejected
   rather than truncated or sign-flipped, the reader half of `#5854`).
   `lower_bound` is true when any capture's figure is a floor.

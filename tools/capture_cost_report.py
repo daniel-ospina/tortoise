@@ -50,7 +50,8 @@ as the ``$`` percentiles so the two reads can never describe different
 captures. Three disclosures ride the token block, because a token count we
 could not see must never read as a tiny extraction: ``partial_captures`` (a
 call happened whose tokens we could not see), ``tokenless_captures`` (calls
-were metered but carried no token field at all) and
+were metered yet produced no usable token count — absent, zero or rejected; it
+overlaps ``invalid_token_captures``) and
 ``invalid_token_captures`` (a negative or non-integral stored count, rejected
 rather than shaped — #5854's rule on the reader side). This is calibration
 only — no ceiling and no policy; the metric set itself is defined in
@@ -393,8 +394,12 @@ def _token_section(tokens: dict) -> list[str]:
         causes = [
             f"{tokens['partial_captures']} capture(s) had a call whose "
             "tokens we could not see",
+            # "no usable token count", NOT "no token field": a capture whose
+            # field was present but rejected is counted here AND in
+            # ``invalid_token_captures``, and two causes that contradict each
+            # other about the same capture would make the warning unreadable.
             f"{tokens['tokenless_captures']} had metered calls carrying "
-            "no token field",
+            "no usable token count",
         ]
         if tokens["invalid_token_captures"]:
             causes.append(
