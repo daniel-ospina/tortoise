@@ -189,7 +189,14 @@ function announcementInputsAndDeps(source) {
     const value = (pair.split(':')[1] || '').trim()
     // A literal can never change, so it can never need a re-run (and no literal
     // may be demanded as a dep).
-    if (/^[A-Za-z_$][\w$]*$/.test(value) && !LITERALS.has(value)) inputs.push(value)
+    if (LITERALS.has(value)) continue
+    if (/^[A-Za-z_$][\w$]*$/.test(value)) { inputs.push(value); continue }
+    // #3728 review (P2): anything else (a member expression, a call, an
+    // operator) is not modelled — FAIL rather than silently skip it. Skipping
+    // is how a real label input could be added without being demanded as a
+    // dep, which is exactly the frozen-announcement defect this pin exists to
+    // prevent.
+    assert.fail(`unmodelled wizardStageLabel option value: ${value} — expose the input as a bare identifier, or model it in announcementInputsAndDeps`)
   }
   // The deps array is the first `}, [` AFTER the effect body's close brace.
   const depsStart = source.indexOf('}, [', close)

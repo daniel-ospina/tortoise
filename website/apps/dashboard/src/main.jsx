@@ -1871,7 +1871,16 @@ function claimIntentInFlight() {
     // deps array is the #2426 TDZ white-screen), which let the two disagree.
     const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
-    if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
+    if (!wizardFocusInit.current) {
+      wizardFocusInit.current = true
+      // #3728 review (P2): seed the last-announced step HERE. The init run
+      // returns before the assignment below, so without this the FIRST dep
+      // change after mount always looks like a step change — and a membership
+      // flip on step 0 (the #3728 scenario) then moved focus to the wizard
+      // container, which is exactly what the r4 guard exists to prevent.
+      lastWizardStepRef.current = wizardStep
+      return
+    }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
     // disclosure (wizardShowPaste) must not yank focus from the control the
     // user just activated, and neither must an invite accept: `welcomeHasOrg`
@@ -1906,7 +1915,7 @@ function claimIntentInFlight() {
     // re-rendered the <h1> to the organisation variant while the sr-only region
     // kept the create-your-organisation label until some unrelated dep moved.
   }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork, welcomeHasOrg])
-  // ⛔ #2426 e2e catch (P0): `wizardShowPaste` (~1832) is declared LATER in
+  // ⛔ #2426 e2e catch (P0): `wizardShowPaste` is declared LATER in
   // this giant component — a hook dep array evaluates eagerly DURING render, so
   // listing it here would throw "Cannot access … before initialization" on
   // every authenticated render and blank the whole dashboard on main
