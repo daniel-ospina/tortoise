@@ -1269,7 +1269,7 @@ def _cmd_recover(args) -> int:
         # #5109 NOTE: DELIBERATE show-once — the key was recovered but could
         # not be persisted, so it exists nowhere else; no resolution expression
         # can replace the value. Echoed to STDERR only, never stdout (the
-        # verbatim-captured channel). Owner-routed on #5109.
+        # verbatim-captured channel).
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
@@ -1776,7 +1776,7 @@ def _cmd_signup(args) -> int:
         # #5109 NOTE: DELIBERATE show-once — the key was minted but could NOT
         # be persisted, so it exists nowhere else; no resolution expression can
         # replace the value. Echoed to STDERR only, never stdout (the
-        # verbatim-captured channel). Owner-routed on #5109.
+        # verbatim-captured channel).
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
         orphan_token = config.get("signup_token")
         if orphan_token:

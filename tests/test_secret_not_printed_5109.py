@@ -294,7 +294,7 @@ def test_json_payload_uses_the_env_form_not_the_literal() -> None:
 
 
 def test_the_setter_is_printed_before_any_consumer_of_the_variable() -> None:
-    """#5109: the emitted command READS `$TORTOISE_API_KEY`, so the line that
+    """#5109: the claude one-liner READS `$TORTOISE_API_KEY`, so the line that
     SETS it must print first.
 
     Pre-fix the command embedded the literal and was order-independent;
@@ -305,20 +305,65 @@ def test_the_setter_is_printed_before_any_consumer_of_the_variable() -> None:
     appeared to succeed. `test_harness_filter` only pins the command prefix
     and the rest of this file only pins the ABSENCE of a literal, so this
     order — the invariant this change establishes — had no guard.
+
+    Claude only: codex's emitted command NAMES the variable for the CLI to
+    read at launch (`--bearer-token-env-var TORTOISE_API_KEY`) rather than
+    expanding it at `add` time, so its ordering carries no such dependency.
     """
     import tortoise.__main__ as main
 
-    for harness, consumer in (("claude", "claude mcp add"), ("codex", "codex mcp add")):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            main._print_mcp_configs(
-                "tt_" + "12" * 16, "https://api.premiselabs.co", harness, None
-            )
-        text = out.getvalue()
-        assert "export TORTOISE_API_KEY=" in text, f"{harness}: no setter printed"
-        assert consumer in text, f"{harness}: no consumer printed"
-        assert text.index("export TORTOISE_API_KEY=") < text.index(consumer), (
-            f"{harness}: the command that reads $TORTOISE_API_KEY is printed "
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        main._print_mcp_configs(
+            "tt_" + "12" * 16, "https://api.premiselabs.co", "claude", None
+        )
+    text = out.getvalue()
+    assert "export TORTOISE_API_KEY=" in text, "claude: no setter printed"
+    assert "claude mcp add" in text, "claude: no consumer printed"
+    assert text.index("export TORTOISE_API_KEY=") < text.index("claude mcp add"), (
+            "claude: the command that reads $TORTOISE_API_KEY is printed "
             "BEFORE the line that sets it — with the var unset the header is "
             "empty and the registration is silently broken"
         )
+
+
+def test_the_printed_resolution_carries_the_config_path_it_was_given() -> None:
+    """#5109: the resolution must name the file the CLI actually wrote.
+
+    `init --api-key` persists to `<cwd>/.tortoise` while the global store is
+    `~/.tortoise/credentials.json`, so an expression that hard-coded the
+    default would silently export a stale global key (or nothing). The helper
+    takes the path; the THREADING at the call sites is the actual fix, and
+    nothing pinned it — the recover test's config-path assertion is satisfied
+    by the unrelated "Config saved to …" line printed beneath the resolution.
+    """
+    import tortoise.__main__ as main
+
+    cfg = "/tmp/tt-5109-config-under-test/.tortoise"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        main._print_mcp_configs(
+            "tt_" + "12" * 16, "https://api.premiselabs.co", "claude", cfg
+        )
+    printed = [ln for ln in out.getvalue().splitlines() if "python3 -c" in ln]
+    assert printed, "claude: no resolution instruction printed"
+    assert all(cfg in ln for ln in printed), (
+        "the resolution must name the config path it was given — a hard-coded "
+        f"default resolves the wrong file: {printed}"
+    )
+
+    # `_write_mcp_config_file` threads it the same way; the codex arm is the
+    # one that prints a resolution without touching the filesystem.
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        main._write_mcp_config_file(
+            "tt_" + "12" * 16, "https://api.premiselabs.co", "codex", True,
+            config_path=cfg,
+        )
+    printed = [
+        ln for ln in out.getvalue().splitlines() if "export TORTOISE_API_KEY=" in ln
+    ]
+    assert printed, "codex: no setter printed"
+    assert all(cfg in ln for ln in printed), (
+        f"the codex setter must name the config path it was given: {printed}"
+    )
