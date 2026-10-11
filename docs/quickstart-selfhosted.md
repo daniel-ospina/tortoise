@@ -314,6 +314,27 @@ index-path migration still invokes the legacy `index sessions` — which becomes
 `nohup command-not-found → /dev/null` after the legacy CLI is removed, another
 silent failure.
 
+**The ORDER of the two `SessionStart` steps is part of that contract (#3796).**
+Two independent things run at every session start: the memory digest
+(`tortoise context`, whose stdout Claude Code injects) and the install-probe
+beacon (`tortoise session probe`, the `install_probe_<harness>` signal the
+dashboard's onboarding state reads). The beacon is **dispatched first** and
+reaped after the digest finishes, so it is on the wire before the digest can
+spend its first second. Before generation 11 the digest ran to completion in the
+foreground and the POST was only sent after it returned, so a busy-but-live
+embedded store — whose acquisition prefix the hook does not bound — could delay
+the beacon past the harness's `SessionStart` timeout; a harness that kills a
+slow hook kills the beacon with it, and the dashboard then reads a correctly
+installed seam as `install-pending`. The probe writes nothing to stdout (the
+digest's stdout is the injection channel), so the two can run concurrently
+without contaminating what Claude Code injects.
+
+**This is why the upgrade matters, not just the copy:** installed hook bytes are
+frozen at install time, so a copy left at generation 10 keeps the serialized
+order indefinitely while `tortoise hooks status` would report it current if the
+marker had not moved. `tortoise hooks upgrade` (or the manual `cp` above) is
+what actually carries the new order to an existing install.
+
 ### How to restore (backup → wipe → rebuild → re-index)
 
 1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`

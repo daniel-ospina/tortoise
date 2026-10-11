@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
@@ -165,10 +167,22 @@ class TestClaudeHookTimeouts:
     guard's envelope is PER EVENT and each figure is labelled for what it is: 60 s
     is SessionEnd's documented hard cap, while SessionStart is a command hook that
     defaults to 600 s with no documented ceiling above it — the shipped 60 s
-    there is a PROJECT bound (~6× headroom over the digest path), not a
-    platform rule, so this guard must not reject a legitimate rise toward the
-    documented 600 s. The 9.26 s floor is a SessionEnd measurement, asserted
-    only where that measurement exists.
+    there is a PROJECT bound, not a platform rule, so this guard must not reject
+    a legitimate rise toward the documented 600 s.
+
+    #3803 corrected the parenthetical that used to sit on that sentence ("~6×
+    headroom over the digest path"): no SessionStart measurement ever backed it.
+    The ratio is 60/9.26 — the session-END measurement carried across events,
+    the same borrowed-figure error #3793 corrected in the envelope, left
+    standing in the prose — and a wall-clock claim nothing in the repo can
+    reproduce is not evidence. #3793 also left SessionStart with a CEILING only, so a shipped
+    `"timeout": 1` passed this guard and shipped the #3754 failure mode on the
+    session-start side: `session-start.sh` is fail-open, the hook is cancelled
+    before `tortoise context` can return, and the user gets a session with no
+    memory digest and NO error. `MIN_TIMEOUT_S` below is that missing floor.
+
+    The 9.26 s floor is a SessionEnd measurement, asserted only where that
+    measurement exists.
 
     FOUR surfaces carry the same `settings.json` snippet, and a copy that loses
     its `timeout` re-opens the bug on that surface alone. #3802 corrected this
@@ -228,10 +242,38 @@ class TestClaudeHookTimeouts:
         # invented envelope.
         "UserPromptSubmit": "the #3754 documented per-hook budget cap",
     }
-    # #3754: floors are MEASUREMENTS, and only SessionEnd has one (a real hosted
-    # run with the seam-literal settings). SessionStart carries the guard's upper
-    # bound only, rather than inheriting a session-END figure it never produced.
+    # #3754: floors that ARE measurements, asserted only where the measurement
+    # exists (a real hosted run with the seam-literal settings) — never carried
+    # across events.
     MEASURED_S: ClassVar[dict[str, float]] = {"SessionEnd": 9.26}
+    # #3803: floors that are PROJECT BOUNDS — policy, not measurements, and
+    # labelled as such here AND in the failure message. `SessionStart` was the
+    # gap #3793 left: a ceiling only, so `"timeout": 1` passed and re-opened
+    # #3754 on the session-start side (fail-open hook cancelled before the
+    # digest returns → no digest, no error).
+    #
+    # 20 s is DERIVED from the digest's own code-permitted worst case plus its
+    # measured cold start, not picked for taste:
+    #
+    #   * `tortoise/__main__.py::_cmd_context` allows exactly ONE
+    #     `urlopen(req, timeout=15)` on the hosted leg, so a single legitimate
+    #     API wait can occupy 15 s.
+    #   * the measured `tortoise context` → stdout run against a populated
+    #     3.8 MB embedded store (the server starts on demand, as it does on a
+    #     user's machine): cold 3.40 s on 3/3 runs, warm 2.07–2.15 s on 5/5,
+    #     2026-10-11 on a dev box.
+    #
+    # 15 + 3.40 = 18.4 ⇒ 20 s: a shipped timeout below it cannot cover the
+    # slowest run the digest's own code permits, so the hook can be cancelled
+    # while the digest is still legitimately waiting.
+    #
+    # Deliberately NOT the 9.26 s SessionEnd figure: no SessionStart measurement
+    # backs it, and asserting a session-END figure for SessionStart is the exact
+    # error #3793 corrected. The local/embedded leg is still unbounded in code
+    # (#3796 records a measured ~26.8 s slow-store query), so this floor bounds
+    # the KNOWN path only — #3796, not this constant, owns that bound, and the
+    # shipped 60 s sits above it.
+    MIN_TIMEOUT_S: ClassVar[dict[str, float]] = {"SessionStart": 20}
     # surface → {event: number of snippets carrying that event}
     SURFACES: ClassVar[dict[str, dict[str, int]]] = {
         "harnesses.js": {"SessionStart": 2, "SessionEnd": 2,
@@ -280,29 +322,83 @@ class TestClaudeHookTimeouts:
             "MAX_TIMEOUT_S and ENVELOPE_KIND must list the same events: "
             f"{sorted(self.MAX_TIMEOUT_S)} != {sorted(self.ENVELOPE_KIND)}"
         )
+        # #3803: a floor keyed on an event with no ceiling — or set at/above its
+        # own ceiling — would make EVERY shipped value RED. Pin the invariant
+        # here, where the failure names the constant, not as a bare red suite.
+        for event, floor in self.MIN_TIMEOUT_S.items():
+            assert event in self.MAX_TIMEOUT_S, (
+                f"#3803: MIN_TIMEOUT_S carries a {event} floor and "
+                f"MAX_TIMEOUT_S carries no {event} ceiling"
+            )
+            assert floor < self.MAX_TIMEOUT_S[event], (
+                f"#3803: the {event} floor ({floor}s) is not below its ceiling "
+                f"({self.MAX_TIMEOUT_S[event]}s) — no shipped timeout could pass"
+            )
         for name, event, entry in self._walk():
-            timeout = entry.get("timeout")
-            assert isinstance(timeout, int) and not isinstance(timeout, bool), (
-                f"#3754: {name} ships a {event} hook entry with no integer "
-                f'"timeout" ({entry!r}) — Claude Code cancels SessionEnd at its '
-                f"1.5s default, so the session is silently never filed"
-            )
-            bound = self.MAX_TIMEOUT_S.get(event)
-            assert bound is not None, (
-                f"#3754: {name} ships a {event} hook entry and no documented "
-                f"timeout envelope is recorded for that event — add its "
-                f"platform figure to MAX_TIMEOUT_S before shipping the snippet"
-            )
-            assert timeout <= bound, (
-                f"#3754: {name} {event} timeout={timeout}s is above this "
-                f"guard's {event} bound ({bound}s — {self.ENVELOPE_KIND[event]})"
-            )
-            measured = self.MEASURED_S.get(event)
-            assert measured is None or measured < timeout, (
-                f"#3754: {name} {event} timeout={timeout}s does not clear the "
-                f"{measured}s measured {event} run — the hook would be "
-                f"cancelled mid-flight"
-            )
+            self._assert_entry_within_envelope(name, event, entry)
+
+    def _assert_entry_within_envelope(self, name: str, event: str, entry: dict) -> None:
+        """The per-entry guard — the #3754 envelope + the #3803 floor.
+
+        Factored out so the shipped-snippet walk above AND the boundary test
+        below exercise the SAME assertions: a boundary test that re-implemented
+        them could stay green while the shipped-snippet path regressed.
+        """
+        timeout = entry.get("timeout")
+        assert isinstance(timeout, int) and not isinstance(timeout, bool), (
+            f"#3754: {name} ships a {event} hook entry with no integer "
+            f'"timeout" ({entry!r}) — Claude Code cancels SessionEnd at its '
+            f"1.5s default, so the session is silently never filed"
+        )
+        bound = self.MAX_TIMEOUT_S.get(event)
+        assert bound is not None, (
+            f"#3754: {name} ships a {event} hook entry and no documented "
+            f"timeout envelope is recorded for that event — add its "
+            f"platform figure to MAX_TIMEOUT_S before shipping the snippet"
+        )
+        assert timeout <= bound, (
+            f"#3754: {name} {event} timeout={timeout}s is above this "
+            f"guard's {event} bound ({bound}s — {self.ENVELOPE_KIND[event]})"
+        )
+        measured = self.MEASURED_S.get(event)
+        assert measured is None or measured < timeout, (
+            f"#3754: {name} {event} timeout={timeout}s does not clear the "
+            f"{measured}s measured {event} run — the hook would be "
+            f"cancelled mid-flight"
+        )
+        floor = self.MIN_TIMEOUT_S.get(event)
+        assert floor is None or timeout >= floor, (
+            f"#3803: {name} {event} timeout={timeout}s is below this guard's "
+            f"{event} floor ({floor}s — a PROJECT BOUND: the digest's own "
+            f"code-permitted worst case is a 15s API wait plus a 3.4s measured "
+            f"cold start), so the hook is cancelled before a slow-but-healthy "
+            f"digest returns and, the hook being fail-open, the session gets no "
+            f"memory digest and no error"
+        )
+
+    def test_session_start_floor_rejects_the_boundary_timeouts(self):
+        """#3803: `SessionStart` 1 is RED; 60 (shipped) and 120 pass; 601 is RED.
+
+        The floor IS the fix — before it, `SessionStart` had a ceiling only and
+        a shipped `"timeout": 1` passed (the verifier's reproduction of P2
+        #3803). Exercised on synthetic entries through the SAME per-entry guard
+        the shipped-snippet walk uses, so the boundaries are pinned without
+        hand-mutating a source file, while the walk above proves the shipped
+        copies themselves.
+        """
+        entry = {"type": "command",
+                 "command": ".claude/hooks/session-start.sh", "timeout": 0}
+        for bad in (1, 5, 19):            # below the 20s floor → RED
+            with pytest.raises(AssertionError):
+                self._assert_entry_within_envelope(
+                    "synthetic", "SessionStart", {**entry, "timeout": bad})
+        for good in (20, 60, 120, 600):   # at/above the floor, within the ceiling
+            self._assert_entry_within_envelope(
+                "synthetic", "SessionStart", {**entry, "timeout": good})
+        for high in (601, 3600):          # above the 600s ceiling → RED
+            with pytest.raises(AssertionError):
+                self._assert_entry_within_envelope(
+                    "synthetic", "SessionStart", {**entry, "timeout": high})
 
     def test_snippet_surfaces_are_fully_pinned(self):
         # An added or removed copy of the snippet must land here: an

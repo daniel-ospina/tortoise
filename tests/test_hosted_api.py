@@ -10986,6 +10986,14 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
         "Artifact exceeds the team graph size cap", "Session turn cap exceeded",
         "Too many registration attempts", "Signup is rate-limited right now",
+        # #3514: the demand surface's two THROTTLES. Each names its next step
+        # ("retry shortly", plus the `Retry-After` header), so there is no
+        # ceiling to buy out of and nothing for the human path to resolve — the
+        # same category as the two signup throttles above. The rate cap bounds
+        # RATE and the cardinality cap bounds DISTINCT KEYS; neither is a
+        # plan/quota limit, so offering an upgrade would be a false promise.
+        "demand rate cap exceeded",
+        "integration-key cardinality cap reached",
         # the seam's own body: it IS the contact path (and must not recurse)
         "Need more? Contact support@premiselabs.co.",
     )

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._provider_env import pin_provider_routing_env, provider_routing_env_names
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
@@ -230,6 +231,25 @@ def llm_extraction_provider(monkeypatch):
     (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
     the keyless path clears the seam AND the provider keys itself."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _pinned_provider_routing_env(monkeypatch):
+    """#3699: remove the AMBIENT provider-routing env for every test in this
+    module, from the canonical registries (`tests/_provider_env.py`).
+
+    The per-test ``monkeypatch.delenv`` lists are hand-lists and had drifted
+    from the gates: an ambient ``TORTOISE_EXTRACTOR_PROVIDER=openrouter`` or
+    ``VENICE_API_KEY`` decided the five #1530 gate/failover tests above,
+    turning the developer's shell into the test result. Clearing the derived
+    name set HERE means a routing test's outcome is set by the test's own
+    environment — a test that needs a provider still sets one explicitly, and
+    its ``monkeypatch`` write wins over this teardown-undone removal.
+
+    ``TORTOISE_SESSION_LLM_MOCK`` is NOT in the set (see the module docstring):
+    the sibling ``llm_extraction_provider`` fixture above owns that seam.
+    """
+    pin_provider_routing_env(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -1941,6 +1961,65 @@ def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch, no_provider_key
     assert meta["errors"], "the fatal 401 must be recorded in meta errors"
     # no OpenRouter call ever happened
     assert not any("openrouter.ai" in u for u in requests_log)
+
+
+# ── #3699: the provider-routing env is PINNED, not inherited ──────────────
+# The five tests above failed on a developer shell exporting
+# TORTOISE_EXTRACTOR_PROVIDER / VENICE_API_KEY (measured: `5 failed` with
+# `TORTOISE_EXTRACTOR_PROVIDER=openrouter VENICE_API_KEY=vz-ambient`), because
+# their hand-listed delenv pair did not cover what
+# model_adapters.resolve_extractor_provider() reads. The module-wide
+# `_pinned_provider_routing_env` fixture closes that; these pin the closure.
+
+def test_provider_routing_env_is_pinned_for_this_module():
+    """The pin is in force for every test here, so an ambient routing value
+    cannot decide a gate result. Reds on a hostile shell WITHOUT the fixture
+    (the #3699 false-red class) — that is the point of the assertion."""
+    residual = [n for n in provider_routing_env_names() if n in os.environ]
+    assert not residual, (
+        f"ambient provider-routing env leaked into this module: {residual} — "
+        f"the #3699 pin (_pinned_provider_routing_env) must neutralize these")
+
+
+def test_provider_routing_pin_covers_every_gate_input():
+    """Drift guard: the pin is DERIVED, so it covers both routing gates'
+    key sets — including VENICE_API_KEY, which the hosted availability set
+    does not carry and the hand-lists therefore missed."""
+    from tortoise.hosted_api import _LLM_PROVIDER_KEYS
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    pinned = set(provider_routing_env_names())
+    assert set(_LLM_PROVIDER_KEYS) <= pinned, (
+        "a hosted provider key env is not pinned — the broad availability "
+        "gate could be opened by the ambient shell")
+    assert set(_PROVIDER_KEY_ENV.values()) <= pinned, (
+        "a v2 adapter key env is not pinned — resolve_extractor_provider() "
+        "could route on the ambient shell")
+    assert "TORTOISE_EXTRACTOR_PROVIDER" in pinned, (
+        "the primary/fallback pool selector is not pinned — an ambient "
+        "TORTOISE_EXTRACTOR_PROVIDER flips the primary (the measured #3699 red)")
+
+
+def test_provider_routing_pin_is_load_bearing_against_a_hostile_shell(monkeypatch):
+    """Non-vacuous proof that the pin — not luck about the shell — is what
+    keeps the routing gate honest. Reproduces the measured #3699 mechanism:
+    with the hostile ambient values in place `resolve_extractor_provider()`
+    decides on THEM; after the pin it reports no routing-usable provider, which
+    is what lets `test_capture_session_gate_match_openai_key_alone_rejected`
+    observe the DEEPSEEK_API_KEY failure it is actually asserting on."""
+    from tortoise.model_adapters import resolve_extractor_provider
+
+    # the hostile ambient shell (measured reproduction)
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "openrouter")
+    monkeypatch.setenv("VENICE_API_KEY", "vz-ambient")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(ValueError):
+        resolve_extractor_provider()  # ambient value decides — the false red
+
+    pin_provider_routing_env(monkeypatch)
+    assert resolve_extractor_provider() == (None, None), (
+        "after the pin the gate must see no routing-usable provider")
 
 
 # ── P1 (#1529) fail-closed capture ────────────────────────────────────────

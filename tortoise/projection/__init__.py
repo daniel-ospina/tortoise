@@ -149,6 +149,41 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
     return value
 
 
+def _bounded_server_socket_kwargs() -> dict[str, float | None]:
+    """The product's bounded socket policy, as server-client kwargs.
+
+    ONE resolution point for every raw server-lane client the package builds:
+    the projection's host branch, ``session_indexer``'s graph-entity lookup,
+    ``backup``'s BGSAVE and the ``doctor`` probe in ``__main__``. Before this
+    existed each site re-derived its own bounds or passed none at all. The
+    indexer passed none — which is NOT "redis-py's 5s default":
+    ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and hands
+    that to redis-py explicitly, so the read was UNBOUNDED (#3065). A
+    server-side stall (the #2969 active-defrag loop) then parked the caller in
+    ``recv()`` forever, and the site's best-effort handler made that
+    indistinguishable from "no results". The other two sites passed the
+    pre-#2850 literals (5s connect / 10s read), so neither knob reached them
+    either — the same defect, one step milder (bounded, but not tunable).
+
+    The returned pair is byte-identical to what the host branch has always
+    passed, so a knob set for the product is now set for every product client:
+    ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` / ``TORTOISE_DB_SOCKET_TIMEOUT``
+    (parsed by ``_resolve_socket_timeout``, which fails loud on a typo) with
+    ``_socket_timeouts()`` supplying the default.
+
+    NOT for the embedded (unix-socket) lane: redis-py does not forward
+    ``socket_connect_timeout`` for a unix socket (see that branch), so the
+    embedded client deliberately carries only the read bound.
+    """
+    connect_to, read_to = _socket_timeouts()
+    return {
+        "socket_connect_timeout": _resolve_socket_timeout(
+            _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
+        "socket_timeout": _resolve_socket_timeout(
+            _SOCKET_TIMEOUT_ENV, read_to),
+    }
+
+
 # ── #3585: the fail-closed run boundary (R8/R9) ───────────────────────────
 #
 # The non-folded-event set is collected for the duration of a REPLAY RUN, and
@@ -6068,10 +6103,14 @@ class FalkorProjection(
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             # Resolved at CONNECTION time so an env knob covers every CONSUMER
-            # of this client (SDK sessions, ingest, hosted) — NOT every
-            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
-            # `backup.py` and the probe in `__main__.py` construct their own,
-            # and neither knob reaches them. ACTUAL
+            # of this client (SDK sessions, ingest, hosted) — and, since
+            # #3065, every OTHER raw FalkorDB client in `tortoise/` too:
+            # `session_indexer.py`, `backup.py` and the probe in `__main__.py`
+            # construct their own, and each one now takes its bounds from
+            # `_bounded_server_socket_kwargs()` — the ONE resolution point
+            # (defined beside the #2969 helpers above). Before that the indexer
+            # carried NO bound at all (the unbounded `recv()` #3065 was filed
+            # for) and the other two carried knob-blind literals. ACTUAL
             # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
             # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
             # opt-out) WINS whenever it is set; #2850's product-wide
@@ -6094,18 +6133,17 @@ class FalkorProjection(
             # none/off/false/0 (or any non-positive number) removes the bound
             # entirely — the block-forever mode #2850 exists to PREVENT, reachable
             # only through that opt-out.
-            connect_to, read_to = _socket_timeouts()
             # #3595: same guarded-construction seam on the server lane — the
             # ~142 `reg.query(...)` sites behind TortoiseSDK._get_registry and
             # the direct `proj.db.select_graph(...)` sites all reach the wire
             # through handles this client produces.
+            # #3065: the bounds come from the shared resolution point rather
+            # than being spelled out here — the same values, so the remaining
+            # raw clients can share this exact pair instead of a copy of it.
             self.db = guarded_client(FalkorDB, host=host, port=port,
                                      username=username, password=password,
-                                     socket_connect_timeout=_resolve_socket_timeout(
-                                         _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
-                                     socket_timeout=_resolve_socket_timeout(
-                                         _SOCKET_TIMEOUT_ENV, read_to),
-                                     ssl=ssl)
+                                     ssl=ssl,
+                                     **_bounded_server_socket_kwargs())
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
