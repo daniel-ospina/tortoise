@@ -3014,7 +3014,10 @@ def _install_capture_seam(args, install_capture) -> int:
         # imported, and a printed success over an unimported spool is the
         # #3808 R13 class.
         from tortoise.capture_install import openclaw_home
-        plugin_root = openclaw_home(_P.home()) / "tortoise"
+        # openclaw_home() IS the plugin directory (…/.openclaw/extensions/tortoise).
+        # Appending the dirname again printed a path that does not exist, while
+        # `tortoise hooks status --harness openclaw` printed the correct one.
+        plugin_root = openclaw_home(_P.home())
         print(
             f"OpenClaw loads plugins at Gateway startup: restart it (or run "
             f"`openclaw plugins reload tortoise`) so the plugin at "

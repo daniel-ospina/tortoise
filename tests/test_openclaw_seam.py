@@ -394,7 +394,10 @@ def test_plugin_suite_passes():
     injects nothing, and the captured turn lands in the spool."""
     node = shutil.which("node")
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "TORTOISE_OPENCLAW_SPOOL": str(Path(tmp) / "turns.jsonl")}
+        # The plugin and the node suite both read …_SPOOL_DIR (a DIRECTORY). The
+        # previous name read by nothing, so the comment's promise of a temp
+        # state dir was delivered only by the node test's own override.
+        env = {**os.environ, "TORTOISE_OPENCLAW_SPOOL_DIR": str(Path(tmp))}
         proc = subprocess.run(
             [node, "--test", str(NODE_TEST)],
             capture_output=True, text=True, timeout=300, env=env,
@@ -480,8 +483,15 @@ def test_install_guidance_names_the_per_session_spool(tmp_path):
         [sys.executable, "-m", "tortoise", "sessions", "import",
          "--harness", "openclaw", "--file", str(tmp_path / "absent.jsonl")],
         capture_output=True, text=True, timeout=300, env=env, cwd=str(REPO_ROOT))
-    assert "invalid choice" not in (probe.stderr + probe.stdout), \
-        f"sessions import refuses the harness the install guidance prints:\n{probe.stderr}"
+    out = probe.stdout + probe.stderr
+    assert "invalid choice" not in out, \
+        f"sessions import refuses the harness the install guidance prints:\n{out}"
+    # ...and assert the LEGITIMATE later failure too: a CLI that broke earlier
+    # (an import error, a traceback) satisfies the check above on its own, which
+    # is the same vacuous pass in a new place. The probe names an absent
+    # transcript, so this is the only acceptable outcome.
+    assert probe.returncode == 1 and "Session file not found" in out, \
+        f"expected the absent-file failure, got rc={probe.returncode}:\n{out}"
 
 
 def test_session_verify_reaches_openclaw_and_is_honestly_unverifiable():

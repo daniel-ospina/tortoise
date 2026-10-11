@@ -202,8 +202,10 @@ UNVERIFIABLE_REASON: dict[str, str] = {
     "openclaw": (
         "OpenClaw's seam is a native plugin loaded in-process by the OpenClaw "
         "gateway "
+        # openclaw_home() already ENDS in the plugin dirname: appending it again
+        # rendered ~/.openclaw/extensions/tortoise/tortoise/index.mjs — a path
+        # that does not exist, in a user-visible reason string.
         f"({capture_install.openclaw_home('~')}/"
-        f"{capture_install.OPENCLAW_PLUGIN_DIRNAME}/"
         f"{capture_install.OPENCLAW_ENTRY_NAME}), "
         "not a command this verifier can execute; the install leg is therefore "
         "not firable by this command. The seam's handler logic is exercised "
