@@ -2162,6 +2162,17 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  # #1652: the served skill set's own guard. `website/apps/dashboard/public/
+  # skills/` is a SOURCE_PATTERN for THIS surface (tools/ci_selection.py), and
+  # the surface's existing tests pin the onboarding document + the installer's
+  # shipped set — not the CAPABILITY skills' content. This file asserts over
+  # the whole served tree (frontmatter lint, every `tortoise_*` name advertised)
+  # plus the two priority-3 skills and the research loop wired into
+  # tortoise-decide, so a change to any served SKILL.md selects it. Registered
+  # under `onboarding` because that is the surface the skills path matches;
+  # `core` would not reach a `public/skills/`-only diff (a SOURCE_PATTERNS match
+  # replaces the `core` fallback in select()).
+  - test_served_skills.py
   # `test_dashboard_client_paths_resolve.py` is DUAL-REGISTERED (#4446): a change to
   # `website/apps/dashboard/src/` selects THIS surface and not `api`, and that is the
   # half of the invariant a client edit breaks — registering it only under `api` would
