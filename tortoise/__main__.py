@@ -1273,11 +1273,11 @@ def _cmd_recover(args) -> int:
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
-    # #5109: recover is NEITHER a mint NOR one-time — the key was just
-    # persisted to config_path (0600) above, and this command re-POSTs and
-    # re-prints on EVERY invocation, so a resolution expression CAN replace
-    # the value. Print the resolution, never the value (stdout is the
-    # verbatim-captured channel; see the module note on #5109).
+    # #5109: the key was just PERSISTED to config_path (0600) above, so a
+    # resolution expression resolves it — print the resolution, never the
+    # value (stdout is the verbatim-captured channel; see the module note on
+    # #5109). (`recover` mints a NEW key per invocation, but that is not what
+    # makes the resolution valid; the persistence is.)
     print(f"   API key: {_key_resolution_expr(config_path)}")
     print(f"   Config saved to {config_path} (0600 — key stays on disk)")
     print(f"   Recovery token kept: {token[:14]}…")
@@ -1839,10 +1839,9 @@ def _cmd_signup(args) -> int:
                   "a signup token; you cannot use `tortoise recover` for this "
                   "team. The API key above is your only access — store it safely.",
                   file=sys.stderr)
-    # #5109 NOTE: this success branch echoes a key that was already persisted
-    # to config_path above. It is DELIBERATE and test-pinned (#1709 "shown
-    # once", tests/test_cli_signup.py) — so it is left as the product decided,
-    # and raised as an owner decision on #5109 rather than changed in flight.
+    # #5109 NOTE: this success branch still echoes the value it just persisted
+    # to config_path. Retained deliberately (the "shown once" contract, #1709)
+    # and raised as an owner decision on #5109 rather than reversed in flight.
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
@@ -2244,11 +2243,18 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     import os
     from pathlib import Path
 
+    status = sys.stderr if status_to_stderr else sys.stdout
+
     if harness == "codex":
-        print("Codex manages its own config — run:")
-        print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
+        # These three lines are STATUS, not payload: they must follow the same
+        # routing as the lines at the end of this function. Emitting them to
+        # stdout unconditionally put text after the JSON object for
+        # `--harness codex --json`, so `json.loads(stdout)` raised
+        # "Extra data" — the purity the docstring above promises.
+        print("Codex manages its own config — run:", file=status)
+        print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}", file=status)
         cfg = _harness_mcp_config("codex", api_key, api_url)
-        print(f"  {cfg['command']}")
+        print(f"  {cfg['command']}", file=status)
         return 0
 
     target = Path.cwd() / ".mcp.json"
@@ -2269,7 +2275,6 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
         servers["tortoise"] = entry
     else:
         data = {"mcpServers": {"tortoise": entry}}
-    status = sys.stderr if status_to_stderr else sys.stdout
     # The written config references $TORTOISE_API_KEY (page #529 env form) —
     # make sure the var is set in the shell that will launch the agent.
     print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)  # noqa: F541

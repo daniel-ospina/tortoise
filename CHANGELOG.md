@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### `init --json` `auth_header` is a template, not a ready-to-use value (#5109)
+
+`tortoise init --json` reports `mcp.auth_header`. It used to be a ready-to-send
+header value (`"Bearer " + <live key>`) — which is why the live key reached the
+session transcripts, task logs and `audit.jsonl` of every agent that ran the
+CLI. It is now the template `"Bearer ${TORTOISE_API_KEY}"`, so nothing on stdout
+carries the credential.
+
+- **This changes a machine-readable contract.** A consumer that assigns the
+  field straight into a request header now sends the literal
+  `Bearer ${TORTOISE_API_KEY}` and gets a 401. Resolve the key yourself from
+  `mcp.configs` (or from the config file the command reports as
+  `config_path`) before building the header. Reverting is not an option — the
+  leak is the reason the field changed.
+
 ### Reaper pass-2 discovery is scoped and in-process (#4068)
 
 `discover()`'s stale-socket pass used to shell out to

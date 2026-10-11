@@ -224,15 +224,15 @@ def test_signup_orphan_echo_is_stderr_only_never_stdout(
 def test_recover_prints_the_resolution_never_the_live_key(
     monkeypatch, tmp_path
 ) -> None:
-    """#5109 P1: `recover` is neither a mint nor one-time.
+    """#5109 P1: `recover` prints the resolution, not the recovered key.
 
-    It PERSISTS the recovered key to ``~/.tortoise/credentials.json`` (0600)
-    and re-POSTs /v1/agent/recover — re-printing the same key — on EVERY
-    invocation, so a resolution expression can replace the value. The
-    previous stdout echo was certified as a "shown once" exception by a
-    `#5109 NOTE`, but nothing pinned the value, and the note was false: it is
-    repeatable and persisted. Assert the sentinel never reaches stdout and
-    the instruction still does.
+    It PERSISTS the recovered key to the config path (0600) before it prints,
+    so a resolution expression resolves the value — that persistence is what
+    makes the replacement valid. (The command also mints a NEW key on each
+    invocation; that is not the reason.) The previous stdout echo was
+    certified as a "shown once" exception by a `#5109 NOTE`, but nothing
+    pinned the value and the key was already on disk when the line ran.
+    Assert the sentinel never reaches stdout and the instruction still does.
     """
     from unittest import mock
 
