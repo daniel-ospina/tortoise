@@ -44,6 +44,17 @@ os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
 # install gate needs the env early.)
 os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
+# #1789: the S4 delta contract is DEFAULT-ON in production (unset → delta).
+# The pre-existing S4 assertions pin the LEGACY complete-list contract
+# (content pins, byte-identity/revert pins, truncation fixtures), so the
+# suite defaults to LEGACY here and delta-path tests opt in with
+# ``monkeypatch.setenv("TORTOISE_S4_DELTA", "1")``. ``setdefault`` (not an
+# ASSIGN) keeps a caller's explicit choice (e.g. a delta-default E2E run)
+# authoritative; tests that need the UNset state must
+# ``monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)`` because this
+# module-level pin would otherwise shadow them.
+os.environ.setdefault("TORTOISE_S4_DELTA", "0")
+
 # #7015: the embedder autouse opt-out below is a *test* fixture, so it is too
 # late for COLLECTION — and collection is where the race bites. Three shard
 # files (test_3815_mitigation_moves_weight, test_ep_directional,

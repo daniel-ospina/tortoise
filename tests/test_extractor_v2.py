@@ -4424,6 +4424,254 @@ class TestS4Merge:
         assert stats["verbatim_reemissions"] == 0
 
 
+class TestS4DeltaContract1789:
+    """#1789: the S4 delta/gaps-only contract — templates, dispatch, the
+    merge-gate fix, no-changes semantics, and the compliance flag.
+
+    The suite default is LEGACY (``tests/conftest.py`` pins
+    ``TORTOISE_S4_DELTA=0``), so every delta-path test opts in with
+    ``monkeypatch.setenv("TORTOISE_S4_DELTA", "1")``.
+    """
+
+    # ── templates + derivation ─────────────────────────────────────────
+
+    def test_delta_templates_carry_the_rules(self):
+        d = v2.S4_TMPL_DELTA
+        assert "DELTA embed list" in d
+        assert "EMIT ONLY DELTAS" in d
+        assert "CORRECTIONS-IDENTITY" in d          # R3
+        assert "ALREADY IN THE BASE" in d           # R4
+        assert "An EMPTY delta" in d                # R5
+        assert "S2 EMBED LIST" in d                 # R7a + R7b
+        assert "JSON" in d                          # json_object-mode guard
+        assert "JSON" in v2.S4_TMPL_CORE_ONLY_DELTA
+
+    def test_delta_anchor_counts_are_exactly_one(self):
+        """The derivation skips nothing silently: each rule fragment occurs
+        exactly once in the variant it applies to (R6 core-only only)."""
+        for old in (v2._S4_DELTA_R1_OLD, v2._S4_DELTA_R2_OLD,
+                    v2._S4_DELTA_R4_OLD, v2._S4_DELTA_R7A_OLD,
+                    v2._S4_DELTA_R7B_OLD, v2._S4_DELTA_R5_OLD):
+            assert v2.S4_TMPL.count(old) == 1, old[:40]
+            assert v2.S4_TMPL_CORE_ONLY.count(old) == 1, old[:40]
+        assert v2.S4_TMPL_CORE_ONLY.count(v2._S4_DELTA_R6_OLD) == 1
+        assert v2.S4_TMPL.count(v2._S4_DELTA_R6_OLD) == 0
+
+    def test_delta_derivation_fails_loudly_on_anchor_drift(self):
+        with pytest.raises(ValueError, match="exactly once"):
+            v2._derive_s4_delta("no anchors here", core_only=False)
+        # R6 is required in the core-only source — applying it to the base
+        # source must fail rather than silently ship a half-delta contract.
+        with pytest.raises(ValueError, match="exactly once"):
+            v2._derive_s4_delta(v2.S4_TMPL, core_only=True)
+
+    def test_legacy_constants_are_untouched(self):
+        """The revert path: both legacy constants keep the complete-list
+        contract verbatim (the delta derivation never mutates its source)."""
+        for legacy in (v2.S4_TMPL, v2.S4_TMPL_CORE_ONLY):
+            assert "EMIT ONLY DELTAS" not in legacy
+            assert "DELTA embed list" not in legacy
+            assert "Re-emit the S2 items you keep" in legacy
+        assert "Re-emit them VERBATIM" in v2.S4_TMPL_CORE_ONLY
+
+    def test_core_only_delta_reconciles_the_kind_clause(self):
+        """R6 removes the #1695 'Re-emit them VERBATIM' clause that would
+        contradict 'EMIT ONLY DELTAS' in the same prompt."""
+        c = v2.S4_TMPL_CORE_ONLY_DELTA
+        assert "EMIT ONLY DELTAS" in c
+        assert "keeps its S2 kind VERBATIM" in c
+        assert "Re-emit them VERBATIM" not in c
+        assert "Re-emit the S2 items you keep" not in c
+
+    # ── env toggle + render dispatch ────────────────────────────────────
+
+    def test_env_toggle_is_default_on(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
+        assert v2._s4_delta_enabled() is True
+        for raw in ("1", "true", "On", "YES", "banana", "0  # comment"):
+            monkeypatch.setenv("TORTOISE_S4_DELTA", raw)
+            assert v2._s4_delta_enabled() is True, raw
+        for raw in ("0", "false", "Off", "no", "0 "):
+            monkeypatch.setenv("TORTOISE_S4_DELTA", raw)
+            assert v2._s4_delta_enabled() is False, raw
+
+    def test_render_dispatch_matrix(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
+        # unset → delta (default-on)
+        assert "EMIT ONLY DELTAS" in v2.render_s4_prompt("S", {}, {})
+        # explicit kwargs beat the env, both directions
+        assert "COMPLETE embed list" in v2.render_s4_prompt(
+            "S", {}, {}, delta=False)
+        assert "EMIT ONLY DELTAS" in v2.render_s4_prompt(
+            "S", {}, {}, delta=True, core_only=True)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "0")
+        assert "COMPLETE embed list" in v2.render_s4_prompt("S", {}, {})
+        assert "EMIT ONLY DELTAS" in v2.render_s4_prompt("S", {}, {}, delta=True)
+
+    def test_revert_render_is_byte_identical(self, monkeypatch):
+        """`TORTOISE_S4_DELTA=0` → the legacy render, byte-for-byte the
+        pre-change string (the revert trigger, I-2-7)."""
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "0")
+        assert v2.render_s4_prompt("S", {}, {}) == v2.render_s4_prompt(
+            "S", {}, {}, delta=False)
+
+    def test_run_s4_threads_delta_kwarg(self):
+        m = MockModel(json.dumps({"points": []}))
+        v2.run_s4(m, "STORY", {}, {}, delta=True)
+        assert "EMIT ONLY DELTAS" in m.calls[0][0]
+        m2 = MockModel(json.dumps({"points": []}))
+        v2.run_s4(m2, "STORY", {}, {}, delta=False)
+        assert "EMIT ONLY DELTAS" not in m2.calls[0][0]
+
+    def test_session_dispatches_delta_and_records_the_effective_flag(
+            self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "1")
+        seen = {}
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GAP REVIEWER" in system:
+                seen["s4"] = system
+                return json.dumps({"points": []})
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(
+            MockModel(resp), [{"role": "user", "content": "we decided X"}])
+        assert "EMIT ONLY DELTAS" in seen["s4"]
+        assert out["stats"]["s4_delta"] is True
+        assert out["stats"]["s4_delta_empty"] == 1
+
+    # ── merge-gate fix ─────────────────────────────────────────────────
+
+    def test_section_content_predicate(self):
+        assert v2._s4_section_is_content("entities", [{"name": "x"}])
+        assert not v2._s4_section_is_content("entities", [])
+        assert not v2._s4_section_is_content("entities", [42])
+        assert not v2._s4_section_is_content("entities", [{}])
+        assert not v2._s4_section_is_content("entities", "garbage")
+        # unknown (model-invented) keys: any non-empty list is content
+        assert v2._s4_section_is_content("model_invented", [{"x": 1}])
+
+    def test_malformed_sections_are_not_empty(self):
+        assert v2._s4_malformed_sections({"entities": "garbage"}) == ["entities"]
+        assert v2._s4_malformed_sections({"entities": [42]}) == ["entities"]
+        assert v2._s4_malformed_sections({"entities": [{}]}) == ["entities"]
+        assert v2._s4_malformed_sections(
+            {"points": [{"content": "x"}, "garbage"]}) == ["points"]
+        assert v2._s4_malformed_sections({"entities": [], "points": []}) == []
+        assert v2._s4_malformed_sections({}) == []
+        assert v2._s4_malformed_sections(None) == []
+        assert v2._s4_malformed_sections(["x"]) == ["<top-level>"]
+        # unknown keys are never shape-checked (merge-and-drop)
+        assert v2._s4_malformed_sections({"model_invented": "nope"}) == []
+
+    def test_retractions_only_delta_merges(self, monkeypatch):
+        """I-1: the legacy 4-section gate DROPPED a retractions-only S4 —
+        silent data loss. The fixed gate merges any content-bearing section."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "1")
+        retr = [{"content": "we believed X"}]
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GAP REVIEWER" in system:
+                return json.dumps({"retractions": retr})
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(
+            MockModel(resp), [{"role": "user", "content": "we decided X"}])
+        assert out["embed_list"]["retractions"] == retr
+        assert "s4_delta_empty" not in out["stats"]
+        assert out["stats"]["s4_delta"] is True
+
+    def test_all_empty_arrays_delta_is_silent(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "1")
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GAP REVIEWER" in system:
+                return json.dumps({"retractions": [], "points": []})
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(
+            MockModel(resp), [{"role": "user", "content": "we decided X"}])
+        assert out["stats"]["s4_delta_empty"] == 1
+        assert out["error_census"] == {}
+        assert not any("kept S2 output" in w for w in out["warnings"])
+
+    def test_malformed_section_census_and_valid_sections_still_merge(
+            self, monkeypatch):
+        """Malformed ≠ empty: the malformed section is censused AND the
+        remaining valid sections merge (no whole-reject, no silent loss)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "1")
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GAP REVIEWER" in system:
+                return json.dumps({"entities": "garbage",
+                                   "points": [_pt("a brand new gap claim")]})
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(
+            MockModel(resp), [{"role": "user", "content": "we decided X"}])
+        assert out["error_census"].get("s4_shape_error") == 1
+        assert any("malformed section" in e for e in out["errors"])
+        assert "s4_delta_empty" not in out["stats"]
+        contents = {p["content"] for p in out["embed_list"]["points"]}
+        assert "a brand new gap claim" in contents
+        assert "single-flash with granularity is the working path" in contents
+
+    # ── compliance flag ────────────────────────────────────────────────
+
+    @staticmethod
+    def _two_point_s2():
+        return {"entities": [], "events": [],
+                "points": [_pt("A"), _pt("B")],
+                "operators": [], "chain_notes": [], "link_before_create": []}
+
+    def _run(self, monkeypatch, s4_body, delta=True):
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_S4_DELTA", "1" if delta else "0")
+        s2 = self._two_point_s2()
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "story"
+            if "GAP REVIEWER" in system:
+                return json.dumps(s4_body)
+            return json.dumps(s2)
+
+        return v2.extract_session_v2(
+            MockModel(resp), [{"role": "user", "content": "x"}])
+
+    def test_suspect_flag_fires_on_a_full_reemitter(self, monkeypatch):
+        out = self._run(monkeypatch, self._two_point_s2())
+        assert out["stats"]["s4_merge"]["verbatim_reemissions"] == 2
+        assert out["stats"]["s4_delta_reemit_suspect"] is True
+
+    def test_suspect_flag_absent_for_a_compliant_delta(self, monkeypatch):
+        out = self._run(monkeypatch, {"points": [_pt("a new gap claim")]})
+        assert out["stats"]["s4_merge"]["verbatim_reemissions"] == 0
+        assert "s4_delta_reemit_suspect" not in out["stats"]
+
+    def test_suspect_flag_absent_in_legacy_mode(self, monkeypatch):
+        """Full re-emission IS the legacy contract — the flag is a
+        delta-compliance signal only, never legacy noise."""
+        out = self._run(monkeypatch, self._two_point_s2(), delta=False)
+        assert out["stats"]["s4_merge"]["verbatim_reemissions"] == 2
+        assert "s4_delta_reemit_suspect" not in out["stats"]
+        assert out["stats"]["s4_delta"] is False
+
+
 class TestE4Orchestrator:
     def test_s4_drop_does_not_lose_s2_point(self, monkeypatch):
         """The E2E-5 scenario at pipeline level: S2 extracts the early-asserted
@@ -4453,8 +4701,12 @@ class TestE4Orchestrator:
         assert out["stats"]["s4_merge"]["kept_from_s2"] == 1
         assert out["stats"]["s4_merge"]["added_by_s4"] == 1
 
-    def test_s4_empty_keeps_s2_with_warning(self, monkeypatch):
-        """Existing graceful degradation preserved: S4 empty → S2 stands + warning."""
+    def test_s4_empty_is_silent_no_changes(self, monkeypatch):
+        """#1789 Task 3: an empty delta IS the correct no-changes response —
+        S2 stands, SILENTLY. The old "S4 returned an empty list" warning fired
+        on the normal no-gaps case (and would fire on every delta session that
+        correctly found nothing); the no-changes signal is now the
+        ``s4_delta_empty`` stats key, never a warning."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
         def resp(system, user):
@@ -4466,7 +4718,9 @@ class TestE4Orchestrator:
 
         conv = [{"role": "user", "content": "we decided X"}]
         out = v2.extract_session_v2(MockModel(resp), conv)
-        assert any("kept S2 output" in w for w in out["warnings"])
+        assert not any("kept S2 output" in w for w in out["warnings"])
+        assert out["stats"]["s4_delta_empty"] == 1
+        assert out["error_census"] == {}
         assert out["payload"]["points"]   # S2 output embedded
 
     def test_s4_exception_keeps_s2_with_error(self, monkeypatch):

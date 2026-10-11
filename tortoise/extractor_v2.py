@@ -72,7 +72,7 @@ from typing import Any
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
-from .env_truthy import is_truthy  # #4097: the declared truthy contract
+from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
@@ -675,6 +675,30 @@ def _classify_later_enabled() -> bool:
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
+
+
+def _s4_delta_enabled() -> bool:
+    """#1789: the call-time S4 delta-contract toggle — DEFAULT-ON.
+
+    Resolved through ``env_flag`` (#4097, the declared tristate contract):
+    unset/blank → the default (True — the delta/gaps-only contract is the
+    shipped default); an explicit truthy spelling (1 / true / yes / on) →
+    True; an explicit falsy spelling (0 / false / no / off) → the LEGACY
+    complete-list contract, whose template render is byte-identical to
+    pre-change (the revert trigger).
+
+    GARBAGE → the default (True), NEVER coerced — the same allowlist
+    semantics ``_classify_later_enabled`` has, with the INVERTED default.
+    The fail-open asymmetry is deliberate and documented in ``.env.example``
+    + the #1789 rollout note: a typo'd or inline-commented value
+    (``"0  # comment"`` — inline comments are NOT stripped) SILENTLY selects
+    delta. Comments belong on their own line.
+
+    Read at CALL time (matching ``_classify_later_enabled``), so the
+    production choke point in ``extract_session_v2`` captures ONE value per
+    session and the render/fallback paths never disagree within a run.
+    """
+    return env_flag("TORTOISE_S4_DELTA", True)
 
 
 def _vet_enabled() -> bool:
@@ -2407,20 +2431,166 @@ S4_TMPL_CORE_ONLY = S4_TMPL.replace(
     "  deterministically). NEVER invent entities.",
 )
 
+# ── #1789: the S4 DELTA contract (gaps + full-item corrections only) ───────
+#
+# S4's legacy contract mandates re-emitting the COMPLETE embed list (the
+# "re-emit tax": S4 output ≈ 1.4-2× S2, the top truncation surface). The
+# delta contract keeps the SAME item shape / SAME `OUTPUT_CONTRACT` and drops
+# only the re-emission mandate: unchanged S2 items are OMITTED and preserved
+# by the pre-existing E4 `merge_embed_lists` union (collision = correction,
+# omission = safe by construction). Competitor precedent: Mem0 v3 ADD-only,
+# Zep/Graphiti incremental episodes, Letta paged partial updates — none
+# re-emit the full list.
+#
+# Derivation discipline (matches the `S4_TMPL_CORE_ONLY` precedent at :2381):
+# every fragment below is `.replace()`d out of the LEGACY constants, so
+# `S4_TMPL` / `S4_TMPL_CORE_ONLY` stay BYTE-IDENTICAL (the revert path and
+# the existing pins). The anchor-count pins live in tests — a fragment that
+# matches 0 or 2+ times fails loudly there rather than silently no-opping.
+#
+# R1 — output line (keeps the "JSON" wording: the DeepSeek json_object-mode
+#      guard, #1782).
+# R2 — emit-only-deltas / corrections (replaces the re-emit clause).
+# R3 — corrections identity: content-verbatim, kind-unchanged (a changed
+#      content/kind is a NEW identity, caught by `_merge_key`).
+# R4 — Tier-A state values are already in the base (never re-emit unless
+#      correcting).
+# R5 — an empty delta is valid (do NOT pad with unchanged items).
+# R6 — the core-only #1695 kind clause reconciled with R2 (do not re-emit;
+#      a corrected item keeps its S2 kind verbatim).
+# R7 — reference relaxation: operator endpoints / slot subject-object names
+#      may reference an UNCHANGED S2 item shown in the prompt WITHOUT
+#      re-emitting it (enforcement runs against the final merged list).
+_S4_DELTA_R1_OLD = "OUTPUT — ONE JSON object, the COMPLETE embed list (S2 + gaps), SAME contract:"
+_S4_DELTA_R1_NEW = (
+    "OUTPUT — ONE JSON object, the DELTA embed list — ONLY your gap ADDITIONS "
+    "and\nfull-item CORRECTIONS, SAME contract shape:")
+
+_S4_DELTA_R2_OLD = (
+    "- Re-emit the S2 items you keep, corrected where the search results show they\n"
+    "  already exist (lifecycle changed/unchanged + supersedes = the existing id).")
+_S4_DELTA_R2_NEW = (
+    "- EMIT ONLY DELTAS: do NOT re-emit S2 items that are UNCHANGED. Re-emit an\n"
+    "  S2 item ONLY as a full-item CORRECTION when the search results show it\n"
+    "  already exists (lifecycle changed/unchanged + supersedes = the existing\n"
+    "  id). S2 items you do not touch are PRESERVED by the merge — your\n"
+    "  omissions are safe by construction.\n"
+    "- CORRECTIONS-IDENTITY (R3): a correction is content-VERBATIM (same content;\n"
+    "  changed lifecycle/supersedes/slots only). Emitting CHANGED content is a\n"
+    "  NEW point, not a correction — never rewrite an existing point's content\n"
+    "  under its old identity. entities section ONLY: name-VERBATIM AND\n"
+    "  kind-UNCHANGED — a kind change is a NEW identity and would APPEND a\n"
+    "  duplicate :Object.")
+
+_S4_DELTA_R4_OLD = (
+    "- Tier-A state-value points from the S2 list are NEVER dropped — re-emit\n"
+    "  them (with corrections if the search shows they exist). The S4 pass\n"
+    "  COMPLETES the list; it does not replace S2 findings. The value is the fact.")
+_S4_DELTA_R4_NEW = (
+    "- Tier-A state-value points from the S2 list are ALREADY IN THE BASE — do\n"
+    "  NOT re-emit them unless CORRECTING them (R3). The merge PRESERVES them;\n"
+    "  the value is the fact.")
+
+_S4_DELTA_R5_OLD = "Empty arrays are valid. Print ONLY the JSON object."
+_S4_DELTA_R5_NEW = (
+    "- An EMPTY delta (no gaps AND no corrections) is VALID — emit nothing; do\n"
+    "  NOT pad the output with unchanged S2 items. Empty arrays are valid.\n"
+    "  Print ONLY the JSON object.")
+
+_S4_DELTA_R6_OLD = (
+    "- S2 ITEMS ARE TYPED (#1695): the S2 items in the input carry kinds assigned\n"
+    "  by the classifier — including PACK kinds NOT in your MASTER LIST and the\n"
+    "  \"unclassified\" sentinel. Re-emit them VERBATIM with their kinds UNCHANGED:\n"
+    "  do NOT re-type an S2 item, do NOT replace a pack kind with a core kind, do\n"
+    "  NOT resolve an \"unclassified\" you cannot see in the list. The\n"
+    "  MUST-come-from-list rule applies to NEW items only.")
+_S4_DELTA_R6_NEW = (
+    "- S2 ITEMS ARE TYPED (#1695): the S2 items in the input carry kinds assigned\n"
+    "  by the classifier — including PACK kinds NOT in your MASTER LIST and the\n"
+    "  \"unclassified\" sentinel. Do NOT re-emit S2 items (R2): a CORRECTED item\n"
+    "  (R3) keeps its S2 kind VERBATIM — do NOT re-type an S2 item, do NOT\n"
+    "  replace a pack kind with a core kind, do NOT resolve an \"unclassified\"\n"
+    "  you cannot see in the list. The MUST-come-from-list rule applies to NEW\n"
+    "  items only.")
+
+# R7 — operator endpoint references (a).
+_S4_DELTA_R7A_OLD = (
+    "- OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point\n"
+    "  or event emitted in THIS output (copy verbatim, no paraphrasing). If an\n"
+    "  endpoint has no point yet, CREATE the point first.")
+_S4_DELTA_R7A_NEW = (
+    "- OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point\n"
+    "  or event in THIS output OR in the S2 EMBED LIST shown above (copy\n"
+    "  verbatim, no paraphrasing — reference an UNCHANGED S2 item WITHOUT\n"
+    "  re-emitting it). If an endpoint has no point yet, CREATE the point first.")
+
+# R7 — slot subject/object references (b).
+_S4_DELTA_R7B_OLD = (
+    "  object names MUST reference an entity in the entities[] of THIS output\n"
+    "  (unresolvable refs are dropped at execution).")
+_S4_DELTA_R7B_NEW = (
+    "  object names MUST reference an entity in the entities[] of THIS output OR\n"
+    "  of the S2 EMBED LIST above (R7: name an UNCHANGED S2 entity WITHOUT\n"
+    "  re-emitting it — enforcement runs against the final merged list).")
+
+_S4_DELTA_RULES = (
+    (_S4_DELTA_R1_OLD, _S4_DELTA_R1_NEW),
+    (_S4_DELTA_R2_OLD, _S4_DELTA_R2_NEW),
+    (_S4_DELTA_R4_OLD, _S4_DELTA_R4_NEW),
+    (_S4_DELTA_R7A_OLD, _S4_DELTA_R7A_NEW),
+    (_S4_DELTA_R7B_OLD, _S4_DELTA_R7B_NEW),
+    (_S4_DELTA_R5_OLD, _S4_DELTA_R5_NEW),
+)
+
+
+def _derive_s4_delta(src: str, *, core_only: bool) -> str:
+    """Apply the #1789 delta rules (R1-R7) to an S4 template constant.
+
+    EVERY rule fragment must occur EXACTLY ONCE in its source (R6 exists
+    only in the core-only source) — a drift raises at import, so a silently
+    un-applied rule (the precise failure a bare ``.replace`` no-op hides)
+    can never ship a half-delta contract. The legacy constants are never
+    passed here, so they stay byte-identical.
+    """
+    rules = list(_S4_DELTA_RULES)
+    if core_only:
+        rules.append((_S4_DELTA_R6_OLD, _S4_DELTA_R6_NEW))
+    out = src
+    for old, new in rules:
+        n = out.count(old)
+        if n != 1:
+            raise ValueError(
+                "#1789 S4 delta anchor must occur exactly once, found "
+                f"{n}: {old[:70]!r}")
+        out = out.replace(old, new)
+    return out
+
+
+S4_TMPL_DELTA = _derive_s4_delta(S4_TMPL, core_only=False)
+S4_TMPL_CORE_ONLY_DELTA = _derive_s4_delta(S4_TMPL_CORE_ONLY, core_only=True)
+
 
 def render_s4_prompt(story: str, search: dict, embed_list: dict,
                      master: dict | None = None, *,
                      session_date: str | None = None,
                      edus: list[dict] | None = None,
-                     core_only: bool | None = None) -> str:
+                     core_only: bool | None = None,
+                     delta: bool | None = None) -> str:
     """The S4 prompt. ``core_only`` (None = env fallback) selects the
-    #1695 Task 5 core-only variant (pack vocabulary + chains out, the S4
-    re-emit clause in); the flag-off default renders byte-identically."""
+    #1695 Task 5 core-only variant (pack vocabulary + chains out); ``delta``
+    (None = env fallback, DEFAULT-ON) selects the #1789 delta/gaps-only
+    contract. The four combinations dispatch independently; with both off the
+    render is byte-identical to pre-change."""
     master = master or build_master_list()
     if core_only is None:
         core_only = _classify_later_enabled()
+    if delta is None:
+        delta = _s4_delta_enabled()
     transcript = _render_source_transcript(edus)
-    tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
+    if delta:
+        tmpl = S4_TMPL_CORE_ONLY_DELTA if core_only else S4_TMPL_DELTA
+    else:
+        tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
     contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
     chains = "" if core_only else _render_chains(master)
     return (tmpl
@@ -2442,15 +2612,24 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
            session_date: str | None = None,
            edus: list[dict] | None = None,
            stats: dict | None = None,
-           core_only: bool | None = None) -> dict:
-    """S4: complete the embed list (S2 + gaps). Draft prompt v1.
+           core_only: bool | None = None,
+           delta: bool | None = None) -> dict:
+    """S4: complete the embed list — gaps + full-item corrections.
+
+    ``delta`` (None = env fallback, DEFAULT-ON) selects the #1789
+    delta/gaps-only contract; with it off the prompt renders byte-identical
+    to the legacy complete-list contract (the revert path). The delta
+    contract does NOT need a different output cap or ladder — the #2134
+    escalation net already re-runs the SAME rendered prompt at the elevated
+    cap, so a truncated delta is retried under the delta contract at 2×
+    tokens (the elevated-cap delta retry the #1789 plan specified).
 
     Output bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); unparseable
     output → ``_ParseError`` → census ``parse_error`` (see ``run_s2``)."""
     return _complete_parsed(model,
                             render_s4_prompt(story, search, embed_list, master,
                                              session_date=session_date, edus=edus,
-                                             core_only=core_only),
+                                             core_only=core_only, delta=delta),
                             "Complete the embed list.",
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
                             stats=stats, seam="s4")
@@ -2517,6 +2696,54 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
         if section in s2 or section in s4:
             out[section] = merged
     return out
+
+
+# ── #1789 Task 3: the S4 delta contract's merge gate ─────────────────────
+#
+# The legacy gate tested only the 4 `_EMBED_SECTIONS`, so a delta carrying
+# ONLY retractions / chain_notes / link_before_create was DROPPED (silent
+# data loss — a pre-existing latent bug that becomes first-order once S4 no
+# longer re-emits the whole list). The gate now fires on ANY content-bearing
+# list section; an empty (or all-empty-arrays) delta is the CORRECT
+# no-changes response — silent, never a warning.
+
+def _s4_section_is_content(key: str, value) -> bool:
+    """#1789 Task 3: does this S4 section carry CONTENT worth merging?
+
+    A KNOWN ``_OUTPUT_SCHEMA`` section requires a non-empty list whose
+    elements are ALL non-empty dicts (a garbage element is MALFORMED, not
+    content — see ``_s4_malformed_sections``). An UNKNOWN (model-invented)
+    key counts as content for ANY non-empty list: the gate must fire and the
+    merge drops the key (merge-and-drop), so an unknown-key-only delta is
+    never misread as "found nothing"."""
+    if not isinstance(value, list) or not value:
+        return False
+    if key in _OUTPUT_SCHEMA:
+        return all(isinstance(i, dict) and i for i in value)
+    return True
+
+
+def _s4_malformed_sections(s4) -> list[str]:
+    """#1789 Task 3: sections whose shape is MALFORMED (malformed ≠ empty).
+
+    A KNOWN ``_OUTPUT_SCHEMA`` section is malformed when its value is truthy
+    but not a list, or is a list carrying any non-dict / empty-dict element
+    (``[42]``, ``[{}]``, mixed ``[{"content": "x"}, "garbage"]``). A
+    non-dict top-level is malformed as ``<top-level>``. The remaining VALID
+    sections still merge — the caller records the census and preserves the
+    S2 content for the malformed section."""
+    if s4 is None:
+        return []
+    if not isinstance(s4, dict):
+        return ["<top-level>"]
+    bad: list[str] = []
+    for key, value in s4.items():
+        if key not in _OUTPUT_SCHEMA or not value:
+            continue
+        if not isinstance(value, list) or not all(
+                isinstance(i, dict) and i for i in value):
+            bad.append(key)
+    return bad
 
 
 # #2408 Task 1: optional noise fields a faithful re-emitter may
@@ -7148,15 +7375,33 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # separately from size-driven escalations. Incremented ONLY under the
     # S2-empty guard (see below) — the S4 merge runs on EVERY non-empty S4.
     s4_full_rescues = 0
+    # #1789: the delta choke point — the toggle is read ONCE per session and
+    # threaded into the S4 call, so a mid-run env flip cannot mix contracts
+    # within a run.
+    s4_delta = _s4_delta_enabled()
+    s4_delta_empty = 0
+    s4_delta_reemit_suspect = False
     if story:
         stage_stats: dict = {}
         try:
             s4 = run_s4(model, story, search, embed_list, master,
                         session_date=session_date, edus=edus,
                         stats=stage_stats,
-                        core_only=classify_later)
-            if s4 and (s4.get("entities") or s4.get("points") or
-                       s4.get("events") or s4.get("operators")):
+                        core_only=classify_later, delta=s4_delta)
+            # #1789 Task 3: MALFORMED sections are censused per section BEFORE
+            # the gate — the remaining VALID sections still merge (no
+            # whole-reject, no silent loss of valid corrections).
+            s4_shape_bad = _s4_malformed_sections(s4)
+            for _sec in s4_shape_bad:
+                errors.append(f"S4 output malformed section {_sec!r} — kept "
+                              "S2 content for that section")
+                _bump_census_class(error_census, "s4_shape_error")
+            # #1789 Task 3 (I-1): the gate fires on ANY content-bearing list
+            # section. The old 4-section check DROPPED a retractions-only /
+            # chain_notes-only / link_before_create-only delta — silent data
+            # loss, pre-existing in legacy mode too.
+            if isinstance(s4, dict) and any(
+                    _s4_section_is_content(k, v) for k, v in s4.items()):
                 complete_list = merge_embed_lists(embed_list, s4)
                 s4_merge_stats = _s4_merge_stats(embed_list, s4, complete_list)
                 # #2335 WI-1b: a full-rescue episode is S4 rebuilding the
@@ -7165,9 +7410,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # counting those would corrupt the measurement).
                 if not any((embed_list or {}).values()):
                     s4_full_rescues += 1
-            else:
-                # graceful degradation — S2 output stands; not an error
-                s4_warnings.append("S4 returned an empty list — kept S2 output")
+                # #1789 Task 6: the delta-compliance signal — a delta-mode
+                # session whose S4 output is mostly VERBATIM re-emissions is
+                # not honoring "emit only deltas". Observability only (no
+                # retry, no error); LEGACY mode exempt (full re-emit IS the
+                # contract there).
+                if (s4_delta and s4_merge_stats.get("s2_items")
+                        and s4_merge_stats.get("verbatim_reemissions", 0)
+                        >= _S4_REEMIT_SUSPECT_RATIO
+                        * s4_merge_stats["s2_items"]):
+                    s4_delta_reemit_suspect = True
+            elif not s4_shape_bad:
+                # #1789 Task 3: an empty delta (or all-empty arrays) IS the
+                # correct no-changes response — SILENT, not a warning. The
+                # old "S4 returned an empty list" warning fired on the normal
+                # no-gaps case (noise) and would fire on every delta session
+                # that correctly found nothing.
+                s4_delta_empty = 1
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
             _bump_census(error_census, e)
@@ -7414,6 +7673,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["failed_chunks"] = failed_chunks
     result["stats"]["edus"] = len(edus)  # #2335 WI-1b: EDU(turn) count
     result["stats"]["s4_merge"] = s4_merge_stats  # E4 (#1536): no-silent-drop proof
+    # #1789: delta-contract observability — the effective toggle for the
+    # session (the choke-point value) + the no-changes signal + the
+    # compliance flag. Absent-when-false for the two signals (the
+    # ``s4_full_rescues`` precedent — a 0 write would fabricate a shape).
+    result["stats"]["s4_delta"] = s4_delta
+    if s4_delta_empty:
+        result["stats"]["s4_delta_empty"] = s4_delta_empty
+    if s4_delta_reemit_suspect:
+        result["stats"]["s4_delta_reemit_suspect"] = True
     if s4_full_rescues:
         # #2335 WI-1b: absent-when-zero (a 0 write would fabricate a recovery
         # shape on sessions that never hit the S2-empty/S4-full geometry).
@@ -7459,6 +7727,15 @@ _DEADLINE_ABORTS_LOCK = threading.Lock()
 # (int, read at call time) raises BOTH stages without a code change — the
 # retry-then-fix protocol's mechanical lever (D6: ``transient_timeout``
 # spike → raise the cap).
+# #1789 Task 6: the runtime compliance flag's ITEM-ratio threshold — a
+# delta-mode session whose S4 output is mostly VERBATIM re-emissions is not
+# honoring the delta contract (observability only: no retry, no error).
+# The E2E token-ratio threshold lives with the gate script; the two share the
+# numeric value by design and diverge in meaning (a compliant high-gap
+# session can trip the token ratio but never the item-ratio flag).
+_S4_REEMIT_SUSPECT_RATIO = 0.5
+
+
 _S1_MAX_TOKENS = 1500
 _S2_S4_MAX_TOKENS = 16000
 
