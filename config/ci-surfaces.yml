@@ -468,6 +468,13 @@ surfaces:
   # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
   # be classified — the scope-v5 drift trap).
   - test_4241_metering_period_reconciliation.py
+  # #1890: the terminal-state invite-ghost sweep's live caller. Registered with
+  # `api` because the step (`_sweep_invite_ghosts`) and both call sites
+  # (`_run_boot_sweeps` + `_event_retention_loop`) live in
+  # tortoise/hosted_api.py, which SELECTS `api` — a named-surface match REPLACES
+  # the `core` fallback (#2938), so a core-only registration would never run on
+  # an api-only PR. Same shape as the #4241 entry above.
+  - test_1890_invite_ghost_sweep_schedule.py
   # #5388: org-enumeration completeness as a SERVER-READ property. Registered on
   # `api` and NOT dual-registered: the file pins tortoise/hosted_api.py (the
   # page-walk and its `order="id"` contract) and tortoise/supabase_control.py

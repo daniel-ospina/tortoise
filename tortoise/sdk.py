@@ -21684,13 +21684,25 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+org
+        # Reject duplicate pending invitations for same email+org.
+        #
+        # #1890: expiry is a DERIVED terminal state — an invite whose
+        # ``expires_at`` has passed is dead even though nothing ever writes
+        # ``status`` (this method does not even set it). Without the
+        # ``expires_at`` arm an expired invite blocks the re-invite FOREVER,
+        # exactly as the hosted registry mint did (hosted_api.py). The
+        # predicate matches the hosted dup-check and
+        # ``cleanup_expired_invitations``, so the three cannot disagree about
+        # whether an invite is live.
         reg = self._get_registry()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i) > 0",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -21700,7 +21712,6 @@ class TortoiseSDK:
         token = str(uuid.uuid4())
         token_hash = hash_api_key(token)
         iid = ulid()
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(

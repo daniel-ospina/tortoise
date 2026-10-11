@@ -1503,6 +1503,48 @@ def _sweep_oauth_retention() -> None:
         _logger.warning("oauth retention sweep failed: %s", exc)
 
 
+def _sweep_invite_ghosts() -> None:
+    """#1890: give the terminal-state invite-ghost sweep a LIVE caller.
+
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) deletes every
+    ``invite-{iid}`` placeholder Membership whose Invitation node is terminal
+    (accepted / revoked / expired / orphaned) — but it shipped with exactly
+    ONE caller: ``graph-scripts/backfill_invite_ghost_members.py``, which an
+    operator has to run by hand. So an invite that expired by the clock after
+    that one-time backfill left its ghost 'invited' row in ``list_members``
+    forever — the #1890 symptom — and the SDK method the issue names as
+    caller-less stayed caller-less. This is the #4241 shape: the sweep was
+    never wrong, it just never ran.
+
+    Scheduled, not operator-run — the same seam as the other sweeps: armed by
+    ``_run_boot_sweeps`` at boot and by ``_event_retention_loop`` on the
+    periodic interval (hourly by default). Idempotent by construction (a
+    second run finds nothing), so re-running every cycle is a no-op, and the
+    predicate is the reviewed #1908 one — a still-pending, unexpired invite's
+    placeholder is kept.
+
+    Registry-only: Supabase mode never constructs the registry graph (#669);
+    the control-plane lane's invitations are a Postgres table with its own
+    dedup index and no placeholder rows.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs and
+    never kills the runner.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        if is_supabase_enabled():
+            return
+        sdk = _make_sdk(namespace="registry")
+        result = sdk.sweep_invite_ghost_memberships()
+        if result.get("deleted"):
+            _logger.info("invite ghost sweep deleted %s terminal placeholder "
+                         "row(s) of %s examined",
+                         result["deleted"], result.get("found"))
+    except Exception as exc:  # a GC sweep must never crash the runner
+        _logger.warning("invite ghost sweep failed: %s", exc)
+
+
 def _reconcile_metering_periods() -> None:
     """#4241: give the period-bound repair a PERIODIC caller.
 
@@ -1680,6 +1722,13 @@ async def _event_retention_loop(interval: float) -> None:
             "oauth retention",
             functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
                               name="tortoise-boot-sweep"))
+        # #1890: the terminal-state invite-ghost sweep (#1908) was reachable
+        # only from a graph-script an operator ran by hand, so a ghost left by
+        # an invite that expired AFTER that one-off backfill never went away.
+        await _guarded_step(
+            "invite ghost sweep",
+            functools.partial(run_on_daemon_worker, _sweep_invite_ghosts,
+                              name="tortoise-boot-sweep"))
         # #4241: repair subscription orgs whose period anchor is unusable.
         # Before this, the idempotent repair had exactly one caller — its own
         # migration — so an org broken after that deploy never healed.
@@ -1723,6 +1772,9 @@ async def _run_boot_sweeps() -> None:
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("deleted-account purge", _purge_deleted_accounts),
                       ("oauth retention", _sweep_oauth_retention),
+                      # #1890: same runner as the periodic loop, so the boot and
+                      # periodic paths for the invite-ghost sweep cannot drift.
+                      ("invite ghost sweep", _sweep_invite_ghosts),
                       # #4241: the SAME runner as the periodic loop, so the
                       # boot and periodic paths for the anchor repair cannot
                       # drift apart — the property _guarded_step exists for.
@@ -18481,24 +18533,36 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
-        from datetime import datetime, timedelta
 
         from tortoise.auth import hash_api_key as _hash
 
+        # #1890: expiry is a DERIVED terminal state. Asking the stored
+        # ``status`` alone is the bug — only the caller-less sweep ever writes
+        # 'expired', so an invite whose ``expires_at`` has passed still counted
+        # as a pending duplicate and 409'd every re-invite FOREVER.
+        # ``expires_at`` is the authority here, exactly as the accept paths,
+        # the Pro capacity read and ``cleanup_expired_invitations`` already
+        # treat it.
+        now = datetime.now(UTC).isoformat()
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND "
             "(i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i)",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+        # #1890: past the dup-check every invite this email has left is
+        # terminal, so their placeholders are swept BEFORE the new one is
+        # minted (see the helper — otherwise the expired invite's ghost
+        # survives the re-mint and the email shows up twice in list_members).
+        _sweep_terminal_invite_placeholders(sdk, org_id, email)
 
         token = str(_uuid.uuid4())
         token_hash = _hash(token)
         iid = _short_id()
-        now = datetime.now(UTC).isoformat()
         expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
         reg.query(
             "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role, "
@@ -18629,6 +18693,44 @@ async def invite_info(token: str):
         "inviter_email": inv.get("inviter_email") or "a team member",
         "expires_at": inv.get("expires_at"),
     }
+
+
+def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
+    """#1890: delete every ``invite-{iid}`` placeholder Membership for ONE
+    (org, email) whose Invitation node is TERMINAL — accepted, revoked, or
+    expired — and return how many Invitation nodes qualified.
+
+    This is #1908's terminal-state sweep (``sweep_invite_ghost_memberships``)
+    applied at the LIVE point where the ghost becomes visible: the mint. By
+    then every invite this email has left is terminal (the dup-check just
+    rejected a live pending one), and without this sweep the re-mint leaves
+    the old placeholder beside the new one, so ``list_members`` shows the
+    same email twice — once as a ghost.
+
+    Expiry is DERIVED from ``expires_at``, in the same form the accept paths
+    and ``cleanup_expired_invitations`` use: nothing live ever writes
+    ``status='expired'``, so a status-only predicate would keep the ghost of
+    an invite that expired by the clock. The predicate mirrors
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` so the two cannot classify
+    a node differently.
+
+    Deletes go through ``_delete_fake_invite_membership`` (best-effort, one
+    warning per row): a transient delete failure must not turn a re-invite
+    into a 500, and the fleet sweep is the backstop.
+    """
+    reg = sdk._get_registry()
+    now = datetime.now(UTC).isoformat()
+    rows = reg.query(
+        "MATCH (i:Invitation {org_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NOT NULL "
+        "OR i.status IN ['accepted', 'revoked', 'expired'] "
+        "OR (i.expires_at IS NOT NULL AND i.expires_at <= $now) "
+        "RETURN i.id",
+        params={"tid": org_id, "email": email, "now": now},
+    ).result_set
+    for (iid,) in rows:
+        _delete_fake_invite_membership(sdk, org_id, iid)
+    return len(rows)
 
 
 def _delete_fake_invite_membership(sdk, org_id: str, invitation_id: str) -> None:

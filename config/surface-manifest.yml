@@ -5438,11 +5438,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.sweep_invite_ghost_memberships.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling'
+  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

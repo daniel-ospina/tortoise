@@ -427,8 +427,8 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.org_get` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.signup_token_lookup` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.topic_summarize` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
-| `TortoiseSDK.sweep_invite_ghost_memberships` | reached by no registered MCP tool; caller categories: other-tooling | tooling, docs | **review** | no MCP tool binds it; callers: other-tooling |
 | `TortoiseSDK.graph_list` | reached by no registered MCP tool; caller categories: other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: other-tooling, tenant-rest |
+| `TortoiseSDK.sweep_invite_ghost_memberships` | reached by no registered MCP tool; caller categories: other-tooling, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: other-tooling, tenant-rest |
 
 ### control-plane — 2
 
