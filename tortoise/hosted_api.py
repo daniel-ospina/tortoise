@@ -6363,9 +6363,20 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
         _alert_unmetered("write_op", org_id, e)
 
 
-async def _emit_capture_ledger(org_id: str, session_id: str,
-                               meta: dict) -> None:
+async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
+                               harness: str | None = None) -> None:
     """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3843 (lane B7, owner-decided): ``harness`` is the SERVER-RESOLVED capture
+    harness (``_capture_session_impl``'s ``capture_harness``), carried onto the
+    per-capture record beside ``session_id``. The owner's decided record shape
+    is *team · session · timestamp · harness · model(s) · calls · input tokens ·
+    output tokens · cost* — every element but ``harness`` already rode this row
+    (team = the row's ``org_id``, timestamp = ``created_at``, model(s) = the
+    ``by_stage`` keys), and a per-harness/per-team read was therefore
+    impossible from the record alone. Defaulted so the ledger-only callers
+    (metering tests, the ``_emit_capture_ledger`` unit seams) keep working; the
+    capture call site always passes it.
 
     #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
     #3359's analytics row is a measurement, not a ledger: nothing keyed by
@@ -6393,7 +6404,7 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
     an analytics failure and must not be labelled one.
     """
     try:
-        _cost_props = _capture_cost_props(session_id, meta)
+        _cost_props = _capture_cost_props(session_id, meta, harness)
         if _cost_props is None:
             return
         from tortoise.metering import record_capture_usage
@@ -13263,7 +13274,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # increment to the operator (lane=capture_ledger) instead of leaving
         # a silent short ledger row behind. A ledger failure is not an
         # analytics failure and is never labelled one.
-        await _emit_capture_ledger(org["org_id"], session_id, meta)
+        await _emit_capture_ledger(org["org_id"], session_id, meta,
+                                   capture_harness)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -26905,6 +26917,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #3843: the capture_cost row's harness dimension reuses the `harness` key
+    # already registered above (the onboarding emits carry it), so no new name
+    # is introduced and the flat allowlist is not widened for every event.
+    # Do NOT remove `harness` from the first line — the per-capture usage
+    # record's per-harness read depends on it surviving this filter.
     # #5868: a per-route by_stage sub-total that could not represent a charge.
     # Without this key the disclosure is stripped here — the documented #3359
     # loss mode — and the row's cost_usd-vs-by_stage gap stays unexplained.
@@ -28281,7 +28298,8 @@ def _as_call_count(value) -> int:
     return n if n > 0 else 0
 
 
-def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+def _capture_cost_props(session_id: str, meta: dict,
+                        harness: str | None = None) -> dict | None:
     """#3359: the per-session cost driver as an analytics ``properties`` dict.
 
     Reads the extractor telemetry (``meta["stats"]["llm"]``) that
@@ -28318,6 +28336,20 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
 
     A capture whose extraction ERRORED does carry a roll-up (and therefore
     a row): the provider calls were made and their spend is real.
+
+    #3843 (lane B7): ``harness`` is the SERVER-RESOLVED capture harness — the
+    last element of the owner's decided per-capture record shape that had no
+    carrier here (see ``_emit_capture_ledger``). It is ALWAYS present on the
+    row, with ``"unknown"`` standing in when the server could not name one
+    (a session-JWT/browser capture observes no harness — ``_credential_is_
+    agent`` is False, so ``_observed_capture_harness`` returns ``None``; see
+    #3700). The sentinel is the one this codebase already uses for exactly
+    this quantity on the Session node (the session-provenance emit,
+    ``source_harness=capture_harness or "unknown"``) — one vocabulary, not a
+    second one. Absence could not
+    do the job: a missing key is the #3824 F1/F2 collapse in miniature, since
+    a pre-#3843 row and a capture whose harness is merely unproven would be
+    the same shape, and every one of them would read as "harness = nothing".
     """
     stats = meta.get("stats") or {}
     llm = stats.get("llm") or {}
@@ -28338,6 +28370,11 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     from tortoise.extractor_v2 import _normalise_token_count
     return {
         "session_id": session_id,
+        # #3843: the harness dimension of the per-capture usage record.
+        # Already in ``_ALLOWED_ANALYTICS_PROPS`` (the onboarding emits carry
+        # it), so it survives the PII filter without widening the global flat
+        # allowlist for every other event.
+        "harness": harness or "unknown",
         "calls": int(llm.get("calls", 0) or 0),
         "retries": int(llm.get("retries", 0) or 0),
         "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,
