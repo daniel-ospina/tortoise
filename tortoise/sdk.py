@@ -19050,6 +19050,37 @@ class TortoiseSDK:
                     edge_sid = (row[6] or "") if len(row) > 6 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
+                if _prov and entity_data:
+                    # #5581 (the #5038 read-path half): the POINT-LEVEL currency
+                    # verdict, and the sourced disclosure that rides with it.
+                    # ONE batch query for the hits' ``extractedFrom`` links —
+                    # read ONLY under the flag, exactly like the two columns
+                    # above, so an unflagged call pays nothing and returns the
+                    # byte-identical row it always did.
+                    #
+                    # ⛔ The verdict is the §4.6 AGGREGATE, never one link's
+                    # pair: a hit is a Point, and ``extractedFrom`` is
+                    # many→many, so reporting a single link's verdict as the
+                    # Point's says ``current`` for a Point another link makes
+                    # stale — the false-current the note exists to prevent
+                    # (see ``currency_status``'s ⚠ and
+                    # ``tests/test_source_version_read_wiring_5199.py``'s
+                    # ``test_search_hit_makes_no_version_claim``).
+                    #
+                    # ``outdated_sources`` carries the behind links' sources so
+                    # the row DISCLOSES what moved rather than flagging a
+                    # binary state — the owner's ruling (2026-09-26) is that the
+                    # out-of-date fact is withheld as an answer and disclosed as
+                    # an FYI **carrying its source**; a flag alone is the shape
+                    # the plan's `OVERRIDES:` line rejects.
+                    from .search_engine import aggregate_currency, read_currency_links
+                    _currency_links = read_currency_links(graph, list(entity_data))
+                    for pid, entry in entity_data.items():
+                        links = _currency_links.get(pid, [])
+                        entry["currency"] = aggregate_currency(
+                            (lk["recorded"], lk["current"]) for lk in links)
+                        entry["outdated_sources"] = [
+                            lk for lk in links if lk["currency"] == "stale"]
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
                     # Point's own ``sessionId`` (camel) prop, else its own
@@ -19252,6 +19283,11 @@ class TortoiseSDK:
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),
                 captured_at=pt.get("captured_at", ""),
+                # #5581: the §4.6 Point-level verdict and the disclosure's
+                # material — present only when the flag fetched them, so
+                # ``to_dict``'s provenance block stays absent by default.
+                currency=pt.get("currency", ""),
+                outdated_sources=pt.get("outdated_sources") or [],
             )
             results.append(result)
 
@@ -21563,9 +21599,10 @@ class TortoiseSDK:
         """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
-        oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
-        is token-attributable ('st_' + left(token_hash, 12)) — never a
-        caller-supplied identity. Returns {api_key, org_id, org_name,
+        of the least-recently-used non-bootstrap key (#750.10 semantics,
+        #1854/#1872 LRU ordering — never-used first) mirror the SQL;
+        created_by is token-attributable ('st_' + left(token_hash, 12)) —
+        never a caller-supplied identity. Returns {api_key, org_id, org_name,
         tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
         token is unknown/revoked or the org is soft-deleted.
         """
@@ -21621,18 +21658,38 @@ class TortoiseSDK:
             # target scan (expired keys don't count — never wedge, and never
             # let the oldest-LIVE key be the revoke collateral for expired
             # rows above the cap; matches the session-key recovery lanes).
+            #
+            # #1872: victim selection is #1854-LRU — never-used (NULL
+            # last_used_at) first, then least-recently-used, created_at as the
+            # final tiebreak — NOT oldest-created. Pre-#1872 the oldest-created
+            # scan rotated a LIVE credential while a never-used key sat beside
+            # it (the #1854 bug class, on the keyless-token lane).
+            #
+            # The just-minted key is EXCLUDED from the victim scan, and that
+            # exclusion is load-bearing rather than tidiness: this lane INSERTs
+            # BEFORE it counts (the self-healing ordering above), so the new row
+            # is inside the candidate set with last_used_at NULL by
+            # construction. Under a NULL-first order it would be the FIRST
+            # candidate and revoke ITSELF whenever every pre-existing key had
+            # already been used — returning a dead key to the caller. The COUNT
+            # still includes the new row; that is what keeps the over-cap check
+            # self-healing.
             rows = reg.query(
                 "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
-                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
+                "RETURN k.id, k.last_used_at, k.created_at",
                 params={"tid": org_id, "now": now_iso},
             ).result_set
-            if len(rows) > max_keys and rows:
-                reg.query(
-                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
-                    params={"id": rows[0][0], "now": now_iso},
-                )
+            if len(rows) > max_keys:
+                victims = [r for r in rows if r[0] != kid]
+                victims.sort(key=lambda r: (r[1] is not None, r[1] or "",
+                                            r[2] or ""))
+                if victims:
+                    reg.query(
+                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                        params={"id": victims[0][0], "now": now_iso},
+                    )
         self._audit(org_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"api_key": api_key, "org_id": org_id,

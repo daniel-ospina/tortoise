@@ -410,6 +410,140 @@ class TestConcurrencyE2E:
         assert len(org_ids) == 3  # N teams — no server-side dedupe pre-mint
 
 
+@pytest.fixture(scope="module")
+def lru_org(client):
+    """ONE minted org shared by TestKeylessRecoveryLRU's three tests.
+
+    Footprint matters here beyond tidiness: the embedded registry's legacy path
+    (`_verify_hashed_lookup` on SignupToken — no key_prefix index, so an
+    O(all SignupToken nodes) PBKDF2 scan) is what
+    `test_signup_token_revoke.py::TestRegistryLane::test_registry_revoke_pbkdf2_only_node`
+    deliberately exercises (it strips its node's `lookup_key`) under a 10s
+    transport wait bound. Every extra SignupToken node in the session
+    lengthens a budget that is already tight in multi-file selections (#5049),
+    so this class mints once and reseeds its key set per test instead of
+    minting a new org per test.
+    """
+    data = _mint(client)
+    return data["org_id"], data["signup_token"]
+
+
+class TestKeylessRecoveryLRU:
+    """#1872: the keyless (signup-token) recovery lane rotates by #1854-LRU
+    — never-used first, then least-recently-used — and NEVER the key it just
+    minted. Pre-#1872 it rotated the OLDEST-CREATED key, so an org whose oldest
+    key was a live, actively-used credential lost that credential while a
+    never-used key sat beside it (the #1854 bug class, unfixed on this lane).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _off_limits(self, monkeypatch):
+        # the rotation assertions, not the per-IP/per-token recovery limiter
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+
+    @staticmethod
+    def _seed_two_keys(org_id: str, first: dict, second: dict):
+        """Replace the org's key set with exactly two LIVE non-bootstrap
+        APIKey nodes so the cap-revoke victim is deterministic."""
+        reg = ha_mod._make_sdk(namespace="registry")._get_registry()
+        reg.query("MATCH (k:APIKey {org_id:$tid}) DELETE k",
+                  params={"tid": org_id})
+        for spec in (first, second):
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_via:'recovery', created_at:$ca, "
+                "last_used_at:$lua, revoked_at:null, expires_at:null})",
+                params={"id": spec["id"], "tid": org_id, "kh": "h-" + spec["id"],
+                        "kp": spec["id"][:10], "ca": spec["created_at"],
+                        "lua": spec.get("last_used_at")},
+            )
+        return reg
+
+    @staticmethod
+    def _revoked_map(reg, org_id: str) -> dict:
+        return {r[0]: r[1] for r in reg.query(
+            "MATCH (k:APIKey {org_id:$tid}) RETURN k.id, k.revoked_at",
+            params={"tid": org_id},
+        ).result_set}
+
+    def test_never_used_key_is_rotated_over_recently_used_older_key(
+            self, client, lru_org):
+        """The never-used key is the victim even though it was created LATER
+        than the recently-used one — the pre-#1872 created_at ASC scan picks
+        the OLDER, live key instead."""
+        org_id, token = lru_org
+        reg = self._seed_two_keys(
+            org_id,
+            # oldest-created, but USED recently → a live credential
+            {"id": "lru-live", "created_at": "2026-08-01T00:00:00Z",
+             "last_used_at": "2026-08-05T00:00:00Z"},
+            # newer, but NEVER used → the safest victim
+            {"id": "lru-never", "created_at": "2026-08-04T00:00:00Z"},
+        )
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        revoked = self._revoked_map(reg, org_id)
+        assert revoked["lru-never"] is not None, (
+            "the never-used key must be the rotation victim (#1872 LRU)")
+        assert revoked["lru-live"] is None, (
+            "the recently-used credential must survive (#1872 LRU)")
+        # cap still honored: 1 survivor + the mint = exactly max_api_keys (2)
+        live = [k for k, v in revoked.items() if v is None]
+        assert len(live) == 2, live
+        # the minted key authenticates — it was not its own collateral
+        r2 = client.get("/v1/team",
+                        headers={"Authorization": f"Bearer {r.json()['key']}"})
+        assert r2.status_code == 200, r2.text
+
+    def test_minted_key_is_never_the_victim_when_every_key_was_used(
+            self, client, lru_org):
+        """⛔ The load-bearing case. This lane INSERTs before it counts, so the
+        freshly minted row is inside the candidate set with last_used_at NULL.
+        With two USED keys at the cap, a NULL-first order that did not exclude
+        the new row would rotate the key it is about to return — a dead key in
+        the response (and a recovery that freed no slot). The victim must be
+        the least-recently-used PRE-EXISTING key."""
+        org_id, token = lru_org
+        reg = self._seed_two_keys(
+            org_id,
+            {"id": "lru-recent", "created_at": "2026-08-01T00:00:00Z",
+             "last_used_at": "2026-08-06T00:00:00Z"},
+            {"id": "lru-stale", "created_at": "2026-08-02T00:00:00Z",
+             "last_used_at": "2026-08-03T00:00:00Z"},
+        )
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        revoked = self._revoked_map(reg, org_id)
+        assert revoked["lru-stale"] is not None, (
+            "the least-recently-used pre-existing key is the victim")
+        assert revoked["lru-recent"] is None
+        # the returned key is LIVE — under a non-excluding NULL-first order it
+        # would have been revoked by its own mint
+        r2 = client.get("/v1/team",
+                        headers={"Authorization": f"Bearer {r.json()['key']}"})
+        assert r2.status_code == 200, (
+            "the minted key must not be the rotation victim: " + r2.text)
+        live = [k for k, v in revoked.items() if v is None]
+        assert len(live) == 2, live
+
+    def test_all_never_used_keys_keep_oldest_created_tiebreak(self, client,
+                                                             lru_org):
+        """Tiebreak parity: an all-NULL last_used_at set keeps the pre-#1872
+        oldest-created behavior (created_at ASC is the final sort key)."""
+        org_id, token = lru_org
+        reg = self._seed_two_keys(
+            org_id,
+            {"id": "lru-tie-old", "created_at": "2026-08-01T00:00:00Z"},
+            {"id": "lru-tie-new", "created_at": "2026-08-04T00:00:00Z"},
+        )
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        revoked = self._revoked_map(reg, org_id)
+        assert revoked["lru-tie-old"] is not None, (
+            "all-NULL set → oldest-created is the victim (tiebreak unchanged)")
+        assert revoked["lru-tie-new"] is None
+
+
 class TestRegistryLegacyNode:
     """#1709 registry parity: an APIKey node WITHOUT expires_at must still
     verify (NULL-as-never-expires) — without the NULL clause every legacy
@@ -576,6 +710,82 @@ class TestSupabaseLane:
                 if k["org_id"] == org_id and k.get("revoked_at") is None
                 and k.get("created_via") != "bootstrap"]
         assert len(keys) <= 2, f"cap overshot: {len(keys)} active non-bootstrap keys"
+
+    # ── #1872: recover_team_key's cap revoke is LRU, not oldest-created ────
+
+    def _seed_two_keys(self, org_id: str, first: dict, second: dict):
+        """Replace the org's api_keys rows with exactly two LIVE
+        non-bootstrap rows so the fake's cap-revoke victim is deterministic."""
+        rows = [k for k in self.fake.tables.get("api_keys", [])
+                if k.get("org_id") != org_id]
+        for spec in (first, second):
+            rows.append({
+                "id": spec["id"], "org_id": org_id,
+                "lookup_hash": "lh-" + spec["id"],
+                "key_prefix": spec["id"][:10],
+                "created_via": "recovery", "created_by": "st_seed",
+                "created_at": spec["created_at"],
+                "last_used_at": spec.get("last_used_at"),
+                "expires_at": None, "revoked_at": None,
+            })
+        self.fake.tables["api_keys"] = rows
+
+    def _by_id(self) -> dict:
+        return {k["id"]: k for k in self.fake.tables.get("api_keys", [])}
+
+    def test_recover_rotates_never_used_key_not_oldest_created(self, client):
+        """#1872 (Supabase lane): recover_team_key's victim is the
+        LEAST-RECENTLY-USED key, not the oldest-created one. Pre-#1872 the
+        created_at ASC scan rotated the OLDER, live credential while a
+        never-used key sat beside it."""
+        data = _mint(client)
+        org_id, token = data["org_id"], data["signup_token"]
+        self._seed_two_keys(
+            org_id,
+            {"id": "lru-live", "created_at": "2026-08-01T00:00:00Z",
+             "last_used_at": "2026-08-05T00:00:00Z"},
+            {"id": "lru-never", "created_at": "2026-08-04T00:00:00Z"},
+        )
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        rows = self._by_id()
+        assert rows["lru-never"]["revoked_at"] is not None, (
+            "the never-used key must be the rotation victim (#1872 LRU)")
+        assert rows["lru-live"]["revoked_at"] is None, (
+            "the recently-used credential must survive (#1872 LRU)")
+        live = [k for k in self.fake.tables["api_keys"]
+                if k["org_id"] == org_id and k.get("revoked_at") is None
+                and k.get("created_via") != "bootstrap"]
+        assert len(live) == 2, live
+        r2 = client.get("/v1/team",
+                        headers={"Authorization": f"Bearer {r.json()['key']}"})
+        assert r2.status_code == 200, r2.text
+
+    def test_recover_never_rotates_the_key_it_just_minted(self, client):
+        """⛔ The load-bearing case for this lane: the RPC INSERTs before it
+        counts, so the freshly minted row sits in the candidate set with
+        last_used_at NULL. With every pre-existing key already used, a
+        NULL-first order that did not exclude the new row would revoke the key
+        it is about to return. Victim must be the LRU pre-existing key."""
+        data = _mint(client)
+        org_id, token = data["org_id"], data["signup_token"]
+        self._seed_two_keys(
+            org_id,
+            {"id": "lru-recent", "created_at": "2026-08-01T00:00:00Z",
+             "last_used_at": "2026-08-06T00:00:00Z"},
+            {"id": "lru-stale", "created_at": "2026-08-02T00:00:00Z",
+             "last_used_at": "2026-08-03T00:00:00Z"},
+        )
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        rows = self._by_id()
+        assert rows["lru-stale"]["revoked_at"] is not None, (
+            "the least-recently-used pre-existing key is the victim")
+        assert rows["lru-recent"]["revoked_at"] is None
+        r2 = client.get("/v1/team",
+                        headers={"Authorization": f"Bearer {r.json()['key']}"})
+        assert r2.status_code == 200, (
+            "the minted key must not be the rotation victim: " + r2.text)
 
     # ── Review P0/P1: transport-shape + error-mapping regressions ──────────
     # PostgREST return=minimal does NOT echo volatile SECURITY DEFINER RPC

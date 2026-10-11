@@ -299,6 +299,66 @@ BEGIN
   END;
 END $$;
 
+-- ============================================================================
+-- SECTION 4b — recover_team_key victim selection is #1854-LRU, and never the
+-- row the call itself minted (#1872)
+-- ============================================================================
+-- Exercised against the post-#1872 body (20261011000001_recover_team_key_lru).
+-- Section 4 above pins the cap/tiebreak behavior on an all-NULL last_used_at
+-- set; this section pins the axis the LRU order changes.
+DO $$ DECLARE
+  v_token_hash text := 'ee' || repeat('cd', 31);
+  v_org_id text := 'org-1709-lru';
+BEGIN
+  INSERT INTO public.organizations (id, name, graph_name)
+  VALUES (v_org_id, 'LRU 1709', 'org_org-1709-lru');
+  INSERT INTO public.agent_signup_tokens (token_hash, org_id)
+  VALUES (v_token_hash, v_org_id);
+
+  -- (a) A never-used key beats an OLDER, recently-used one. Pre-#1872 the
+  -- created_at ASC scan revoked k-live (created first) while k-never sat idle.
+  INSERT INTO public.api_keys (id, org_id, lookup_hash, key_prefix,
+                               created_via, created_by, created_at, last_used_at)
+  VALUES ('k1709lru-live',  v_org_id, 'lu1709lru-live', 'tt_lrulive',
+          'recovery', 'st_x', now() - interval '4 days', now() - interval '1 minute'),
+         ('k1709lru-never', v_org_id, 'lu1709lru-never', 'tt_lrunever',
+          'recovery', 'st_x', now() - interval '1 day', NULL);
+  PERFORM public.recover_team_key(v_token_hash, v_org_id, 'lu1709lru-a', 'tt_lrua', 2);
+  PERFORM tests.assert(
+    (SELECT revoked_at IS NOT NULL FROM public.api_keys WHERE id = 'k1709lru-never'),
+    '#1872: the NEVER-USED key is the rotation victim, not the older live one');
+  PERFORM tests.assert(
+    (SELECT revoked_at IS NULL FROM public.api_keys WHERE id = 'k1709lru-live'),
+    '#1872: a recently-used credential is NOT the rotation victim');
+  PERFORM tests.assert(
+    (SELECT revoked_at IS NULL FROM public.api_keys WHERE lookup_hash = 'lu1709lru-a'),
+    '#1872: the row this call minted is not its own collateral');
+
+  -- (b) ⛔ THE LOAD-BEARING CASE. Every pre-existing key has been USED, so the
+  -- minted row (last_used_at NULL by construction) sorts FIRST under the new
+  -- NULL-first order. Without the v_inserted_id exclusion the call would revoke
+  -- the very key it returns. Victim must be the LRU PRE-EXISTING key.
+  DELETE FROM public.api_keys WHERE org_id = v_org_id;
+  INSERT INTO public.api_keys (id, org_id, lookup_hash, key_prefix,
+                               created_via, created_by, created_at, last_used_at)
+  VALUES ('k1709lru-recent', v_org_id, 'lu1709lru-recent', 'tt_lrurecent',
+          'recovery', 'st_x', now() - interval '4 days', now() - interval '1 minute'),
+         ('k1709lru-stale',  v_org_id, 'lu1709lru-stale',  'tt_lrustale',
+          'recovery', 'st_x', now() - interval '3 days', now() - interval '2 days');
+  PERFORM public.recover_team_key(v_token_hash, v_org_id, 'lu1709lru-b', 'tt_lrub', 2);
+  PERFORM tests.assert(
+    (SELECT revoked_at IS NOT NULL FROM public.api_keys WHERE id = 'k1709lru-stale'),
+    '#1872: with every key used, the LEAST-recently-used pre-existing key is the victim');
+  PERFORM tests.assert(
+    (SELECT revoked_at IS NULL FROM public.api_keys WHERE lookup_hash = 'lu1709lru-b'),
+    '#1872: the minted row is EXCLUDED from the victim scan (never self-revokes)');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys
+      WHERE org_id = v_org_id AND revoked_at IS NULL
+        AND (created_via IS NULL OR created_via <> 'bootstrap')) = 2,
+    '#1872: the cap still holds after an LRU rotation');
+END $$;
+
 -- ── Final cleanup (idempotent re-runs) ─────────────────────────────────────
 DELETE FROM public.agent_signup_tokens WHERE org_id LIKE '%-1709';
 DELETE FROM public.api_keys WHERE org_id LIKE '%-1709';

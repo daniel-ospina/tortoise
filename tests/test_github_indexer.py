@@ -800,6 +800,190 @@ def test_within_second_order_independent_advance(sdk):
         "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 250
 
 
+# ── #1990: DIFF-mode boundary invariant (probe oscillation) ──────────
+
+def test_diff_probe_on_dense_boundary_repo_does_not_restamp_truncated(sdk):
+    """#1990: the post-drain steady state on a DENSE-BOUNDARY repo (the
+    pre-boundary second holds more items than the cap — production: 1425 >
+    500) must poll without re-stamping `truncated`, without regressing the
+    cursor, and without re-walking the full stream.
+
+    Shape (scaled down from the production 1425@S + 460@S1 to keep the test
+    cheap — the property that matters is pre-boundary second > cap while the
+    NEWEST second's block still fits the cap): 100 items at S, 30 newer at
+    S1, cap 40, page_size 10.
+
+    Pre-#1990 the DIFF window `[U−1s, ∞)` re-probed the S block with
+    `_inside_cursor(drain=False)` (which skips only `== U and number <= N`),
+    consumed the whole cap, minted `{S, 40, truncated}` — a cursor REGRESSED
+    to the older second — and walked all 13 pages: the verified lossless-but-
+    churning cycle (production: {S+1,1885} → {S,500,t} → {S,1000,t} →
+    {S,1425} → {S+1,1885} → …, `truncated` re-stamped on 2 of every 4 polls
+    with every poll re-walking the stream). Post-#1990 the probe skips the
+    pre-boundary second wholesale and the walk stops as soon as the stream
+    descends below the boundary second (everything below it is provably
+    indexed — the boundary invariant)."""
+    S = "2026-08-18T02:49:35Z"
+    S1 = "2026-08-18T02:49:36Z"
+    issues = [gh_issue(n, updated_at=S1) for n in range(101, 131)]   # 30
+    issues += [gh_issue(n, updated_at=S) for n in range(1, 101)]    # 100
+    t = MockGitHubTransport(issues=issues, page_size=10)
+    # the drain: 10@S cap-cut → 50 → 90 → clean 100@S → the DIFF run that
+    # advances to the newest second
+    stats = _run(_indexer(t), sdk, cap=40)
+    assert stats["cursor"] == {"updated_at": S, "number": 10,
+                              "truncated": True}
+    for expected in (50, 90):
+        stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+        assert stats["cursor"] == {"updated_at": S, "number": expected,
+                                   "truncated": True}
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    assert stats["cursor"] == {"updated_at": S, "number": 100}  # drained
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    assert stats["cursor"] == {"updated_at": S1, "number": 130}, \
+        "precondition: the DIFF run advanced to the newest second"
+    # the steady-state poll
+    n_before = len(t.issue_query_params())
+    probe = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    pages = len(t.issue_query_params()) - n_before
+    assert probe["processed"] == 0, \
+        "the pre-boundary S block must be skipped wholesale (0 cap spent)"
+    assert probe["cursor"] == {"updated_at": S1, "number": 130}, \
+        "the boundary must NOT regress to S and `truncated` must NOT be " \
+        "re-stamped (pre-#1990: {S, 40, truncated})"
+    assert probe["events_minted"] == 0, "exact-once: the probe mints nothing"
+    assert probe["issues_beyond_window"] == 0, \
+        "a caught-up repo report must not claim a deferred backlog"
+    # fetch bound: the walk stops on the page that first carries the
+    # descending second (30 boundary-second items / page_size 10 → 4 pages),
+    # NOT at the stream end (pre-#1990: all 13 pages)
+    assert pages == 4, f"the DIFF walk must stop at the boundary (got {pages})"
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 130
+
+
+def test_diff_after_drain_cursor_does_not_pingpong_into_drain(sdk):
+    """#1990: a DRAIN completion mints the clean cursor at the newest second
+    it PROCESSED, which can be OLDER than the previous boundary — the next
+    DIFF run therefore legitimately re-probes everything newer (idempotently,
+    up to the cap). That probe must end CLEAN.
+
+    Shape: 600 items over 12 seconds (50/sec), cap 500 = exactly 10 seconds,
+    so the drain's deferred backlog (#501..#600) lives at T10/T11 while the
+    cap cut sits at T9. Pre-#1990 the probe's cap fell exactly at the T9
+    block's last item and was treated as a truncation → `{T9, 500,
+    truncated}` → the next DRAIN re-processed the T10/T11 backlog and minted
+    `{T10, 550}` again: the DIFF↔DRAIN ping-pong repeated FOREVER on this
+    shape, re-walking the full stream and re-stamping `truncated` on every
+    poll. Post-#1990 the cut is clean (the readable region ends after the T9
+    block), so the cursor stabilises at the newest second."""
+    from datetime import datetime, timedelta
+    base = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
+    issues = []
+    for i in range(600):
+        second = base - timedelta(seconds=i // 50)  # 12 distinct seconds
+        issues.append(gh_issue(
+            i + 1,
+            updated_at=second.isoformat().replace("+00:00", "Z")))
+    t = MockGitHubTransport(issues=issues, page_size=100)  # 6 pages
+    stats = _run(_indexer(t), sdk, cap=500)
+    assert stats["cursor"] == {"updated_at": "2026-07-19T11:59:51Z",
+                              "number": 500, "truncated": True}
+    # the DRAIN run drains the deferred backlog and mints a CLEAN cursor at
+    # the newest second it processed (T10) — one second OLDER than the cut
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert stats["processed"] == 100
+    assert stats["cursor"] == {"updated_at": "2026-07-19T11:59:50Z",
+                               "number": 550}, \
+        "precondition: the drain is clean but the boundary sits at T10"
+    # poll 1 (DIFF): the legitimately-readable newer window (T0..T9) is
+    # re-probed idempotently (500 probes = the whole cap) — and the cap cut
+    # landing at the T9 block's last item must NOT be a truncation
+    probe = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert probe["processed"] == 500
+    assert probe["events_minted"] == 0, "exact-once — all probes idempotent"
+    assert probe["cursor"] == {"updated_at": "2026-07-19T12:00:00Z",
+                               "number": 50}, \
+        "the probe must end CLEAN at the newest second (pre-#1990: " \
+        "{T9, 500, truncated} → the next DRAIN ping-pongs back to T10)"
+    # polls 2-3: stable — 0 processed, no truncated, cursor unchanged
+    for poll in range(2):
+        probe = _run(_indexer(t), sdk, cursor=probe["cursor"], cap=500)
+        assert probe["processed"] == 0, f"poll {poll + 2} must be a no-op"
+        assert probe["cursor"] == {"updated_at": "2026-07-19T12:00:00Z",
+                                   "number": 50}
+        assert probe["events_minted"] == 0
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 600
+
+
+def test_diff_probe_does_not_steal_cap_from_new_items(sdk):
+    """#1990: the probe must not spend the cap on the pre-boundary second
+    and thereby starve the NEW items the poll exists to pick up.
+
+    Fixture: cursor `{S, 100}` (clean — everything OLDER than S is already
+    indexed, so the invariant holds), 3 new items at S+1, 300 already-
+    indexed items at S−1s, cap 10. Pre-#1990 the walk processed the 3 new
+    items AND 7 items from the S−1s probe (10 total), then minted
+    `{S−1s, 206, truncated}` — the boundary regressed to the OLDER second
+    and the cap was spent on items that were already indexed. Post-#1990
+    only the 3 new items are processed and the boundary advances to S+1."""
+    S = "2026-08-18T02:49:35Z"
+    S1 = "2026-08-18T02:49:36Z"
+    S_old = "2026-08-18T02:49:34Z"
+    issues = [gh_issue(n, updated_at=S1) for n in range(501, 504)]   # new
+    issues += [gh_issue(n, updated_at=S) for n in range(1, 101)]    # indexed
+    issues += [gh_issue(n, updated_at=S_old) for n in range(200, 500)]
+    t = MockGitHubTransport(issues=issues, page_size=100)
+    stats = _run(_indexer(t), sdk, cap=5000)  # index everything first
+    assert stats["processed"] == 403
+    probe = _run(_indexer(t), sdk, cursor={"updated_at": S, "number": 100},
+                 cap=10)
+    assert probe["processed"] == 3, \
+        "only the S+1 items are readable — the S−1s probe must not consume " \
+        "the cap (pre-#1990: 3 new + 7 probes = 10)"
+    assert probe["cursor"] == {"updated_at": S1, "number": 503}, \
+        "the boundary advances to the new items (pre-#1990 it REGRESSED " \
+        "to {S−1s, 206, truncated})"
+    # the next poll is a no-op: nothing readable remains
+    after = _run(_indexer(t), sdk, cursor=probe["cursor"], cap=10)
+    assert after["processed"] == 0
+    assert after["events_minted"] == 0
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 403
+
+
+def test_diff_exact_cap_at_boundary_block_mints_clean(sdk):
+    """#1990: the #1989 round-2 "exact cap at the final block is not a
+    truncation" exemption must also hold when the final READABLE block is
+    closed by the stream descending below the boundary second (not just at
+    a natural walk end).
+
+    Fixture: cursor `{S, 100}` clean, S holds 600 items (so exactly 500 are
+    processable = the cap) and a 10-item block sits at S−1s (already
+    indexed — invariant-consistent). Pre-#1990 the cap fell on the block's
+    last item and stamped `truncated`, forcing a wasted DRAIN re-walk plus a
+    false `gap_audit_required`; post-#1990 the mint is clean {S, 600}."""
+    S = "2026-08-18T02:49:35Z"
+    S_old = "2026-08-18T02:49:34Z"
+    issues = [gh_issue(n, updated_at=S) for n in range(1, 601)]
+    issues += [gh_issue(n, updated_at=S_old) for n in range(701, 711)]
+    t = MockGitHubTransport(issues=issues, page_size=100)
+    _run(_indexer(t), sdk, cap=5000)  # index everything (invariant holds)
+    stats = _run(_indexer(t), sdk, cursor={"updated_at": S, "number": 100},
+                 cap=500)
+    assert stats["processed"] == 500
+    assert stats["cursor"] == {"updated_at": S, "number": 600}, \
+        "the exact-cap cut on the last readable block is NOT a truncation"
+    assert stats["cleared_truncated"] is False
+    # the next poll is a no-op DIFF probe (0 processed, no re-walk heal)
+    after = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert after["processed"] == 0
+    assert after["cleared_truncated"] is False
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 610
+
+
 # ── P1-4 (PR #1792): DRAIN-mode backlog drain ────────────────────────
 
 def test_drain_mode_drains_backlog_across_runs(sdk):
