@@ -430,9 +430,10 @@ def _stage(value: Any, unit: str | None, reason: str | None = None,
     reason means unavailable" — is right for the RECOVERABLE failures (store
     unreachable, write path unconfigured, page cap, bad data): retry or repair
     fixes them, so the metric exists and merely could not be read just now.
-    An org that has never produced memory has nothing to recall FROM, and no
-    retry changes that — so that case is ``not_measurable`` and must say so
-    explicitly rather than inheriting ``unavailable``.
+    An org that has never produced memory — and has no contradicting org-wide
+    retrieval count (see :data:`GRAPH_SCOPE_UNKNOWN_REASON`) — has nothing to
+    recall FROM, and no retry changes that, so that case is ``not_measurable``
+    and must say so explicitly rather than inheriting ``unavailable``.
     """
     if value is None:
         return {"state": state or (STATE_UNAVAILABLE if reason
@@ -653,8 +654,10 @@ def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | 
     # `recall_attempted_any` on the no-memory path, which is otherwise an
     # UNVERIFIED whole-history count presented as a windowed one. It sits above
     # the `first_memory_at is None` and `truncated` branches so those paths
-    # carry the same doubt; the STAGE precedence is left unchanged (an org with
-    # no memory stays `not_measurable`, it does not become `unavailable`).
+    # carry the same doubt; the STAGE precedence is otherwise unchanged (an org
+    # with no memory AND a withheld/`0` org-wide count stays `not_measurable`;
+    # the one #4039 exception below — an exact, POSITIVE org-wide count — is
+    # what becomes `unavailable`).
     window_failed = False
     if window is not None:
         out_of_range = 0
@@ -1134,14 +1137,21 @@ LIMITATIONS: tuple[str, ...] = (
     "are counted in `detail.recall_attempted_any` when that count is exact "
     "(a windowed, untruncated, fully-placeable read; otherwise it is None and "
     "the exclusion counters name why). The state is graph-scoped, "
-    "the count is org-wide. #4039: when that exact count is POSITIVE the stage "
-    "no longer makes the org-scope claim — it reports `unavailable` "
-    f"(`{GRAPH_SCOPE_UNKNOWN_REASON}`), because the org's "
-    "memory may live outside the graph this read opens. RESIDUAL, not fixed: "
+    "the count is org-wide. #4039: a windowed retrieval CALL is counted by its "
+    "`tool_name` alone — `status` and `result_count` are not read — so the "
+    "count is calls, not answers: a call that FAILED (`status` `exec_error`) or "
+    "returned nothing (`result_count` 0) is counted exactly like one that "
+    "returned items. When that exact count is POSITIVE the stage no longer "
+    "makes the org-scope claim — it reports `unavailable` "
+    f"(`{GRAPH_SCOPE_UNKNOWN_REASON}`). The refusal is therefore deliberately "
+    "CONSERVATIVE: this read cannot tell an org whose memory lives in another "
+    "graph from a single-graph org whose only windowed recall activity failed "
+    "or returned nothing, so such a single-graph org reads `unavailable` "
+    "rather than `not_measurable`. RESIDUAL, not fixed: "
     "a multi-graph org whose count is withheld (a truncated page, an "
     "unplaceable or unclassifiable row, an out-of-window row) or is an exact "
     "`0` (no retrieval call in the window) still reads "
-    "`no_memory_produced_in_lifetime`, because no org-wide evidence contradicts "
+    "`no_memory_produced_in_lifetime`, because no org-wide call contradicts "
     "the graph-scoped absence — this read cannot enumerate the org's other "
     "graphs, so that case is indistinguishable from a single-graph org with no "
     "memory. Making the gate itself org-scoped is the fix that would remove the "

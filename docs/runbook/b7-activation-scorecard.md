@@ -62,12 +62,18 @@ org **default graph**'s `first_memory_at`; the count is the org-wide analytics
 stream (`analytics_events` carries no `graph_id`). For a multi-graph org that
 produced memory only outside the default graph, the graph-scoped absence is not
 a fact about the org, so `no_memory_produced_in_lifetime` would be a false claim
-about it. When that org's windowed retrieval count is **exact and positive** —
-org-wide evidence contradicting the graph-scoped gate — the stage reports
-`unavailable` / `no_memory_in_default_graph_org_scope_unknown` instead. The
-same org with an exact `0` (or a withheld count: a truncated page, an
-unplaceable or unclassifiable row) still reads
-`no_memory_produced_in_lifetime`: no org-wide evidence contradicts the gate, and
+about it. The count is of retrieval **calls**, not answers: a row is counted by
+its `tool_name` alone (`status` and `result_count` are not read), so a call that
+failed (`status` `exec_error`) or returned nothing (`result_count` 0) counts
+exactly like one that returned items. When that count is **exact and positive**
+the stage reports `unavailable` /
+`no_memory_in_default_graph_org_scope_unknown` instead. The refusal is
+deliberately **conservative**: this read cannot tell an org whose memory lives
+in another graph from a single-graph org whose only windowed recall activity
+failed or returned nothing, so such a single-graph org reads `unavailable`
+rather than `not_measurable`. The same org with an exact `0` (or a withheld
+count: a truncated page, an unplaceable or unclassifiable row) still reads
+`no_memory_produced_in_lifetime`: no org-wide call contradicts the gate, and
 this read cannot enumerate the org's other graphs, so that case is
 indistinguishable from a single-graph org with no memory. Making the gate itself
 org-scoped (an org's graph list, then a lifetime memory scan per graph) would
