@@ -410,6 +410,24 @@ class TestConcurrencyE2E:
         assert len(org_ids) == 3  # N teams — no server-side dedupe pre-mint
 
 
+@pytest.fixture(scope="module")
+def lru_org(client):
+    """ONE minted org shared by TestKeylessRecoveryLRU's three tests.
+
+    Footprint matters here beyond tidiness: the embedded registry's legacy path
+    (`_verify_hashed_lookup` on SignupToken — no key_prefix index, so an
+    O(all SignupToken nodes) PBKDF2 scan) is what
+    `test_signup_token_revoke.py::TestRegistryLane::test_registry_revoke_pbkdf2_only_node`
+    deliberately exercises (it strips its node's `lookup_key`) under a 10s
+    transport wait bound. Every extra SignupToken node in the session
+    lengthens a budget that is already tight in multi-file selections (#5049),
+    so this class mints once and reseeds its key set per test instead of
+    minting a new org per test.
+    """
+    data = _mint(client)
+    return data["org_id"], data["signup_token"]
+
+
 class TestKeylessRecoveryLRU:
     """#1872: the keyless (signup-token) recovery lane rotates by #1854-LRU
     — never-used first, then least-recently-used — and NEVER the key it just
@@ -448,12 +466,12 @@ class TestKeylessRecoveryLRU:
             params={"tid": org_id},
         ).result_set}
 
-    def test_never_used_key_is_rotated_over_recently_used_older_key(self, client):
+    def test_never_used_key_is_rotated_over_recently_used_older_key(
+            self, client, lru_org):
         """The never-used key is the victim even though it was created LATER
         than the recently-used one — the pre-#1872 created_at ASC scan picks
         the OLDER, live key instead."""
-        first = _mint(client)
-        org_id, token = first["org_id"], first["signup_token"]
+        org_id, token = lru_org
         reg = self._seed_two_keys(
             org_id,
             # oldest-created, but USED recently → a live credential
@@ -477,15 +495,15 @@ class TestKeylessRecoveryLRU:
                         headers={"Authorization": f"Bearer {r.json()['key']}"})
         assert r2.status_code == 200, r2.text
 
-    def test_minted_key_is_never_the_victim_when_every_key_was_used(self, client):
+    def test_minted_key_is_never_the_victim_when_every_key_was_used(
+            self, client, lru_org):
         """⛔ The load-bearing case. This lane INSERTs before it counts, so the
         freshly minted row is inside the candidate set with last_used_at NULL.
         With two USED keys at the cap, a NULL-first order that did not exclude
         the new row would rotate the key it is about to return — a dead key in
         the response (and a recovery that freed no slot). The victim must be
         the least-recently-used PRE-EXISTING key."""
-        first = _mint(client)
-        org_id, token = first["org_id"], first["signup_token"]
+        org_id, token = lru_org
         reg = self._seed_two_keys(
             org_id,
             {"id": "lru-recent", "created_at": "2026-08-01T00:00:00Z",
@@ -508,11 +526,11 @@ class TestKeylessRecoveryLRU:
         live = [k for k, v in revoked.items() if v is None]
         assert len(live) == 2, live
 
-    def test_all_never_used_keys_keep_oldest_created_tiebreak(self, client):
+    def test_all_never_used_keys_keep_oldest_created_tiebreak(self, client,
+                                                             lru_org):
         """Tiebreak parity: an all-NULL last_used_at set keeps the pre-#1872
         oldest-created behavior (created_at ASC is the final sort key)."""
-        first = _mint(client)
-        org_id, token = first["org_id"], first["signup_token"]
+        org_id, token = lru_org
         reg = self._seed_two_keys(
             org_id,
             {"id": "lru-tie-old", "created_at": "2026-08-01T00:00:00Z"},
