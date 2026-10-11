@@ -3257,6 +3257,15 @@ def sole_owned_org_ids(cp, user_id: str) -> list[str]:
     The placeholder membership (``org_id = ''``) is never an org.
 
     Shape-gates user_id (#1719: a non-UUID literal would 22P02 → 500).
+
+    This gate is also the OWNERSHIP BOUNDARY, not just an id filter: memory
+    belongs to the ACCOUNT (owner ruling on #3925), so a person's erasure may
+    cascade only where that person *is* the account — an org they solely own.
+    A member's or co-owner's erasure reaches no team memory. Do NOT widen this
+    to "every org the caller belongs to", and do not read a per-subject erasure
+    request as licence to build the account-side PII filter, which is deferred
+    and unowned (#3925; the boundary is stated in
+    ``docs/retention-and-deletion.md``).
     """
     if not _is_uuid(user_id):
         return []
