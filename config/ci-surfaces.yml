@@ -1370,6 +1370,12 @@ surfaces:
   # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
   - test_update_point_content_embedding_4208.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
+  # #2007 (W12): the self-hosted onboarding path. Load-bearing HERE because the
+  # two SDK-init seams it pins (`tortoise/selfhost_api.py` `_sdk`,
+  # `tortoise/mcp_auth.py` `_get_org_sdk`) and the selfhost observation branch
+  # in `tortoise/mcp_server.py` all select `api` — so a selfhost-only change
+  # must run this guard. Dual-registered with `onboarding` (the module's home).
+  - test_onboarding_selfhost_w12.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_destructive_wipe_guard.py
@@ -1617,6 +1623,13 @@ surfaces:
   - test_epic903_observability.py
   - test_epic903_retention.py
   - test_epic903_scheduler.py
+  # #1338 (epic 903 follow-up): the PRODUCTION-SCALE contracts — configurable
+  # production-sane default window budget, routing at scale, and the defined
+  # ``dream_all`` cap behaviour at the top of the recorded 5k-500k-operator
+  # range (truncation is incomplete, never a silent success). ``core`` is the
+  # surface a `tortoise/dream.py` change does NOT select on its own (that is
+  # `ep`) and vice versa — the file is dual-registered below.
+  - test_epic903_scale.py
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
   - test_eval_metrics.py
@@ -2199,6 +2212,14 @@ surfaces:
   # (GRAPH.COPY drops the `false` entries of the is_operator index, #3154).
   - test_dream_noop_3139.py
   - test_6597_window_closure_coverage.py  # #6597: dream() coverage closure must be a SUPERSET of EP's affected set (affected ⊆ closure, coverage <= 1.0 on >=4-claim chains)
+  # #1338 (epic 903 follow-up): production-scale contracts for the stale-first
+  # scheduler's default budget (env-configurable, production-sane), the routing
+  # of a production-sized graph, and the `dream_all` cap's DEFINED behaviour at
+  # the top of the 5k-500k-operator range. `ep` owns `tortoise/dream.py`, so a
+  # dream.py-only change REPLACES the `core` fallback and would otherwise never
+  # run this file (the #2938/#1349 silent-drop class; it is also registered
+  # under `core`).
+  - test_epic903_scale.py
   - test_ep_calibration.py
   - test_ep_directed_nand.py
   - test_ep_directional.py
@@ -2336,6 +2357,14 @@ surfaces:
   - test_onboarding_state_split_patch.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_state_split_projection.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
+  # #2007 (W12): the self-hosted onboarding path (init + two-prompt seed +
+  # decide, no Supabase). Registered HERE because the module it pins lives in
+  # `tortoise/onboarding/` (an `onboarding` SOURCE_PATTERN), and dual-
+  # registered with `api` because the surfaces it drives
+  # (`tortoise/selfhost_api.py`, `tortoise/selfhost.py`, `tortoise/mcp_auth.py`)
+  # are `api` exact matches that REPLACE the `core` fallback — a
+  # selfhost-only PR would otherwise run no guard at all (#1349 class).
+  - test_onboarding_selfhost_w12.py
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
   # #2006 (W11): the funnel-event exact-once guard (emission gated on the
   # COMPLETED_STEP edge's new creation). Registered here for the

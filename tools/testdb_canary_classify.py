@@ -31,7 +31,8 @@ input files always classify the same run. Buckets, in order:
   guard-red        a junitxml <skipped message> in the FalkorDB
                    availability-REGRESSION family (skip-guard's
                    is_falkor_reason_violation — the intentional families are
-                   exempt)                                    -> reset to 0
+                   exempt), evaluated AS the docker lane (#3592: the matcher
+                   is lane-aware, and this shard IS a docker shard) -> reset to 0
   manifest-red     an expected nodeid absent from the junitxml testcases
                    (vanished nodeid)                          -> reset to 0
   divergence       failing nodeids ALL match the divergence-confirmation
@@ -198,7 +199,14 @@ def _read_junitxml(path: str | None) -> dict | None:
         skipped = tc.find("skipped")
         if skipped is not None:
             reason = (skipped.get("message") or "").strip()
-            if is_falkor_reason_violation(reason):
+            # #3592: the classifier buckets the PRODUCER SHARD, which is a
+            # DOCKER shard by construction (see the module docstring: "Only the
+            # DOCKER lane is classified") — so its lane is passed EXPLICITLY.
+            # Without it the verdict would ride on this JOB's environment (the
+            # canary-streak job declares no URI expectation), and a docker-lane
+            # availability regression would be bucketed by the undeclared-lane
+            # fallback instead of as the guard-red it is.
+            if is_falkor_reason_violation(reason, lane=True):
                 guard_violations.append(nodeid)
             continue
         for child in tc:

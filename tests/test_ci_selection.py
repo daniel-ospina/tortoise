@@ -932,10 +932,13 @@ def test_unrelated_tools_change_still_tier1():
 
 
 def test_activation_cohort_change_does_not_drop_to_tier1():
-    # #B7 (#3674): tools/activation_cohort.py owns part of
-    # tests/test_activation_scorecard.py (its roll_up cohort-summing logic).
-    # Without the TOOL_CARVEOUTS entry the flat "tools/" prefix swallows it ->
-    # tier-1 smoke only, and the suite that pins the cohort number never runs.
+    # #B7 (#3674, restated by #3676): tools/activation_cohort.py's transport
+    # guards (https-only, no-redirect, credential hygiene) are pinned by
+    # tests/test_activation_scorecard.py. Without the TOOL_CARVEOUTS entry the
+    # flat "tools/" prefix swallows it -> tier-1 smoke only, and the suite that
+    # pins those controls never runs. (The cohort FOLD moved into
+    # tortoise/activation_scorecard.py in #3676 — the `core` surface covers
+    # that file, so the carve-out's reason narrowed rather than vanished.)
     r = _sel(["tools/activation_cohort.py"])
     assert r["surfaces"], r
     assert set(r["test_files"]) != _tier1(), r
@@ -3127,6 +3130,85 @@ def test_xdist_is_admitted_only_in_the_d3_shape():
     assert _re.search(r"^\s*XDIST_WORKERS=0\s*$", script, _re.M), (
         f"{job_name}/{step_name}: the worker count must DEFAULT to xdist's "
         "serial mode (`0`) and be raised only inside the D3 guard")
+
+
+# The tool whose lane declaration the CI jobs must make visible to the
+# skip-guard STEP (a sibling of the pytest step, so it sees only the job env).
+_SKIP_GUARD_PATH = Path(__file__).resolve().parents[1] / "tools" / "skip-guard.py"
+
+
+def test_skip_guard_can_see_the_lane_signal():
+    """#3592: the skip-guard's reason matcher is LANE-AWARE, and the lane signal
+    must REACH the tool in every docker lane it gates.
+
+    The signal used to be set in exactly ONE place — the pytest run step's
+    `env:` — while the skip-guard is a LATER SIBLING step, which receives only
+    the JOB env. The job env carries the "Compute docker URI" step's own
+    `$GITHUB_ENV` spelling (`EXPECT_URI`), so the tool reads BOTH names
+    (tools/skip-guard.py::_LANE_EXPECT_URI_ENV_ALIASES) — THIS TEST IS THE
+    COUPLING: a rename of that `$GITHUB_ENV` line must red here, never silently
+    revert the guard to the UNDECLARED arm, which is the #3592 false PASS (a
+    module whose live-availability probe regressed skips behind "requires
+    TORTOISE_DB_URI" and `python-ci-gate` stays green while the file ran
+    nothing).
+
+    Conversely the tier-2 legs need their EMPTY value visible, because that is
+    how they declare themselves URI-less — without it a probe race reddens a
+    green pytest (measured: run 37350021093, shard f, `EXPECT_URI: ` empty and
+    the guard RED on 9 "Live FalkorDB (Docker) not available" skips).
+
+    The carve-out job (test-carve-out) deliberately declares NOTHING: its
+    selection is embedded-by-design, so the undeclared arm — which keeps the
+    pre-#3592 verdicts — is what reds a live file mis-assigned into that lane.
+    """
+    import importlib.util
+
+    wf = _load_python_ci()
+    spec = importlib.util.spec_from_file_location(
+        "_skip_guard_lane_names", str(_SKIP_GUARD_PATH))
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._LANE_EXPECT_URI_ENV_ALIASES, (
+        "the guard must read a name a SIBLING step can see (the job env)")
+    for job_name in ("test", "test-slow"):
+        steps = wf["jobs"][job_name]["steps"]
+        compute = next(s for s in steps
+                       if "Compute docker URI" in s.get("name", ""))
+        script = compute["run"]
+        # The prefixed name is mapped onto the pytest step (the canonical E2E-6
+        # signal; the iff is asserted by test_expect_uri_gated_iff_uri), while
+        # every alias the TOOL reads must be a name this job actually exports to
+        # $GITHUB_ENV — otherwise the guard cannot see the lane at all.
+        for name in mod._LANE_EXPECT_URI_ENV_ALIASES:
+            export = f'echo "{name}=$EXPECT_URI" >> "$GITHUB_ENV"'
+            assert export in script, (
+                f"{job_name}: {name!r} is read by tools/skip-guard.py but this "
+                "job does not export it to $GITHUB_ENV — the sibling "
+                "skip-guard step would read an UNDECLARED lane (#3592)")
+            assert export in script.split("fi", 1)[1], (
+                f"{job_name}: the {name!r} export must sit AFTER the gate so "
+                "BOTH shapes are visible (the empty tier-2 declaration too)")
+        guard = next(s for s in steps
+                     if s.get("name", "").startswith("Skip-fail guard"))
+        assert "--manifest-only" not in guard["run"], (
+            f"{job_name}: --manifest-only turns the lane-aware reason matcher "
+            "OFF, so the lane export above would assert nothing")
+        assert "TORTOISE_TEST_EXPECT_URI" not in guard.get("env", {}), (
+            f"{job_name}: the guard step must INHERIT the lane from the job "
+            "env, not re-declare it (a second spelling is a second source of "
+            "truth)")
+
+
+def test_canary_classifier_is_pinned_to_the_docker_lane():
+    """#3592: the classifier buckets the DOCKER producer shard, so it must pass
+    its lane EXPLICITLY rather than inherit the canary-streak job's environment
+    (which declares no URI expectation — the undeclared arm would bucket a
+    docker-lane availability regression as unattributed instead of guard-red)."""
+    tool = (Path(__file__).resolve().parents[1] / "tools"
+            / "testdb_canary_classify.py").read_text()
+    assert "is_falkor_reason_violation(reason, lane=True)" in tool, (
+        "tools/testdb_canary_classify.py must pin the docker lane it classifies")
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():

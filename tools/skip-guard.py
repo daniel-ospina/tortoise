@@ -127,11 +127,34 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
   file:line summaries never match --collect-only full nodeids.
 
   The FalkorDB-reason matcher reads <skipped message> from the junitxml
-  (lossless, never truncated). Intentional availability-class reason families
-  are EXEMPT in BOTH the junitxml matcher and the legacy line matcher:
-    - "requires TORTOISE_DB_URI"           (_live_utils._skip_unless_live_uri —
-                                           the visible URI-gate for the
-                                           test-concurrency-falkor job)
+  (lossless, never truncated). What a FalkorDB-reason skip MEANS is a property
+  of the LANE, not of the reason STRING (#3592). The lane declares its URI
+  expectation in TORTOISE_TEST_EXPECT_URI (or the workflow's own $GITHUB_ENV
+  spelling of the same gate — see the _LANE_EXPECT_URI_ENV_ALIASES block below)
+  — the E2E-6 signal, set iff TORTOISE_DB_URI is set (epic #1647 Task 9; the iff
+  is pinned by tests/test_ci_selection.py::test_expect_uri_gated_iff_uri) — and
+  that declaration decides the verdict:
+    - "1" — the lane PROMISED a live URI. A skip whose reason asserts that
+      same precondition ("requires TORTOISE_DB_URI…") is then a CONTRADICTION,
+      not an exemption: that is the #3592 false PASS, where a module whose
+      live-availability probe regressed borrows the URI-gate wording and hides
+      its whole file behind an exempted prefix. RED.
+    - present but not "1" — the lane DECLARED itself URI-less (the tier-2 /
+      embedded shape). Its skips ARE that shape's expected state, so the
+      availability families are exempt there — including the one that used to
+      be unexemptable, "Live FalkorDB (Docker) not available", which redded a
+      URI-less leg on a probe race (measured: run 37350021093, shard f —
+      pytest rc=0, guard RED on 9 skips of that family; a verdict that turns
+      on an ephemeral docker probe answering at import time is a flake
+      generator, not a regression signal).
+    - ABSENT — the lane declared nothing, so the historical reason-prefix
+      calibration applies UNCHANGED. Preserved deliberately: an undeclared
+      lane (the carve-out job, a local run) keeps the exact verdicts it had
+      before #3592 instead of silently inheriting a relaxation it never asked
+      for.
+  Two families are exempt in EVERY lane, because they are design classes no
+  lane can satisfy (not lane preconditions), in BOTH the junitxml matcher and
+  the legacy line matcher:
     - "Live FalkorDB server on localhost:6399"  (test_falkordb_compat's
                                            TestLiveServerCompat permanent class
                                            skip — legacy falkordblite 0.10.0
@@ -141,7 +164,8 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
                                            family — runs embedded BY DESIGN
                                            under a URI job)
   The availability-REGRESSION family ("Live FalkorDB (Docker) not available" —
-  the provisioned-service probes) stays RED; that is the guard's whole job.
+  the provisioned-service probes) stays RED in every lane that did not declare
+  itself URI-less; that is the guard's whole job.
 
   Fail-closed corners:
     - --manifest passed but the junitxml is missing/unreadable -> every expected
@@ -321,16 +345,42 @@ _COLLECTION_SKIP_MESSAGE = "collection skipped"
 # docker-lane URI gates (tests/test_capabilities_endpoint.py, the onboarding
 # W3-W8 suites, tests/test_eval_ingest_cache.py …) abort their module BY
 # DESIGN on a URI-less tier-2 leg, and the guard must not red for them.
-# Substring match on the skip reason (the junitxml element text), mirroring
-# _EXEMPT_REASON_PREFIXES for the FalkorDB class. The #4221 reason names no
+# Substring match on the skip reason (the junitxml element text), mirroring the
+# FalkorDB class's URI-gate arm — which is ALSO lane-aware since #3592: the
+# exemption holds unless the lane promised the URI. The #4221 reason names no
 # such precondition — which is exactly why the class cannot be a reason-text
 # match.
 _COLLECTION_SKIP_EXEMPT_RE = re.compile(r"TORTOISE_DB_URI", re.IGNORECASE)
 
-# Intentional availability-class reason families, exempt from the FalkorDB
-# trip. Prefix match on the raw reason (case-sensitive for these two).
-_EXEMPT_REASON_PREFIXES = (
-    "requires TORTOISE_DB_URI",
+# ── The lane declaration (#3592) ─────────────────────────────────────────
+# `TORTOISE_TEST_EXPECT_URI` is the E2E-6 lane signal: CI's docker lanes set it
+# to "1" TOGETHER with TORTOISE_DB_URI, and the URI-less tier-2 legs set it to
+# "" under the SAME gate. It is the one input that states what the lane was
+# ENTITLED to expect; a reason string cannot supply it, which is why a flat
+# prefix list was simultaneously too broad (a probe regression hiding behind
+# "requires TORTOISE_DB_URI") and too narrow (a legitimate tier-2 skip of the
+# "Live FalkorDB (Docker) not available" family redded the leg).
+#
+# THE ALIAS (and why it is not a second source of truth): the runner's skip-guard
+# step is a SIBLING of the pytest step — GitHub Actions gives it the job env,
+# where the "Compute docker URI" step's own `$GITHUB_ENV` line exports the SAME
+# gate's value under the workflow's spelling, `EXPECT_URI`. The prefixed name is
+# step-local to the pytest step (and job-level in track-b/post-merge), so the
+# alias is what a sibling step can actually see. One gate, one value, two
+# spellings; the prefixed name wins when both are present. Landing the prefixed
+# export into the job env needs a `.github/workflows/` change, which this
+# session's CI credential cannot push (no `workflow` scope) — pinned by
+# tests/test_ci_selection.py::test_skip_guard_can_see_the_lane_signal, so a
+# rename in the workflow reds a TEST instead of silently reverting the guard to
+# the UNDECLARED arm (which is the #3592 false PASS).
+_LANE_EXPECT_URI_ENV = "TORTOISE_TEST_EXPECT_URI"
+_LANE_EXPECT_URI_ENV_ALIASES = ("EXPECT_URI",)
+# The URI-gate reason family — a claim ABOUT the URI, so it is checked against
+# the lane's own declaration instead of being blanket-exempt.
+_URI_GATE_REASON_PREFIX = "requires TORTOISE_DB_URI"
+# Reason families exempt in EVERY lane: design classes no lane can satisfy.
+# Prefix match on the raw reason (case-sensitive).
+_ALWAYS_EXEMPT_PREFIXES = (
     "Live FalkorDB server on localhost:6399",
 )
 # Embedded-lane / carve-out precondition family — case-insensitive prefix.
@@ -389,7 +439,28 @@ def is_embedder_reason_violation(reason: str) -> bool:
     return bool(_EMBEDDER_UNAVAILABLE_RE.search(reason))
 
 
-def is_collection_skip_violation(message: str, detail: str = "") -> bool:
+def lane_expects_live_uri() -> bool | None:
+    """The lane's DECLARED URI expectation, or None when it declared none.
+
+    True  — the lane promised a live TORTOISE_DB_URI (CI's docker lanes);
+    False — the lane declared itself URI-less (the tier-2/embedded shape);
+    None  — the lane never declared anything, so the historical reason-prefix
+            calibration is the only available verdict (see the module
+            docstring's three cases).
+
+    Reads TORTOISE_TEST_EXPECT_URI first, then the workflow's own $GITHUB_ENV
+    spelling of the same gate (see _LANE_EXPECT_URI_ENV_ALIASES). At CALL time
+    (never captured at import) so a test can pin the lane.
+    """
+    for name in (_LANE_EXPECT_URI_ENV, *_LANE_EXPECT_URI_ENV_ALIASES):
+        raw = os.environ.get(name)
+        if raw is not None:
+            return raw.strip() == "1"
+    return None
+
+
+def is_collection_skip_violation(message: str, detail: str = "", *,
+                                 lane: bool | None = None) -> bool:
     """True when a junitxml <skipped> is a whole-module collection skip.
 
     ``message`` is the <skipped> ``message`` attribute and ``detail`` its text
@@ -399,31 +470,68 @@ def is_collection_skip_violation(message: str, detail: str = "") -> bool:
     means the module was aborted during collection, so none of its tests ran
     (#4221).
 
-    A reason naming a recognised precondition (``TORTOISE_DB_URI`` — the
-    docker-lane module gates) is a deliberate visible gate, not a vacancy, and
-    is exempt. The #4221 reason names no precondition and is caught.
+    A reason naming ``TORTOISE_DB_URI`` is the docker-lane module gate
+    (tests/test_capabilities_endpoint.py, the onboarding W3-W8 suites,
+    tests/test_eval_ingest_cache.py …): deliberate and visible on a URI-less
+    leg, but on a lane that PROMISED the URI a whole-module abort naming it is
+    the vacancy this class exists to catch — the same lane question the
+    reason matcher asks (#3592). ``lane`` is that declaration (None reads
+    TORTOISE_TEST_EXPECT_URI); undeclared keeps the pre-#3592 behaviour.
     """
     if message.strip() != _COLLECTION_SKIP_MESSAGE:
         return False
-    return not _COLLECTION_SKIP_EXEMPT_RE.search(detail)
+    if not _COLLECTION_SKIP_EXEMPT_RE.search(detail):
+        return True
+    if lane is None:
+        lane = lane_expects_live_uri()
+    return lane is True
 
 
-def is_falkor_reason_violation(reason: str) -> bool:
-    """True when a FalkorDB-mentioning skip reason is a REAL violation.
+def is_falkor_reason_violation(reason: str, *,
+                               lane: bool | None = None) -> bool:
+    """True when a skip reason is a REAL violation of the lane's promise.
 
-    The intentional availability-class families (requires-URI, 6399, embedded/
-    redislite-unavailable) are exempt — their skips are the visible design, not
-    evidence the provisioned docker service is down. The availability-REGRESSION
-    family stays red.
+    ``lane`` is the lane's declared URI expectation (True = the lane promised
+    a live URI, False = the lane declares itself URI-less, None = undeclared);
+    None reads TORTOISE_TEST_EXPECT_URI. The three arms and their rationale
+    are in the module docstring's lane-declaration block (#3592).
+
+    The name keeps its historical spelling (this is the FalkorDB class's
+    matcher); the URI-gate arm is checked first and is deliberately NOT
+    restricted to reasons naming FalkorDB, because the contradiction it detects
+    is the URI claim itself — see the arm's comment.
+
+    Callers that KNOW their lane by construction (tools/testdb_canary_classify
+    buckets the DOCKER producer shard) pass it explicitly, so the verdict
+    cannot turn on their own process environment.
     """
+    if lane is None:
+        lane = lane_expects_live_uri()
+    if reason.startswith(_URI_GATE_REASON_PREFIX):
+        # A claim about the URI, so the lane's own declaration decides it: on a
+        # URI-less lane this IS the visible gate; on a lane that promised the
+        # URI it is a contradiction (the #3592 false PASS), and an undeclared
+        # lane keeps the historical exemption.
+        #
+        # This arm runs BEFORE the "FalkorDB" filter on purpose: the claim is
+        # the CONTRADICTION, whether or not the reason also names the backend.
+        # tests/test_time_aware_run_2520.py's probe-gated tests skip with
+        # "requires TORTOISE_DB_URI (the run ingests)" — no "FalkorDB" — so a
+        # docker-lane probe regression there was invisible to BOTH classes.
+        return lane is True
     if not _FALKORDB_RE.search(reason):
         return False
-    for prefix in _EXEMPT_REASON_PREFIXES:
-        if reason.startswith(prefix):
-            return False
+    # Design classes no lane can satisfy → exempt everywhere, before the lane
+    # question is even asked.
+    if any(reason.startswith(prefix) for prefix in _ALWAYS_EXEMPT_PREFIXES):
+        return False
     lowered = reason.lower()
-    return not any(lowered.startswith(prefix)
-                   for prefix in _EMBEDDED_UNAVAILABLE_PREFIXES)
+    if any(lowered.startswith(prefix)
+           for prefix in _EMBEDDED_UNAVAILABLE_PREFIXES):
+        return False
+    # The availability-REGRESSION family. Only a lane that EXPLICITLY declared
+    # itself URI-less is excused; every other lane holds it against the run.
+    return lane is not False
 
 
 def find_violations(log_text: str) -> list[str]:
@@ -437,9 +545,10 @@ def find_violations(log_text: str) -> list[str]:
     targets AVAILABILITY regressions (a probe should have found the provisioned
     falkordb service and didn't), which is a different reason family.
 
-    The same reason-family exemptions as the junitxml matcher apply (epic #1647
-    Task 3, cycle-7 P2-4): a tier-2 PR can route test_falkordb_compat to half a,
-    where its 6399 class skip must not red the legacy matcher either.
+    The same lane-aware exemptions as the junitxml matcher apply (epic #1647
+    Task 3, cycle-7 P2-4), so the two matchers cannot disagree: a lane that
+    DECLARED itself URI-less exempts the availability families, a lane that
+    PROMISED the URI (#3592) reds a skip that contradicts the promise.
 
     #2573: the embedder-unavailable class is matched here too, so the legacy
     line matcher and the junitxml matcher agree on the embedder family (half a
@@ -460,6 +569,11 @@ def find_violations(log_text: str) -> list[str]:
     skip can occur.
     """
     violations = []
+    # The lane's declaration is read ONCE for the whole log: every skip in a
+    # run belongs to the same lane, and re-reading the env per line would let a
+    # mid-run mutation change the verdict part-way through (the guard's verdict
+    # must be a property of the RUN, not of when it looked).
+    lane = lane_expects_live_uri()
     for line in log_text.splitlines():
         if _SKIPPED_MARK not in line:
             continue
@@ -473,10 +587,10 @@ def find_violations(log_text: str) -> list[str]:
             # (never truncated) is the authoritative reason source; a real
             # regression skip always appears there with its reason intact.
             continue
-        if is_falkor_reason_violation(reason):
+        if is_falkor_reason_violation(reason, lane=lane):
             if "_live_utils.py" in line:
                 # Legacy location-based exclusion (kept for back-compat; the
-                # canonical exclusion is the reason-family prefix above).
+                # canonical exclusion is the lane-aware URI-gate arm above).
                 continue
             violations.append(extract_nodeid(line))
         elif is_embedder_reason_violation(reason):
@@ -579,6 +693,8 @@ def _read_junitxml(
     embedder_violations: list[str] = []
     collection_violations: list[str] = []
     contract_error: str | None = None
+    # One lane per run — see find_violations for why it is read once (#3592).
+    lane = lane_expects_live_uri()
     tree = ET.parse(path)
     for tc in tree.iter("testcase"):
         file = tc.get("file") or ""
@@ -587,13 +703,13 @@ def _read_junitxml(
         skipped = tc.find("skipped")
         if skipped is not None:
             reason = (skipped.get("message") or "").strip()
-            falkor = is_falkor_reason_violation(reason)
+            falkor = is_falkor_reason_violation(reason, lane=lane)
             embedder = is_embedder_reason_violation(reason)
             # The collection-skip class reads the REAL reason from the element
             # TEXT (the repr pytest writes there), not from the constant
             # message attr — is_collection_skip_violation owns both halves.
             collection = is_collection_skip_violation(
-                skipped.get("message") or "", skipped.text or "")
+                skipped.get("message") or "", skipped.text or "", lane=lane)
             if falkor or embedder or collection:
                 if collection and file:
                     # A collection skip's <testcase> is the MODULE (empty
@@ -750,8 +866,9 @@ def _report(violations: list[str], falkor_violations: list[str],
               "while testing nothing (issue #1436):")
         for nodeid in sorted(set(falkor_violations)):
             print(f"   - {nodeid}")
-        print(f"{len(falkor_violations)} skip line(s) matching the live-FalkorDB "
-              "reason family.")
+        print(f"{len(falkor_violations)} skip line(s) matching the "
+              "live-FalkorDB reason family, or claiming a TORTOISE_DB_URI that "
+              "this lane had promised (#3592).")
     if embedder_violations:
         print("❌ embedder-unavailable tests SKIPPED in this run — the suite "
               "would silently run keyword-only (TF-IDF-degraded) and report "
@@ -1282,7 +1399,8 @@ def main(argv: list[str]) -> int:
 
     print("❌ guarded availability-class tests SKIPPED in this run — CI would "
           "be green while testing nothing (live-FalkorDB #1436 / "
-          "embedder-unavailable #2573 / module-collection-skip #4221):")
+          "embedder-unavailable #2573 / module-collection-skip #4221 / "
+          "URI-gate-contradiction #3592):")
     for nodeid in sorted(set(violations)):
         print(f"   - {nodeid}")
     print(f"{len(violations)} skip line(s) matching a guarded reason family.")
