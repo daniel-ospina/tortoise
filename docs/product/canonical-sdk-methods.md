@@ -125,7 +125,7 @@ Three rules, each of which caught a real error in this document.
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable**: the URL is the node identity |
 | W4 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
-| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | keep — session-adjacent capture artifacts |
+| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one |
 | W6 | `capture_session_local` | — | `capture_session` | keep — **SDK-only name.** Writes the session into your own graph |
 | W7 | `capture_session_hosted` | — | `commit_session` | keep — **SDK-only name.** Extracts locally, validates, then POSTs to `/v1/sessions/commit`; needs a hosted endpoint and an API key |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
@@ -210,12 +210,39 @@ both. It has to split.
 journal, not knowledge capture. `capture` also now collides with
 `capture_session_local` / `capture_session_hosted`, which *do* capture sessions.
 
-**Proposed split** (owner decision):
+**Proposed split** (owner decision) — ⛔ **SUPERSEDED (owner ruling 2026-10-09, #4282). Do not action this table.**
 
 | Was | Becomes | Kind |
 |---|---|---|
 | `checkpoint`, `diary_write` | `write_journal` | write |
 | `diary_read` | `read_journal` | read |
+
+**⛔ Amendment — owner ruling 2026-10-09 (#4282).** The split above was never adopted. When the two
+owner-approved docs were reconciled, they disagreed about these three names and the owner ruled
+— *"The approval wins; the table is the defect"* — that **`canonical-mcp-tools.md` governance
+governs** (2026-10-09). That doc **absorbs** each member into the replacement that already exists
+for it, so **no `write_journal` / `read_journal` names are created** — and the three no longer
+share **one** W5 destination. Each retires to its own:
+
+| Was | Becomes instead | Authority |
+|---|---|---|
+| `diary_write` | `create_entity` (W1) | `canonical-mcp-tools.md` row 10 |
+| `checkpoint` | `mine_knowledge_from_session` (beta's name for canonical row 13 `capture_knowledge`) | `canonical-mcp-tools.md` row 13 |
+| `diary_read` | `list_knowledge` (R2) | `canonical-mcp-tools.md` "Removed entirely" |
+
+**They remain W5 members**, and that is not a contradiction: this partition is keyed by each
+method's *current* name, so a group records where a method IS, never where it GOES. The rendered
+rename table lists all three under W5, each against its own target — which is exactly the split
+the group's single action row no longer supplies. Do not read W5's membership as a shared
+destination; read the per-member rows.
+
+**OVERRIDES:** this doc's `write_journal` / `read_journal` split — the canonical menu's absorptions govern, so each journal method retires into the replacement that already exists for it rather than becoming a new name. The reconciled destinations are recorded in `docs/product/bridge-table.md` and `docs/product/beta-sdk-surface.md`; the marker and the ruling reasoning are in the `OVERRIDES:` comment in `tools/bridge_table.py`, and the plan of record is the mapping comment on #4282.
+
+What **survives** the amendment: the diagnosis below (the read/write mix and the name collision are
+real, and they are *why* the group dissolves), and the ontology flag (`wing` / `room` appears
+nowhere in `docs/ONTOLOGY.md`) — the retirement settles the **names**, not that vocabulary, so
+whether the parameters survive the absorption remains open and is recorded on **#4282**, which owns
+the replacements' parameter surface.
 
 **Also observed:** `checkpoint` and the diary methods take `wing` / `room` parameters.
 That vocabulary appears nowhere in `docs/ONTOLOGY.md`, which models graphs, namespaces and

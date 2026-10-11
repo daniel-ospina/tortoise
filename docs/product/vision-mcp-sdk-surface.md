@@ -1,6 +1,12 @@
 ---
 title: Vision — the MCP and SDK surface
 status: approved-scope
+type: synthesis
+domain: capability
+doc_status: live
+created: 2026-09-21
+ownedBy: epistemic-team
+aboutSubjects: tortoise-memory
 products: [tortoise]
 aboutObjects: [tortoise-mcp, tortoise-sdk]
 ---
@@ -70,14 +76,25 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 | | |
 |---|---|
 | Registry tools | **98** |
-| Absorbed into the 26 MCP targets | **81** |
+| Absorbed into the 26 MCP targets | **84** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **14** |
+| Retired | **11** |
 | MCP target tools | **26** |
 
 **The four bucket rows sum to 98.** (The last row is the target *surface*, not a bucket —
-26 targets received those 81 absorbed tools many-to-one, so it is not part of the sum.)
+26 targets received those 84 absorbed tools many-to-one, so it is not part of the sum.)
+
+The three journal names (`checkpoint`, `diary_write`, `diary_read`) moved from the *Retired*
+bucket to the *Absorbed* bucket on the owner's 2026-10-09 ruling: the two owner-approved docs
+disagreed about them, and the owner ruled that the canonical menu's absorptions govern (#4282).
+They still **retire as names** — the “Not in beta” bullet below records that, and it is not a
+contradiction: an *absorbed* name retires **into** a replacement, while a `Retired` row in the
+table above retires into nothing. Each of these three now has a destination — rows 10 and 13 of
+`docs/product/canonical-mcp-tools.md` and its “Removed entirely” table — recorded per name in
+`tools/sdk_rename_table.py` (`w5_diary_write` / `w5_checkpoint` / `w5_diary_read`) and in
+`tools/bridge_table.py::DESTINATION`. None is a `REMOVED` row, so none carries a `REMOVALS`
+reason.
 
 † **`run_onboarding` is in the approved 23-tool list — it is tool #23, absorbing the seven
 `onboarding_*` tools — and the beta 26 drops it in favour of `check_connection`.** That is not a
@@ -89,8 +106,8 @@ the proposed entry point and absorbs none of them. Two of the seven were **tenan
 **rehomed to the tenancy block (SDK/REST)**, so the capability survives while the MCP surface
 loses both reads.
 
-**`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 14 retire, 2 are tenancy-only,
-1 is absorbed into a builder-only SDK method that is not on the MCP, and 81 are
+**`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 11 retire, 2 are tenancy-only,
+1 is absorbed into a builder-only SDK method that is not on the MCP, and 84 are
 absorbed into the 26 targets. Many current tools map onto one target, so the two numbers are
 not complements.
 
@@ -200,7 +217,7 @@ mechanism — see 2.5.
 | | Deliverable | Depends on |
 |---|---|---|
 | **3.1** | The 26 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The **14 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **81 are absorbed** into the 26 targets — many-to-one. Writing "98 − 26 = 72 retired" conflates the two and is wrong. | 3.1 |
+| **3.2** | The **11 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **84 are absorbed** into the 26 targets — many-to-one. Writing "98 − 26 = 72 retired" conflates the two and is wrong. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification
@@ -253,5 +270,6 @@ steps rather than gates. Applying them cost less than asking.
   on **#4667** (2026-10-09), each name retires in the same release that lands its replacement
   (`diary_write` into `create_entity`, `checkpoint` into `capture_knowledge`, `diary_read` into
   `list_knowledge`) — so no retirement signpost ever names a replacement that does not exist yet.
-  Until then they stay callable and unlisted; reconciling `tools/bridge_table.py`'s `REMOVED`
-  mapping against the approved menu is tracked on **#4282**.
+  Until then they stay callable and unlisted; their `tools/bridge_table.py` destinations were
+  reconciled to those absorptions under **#4282**, so the table no longer reads `REMOVED` for any
+  of the three (see the bucket table above).

@@ -775,6 +775,133 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# THE REASONED-RETIREMENT PROOF (#4282)
+#
+# The owner's prerequisite was that every one of the 98 declared names resolves either
+# to a target that exists in the approved menu or to an explicit, REASONED retirement.
+# `_validate` refuses both failure directions — a `REMOVED` row with no reason, and a
+# reason outliving the row it describes. The reason map is the load-bearing half of the
+# reconciliation (it is the "explicit" in "explicit, reasoned retirement"), so the
+# mutation tests below red the build in BOTH directions: a check that nothing exercises
+# can be deleted silently, and `_validate` returning `[]` on the live map cannot tell
+# the difference between "the proof passed" and "the proof is gone".
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> None:
+    """The reason map's key set IS the retired set — the invariant the build enforces."""
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import DESTINATION, REMOVALS, _registry_rows, _validate
+
+    assert _validate(_registry_rows()) == [], (
+        "the live map does not validate — every assertion below is then describing a "
+        "state the build already refuses"
+    )
+
+    retired = {n for n, d in DESTINATION.items() if d == "REMOVED"}
+    assert retired == set(REMOVALS), (
+        "the retired set and the reason set disagree, so a retirement is either "
+        f"unreasoned ({sorted(retired - set(REMOVALS))}) or the reason is stale "
+        f"({sorted(set(REMOVALS) - retired)})"
+    )
+    assert len(retired) == 11, f"expected 11 retired tools, got {len(retired)}"
+
+    for name, reason in sorted(REMOVALS.items()):
+        assert reason.strip(), f"{name} carries an empty reason"
+        # A reason is only a PROOF if it names what authorises it. Every entry names
+        # either the canonical doc or the dated ruling that settled it.
+        assert "canonical" in reason or "settled" in reason, (
+            f"{name}'s reason names no authority: {reason!r}"
+        )
+
+
+def test_a_retirement_without_a_reason_fails_the_build(monkeypatch) -> None:
+    """Drop ONE reason from a retired name -> the build must refuse that name.
+
+    Mutated per name rather than on a single sample: a guard that happens to fire for
+    `tortoise_analyze` but not for the onboarding block would leave the block silently
+    unreasoned.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools import bridge_table as bt
+
+    rows = bt._registry_rows()
+    retired = sorted(n for n, d in bt.DESTINATION.items() if d == "REMOVED")
+    assert retired, "the fixture is vacuous: nothing is retired"
+
+    for name in retired:
+        reasons = dict(bt.REMOVALS)
+        del reasons[name]
+        monkeypatch.setattr(bt, "REMOVALS", reasons)
+        errs = bt._validate(rows)
+        assert any("UNREASONED retirement" in e and name in e for e in errs), (
+            f"dropping {name}'s reason did not red the build — the retirement proof "
+            f"does not cover {name}; got {errs}"
+        )
+
+
+def test_a_stale_reason_fails_the_build(monkeypatch) -> None:
+    """A reason outliving its `REMOVED` row must red the build (the other direction).
+
+    Without this direction the map could accumulate reasons for tools that resolve to a
+    real target — a reader would then be told a live tool was retired.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools import bridge_table as bt
+
+    rows = bt._registry_rows()
+    live = sorted(n for n, d in bt.DESTINATION.items() if d != "REMOVED")
+    assert live, "the fixture is vacuous: everything is retired"
+
+    for name in live[:5]:
+        reasons = dict(bt.REMOVALS)
+        reasons[name] = "canonical-mcp-tools.md §Removed entirely — stale"
+        monkeypatch.setattr(bt, "REMOVALS", reasons)
+        errs = bt._validate(rows)
+        assert any("STALE retirement reason" in e and name in e for e in errs), (
+            f"a reason for the live tool {name} did not red the build — a resolved "
+            f"retirement can leave a stale reason behind; got {errs}"
+        )
+
+    # And the block must actually be REACHABLE: with no reasons at all, every retired
+    # name is unreasoned. This is what a deleted guard cannot satisfy.
+    monkeypatch.setattr(bt, "REMOVALS", {})
+    errs = bt._validate(rows)
+    assert sum("UNREASONED retirement" in e for e in errs) == len(
+        [n for n, d in bt.DESTINATION.items() if d == "REMOVED"]
+    ), f"the proof does not cover every retirement: {errs}"
+
+
+def test_namespaced_destinations_are_rehomes_and_owe_no_retirement_reason() -> None:
+    """`tenancy:`/`sdk:` are rehomes, NOT retirements — so they must not carry a reason."""
+    sys.path.insert(0, str(ROOT))
+    from tools import bridge_table as bt
+
+    # `tenancy:` and `sdk:` are self-describing non-target destinations, NOT retirements,
+    # so they must not owe a reason: requiring one would make the map describe an
+    # account-tenancy rehome as a deletion.
+    for name, dest in bt.DESTINATION.items():
+        if dest.startswith(("tenancy:", "sdk:")):
+            assert name not in bt.REMOVALS, (
+                f"{name} is rehomed to {dest!r}, not retired, but carries a REMOVALS "
+                "reason — the reason map would read as a deletion"
+            )
+
+
+def test_check_exits_nonzero_on_an_unreasoned_retirement(monkeypatch) -> None:
+    """`--check` is the gate the migration runs through: it must exit non-zero."""
+    sys.path.insert(0, str(ROOT))
+    from tools import bridge_table as bt
+
+    monkeypatch.setattr(bt, "REMOVALS", {})
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
+    assert bt.main() != 0, (
+        "`bridge_table.py --check` returned 0 with every retirement unreasoned — the "
+        "gate the migration is driven through does not enforce the proof"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # THE DESTINATION CITATIONS (#4282, defect class of PR #4477)
 #
 # The `Destination` column's evidence is the beta doc's own disposition row. A read

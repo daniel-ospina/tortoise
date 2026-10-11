@@ -8,9 +8,9 @@ below is arithmetic computed against the **served registry** — the live tools 
 16 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
-**Registry: 98 tools → 81 absorbed into the 26 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 14 retired.**
+**Registry: 98 tools → 84 absorbed into the 26 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 11 retired.**
 
-**These are not the same number.** The MCP has **26** tools; **14** current tools retire, **2** are tenancy-only, **1** is absorbed into a builder-only SDK method that is not on the MCP, and **81** are absorbed into those 26 — many-to-one. Writing "98 minus 26 equals 72 retired" conflates the two, and is wrong.
+**These are not the same number.** The MCP has **26** tools; **11** current tools retire, **2** are tenancy-only, **1** is absorbed into a builder-only SDK method that is not on the MCP, and **84** are absorbed into those 26 — many-to-one. Writing "98 minus 26 equals 72 retired" conflates the two, and is wrong.
 
 ---
 
@@ -29,10 +29,10 @@ something derivable from today's code.
 |---|---|---|---|
 | `graph_overview` | 13 | `section=` | **no — Part C1** |
 | `check_confidence` | 7 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `create_entity` | 7 | `type=` | yes |
 | `get_entity` | 7 | `type=` | yes |
 | `search_knowledge` | 7 | `mode=` (full-text / hybrid) | **no — Part C1** |
-| `create_entity` | 6 | `type=` | yes |
-| `list_knowledge` | 5 | `kind=` | **no — Part C1** |
+| `list_knowledge` | 6 | `kind=` | **no — Part C1** |
 | `update_knowledge` | 4 | *(which fields — incl. the retract fields)* | **no — Part C1** |
 | `adjust_relationship` | 3 | *(strength)* | **no — Part C1** |
 | `delete_knowledge` | 3 | *(node or link)* | **no — Part C1** |
@@ -42,9 +42,10 @@ something derivable from today's code.
 | `review_link_candidates` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `link_entities` | 2 | *(relation kind)* | **no — Part C1** |
 | `manage_source_trust` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `mine_knowledge_from_session` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `supersede_knowledge` | 2 | *(link policy)* | **no — Part C1** |
 
-**16 merged targets. 2 of them have a method behind them today.** The other **14** are Phase 2 work, not renames.
+**17 merged targets. 2 of them have a method behind them today.** The other **15** are Phase 2 work, not renames.
 
 ## Part B — every served name and its single destination (82 live + 16 retired)
 
@@ -59,7 +60,7 @@ something derivable from today's code.
 | 7 | `tortoise_belief_timeline` | `tool_registry.py:393` | `belief_timeline` | yes | `check_confidence` |
 | 8 | `tortoise_calibrate_summary` | `tool_registry.py:441` | `calibrate_summary` | yes | `check_confidence` |
 | 9 | `tortoise_check_structure` | `tool_registry.py:138` | `check_structure` | yes | `graph_overview` |
-| 10 | `tortoise_checkpoint` | `tool_registry.py:632` | `checkpoint` | no | `REMOVED` |
+| 10 | `tortoise_checkpoint` | `tool_registry.py:632` | `checkpoint` | no | `mine_knowledge_from_session` |
 | 11 | `tortoise_compute_confidence` | `tool_registry.py:404` | `compute_confidence` | yes | `check_confidence` |
 | 12 | `tortoise_create_document` | `tool_registry.py:971` | `create_document` | no | `create_entity` |
 | 13 | `tortoise_create_edge` | `tool_registry.py:1103` | `create_edge` | no | `link_entities` |
@@ -73,8 +74,8 @@ something derivable from today's code.
 | 21 | `tortoise_delete` | `tool_registry.py:1079` | `delete` | no | `delete_knowledge` |
 | 22 | `tortoise_delete_entity` | `tool_registry.py:1044` | `delete_entity` | no | `delete_knowledge` |
 | 23 | `tortoise_delete_point` | `tool_registry.py:552` | `delete_point_wrapped` | no | `delete_knowledge` |
-| 24 | `tortoise_diary_read` | `tool_registry.py:652` | `diary_read` | yes | `REMOVED` |
-| 25 | `tortoise_diary_write` | `tool_registry.py:642` | `diary_write` | no | `REMOVED` |
+| 24 | `tortoise_diary_read` | `tool_registry.py:652` | `diary_read` | yes | `list_knowledge` |
+| 25 | `tortoise_diary_write` | `tool_registry.py:642` | `diary_write` | no | `create_entity` |
 | 26 | `tortoise_dream` | `tool_registry.py:449` | `dream` | no | `refresh_confidence` |
 | 27 | `tortoise_dream_health` | `tool_registry.py:466` | `dream_health_check` | yes | `graph_overview` |
 | 28 | `tortoise_entity_profile` | `tool_registry.py:612` | **none declared** | yes | `explore_connections` |
@@ -164,13 +165,13 @@ the documented reading and the authority for it.
 
 | Destination | Count |
 |---|---|
-| `REMOVED` | 14 |
 | `graph_overview` | 13 |
+| `REMOVED` | 11 |
 | `check_confidence` | 7 |
+| `create_entity` | 7 |
 | `get_entity` | 7 |
 | `search_knowledge` | 7 |
-| `create_entity` | 6 |
-| `list_knowledge` | 5 |
+| `list_knowledge` | 6 |
 | `update_knowledge` | 4 |
 | `adjust_relationship` | 3 |
 | `delete_knowledge` | 3 |
@@ -180,11 +181,11 @@ the documented reading and the authority for it.
 | `review_link_candidates` | 3 |
 | `link_entities` | 2 |
 | `manage_source_trust` | 2 |
+| `mine_knowledge_from_session` | 2 |
 | `supersede_knowledge` | 2 |
 | `approve_merge` | 1 |
 | `graph_set_recording` | 1 |
 | `mine_knowledge_from_directory` | 1 |
-| `mine_knowledge_from_session` | 1 |
 | `poll_events` | 1 |
 | `record_decision` | 1 |
 | `register_source` | 1 |
