@@ -144,6 +144,35 @@ def backlog_dir() -> Path:
     return local_state_dir(BACKLOG_DIR_LEAF)
 
 
+def _existing_path(session_id: str) -> Path:
+    """Where this session's record ALREADY lives, else where it belongs.
+
+    The canonical path is not the only place a record can be: an earlier
+    iteration of this module named records ``<sanitised id>.json``, WITHOUT the
+    digest the map now always carries.  Addressing only the canonical path would
+    make such a record unreachable in both directions — ``mark_processed`` would
+    write a second file while the old one kept reading ``not-processed`` (so the
+    entry could never be retired), and the monotonic guard would not see an old
+    ``processed`` record (so a store-only re-capture could resurrect it).
+
+    Matching is by the record's own ``session_id`` field: that field is the
+    record's IDENTITY, the filename is only storage.
+    """
+    canonical = _session_path(session_id)
+    try:
+        if canonical.exists():
+            return canonical
+        for path in backlog_dir().glob("*.json"):
+            if path.name.endswith(".tmp"):
+                continue
+            rec = _read_json(path)
+            if rec and str(rec.get("session_id") or "") == str(session_id):
+                return path
+    except Exception:
+        return canonical
+    return canonical
+
+
 def _policy_path() -> Path:
     """The policy record's path — derived once, like every other path here."""
     return backlog_dir() / _POLICY_DIR / _POLICY_FILE
@@ -159,7 +188,7 @@ def _session_path(session_id: str) -> Path:
     ledger and a reader scanning the directory would never see the record it
     wrote — a silent write-nothing).
 
-    Substitution alone is NOT injective — `a/b`, `a..b` and `" a b "` all
+    Substitution alone is NOT injective — `a/b`, `a..b` and `a_b` all
     address one record — and that is not a cosmetic point: the writers preserve
     a previously recorded transcript path, so two colliding ids would share one
     record and the second would inherit the first's ``file``, making
@@ -290,7 +319,7 @@ def record_not_processed(*, session_id: str, harness: str | None = None,
     or the record already said ``processed``.  Never raises.
     """
     try:
-        path = _session_path(session_id)
+        path = _existing_path(session_id)
         existing = _read_json(path)
         if existing and existing.get("status") == STATUS_PROCESSED:
             return False
@@ -334,13 +363,36 @@ def mark_processed(session_id: str, *, processed_at: str | None = None) -> bool:
     normal capture would report a backlog that never existed.
     """
     try:
-        path = _session_path(session_id)
+        path = _existing_path(session_id)
         existing = _read_json(path)
         if not existing:
             return False
         existing["status"] = STATUS_PROCESSED
         existing["processed_at"] = processed_at
         return _write_json(path, existing)
+    except Exception:
+        return False
+
+
+def forget(session_id: str) -> bool:
+    """DROP ``session_id``'s ledger record.  ``True`` if one was removed.
+
+    The deliberate way OUT of a record nothing can act on.  A `session drain`
+    deferral is recorded WITHOUT a transcript path (the spool keeps the turns,
+    not the path they came from), so ``--process`` can only skip it — and a
+    record that inflates the pending count, the price and the `doctor` row
+    while no command can clear it is a surface that cannot converge.  Dropping
+    is the user's call to make explicitly, never an automatic tidy-up: the
+    record is the only evidence that the session was stored without extraction.
+
+    Never raises; a missing record is a no-op (``False``).
+    """
+    try:
+        path = _existing_path(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
     except Exception:
         return False
 
@@ -474,7 +526,8 @@ def summary() -> dict:
 
 
 def format_report(state: dict, *, provider: str | None = None,
-                  model: str | None = None) -> str:
+                  model: str | None = None,
+                  suppress_recommendation: bool = False) -> str:
     """The human report for :func:`summary` — the offer, cost first.
 
     The cost and the recommendation are printed BEFORE the run is possible, so
@@ -518,9 +571,13 @@ def format_report(state: dict, *, provider: str | None = None,
                 f" {_as_int(rec.get('turns')) or 0} turn(s), est. "
                 f"{_est if _est is not None else 'cost unknown'} unit(s)"
                 f"{' — ' + str(rec.get('reason')) if rec.get('reason') else ''}")
-    rec = recommendation(state)
-    if rec:
-        lines.append(f"  {rec}")
+    if not suppress_recommendation:
+        # Suppressed INSIDE a `--process` run: recommending the action that is
+        # already executing reads as a contradiction, and it is the one line a
+        # reader of the run's own report cannot act on.
+        rec = recommendation(state)
+        if rec:
+            lines.append(f"  {rec}")
     return "\n".join(lines)
 
 
@@ -539,9 +596,12 @@ def recommendation(state: dict) -> str | None:
     if not state.get("not_processed"):
         return None
     if state.get("declined"):
-        return ("Choice recorded: future conversations only. The saved backlog "
-                "is NOT extracted — run `tortoise sessions backlog --process` "
-                "to change that (recommended).")
+        # The choice's own announcement already happened where it was MADE
+        # (`--future-only` prints "Choice recorded: …"); repeating it here made
+        # one command announce the same choice twice in two wordings, reading as
+        # a retry rather than a confirmation followed by the way back.
+        return ("The saved backlog is NOT extracted — run `tortoise sessions "
+                "backlog --process` to change that (recommended).")
     return ("Recommended: `tortoise sessions backlog --process` extracts the "
             "saved backlog now at the estimated cost shown above; "
             "`--future-only` keeps only future conversations.")

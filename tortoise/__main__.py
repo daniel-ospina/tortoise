@@ -4404,6 +4404,22 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # the server extracts a session once). Surface it honestly instead of
     # claiming a fresh extraction happened.
     if body.get("extraction_mode") == "replayed":
+        # #4197 review: "replayed" is NOT proof that extraction ran. A replayed
+        # receipt carrying an upgrade-refused warning means the prior store-only
+        # capture was replayed and the upgrade was REFUSED — the session still
+        # has no memory points — so "already captured" is the false statement
+        # that warning exists to correct, and the deferral must be recorded like
+        # any other (it is the same class of silent loss as the store-only and
+        # degraded shapes).
+        _replayed_reason = _deferral_reason(body)
+        if _replayed_reason:
+            print(f"capture deferred: {_replayed_reason} — the turns are stored "
+                  "but no memory points were extracted.", file=_sys.stderr)
+            _replay_harness, _replay_file = _capture_deferral_target(args, harness)
+            _record_backlog_deferral(
+                session_id=session_id, harness=_replay_harness,
+                file_path=_replay_file, turns=turns, reason=_replayed_reason)
+            return 0
         print(f"Session {server_session} already captured — replayed (no new extraction).")
         return 0
     # P1 #1529: a status-only consumer must not report success on a failed
@@ -4556,22 +4572,12 @@ def _record_drain_deferrals(root, summary) -> None:
     try:
         from tortoise import capture_backlog
         from tortoise.capture_spool import read_spool_meta, read_spool_turns
-        from tortoise.sdk import (
-            _CAPTURE_EXTRACTION_DISABLED_MODE,
-            _CAPTURE_NO_PROVIDER_MODE,
-        )
 
         for sid, outcome in (summary.outcomes or {}).items():
             if not sid or not outcome.ok:
                 continue
-            _mode = (outcome.body or {}).get("extraction_mode")
-            _degraded = _degraded_extraction(outcome.body)
-            if _mode in (_CAPTURE_NO_PROVIDER_MODE,
-                         _CAPTURE_EXTRACTION_DISABLED_MODE):
-                _reason = _mode
-            elif _degraded:
-                _reason = _degraded
-            else:
+            _reason = _deferral_reason(outcome.body)
+            if not _reason:
                 # Extraction ran — this entry is not a deferral.
                 continue
             _meta = read_spool_meta(root, sid) or {}
@@ -5342,6 +5348,44 @@ def _degraded_extraction(body) -> str | None:
     return None
 
 
+def _deferral_reason(body) -> str | None:
+    """WHY a 2xx stored the session without extracting — ``None`` if extraction ran.
+
+    THE single definition of "this capture still needs a re-attempt", used by all
+    three writers (`sessions import`, `session capture`, `session drain`) so they
+    cannot disagree about one response body.  FOUR shapes qualify, and the first
+    is not an extraction MODE at all:
+
+    * a `replayed` receipt carrying an upgrade-refused warning.  The prior
+      store-only capture was replayed and the re-POST REFUSED the upgrade, so
+      the session STILL has no memory points — the SDK attaches that warning
+      precisely because "already captured" would be a false statement of this
+      state (`tortoise/sdk.py`).  Reading `replayed` as proof of extraction is
+      how the drain silently dropped the sessions this backfill exists to
+      recover.
+    * the two store-only modes (keyless #4188 / extraction-disabled #4258);
+    * a DEGRADED 2xx (see :func:`_degraded_extraction`).
+    """
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
+
+    if not isinstance(body, dict):
+        return None
+    _warns = body.get("warnings") or []
+    if _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns:
+        return "upgrade refused: extraction disabled"
+    if _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns:
+        return "upgrade refused: no provider key"
+    _mode = body.get("extraction_mode")
+    if _mode in (_CAPTURE_NO_PROVIDER_MODE, _CAPTURE_EXTRACTION_DISABLED_MODE):
+        return _mode
+    return _degraded_extraction(body)
+
+
 def _record_backlog_deferral(*, session_id: str, harness: str | None,
                              file_path, turns, reason: str,
                              estimate=None) -> None:
@@ -5453,6 +5497,18 @@ def _cmd_sessions_backlog(args) -> int:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     state = capture_backlog.summary()
 
+    if getattr(args, "forget", None):
+        # The deliberate way OUT of a record nothing can act on. A `session
+        # drain` deferral is recorded with NO transcript path (the spool keeps
+        # the turns, not the path), so `--process` can only skip it — and a
+        # record that inflates the pending count, the price and the `doctor`
+        # row while no command can clear it is a surface that cannot converge.
+        if not capture_backlog.forget(args.forget):
+            print(f"No saved-backlog record for {args.forget}.", file=sys.stderr)
+            return 1
+        print(f"Dropped the saved-backlog record for {args.forget}.")
+        return 0
+
     if getattr(args, "future_only", False):
         pending = int(state["counts"][capture_backlog.STATUS_NOT_PROCESSED])
         if not capture_backlog.set_policy(capture_backlog.CHOICE_FUTURE_ONLY,
@@ -5464,10 +5520,12 @@ def _cmd_sessions_backlog(args) -> int:
               f"extracted. {pending} saved session(s) stay un-extracted and "
               f"are NOT re-extracted on their own.")
         # `recommendation()` returns None when nothing is pending — printing it
-        # unguarded emitted a literal `None` on a backlog-free machine.
+        # unguarded emitted a literal `None` on a backlog-free machine. Its
+        # declined text is the ACTIONABLE half only, so the choice is not
+        # announced a second time in a second wording.
         _rec = capture_backlog.recommendation(capture_backlog.summary())
         if _rec:
-            print(_rec)
+            print(f"  {_rec}")
         return 0
 
     if getattr(args, "process", False):
@@ -5484,11 +5542,39 @@ def _cmd_sessions_backlog(args) -> int:
         return 0
 
     if not state["not_processed"] and not state["processed"]:
-        print("No saved backlog — nothing was captured without extraction.")
+        # SCOPED TO THE LOCAL RECORD, like `format_report`'s own caveat: the
+        # ledger is written by `sessions import` / `session capture` /
+        # `session drain` only — the Pi capture extension does not write it — so
+        # a host that DID capture store-only sessions can reach this branch, and
+        # "nothing was captured without extraction" would assert an absence this
+        # surface cannot observe.
+        print("No saved backlog — no session was LOCALLY RECORDED as captured "
+              "without extraction.")
         return 0
     provider, model = _backlog_provider_note()
     print(capture_backlog.format_report(state, provider=provider, model=model))
     return 0
+
+
+def _import_receipt_for(session_id: str) -> Path:
+    """The local import receipt for ``session_id`` — ONE derivation.
+
+    Shared by the receipt writer and by the backlog run's reconciliation, so the
+    two cannot disagree about where a receipt is (a divergence would either
+    revive a retired entry or wedge one forever).
+    """
+    import os
+
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir / f"{session_id}.json"
+
+
+#: The command that drops a record nothing can act on — named in the messages
+#: that report such a record, so the way out is discoverable where the dead end
+#: is reported rather than only in `--help`.
+_FORGET_HINT = "tortoise sessions backlog --forget <session-id>"
 
 
 def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
@@ -5501,6 +5587,7 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     as processed would be the one lie this whole feature exists to prevent.
     """
     import argparse as _argparse
+    import time
 
     from tortoise import capture_backlog
 
@@ -5522,7 +5609,7 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
             for record in without_file:
                 print(f"  skipped {record.get('session_id')}: no transcript "
                       "path was recorded for it (re-run its import to set "
-                      "one)")
+                      f"one, or drop the record with `{_FORGET_HINT}`)")
             return 0
         print("No saved backlog to process.")
         return 0
@@ -5539,18 +5626,32 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     if _provider_note:
         print(_provider_note)
 
-    # Record the choice BEFORE rendering the report. The report's own
-    # recommendation is derived from the recorded policy, so rendering first
-    # printed "the saved backlog is NOT extracted — run --process to change
-    # that" immediately before the run extracted. The report must describe the
-    # run being started, not the policy being overridden (#4197 AC5).
-    capture_backlog.set_policy(capture_backlog.CHOICE_BACKLOG,
-                              decided_at=decided_at)
+    _policy_recorded = capture_backlog.set_policy(
+        capture_backlog.CHOICE_BACKLOG,
+        decided_at=decided_at)
+    if not _policy_recorded:
+        # The `--future-only` branch fails loudly on the same call, and it is
+        # right to: an unverified policy write cannot deliver the ordering's
+        # purpose. The run still proceeds (the user asked for it, and the
+        # per-entry verdict is read from the ledger), but the choice is NOT
+        # recorded — so the report below must not claim a policy this run is
+        # overriding. `state` is re-read after the write, so the override is
+        # applied to the re-read state, immediately before rendering.
+        print("Could not record the choice (the local ledger is not writable) "
+              "— the run continues, but a later `sessions backlog` will not "
+              "see it as chosen.", file=sys.stderr)
     state = capture_backlog.summary()
     entries = [r for r in state["not_processed"] if r.get("file")]
     without_file = [r for r in state["not_processed"] if not r.get("file")]
+    if not _policy_recorded:
+        state = dict(state, choice=capture_backlog.CHOICE_BACKLOG,
+                     declined=False)
     provider, model = _backlog_provider_note()
-    print(capture_backlog.format_report(state, provider=provider, model=model))
+    # `suppress_recommendation`: the report is rendered IMMEDIATELY before the
+    # run it describes, so recommending `--process` would tell the user to run
+    # the command already executing.
+    print(capture_backlog.format_report(state, provider=provider, model=model,
+                                        suppress_recommendation=True))
 
     total = len(entries)
     processed = failed = 0
@@ -5558,6 +5659,22 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
         session_id = str(record.get("session_id") or "")
         print(f"  [{index}/{total}] re-capturing {session_id} "
               f"({record.get('turns') or 0} turn(s)) …")
+        # RECONCILE FIRST: a local import receipt is PROOF the server took this
+        # session WITH extraction — every deferring shape returns before the
+        # receipt write — so a ledger entry that still says `not-processed`
+        # beside a receipt is a MISSED RETIREMENT (a kill between the two
+        # writes, or a `mark_processed` write that failed; both are documented
+        # as possible). Without this the entry would short-circuit at the
+        # receipt check BEFORE the POST, be counted failed, and leave
+        # `--process` exiting 1 and `doctor` warning forever, with no command
+        # able to clear it.
+        if _import_receipt_for(session_id).exists():
+            _stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            capture_backlog.mark_processed(session_id, processed_at=_stamp)
+            processed += 1
+            print(f"  [{index}/{total}] {session_id}: extracted ✓ "
+                  "(reconciled from its import receipt)")
+            continue
         rc = _cmd_sessions_import(_argparse.Namespace(
             file=record.get("file"),
             # The ledger may carry a harness the parsers spell differently
@@ -5585,7 +5702,8 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
 
     for record in without_file:
         print(f"  skipped {record.get('session_id')}: no transcript path was "
-              "recorded for it (re-run its import to set one)")
+              "recorded for it (re-run its import to set one, or drop the "
+              f"record with `{_FORGET_HINT}`)")
     print(f"Saved backlog run complete: {processed} processed, {failed} "
           f"still not-processed, {len(without_file)} skipped.")
     return 1 if failed else 0
@@ -5628,7 +5746,7 @@ def _cmd_sessions_import(args) -> int:
     server-side failure key unset, so the panel would read healthy over a
     session that was never captured.
     """
-    import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
+    import hashlib, json as _json, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -5694,10 +5812,7 @@ def _cmd_sessions_import(args) -> int:
         "imp_" + hashlib.sha256(raw).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
-    receipt_dir = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts")))
-    receipt = receipt_dir / f"{session_id}.json"
+    receipt = _import_receipt_for(session_id)
     if receipt.exists():
         print(f"Already imported: {session_id} (receipt present) — skipping.")
         return 0
@@ -5887,7 +6002,7 @@ def _cmd_sessions_import(args) -> int:
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:
                 return False
-            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
             receipt.write_text(_json.dumps({
                 "session_id": session_id,
                 "harness": harness, "file": str(file_path),
@@ -5995,8 +6110,8 @@ def _cmd_sessions_import(args) -> int:
     # failure surface for a capture whose turn mutation already happened, so it
     # is reported below and then deferred (no receipt) rather than treated as a
     # completed import.
-    if result.get("errors") or result.get("warnings") or \
-            result.get("extraction_mode") in ("error", "empty"):
+    _degraded_body = _degraded_extraction(result)
+    if result.get("errors") or result.get("warnings") or _degraded_body:
         print("import warnings: " + str(
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
@@ -6061,9 +6176,7 @@ def _cmd_sessions_import(args) -> int:
             session_id=session_id, harness=harness, file_path=file_path,
             turns=turns, reason=_degraded)
         return 0
-    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
-                          _CAPTURE_EXTRACTION_DISABLED_MODE)
-            or _upgrade_refused):
+    if _deferral_reason(result):
         # #4258: the missing key and the turned-off setting are INDEPENDENT
         # reasons. When BOTH hold, the mode is "no-provider" but the receipt
         # also carries the disabled warning — the remedy must then name both
@@ -6101,7 +6214,7 @@ def _cmd_sessions_import(args) -> int:
             session_id=session_id, harness=harness, file_path=file_path,
             turns=turns, reason=_why)
         return 0
-    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
         "harness": harness, "file": str(file_path),
@@ -9871,6 +9984,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Extract the saved backlog now (RECOMMENDED; spends model "
              "budget — the estimate is printed first)")
     _backlog_choice.add_argument(
+        "--forget", metavar="SESSION_ID", default=None,
+        help="Drop one saved-backlog record and stop counting it. The way out "
+             "of a record nothing can act on: a `session drain` deferral "
+             "records no transcript path, so `--process` can only skip it")
+    _backlog_choice.add_argument(
         "--future-only", action="store_true",
         help="Keep only future conversations: record the choice, leave the "
              "saved transcripts un-extracted")
@@ -10130,7 +10248,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_sessions_import(args)
         if args.sessions_cmd == "backlog":
             return _cmd_sessions_backlog(args)
-        print("Unknown sessions command. Try import.", file=sys.stderr)
+        print("Unknown sessions command. Try import or backlog.",
+              file=sys.stderr)
         return 1
     elif args.cmd == "index":
         if args.index_cmd == "github":
