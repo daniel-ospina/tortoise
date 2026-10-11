@@ -119,7 +119,7 @@ class TestFirstCaptureDisclosure:
     def test_first_capture_writes_capture_disclosed_checkpoint(self):
         """The org's FIRST capture writes the graph-held capture-disclosed
         checkpoint + answers first_capture=true (the MCP/agent caller fires
-        its in-conversation one-liner on that flag — SKILL.md §6 contract:
+        its in-conversation one-liner on that flag — SKILL.md §7 contract:
         W6 implements the TRIGGER, the agent owns the line)."""
         tc, org_id = _registered_client()
         try:

@@ -256,10 +256,13 @@ _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
 # never reads the Source, so the replay can only reproduce what the payload states.)
 
 # #548: operators store NO `content`/`pointKind` as node properties (the live
-# writer creates the node without them). The journal SEAM synthesizes both
-# (`sdk.py` — "Operators may not store 'content' as a node property (#548);
-# `_upsert_point_props` requires it — synthesize a fallback") because the replay
-# writer sets them unconditionally.
+# writer creates the node without them). The replay writer sets them
+# UNCONDITIONALLY (`n.content=$content` with `p.get("content", "")` — the
+# `_WRITER_DEFAULTS` empty string; `n.pointKind=coalesce($pk, n.pointKind)`), so
+# on an OPERATOR node they are ONE-SIDED by design. #5089 removed the extra
+# label the journal seam used to SYNTHESIZE on top of that (`sdk.py`: a
+# fabricated `IMPL(inputs)` content that no writer had stored and the replay then
+# persisted) — the asymmetry is now the empty string alone.
 #
 # On an OPERATOR node they are therefore ONE-SIDED by design (the live graph
 # lacks them, the journal/replay has them) — but they are NOT silently dropped:
@@ -270,8 +273,8 @@ _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
 # invisible blind spot.
 _OPERATOR_ABSENT_PROPS: frozenset[str] = frozenset({"content", "pointKind"})
 _OPERATOR_ABSENT_REASON = (
-    "#548 — operators store no `content`/`pointKind`; the journal seam "
-    "synthesizes both because the replay writer sets them unconditionally"
+    "#548 — operators store no `content`/`pointKind`; the replay writer "
+    "sets both unconditionally, so the journal side carries them"
 )
 
 # Writer defaults for keys it sets with a DETERMINISTIC default. When the
