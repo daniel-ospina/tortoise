@@ -196,10 +196,12 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
             content = encoded[-room:].decode("utf-8", errors="ignore")
             encoded = content.encode("utf-8")
         if not content.strip():
-            # `continue`, NOT `break`: a byte slice can leave only a dropped
-            # partial codepoint, and an unusable NEWEST turn must not abandon
-            # the older turns that still fit — dropping the whole window is the
-            # silent no-op this bound exists to prevent.
+            # A byte slice can decode to nothing when ``room`` is smaller than
+            # the tail codepoint's width (room 1-3). `continue`, NOT `break`:
+            # this turn is unusable, but an OLDER one may still fit in the same
+            # room, and `break` would take it down with this one. (The NEWEST
+            # turn cannot land here — it is processed first with room == 15296,
+            # and ``rstrip`` guarantees its last codepoint is non-whitespace.)
             continue
         kept.append({"role": role, "content": content})
         total += len(encoded) + PER_TURN_OVERHEAD_BYTES
@@ -353,6 +355,13 @@ def semantic_kernel_prompt_render_filter(reflex: Reflex) -> Callable:
     the remaining pipeline — and then PREPENDS the reflex block to the rendered
     prompt before it reaches the model. A filter error from ``next`` is the
     app's own and propagates; only Tortoise's half is fail-open.
+
+    This adapter is the one that runs on the event loop, so its reflex is
+    invoked SYNCHRONOUSLY on it: ``http_reflex`` blocks that loop for up to
+    ``HTTP_TIMEOUT_S`` on an unreachable endpoint, and ``sdk_reflex`` blocks it
+    for the graph query. The two synchronous adapters have no loop to block —
+    in an asyncio application, offload the provider itself
+    (``asyncio.to_thread``) if the loop must stay responsive.
     """
     async def prompt_render_filter(context: Any, next: Callable) -> None:
         await next(context)

@@ -412,6 +412,28 @@ def test_single_turn_with_a_long_whitespace_tail_still_injects():
     assert seen["window"][0]["content"].endswith("?")
 
 
+def test_unusable_turn_does_not_abandon_an_older_turn_that_fits():
+    """The `continue` branch, made load-bearing.
+
+    A byte slice yields nothing when ``room`` is smaller than the tail
+    codepoint's width. That happens only for an OLDER turn, and the older turn
+    still waiting behind it has to be kept: `break` would take it down too.
+
+    Arithmetic is exact — the newer turn consumes 15230 content bytes, so the
+    next turn's room is 15360 - (15230 + 64) - 64 = 2 bytes; a 3-byte "中"
+    slices to a partial codepoint and decodes to "", and the turn behind it
+    then gets the same 2-byte room and survives as its 2-byte tail.
+    """
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [
+        _Msg("human", "REAL QUESTION"),
+        _Msg("human", "中"),
+        _Msg("human", "A" * 15_230),
+    ]})
+    window = seen["window"]
+    assert [turn["content"] for turn in window] == ["ON", "A" * 15_230]
+
+
 @pytest.mark.parametrize("filler", ["A", "á", "中", "😀"])
 def test_built_window_is_accepted_by_the_real_reflex(seeded_sdk, filler):
     """#8107 review P1: the bound must be the reflex's BYTE budget, not characters.
