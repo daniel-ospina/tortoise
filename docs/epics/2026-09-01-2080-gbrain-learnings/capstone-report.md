@@ -114,7 +114,7 @@ Two documented deferrals keep this at PARTIAL, both carried in #2103's close not
 
 | Artifact | Expected | Measured |
 |---|---|---|
-| W1 learnings map + licensing gate | `docs/research/2026-08-31-gbrain-learnings/` | present (learnings-map, research-brief, raw-notes, delivery-shape, ux-research, platform-landscape) ✅ |
+| W1 learnings map + licensing gate | `docs/research/2026-08-31-gbrain-learnings/`, `docs/research/2026-09-01-gbrain-learnings/` | present (learnings-map, research-brief, raw-notes, delivery-shape, ux-research, platform-landscape, platform-seams) ✅ |
 | W2 baseline + can-fail CI gate | committed baseline w/ justification + failure classes | `baselines/main.json` (6 justified history entries) ✅; survival target not reached ⚠️ |
 | W3 harness published numbers | committed baselines | null-reflex + why-suite template ⚠️ |
 | W7 run receipt naming commit/corpus/judge | validated receipt | machinery only — run PENDING ❌ |
