@@ -62,14 +62,23 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from .volunteer import MAX_WINDOW_BYTES, PER_TURN_OVERHEAD_BYTES
+
 logger = logging.getLogger(__name__)
 
 # Window bounds. The reflex validates 1..1000 turns / <= 15 KB and raises on
 # out-of-contract input (tortoise/volunteer.py::validate_request), so the
 # middleware bounds the window it builds rather than letting a long framework
 # conversation degrade to silent nothing.
+#
+# The BYTE budget is IMPORTED from the reflex, never restated: validate_request
+# counts UTF-8 bytes plus PER_TURN_OVERHEAD_BYTES per turn, so a character
+# count — or a byte count that forgot the per-turn overhead — builds a window
+# the reflex REJECTS. The rejection is swallowed by the fail-open boundary, so
+# the symptom is not an error but a silent no-op in exactly the long
+# conversation the bound exists for (and multibyte content, accented Spanish
+# included, trips it about twice as early).
 MAX_WINDOW_TURNS = 20
-MAX_WINDOW_CHARS = 15_000
 HTTP_TIMEOUT_S = 15.0
 
 # A provider takes a canonical window (list of {role, content}) and returns a
@@ -145,11 +154,17 @@ def http_reflex(base_url: str, api_key: str | None = None, **options: Any) -> Re
 # ── Window builders ────────────────────────────────────────────────────────
 
 def _bounded_window(turns: list[Any]) -> list[dict]:
-    """Keep the last ``MAX_WINDOW_TURNS`` non-empty turns within the byte bound.
+    """Keep the last ``MAX_WINDOW_TURNS`` non-empty turns within the reflex's byte bound.
 
     Truncation keeps the END of an over-long turn (the turn being answered,
     which is what the reflex resolves against) and drops the OLDEST turns
     first — the same discipline the shipped hook script applies.
+
+    The budget is the REFLEX's own: ``MAX_WINDOW_BYTES`` against the UTF-8
+    bytes of the content plus ``PER_TURN_OVERHEAD_BYTES`` per turn
+    (tortoise/volunteer.py::validate_request). Bounding a different quantity
+    than the validator measures is not a smaller bound — it is no bound at
+    all, because the overflow path is a swallowed validation error.
     """
     kept: list[dict] = []
     total = 0
@@ -163,26 +178,48 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
             continue
         if len(kept) >= MAX_WINDOW_TURNS:
             break
-        room = MAX_WINDOW_CHARS - total
+        # Room left for CONTENT once this turn's own overhead is reserved.
+        room = MAX_WINDOW_BYTES - total - PER_TURN_OVERHEAD_BYTES
         if room <= 0:
             break
-        if len(content) > room:
-            content = content[-room:]
+        encoded = content.encode("utf-8")
+        if len(encoded) > room:
+            # Slice BYTES and drop a split leading character: slicing
+            # characters would let a multibyte turn exceed the byte budget it
+            # was truncated to fit.
+            content = encoded[-room:].decode("utf-8", errors="ignore")
+            encoded = content.encode("utf-8")
+        if not content.strip():
+            break
         kept.append({"role": role, "content": content})
-        total += len(content)
+        total += len(encoded) + PER_TURN_OVERHEAD_BYTES
     kept.reverse()
     return kept
 
 
+# ADK's own role vocabulary is ``user`` / ``model``; the canonical window's is
+# ``user`` / ``assistant`` / ``system``. Normalizing here is what keeps an
+# assistant turn from being filtered out of every ADK window.
+_ADK_ROLES = {"model": "assistant"}
+
+
 def _window_from_adk(llm_request: Any) -> list[dict]:
-    """ADK ``LlmRequest.contents`` (``types.Content`` with text parts) → window."""
+    """ADK ``LlmRequest.contents`` (``types.Content`` with text parts) → window.
+
+    ADK's own role vocabulary is ``user`` / ``model``; the canonical window's is
+    ``user`` / ``assistant`` / ``system``, so ``model`` is normalized the same
+    way the LangGraph adapter normalizes ``ai``. Without it every assistant turn
+    is filtered out by :func:`_bounded_window` and the reflex sees a user-only
+    window.
+    """
     turns = []
     for content in getattr(llm_request, "contents", None) or []:
         text = "".join(
             getattr(part, "text", "") or ""
             for part in (getattr(content, "parts", None) or [])
         )
-        turns.append({"role": getattr(content, "role", None) or "user", "content": text})
+        role = getattr(content, "role", None) or "user"
+        turns.append({"role": _ADK_ROLES.get(role, role), "content": text})
     return _bounded_window(turns)
 
 
@@ -193,15 +230,25 @@ _LANGGRAPH_ROLES = {
 
 
 def _window_from_langgraph(state: Any) -> list[dict]:
-    """LangGraph state (``{"messages": [...]}``) → window."""
+    """LangGraph state (``{"messages": [...]}``) → window.
+
+    TOTAL by construction: a state that does not match the expected shape
+    yields only the turns it CAN yield and never raises. The caller also keeps
+    this inside its fail-open boundary — the two together are what make the
+    module's "never raises into the app's turn" contract hold for a framework
+    object of any shape, not just the ones with a test.
+    """
     messages = state.get("messages") if isinstance(state, dict) else None
+    if not isinstance(messages, (list, tuple)):
+        return []
     turns = []
-    for message in messages or []:
+    for message in messages:
         role = getattr(message, "type", None) or type(message).__name__.lower()
         content = getattr(message, "content", None)
         if isinstance(content, list):  # multimodal content blocks
             content = "".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
+                (block.get("text") or "")
+                for block in content if isinstance(block, dict)
             )
         turns.append({
             "role": _LANGGRAPH_ROLES.get(role, "user"),
@@ -270,10 +317,13 @@ def langgraph_pre_model_node(
     graph's model accepts it.
     """
     def volunteer_pre_model(state: Any) -> dict:
-        block = _safe_block(reflex, _window_from_langgraph(state))
-        if not block:
-            return {}
+        # The window BUILDER is inside the boundary too: a framework object
+        # that does not match the expected shape must inject nothing, not raise
+        # into the app's turn (the ADK adapter is shaped the same way).
         try:
+            block = _safe_block(reflex, _window_from_langgraph(state))
+            if not block:
+                return {}
             make = message_factory or _langchain_human_message
             return {"messages": [make(block)]}
         except Exception:
@@ -298,7 +348,11 @@ def semantic_kernel_prompt_render_filter(reflex: Reflex) -> Callable:
         await next(context)
         try:
             rendered = getattr(context, "rendered_prompt", None) or ""
-            block = _safe_block(reflex, [{"role": "user", "content": rendered}])
+            # Through the SAME bounded builder as the other two adapters: the
+            # rendered prompt is one turn, and an over-cap one is rejected by
+            # the reflex and silently injects nothing.
+            block = _safe_block(
+                reflex, _bounded_window([{"role": "user", "content": rendered}]))
             if block:
                 context.rendered_prompt = f"{block}\n\n{rendered}"
         except Exception:

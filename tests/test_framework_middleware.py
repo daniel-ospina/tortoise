@@ -50,7 +50,12 @@ from tortoise.framework import (
     sdk_reflex,
     semantic_kernel_prompt_render_filter,
 )
-from tortoise.volunteer import degraded_response, empty_response
+from tortoise.volunteer import (
+    MAX_WINDOW_BYTES,
+    PER_TURN_OVERHEAD_BYTES,
+    degraded_response,
+    empty_response,
+)
 
 _CLAIM = "The CI pipeline deploys via GitHub Actions on main merge."
 _PROMPT = "How is CI deploy triggered?"
@@ -341,11 +346,102 @@ def test_window_is_bounded_to_the_last_twenty_turns():
 
 
 def test_overlong_turn_is_truncated_keeping_the_tail():
+    """The tail survives, and the truncated turn fits the REFLEX's byte budget.
+
+    The budget is ``MAX_WINDOW_BYTES`` against UTF-8 bytes plus the per-turn
+    overhead ``validate_request`` charges — not a character count (see
+    :func:`test_built_window_is_accepted_by_the_real_reflex`).
+    """
     reflex, seen = _spy()
     _lg(reflex)({"messages": [_Msg("human", "A" * 10_000 + "Z" * 10_000)]})
     content = seen["window"][0]["content"]
-    assert len(content) == 15_000
-    assert content.endswith("Z" * 1_000)
+    assert content.endswith("Z" * 1_000)  # the tail — the turn being answered
+    assert len(content.encode("utf-8")) == MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES
+    assert content[-1_000:].count("A") == 0  # only the tail is kept
+
+
+def test_overlong_multibyte_turn_is_truncated_without_splitting_a_character():
+    """A byte budget must slice BYTES: a naive character slice overruns it, and
+    a naive byte slice can leave a broken leading codepoint."""
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [_Msg("human", "á" * 20_000)]})
+    content = seen["window"][0]["content"]
+    assert len(content.encode("utf-8")) <= MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES
+    assert content == "á" * len(content)  # no replacement/orphan codepoint
+    assert content.endswith("á")
+
+
+@pytest.mark.parametrize("filler", ["A", "á", "中", "😀"])
+def test_built_window_is_accepted_by_the_real_reflex(seeded_sdk, filler):
+    """#8107 review P1: the bound must be the reflex's BYTE budget, not characters.
+
+    The old bound counted characters (``MAX_WINDOW_CHARS = 15_000``) against a
+    validator that counts UTF-8 bytes plus 64 per turn. A 20-turn window at the
+    character cap — and every multibyte window far below it — was therefore
+    REJECTED by ``validate_request``, swallowed by ``_safe_block``, and injected
+    nothing: a silent no-op in exactly the long-conversation case the bound
+    exists for. Accented Spanish tripped it ~2x earlier still. This drives the
+    REAL validator, not a spy — a fake reflex cannot catch it.
+    """
+    from tortoise.volunteer import validate_request
+
+    real = sdk_reflex(seeded_sdk)
+    seen: dict = {}
+
+    def recording(window):
+        seen["window"] = window
+        return real(window)  # the REAL validator runs on this window
+
+    messages = [_Msg("human", filler * 15_000) for _ in range(20)]
+    _lg(recording)({"messages": messages})  # the adapter swallows, never raises
+    window = seen["window"]
+    validate_request(window)  # explicit: the reflex accepted the built window
+    assert 0 < len(window) <= 20
+    assert any(turn["content"].strip() for turn in window)
+
+
+def test_semantic_kernel_rendered_prompt_is_bounded():
+    """The SK adapter handed the WHOLE rendered prompt to the reflex as one
+    unbounded turn, so an over-cap prompt was rejected and injected nothing."""
+    from tortoise.volunteer import validate_request
+
+    reflex, seen = _spy()
+    context = _SkContext("X" * 50_000)
+    asyncio.run(semantic_kernel_prompt_render_filter(reflex)(context, _NeverNext()))
+    validate_request(seen["window"])
+    assert len(seen["window"]) == 1
+    assert seen["window"][0]["content"].endswith("X")  # tail kept
+    assert context.rendered_prompt.startswith("REFLEX BLOCK")
+
+
+@pytest.mark.parametrize("state", [
+    {"messages": 5},
+    {"messages": None},
+    {"messages": []},
+    {},
+    "not-a-dict",
+    {"messages": [None]},
+    {"messages": [_Msg("human", [{"type": "text", "text": None}])]},
+    {"messages": [_Msg("human", {"not": "a string"})]},
+])
+def test_langgraph_malformed_state_never_raises(state):
+    """#8107 review P2: the builder ran OUTSIDE the fail-open boundary, so a
+    framework object that did not match the expected shape (a non-list
+    ``messages``, a content block whose ``text`` was None) raised into the app's
+    turn — the contract the module promises to hold."""
+    node = _lg(_reflex())
+    assert isinstance(node(state), dict)
+
+
+def test_adk_model_turns_are_normalized_not_dropped():
+    """ADK's assistant role is literally ``model``; unnormalized, every ADK
+    assistant turn was filtered out of the window before the reflex saw it."""
+    reflex, seen = _spy()
+    adk_before_model_callback(reflex)(
+        None, _AdkRequest([("user", "hi"), ("model", "assistant reply"),
+                           ("user", "a question")]))
+    assert [t["role"] for t in seen["window"]] == ["user", "assistant", "user"]
+    assert seen["window"][1]["content"] == "assistant reply"
 
 
 def test_empty_window_never_calls_the_reflex():
