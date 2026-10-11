@@ -805,6 +805,44 @@ def test_dream_writeback_persists_full_precision_for_non_point(sdk):
         "the dream write-back did not stamp lastDreamedAt on the Event")
 
 
+def test_dream_coverage_denominator_includes_non_point_operator_input(sdk):
+    """#7853 review (P1): the coverage DENOMINATOR must widen with the run set.
+
+    ``_affected_claims`` admits a non-`:Point` operator input and
+    ``dream(mode="local")`` reaches one through its dirty roots, so
+    ``_window_closure`` / ``_reachable_claim_count`` (the coverage
+    denominator, which mirrors ``_affected_claims``'s reach) must admit it
+    too — or ``coverage = affected / closure`` breaks the documented
+    ``0 <= coverage <= 1.0`` bound (`_window_closure` docstring, #6597).
+
+    Pre-fix this graph reports ``coverage == 1.5``: ``affected = {a, b, ev}``
+    over a ``:Point``-only closure ``{a, b}``.
+    """
+    a = make_point(sdk, "claim A")
+    b = make_point(sdk, "claim B")
+    ev = make_labeled_node(sdk, "Event", "evt-coverage-7853", "an event")
+    # A ternary IMPL operator: two live :Points keep it past the selector's
+    # derived-liveness gate; the :Event is the newly-admitted input.
+    sdk.create_operator("IMPL", a, [b, ev], direction="bidirectional")
+    sdk._dirty_roots.clear()
+    sdk._dirty_roots.add(a)
+
+    local = sdk.dream(mode="local", require_calibration=False)
+
+    assert ev in local["affected_claims"], (
+        "precondition: the widened run set must admit the :Event operator "
+        f"input, got {local['affected_claims']}")
+    assert 0.0 <= local["coverage"] <= 1.0, (
+        f"local coverage {local['coverage']} exceeds the 1.0 bound — the "
+        "`_window_closure` denominator did not widen with "
+        "`_affected_claims`")
+
+    full = sdk.dream(mode="full", require_calibration=False)
+    assert 0.0 <= full["coverage"] <= 1.0, (
+        f"full coverage {full['coverage']} exceeds the 1.0 bound — the "
+        "`_reachable_claim_count` denominator did not widen with the run set")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 9. Round-4 (#7936) — the ordered existence boundary
 # ═══════════════════════════════════════════════════════════════════

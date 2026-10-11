@@ -15671,7 +15671,12 @@ class TortoiseSDK:
 
         Mirrors ``TortoiseEP._affected_claims``'s reach so that
         ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
-        (#6597). The window members themselves are reachable at 0 claim-hops
+        (#6597). #7853: the reach is widened with ``_affected_claims`` — the
+        id-anchored seeds sweep every epistemic label and the operator hop's
+        far endpoint is a label-disjunction, so a non-`:Point` operator input
+        is in the denominator too. The operator-less DIRECT-edge hop stays
+        ``:Point``→``:Point``, exactly as ``_affected_claims`` keeps it. The
+        window members themselves are reachable at 0 claim-hops
         (an operator-less isolated claim is its own window); then, exactly as
         ``_affected_claims`` seeds its own expansion, the plain window
         members are expanded by ONE claim-hop (direct edges + operator
@@ -15700,12 +15705,18 @@ class TortoiseSDK:
         # terminal window claims must remain seeds so the operator siblings
         # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        # #7853: the seed is ID-ANCHORED — sweep the epistemic labels so a
+        # non-`:Point` window member is a closure seed too. The widened
+        # `_affected_claims` admits one, so the denominator must, or
+        # `coverage = affected / closure` exceeds the 1.0 bound.
+        rows: list = []
+        for _qn in epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
-            f"AND {live} RETURN n.id",
-            params={"ids": list(window)},
-        ).result_set
+            f"AND {live} RETURN n.id"
+        ):
+            rows.extend(proj.g.query(
+                _qn, params={"ids": list(window)}).result_set)
         closure: set[str] = {r[0] for r in rows}
 
         live_op = _live_only("op.status")
@@ -15728,15 +15739,22 @@ class TortoiseSDK:
             new_frontier: list[str] = []
             if not frontier:
                 return new_frontier
-            nbr_rows = proj.g.query(
-                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                "-[r2:IMPL|NAND]->(m:Point) "
+            # #7853: n is the id-anchored frontier — sweep its labels; the
+            # far endpoint m is widened by traversal. Mirrors
+            # `_affected_claims`'s widened operator hop, so the closure can
+            # hold every claim the pass admits.
+            nbr_rows: list = []
+            for _qn in epistemic_label_queries(
+                "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m) "
                 "WHERE n.id IN $ids AND m.id <> n.id "
+                f"AND {epistemic_disjunction('m')} "
                 "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 f"AND {live_op} AND {live_m} "
-                "RETURN DISTINCT n.id, m.id",
-                params={"ids": frontier},
-            ).result_set
+                "RETURN DISTINCT n.id, m.id"
+            ):
+                nbr_rows.extend(proj.g.query(
+                    _qn, params={"ids": frontier}).result_set)
             for _nid, mid in nbr_rows:
                 if mid not in closure:
                     closure.add(mid)
@@ -15774,9 +15792,13 @@ class TortoiseSDK:
         # denominator bug reached through the SEED rather than the hop. Mirrors
         # `_affected_claims`'s operator-seed branch, which admits an operator
         # seed's outgoing `IMPL|NAND` targets.
+        # #7853: an operator's INPUT may be any epistemic label (mirrors
+        # `_affected_claims`'s operator-seed branch, which admits a non-Point
+        # operator target).
         op_input_rows = proj.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
+            f"AND {epistemic_disjunction('c')} "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
             f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
@@ -15824,9 +15846,14 @@ class TortoiseSDK:
         converged pass reports coverage < 1.0 forever).
         """
         proj = self._get_proj()
+        # #7853: the EP-run universe widened to every epistemic label, so
+        # this denominator must too — else `coverage = total_affected /
+        # reachable` exceeds 1.0 for a non-`:Point` operator input.
         rows = proj.g.query(
-            "MATCH (n:Point)-[r:IMPL|NAND]-(m:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "MATCH (n)-[r:IMPL|NAND]-(m) "
+            f"WHERE {epistemic_disjunction('n')} "
+            f"AND {epistemic_disjunction('m')} "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status <> 'draft') "
             "AND (m.status IS NULL OR m.status <> 'draft') "
             "RETURN count(DISTINCT n)"
