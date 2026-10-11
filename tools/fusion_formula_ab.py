@@ -58,7 +58,7 @@ quiet-host pass. This tool is **zero-paid** (local embedder, no reader).
 USAGE
 -----
     TORTOISE_DB_URI='docker://:falkordb@localhost:6379/<ns>' \\
-      .venv/bin/python tools/fusion_formula_ab.py \\
+      uv run python tools/fusion_formula_ab.py \\
         --alpha 0.7 --alphas 0.3,0.5,0.7,0.9 --out /tmp/fusion-ab.json
 
     # a slice while sizing the run:
