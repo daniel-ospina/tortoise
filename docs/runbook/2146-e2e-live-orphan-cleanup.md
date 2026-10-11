@@ -27,8 +27,9 @@ aboutObjects: tortoise
 > **#5971 (2026-10-10): the recurrence path.** A recurrence is NEWER than this
 > runbook's historical window and may sit off the strict email guard shape, so
 > the default procedure below finds nothing in its DELETE set — see **§6.1** for
-> `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 remain the record of the
-> original red window, reproduced as written on 2026-09-02.
+> `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 are the record of the
+> original red window (figures as measured on 2026-09-02); §6.1 is the 2026-10-10
+> recurrence path.
 
 ---
 
@@ -397,9 +398,10 @@ uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
     --phase all --all-e2e-live --include-residue --manifest "$RECUR" --execute
 # 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
 #    reconcile run is green (that check is the end-to-end proof, not this list).
-#    For a residue TEAM that re-run refuses by design ($RECUR now holds the
-#    promoted team, but Guard-A found none) — remove $RECUR once its graph has
-#    been dropped, or re-enumerate to a fresh --manifest. Remove the scratch too:
+#    For any $RECUR that now holds team rows this re-run refuses by design —
+#    a promoted residue TEAM, or the Guard-A teams step 3 just deleted (Guard-A
+#    finds none of either) — so verify with a fresh --manifest instead, or after
+#    the graphs are dropped and $RECUR is removed:
 #    rm -f "$RECUR" "$RECUR.dryrun"
 ```
 

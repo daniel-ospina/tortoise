@@ -109,8 +109,8 @@ teardown could not run — see PR #3790's commit message).
   * Recurrences use a SEPARATE --manifest (below): their rows are usually all
     users, so the enumeration has no Guard-A (strict-shape) teams, and the
     clobber guard refuses to overwrite a manifest that holds team graph names
-    when the new enumeration has no Guard-A rows — that list is the FalkorDB
-    companion's only drop record.
+    when the new enumeration has no Guard-A rows — that list is the drop record
+    the FalkorDB companion reads.
 
 Usage (dry-run first, then execute):
   # 1) enumerate + write manifest (no writes)
@@ -604,8 +604,8 @@ def main() -> int:
         # this refusal fires for it too —
         # deliberately. The test is against the PRE-promotion count
         # (`scope.guard_a_teams`), never the promoted `teams`: promoting a residue
-        # team must not route around it. The prior `teams` list is the FalkorDB
-        # companion's ONLY drop record (`2146_falkordb_graph_cleanup.py` reads
+        # team must not route around it. The prior `teams` list is the drop record
+        # the FalkorDB companion reads (`2146_falkordb_graph_cleanup.py` reads
         # `manifest["teams"]` and returns 0 on an empty list), so the guard is
         # what keeps that list from being discarded silently. A recurrence
         # therefore enumerates to its OWN --manifest (the runbook §6.1 path): the

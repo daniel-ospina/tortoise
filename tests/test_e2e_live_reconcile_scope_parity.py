@@ -324,9 +324,9 @@ def test_residue_only_recurrence_uses_its_own_manifest_and_keeps_the_old_one(
     FalkorDB drop list.
 
     The live #5971 case is `users=4 teams=0`, so a recurrence whose rows are all
-    users enumerates an EMPTY team list. The prior manifest's `teams` is the
-    FalkorDB companion's
-    only drop record (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]`
+    users enumerates an EMPTY team list. The prior manifest's `teams` is the drop
+    record the FalkorDB companion reads
+    (`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]`
     and returns 0 on an empty list), so the clobber guard refuses — by design.
     The recurrence reaches its rows by enumerating to its OWN --manifest, which
     is the runbook §6.1 procedure.
@@ -380,7 +380,7 @@ def test_a_promoted_residue_team_cannot_route_around_the_clobber_guard(
     The guard has to test the PRE-promotion (Guard-A) team list. A promoted
     residue TEAM makes `manifest["teams"]` non-empty, and a guard reading the
     promoted list would overwrite a prior manifest holding 154 team graph names
-    — silently discarding the FalkorDB companion's only drop record.
+    — silently discarding the drop record the FalkorDB companion reads.
     """
     prior_path = tmp_path / "2146-e2e-live-orphans.manifest.json"
     prior_teams = [{"id": f"old-{i}", "graph_name": f"team_{i:026x}"} for i in range(154)]
