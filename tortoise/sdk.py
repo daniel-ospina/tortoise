@@ -24740,6 +24740,18 @@ class TortoiseSDK:
         counts only Events already fully linked — index_file enumerates skip
         reasons; backfill's skipped bucket had no definition until this pin —
         E2E-8's second run asserts it).
+        Accounting for a legacy Event is EXHAUSTIVE per run (issue #3593) — it
+        lands in exactly ONE category: `created` (this run created the Source;
+        the edge link also counts in `linked`), `skipped` (already fully linked
+        at probe time), or the REPAIR category `linked`-WITHOUT-`created` (the
+        Source already existed — e.g. a concurrent `index_directory` created it
+        inside this run's probe→merge window — so the conditional MERGE MATCHED
+        and only the missing edge was written; the same category the
+        crash-repair path produces). `created + skipped` is therefore NOT the
+        per-unit total: repair work is the third accounting of the same unit,
+        and the honest invariant is
+        `created + skipped + (linked when not created) == 1`
+        (pinned by tests/test_backfill_sources.py::test_e2e8_race_repair_accounting).
         Counters are HONEST in the `db` failure class: a Source-write failure
         NEVER increments `linked` (an edge that was not written is never counted),
         and a re-run REPAIRS the missing edge (`linked`) instead of skipping.
