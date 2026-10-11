@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -953,7 +953,7 @@ const COPY_FAILED = '__copy_failed__'
 // whose payload was never attempted — and carried that onto the next harness.
 const copyFailedKey = (text) => `${COPY_FAILED}|${text}`
 
-function WizardPromptCard({ text, label }) {
+function WizardPromptCard({ text, label, onCopied }) {
   const [copied, setCopied] = React.useState(false)
   const [copyFailed, setCopyFailed] = React.useState(false)
   // #2935 (review 4): the success flash timer must be CANCELLED, not merely
@@ -993,7 +993,12 @@ function WizardPromptCard({ text, label }) {
     setCopied(true)
     clearTimeout(copyTimerRef.current)
     copyTimerRef.current = setTimeout(() => setCopied(false), 1600)
-  }, [text])
+    // #2936: the card REPORTS a resolved write; the surface that knows what the
+    // copy MEANS decides whether it is attributed (main.jsx `wizardBeacon`).
+    // Only on success — the analytics must never count a copy the user could
+    // not paste (#2935).
+    if (onCopied) onCopied()
+  }, [text, onCopied])
   return (
     <div className="wizard-prompt-card">
       {/* #2912 (review cycle 2): the long prompts scroll, so the <pre> is a
@@ -3348,6 +3353,34 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
+  // #2936: the ONE copy-attribution beacon. The live connect step's cards
+  // (via WizardPromptCard's `onCopied`) and the ARCHIVED #1643 render's
+  // `wizardCopy` both go through here, so the server-vocabulary mapping in
+  // harnesses.js is applied on every path and the request shape has one home
+  // (the PATCH call-site count in tests/test_dashboard_client_paths_resolve.py
+  // stays 6 because sites MOVE here rather than being added).
+  //
+  // The leaf is resolved FIRST and an unresolvable one sends NOTHING. Handing
+  // the server a value outside its frozen vocabulary is not harmless: the
+  // handler reports it to the unregistered-value sink (#3821) — a beacon that
+  // never fired and a beacon the server dropped must not look the same.
+  //
+  // `section` follows #235/#529's vocabulary by ARTIFACT, which is why the
+  // connect step's cards are 'both' and not 'prompt': 'config' is the setup
+  // command / config block, 'prompt' is a prompt the user hands their agent,
+  // and 'both' is ONE copy carrying the config instructions AND the prompt.
+  // The connect-step bodies interpolate the MCP URL, the key and the skills
+  // install in the same block as the instruction to the agent, so they are the
+  // live wizard's replacement for the legacy setup-command copy ('config').
+  // The section population is pinned against the server enum by
+  // tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract.
+  function wizardBeacon(harness, section) {
+    const attributed = analyticsHarnessOf(harness)
+    if (attributed == null) return
+    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ harness: attributed, section }) }).catch(() => {})
+  }
+
   async function wizardCopy(text, label) {
     // #2935: see wizardCopyStep — same decorative try, same false 'Copied ✓'.
     if (!(await copyText(text))) {
@@ -3369,8 +3402,10 @@ function claimIntentInFlight() {
       // it). It resets on harness-tab switch and on step change instead.
       setTimeout(() => { if (mountedRef.current) setWizardCopied((c) => (c === label ? '' : c)) }, 1600)  // review: mounted-guard the flash timer
     }
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
+    // #2936: the shared emitter, so this ARCHIVED render cannot drift from the
+    // live connect step's cards. The legacy setup-command copy is the CONFIG
+    // artifact (`section: 'config'`).
+    wizardBeacon(wizardHarness, 'config')
   }
 
   const stopGithubPoll = () => {
@@ -7979,14 +8014,16 @@ function claimIntentInFlight() {
                         procedure = (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'both')} />
                           </>
                         )
                         procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
                         procedureTail = (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.verify}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
                           </>
                         )
                       } else if (agentDriven1Step.includes(wizardHarness)) {
@@ -7996,12 +8033,14 @@ function claimIntentInFlight() {
                         procedure = wizardConnectHarness === 'codexDesktop' ? (
                           <>
                             <p className="wizard-caption">{HARNESS_INTRO.codexDesktop}</p>
-                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'config')} />
                           </>
                         ) : (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'both')} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -8051,7 +8090,8 @@ function claimIntentInFlight() {
                             <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
                             {/* #2865: composed KEY-LESS — a connector surface
                                 never carries a key. */}
-                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel} />
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
                           </>
                         )
                       }

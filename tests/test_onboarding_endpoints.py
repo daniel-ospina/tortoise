@@ -1255,14 +1255,21 @@ def test_cross_surface_harness_vocab_contract():
     """#1727 (Task 11, T2-P2d): the analytics harness values are a subset of
     the SessionRequest harness Literal — one value set across surfaces (both
     code comments in hosted_api.py pin this contract; this test enforces it).
-    Also asserts the dashboard's HARNESS_ORDER matches the analytics vocab, so
-    the UI rows and the server can never drift to different harness names.
+
+    #2936: the second half is the WIZARD contract — every leaf the chooser can
+    select must resolve, through the SAME alias table the beacon uses, into
+    that vocabulary. It used to read `HARNESS_ORDER`, which has no
+    `codexDesktop` row: #2912 added that leaf as a UI-only SURFACE id, so the
+    check that exists to catch wizard/server drift could not see the drift the
+    issue is about. The frontend set is now the chooser vocabulary
+    (`HARNESS_FAMILIES`) mapped through `HARNESS_ANALYTICS_ALIASES`.
     """
     import re
     from pathlib import Path
 
     from tortoise.hosted_api import (
         _HARNESS_ANALYTICS_VALUES,
+        _SECTION_ANALYTICS_VALUES,
         _SESSION_HARNESS_VALUES,
     )
 
@@ -1276,19 +1283,76 @@ def test_cross_surface_harness_vocab_contract():
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }) == _SESSION_HARNESS_VALUES
 
-    # 2. the frontend harness set SUPERSETS the analytics vocab — and by
-    # exactly the wizard-only chatgpt harness. #1701 R2: chatgpt is key-less
-    # OAuth in the browser — ChatGPT never files sessions or fires copy
-    # attribution (no local skills), so it is intentionally absent from the
-    # server capture/analytics vocabulary. The wizard tab can therefore never
-    # drift the server Literals; only a SECOND wizard-only harness would.
+    # 2. the WIZARD contract (#2936). The client declares only the EXCEPTIONS
+    # (`HARNESS_ANALYTICS_ALIASES`); the vocabulary itself stays server-owned,
+    # so it is never restated in JS where it could drift.
     root = Path(__file__).resolve().parent.parent
     harnesses_js = (root / "website/apps/dashboard/src/harnesses.js").read_text()
-    m = re.search(r"export const HARNESS_ORDER\s*=\s*\[([^\]]*)\]", harnesses_js)
-    assert m, "HARNESS_ORDER not found in website/apps/dashboard/src/harnesses.js"
-    frontend = {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
-    assert set(_HARNESS_ANALYTICS_VALUES) <= frontend
-    assert frontend - set(_HARNESS_ANALYTICS_VALUES) == {"chatgpt"}
+
+    alias_src = re.search(
+        r"export const HARNESS_ANALYTICS_ALIASES\s*=\s*Object\.freeze\(\{([^}]*)\}\)",
+        harnesses_js)
+    assert alias_src, "HARNESS_ANALYTICS_ALIASES not found in harnesses.js"
+    aliases: dict[str, str | None] = {}
+    for entry in alias_src.group(1).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        key, _, value = entry.partition(":")
+        value = value.strip()
+        aliases[key.strip().strip("'\"")] = None if value == "null" else value.strip("'\"")
+
+    # The chooser's leaf population: family ids + surface ids (a single-surface
+    # family's surface IS its id, so the union dedupes).
+    fam_src = harnesses_js[
+        harnesses_js.index("export const HARNESS_FAMILIES"):
+        harnesses_js.index("export const HARNESS_FAMILY_IDS")]
+    chooser_leaves = set(re.findall(r"id:\s*'([^']+)'", fam_src))
+    assert chooser_leaves == {
+        "claude", "claude-desktop", "claude-web", "codex", "codexDesktop",
+        "cursor", "pi",
+    }, ("the chooser leaf population moved — re-check the analytics bridge "
+        "(HARNESS_ANALYTICS_ALIASES) for the new leaf; #2936")
+
+    def attributed(leaf: str) -> str | None:
+        """`analyticsHarnessOf`'s rule, verbatim: an alias wins (a `null` alias
+        means NOT attributable), anything else is its own value."""
+        return aliases[leaf] if leaf in aliases else leaf
+
+    # 2a. Every leaf the LIVE wizard can put on screen resolves into the
+    # vocabulary — and the resolved set IS the vocabulary, so a narrowed or
+    # renamed server enum reds here too.
+    emitted = {attributed(leaf) for leaf in chooser_leaves}
+    assert None not in emitted, (
+        f"a chooser leaf has no analytics value — the beacon would emit nothing: "
+        f"{sorted(leaf for leaf in chooser_leaves if attributed(leaf) is None)}")
+    assert emitted == set(_HARNESS_ANALYTICS_VALUES), (
+        f"the wizard's copy attribution must cover exactly the server vocabulary: "
+        f"{sorted(emitted)} != {sorted(_HARNESS_ANALYTICS_VALUES)}")
+
+    # 2b. The ARCHIVED #1643 render maps the full HARNESS_ORDER, so every tab it
+    # can select is either attributable or DELIBERATELY excluded — and the one
+    # exclusion is pinned, so a second one cannot appear unnoticed. #1701: the
+    # server Literal is NOT widened for chatgpt (it never files sessions), and
+    # `test_patch_chatgpt_harness_beacon_is_inert` pins the server stays inert.
+    order_m = re.search(r"export const HARNESS_ORDER\s*=\s*\[([^\]]*)\]", harnesses_js)
+    assert order_m, "HARNESS_ORDER not found in website/apps/dashboard/src/harnesses.js"
+    order = [s.strip().strip("'\"") for s in order_m.group(1).split(",") if s.strip()]
+    assert {leaf for leaf in order if attributed(leaf) is None} == {"chatgpt"}
+    assert {attributed(leaf) for leaf in order} - {None} == set(_HARNESS_ANALYTICS_VALUES)
+
+    # 2c. The beacon's OTHER enum, same drift class: every section named at a
+    # `wizardBeacon(...)` call site must be one the PATCH handler accepts, or
+    # the event is dropped exactly like an out-of-vocabulary harness.
+    main_jsx = (root / "website/apps/dashboard/src/main.jsx").read_text()
+    sections = set(re.findall(r"wizardBeacon\([^,]+,\s*'([^']+)'\)", main_jsx))
+    assert sections, "no wizardBeacon(...) call sites found in main.jsx (#2936)"
+    assert sections <= _SECTION_ANALYTICS_VALUES, (
+        f"a beacon section is outside the server enum: "
+        f"{sorted(sections - _SECTION_ANALYTICS_VALUES)}")
+    assert sections == {"both", "config", "prompt"}, (
+        "the beacon's section population changed — the vocabulary bridge covers "
+        "both enums; re-check _SECTION_ANALYTICS_VALUES (#2936)")
 
 
 # #3552: the last two key families the issue names beside the capture EVIDENCE
