@@ -416,3 +416,60 @@ def test_init_threads_the_config_path_into_the_printed_resolution(
         f"wrote. A dropped config_path resolves the global store instead: {printed}"
     )
     assert all("credentials.json" not in ln for ln in printed), printed
+
+
+def test_every_write_mcp_config_call_site_threads_the_config_path(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#5109: `_cmd_init` has FOUR `config_path`-carrying call sites; pin them all.
+
+    `_print_mcp_configs` has its own pin above. The three
+    `_write_mcp_config_file` sites are: fresh non-json, fresh `--json`, and the
+    already-connected short-circuit. On the last two `_print_mcp_configs` is
+    never reached, so a dropped `config_path` leaves a resolution against the
+    global `~/.tortoise/credentials.json` as the ONLY instruction printed —
+    the "silently exports the wrong key" failure the threading exists to stop.
+    """
+    from unittest import mock
+
+    from tortoise.__main__ import main as cli_main
+
+    key = "tt_" + "12" * 16
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://api.premiselabs.co")
+    expected = str(tmp_path / ".tortoise")
+
+    def _response():
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps({"org_id": "team5109"}).encode()
+        resp.__enter__.return_value = resp
+        return resp
+
+    runs = [
+        # fresh, non-json — the `_write_mcp_config_file` call in the non-json arm
+        (False, ["init", "--api-key", key, "--harness", "claude", "--write-mcp-config", "--force"]),
+        # fresh, --json — the `--json` arm. codex, because that arm prints the
+        # setter and nothing else from the filesystem. Delete the saved config
+        # first: a still-valid saved key would take the already-connected
+        # short-circuit and never reach this call site.
+        (True, ["init", "--api-key", key, "--json", "--harness", "codex", "--write-mcp-config", "--force"]),
+        # already-connected — the short-circuit arm (same key, so it skips the API)
+        (False, ["init", "--api-key", key, "--harness", "claude", "--write-mcp-config", "--force"]),
+    ]
+    for reset, argv in runs:
+        if reset:
+            (tmp_path / ".tortoise").unlink()
+        with mock.patch("urllib.request.urlopen", return_value=_response()):
+            assert cli_main(argv) == 0, argv
+
+    captured = capsys.readouterr()
+    printed = [
+        ln for ln in (captured.out + captured.err).splitlines()
+        if "export TORTOISE_API_KEY=" in ln
+    ]
+    assert len(printed) >= 3, f"expected a setter from each call site: {printed}"
+    assert all(expected in ln for ln in printed), (
+        "every printed setter must name the <cwd>/.tortoise this init wrote — a "
+        f"dropped config_path resolves the global store instead: {printed}"
+    )
+    assert all(".tortoise/credentials.json" not in ln for ln in printed), printed
