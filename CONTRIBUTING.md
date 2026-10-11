@@ -265,7 +265,10 @@ deliberately (those references are optional audit records and nothing machine-va
 4. Get the owner's approval and record it in the canonical doc: `approval_status: approved`,
    `approvedBy`, `approved`, and `approval_pr`. **Then re-run `cut` (step 2).** The manifest is a
    committed snapshot, so the doc's approval reaches it only when a `cut` copies it: recording the
-   approval *after* the cut leaves the manifest `pending` and reds both checks until you re-cut. A per-row
+   approval *after* the cut leaves the committed copy stale, and a re-cut is what carries it
+   forward. `tools/surface_manifest.py check` is what catches the stale copy — not the guard,
+   which skips a manifest that makes no claim — and #8144 arms that comparison by dropping the
+   four `approval_*` keys from `NON_DERIVABLE_DOC_KEYS`. A per-row
    `approval:` remains an optional audit reference (nothing machine-validates its format); it is
    no longer the approval gate. The `exemption: true` flag is **not** an approval
    carve-out — it records a method deliberately outside

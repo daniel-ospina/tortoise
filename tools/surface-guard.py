@@ -62,7 +62,8 @@ FAIL-CLOSED
     target — see docs/product/canonical-mcp-tools.md and tools/surface-target-check.py).
     Exit 1 = expansion, removal, a served-surface change, an exemption
              transition, a CLAIMED approval that disagrees with
-             docs/product/canonical-mcp-tools.md, an unresolvable retired name, or
+             docs/product/canonical-mcp-tools.md, a live surface grown past the
+             frozen `high_water_counts` pin, an unresolvable retired name, or
              unreadable evidence.
 
 Usage:
