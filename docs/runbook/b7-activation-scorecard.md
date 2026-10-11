@@ -73,7 +73,8 @@ in another graph from a single-graph org whose only windowed recall activity
 failed or returned nothing, so such a single-graph org reads `unavailable`
 rather than `not_measurable`. The same org with an exact `0` (or a withheld
 count: a truncated page, an unplaceable or unclassifiable row) still reads
-`no_memory_produced_in_lifetime`: no org-wide call contradicts the gate, and
+`no_memory_produced_in_lifetime`: no org-wide call count contradicts the
+gate, and
 this read cannot enumerate the org's other graphs, so that case is
 indistinguishable from a single-graph org with no memory. Making the gate itself
 org-scoped (an org's graph list, then a lifetime memory scan per graph) would
