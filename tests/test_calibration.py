@@ -80,8 +80,9 @@ def test_require_calibration_raises(sdk):
 def test_require_calibration_partial(sdk):
     """One calibrated, one live-uncalibrated → still raises."""
     p1 = sdk.create_point("statement", "Calibrated", credibility="gold")
-    # Live uncalibrated point — the draft default would be excluded from the
-    # gate (#780/PR #1212), so the fail-closed assertion needs explicit live.
+    # Live uncalibrated point — a DRAFT would be excluded from the gate
+    # (#780/PR #1212); since #1088 a no-status create is LIVE, so the live
+    # status is stated explicitly here.
     sdk.create_point("statement", "Not calibrated", status="live")
     
     sdk.create_operator("IMPL", p1["id"], [sdk.create_point("statement", "target")["id"]])
@@ -120,12 +121,13 @@ def test_require_calibration_default(sdk):
 def test_require_calibration_ignores_drafts(sdk):
     """Draft evidence points do NOT trip the fail-closed gate (#780, PR #1212).
 
-    create_point defaults to status='draft', and drafts are excluded from
-    factor extraction + EP propagation (include_draft=False). A graph whose
-    only uncalibrated points are drafts must not demand calibration of
-    points EP will never use — the gate guards live evidence only.
+    Draft is EXPLICIT since #1088 — a no-status create_point is LIVE — and
+    drafts are excluded from factor extraction + EP propagation
+    (include_draft=False). A graph whose only uncalibrated points are drafts
+    must not demand calibration of points EP will never use — the gate guards
+    live evidence only.
     """
-    sdk.create_point("statement", "Draft staging claim")  # defaults to draft
+    sdk.create_point("statement", "Draft staging claim", status="draft")
     sdk.create_point("statement", "Another draft", status="draft")
     # Draft-only graph → gate passes (nothing live to calibrate); EP finds
     # no live factors and returns a no-op result instead of raising.
@@ -136,7 +138,7 @@ def test_require_calibration_ignores_drafts(sdk):
     import tempfile
     s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
     try:
-        s2.create_point("statement", "Draft staging claim")
+        s2.create_point("statement", "Draft staging claim", status="draft")
         s2.create_point("statement", "Live uncalibrated", status="live")
         with pytest.raises(CalibrationError, match="uncalibrated"):
             s2.compute_confidence(require_calibration=True)
@@ -289,8 +291,9 @@ def test_non_evidence_kinds_ignored_by_gate(sdk):
 def test_dream_require_calibration_raises(sdk):
     """dream(require_calibration=True) on uncalibrated graph raises
     CalibrationError BEFORE any EP write (#1157)."""
-    # #943: default status is draft; the #1157 gate excludes drafts (#780),
-    # so the point must be live for the gate to see it.
+    # Since #1088 a no-status create_point is LIVE, and a DRAFT is excluded
+    # from the #1157 gate (#780/PR #1212), so the point must be explicitly
+    # live for the gate to see it.
     sdk.create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="dream.*uncalibrated"):  # noqa: RUF043

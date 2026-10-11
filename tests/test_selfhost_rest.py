@@ -130,6 +130,35 @@ class TestPointsCRUD:
             )
             assert r.status_code == 422, r.text
 
+    def test_credibility_calibrates_the_point(self, monkeypatch, tmp_path):
+        """#1088: the self-host REST write surface can AUTHOR a baseline —
+        the parity of the hosted_api.CreatePointRequest fix. Without it a
+        self-host client writes a LIVE point the fail-closed calibration
+        gate then makes `/v1/dream` refuse, with no way to make it EP-able."""
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={"content": "selfhost credibility round trip",
+                      "kind": "statement", "credibility": "gold"},
+            )
+            assert r.status_code == 200, r.text
+            props = self._persisted_props(r.json()["id"])
+            assert props.get("baseline_set") is True, props
+            assert props.get("baseline_source") == "set-by-author", props
+
+    def test_bad_credibility_is_rejected_not_500(self, monkeypatch, tmp_path):
+        # A ladder word the store cannot resolve is a client error — 4xx, not
+        # the route's catch-all 500.
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={"content": "selfhost bad credibility",
+                      "kind": "statement", "credibility": "platinum"},
+            )
+            assert r.status_code == 422, r.text
+
 
 class TestSearch:
     def test_search_finds_point(self, monkeypatch, tmp_path):

@@ -160,20 +160,29 @@ class TestIngestFullBundle:
         source = sdk._get_entity(res["ids"]["sources"][0])
         assert "ref" not in source
 
-    def test_points_default_to_draft_unless_specified(self, sdk):
-        # Per-item status:'live' is only allowed under promotion_policy='auto'
-        # (INGEST_CONTRACT row 9: under gated it is a violation).
+    def test_points_born_live_unless_explicit_draft(self, sdk):
+        """#1088 owner ruling: live is the DEFAULT for everything added to the
+        graph, so a no-status point under promotion_policy='auto' is born
+        live — an agent asks for draft with an explicit status="draft".
+
+        A per-item status is only allowed under 'auto' (INGEST_CONTRACT row 9:
+        under gated any non-draft explicit status is a violation).
+        """
         bundle = {
             "points": [
-                {"kind": "claim", "content": "draft point, no connections"},
-                {"kind": "claim", "content": "live point", "status": "live"},
+                {"kind": "claim", "content": "no status → born live"},
+                {"kind": "claim", "content": "explicitly live",
+                 "status": "live"},
+                {"kind": "claim", "content": "explicitly draft",
+                 "status": "draft"},
             ],
             "connections": [],
         }
         res = sdk.ingest(bundle, promotion_policy="auto")
-        pid_draft, pid_live = res["ids"]["points"]
-        assert sdk.get_point(pid_draft)["status"] == "draft"
+        pid_default, pid_live, pid_draft = res["ids"]["points"]
+        assert sdk.get_point(pid_default)["status"] == "live"
         assert sdk.get_point(pid_live)["status"] == "live"
+        assert sdk.get_point(pid_draft)["status"] == "draft"
 
 # ── promotion_policy (epic #902 W4 A0) ─────────────────────────────
 
@@ -304,6 +313,115 @@ class TestPromotionPolicy:
         pA, _ = res["ids"]["points"]
         assert sdk.get_point(pA)["status"] == "live"
 
+    def test_auto_dual_role_point_source_wins(self, sdk):
+        """A point that is the `to` of one operator connection AND the
+        `from` of another must be born LIVE under auto (SOURCE WINS).
+
+        Prevents the #1088 defect where the target-draft injection stranded
+        a dual-role point in draft forever: the promotion clauses were
+        narrowed to fill only a NEVER-SET status (`WHERE s.status IS NULL`),
+        so the later `from` promotion can never overwrite the injected draft
+        and the point is silently EP-inert. Mutation that reds this test:
+        making a connection source also count as a target (dropping the
+        `_auto_targets -= _auto_sources` subtraction) — pB then reads draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+                {"ref": "pC", "kind": "claim", "content": "C"},
+            ],
+            "connections": [
+                {"from": "pA", "to": "pB", "operator": "IMPL"},
+                {"from": "pB", "to": "pC", "operator": "IMPL"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, pB, pC = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "live"   # pure source
+        assert sdk.get_point(pB)["status"] == "live"   # dual-role: source wins
+        assert sdk.get_point(pC)["status"] == "draft"  # pure target
+
+    def test_auto_goal_target_is_born_live(self, sdk):
+        """#7856 on the INGEST surface: a `goal` that is only ever an
+        operator-connection TARGET must still be born live.
+
+        A draft Point that is only ever a TARGET is EP-inert while the graph
+        still reports it, and a goal additionally reports converged=True
+        (docs/ONTOLOGY.md §5) — so the target-draft injection must not apply
+        to `goal`, for the same reason it does not apply to the #2199 decide
+        parts. Mutation that reds this test: dropping `| GOAL_KINDS` from the
+        exclusion, which injects status="draft" on `top`; `top` is never a
+        source and the promotion clauses fill only a never-set status, so it
+        would stay draft — and EP-inert — forever.
+        """
+        bundle = {
+            "points": [
+                {"ref": "top", "kind": "goal", "content": "become profitable"},
+                {"ref": "mid", "kind": "goal", "content": "grow revenue"},
+            ],
+            "connections": [
+                {"from": "mid", "to": "top", "operator": "IMPL"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        top, mid = res["ids"]["points"]
+        assert sdk.get_point(top)["status"] == "live"   # pure target, goal
+        assert sdk.get_point(mid)["status"] == "live"   # pure source
+
+        # Under gated the same shape is draft for both — the gate is the
+        # explicit draft request and it applies to goals too. A SEPARATE
+        # bundle: re-ingesting the one above dedups onto those (now live)
+        # points, and a dedup hit never rewrites an existing status.
+        gated = sdk.ingest({
+            "points": [
+                {"ref": "top", "kind": "goal", "content": "ship v4"},
+                {"ref": "mid", "kind": "goal", "content": "measure first"},
+            ],
+            "connections": [
+                {"from": "mid", "to": "top", "operator": "IMPL"},
+            ],
+        }, promotion_policy="gated")
+        g_top, g_mid = gated["ids"]["points"]
+        assert sdk.get_point(g_top)["status"] == "draft"
+        assert sdk.get_point(g_mid)["status"] == "draft"
+
+    def test_auto_relation_only_source_is_born_live(self, sdk):
+        # #1088 owner ruling: a relation-only source is NEITHER an
+        # operator-connection source nor an operator-connection TARGET, so
+        # under auto nothing asks for draft — it gets NO injected status and
+        # is born live by create_point's default.
+        #
+        # The surviving `"operator" in conn` guard is what keeps a
+        # relation-only connection from contributing to EITHER set: nothing
+        # is injected, so create_point's live default supplies the status.
+        # (It does NOT keep `p1` out of the TARGET set — this connection's
+        # `to` is `src1`, not `p1`, so removing the guard would not red this
+        # test.) The mutation that reds this test is reverting that default
+        # to `draft`. The target path itself is covered by
+        # tests/test_mcp_server.py's source-only pin
+        # (test_mcp_auto_promotes_source_live: source live, target draft).
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "statement",
+                 "content": "a relation-only source claim"},
+            ],
+            "sources": [
+                {"ref": "src1", "url": "https://example.com/relation-only",
+                 "sourceKind": "report"},
+            ],
+            "connections": [
+                {"ref": "c1", "from": "p1", "to": "src1",
+                 "relation": "extractedFrom"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        p1 = res["ids"]["points"][0]
+        assert sdk.get_point(p1)["status"] == "live", (
+            "a relation-only source is born live under auto — nothing "
+            "asked for draft"
+        )
+
     def test_auto_granular_parity(self, sdk):
         # E2E-5 discriminating cell: auto holds in granular mode — the
         # promote flag must not be dropped on the granular code path.
@@ -405,8 +523,9 @@ class TestPromotionPolicy:
 
     def test_gated_accepts_items_without_status_key(self, sdk):
         # Items with NO status key anywhere (top-level or nested props) are
-        # accepted under gated and default to draft — the has_status flag in
-        # the shared helper must not false-reject them.
+        # accepted under gated and get the gated policy's draft default (NOT
+        # create_point's implicit status, which is live since #1088) — the
+        # has_status flag in the shared helper must not false-reject them.
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A"},

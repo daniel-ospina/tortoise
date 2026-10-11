@@ -562,7 +562,8 @@ def test_ac2_noarg_draft_only_no_factors():
     """AC2 — no-arg with dirty roots but no live closure → no_factors
     (preserves the pre-#395 diagnostic for the vacuous-dirty case)."""
     with _fresh_sdk() as sdk:
-        sdk.create_point("statement", "draft-only")  # defaults to draft
+        # #1088: draft must be explicit — live is the create default.
+        sdk.create_point("statement", "draft-only", status="draft")
         result = sdk.compute_confidence(require_calibration=True)
         assert result["diagnostic"] == "no_factors", result
 

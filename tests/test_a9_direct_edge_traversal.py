@@ -64,7 +64,8 @@ def _live(sdk: TortoiseSDK, content: str) -> dict:
 
 
 def _draft(sdk: TortoiseSDK, content: str) -> dict:
-    return sdk.create_point("statement", content)  # default status draft
+    # #1088: draft must be requested explicitly — live is the create default.
+    return sdk.create_point("statement", content, status="draft")
 
 
 def _select(proj, anchors, **kw):

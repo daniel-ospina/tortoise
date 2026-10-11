@@ -298,6 +298,17 @@ def test_the_guard_reds_when_a_tools_SDK_binding_moves(tmp_path):
     assert "binding" in result.stdout
 
 
+def _fn_from_source(src: str, name: str = "f"):
+    """Compile ONE function from source, so a test can vary a default or an annotation.
+
+    `compile`-and-`exec` (not a literal `def` in the test body) because the variants differ
+    only in their source text, which is what the surface's own declarations look like.
+    """
+    namespace: dict = {}
+    exec(compile(src, "<surface-declaration>", "exec"), namespace)
+    return namespace[name]
+
+
 def _load_guard():
     """Import tools/surface-guard.py (hyphenated filename) as a module."""
     import importlib.util
@@ -480,6 +491,11 @@ def test_the_check_reds_on_a_hand_edited_count(checker, tmp_path, mutate):
     [
         pytest.param("tool", "job", "a description no derivation produces", id="rendered-cell"),
         pytest.param("sdk", "class", "definitely-not-derived", id="caller-scan-column"),
+        # #4192: the served DECLARATION cell (defaults / annotations). It is derived by
+        # `_served_attributes`, so a hand-edited value is the same class of unrecorded
+        # change as a hand-edited `job` — and the cell is what makes a changed default
+        # visible at all.
+        pytest.param("tool", "served_attributes", "0" * 16, id="served-declaration-cell"),
     ],
 )
 def test_the_check_reds_on_a_hand_edited_derived_cell(checker, tmp_path, row_name, field, value):
@@ -499,6 +515,60 @@ def test_the_check_reds_on_a_hand_edited_derived_cell(checker, tmp_path, row_nam
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, f"a hand-edited `{field}` did not red the lint"
     assert field in out and row["name"] in out, out
+
+
+def _shadow_of(fn, **overrides):
+    """A function object sharing `fn.__code__`, with tampered function ATTRIBUTES.
+
+    `types.FunctionType` over the same code object is the tamper #4192 verified: the code
+    object is byte-identical (`served_from` cannot see it), while the defaults/annotations
+    the MCP inputSchema publishes are different.
+    """
+    import types
+
+    shadow = types.FunctionType(
+        fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__
+    )
+    shadow.__annotations__ = dict(fn.__annotations__)
+    shadow.__kwdefaults__ = dict(fn.__kwdefaults__ or {})
+    for name, value in overrides.items():
+        setattr(shadow, name, value)
+    return shadow
+
+
+def test_the_check_reds_when_a_served_default_changes_behind_an_unchanged_code_object(
+    capsys,
+):
+    """#4192 end to end, on the REAL manifest and the REAL derivation.
+
+    The `checker` fixture patches `build_doc` with a module-scoped cache, so this loads the
+    tool fresh: the point is that the DERIVATION itself sees the changed default. `served`
+    `_from` is byte-identical — the code object did not change — which is exactly why the
+    pre-fix required job stayed green on a changed served behaviour (measured before the
+    fix: the guard exited 0 on this same tamper).
+    """
+    sm = _load_manifest_tool()
+    from tortoise import mcp_server
+
+    components = mcp_server.mcp._local_provider._components
+    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    original = components[key]
+    fn = original.fn
+    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+
+    tampered = _shadow_of(fn, __defaults__=(*fn.__defaults__[:3], 999, *fn.__defaults__[4:]))
+    assert sm._code_digest(tampered.__code__) == sm._code_digest(fn.__code__), (
+        "the code object must be identical, or this is not the #4192 case"
+    )
+
+    mcp_server.mcp.add_tool(tampered)
+    try:
+        rc = sm.cmd_check(argparse.Namespace())
+        out = capsys.readouterr().out
+    finally:
+        components[key] = original
+    assert rc == 1, "a changed served default did not red the derivation check (#4192)"
+    assert "served_attributes" in out and "tortoise_search" in out, out
 
 
 def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):
@@ -816,6 +886,101 @@ def test_code_digest_is_move_invariant_and_constant_sensitive():
     assert guard._code_digest(g1["f"].__code__) == guard._code_digest(g2["f"].__code__)
 
 
+def test_served_attributes_sees_what_the_code_object_cannot():
+    """#4192 — the two halves of a tool's recorded identity disagree about a default.
+
+    Measured before the fix: a `types.FunctionType` over a served tool's `__code__` with a
+    tampered `__defaults__` served different behaviour (`limit=10` -> `limit=999`) while the
+    gate exited 0 — the code object is byte-identical, and a default is not in it.
+    """
+    guard = _load_guard()
+    src = "def f(q, limit=10):\n    return q, limit\n"
+    base = _fn_from_source(src)
+    changed = _fn_from_source(src.replace("limit=10", "limit=99"))
+
+    # the code object cannot tell them apart (this IS the defect) …
+    assert guard._code_digest(base.__code__) == guard._code_digest(changed.__code__)
+    # … and the served declaration can.
+    assert guard._served_attributes(base) != guard._served_attributes(changed)
+    # the same source compiled twice is the same declaration (no address, no dict order)
+    assert guard._served_attributes(base) == guard._served_attributes(_fn_from_source(src))
+
+
+def test_served_attributes_covers_every_caller_visible_part_outside_the_code_object():
+    """Defaults, keyword-only defaults and annotations all move the cell — none of them is
+    in the code object, and the MCP `tools/list` schema publishes all three."""
+    guard = _load_guard()
+    src = "def f(q: str, limit=10, *, mode='x') -> dict:\n    return {}\n"
+    baseline = guard._served_attributes(_fn_from_source(src))
+    baseline_code = guard._code_digest(_fn_from_source(src).__code__)
+
+    for label, variant_src in (
+        ("positional default", src.replace("limit=10", "limit=11")),
+        ("keyword-only default", src.replace("mode='x'", "mode='y'")),
+        ("parameter annotation", src.replace("q: str", "q: bytes")),
+        ("return annotation", src.replace("-> dict", "-> list")),
+    ):
+        variant = _fn_from_source(variant_src)
+        assert guard._code_digest(variant.__code__) == baseline_code, (
+            f"the code object should NOT see a changed {label} — that is the whole point"
+        )
+        assert guard._served_attributes(variant) != baseline, f"a changed {label} was invisible"
+
+
+def test_served_attributes_is_stable_for_a_code_bearing_default():
+    """A lambda default must be RECURSED, never repr'd: its repr carries an address.
+
+    Two live copies of the same source hold two distinct function objects, so a repr-based
+    encoding would give them different fingerprints — and the gate would then red between
+    two runs over an UNCHANGED tree.
+    """
+    guard = _load_guard()
+    src = "def f(cb=lambda x: x, limit=3):\n    return cb, limit\n"
+    first = _fn_from_source(src)
+    second = _fn_from_source(src)
+    assert first.__defaults__[0] is not second.__defaults__[0], (
+        "the two lambdas must be distinct objects, or this proves nothing"
+    )
+    assert repr(first.__defaults__[0]) != repr(second.__defaults__[0]), (
+        "a repr'd lambda default differs between two live copies — the reason it is recursed"
+    )
+    assert guard._served_attributes(first) == guard._served_attributes(second)
+    # …and a different lambda BODY is still a different declaration.
+    other = _fn_from_source(src.replace("lambda x: x", "lambda x: x + 1"))
+    assert guard._served_attributes(other) != guard._served_attributes(first)
+
+
+def test_the_guard_reds_on_a_tampered_default_behind_an_approved_tool():
+    """#4192, the guard's own half: same `__code__`, different `__defaults__`.
+
+    A live client gets the tampered default while the code object — and therefore
+    `served_from` — is untouched, so the same-name-substitution check cannot see it.
+    """
+    from tortoise import mcp_server
+
+    guard = _load_guard()
+    components = mcp_server.mcp._local_provider._components
+    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    original = components[key]
+    fn = original.fn
+    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+
+    tampers = {
+        # `limit` is the 4th positional default of `tortoise_search`.
+        "default": {"__defaults__": (*fn.__defaults__[:3], 999, *fn.__defaults__[4:])},
+        "annotation": {"__annotations__": {**fn.__annotations__, "query": "int"}},
+    }
+    for label, override in tampers.items():
+        shadow = _shadow_of(fn, **override)
+        assert guard._code_digest(shadow.__code__) == guard._code_digest(fn.__code__), label
+        mcp_server.mcp.add_tool(shadow)
+        try:
+            assert guard.main([]) == 1, f"a tampered {label} did not red the gate (#4192)"
+        finally:
+            components[key] = original
+            assert guard.main([]) == 0, f"the check did not recover after the {label} tamper"
+
+
 def test_the_guard_reds_when_the_served_component_has_no_code_object():
     """A PRESENT-but-unfingerprintable component is malformed evidence, not
     absence: a substitution whose callable has no `__code__` must red, not be
@@ -980,6 +1145,35 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
         components = mcp_server.mcp._local_provider._components
         for k in [k for k in components if k.startswith("tool:tortoise_search_shadow@")]:
             components.pop(k)
+
+
+def test_a_null_served_attributes_is_treated_as_malformed_not_as_nothing_to_check():
+    """The same doctrine as `served_from`, on the served-declaration cell (#4192).
+
+    A null is malformed EVIDENCE: skipping it would let a changed default ride the baseline,
+    and the cell is derived, so no legitimate cut produces one.
+    """
+    import copy
+    import tempfile
+
+    doc = _manifest()
+    mutated = copy.deepcopy(doc)
+    for row in mutated["rows"]:
+        if row.get("name") == "tortoise_search":
+            row["served_attributes"] = None
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "m.yml"
+    tmp.write_text(yaml.safe_dump(mutated, sort_keys=False, width=110))
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "surface-guard.py"), "--manifest", str(tmp)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, "a null served_attributes was skipped instead of refused"
+    assert "no `served_attributes` fingerprint" in result.stdout, (
+        "the guard redded for some other reason than the missing declaration cell"
+    )
 
 
 def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdown():

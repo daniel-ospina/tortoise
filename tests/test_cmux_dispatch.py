@@ -2998,8 +2998,8 @@ class TestBracketedProgramOutputIsNotAFooterRow(unittest.TestCase):
     and EXECUTED. That is the #7158 direction this tool exists to prevent.
 
     Measured on `main@8dc62a407` while #7875 was on it (`_footer_stats_end` = 47,
-    `shell_prompt_below_footer` = False, `screen_ready` = True); this test reddens
-    if the anchor is ever widened again.
+    `shell_prompt_below_footer` = False, `screen_ready` = True); this class
+    reddens if the anchor is ever widened again.
     """
 
     _BARE_SHELL = ("host % cat notes.txt\n"
@@ -3027,6 +3027,20 @@ class TestBracketedProgramOutputIsNotAFooterRow(unittest.TestCase):
             "a bracketed program-output line was accepted as a footer row — "
             "this is the #7918 fail-open")
         self.assertFalse(cd._is_pwd_line("[INFO] starting"))
+
+    def test_this_fleets_own_status_tags_cannot_anchor_either(self):
+        # The widening was motivated by THIS fleet's status tags, so they are
+        # the adversarial case: these bytes appear on real panes, so a shell can
+        # print them. None may anchor the scan.
+        for tag in ("[loop-enforcer] agent_end FIRED",
+                    "[tortoise-capture] appended 12 messages",
+                    "[repo-freshness] auto-pull 1 behind origin/main",
+                    "[session-checks] hub-state-check: skipped"):
+            with self.subTest(tag=tag):
+                self.assertEqual(
+                    cd._footer_stats_end(f"{tag}\n42.0%/700k (auto)\n"), -1,
+                    f"{tag!r} anchored the scan — a shell can print this")
+                self.assertFalse(cd._is_pwd_line(tag))
 
 
 class TestIssue7913UnreadablePaneFallback(unittest.TestCase):

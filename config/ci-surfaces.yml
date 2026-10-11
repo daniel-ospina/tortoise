@@ -1214,6 +1214,18 @@ surfaces:
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_5048_mitigated_by_replay.py  # #5048: a mitigation's mitigated_by edge, NON-operator identity and revised strength must survive rebuild_all, and check_consistency must not call the faithful rebuild diverged. `tortoise/consistency.py` and `tortoise/projection/entities.py` select `core`; `projection/edges.py` and `projection/__init__.py` are SHARED_MODULEs, and `tortoise/api.py` selects `api`+`core`, so `core` alone reaches every seam this file guards. Lane: DOCKER (the #1647 default) — URI-less it FAILS at the session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
+  # #3817: the objective-6 TAGS guard — does a Point's tags survive rebuild_all?
+  # It measures the journal carriage (AC2), the tag-filtered retrieval through
+  # `SDK.query_points_by_tag` before and after the rebuild (AC1/AC5), the
+  # no-resurrection case (AC3) and the negative control (AC4), and it pins the
+  # RECORDED DECISION that replay refuses `tags` + reports the drop (#2897;
+  # `tortoise/projection/entities.py:_POINT_LIST_PROPS`). `tortoise/projection/`
+  # matches no named surface and falls through to `core` (#2795/
+  # `test_unjournaled_mutation_class.py` is the sibling registered here), and
+  # `tortoise/sdk.py` is a SHARED_MODULE — so `core` reaches every seam this
+  # file guards. Lane: DOCKER (the #1647 default) — URI-less it FAILS at the
+  # session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
+  - test_3817_tags_rebuild_durability.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
@@ -1707,6 +1719,15 @@ surfaces:
   - test_reaper_ownership.py
   - test_redirect_seam.py
   - test_references_edge.py
+  # #5213: the NON-provenance writers of a derivation `references` link — the
+  # `create_edge` escape hatch and `graph-scripts/backfill_references.py` — carry
+  # no `sourceVersion` anchor, BY DECISION (option 3: document, do not re-route).
+  # `graph-scripts/` matches no named surface and falls through to `core`, and
+  # `tortoise/projection/edges.py` selects `sdk` + adds `core` via CORE_ALSO, so
+  # this arm is what runs the pin on an ops-script-only diff. DUAL with `sdk`
+  # (below), because an `edges.py`-only change selects `sdk` and a named-surface
+  # match REPLACES the `core` fallback. Hermetic (embedded DB per test, no URI).
+  - test_references_boundary_5213.py
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
@@ -1729,6 +1750,7 @@ surfaces:
   - test_retrieval.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
+  - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
@@ -1836,6 +1858,11 @@ surfaces:
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
   - test_unjournaled_mutation_class.py
+  # #3311: the multi-label (`:Point:Object`) status write — vocabulary validation
+  # plus a replayable journal line on the generic entity surface. Same
+  # projection/journal seam as test_unjournaled_mutation_class.py directly above;
+  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so `core` is the default home.
+  - test_3311_multilabel_status_vocab.py
   - test_uri_env_mutations_declared.py
   # #4649: the write OR-set (Source by id OR url) — producer, both replay
   # folds and the MCP delete preview, with the rebuild residual pinned to #5048.
@@ -2254,6 +2281,7 @@ surfaces:
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
   - test_3844_annotation_injection.py  # #3844: annotation-prefix newline forging; dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"] — a core-only entry would never run on a retrieval.py-only change
+  - test_6252_body_fence.py  # #6252: BODY-side line-forging fence (retrieval._fence_body); dual core+sdk for the same reason as #3844 above
   # #4509: the S3 link-before-create prior lookup excludes the capture's own
   # turn echoes BEFORE the callee's [:limit] cut — the retrieval-layer opt-in
   # `exclude_turn_echo_session` seam (tortoise/retrieval.py predicate +
@@ -2278,6 +2306,13 @@ surfaces:
   # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
   # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
   - test_vocab_gating_callers_5163.py
+  # #5213: `tortoise/projection/edges.py` IS a SOURCE_PATTERNS["sdk"] source, so
+  # this arm owns the pin for the anchor's `ON CREATE`-only mechanism (the
+  # measured pre-emption half) and for the `create_edge` signatures. DUAL with
+  # `core`: a graph-scripts-only diff selects `core`, and `tortoise/sdk.py` — the
+  # other file this pins — is a SHARED_MODULE, so a sdk.py change runs it under
+  # the full matrix regardless. See the `core` arm's entry for the same file.
+  - test_references_boundary_5213.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -2433,6 +2468,7 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
+- test_3311_multilabel_status_vocab.py
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -2921,6 +2957,7 @@ durations:
   test_graph_diagnostics.py: 24.3
   eval/write_path/test_write_path_runner.py: 70.0
   test_unjournaled_mutation_class.py: 100.0  # unmeasured — #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
+  test_3311_multilabel_status_vocab.py: 15.3  # unmeasured — #3311: locally re-measured 2026-10-10 on this host (load ~80-84, 10 CPUs), 14 tests as the file collects now. HOW: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_3311_multilabel_status_vocab.py -q --durations=0` — live FalkorDB on the shared docker lane, reached through the projection's TEST_MODE redirect (under pytest an explicit db_path is rewritten onto TORTOISE_DB_URI; the `env` fixture's tmp_path .db is only the redirect key). Verified this turn: the per-path graph `test_ml3311_<hash12>` is on the shared container WHILE the file runs (polled `redis-cli GRAPH.LIST` mid-run) — and do NOT use the container's `total_commands_processed` delta as evidence for this, the container is shared with other lanes and that number is not reproducible. WHAT THE NUMBER IS: pytest's own session total, "14 passed in 15.31s". It is NOT what this map's own refresher computes: `tools/ci_timing.py --refresh-durations` reads the TEXTUAL `--durations=` block out of the CI log (python-ci.yml runs `--durations=15`, so only those printed lines are summed, per `parse_log`) and never reads junit — so a CI reading is a LOWER bound on this figure (measured while correcting this note: 11.57 s parsed vs 12.14 s session, and 9.92 s vs 10.41 s). Session totals across runs were 13.6 / 15.3 / 17.1 s and the enclosing process wall was 17.2-20.7 s including uv startup; 15.3 s is committed at the map's one-decimal precision. THE 188.0 THIS ROW USED TO CARRY IS CORRECTED, not merely updated: it was a two-run local reading, and it is not reproducible here — 188.0 s is 12x the measured cost, and the same measurement at the pre-fix projection (9dd52f717, which collected 11 tests) was still only 17.5 s wall, so the drop is not the #3311 projection fix. The old note's "10 tests" was wrong even for that state (11 collected before the three rebuild tests, 14 now). Kept in this map rather than left to the sweep because `--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time. Refresh from the first post-merge run that includes it, via `tools/ci_timing.py --refresh-durations`.
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
@@ -3543,6 +3580,7 @@ durations:
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.2
   test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
+  test_3817_tags_rebuild_durability.py: 30.0  # unmeasured — #3817: carried at the weight of its sibling rebuild-cycle file (test_5048_mitigated_by_replay.py = 30.0, the same shape: real rebuild cycles over a projection); the local embedded-lane run (160s/7 tests) is dominated by the ONCE-per-session embedder warm-up (~150s, paid by whichever file runs first) and is not a per-file cost. Refresh from the first CI junit that includes it.
   test_5048_mitigated_by_replay.py: 30.0  # unmeasured — #5048: local private-lane readings on this host (17.5s/24.8s/26.5s/29.7s across the review rounds, 10 tests each driving real FalkorDB rebuild cycles); 30.0 is their max. Refresh from the first CI junit that includes it. Registered here rather than in `slow_files` deliberately: ~30s is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives, and the value errs high (the conservative side for a shard-balance veto) without inflating the slow leg.
   test_build_cohorts_2517.py: 0.1
   test_eval_reinjection_cap_resume.py: 0.5
@@ -3742,6 +3780,7 @@ durations:
   test_3026_oauth_boundaries.py: 0.7
   test_3660_session_upload_identity.py: 0.1
   test_3844_annotation_injection.py: 0.1
+  test_6252_body_fence.py: 0.1
   test_3982_date_only_utc.py: 0.1
   test_4041_breadcrumb_reader.py: 2.4
   test_4199_dense_scope_coverage.py: 0.6

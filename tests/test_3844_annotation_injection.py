@@ -13,8 +13,10 @@ distinguishes it from one.
 
 The BLOCK BODY (`content`) is deliberately NOT collapsed here: a captured turn
 is stored as `f"[{role}] {content}"` (`tortoise/sdk.py:556`), so a body line
-legitimately begins with a role bracket. Whether the body should be fenced
-anyway is a product decision, tracked separately in #6252.
+legitimately begins with a role bracket. Collapsing it would destroy legitimate
+multi-line claims — #6252 closed that channel by FENCING the body instead (every
+non-blank continuation line is indented and marked, `retrieval._fence_body`),
+so the body can no longer render a block-scope line either.
 
 Class B — mechanical architecture conformance. Each test states (1) the value
 that makes it fail and (2) where the fixture reaches it.
@@ -52,7 +54,8 @@ def test_a_newline_in_a_decoration_cannot_forge_a_line(field, payload):
     out = _render_block(_hit(**{field: payload}))
     assert "\n" not in out, f"{field} forged a line: {out!r}"
     assert "\r" not in out, f"{field} carried a carriage return: {out!r}"
-    # The content is the only thing that may start a line.
+    # The block-start annotation is the only thing that may start a line (the
+    # BODY is fenced separately — #6252, tests/test_6252_body_fence.py).
     assert out.count("\n") == 0
 
 
