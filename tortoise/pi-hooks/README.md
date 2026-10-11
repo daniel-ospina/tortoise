@@ -106,8 +106,11 @@ producer (this one, and the legacy directory above) is **#3713**'s.
 
 The product half is already landed: the extension here is the artifact
 `capture_install._install_pi` writes, it ships in the wheel, and
-`tests/test_pi_capture_disposition.py` pins the record (`#3512`) against this
-tree, so a future edit cannot name a home that does not exist.
+`tests/test_pi_capture_disposition.py` pins the **README** half of the record
+(`#3512`) against this tree, so a `tortoise/pi-hooks/` edit cannot name a home
+that does not exist. (The plan's own copy of the record is covered by review of
+the `.md`: `docs/` selects no Python surface, so a plan-only edit runs no
+assertion — `config/ci-surfaces.yml` says so at the arm.)
 
 ## Verification — what is executable, what is manual-only
 
