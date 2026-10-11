@@ -1073,13 +1073,8 @@ class TortoiseEP:
             rows.extend(self.g.query(_q, params={"ids": list(ids)}).result_set)
         return {r[0] for r in rows}
 
-    def _live_neighbors(self, node_id: str, include_draft: bool,
-                        label: str | None = None) -> list[str]:
-        """Single-id wrapper over `_live_neighbors_many` (#7902)."""
-        return self._live_neighbors_many([node_id], include_draft, label=label)
-
     def _live_neighbors_many(self, node_ids: list[str], include_draft: bool,
-                             label: str | None = None) -> list[str]:
+                             label: str) -> list[str]:
         """Operator-mediated neighborhood hop that never crosses drafts (#780).
 
         Operator-mediated neighborhood hop for the affected-set expansion —
@@ -1103,9 +1098,9 @@ class TortoiseEP:
         rather than SKIPPED: skipping a seed an earlier seed merely REACHED
         would drop its neighbours from the pre-BFS set (#6597).
 
-        ``label`` (#7902 perf): the nodes' already-resolved epistemic label.
-        When supplied, the id-anchored hop runs ONCE on that label instead of
-        sweeping all four. Omit it for the standalone sweep.
+        ``label`` (#7902 perf): the nodes' already-resolved epistemic label —
+        the hop runs ONCE on it. The caller resolves the label when it builds
+        the seed group, so there is no four-label sweep here.
         """
         if not node_ids:
             return []
@@ -1122,12 +1117,7 @@ class TortoiseEP:
             f"AND {_live_only('m.status', include_draft)} "
             "RETURN DISTINCT m.id"
         )
-        if label is not None:
-            queries = [template.replace("{label}", label)]
-        else:
-            # include_draft=True allows drafts as bridge endpoints but never
-            # terminal points (#2422) — `_live_only` already encodes that.
-            queries = epistemic_label_queries(template)
+        queries = [template.replace("{label}", label)]
         rows: list = []
         for _q in queries:
             rows.extend(self.g.query(

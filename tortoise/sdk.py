@@ -15805,19 +15805,27 @@ class TortoiseSDK:
                 if mid not in closure:
                     closure.add(mid)
                     new_frontier.append(mid)
-            dir_rows = proj.g.query(
-                "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
-                "WHERE a.id IN $ids AND b.id <> a.id "
-                f"AND {live_a} AND {live_b} "
-                # #3139/#3154: index-independent non-operator predicate
-                # (the `= false` form is emptied by a GRAPH.COPY'd index).
+            # #7902: a is the id-anchored frontier (sweep its labels) and b is
+            # widened by traversal — the direct-edge half of the same
+            # widening `_affected_claims` and `_live_neighbors_many` use.
+            dir_conds = ["a.id IN $ids", "b.id <> a.id",
+                         epistemic_disjunction("b")]
+            if live_a:
+                dir_conds.append(live_a)
+            if live_b:
+                dir_conds.append(live_b)
+            dir_rows: list = []
+            for _qa in epistemic_label_queries(
+                "MATCH (a:{label})-[r:IMPL|NAND]-(b) "
+                "WHERE " + " AND ".join(dir_conds) + " "
                 "AND (a.is_operator IS NULL OR a.is_operator = false) "
                 "AND a.op_type IS NULL "
                 "AND (b.is_operator IS NULL OR b.is_operator = false) "
                 "AND b.op_type IS NULL "
-                "RETURN DISTINCT a.id, b.id",
-                params={"ids": frontier},
-            ).result_set
+                "RETURN DISTINCT a.id, b.id"
+            ):
+                dir_rows.extend(proj.g.query(
+                    _qa, params={"ids": frontier}).result_set)
             for _aid, bid in dir_rows:
                 if bid not in closure:
                     closure.add(bid)

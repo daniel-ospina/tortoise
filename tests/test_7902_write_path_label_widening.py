@@ -618,3 +618,60 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
         s2.close()
     finally:
         shutil.rmtree(dbdir, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Coverage invariant under the widened labels (#6597 × #7902)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_mixed_label_window_closure_covers_affected(sdk):
+    """#6597's `affected ⊆ closure` must survive the #7902 label widening.
+
+    A :Point root with a non-:Point direct neighbour is reachable by
+    `_affected_claims` (widened by #7902) but was NOT in `_window_closure`
+    (still :Point-only), so `dream()["coverage"]` exceeded 1.0 — measured
+    1.5 on this exact shape. The existing #6597 harness uses only Points and
+    therefore cannot see the regression.
+    """
+    p1 = _point(sdk, "p1-7902-mixed")
+    p2 = _point(sdk, "p2-7902-mixed")
+    sdk.create_direct_edge("IMPL", p1, p2)
+    sub = _node(sdk, "Subject", "sub-7902-mixed")
+    sdk.create_direct_edge("IMPL", p1, sub)
+
+    # Pin the Point roots as the window (mirrors the #6597 harness): the
+    # `create_direct_edge` writes marked the endpoints dirty, and `dream()`
+    # would otherwise hydrate a wider window that hides the bug.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.ep_dirty = true "
+        "SET n.ep_dirty = null, n.ep_dirty_at = null")
+    sdk._dirty_roots.clear()
+    sdk._dirty_roots.update({p1, p2})
+
+    affected = sdk._get_ep()._affected_claims([p1, p2], 2)
+    closure = sdk._window_closure([p1, p2], 2)
+    assert sub in affected, "the widened pass must reach the :Subject"
+    assert affected <= closure, (
+        f"affected ∖ closure = {sorted(affected - closure)!r} — the widened "
+        "affected set trails the coverage denominator")
+
+    result = sdk.dream(mode="local", require_calibration=False, max_hops=2)
+    assert 0.0 <= result["coverage"] <= 1.0, (
+        f"coverage={result['coverage']} — affected ⊆ closure is broken")
+
+
+def test_affected_claims_tolerates_unresolved_and_duplicate_seeds(sdk):
+    """The batched seed resolution (#7902) must not raise or double-count.
+
+    Covers the two shapes the per-seed loop handled implicitly and the
+    batched rewrite must preserve: a seed that resolves to NO epistemic
+    label contributes nothing, and a repeated seed is expanded once.
+    """
+    p1 = _point(sdk, "p1-7902-seeds")
+    p2 = _point(sdk, "p2-7902-seeds")
+    sdk.create_direct_edge("IMPL", p1, p2)
+
+    ep = sdk._get_ep()
+    baseline = ep._affected_claims([p1], 2)
+    assert ep._affected_claims([p1, p1], 2) == baseline
+    assert ep._affected_claims([p1, "no-such-7902-seed"], 2) == baseline
