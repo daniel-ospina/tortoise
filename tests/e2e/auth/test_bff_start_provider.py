@@ -6,6 +6,11 @@ binding and the REAL S256 PKCE exchange against the shared mock Supabase. So
 "GoTrue was called", "the flow row was written" and "the method is s256" are
 OBSERVED rather than inferred from a status code.
 
+It also carries the `/auth/start` side of #3647 — the sweep that collects expired
+`auth_flows` rows — because the defect is a property of THIS route's writes (every
+`/auth/start` starts a flow, and the scheduled probe abandons each one), and the
+correct local D1 harness already exists here.
+
 HARNESS NOTE — why this is a separate file
 ------------------------------------------
 The auth Functions live at `website/apps/dashboard/functions` (moved there by
@@ -25,6 +30,7 @@ import contextlib
 import http.cookiejar
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -36,11 +42,26 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
-from bff_test_helpers import d1_sqlite_files, pick_free_port, require_toolchain, stop, wait_for_port
+from bff_test_helpers import (
+    d1_sqlite_files,
+    dashboard_persist_args,
+    pick_free_port,
+    require_toolchain,
+    stop,
+    wait_for_port,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = Path(__file__).resolve().parent / "mock_supabase.mjs"
+SESSION_TS = DASHBOARD_DIR / "functions" / "_shared" / "auth" / "session.ts"
+
+# Every garbage-collection assertion counts only ITS OWN rows: the module-scoped
+# `stack` shares one local D1 across this whole file, so a count without a prefix
+# would be reading the residue of whatever test ran before it.
+GC_ABANDONED = "gc-abandoned-"
+GC_LIVE = "gc-live-"
+GC_BACKLOG = "gc-backlog-"
 
 # Outside every range the sibling suites claim (8790-8801, 8970-8971,
 # 8980-8981, 8995, 8997-8998, 9002-9003).
@@ -122,6 +143,10 @@ def stack():
             wrangler, "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
+            # Pinned: `_d1_sqlite()` below reads THIS path, and wrangler's own
+            # state-root walk can resolve it outside the checkout (see
+            # `dashboard_persist_args`).
+            *dashboard_persist_args(),
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             "-b", f"AUTH_CALLBACK_URL={APP}/auth/callback",
@@ -206,6 +231,82 @@ def _headers(r) -> dict:
     for k, v in r.headers.items():
         h[k] = f"{h[k]}, {v}" if k in h else v
     return h
+
+
+def _warm_up(j: "Jar") -> None:
+    """Drive one real `/auth/start`, which is what materialises local D1.
+
+    Two things depend on this and neither is incidental:
+
+    * `wrangler pages dev` creates the D1 database file on first USE, not at
+      startup — `--persist-to` only ever holds `metadata.sqlite` until a query
+      runs. `_d1_sqlite()` therefore finds nothing until a D1-touching request
+      has happened, and seeding at fixture time would fail with "no D1 sqlite
+      appeared", far from the cause.
+    * `auth_flows` and its `expires_at` index are created by the RUNTIME bootstrap
+      (`ensureFlowTable`), which is also how production creates them
+      (`config/required-bindings.yml`: "Tables are created at runtime"). Warming
+      up through the route means these tests sweep a table shaped exactly like
+      production's, rather than one this file built for itself.
+    """
+    status, body, _ = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302, f"warm-up start failed: {status} {body}"
+
+
+def _seed_flow_rows(count: int, *, expires_at: int, prefix: str) -> list[str]:
+    """Insert `auth_flows` rows directly, so a sweep is OBSERVED, not inferred."""
+    ids = [f"{prefix}{i}" for i in range(count)]
+    now = int(time.time() * 1000)
+    con = sqlite3.connect(_d1_sqlite(), timeout=15)
+    try:
+        con.executemany(
+            "INSERT OR REPLACE INTO auth_flows "
+            "(flow_id,verifier,kind,created_at,expires_at) VALUES (?,'v','signin',?,?)",
+            [(fid, now, expires_at) for fid in ids],
+        )
+        con.commit()
+    finally:
+        con.close()
+    return ids
+
+
+def _count_flow_rows(prefix: str) -> int:
+    con = sqlite3.connect(_d1_sqlite(), timeout=15)
+    try:
+        return con.execute(
+            "SELECT COUNT(*) FROM auth_flows WHERE flow_id LIKE ?", (f"{prefix}%",)
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+
+def _index_exists(name: str) -> bool:
+    con = sqlite3.connect(_d1_sqlite(), timeout=15)
+    try:
+        return (
+            con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", (name,)
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        con.close()
+
+
+def _sweep_limit() -> int:
+    """`FLOW_SWEEP_LIMIT` read from the source that enforces it.
+
+    A hardcoded cap here would silently stop testing the cap the moment the
+    constant moved, and the bound IS the property under test.
+    """
+    m = re.search(
+        r"export const FLOW_SWEEP_LIMIT\s*=\s*(\d+)", SESSION_TS.read_text(encoding="utf-8")
+    )
+    assert m, (
+        f"FLOW_SWEEP_LIMIT not found in {SESSION_TS} — the sweep's bound was "
+        "renamed or removed, so this suite can no longer check it"
+    )
+    return int(m.group(1))
 
 
 def _mock_paths(reset: bool = False) -> list[str]:
@@ -385,6 +486,124 @@ def test_start_post_alias_still_accepts_a_provider(stack):
     assert status == 302, f"POST alias must redirect, got {status}"
     _, q = _authorize(headers)
     assert q.get("provider") == ["google"], q
+
+
+# ---------------------------------------------------------------------------
+# Contract: expired flows are garbage-collected (#3647)
+#
+# The defect these guard. Every deletion of an `auth_flows` row was coupled to
+# the flow COMPLETING — `/auth/callback` on a successful return trip,
+# `/auth/link` when the upstream call never started a flow. A flow that is
+# started and ABANDONED reaches neither, so its row stayed forever; the
+# scheduled `/auth/start` probe (#3628) abandons one flow per run BY DESIGN
+# (reading the redirect's `Location` is what lets it catch the #3616 class), so
+# it was a steady producer of exactly those rows.
+#
+# Each assertion is the row observed in local D1 BEFORE and AFTER a real
+# `GET /auth/start`, never a read of the handler's intent.
+# ---------------------------------------------------------------------------
+def test_an_abandoned_expired_flow_is_collected_by_the_next_start(stack):
+    """#3647: the row a probe leaves behind is gone after the next start."""
+    j = Jar()
+    _warm_up(j)
+
+    expired_at = int(time.time() * 1000) - 60_000  # past its 30-minute window
+    _seed_flow_rows(1, expires_at=expired_at, prefix=GC_ABANDONED)
+    assert _count_flow_rows(GC_ABANDONED) == 1, (
+        "seeding failed — the pre-condition for this test is not established"
+    )
+
+    status, body, headers = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302, f"the sweep must not break the start path: {status} {body}"
+
+    assert _count_flow_rows(GC_ABANDONED) == 0, (
+        "an expired, abandoned flow row survived a later /auth/start — this is "
+        "exactly the unbounded growth #3647 describes"
+    )
+    # ... and the sweep did not eat the flow this very request minted.
+    minted = j.cookie("__Host-authflow")
+    assert minted, f"no flow cookie on a 302 start: {headers.get('Set-Cookie')}"
+    assert _flow_row(minted) is not None, (
+        "the sweep deleted the flow it was running inside — the new row must never "
+        "be its own victim"
+    )
+
+
+def test_the_sweep_never_deletes_a_flow_that_is_still_live(stack):
+    """Collection keys on `expires_at`, NEVER on "unfinished".
+
+    An in-flight flow that has not been redeemed yet is exactly the state a
+    legitimate user is in between `/auth/start` and `/auth/callback`; sweeping it
+    would break the sign-in it was meant to protect.
+    """
+    _j = Jar()
+    _warm_up(_j)
+    _seed_flow_rows(1, expires_at=int(time.time() * 1000) + 600_000, prefix=GC_LIVE)
+
+    status, _, _ = _j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302
+
+    assert _count_flow_rows(GC_LIVE) == 1, (
+        "the sweep deleted an UNEXPIRED flow — /auth/callback could still have "
+        "redeemed it, so the predicate must be expires_at, not completion"
+    )
+
+
+def test_the_sweep_is_bounded_per_request_and_converges(stack):
+    """A backlog is drained in slices, and the bound is progress, not a cap.
+
+    Both halves matter. The bound is what keeps one user-facing request from
+    trying to delete a year of accumulated rows; convergence is what stops the
+    bound from stranding the remainder forever.
+    """
+    limit = _sweep_limit()
+    backlog = limit + 100
+    j = Jar()
+    _warm_up(j)
+    _seed_flow_rows(backlog, expires_at=int(time.time() * 1000) - 60_000, prefix=GC_BACKLOG)
+    assert _count_flow_rows(GC_BACKLOG) == backlog
+
+    status, _, _ = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302
+    assert _count_flow_rows(GC_BACKLOG) == backlog - limit, (
+        f"expected exactly one bounded slice of {limit} rows per request"
+    )
+
+    status, _, _ = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302
+    assert _count_flow_rows(GC_BACKLOG) == 0, (
+        "the backlog did not drain across successive starts — the bound has "
+        "become a cap that strands rows"
+    )
+
+
+def test_the_start_bootstrap_recreates_the_expires_index(stack):
+    """The sweep's cost argument IS the index, so the bootstrap must create it.
+
+    `idx_auth_flows_expires` is declared in the migration, but a database created
+    by the runtime bootstraps alone never got it — and `config/required-bindings.yml`
+    records that production's tables are created exactly that way. Without the
+    index the sweep's range predicate degrades to a table scan on the sign-in
+    path, which is the whole reason the bound and the index ship together.
+    """
+    name = "idx_auth_flows_expires"
+    j = Jar()
+    _warm_up(j)
+
+    con = sqlite3.connect(_d1_sqlite(), timeout=15)
+    try:
+        con.execute(f"DROP INDEX IF EXISTS {name}")
+        con.commit()
+    finally:
+        con.close()
+    assert not _index_exists(name), "could not establish the pre-condition"
+
+    status, _, _ = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302
+    assert _index_exists(name), (
+        "the flow bootstrap did not create idx_auth_flows_expires on a database "
+        "that lacked it — the sweep would fall back to a full table scan"
+    )
 
 
 if __name__ == "__main__":

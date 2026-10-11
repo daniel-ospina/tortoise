@@ -111,7 +111,7 @@ class TestKindIndexBuild:
 
     def test_declared_kinds_without_kinddefs_synthesized(self, spec):
         """FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,
-        marketing:keyword, pm:milestone, ALL 8 pm eventKinds, ...) are in
+        marketing:keyword, pm:kanbanBoard, ALL 8 pm eventKinds, ...) are in
         the candidate set — the classifier can't assign a kind that isn't
         in the index, and nearMisses refs to it would resolve to ∅.
         Synthesized entries are name-only; an existing kindDefs entry is
@@ -121,8 +121,13 @@ class TestKindIndexBuild:
         assert spec["dev:api"] is not None
         assert spec["marketing:keyword"]["section"] == "objects"
         assert spec["marketing:contentCalendar"]["section"] == "objects"
-        assert spec["pm:milestone"]["section"] == "objects"
         assert spec["pm:kanbanBoard"]["section"] == "objects"
+        # #2767: `milestone` is a CORE event kind, not a pm object kind — so
+        # pm contributes no `pm:milestone` entry. There is deliberately no
+        # bare-`milestone` assertion here: the only bare key the index emits is
+        # the point kind `statement` (measured), so asserting the absence of a
+        # bare `milestone` could never fail.
+        assert "pm:milestone" not in spec
         for ek in ("cardCreated", "cardMoved", "sprintStarted",
                    "sprintCompleted", "stepStarted", "stepCompleted",
                    "gatePassed", "gateBlocked"):

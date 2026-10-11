@@ -67,6 +67,11 @@ CANONICAL_EVENT_KINDS = frozenset({
     "meeting", "decision", "experiment", "deployment", "review",
     "friction", "extraction", "documentCreated", "roleCreated", "pointAdded",
     "sessionCaptured",  # #125 metadata-only session capture
+    # #2767: a milestone is REACHED at a moment — a core event, not an Object.
+    # Promoted from pm's `objectKinds` (and the base vocabulary's event list)
+    # so the bare name has ONE canonical identity, and so the miner's
+    # `event_kind="milestone"` write is declared.
+    "milestone",
 })
 
 CANONICAL_POINT_KINDS = frozenset({

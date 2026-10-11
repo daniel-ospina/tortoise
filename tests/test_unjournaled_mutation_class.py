@@ -1008,9 +1008,13 @@ class TestRegressionGuards:
     is to fail if the seam is widened."""
 
     def test_point_annotator_path_unchanged(self, env, caplog):
-        """The ``:Point`` branch of ``_update_entity`` still emits
-        ``PointRevised`` with only the annotator props, and still journals no
-        ``EntityMutated`` (its own record type already carries it)."""
+        """The dedicated ``update_point`` path still emits ``PointRevised``
+        and still journals no ``EntityMutated`` (its own record type already
+        carries the revision).
+
+        The generic ``_update_entity`` Point branch journals no
+        ``EntityMutated`` for a NON-status prop either; #3311's seam adds one
+        for ``status`` ONLY, and this test's subject is the annotator path."""
         sdk, events = env
         pid = sdk.create_point("observation", "x")["id"]
         sdk.update_point(pid, note="annotated")
@@ -1018,6 +1022,12 @@ class TestRegressionGuards:
         assert "PointRevised" in kinds
         assert not [r for r in _mutations(events) if r.get("id") == pid], (
             "the Point annotator path must not double-journal via the new seam")
+        # The generic surface's Point branch, for a non-status prop: also
+        # journal-free (#3311 journals `status` only). This exercises the
+        # branch the docstring above used to name without testing.
+        sdk.update_entity(pid, note="generic annotate")
+        assert not [r for r in _mutations(events) if r.get("id") == pid], (
+            "a non-status prop on the generic Point branch must not journal")
         _assert_round_trip(sdk, events, caplog)
 
     def test_class_mechanisms_3_and_4_are_still_open(self, env):

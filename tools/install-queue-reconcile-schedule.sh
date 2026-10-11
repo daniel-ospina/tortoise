@@ -547,7 +547,7 @@ install_linux() {
     local current new_line
     current="$($CRONTAB_CMD -l 2>/dev/null || true)"
     new_line="$(cron_line | tail -1)"
-    if printf '%s\n' "$current" | grep -qF "$CRON_MARKER"; then
+    if grep -qF "$CRON_MARKER" <<<"$current"; then
         # Replace any prior block (marker + schedule lines) by FIXED string, so
         # re-running neither accumulates markers nor strands a stale line.
         current="$(printf '%s\n' "$current" \

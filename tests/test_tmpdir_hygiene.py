@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests._tmpdir_hygiene import (
+    _ZERO_CLIENT_STATE_PATH_ENV,
     HOST_TMPDIR,
     ROOT_BASE,
     SharedTmpdirScanError,
@@ -409,6 +410,34 @@ def test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped():
         HOST_TMPDIR.rstrip(os.sep) + os.sep), ACTIVE_SUITES_DIR
     assert os.path.realpath(_LOCK_PATH).startswith(
         os.path.realpath(scan_root()).rstrip(os.sep) + os.sep), _LOCK_PATH
+
+
+def test_session_root_pins_the_reaper_zero_client_state_file():
+    """#7923: the private session root pins the embedded reaper's persisted
+    zero-client state INSIDE itself, so the suite-wide end-sweep (conftest's
+    `_redislite_hygiene`) can never write it into the developer's real
+    `$HOME/.tortoise`.
+
+    `install_session_tmpdir()` runs at conftest import, so the live process
+    environment is the observable under test — same shape as
+    `test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped`.
+    """
+    from tortoise.embedded_reaper import (
+        ZERO_CLIENT_STATE_PATH_ENV,
+        _zero_client_state_path,
+    )
+
+    # The literal mirror in this module must not drift from the reaper's.
+    assert _ZERO_CLIENT_STATE_PATH_ENV == ZERO_CLIENT_STATE_PATH_ENV
+
+    override = os.environ.get(ZERO_CLIENT_STATE_PATH_ENV)
+    assert override, "the session must export the reaper state override"
+    root = os.path.realpath(scan_root())
+    assert os.path.realpath(override).startswith(root.rstrip(os.sep) + os.sep), \
+        override
+    # The reaper resolves to that same contained path (attribute seam unset).
+    assert os.path.realpath(_zero_client_state_path()) == \
+        os.path.realpath(override)
 
 
 def test_marker_read_is_hardened_against_the_shared_base(tmp_path):

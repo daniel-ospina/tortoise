@@ -21,7 +21,9 @@ def test_status_vocabulary():
 
 def test_transition_guards_live_to_draft(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "guarded")
+    # Draft is explicit since #1088 (a no-status create is LIVE) — the guard
+    # under test is the draft→live promote, so start from a real draft.
+    p = sdk.create_point("statement", "guarded", status="draft")
     assert p["status"] == "draft"
     sdk.update_point(p["id"], status="live")  # draft→live promote still allowed
     with pytest.raises(ValueError, match="live"):
@@ -140,11 +142,14 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
     from tortoise.sdk import POINT_STATUS_VALUES
     sdk = sdk_factory(tmp_path)
 
-    # create_point: default draft
+    # create_point: no-status is LIVE since #1088; an explicit draft is
+    # honoured and never auto-promoted (see the p3 update below)
     p = sdk.create_point("statement", "parity-1")
     assert p["status"] in POINT_STATUS_VALUES
 
-    # create_operator: promotes source to live
+    # create_operator: promotes a NEVER-SET source to live. Since #1088
+    # create_point always sets a status, so this pins the resulting value —
+    # the never-set promotion path is only reachable from legacy graphs.
     p2 = sdk.create_point("statement", "parity-2")
     op = sdk.create_operator("IMPL", p2["id"], [p["id"]])  # noqa: F841
     assert sdk.get_point(p2["id"])["status"] == "live"
@@ -163,7 +168,7 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
     assert "superseded" in POINT_STATUS_VALUES
 
     # update_point: can promote draft→live (status='live' set)
-    p3 = sdk.create_point("statement", "parity-3")
+    p3 = sdk.create_point("statement", "parity-3", status="draft")
     sdk.update_point(p3["id"], status="live")
     assert sdk.get_point(p3["id"])["status"] == "live"
 

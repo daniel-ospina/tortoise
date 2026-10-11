@@ -367,6 +367,12 @@ const suites = [
   // here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20260926000002_metering_set_graph_storage.sql',  // #5331
+  // #4242 — the ledger WINDOW follows the authoritative bound on every
+  // increment (the sticky-approximated-window defect). NOTE: this list is
+  // EXPLICIT, not a glob — a suite file that is not named here never runs, and
+  // "the suite exists" is then mistaken for "the suite passes". Add the entry
+  // in the same commit as the file.
+  '20261010000001_metering_period_end_refresh.sql',  // #4242
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

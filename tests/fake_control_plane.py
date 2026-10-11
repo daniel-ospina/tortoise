@@ -288,6 +288,26 @@ def _metering_period_label(period_start) -> str | None:
     return f"{dt.year}-{dt.month:02d}"
 
 
+def _refresh_period_end(row, p) -> None:
+    """#4242: the ``ON CONFLICT (org_id, period_start) DO UPDATE`` also refreshes
+    the WINDOW, exactly as the SQL does after
+    ``20261010000001_metering_period_end_refresh.sql``.
+
+    Every period-keyed writer in the real ledger used to update its COUNTERS
+    only, so a row created under an APPROXIMATED anchor (20260918000001's
+    ``end - 1 month`` backfill / 20260919000001's ``start + 1 month`` repair)
+    kept that window after the authoritative ``current_period_end`` arrived —
+    and the cohort read's half-open OVERLAP test could then miss the row, which
+    is fail-OPEN on a spend ceiling.
+
+    This lives in ONE place because five lanes share the semantics and a
+    per-lane copy is how one of them gets forgotten: the fake is the ONLY
+    behavioural proxy for these RPCs in CI (the SQL never runs here), so a fake
+    that kept the old semantics would report the defect as fixed.
+    """
+    row["period_end"] = p.get("p_period_end")
+
+
 def _as_dt(value):
     """Parse a stored metering instant for the fake's SQL-semantics
     comparisons. ``None`` in → ``None`` out (a row with no window cannot match
@@ -504,6 +524,7 @@ class FakeControlPlane:
                        None)
             n = int(p.get("p_n") or 1)
             if row:
+                _refresh_period_end(row, p)
                 row["write_ops"] = row.get("write_ops", 0) + n
             else:
                 rows.append({"org_id": p.get("p_org_id"),
@@ -528,6 +549,7 @@ class FakeControlPlane:
             tout = int(p.get("p_tokens_out") or 0)
             cost = float(p.get("p_cost_usd") or 0.0)
             if row:
+                _refresh_period_end(row, p)
                 row["ask_calls"] = row.get("ask_calls", 0) + calls
                 row["ask_tokens_in"] = row.get("ask_tokens_in", 0) + tin
                 row["ask_tokens_out"] = row.get("ask_tokens_out", 0) + tout
@@ -558,6 +580,7 @@ class FakeControlPlane:
             tout = int(p.get("p_tokens_out") or 0)
             cost = float(p.get("p_cost_usd") or 0.0)
             if row:
+                _refresh_period_end(row, p)
                 row["capture_calls"] = row.get("capture_calls", 0) + calls
                 row["capture_tokens_in"] = (
                     int(row.get("capture_tokens_in") or 0) + tin)
@@ -606,6 +629,7 @@ class FakeControlPlane:
             model = p.get("p_model")
             revision = p.get("p_revision")
             if row:
+                _refresh_period_end(row, p)
                 mixed = bool(row.get("embed_identity_mixed"))
                 if p.get("p_identity_mixed"):
                     mixed = True
@@ -664,6 +688,7 @@ class FakeControlPlane:
                 "graph_storage_measured_at": p.get("p_measured_at"),
             }
             if row:
+                _refresh_period_end(row, p)
                 row.update(values)
             else:
                 rows.append({"org_id": p.get("p_org_id"),

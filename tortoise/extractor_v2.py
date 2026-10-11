@@ -5747,7 +5747,7 @@ def _object_kind_forms(master: dict) -> set[str]:
     alignment): the master's object/subject/point/event forms
     (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
     document kinds (objectKinds + documentKinds — including kindDefs-less
-    ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
+    ones the classifier can assign, e.g. dev:apiSpec, pm:kanbanBoard,
     marketing:keyword) **for the namespaces this graph installs**. Full +
     bare forms, case-folded. The gate must never raise: a pack-registry
     failure degrades to the master-forms-only set (mirrors
@@ -5858,7 +5858,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # FIX M candidate/write-gate alignment: the entity gate uses the
         # EXTENDED object vocabulary (master + pack object/document kinds —
         # the classifier's synthesized object kinds, e.g. dev:apiSpec,
-        # pm:milestone, marketing:keyword, must survive un-repaired).
+        # pm:kanbanBoard, marketing:keyword, must survive un-repaired).
         forms = _object_kind_forms(master)
         if kind.lower() == UNCLASSIFIED:
             # #1695 Task 5: the classify-later sentinel is NEVER written to

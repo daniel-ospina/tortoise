@@ -100,7 +100,7 @@ MariaDB steward text + adopter files (linked in §2), not GitHub.
 The #526 package split ships the engine as a server-only distribution
 (`tortoise-graph`, BSL-1.1 — unchanged) and a **thin driver** distribution
 (`tortoise-client`) under **Apache-2.0**. Full mechanics:
-[docs/client-server-split.md](docs/client-server-split.md).
+[docs/client-server-split.md](client-server-split.md).
 
 **Why Apache-2.0 for the client (vs MPL-2.0):**
 

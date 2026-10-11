@@ -51,6 +51,7 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
+from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
@@ -650,19 +651,27 @@ class _InMemoryEventLog:
 
 
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
-# the capture response's `props` superset — E3 writes source_turn_id /
-# search_keys / when / quote via the v2 payload point dict / the M2 folded
-# statement dict. On the v2 INGEST SEAM a create must never silently drop a
-# value they carry (the two presence normalizations — a None value, which the
-# graph does not store, and an empty/blank `search_keys` list/tuple, popped by
-# _flatten_search_keys_prop — are mirrored out of the response, so presence
-# still agrees), and a v2 dedup HIT writes NONE of these props (the session
-# CONTAINS edge is still MERGEd), so its response reports the canonical's
-# STORED props — a field the node does not hold is omitted, never echoed from
-# the payload. NOTE: the above is v2-only; the env-gated M2 lane reports these
-# keys from the folded statement dict with no read-back (no in-tree M2 caller
-# emits them today — tracked, with the residual "M2 folded statement dict"
-# claim below, in #3778). Deliberately a
+# the capture response's `props` — E3 writes source_turn_id /
+# search_keys / when / quote (plus E4's span_start/span_end) via the v2
+# payload point dict / the M2 folded statement dict. ONE contract for BOTH
+# capture lanes (#3778): the response reports what the resolved NODE STORES,
+# read back from the graph — never the payload. On the v2 INGEST SEAM a create
+# must never silently drop a value they carry (the two presence normalizations
+# — a None value, which the graph does not store, and an empty/blank
+# `search_keys` list/tuple, popped by _flatten_search_keys_prop — are mirrored
+# out of the response, so presence still agrees; a create may echo those raw
+# values because it handed them to create_point), and a v2 dedup HIT writes
+# NONE of these props (the session CONTAINS edge is still MERGEd), so its
+# response reports the canonical's STORED props via
+# `_read_capture_passthrough_props`. The env-gated M2 lane read-backs for
+# EVERY entry — create and in-capture fold alike (#3778) — because its write is
+# the shared EventAPI → projection path, which persists a SUBSET of the folded
+# dict's fields (a list `search_keys` is dropped by the projection's
+# undeclared-list policy, #2795 D2; there is no `_flatten_search_keys_prop` on
+# that door), so the payload echo could advertise a field the node does not
+# hold — the #2813 symptom — and a fold describes the canonical, not the
+# duplicate. Either way a field the node does not hold is omitted, never
+# echoed from the payload. Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
@@ -2585,7 +2594,12 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     Runs a diagnostic existence read ONLY when the guarded SET returned no
     rows, so the happy path stays a single round trip. Missing point →
     ValueError matching the historical missing-point behavior; present but
-    not draft → illegal-transition ValueError.
+    not promotable → illegal-transition ValueError.
+
+    #1088: an already-LIVE point is short-circuited in ``update_point``
+    (idempotent no-op), so the only statuses that reach this error are the
+    TERMINAL ones (retracted / superseded / outdated / archived) — a terminal
+    point is never resurrected by update_point.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -3299,9 +3313,19 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     its own ingest pass).  A FOLDED-ONLY ingest (every claim resolved to an
     existing node) still needs a FIRST-TIME calibration when the canonical
     never got one — its own ingest's EP pass failed fail-open and left it
-    draft/uncalibrated — otherwise the point stays uncalibrated forever
-    (a folded re-ingest would never re-run the pass).  A canonical that is
-    live + calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    UNCALIBRATED — otherwise the point stays uncalibrated forever (a folded
+    re-ingest would never re-run the pass).  Calibration is decided by the
+    EP MARKERS alone (``posterior_alpha IS NULL AND ep_alpha IS NULL``); the
+    point's ``status`` is deliberately NOT part of the selector.  A folded
+    EXPLICIT draft is intentionally left uncalibrated: #1088 never
+    retro-promotes a folded id, and the EP pass excludes drafts
+    (``include_draft=False``).  An uncalibrated draft (markers null) is
+    already nominated by the markers arm, so a ``status='draft'`` disjunct
+    could add ONLY drafts that already carry EP markers — already
+    calibrated, so nothing to refresh.  A canonical that is live +
+    calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    Folded ids are EP/dirty targets ONLY — never promotion targets (the
+    caller passes the MINTED ids to ``_apply_capture_ingest_ep``, #1088).
     Shared by the hosted impl (byte-parity).
     """
     from tortoise.write_verb import DEDUP_NEW
@@ -3312,10 +3336,15 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
               if p.get("id") and p.get("dedup", DEDUP_NEW) != DEDUP_NEW]
     if not folded:
         return []
+    # #1088 review P2: the selector keys on the EP MARKERS, never on status.
+    # A folded explicit draft is never promoted (only minted ids are, above)
+    # and the EP pass excludes drafts (``include_draft=False``). An
+    # uncalibrated draft (markers null) is already nominated by the markers
+    # arm, so a ``status='draft'`` disjunct could add ONLY drafts that
+    # already carry EP markers — already calibrated, so nothing to refresh.
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND "
-        "(coalesce(n.status, '') = 'draft' OR "
-        "(n.posterior_alpha IS NULL AND n.ep_alpha IS NULL)) "
+        "n.posterior_alpha IS NULL AND n.ep_alpha IS NULL "
         "RETURN n.id",
         params={"ids": folded},
     ).result_set
@@ -3324,23 +3353,36 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
 
 @phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
+                             promotion_ids: list[str],
+                             operator_ids: list[str],
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
 
     ROOT CAUSE (verified): capture wrote the extracted claims via the #131
-    draft default and wired their IMPL/NAND operator topology as draft
+    draft default (pre-#1088, when a no-status create defaulted to draft)
+    and wired their IMPL/NAND operator topology as draft
     (#780 extraction operators, ``promote_source=False``); EP's BFS
     expansion excludes draft subgraphs (``include_draft=False`` default), so
     the ingest EP pass could never calibrate the captured claims
     (``dream()`` total_affected 0 / coverage 0.0 / ``has_ep`` False —
     structurally, until the claims are EP-able).
 
-    FIX — capture-scoped ONLY (create_point's global draft default, the
-    #780 draft-operator semantics of NON-capture extraction paths, EP
-    semantics, and global dream routing are all untouched):
-      1. every extracted (non-episodic) claim of THIS capture is promoted
-         draft->live (the DM-2/§4.4 status branch: draft -> live on the
-         capture write path; the episodic turn stream STAYS draft — it is
+    FIX — capture-scoped ONLY (the #780 draft-operator semantics of
+    NON-capture extraction paths, EP semantics, and global dream routing are
+    all untouched). ``promotion_ids`` (REQUIRED) is the set of CLAIM points
+    this call may PROMOTE; the EP/dirty pass still runs over the full
+    ``claim_ids``. Callers pass the capture's MINTED ids (see
+    ``_capture_minted_ids``) so a FOLDED, pre-existing canonical — which an
+    agent may have explicitly created draft — is calibrated if it needs it
+    but never retro-promoted (#1088). ``operator_ids`` (REQUIRED) is the set
+    of operator Points THIS capture created — a folded-only capture mints no
+    claim (``promotion_ids == []``) yet can still wire a new operator, and
+    keying the operator-promotion arm on claims alone left that operator
+    draft and the folded claim's first calibration unable to propagate
+    through it (#4936's create-then-rekey class):
+      1. every MINTED extracted (non-episodic) claim of THIS capture is
+         promoted draft->live (the DM-2/§4.4 status branch: draft -> live on
+         the capture write path; the episodic turn stream STAYS draft — it is
          the turn stream, not beliefs);
       2. the capture's operator topology (IMPL/NAND operator Points with an
          edge to a captured claim) is promoted with its claims — a live
@@ -3363,8 +3405,19 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
     ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
     capture surfaces can never drift (byte-parity).
     """
-    if not claim_ids:
+    # No-op only when there is NOTHING to do: no claim to promote/calibrate
+    # AND no operator this capture created. #1088 P2 — keying this on
+    # ``claim_ids`` alone blocks the folded-but-calibrated case below, where
+    # a capture wired a new operator while every payload point folded onto
+    # an already-calibrated canonical (``claim_ids == []``).
+    if not claim_ids and not operator_ids:
         return
+    # #1088: only ids MINTED by this capture may be promoted. A folded,
+    # pre-existing id can still be an EP target, but an explicit draft must
+    # never be retro-promoted by a later capture that merely deduped onto it.
+    # ``promotion_ids`` is REQUIRED so a caller cannot silently fall back to
+    # promoting the EP target set.
+    promote_ids = list(promotion_ids)
     try:
         proj = sdk._get_proj()
         # 1. Claims -> live (draft-only guard mirrors create_operator's
@@ -3377,13 +3430,13 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # live state. Capture auto-promotion is NOT reviewer-gated — the
         # snapshot carries the point's own props (no fabricated reviewed).
         # Candidate read FIRST (the SET below destroys the draft evidence):
-        # exact extracted ids, non-operator, draft-or-unset status.
+        # MINTED ids only (#1088), non-operator, draft-or-unset status.
         cand_rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status = 'draft') "
             "RETURN n.id",
-            params={"ids": list(claim_ids)},
+            params={"ids": promote_ids},
         ).result_set
         promoted_claims = [r[0] for r in cand_rows]
         if promoted_claims:
@@ -3398,6 +3451,13 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
         # projection/__init__.py:1082 restores live on replay). Mirror
         # promote_point's _promote_incident_operators event exactly.
+        # #1088: promote the operators THIS capture created (operator_ids) as
+        # well as those wired to a promoted claim (promote_ids). The CLAIM
+        # arm above stays minted-only (a folded explicit draft is never
+        # retro-promoted), but a draft operator this call minted over a
+        # FOLDED claim must go live or that claim's first calibration cannot
+        # propagate through it — and a folded-only capture mints no claim,
+        # so promotion_ids is empty and the claim join alone reaches nothing.
         op_rows: list = []
         _seen_op_ids: set = set()
         # #7853: c is id-anchored — sweep the epistemic labels so an operator
@@ -3405,15 +3465,18 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # multi-labelled endpoint (``:Point:Object``) matches MORE than one
         # sweep, so collapse on ``o.id`` before the emit loop: the promoted
         # set must equal the journalled set (#395), and the loop below emits
-        # one ``OperatorPromoted`` per row.
+        # one ``OperatorPromoted`` per row. The ``o.id IN $op_ids`` arm keeps
+        # #1088's created-operator promotion inside this same sweep, so a
+        # capture-minted operator over a FOLDED claim still goes live.
         for _q in epistemic_label_queries(
             "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:{label}) "
-            "WHERE c.id IN $ids "
+            "WHERE (c.id IN $ids OR o.id IN $op_ids) "
             "AND (o.status IS NULL OR o.status = 'draft') "
             "RETURN DISTINCT o.id"
         ):
             for row in proj.g.query(
-                    _q, params={"ids": list(claim_ids)}).result_set:
+                    _q, params={"ids": promote_ids,
+                                "op_ids": operator_ids}).result_set:
                 if row[0] not in _seen_op_ids:
                     _seen_op_ids.add(row[0])
                     op_rows.append(row)
@@ -5276,6 +5339,11 @@ class TortoiseSDK:
 
         Set dedup=True for idempotent creation (matches by content hash).
 
+        LIVE is the default (#1088): a point created WITHOUT an explicit
+        ``status`` is live — not draft — whatever its kind. Draft is opt-in:
+        pass ``status="draft"`` and it is honoured (no promotion clause,
+        ingest fold, or operator edge will move it to live).
+
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
         with an explicit, provenance-recorded starting belief: the default
@@ -5430,15 +5498,14 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # Points enter as draft, go live when first edge is created (#131) —
-        # EXCEPT decision parts (#2199): a decision-part kind created without
-        # an explicit status is born live (matching how the decide skill's
-        # protocol is written), so EP factor extraction sees the option /
-        # criterion / finding right away. "Was status given?" is decided
-        # BEFORE the pop so a caller that explicitly passes a status (the
-        # capture/extraction paths pass status="draft" + extractedFrom, or a
-        # decide flow staging drafts deliberately) keeps full manual control
-        # and the #344/#1212 fail-closed posture.
+        # #1088: LIVE is the default for everything added to the graph; an
+        # agent that deliberately asks for draft gets draft, and it is
+        # honoured. "Was status given?" is decided BEFORE the pop so an
+        # explicit status (the capture/extraction paths pass status="draft" +
+        # extractedFrom, or an agent staging a draft deliberately) is explicit
+        # BY CONSTRUCTION, keeps full manual control, and preserves the
+        # #344/#1212 fail-closed posture. Precedent: #2199 did exactly this
+        # for the decide-part kinds.
         explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
@@ -5447,14 +5514,13 @@ class TortoiseSDK:
         # items as committed). Popping up front also keeps vocabulary
         # validation uniform for both paths: an invalid status raises even
         # when the point already exists (no silent-ignore asymmetry).
-        if not explicit_status and (kind in DECIDE_PART_KINDS
-                                    or kind in GOAL_KINDS):
-            # #2199 decide parts and #7856 goals are born LIVE: a draft goal
-            # that is only ever a TARGET is EP-inert and silently reported as
-            # converged, so it must not be creatable by default.
-            status = props.pop("status", "live")
-        else:
-            status = props.pop("status", "draft")
+        # Merge of main's #7856 (goals born live) with #1088 (LIVE is the
+        # default for EVERY kind): the universal default below subsumes
+        # main's GOAL_KINDS rule — a goal is still born live, for exactly the
+        # reason main gives (a draft goal that is only ever a TARGET is
+        # EP-inert while converged=True is still reported), and so is every
+        # other kind. An explicit status is honoured by the pop below.
+        status = props.pop("status", "live")
         # Fail-closed vocabulary validation (mirrors update_point): a
         # non-canonical status (case variant, junk, non-str, typo) would
         # otherwise be stored verbatim and treated as EP-LIVE by _live_only
@@ -5959,7 +6025,19 @@ class TortoiseSDK:
         (``datetime.now(timezone.utc).isoformat()``), so production commits
         get date-anchored extraction by default. Returns the endpoint
         response, or the local extraction result with the payload when the
-        endpoint is unreachable."""
+        endpoint is unreachable.
+
+        ``base_url`` / ``api_key`` are the **Tortoise API POST** credentials
+        ONLY (they reach exactly one call site — ``_post_commit``, where they
+        stand in for ``TORTOISE_API_URL`` / ``TORTOISE_API_KEY``). They do NOT
+        select the extraction provider: the LLM that reads the conversation is
+        chosen on a different credential plane — ``extractor_model`` when
+        given, and the ambient environment (``TORTOISE_EXTRACT_MODEL``,
+        ``TORTOISE_EXTRACTOR_PROVIDER`` + the provider API keys) otherwise.
+        A caller that supplies ``base_url``/``api_key`` while
+        ``extractor_model`` is None therefore still extracts on the
+        deployment's provider account; that divergence is warned about
+        (``UserWarning``) rather than silently assumed (#6869)."""
         import os
         import uuid
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
@@ -5983,6 +6061,38 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
                     "payload": None}
+        # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
+        # they never reach the extraction model. With extractor_model=None the
+        # model is built from the AMBIENT environment (_default_byok_model →
+        # build_extractor_model, env-routed), so a caller who reads
+        # base_url/api_key as BYOK controls silently extracts (and bills) on
+        # the deployment's provider account and egresses the conversation to a
+        # provider it did not name. The divergence is invisible by
+        # construction — an in-tree test made exactly this wrong inference
+        # (tests/test_value_extractor.py::test_commit_session_warn_mode_reaches
+        # _payload) — so surface it at the entry point. Placed AFTER the
+        # consent gate: a declined call spends nothing and needs no notice.
+        #
+        # The predicate is TRUTHINESS (`not extractor_model`), matching how
+        # every call site actually selects the model (`extractor_model or
+        # _default_byok_model()`: v2 and both v1 branches). An identity test
+        # (`is None`) would stay silent on a falsy-but-not-None adapter
+        # (``""``/``False``/``0`` from a config default) that still takes the
+        # ambient path — the same silent divergence this notice exists to
+        # surface (review of #7938).
+        if (base_url or api_key) and not extractor_model:
+            import warnings
+            warnings.warn(
+                "commit_session(base_url=..., api_key=...) configures the "
+                "Tortoise API POST credentials only — it does NOT select the "
+                "extraction provider. With extractor_model=None the "
+                "extraction model is built from the ambient environment "
+                "(TORTOISE_EXTRACT_MODEL / TORTOISE_EXTRACTOR_PROVIDER and "
+                "the provider API keys), so the conversation is extracted — "
+                "and billed — on this deployment's provider account, not the "
+                "endpoint named by base_url. Pass extractor_model=<adapter> "
+                "to control extraction (#6869).",
+                UserWarning, stacklevel=2)
         extractor = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
         if extractor == "v1" or summary is not None:
             return self._commit_session_v1(
@@ -7038,15 +7148,46 @@ class TortoiseSDK:
         # warning only.  W5 Phase D (#2104): the pass gates over
         # ``_capture_ep_target_ids`` (minted ids — folded entries resolved
         # to nodes already calibrated at their original ingest are never
-        # re-calibrated; a folded canonical still draft/uncalibrated from a
-        # fail-open first ingest gets its FIRST calibration here).
-        if extracted:
-            ep_ids = _capture_ep_target_ids(extracted, proj)
-            if ep_ids:
-                _apply_capture_ingest_ep(
-                    self, ep_ids,
-                    warn=extraction_warnings.append,
-                )
+        # re-calibrated; a folded canonical still UNCALIBRATED from a
+        # fail-open first ingest keeps being nominated for its FIRST
+        # calibration here, whereas a folded EXPLICIT draft is intentionally
+        # left uncalibrated).
+        # #1088 P2: the pass must not ride ``extracted`` either. A capture
+        # whose payload points ALL fold as PARAPHRASE noops (the reason is not
+        # ``identical``, so the surfacing block above skips every one and
+        # ``extracted == []``) or all fold onto priors with no capture
+        # provenance can still have wired a NEW IMPL/NAND operator via
+        # ``apply_payload_operators`` (``meta["operator_ids"]`` non-empty,
+        # minted ``draft``). Nesting this whole pass inside ``if extracted:``
+        # left that operator ``status='draft'`` — EP-inert under the #780
+        # live-only selector, with no public promote path — and broke the
+        # documented byte-parity with the hosted mirror, which has no such
+        # wrapper (``hosted_api.py``). The calibration selector still needs
+        # ``extracted``, so it alone stays guarded; the run condition is EITHER
+        # list non-empty.
+        ep_ids = _capture_ep_target_ids(extracted, proj) if extracted else []
+        # #1088 P2: the operator-promotion arm must not ride the
+        # CALIBRATION selector. A capture whose payload points ALL fold
+        # onto canonicals that are ALREADY calibrated gets
+        # ``ep_ids == []`` — ``_capture_ep_target_ids`` keys on
+        # ``n.posterior_alpha IS NULL AND n.ep_alpha IS NULL`` — yet the
+        # capture can still have wired a NEW IMPL/NAND operator; gating
+        # the whole pass on ``ep_ids`` left that operator
+        # ``status='draft'`` (EP-inert under the #780 live-only selector,
+        # with no public promote path). Run the pass when EITHER list is
+        # non-empty. (e96b01681 widened the promotion JOIN but left this
+        # guard, so only the folded-but-UNCALIBRATED sub-case was fixed.)
+        operator_ids = list(meta.get("operator_ids") or [])
+        if ep_ids or operator_ids:
+            # #1088: only ids this capture MINTED may be promoted; a
+            # folded, pre-existing canonical stays as its author left it
+            # (draft included), and is only calibrated if it needs it.
+            _apply_capture_ingest_ep(
+                self, ep_ids,
+                promotion_ids=_capture_minted_ids(extracted),
+                operator_ids=operator_ids,
+                warn=extraction_warnings.append,
+            )
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
         # receipt — byte-parity with hosted_api._capture_session_impl (the
         # shared-surface rule): ``surfaced`` uses the §3.2.2 marker
@@ -7111,8 +7252,11 @@ class TortoiseSDK:
         ``extracted`` is the [{id, kind, text, props}] list the capture
         contract reports (``kind`` reflects the stored pointKind; the M2
         conversation stage writes untyped Points, reported as "statement";
-        ``props`` is the whitelisted _CAPTURE_PASSTHROUGH_PROPS superset so
-        E3 fields pass through); ``meta`` = {"provider", "route",
+        ``props`` is the ``_CAPTURE_PASSTHROUGH_PROPS`` subset the resolved
+        NODE actually holds — read back from ``proj.g`` for every entry
+        (create and fold alike, #3778), never echoed off the folded statement
+        dict, so a field the projection did not persist is omitted and a fold
+        reports the canonical's stored values); ``meta`` = {"provider", "route",
         "failover_used", "errors", "warnings", "mode"} — P1 #1529 makes
         this branch fail closed: extraction-stage exceptions are captured as
         structured errors (never re-raised — turn points have already
@@ -7265,8 +7409,39 @@ class TortoiseSDK:
                         "MERGE (s)-[:CONTAINS]->(p)",
                         params={"sid": session_id, "pid": pid},
                     )
-                props = {k: v for k, v in p.items()
-                         if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #3778: report what the NODE holds — never the folded
+                # statement dict's payload. This lane's write is the shared
+                # EventAPI → projection path (``proj.g``, the projection handed
+                # to the EventAPI above), so the response can be read back
+                # AFTER the write instead of re-deriving write-side presence
+                # rules by hand — the #2949 asymmetry, re-minted here, in the
+                # other direction: the folded dict is built by ``fold`` from
+                # the PointAdded payload, and it carries whatever the extractor
+                # passed as top-level fields (``EventAPI.add_point(**fields)``
+                # → ``p.update(fields)``), which is a superset of what the
+                # projection persists. Two verified divergences the payload
+                # echo produced (probe, #3778):
+                #   - ``search_keys`` as a list/tuple: the capture E3 spelling.
+                #     The projection drops undeclared list props
+                #     (``_POINT_LIST_PROPS`` is empty — #2795 D2), and this
+                #     lane has no ``_flatten_search_keys_prop`` call (that is
+                #     the SDK ``create_point``/``update_point`` write side), so
+                #     the node stores NOTHING while the payload advertised the
+                #     list — the #2813 symptom verbatim;
+                #   - a fold: the duplicate is detached and the entry reports
+                #     the CANONICAL id, whose props were written by an earlier
+                #     occurrence (or an earlier capture) — the payload here is
+                #     the DUPLICATE's, so the response described values the
+                #     node never held.
+                # Same principle as the v2 seam's dedup-hit read-back (#2949):
+                # the reply describes the graph. One read-back for BOTH the
+                # create and the fold case (a create that the projection
+                # transformed or refused is the same lie), through the SAME
+                # F4-derived helper so the field list stays derived from
+                # ``_CAPTURE_PASSTHROUGH_ORDER`` — absent (not stored) fields
+                # are omitted, never fabricated, and a vanished node fails
+                # CLOSED to {} rather than echoing the payload.
+                props = self._read_capture_passthrough_props(proj, pid)
                 extracted.append({
                     "id": pid,
                     "kind": p.get("pointKind") or "statement",
@@ -8201,8 +8376,9 @@ class TortoiseSDK:
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
-            draft→live promote via status (only transition allowed), version
-            increment for :Point:Object nodes, status validation against
+            draft→live promote via status (the only transition allowed; an
+            already-live point is an idempotent no-op), version increment for
+            :Point:Object nodes, status validation against
             POINT_STATUS_VALUES, context rejected.
           - Entity (Subject/Object/Event/Document/Source) → plain property
             update (delegates to update_entity).
@@ -8401,6 +8577,27 @@ class TortoiseSDK:
                     "update_point only promotes draft→live — use "
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
+
+        # #1088: with LIVE as the create default, an ordinary flow reaches
+        # here with status='live' on a point that is ALREADY live. That is an
+        # idempotent success, not the illegal transition the draft-born guard
+        # was written to refuse — promote_point already answers 'already_live'
+        # as a no-op (DE2E-N9), and this mirrors it. The probe runs only when
+        # a status was supplied, and a genuinely illegal transition (a
+        # terminal status resurrected) still falls through to the guarded
+        # WHERE below and raises.
+        if 'status' in props:
+            _cur_status = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+            ).result_set
+            if _cur_status and _cur_status[0][0] == 'live':
+                if len(props) == 1:
+                    # status-only: a true no-op — no write, no event.
+                    return self.get_point(id)
+                # Other props still belong to the caller; drop only the
+                # already-satisfied status and let the non-status write path
+                # below apply them (never silently discard caller data).
+                props.pop('status')
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
@@ -10231,10 +10428,15 @@ class TortoiseSDK:
             Default bidirectional (mutual) for all op types; pass
             "unidirectional" for a directed attack (no back-pressure).
           - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
-          - promote_source: default True preserves the #131 draft→live lifecycle
-            (source point goes live when its first edge is created). Pass
-            False for extraction paths (#780): the operator node itself is
-            created with status:'draft' AND the source is NOT auto-promoted —
+          - promote_source: default True fills in a source point's NEVER-SET
+            status (``status IS NULL``) to live when its first edge is
+            created. An EXPLICIT or prior ``draft`` is NOT retro-promoted
+            (#1088) — a point an agent deliberately staged stays draft, and a
+            pre-#1088 graph's implicit-draft points are indistinguishable from
+            explicit drafts, so they also stay draft (EP-inert) until
+            explicitly promoted. Pass False for extraction paths (#780): the
+            operator node itself is created with status:'draft' AND the
+            source is NOT auto-promoted —
             a draft must never wire an operator to a live Point. NOTE: there is
             currently NO public promote API for draft operators — they stay
             draft until the reviewer-gated promotion path lands (#785
@@ -10356,16 +10558,21 @@ class TortoiseSDK:
                 f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
-        # Draft → live lifecycle (#131): source point goes live when first edge created.
-        # P1 (code-review): draft → live promote ONLY for draft/null sources —
-        # an unconditional promote resurrected retracted (terminal) sources,
-        # violating the terminal-state contract with no event in the stream.
+        # #1088: the guarded SET below fills in only a NEVER-SET status with
+        # the live default — an explicitly-drafted source is never moved to
+        # live by this command.
+        # P1 (code-review): the guard exists because an unconditional promote
+        # resurrected retracted (terminal) sources, violating the terminal-state
+        # contract with no event in the stream.
         # #780: extraction paths (promote_source=False) skip this entirely —
         # the source stays draft and the draft operator node carries the status.
         if promote_source:
+            # #1088: only a never-set status is filled in with the live
+            # default; an explicitly-drafted source is never moved to live
+            # by this command.
             proj.g.query(
                 "MATCH (s:Point {id:$sid}) "
-                "WHERE (s.status IS NULL OR s.status = 'draft') "
+                "WHERE s.status IS NULL "
                 "SET s.status = 'live'",
                 params={"sid": source_id},
             )
@@ -10813,6 +11020,20 @@ class TortoiseSDK:
         interpolated into the query STRUCTURE (``-[:TYPE]->``) where
         parameterization is impossible; an unvalidated value is a Cypher
         injection primitive. direction is validated to outgoing/incoming.
+
+        #6101: each result carries the matched edge's ``idx`` property.
+        ``create_operator`` writes one IMPL/NAND/hasPart edge per input with
+        ``idx`` 0 on the SOURCE and ``idx >= 1`` on each TARGET (mirrored by
+        ``(input)-[:INPUT {idx}]->(operator)``). Dropping that property made a
+        returned endpoint pair unordered, so an operator read identically to
+        its own reverse. ``idx`` always names the OPERATOR-INPUT end of the
+        matched edge. On an operator's own edge that end is not the operator,
+        so ``direction="outgoing"`` (queried from the operator) reports each
+        input's position and ``direction="incoming"`` (queried from an input)
+        reports the queried point's position. The ``:INPUT`` mirror points the
+        other way, so for it those two SWAP. Edges written without an ``idx``
+        — non-operator edges, and edges predating the property — return
+        ``None``.
         """
         proj = self._get_proj()
         # #329: validate before building any Cypher
@@ -10820,15 +11041,16 @@ class TortoiseSDK:
         validate_rel_type(relationship_type)
         if direction not in ("outgoing", "incoming"):
             raise ValueError(f"Invalid direction: {direction!r}. Use 'outgoing' or 'incoming'.")
-        pat = (f"(n:Point {{id:$id}})-[:{relationship_type}]->(m:Point)"
+        pat = (f"(n:Point {{id:$id}})-[r:{relationship_type}]->(m:Point)"
                if direction == "outgoing" else
-               f"(n:Point {{id:$id}})<-[:{relationship_type}]-(m:Point)")
+               f"(n:Point {{id:$id}})<-[r:{relationship_type}]-(m:Point)")
         rows = proj.g.query(
-            f"MATCH {pat} RETURN m.id, m.content, m.pointKind",
+            f"MATCH {pat} RETURN m.id, m.content, m.pointKind, r.idx",
             params={"id": id},
         ).result_set
         return [
-            {"id": r[0], "content": r[1], "pointKind": r[2]}
+            {"id": r[0], "content": r[1], "pointKind": r[2],
+             "idx": r[3] if len(r) > 3 else None}
             for r in rows
         ]
 
@@ -12134,17 +12356,26 @@ class TortoiseSDK:
           merge by name; operator connections dedup by (op_type, input set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
-        - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle). Under promotion_policy='gated' ANY effective status other
-          than 'draft' on a point item is rejected (INGEST CONTRACT row 9 —
+        - EP-safe: under promotion_policy='gated' every no-status point is
+          born draft and stays draft (the operator wiring passes
+          promote_source=False). Under promotion_policy='auto' a no-status
+          connection-source point is born live and a no-status non-source
+          point draft; a no-status DECIDE-PART item is left to create_point's
+          #2199 system-default baseline. Since #1088 create_point's own
+          default is live, this path states each point's status by intent
+          rather than inheriting that default. Under gated ANY effective
+          status other than 'draft' on a point item is rejected (INGEST
+          CONTRACT row 9 —
           no bypass of the gated contract; the sanctioned routes are
           promotion_policy='auto' or update_point(status='live') after ingest;
           case variants, nested props={...}, and canonical terminal statuses
           are rejected too — EP _live_only excludes 'draft' and terminal
           statuses/flag (#2422)).
           Connection-driven promotion (source → live on first edge) only
-          happens under promotion_policy='auto', and only for draft/null-status sources
-          (retracted/deprecated terminal sources are never resurrected).
+          happens under promotion_policy='auto', and only for null-status
+          sources (retracted/deprecated terminal sources are never
+          resurrected; an explicit or prior draft is never retro-promoted,
+          #1088).
           Under auto the operator node is written WITHOUT a status property
           (live by projection — the #780 asymmetry: gated writes explicit
           draft on the operator, auto writes none).
@@ -12275,7 +12506,77 @@ class TortoiseSDK:
                                 "item": item, "result": node,
                                 "deduped": bool(existed and existed[0][0])})
 
-        # ── 2. Points (default status='draft', #131) ────────────────────
+        # ── 2. Points (status stated EXPLICITLY, #1088) ─────────────────
+        # #1088 / INGEST_CONTRACT.md §11: with live as the create_point
+        # default, ingest states each point's status by INTENT instead of
+        # inheriting a default. Under gated every no-status point is born
+        # draft and stays draft (the operator wiring passes
+        # promote_source=False). Under auto the edge SOURCE is the point the
+        # #131 contract promotes live — and under the #1088 ruling that is
+        # exactly what create_point's default supplies, so ingest injects
+        # NOTHING for a source; the operator-connection TARGET keeps the
+        # draft→live lifecycle. An explicit per-item status (top-level or
+        # nested props) always wins — the gated row-9 gate above already
+        # rejected any non-draft explicit status, and this default fills only
+        # items that carry no status key anywhere (mirrors
+        # _check_gated_status's has_status).
+        # #1088: the operator-connection TARGETS, collected from the
+        # operator-requiring connections. A target is NOT promoted — the #131
+        # contract promotes only the source — so under auto a no-status
+        # target keeps the draft→live lifecycle (tests/test_mcp_server.py,
+        # "source-only"). A point that is neither source nor target is a
+        # standalone point: no status is injected at all, so create_point's
+        # (live) default supplies it.
+        _auto_sources: set[str] = set()
+        _auto_targets: set[str] = set()
+        if promotion_policy == "auto":
+            for _conn in bundle.get("connections") or []:
+                # Only an OPERATOR-requiring connection has a promotion path
+                # (create_operator / create_direct_edge, both keyed on
+                # "operator"). A plain relation connection (extractedFrom /
+                # aboutSubject / …) never promotes, so it contributes no
+                # target — mirror the ``if "operator" in conn`` write branch
+                # below.
+                if not (isinstance(_conn, dict) and "operator" in _conn):
+                    continue
+                # #1088: SOURCE WINS. A dual-role point — the `to` of one
+                # operator connection AND the `from` of another — must not
+                # be classified as a target. The three promotion clauses were
+                # narrowed by this PR to fill only a NEVER-SET status
+                # (`WHERE s.status IS NULL`), so an injected draft on a
+                # connection SOURCE is never overwritten by the later
+                # promote: the point would stay draft forever and be
+                # silently EP-inert. A source is born live by create_point's
+                # default, so collect the sources and subtract them from the
+                # targets below.
+                _from = _conn.get("from")
+                if isinstance(_from, str):
+                    _auto_sources.add(_from)
+                # #3263 parity: `to` is a LIST on a many-to-many operator
+                # connection (the same shape _resolve_ref_field and the
+                # extractedFrom branch above handle element-wise). Collecting
+                # only the scalar form silently reclassified every list-`to`
+                # endpoint as a STANDALONE point, which then inherited the
+                # live default — main wrote those targets draft.
+                _to = _conn.get("to")
+                if isinstance(_to, str):
+                    _auto_targets.add(_to)
+                elif isinstance(_to, list):
+                    _auto_targets.update(
+                        t for t in _to if isinstance(t, str))
+            # #1088 SOURCE WINS: a dual-role point is a source first, so it is
+            # never treated as a target (see the rationale above).
+            _auto_targets -= _auto_sources
+
+        def _bundle_item_has_status(it: dict) -> bool:
+            """True when a point item carries a status key top-level OR in a
+            nested props dict (the two forms _coerce_props flattens — the
+            same two _check_gated_status inspects)."""
+            if "status" in it:
+                return True
+            return (isinstance(it.get("props"), dict)
+                    and "status" in it["props"])
+
         for i, item in enumerate(bundle.get("points") or []):
             viols = []
             self._check_item_shape("points", i, item, viols)
@@ -12314,25 +12615,42 @@ class TortoiseSDK:
             # carries the same non-operator predicate the writer uses, so the
             # counter matches the writer exactly.
             existed = self._find_point_by_content(content, pointKind=kind)
-            # #7856: under the gated contract EVERY ingest point stays draft.
-            # A born-live kind (`goal`, and the #2199 decide parts) would
-            # otherwise be written LIVE when the item carries no explicit
-            # status — `_check_gated_status` only inspects an EXPLICIT status,
-            # so the born-live default was a silent bypass of the gate. Name
-            # `draft` explicitly so the effective status is the one the
-            # contract promises; `promotion_policy='auto'` stays the sanctioned
-            # route to a live goal.
+            # #1088 / #2199: decide the status on the WRITE COPY only — never
+            # on `item` itself. An explicit per-item status (top-level or
+            # nested props) ALWAYS wins: the branches below fill only items
+            # that carry no status key anywhere (mirrors _check_gated_status's
+            # has_status). Under gated EVERY no-status ingest point is born
+            # draft — that explicit draft IS the request the gate promises
+            # (`_check_gated_status` only inspects an EXPLICIT status, so
+            # without it a born-live kind would silently bypass the gate).
             write_item = item
-            if promotion_policy == "gated" and "status" not in item and not (
-                isinstance(item.get("props"), dict)
-                and "status" in item["props"]
-            ):
-                # #7856: a COPY, not a mutation of `item`. Granular
-                # `results[].item` echoes the item's remaining props
-                # (docs/INGEST_CONTRACT.md — empty for a bare statement
-                # point), so forcing the draft in place would report a
-                # status the caller never passed.
-                write_item = {**item, "status": "draft"}
+            if not _bundle_item_has_status(item):
+                if promotion_policy == "gated":
+                    # gated IS the explicit draft request: every no-status
+                    # ingest point is born draft and stays draft.
+                    write_item = {**item, "status": "draft"}
+                elif (ref in _auto_targets and not (
+                        isinstance(kind, str)
+                        and kind in DECIDE_PART_KINDS | GOAL_KINDS)):
+                    # #131 "source-only": an operator-connection TARGET keeps
+                    # the draft→live lifecycle. Everything else under auto is
+                    # left with NO status, so create_point's default supplies
+                    # it — live, per the #1088 ruling. A dual-role point was
+                    # already subtracted from _auto_targets (SOURCE WINS), so
+                    # nothing is injected for it and it is born live; no
+                    # `live` branch is injected anywhere — the default is it.
+                    # #2199 and #7856: the decide parts and `goal` are
+                    # exempt because a draft Point that is only ever a TARGET
+                    # is EP-inert while the graph still reports it (a goal
+                    # additionally reports converged=True — docs/ONTOLOGY.md
+                    # §5). Those kinds keep their born-live contract; only
+                    # `promotion_policy='gated'` writes them draft.
+                    write_item = {**item, "status": "draft"}
+            # #7856: a COPY, never a mutation of `item`. Granular
+            # `results[].item` echoes the item's remaining props
+            # (docs/INGEST_CONTRACT.md — empty for a bare statement point),
+            # so forcing the draft in place would report a status the caller
+            # never passed.
             point = self.create_point(kind, content, dedup=True, **write_item)
             pid = point["id"]
             if ref:
@@ -13024,9 +13342,12 @@ class TortoiseSDK:
         # Promotion-on-created-only (CYCLE-24 pin): the guarded #131-style SET
         # fires ONLY when the MERGE created the edge.
         if created and promote_source:
+            # #1088: only a never-set status is filled in with the live
+            # default; an explicitly-drafted source is never moved to live
+            # by this command.
             proj.g.query(
                 "MATCH (s:Point {id:$id}) "
-                "WHERE s.status IS NULL OR s.status = 'draft' "
+                "WHERE s.status IS NULL "
                 "SET s.status = 'live', s.updatedAt = $now",
                 params={"id": source_id,
                         "now": _now_iso()},
@@ -13167,9 +13488,11 @@ class TortoiseSDK:
         operator under auto (a crash after the full input-edge loop, before
         the promotion SET). Mirrors create_operator's #131 guarded SET."""
         proj = self._get_proj()
+        # #1088: only a never-set status is filled in with the live default;
+        # an explicitly-drafted operator node is never moved to live here.
         proj.g.query(
             "MATCH (s:Point {id:$id}) "
-            "WHERE s.status IS NULL OR s.status = 'draft' "
+            "WHERE s.status IS NULL "
             "SET s.status = 'live', s.updatedAt = $now",
             params={"id": op_id, "now": _now_iso()},
         )
@@ -15258,10 +15581,9 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking). The
-        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
-        are not mirrors, so `affected` can exceed the closure and coverage can
-        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        ranking). The `0 ≤ coverage ≤ 1` bound holds: `_window_closure` now
+        mirrors the pass's seed expansion and liveness predicates (#6597), so
+        ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
         flag: a converged pass clears the affected roots; a failed pass clears
         nothing (W4 retention — non-converged regions reselect via the window
@@ -15339,30 +15661,36 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
-        are transparent bridges — one claim-hop per BFS level; the operator
-        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
-        are bridged; operator-less direct edges via #888 W5 semantics; #780
-        draft exclusion). The window members themselves are reachable at 0
-        claim-hops (an operator-less isolated claim is its own window).
+        Mirrors ``TortoiseEP._affected_claims``'s reach so that
+        ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
+        (#6597). The window members themselves are reachable at 0 claim-hops
+        (an operator-less isolated claim is its own window); then, exactly as
+        ``_affected_claims`` seeds its own expansion, the plain window
+        members are expanded by ONE claim-hop (direct edges + operator
+        siblings) BEFORE the BFS loop — the closure is no longer one hop short
+        on ≥4-claim chains. Per-hop narrowing is shared: operators are
+        transparent bridges (one claim-hop per BFS level); the operator hop is
+        typed `IMPL|NAND` AND directed (#5566, only operator INPUTS bridged);
+        operator-less direct edges use #888 W5 semantics; every traversal
+        predicate is ``_live_only`` (draft AND terminal exclusion, #2422), so
+        a terminal/outdated bridge can no longer inflate the denominator.
 
-        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
-        guaranteed — do not reinstate that claim. Two gaps remain, both
-        predating #5566 and both filed (as the duplicate pair **#6597** /
-        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
-        seeds by ONE claim-hop before its loop while this starts at 0, so
-        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
-        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
-        rather than ``_live_only``, so a terminal/outdated bridge is counted
-        here but can never be reached by EP. The third asymmetry — an operator
-        window member being dropped from the seed set — was #5566's own
-        regression and is handled below.
+        One deliberate asymmetry: the SEED query keeps the draft-only filter.
+        A terminal/outdated window claim must stay a seed because
+        ``_affected_claims`` still expands its operator siblings through
+        ``_live_neighbors`` (which does not filter the seed); dropping it here
+        would make the closure miss reachable claims and re-introduce
+        ``coverage > 1.0``. The reverse — a terminal window member the pass
+        never affects — can only OVER-count, so the subset invariant holds.
 
-        Two batched queries per hop (operator-bridge + direct-edge), seeded
-        with the whole window — cheap for the scheduler's large windows
-        (2 × max_hops queries total), unlike a per-seed BFS.
+        Batched queries per hop (operator-bridge + direct-edge), seeded with
+        the whole window and one extra seed hop — cheap for the scheduler's
+        large windows (O(max_hops) queries total), unlike a per-seed BFS.
         """
         proj = self._get_proj()
+        # #6597: the SEED keeps the draft-only predicate (see docstring) —
+        # terminal window claims must remain seeds so the operator siblings
+        # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -15371,73 +15699,104 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+
+        live_op = _live_only("op.status")
+        live_m = _live_only("m.status")
+        live_a = _live_only("a.status")
+        live_b = _live_only("b.status")
+        live_o = _live_only("o.status")
+        live_c = _live_only("c.status")
+
+        def _hop(frontier: list[str]) -> list[str]:
+            """One batched claim-hop; returns the newly-reached claim ids.
+
+            Query shape mirrors ``_affected_claims``'s per-hop batch:
+            operator-mediated bridges (operator INPUTS only, typed AND
+            directed — #5566; op_type OR is_operator legacy parity, #943)
+            plus operator-less direct IMPL|NAND edges (#888 W5). Every
+            endpoint predicate is ``_live_only`` (#2422) so the closure does
+            not count a terminal bridge EP can never reach.
+            """
+            new_frontier: list[str] = []
+            if not frontier:
+                return new_frontier
+            nbr_rows = proj.g.query(
+                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m:Point) "
+                "WHERE n.id IN $ids AND m.id <> n.id "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                f"AND {live_op} AND {live_m} "
+                "RETURN DISTINCT n.id, m.id",
+                params={"ids": frontier},
+            ).result_set
+            for _nid, mid in nbr_rows:
+                if mid not in closure:
+                    closure.add(mid)
+                    new_frontier.append(mid)
+            dir_rows = proj.g.query(
+                "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                "WHERE a.id IN $ids AND b.id <> a.id "
+                f"AND {live_a} AND {live_b} "
+                # #3139/#3154: index-independent non-operator predicate
+                # (the `= false` form is emptied by a GRAPH.COPY'd index).
+                "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                "AND a.op_type IS NULL "
+                "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                "AND b.op_type IS NULL "
+                "RETURN DISTINCT a.id, b.id",
+                params={"ids": frontier},
+            ).result_set
+            for _aid, bid in dir_rows:
+                if bid not in closure:
+                    closure.add(bid)
+                    new_frontier.append(bid)
+            return new_frontier
+
+        # #6597: one claim-hop of SEED expansion from the plain window
+        # members, mirroring `_affected_claims`'s plain-seed branch (direct
+        # neighbors + operator siblings). Without it the closure trails the
+        # pass by a claim-hop and `coverage` exceeds 1.0 on ≥4-claim chains.
+        seed_frontier = _hop(list(closure))
         # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
         # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
         # operator reaches that operator's INPUTS, so they are part of what a
         # pass CAN reach and belong in the denominator. Without them the closure
         # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
-        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
-        # denominator bug #6597/#6598 describe, reached through the SEED rather
-        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
-        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), the
+        # denominator bug reached through the SEED rather than the hop. Mirrors
+        # `_affected_claims`'s operator-seed branch, which admits an operator
+        # seed's outgoing `IMPL|NAND` targets.
         op_input_rows = proj.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND (o.status IS NULL OR o.status <> 'draft') "
-            "AND (c.status IS NULL OR c.status <> 'draft') "
+            f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
             params={"ids": list(window)},
         ).result_set
-        closure |= {r[0] for r in op_input_rows}
-        frontier = list(closure)
+        op_inputs: list[str] = []
+        for _r in op_input_rows:
+            if _r[0] not in closure:
+                closure.add(_r[0])
+                op_inputs.append(_r[0])
+        frontier = seed_frontier + op_inputs
+        # #6597: the pass does NOT seed EP from the raw window — `dream.py`
+        # seeds it from `_bfs_select_operators(window, max_hops)`, which
+        # already expands the window by up to `max_hops` graph hops. The pass
+        # therefore reaches the selector's max_hops hops PLUS
+        # `_affected_claims`'s own seed hop and its max_hops BFS — up to
+        # `2*max_hops + 1` claim-hops from the window. A claim-hop is never
+        # shorter than a graph hop, so expanding one seed hop + `2*max_hops`
+        # more is a provable SUPERSET of every claim the selector can hand
+        # EP. This is deliberately conservative for operator window members
+        # (whose seed hop already lands on the operator's inputs); the hard
+        # contract is `affected ⊆ closure` / `coverage <= 1.0`, not a tight
+        # denominator.
+        hop_budget = None if max_hops is None else 2 * max_hops
         hops = 0
-        while frontier and (max_hops is None or hops < max_hops):
+        while frontier and (hop_budget is None or hops < hop_budget):
             hops += 1
-            new_frontier: list[str] = []
-            if frontier:
-                # Operator-mediated bridges (op_type OR is_operator — legacy
-                # operator detection parity, #943). Never hops through drafts.
-                # #5566: typed AND directed, mirroring _affected_claims — only
-                # operator INPUTS are bridged (a structural predicate or the
-                # reverse-only mitigation `IMPL` forms no factor and would
-                # inflate the denominator, permanently under-reporting
-                # coverage).
-                nbr_rows = proj.g.query(
-                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                    "-[r2:IMPL|NAND]->(m:Point) "
-                    "WHERE n.id IN $ids AND m.id <> n.id "
-                    "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                    "AND (op.status IS NULL OR op.status <> 'draft') "
-                    "AND (m.status IS NULL OR m.status <> 'draft') "
-                    "RETURN DISTINCT n.id, m.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _nid, mid in nbr_rows:
-                    if mid not in closure:
-                        closure.add(mid)
-                        new_frontier.append(mid)
-                # Operator-less direct IMPL|NAND edges between plain Points
-                # (#888 W5). Draft endpoints never propagate (#780).
-                dir_rows = proj.g.query(
-                    "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
-                    "WHERE a.id IN $ids AND b.id <> a.id "
-                    "AND (a.status IS NULL OR a.status <> 'draft') "
-                    "AND (b.status IS NULL OR b.status <> 'draft') "
-                    # #3139/#3154: index-independent non-operator predicate
-                    # (the `= false` form is emptied by a GRAPH.COPY'd index).
-                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
-                    "AND a.op_type IS NULL "
-                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
-                    "AND b.op_type IS NULL "
-                    "RETURN DISTINCT a.id, b.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _aid, bid in dir_rows:
-                    if bid not in closure:
-                        closure.add(bid)
-                        new_frontier.append(bid)
-            frontier = new_frontier
+            frontier = _hop(frontier)
         return closure
 
     def _reachable_claim_count(self) -> int:
@@ -22279,6 +22638,60 @@ class TortoiseSDK:
             secondary_entity_id_props,
         )
 
+        # #3311: POINT-LABEL PRECEDENCE on the multi-label shape. A node that
+        # carries the :Point label is governed by the claim lifecycle
+        # vocabulary (#2977), and a `status` write through this generic
+        # surface must be JOURNALED against the label the node REPLAYS as.
+        #
+        # Before this guard the :Point arm below wrote caller props with a live
+        # `SET n += $p` and emitted no state record, while a sibling arm (e.g.
+        # :Object) re-wrote the SAME node and journaled a `restatus` for ITS
+        # label. That record cannot fold on replay — no production path mints a
+        # `:Point:Object`, so the node re-materializes as `:Point` — which is
+        # why `update_entity(<:Point:Object>, status=...)` BOTH accepted an
+        # unvalidated value (`''`, `'deprecated'`, arbitrary text) AND left a
+        # record `rebuild_all` refused with `state-op-miss`. Validate once
+        # against the Point vocabulary, write once, journal once through the
+        # ONE builder (`_journal_entity_mutation`, which already handles
+        # `restatus`), then drop the key so no sibling arm repeats it.
+        #
+        # A union vocabulary would close the validation half and leave the
+        # journal half: journaling is what decides this mechanism.
+        if "status" in props:
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _pt_hits:
+                _status = props["status"]
+                if (not isinstance(_status, str)
+                        or _status not in POINT_STATUS_VALUES):
+                    # Same refusal `update_point` issues (#3311 defect 1). The
+                    # raise precedes every write, so a refused status leaves
+                    # the node untouched.
+                    raise ValueError(
+                        f"Invalid status {_status!r}. "
+                        f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
+                    )
+                # Write FIRST, journal SECOND, gated on the write having
+                # MATCHED (a missed/no-op write must never leave a phantom
+                # record — the count probe above and this SET are two
+                # statements, so a concurrent delete between them must not
+                # journal a record whose fold then reports
+                # `state-op-miss`). `status` is then dropped from `props` so
+                # the per-label loop cannot re-write it — and, on a sibling
+                # arm, cannot journal a second `restatus` against a label this
+                # node cannot replay as.
+                _wrote = proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n += $s RETURN count(n)",
+                    params={"id": id_val, "s": {"status": _status}},
+                ).result_set
+                if _wrote and _wrote[0][0]:
+                    self._journal_entity_mutation(
+                        "Point", id_val, "restatus",
+                        state={"status": _status})
+                props = {k: v for k, v in props.items() if k != "status"}
+
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT
@@ -24458,6 +24871,18 @@ class TortoiseSDK:
         counts only Events already fully linked — index_file enumerates skip
         reasons; backfill's skipped bucket had no definition until this pin —
         E2E-8's second run asserts it).
+        Accounting for a legacy Event is EXHAUSTIVE per run (issue #3593) — it
+        lands in exactly ONE category: `created` (this run created the Source;
+        the edge link also counts in `linked`), `skipped` (already fully linked
+        at probe time), or the REPAIR category `linked`-WITHOUT-`created` (the
+        Source already existed — e.g. a concurrent `index_directory` created it
+        inside this run's probe→merge window — so the conditional MERGE MATCHED
+        and only the missing edge was written; the same category the
+        crash-repair path produces). `created + skipped` is therefore NOT the
+        per-unit total: repair work is the third accounting of the same unit,
+        and the honest invariant is
+        `created + skipped + (linked when not created) == 1`
+        (pinned by tests/test_backfill_sources.py::test_e2e8_race_repair_accounting).
         Counters are HONEST in the `db` failure class: a Source-write failure
         NEVER increments `linked` (an edge that was not written is never counted),
         and a re-run REPAIRS the missing edge (`linked`) instead of skipping.
@@ -26134,6 +26559,27 @@ class TortoiseSDK:
         (``from``/``to`` are Python keywords — mapped to from_id/to_id).
 
         Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+
+        ⚠️ **A derivation ``references`` edge minted HERE carries no
+        ``sourceVersion`` anchor, and nothing will add one later.** ``references``
+        is in the allowlist above, and this method writes the edge BARE: it takes
+        no property parameter (neither do the MCP tool ``tortoise_create_edge``
+        nor ``projection.edges._EdgeHandlers.create_edge``), and ``create_source``
+        refuses a caller-supplied ``sourceVersion`` — so the anchor cannot be
+        supplied from the outside. The provenance writers
+        (``link_source_to_entity`` / ``link_source_to_event`` /
+        ``link_source_to_legacy_event``) are the only writers that stamp it, and
+        their stamp is ``ON CREATE``-only, so a bare edge created here also
+        PRE-EMPTS them: the later ``MERGE`` matches the existing edge and the
+        clause never fires. A currency read of such an edge is ``unknown``
+        (honest — never ``current``), and no writer repairs it: the only repair
+        the SDK offers is deleting the edge and re-linking through a provenance
+        writer (raw Cypher could ``SET`` the property, but that is not a repair
+        path this SDK exposes). This is the documented boundary, not an oversight:
+        option 3 of `#5213`; `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6
+        ("a pipeline guarantee, NOT a graph invariant") carries the decision, and
+        `tests/test_references_boundary_5213.py` pins this behaviour — read it
+        before re-routing this method through the anchor.
         """
         proj = self._get_proj()
         created = proj.create_edge(from_id, to_id, relation)  # validates relation

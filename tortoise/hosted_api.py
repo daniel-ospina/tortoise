@@ -1856,6 +1856,11 @@ async def _lifespan(app):
     when the 30s load timeout was exceeded on a cold 2GB VM. Embeddings are
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
+
+    #7809: the pre-warm honours ``TORTOISE_EMBEDDER_WARMUP`` (the same
+    contract ``EmbeddingModel.start_warm_up`` enforces, fail-safe default ON).
+    ``TORTOISE_EMBEDDER_WARMUP=0`` skips the thread entirely, so the test
+    suite's opt-out is not silently bypassed by the hosted lifespan.
     """
     # ── #2850: every app instance starts from a clean health-probe state.
     # A probe worker wedged during a previous app instance (TestClient reuse
@@ -1957,7 +1962,25 @@ async def _lifespan(app):
                 except Exception as exc:
                     _logger.warning("embeddings: background pre-warm failed: %s", exc)
 
-            threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
+            # #7809: honour the SAME ``TORTOISE_EMBEDDER_WARMUP`` contract
+            # ``EmbeddingModel.start_warm_up`` enforces (#4097). Without this
+            # the suite-wide ``TORTOISE_EMBEDDER_WARMUP=0``
+            # (tests/conftest.py::_disable_embedder_autowarmup) was ignored
+            # here, so every ``with TestClient(ha.app)`` started a REAL
+            # embedder load that outlived its test and leaked into the next
+            # one. Fail-safe: an unset env keeps the pre-warm ON.
+            from tortoise.embeddings import _embedder_warmup_enabled
+
+            if _embedder_warmup_enabled():
+                threading.Thread(
+                    target=_prewarm_embeddings, name="embedding-prewarm",
+                    daemon=True,
+                ).start()
+            else:
+                _logger.info(
+                    "embeddings: background pre-warm skipped "
+                    "(TORTOISE_EMBEDDER_WARMUP=0)"
+                )
         except Exception as exc:
             _logger.warning("embeddings: could not start background pre-warm: %s", exc)
 
@@ -6340,9 +6363,20 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
         _alert_unmetered("write_op", org_id, e)
 
 
-async def _emit_capture_ledger(org_id: str, session_id: str,
-                               meta: dict) -> None:
+async def _emit_capture_ledger(org_id: str, session_id: str, meta: dict,
+                               harness: str | None = None) -> None:
     """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3843 (lane B7, owner-decided): ``harness`` is the SERVER-RESOLVED capture
+    harness (``_capture_session_impl``'s ``capture_harness``), carried onto the
+    per-capture record beside ``session_id``. The owner's decided record shape
+    is *team · session · timestamp · harness · model(s) · calls · input tokens ·
+    output tokens · cost* — every element but ``harness`` already rode this row
+    (team = the row's ``org_id``, timestamp = ``created_at``, model(s) = the
+    ``by_stage`` keys), and a per-harness/per-team read was therefore
+    impossible from the record alone. Defaulted so the ledger-only callers
+    (metering tests, the ``_emit_capture_ledger`` unit seams) keep working; the
+    capture call site always passes it.
 
     #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
     #3359's analytics row is a measurement, not a ledger: nothing keyed by
@@ -6370,7 +6404,7 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
     an analytics failure and must not be labelled one.
     """
     try:
-        _cost_props = _capture_cost_props(session_id, meta)
+        _cost_props = _capture_cost_props(session_id, meta, harness)
         if _cost_props is None:
             return
         from tortoise.metering import record_capture_usage
@@ -6542,6 +6576,18 @@ class CreatePointRequest(BaseModel):
     # tool use. A value the store cannot hold is a 422, never a silent drop.
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
+    # #1088: a no-status write is LIVE, and the fail-closed calibration gate
+    # (#344/#1157) demands an authored baseline before an EP surface (dream)
+    # runs — so the REST write surface must be able to AUTHOR one, exactly as
+    # the MCP ``tortoise_create_point`` tool already can (it has carried
+    # ``credibility`` since before this endpoint existed). Without this a
+    # hosted client could write a live point that ``/v1/dream`` then refuses
+    # and never make it EP-able through this surface. Forwarded to
+    # ``create_point``'s ``credibility=`` and consumed into the
+    # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
+    # with a logged warning (the existing point keeps its own baseline).
+    credibility: str | int | float | None = None
 
     @field_validator("kind")
     @classmethod
@@ -6562,6 +6608,23 @@ class CreatePointRequest(BaseModel):
                 raise ValueError("each tag must be 1-200 characters")
             if any(ch in t for ch in '\n\r\t'):
                 raise ValueError("tags cannot contain newlines or tabs")
+        return v
+
+    @field_validator("credibility")
+    @classmethod
+    def valid_credibility(cls, v):
+        # #1088: the ladder word/scale is resolved by the SDK itself
+        # (`source_credibility.credibility_prior`). Validating HERE turns a
+        # typo into the 422 this model's other author fields promise instead
+        # of a 500 raised from deep inside `create_point` (the route's bare
+        # `except Exception` maps anything unanticipated to 500).
+        if v is None:
+            return v
+        from tortoise.source_credibility import credibility_prior
+        if credibility_prior(v) is None:
+            raise ValueError(
+                f"Unknown credibility {v!r}. Ladder words: gold / high / "
+                "medium / low / unverified (or the T0-T4 / numeric forms).")
         return v
 
 
@@ -8260,6 +8323,8 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["confidence"] = body.confidence
             if body.authoredBy is not None:
                 _author_props["authoredBy"] = body.authoredBy
+            if body.credibility is not None:
+                _author_props["credibility"] = body.credibility
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
@@ -13209,7 +13274,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # increment to the operator (lane=capture_ledger) instead of leaving
         # a silent short ledger row behind. A ledger failure is not an
         # analytics failure and is never labelled one.
-        await _emit_capture_ledger(org["org_id"], session_id, meta)
+        await _emit_capture_ledger(org["org_id"], session_id, meta,
+                                   capture_harness)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -13494,10 +13560,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (byte-parity with the mirror) — minted ids calibrate; folded entries
     # resolved to nodes already calibrated at their original ingest are
     # never re-calibrated (no EP churn on re-ingest); a folded canonical
-    # still draft/uncalibrated from a fail-open first ingest gets its
-    # FIRST calibration here.
+    # still UNCALIBRATED from a fail-open first ingest keeps being nominated
+    # for its FIRST calibration here. A folded EXPLICIT draft is
+    # intentionally left uncalibrated: #1088 never retro-promotes a folded
+    # id, and the local EP pass excludes drafts (``include_draft=False``).
     ep_ids = _capture_ep_target_ids(extracted, proj)
-    if ep_ids:
+    # #1088 P2: the operator-promotion arm must not ride the CALIBRATION
+    # selector. A capture whose payload points ALL fold onto canonicals that
+    # are ALREADY calibrated gets ``ep_ids == []`` — the selector keys on
+    # ``posterior_alpha IS NULL AND ep_alpha IS NULL`` — yet the capture can
+    # still have wired a NEW IMPL/NAND operator; gating the whole pass on
+    # ``ep_ids`` left that operator ``status='draft'`` (EP-inert under the
+    # #780 live-only selector, with no public promote path). Run the pass
+    # when EITHER list is non-empty. (e96b01681 widened the promotion JOIN
+    # but left this guard, so only the folded-but-UNCALIBRATED sub-case was
+    # fixed.)
+    operator_ids = list(meta.get("operator_ids") or [])
+    if ep_ids or operator_ids:
         # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
         # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
         # (#3718). It ran INLINE here, ON the event loop, freezing every
@@ -13525,7 +13604,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         def _capture_ep_pass() -> None:
             with _dream_lock(_dk):
                 _apply_capture_ingest_ep(
-                    sdk, ep_ids, warn=extraction_warnings.append)
+                    sdk, ep_ids,
+                    promotion_ids=_capture_minted_ids(extracted),
+                    operator_ids=operator_ids,
+                    warn=extraction_warnings.append)
 
         await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
@@ -26835,6 +26917,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #3843: the capture_cost row's harness dimension reuses the `harness` key
+    # already registered above (the onboarding emits carry it), so no new name
+    # is introduced and the flat allowlist is not widened for every event.
+    # Do NOT remove `harness` from the first line — the per-capture usage
+    # record's per-harness read depends on it surviving this filter.
     # #5868: a per-route by_stage sub-total that could not represent a charge.
     # Without this key the disclosure is stripped here — the documented #3359
     # loss mode — and the row's cost_usd-vs-by_stage gap stays unexplained.
@@ -28211,7 +28298,8 @@ def _as_call_count(value) -> int:
     return n if n > 0 else 0
 
 
-def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+def _capture_cost_props(session_id: str, meta: dict,
+                        harness: str | None = None) -> dict | None:
     """#3359: the per-session cost driver as an analytics ``properties`` dict.
 
     Reads the extractor telemetry (``meta["stats"]["llm"]``) that
@@ -28248,6 +28336,20 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
 
     A capture whose extraction ERRORED does carry a roll-up (and therefore
     a row): the provider calls were made and their spend is real.
+
+    #3843 (lane B7): ``harness`` is the SERVER-RESOLVED capture harness — the
+    last element of the owner's decided per-capture record shape that had no
+    carrier here (see ``_emit_capture_ledger``). It is ALWAYS present on the
+    row, with ``"unknown"`` standing in when the server could not name one
+    (a session-JWT/browser capture observes no harness — ``_credential_is_
+    agent`` is False, so ``_observed_capture_harness`` returns ``None``; see
+    #3700). The sentinel is the one this codebase already uses for exactly
+    this quantity on the Session node (the session-provenance emit,
+    ``source_harness=capture_harness or "unknown"``) — one vocabulary, not a
+    second one. Absence could not
+    do the job: a missing key is the #3824 F1/F2 collapse in miniature, since
+    a pre-#3843 row and a capture whose harness is merely unproven would be
+    the same shape, and every one of them would read as "harness = nothing".
     """
     stats = meta.get("stats") or {}
     llm = stats.get("llm") or {}
@@ -28268,6 +28370,11 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     from tortoise.extractor_v2 import _normalise_token_count
     return {
         "session_id": session_id,
+        # #3843: the harness dimension of the per-capture usage record.
+        # Already in ``_ALLOWED_ANALYTICS_PROPS`` (the onboarding emits carry
+        # it), so it survives the PII filter without widening the global flat
+        # allowlist for every other event.
+        "harness": harness or "unknown",
         "calls": int(llm.get("calls", 0) or 0),
         "retries": int(llm.get("retries", 0) or 0),
         "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,

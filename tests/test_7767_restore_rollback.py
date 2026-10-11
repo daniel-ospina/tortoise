@@ -194,6 +194,154 @@ def test_a_successful_restore_commits_and_leaves_no_aside(tmp_path):
     assert _asides(tmp_path) == [], "a committed restore left an aside behind"
 
 
+# ── the snapshot-less fold must not land on a populated graph (#7928) ──
+
+
+def test_a_snapshot_less_restore_refuses_a_populated_destination_before_mutating(
+        tmp_path):
+    """#7928: FAILS IF: a snapshot-less restore folds the journal INTO a
+    destination graph that already holds nodes, so a refusal that lands
+    mid-replay leaves the partially-folded records behind (pre-fix the
+    destination held BOTH `pre-existing` and `added-by-partial-replay`,
+    measured).
+    REACHABLE: a destination DB holding one Point and a backup with NO
+    snapshot whose journal is a terminalizer miss that only refuses AFTER the
+    earlier `PointAdded` has been folded — the exact shape filed on #7928."""
+    from tortoise.backup import NonEmptyDestinationError
+    from tortoise.projection import FalkorProjection
+
+    dest_events, dest_db = _dest(tmp_path)
+    # Create the destination GRAPH first (so its node set is exactly
+    # `pre-existing`) and only then give it a journal — a journal written
+    # before the DB exists is auto-folded into the DB on first open, which is
+    # not the state under test.
+    keeper = FalkorProjection(str(dest_db))
+    try:
+        keeper.g.query("CREATE (:Point {id: 'pre-existing', content: 'kept'})")
+    finally:
+        keeper.close()
+    dest_events.write_text('{"type":"PointAdded","point":{"id":"dest-marker"}}')
+    before = dest_events.read_bytes()
+    src = _backup_dir(
+        tmp_path,
+        _journal(
+            {"type": "PointAdded",
+             "point": {"id": "added-by-partial-replay", "content": "x"}},
+            {"type": "PointSuperseded", "id": "never", "new_id": "y",
+             "event_id": "e-7928"},
+        ),
+        snapshot=None)
+
+    with pytest.raises(NonEmptyDestinationError) as exc:
+        restore(str(src), db_path=str(dest_db), events_path=str(dest_events),
+                into_falkor=True)
+
+    assert exc.value.node_count >= 1, exc.value
+    assert dest_events.read_bytes() == before, (
+        "the refused restore replaced the destination journal")
+    proj = FalkorProjection(str(dest_db))
+    try:
+        ids = sorted(r[0] for r in
+                     proj.g.query("MATCH (n:Point) RETURN n.id").result_set)
+    finally:
+        proj.close()
+    assert ids == ["pre-existing"], (
+        f"the refused restore left a partial fold in the destination: {ids}")
+    assert _asides(tmp_path) == [], "rollback asides were left behind"
+
+
+def test_a_snapshot_less_restore_refuses_an_AOF_ONLY_populated_destination(
+        tmp_path, monkeypatch):
+    """#7928 review (P1): FAILS IF: the pre-flight probes only the RDB path, so
+    a destination whose live graph lives ENTIRELY in `<db>-appendonlydir/`
+    reads as EMPTY and the snapshot-less fold lands on it — leaving a partial
+    fold that a mid-replay refusal cannot roll back. That is the #7928 hazard
+    on the #915 durability posture (`TORTOISE_EMBEDDED_AOF=1`), where the RDB
+    can be absent while the AOF dir holds the graph.
+    REACHABLE: build a populated store with AOF on, delete the RDB so only the
+    AOF dir holds the graph, then restore a snapshot-less backup into it.
+    Measured pre-fix: the destination kept BOTH nodes."""
+    monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")
+    from tortoise.backup import NonEmptyDestinationError
+    from tortoise.projection import FalkorProjection, stale_aof_dirs
+
+    dest_events, dest_db = _dest(tmp_path)
+    keeper = FalkorProjection(str(dest_db))
+    try:
+        keeper.g.query("CREATE (:Point {id: 'pre-existing', content: 'kept'})")
+    finally:
+        keeper.close()
+    # The precondition this test exists for: NO RDB, an AOF dir that holds the
+    # graph. Without both, the test would exercise the path it already covers.
+    assert dest_db.exists(), "precondition: the store should have an RDB here"
+    dest_db.unlink()
+    assert not dest_db.exists(), "precondition: the RDB must be gone"
+    assert any(d.is_dir() and any(d.iterdir()) for d in stale_aof_dirs(dest_db)), (
+        "precondition: the AOF dir must hold the graph")
+
+    dest_events.write_text('{"type":"PointAdded","point":{"id":"dest-marker"}}')
+    before = dest_events.read_bytes()
+    src = _backup_dir(
+        tmp_path,
+        _journal({"type": "PointAdded",
+                  "point": {"id": "added-by-partial-replay", "content": "x"}}),
+        snapshot=None)
+
+    with pytest.raises(NonEmptyDestinationError) as exc:
+        restore(str(src), db_path=str(dest_db), events_path=str(dest_events),
+                into_falkor=True)
+
+    assert exc.value.node_count >= 1, exc.value
+    assert dest_events.read_bytes() == before, (
+        "the refused restore replaced the destination journal")
+    proj = FalkorProjection(str(dest_db))
+    try:
+        ids = sorted(r[0] for r in
+                     proj.g.query("MATCH (n:Point) RETURN n.id").result_set)
+    finally:
+        proj.close()
+    assert ids == ["pre-existing"], (
+        f"the refused restore left a partial fold in the AOF destination: {ids}")
+    assert _asides(tmp_path) == [], "rollback asides were left behind"
+
+
+def test_a_snapshot_less_restore_still_folds_into_an_absent_destination(
+        tmp_path):
+    """FAILS IF: the #7928 pre-flight refuses a destination that does not
+    exist — the happy path the snapshot-less JSONL fallback exists for.
+    REACHABLE: an absent destination DB and a foldable journal."""
+    dest_events, dest_db = _dest(tmp_path)
+    src = _backup_dir(
+        tmp_path,
+        _journal({"type": "PointAdded",
+                  "point": {"id": "restored-p1", "content": "kept"}}),
+        snapshot=None)
+
+    result = restore(str(src), db_path=str(dest_db), events_path=str(dest_events),
+                     into_falkor=True)
+
+    assert result["status"] == "ok", result
+    assert dest_db.exists(), "a fresh snapshot-less restore must keep its DB"
+
+
+def test_a_snapshot_restore_still_replaces_a_populated_destination(
+        tmp_path, rdb_snapshot):
+    """FAILS IF: the #7928 pre-flight refuses a restore whose backup carries a
+    snapshot — the destination is REPLACED on that path, so a populated one is
+    not the fold-into hazard the refusal guards.
+    REACHABLE: a destination DB plus a backup carrying a valid snapshot
+    (RDB-first, so no replay and no fold)."""
+    dest_events, dest_db = _dest(tmp_path)
+    dest_db.write_bytes(b"STALE-DB-BYTES")
+    src = _backup_dir(tmp_path, "[]\n", snapshot=rdb_snapshot)
+
+    result = restore(str(src), db_path=str(dest_db), events_path=str(dest_events),
+                     into_falkor=True)
+
+    assert result["status"] == "ok", result
+    assert result.get("restored_via") == "rdb", result
+
+
 # ── the snapshot-present path ────────────────────────────────────────────
 
 

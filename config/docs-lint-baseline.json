@@ -18,7 +18,8 @@
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
       "markdownlint": 3300,
-      "lychee": 52
+      "lychee": 46,
+      "relative_links": 0
     },
     "variance": "markdownlint findings are deterministic and occurrence-counted. The lychee half also checks REMOTE links, whose occurrence count varies between RUNS for reasons no author controls (rate limits, transient network, TLS, run population), so it is a SET of `(path, target)` keys, not a count \u2014 its pinned ceiling in tests/test_docs_lint_baseline.py is the MAXIMUM OBSERVED set size (a re-baseline above it must raise that row out loud) while the markdownlint one is exact. Regenerate with `update`; never hand-edit."
   },
@@ -3326,9 +3327,6 @@
   ],
   "lychee": [
     "AGENTS.md|https://github.com/premise-labs/agent-infra#prerequisites",
-    "docs/04_platform/wiki/index.md|docs/04_platform/event-catalog.md",
-    "docs/04_platform/wiki/index.md|docs/04_platform/wiki/concepts",
-    "docs/04_platform/wiki/index.md|docs/04_platform/wiki/entities",
     "docs/benchmarks/comparison-systems.md|https://www.mempalace.net/benchmarks",
     "docs/epics/2026-08-24-test-db-migration/external-research.md|https://stackoverflow.com/questions/20531494/when-should-sqlite-not-be-used-for-testing-in-django-if-a-different-rdbmse-g-p",
     "docs/epics/2026-08-27-tortoise-blog-cms/README.md|https://ybetwichurajbfswfeqa.supabase.co/",
@@ -3337,7 +3335,6 @@
     "docs/epics/2026-09-10-2835-capability-registry/prior-art-scan.md|https://dl.acm.org/doi/10.1145/1985441.1985449",
     "docs/epics/2026-09-10-2835-capability-registry/prior-art-scan.md|https://help.ardoq.com/en/articles/197354-architecture-records-metamodel",
     "docs/epics/2026-09-10-2835-capability-registry/prior-art-scan.md|https://sourcegraph.com/blog/evolving-precise-code-intel-backend",
-    "docs/license-notes.md|docs/docs/client-server-split.md",
     "docs/license-notes.md|https://www.couchbase.com/blog/couchbase-adopts-bsl-license/",
     "docs/license-notes.md|https://www.hashicorp.com/en/bsl",
     "docs/plans/2026-08-07-327-db-indexes.md|error:|Cannot parse 'docker://:16379' into a URL: empty host",
@@ -3371,11 +3368,10 @@
     "index.md|https://github.com/daniel-ospina/eldato",
     "index.md|https://github.com/daniel-ospina/eldato-outreach",
     "index.md|https://github.com/daniel-ospina/swarm",
-    "index.md|tests/deprecated_svbp",
     "product/competition/emergence-ai.md|https://medium.com/asymptotic-spaghetti-integration/emergence-ai-broke-the-agent-memory-benchmark-i-tried-to-break-their-code-23b9751ded97",
     "product/competition/emergence-ai.md|https://www.eetimes.com/u-s-startup-emergence-ai-opens-research-hub-in-bengaluru/",
     "product/competition/hindsight.md|https://g2.com/",
-    "product/competition/letta-cognee.md|https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59",
-    "tortoise/onboarding/archive/AGENT_ONBOARDING.md|tortoise/docs/beta-feedback.md"
-  ]
+    "product/competition/letta-cognee.md|https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59"
+  ],
+  "relative_links": []
 }

@@ -31,8 +31,9 @@ def sdk():
 
 
 def _make_claim(sdk, content: str, kind: str = "statement") -> dict:
-    # #992: EP tests model live claims — create_point defaults to draft since #943
-    # (#780 draft filter strips draft inputs from operators, making them degenerate).
+    # #992: EP tests model live claims — status="live" is explicit for intent;
+    # create_point's implicit status is live since #1088 (it was draft from
+    # #943; the #780 draft filter strips draft inputs from operators).
     return sdk.create_point(kind, content, dedup=False, status="live")
 
 

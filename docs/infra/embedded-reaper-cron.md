@@ -136,6 +136,11 @@ rendered plist changes, which is why an upgrade off the old
   condition under which a backlog drains is tracked separately (`#4487` /
   `#4500`).
 - Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
+- Persisted 0-client confirmation state lives at `~/.tortoise/reaper-zero-client.json`
+  by default. The path is resolved at CALL time from the ambient `$HOME`, and
+  `TORTOISE_ZERO_CLIENT_STATE_PATH` overrides it (mirroring `TORTOISE_INDEX_LOCK_DIR`);
+  the pytest session root pins the override so a test run never writes into a
+  developer's real `$HOME` (#7923).
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).
 - `--no-dry-run` also **rmtrees dead-pid leftover dirs** (`stale_socket`

@@ -44,6 +44,109 @@ def _isolate_zero_client_state(tmp_path, monkeypatch):
                         str(tmp_path / "reaper-zero-client.json"))
 
 
+# ── #7923: the zero-client state path must resolve at CALL time ────────────
+# The path used to be an import-time constant off `os.path.expanduser("~")`,
+# with no env override — so a suite that redirected $HOME after import (the
+# private session root) still wrote the state file into the developer's real
+# $HOME, and a per-test fixture that only patched the attribute could not move
+# the frozen constant. These four pin the resolution contract; the autouse
+# `_isolate_zero_client_state` above is deliberately undone (attribute ->
+# None) so the resolver, not the seam, is under test.
+
+
+def _reset_state_path(monkeypatch):
+    """Clear both the attribute seam and the env override."""
+    from tortoise import embedded_reaper
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", None)
+    monkeypatch.delenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       raising=False)
+    return embedded_reaper
+
+
+def test_zero_client_state_path_resolves_ambient_home_at_call_time(
+        tmp_path, monkeypatch):
+    """#7923: the path follows the ambient $HOME at CALL time, so redirecting
+    HOME after import (the per-session test root) moves it with it."""
+    reaper = _reset_state_path(monkeypatch)
+    home_a = tmp_path / "home_a"
+    monkeypatch.setenv("HOME", str(home_a))
+    assert reaper._zero_client_state_path() == str(
+        home_a / ".tortoise" / "reaper-zero-client.json")
+    # Not frozen: a later $HOME redirect relocates the path.
+    home_b = tmp_path / "home_b"
+    monkeypatch.setenv("HOME", str(home_b))
+    assert reaper._zero_client_state_path() == str(
+        home_b / ".tortoise" / "reaper-zero-client.json")
+
+
+def test_zero_client_state_path_env_override_wins_over_home(
+        tmp_path, monkeypatch):
+    """#7923 indicator 2: TORTOISE_ZERO_CLIENT_STATE_PATH redirects the path,
+    mirroring TORTOISE_INDEX_LOCK_DIR."""
+    reaper = _reset_state_path(monkeypatch)
+    override = tmp_path / "session" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(tmp_path / "real_home"))
+    monkeypatch.setenv(reaper.ZERO_CLIENT_STATE_PATH_ENV, str(override))
+    assert reaper._zero_client_state_path() == str(override)
+
+
+def test_zero_client_state_write_honours_env_override(tmp_path, monkeypatch):
+    """#7923 indicator 1's mechanism: a redirected state path keeps the write
+    out of the real $HOME entirely."""
+    reaper = _reset_state_path(monkeypatch)
+    real_home = tmp_path / "real_home"
+    override = tmp_path / "session" / ".tortoise" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv(reaper.ZERO_CLIENT_STATE_PATH_ENV, str(override))
+
+    reaper._zero_client_state_write(
+        {"/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}})
+
+    assert override.is_file(), "the override path must receive the write"
+    assert json.loads(override.read_text()) == {
+        "/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}}
+    assert not (real_home / ".tortoise" / "reaper-zero-client.json").exists()
+    assert reaper._zero_client_state_read() == {
+        "/x/redis.socket": {"pid": 1, "start": 2.0, "first_seen": 3.0}}
+
+
+def test_zero_client_state_path_attribute_seam_still_wins(
+        tmp_path, monkeypatch):
+    """Back-compat: the module attribute remains the highest-precedence
+    redirect, so the existing fixtures (and any operator patch) keep working."""
+    from tortoise import embedded_reaper
+    seam = tmp_path / "seam.json"
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", str(seam))
+    monkeypatch.setenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       str(tmp_path / "env.json"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert embedded_reaper._zero_client_state_path() == str(seam)
+
+
+def test_zero_client_state_confirmation_writes_inside_override(
+        tmp_path, monkeypatch):
+    """#7923 end-to-end through the confirmation path: the state persisted for a
+    live 0-client candidate lands under the env override (the per-session test
+    tree), never under the developer's real $HOME."""
+    from tortoise import embedded_reaper
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH", None)
+    real_home = tmp_path / "real_home"
+    override = tmp_path / "session" / ".tortoise" / "reaper-zero-client.json"
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv(embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV,
+                       str(override))
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(embedded_reaper, "_pid_alive", lambda p: True)
+    monkeypatch.setattr(embedded_reaper, "_pid_is_redis", lambda p: True)
+
+    rec = _zero_client_candidate("/tmp/fake-orphan-7923.sock", os.getpid())
+    embedded_reaper._mark_orphan_confirmation([rec])
+
+    assert override.is_file(), "the confirmation state must be persisted"
+    assert not (real_home / ".tortoise").exists(), \
+        "no state may be written under the real $HOME"
+
+
 @pytest.fixture(autouse=True)
 def _clean_redislite_residue():
     """Remove redislite servers + socket dirs spawned by THIS test.
@@ -4724,6 +4827,13 @@ def test_reap_only_safe_refuses_unconfirmed_live_candidate(monkeypatch):
 #   component; final-component refusal + the action-time ownership read are
 #   what is covered here). No override/allowlist for cross-uid reaping exists
 #   BY DECISION (#4136).
+#   #4237 (surfaced by this section's adversarial review, rated out of scope
+#   there): the final-component refusal above is defeated by the path's
+#   SPELLING — a trailing separator makes the kernel resolve the final
+#   component as a directory — so `_normalize_candidate_dir` now runs first
+#   and the guard and its action share one path string. Same class, closed
+#   in scope: `test_dir_owned_by_euid_refuses_a_trailing_separator_symlink`,
+#   `test_cleanup_tempdir_leaves_a_trailing_separator_symlink_target_intact`.
 # A second local uid cannot be created from a test process without root, so
 # the foreign-uid precondition is simulated the way the guard READS it: the
 # invoking `os.geteuid()` is made to differ from the directory's real
@@ -4876,6 +4986,84 @@ def test_cleanup_tempdir_still_removes_a_same_uid_dir(monkeypatch, tmp_path):
     result = R._cleanup_tempdir(owned)
     assert result is not False, "same-uid removal must never be refused"
     assert not os.path.exists(owned)
+
+
+def test_dir_owned_by_euid_refuses_a_trailing_separator_symlink(tmp_path):
+    """#4237: a trailing separator must not turn a REFUSED final symlink into
+    an authorized one.
+
+    `O_NOFOLLOW` protects the final component only, and a trailing separator
+    (or its POSIX-identical `/.` spelling) makes the kernel resolve that
+    component as a directory — `os.open("<link>/", O_RDONLY|O_DIRECTORY|
+    O_NOFOLLOW)` SUCCEEDS on macOS and `fstat` then reports the TARGET's
+    `st_uid`. The guard must return the same no-follow verdict for every
+    spelling of the same path, so the record can never authorize an action on
+    a directory it never proved ours.
+    """
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tm4237_owned")
+    link = tmp_path / "tm4237_link"
+    link.symlink_to(owned, target_is_directory=True)
+    assert R._dir_owned_by_euid(str(link)) is False
+    for form in (str(link) + os.sep,
+                 str(link) + os.sep + ".",
+                 str(link) + os.sep + "." + os.sep):
+        assert R._dir_owned_by_euid(form) is False, (
+            f"{form!r} followed the final symlink through the "
+            f"trailing-separator spelling (#4237)")
+    # The separator itself is not what fails — a GENUINE owned dir stays
+    # accepted with one (normalization, not rejection), so legitimate
+    # `dir=/tmp/x/` registry values are not silently stranded.
+    assert R._dir_owned_by_euid(owned + os.sep) is True
+    assert R._dir_owned_by_euid(owned + os.sep + ".") is True
+    # A path that is only separators IS the filesystem root: fail closed.
+    assert R._dir_owned_by_euid(os.sep) is False
+    assert R._dir_owned_by_euid(os.sep + os.sep) is False
+
+
+def test_cleanup_tempdir_leaves_a_trailing_separator_symlink_target_intact(
+        tmp_path):
+    """#4237 end-to-end: `_cleanup_tempdir("<symlink-to-our-dir>/")` must
+    REFUSE, not rmtree the TARGET.
+
+    `shutil.rmtree` refuses a symlink at the top level only when it can see
+    one (`os.path.islink("<link>/")` is False and the fd it opens is the
+    target), so BOTH the guard and the removal follow the symlink through the
+    separator. The target here is same-uid — the declared-in-scope half of
+    #4136 — which makes the guard's own verdict the only thing between the
+    call and the target's contents.
+    """
+    from tortoise import embedded_reaper as R
+    target = tmp_path / "tm4237_target"
+    target.mkdir()
+    (target / "important.txt").write_text("keep\n")
+    link = tmp_path / "tm4237_link"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert R._cleanup_tempdir(str(link) + os.sep) is False
+    assert R._cleanup_tempdir(str(link) + os.sep + ".") is False
+    assert (target / "important.txt").read_text() == "keep\n", (
+        "the trailing separator made _cleanup_tempdir rmtree the symlink's "
+        "target (#4237)")
+    # Control: the bare symlink was already refused, and stays refused.
+    assert R._cleanup_tempdir(str(link)) is False
+    assert (target / "important.txt").exists()
+
+
+def test_cleanup_tempdir_binds_rmtree_to_the_normalized_path(
+        monkeypatch, tmp_path):
+    """#4237 guard/action agreement: the path handed to `shutil.rmtree` is the
+    SAME string the ownership verdict was read from, so rmtree's own
+    top-level symlink refusal cannot be defeated by the spelling the caller
+    used (a verdict read from one path and an action taken on another is the
+    defect class, not just the symlink)."""
+    from tortoise import embedded_reaper as R
+    seen = []
+    monkeypatch.setattr(R.shutil, "rmtree",
+                        lambda p, **kw: seen.append(p))
+    owned = _owned_dir(tmp_path, "tm4237_owned")
+    assert R._cleanup_tempdir(owned + os.sep) is True
+    assert seen == [owned], f"rmtree got {seen!r}, not the guarded path"
 
 
 def test_stale_action_refuses_a_foreign_owned_dir(monkeypatch):

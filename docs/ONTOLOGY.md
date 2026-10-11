@@ -54,6 +54,14 @@ doc_status: live
 >   endpoints: the write path admits `:Point`/`:Event` only until #7902 lands, so
 >   the model must not read as a live end-to-end shape.
 >
+> **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
+> §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
+> as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,
+> which made a second pack declaring it fail the cross-pack `nearMisses` check. Owner ruling (on
+> #2767, 2026-10-09): **use core → event** — a milestone is *reached* at a moment. §5 now lists
+> `milestone` among the core event kinds, and `project-management` no longer declares it. **No new
+> vocabulary:** the packs had the category wrong and core already dissolved it.
+>
 > **Changelog v3.22 (2026-10-09 — issue #7856 — a goal's achievement state is a separate axis):**
 >
 > - New field `goalState` (§4.1 Point props, §4.3 Object props): a goal's
@@ -1253,6 +1261,8 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 ```text
 meeting, decision, experiment, deployment, review, friction, extraction,
 documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval,  # #531
+milestone,          # #2767: a milestone is REACHED at a moment — core event (a
+                    # `pm:milestone` objectKind declaration was the deformation)
 occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted occurrence;
                     # turn = capture turn records (replaces pointKind 'event', issue #1013)
 ```
@@ -1332,8 +1342,8 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 
 | Status | Kind | Write path | Transitions to | Notes |
 |--------|------|------------|----------------|-------|
-| `draft` | initial | `create_point`, `EventAPI._point` | `live` | Inert for EP computation; promoted on first operator edge |
-| `live` | active | `create_operator` (auto-promote source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
+| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point`, the capture/extraction writers | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
+| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
 | `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
@@ -1347,7 +1357,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 >
 > **Tombstone contract:** Retracted points stay in the graph (`get_point` returns them with `status='retracted'`). Default query surfaces (`query`, `paginated_query`) exclude them; pass `include_retracted=True` or an explicit `status='retracted'` filter to surface them. Deletion via `delete_point` hard-deletes (no tombstone).
 >
-> **Parity decision (#690):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). EventAPI births `draft` (same as SDK); CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
+> **Parity decision (#690, amended #1088):** SDK + EventAPI + CLI share a single status vocabulary (`POINT_STATUS_VALUES` in `sdk.py`). A no-status `create_point` is `live` and an explicit `draft` is honoured and never auto-promoted; EventAPI births `draft` as its own journal-composer posture — deliberately NOT SDK parity since #1088; CLI backfill promotes NULL-status legacy points to `live` (migration-only, not a drift). The `:GraphEvent` label is RESERVED for the #432 change-log stream (`{seq, ts, type, payload, event_id}`, zero relationships — graph islands) — distinct from the `:Event` ontology entity with `eventId` (§3.4). See docs/event-catalog.md.
 
 ---
 

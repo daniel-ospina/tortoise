@@ -714,6 +714,53 @@ export function preferredSurface(family, current) {
   return family.id
 }
 
+// ── #2936: the copy-attribution vocabulary bridge ──────────────────────────
+// The wizard's copy-attribution beacon (PATCH /v1/onboarding/state with
+// {harness, section}) may only name a harness the SERVER's analytics
+// vocabulary accepts; the handler drops anything else (and, since #3821,
+// reports it to the unregistered-value sink — so a beacon the server refused
+// stops looking like a beacon that never fired). The wizard's own vocabulary
+// has grown past that set in two directions:
+//
+//   * `codexDesktop` (#2912) is a SURFACE leaf, not a capture harness. It is
+//     the Codex Desktop GUI, which shares ~/.codex/config.toml with the CLI
+//     and whose copy hands the user the `--harness codex` install — so its
+//     copy is attributed to `codex`. The server Literal is NOT widened for it:
+//     the RECORDED decision on #1701 (docs/scoping/2026-09-10-1701-remaining-
+//     slice-scoping.md, "Do NOT 'fix' the missing beacon by widening a
+//     Literal") is that the capture and copy-attribution value sets stay ONE
+//     set, and the session Literal mints a per-harness receipt key per member
+//     — widening it would mint one for a surface that files no session.
+//   * `chatgpt` is key-less OAuth with no local skills and no capture lane, and
+//     `tests/test_onboarding_analytics_patch.py` pins that the server stays
+//     inert for it. #2698/#2912 keep it out of the live chooser, but the
+//     ARCHIVED #1643 render still maps the full HARNESS_ORDER, so the bridge
+//     must answer for it too.
+//
+// A `null` entry means "no attributable value — emit NOTHING", never "send it
+// and let the server drop it". A leaf with NO entry is taken as itself, which
+// is what the server's identity-valued harnesses need; the invariant this
+// rests on — every leaf the chooser can select resolves into the server
+// vocabulary — is enforced by
+// `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract`
+// (the JS side declares the exceptions; the server side owns the vocabulary,
+// so the set is not restated here where it could drift).
+export const HARNESS_ANALYTICS_ALIASES = Object.freeze({
+  codexDesktop: 'codex',
+  chatgpt: null,
+})
+
+// The value the copy-attribution beacon emits for a wizard leaf, or null when
+// the leaf must not be attributed at all. The ONE place this mapping lives —
+// the live connect step's cards and the archived render's `wizardCopy` both
+// resolve through it (main.jsx `wizardBeacon`).
+export function analyticsHarnessOf(leaf) {
+  if (leaf == null) return null
+  return Object.prototype.hasOwnProperty.call(HARNESS_ANALYTICS_ALIASES, leaf)
+    ? HARNESS_ANALYTICS_ALIASES[leaf]
+    : leaf
+}
+
 // ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
 // The connect step's ONE command per harness — all 7 covered, 4 self-install
 // (config-write) + 3 teach-human (desktop/web/chatgpt — web/chatgpt have no

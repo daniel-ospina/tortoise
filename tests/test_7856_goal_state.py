@@ -165,11 +165,19 @@ def test_gated_ingest_does_not_echo_a_synthetic_status(sdk):
     assert r["results"][0]["item"] == {}
 
 
-def test_non_goal_points_still_born_draft(sdk):
-    """The born-live default is scoped to `goal` — ordinary claims keep the
-    #131 draft→live lifecycle."""
+def test_non_goal_points_born_live_by_default(sdk):
+    """#1088 owner ruling: `live` is the DEFAULT for everything added to the
+    graph — for EVERY kind, not just `goal` — and an agent asks for draft
+    explicitly. So a no-status `create_point("statement", ...)` is live; the
+    supported way to get a draft is an explicit `status="draft"`.
+
+    (This replaces `test_non_goal_points_still_born_draft`, which asserted
+    the superseded scoping of born-live to `goal`.)"""
     p = sdk.create_point("statement", "an ordinary claim")
-    assert p["status"] == "draft"
+    assert p["status"] == "live"
+    d = sdk.create_point("statement", "an ordinary claim, held back",
+                         status="draft")
+    assert d["status"] == "draft"
 
 
 # ── Durability — the map is rebuilt from the journal ─────────────────────

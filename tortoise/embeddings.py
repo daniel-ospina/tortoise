@@ -37,6 +37,10 @@ def _embedder_warmup_enabled() -> bool:
 
     #4097: the single resolution point (``EmbeddingModel.start_warm_up`` calls it),
     through the declared truthy contract; ``0``/``false``/``no``/``off`` opt out.
+
+    #7809: this same flag also gates the HOSTED lifespan pre-warm
+    (``tortoise.hosted_api._lifespan``), so ``TORTOISE_EMBEDDER_WARMUP=0``
+    keeps both the SDK engine-init warm-up AND the hosted background load out.
     """
     return env_flag("TORTOISE_EMBEDDER_WARMUP", True)
 

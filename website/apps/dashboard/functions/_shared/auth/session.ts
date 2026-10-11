@@ -29,6 +29,20 @@ export const SESSION_MAX_AGE_S = 400 * 24 * 60 * 60; // 400 days
 /** §8.3 — flow cookie lifetime must exceed email-confirmation latency. */
 export const FLOW_MAX_AGE_S = 30 * 60; // 30 minutes
 
+/**
+ * Rows one opportunistic sweep may remove (#3647).
+ *
+ * The sweep runs on the flow-start path, so its cost must be bounded
+ * INDEPENDENTLY of how far behind the backlog has fallen: `LIMIT` caps the work
+ * per call and the next call takes the next slice. Without a cap, the first
+ * call after a long un-swept period would try to drain the entire backlog
+ * inside one user-facing request.
+ *
+ * Steady state is far below this — a 30-minute expiry against a 5-minute probe
+ * is ~150 rows — so the cap is reached only while draining an existing backlog.
+ */
+export const FLOW_SWEEP_LIMIT = 500;
+
 export interface SessionRow {
   handle: string;
   user_id: string;
@@ -72,6 +86,69 @@ export async function ensureColumn(
     const msg = e instanceof Error ? e.message : String(e);
     if (/duplicate column name/i.test(msg)) return;
     throw e;
+  }
+}
+
+/**
+ * Create the index the sweep's cost argument rests on.
+ *
+ * `idx_auth_flows_expires` is declared in `website/migrations/0001_auth_sessions.sql`,
+ * but a database created by the RUNTIME bootstraps alone (`ensureFlowTable`)
+ * never got — and `config/required-bindings.yml` records that production's
+ * tables are created exactly that way, so the index's absence there is the
+ * live possibility, not the hypothetical one. Since the whole point of
+ * `sweepExpiredFlows` being safe to call on a request path is that its range
+ * predicate is INDEXED (`SEARCH auth_flows USING INDEX idx_auth_flows_expires`),
+ * create it where the table is created. Same shape as `ensureSchema`'s
+ * `idx_sessions_user`.
+ */
+export async function ensureAuthFlowIndexes(db: D1Database): Promise<void> {
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_auth_flows_expires ON auth_flows(expires_at);",
+  );
+}
+
+/**
+ * Delete expired `auth_flows` rows — the garbage collection this table never had (#3647).
+ *
+ * WHY THIS EXISTS. Every deletion of a flow row was coupled to the flow
+ * COMPLETING: `/auth/callback` deletes on a successful return trip, and
+ * `/auth/link` deletes when the upstream call never started a flow. A flow that
+ * is started and ABANDONED reaches neither, so its row stays forever — expired,
+ * unusable, and never removed. The scheduled `/auth/start` probe (#3628) starts
+ * a flow every 5 minutes and deliberately does NOT follow the 302 (reading the
+ * redirect's `Location` is what lets it catch the #3616 class), so it is a
+ * steady producer of exactly those rows: 288/day from the watchdog alone, plus
+ * every deploy-gate and e2e probe. Deletion is now coupled to the flow's
+ * LIFETIME instead of to a completion an abandoned flow never reaches.
+ *
+ * WHY IT IS SAFE. `expires_at` already encodes the row's entire usable life:
+ * `/auth/callback` refuses a row with `expires_at <= Date.now()`, and
+ * `/auth/start` never reads a pre-existing row at all — it only inserts. So a
+ * sweep cannot delete a row a live flow still needs. The row just inserted has
+ * `expires_at = now + FLOW_MAX_AGE_S`, so it is never its own victim.
+ *
+ * WHY IT NEVER THROWS. This is housekeeping on the sign-in path. A sweep
+ * failure means rows linger — the status quo this replaces, not a fault the
+ * caller can act on — so propagating it would turn a collection problem into a
+ * 503 on sign-in, breaking the user-visible path in order to report a
+ * non-fault. It is LOGGED rather than swallowed silently: a sweep that never
+ * succeeds is otherwise invisible, which is `ensureColumn`'s lesson read from
+ * the other direction.
+ */
+export async function sweepExpiredFlows(db: D1Database, now = Date.now()): Promise<number> {
+  try {
+    const res = await db
+      .prepare(
+        "DELETE FROM auth_flows WHERE flow_id IN (" +
+          "SELECT flow_id FROM auth_flows WHERE expires_at < ?1 ORDER BY expires_at LIMIT ?2)",
+      )
+      .bind(now, FLOW_SWEEP_LIMIT)
+      .run();
+    return res.meta?.changes ?? 0;
+  } catch (e) {
+    console.error("auth_flows sweep failed", e);
+    return 0;
   }
 }
 

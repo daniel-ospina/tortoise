@@ -300,8 +300,8 @@ class TestAuditLoggerPostgres:
                          resource_type="team", resource_id="pg-1")
         # If we got here without exception, the write succeeded
         # Verify by appending another and checking no fallback was needed
-        assert not pg_logger._fallback_path.exists() or \
-            pg_logger._fallback_path.read_text().strip() == ""
+        fb = pg_logger._fallback_file()
+        assert not fb.exists() or fb.read_text().strip() == ""
 
     def test_non_uuid_actor_lands_with_text_value(self, pg_logger):
         """E2E-9 (#771): non-UUID actor round-trips through a real Postgres.
@@ -336,5 +336,5 @@ class TestAuditLoggerPostgres:
         for i in range(3):
             pg_logger.append("team-multi", "user-multi", f"op_{i}")
         # No fallback file should be needed
-        assert not pg_logger._fallback_path.exists() or \
-            pg_logger._fallback_path.read_text().strip() == ""
+        fb = pg_logger._fallback_file()
+        assert not fb.exists() or fb.read_text().strip() == ""

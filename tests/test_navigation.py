@@ -128,6 +128,30 @@ def test_entity_profile_multi_hop():
     print("✓ entityProfile multi-hop (2 hops)")
 
 
+def test_entity_profile_reports_edge_idx():
+    """#6101: a connected node carries the traversed edge's idx (`_idx`), so the
+    manifest's response-field record for `tortoise_entity_profile._idx` is
+    backed. A legacy 2-column row degrades to None, never an IndexError."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    src = _node("src", ["Point"], {"content": "src"})
+    tgt = _node("tgt", ["Point"], {"content": "tgt"})
+    plain = _node("plain", ["Point"], {"content": "plain"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[src, "IMPL", 1], [tgt, "IMPL", 0], [plain, "TAGGED"]],
+        ],
+    })
+    result = entityProfile(db, "tortoise", "root-1", hops=1)
+    by_id = {p["id"]: p for p in result["connected"]["points"]}
+    assert by_id["src"]["_idx"] == 1
+    assert by_id["tgt"]["_idx"] == 0
+    assert by_id["plain"]["_idx"] is None
+    assert by_id["plain"]["_relationship"] == "TAGGED"
+    print("✓ entityProfile reports edge idx (None on a 2-column row)")
+
+
 def test_entity_profile_filter_pointKind():
     """pointKind filter excludes non-matching nodes."""
     root = _node("root-1", ["Point"], {"content": "root"})
@@ -210,6 +234,44 @@ def test_tortoise_traverse_diamond():
     ids = {n["node"]["id"] for n in result["nodes"]}
     assert ids == {"a", "b", "c"}  # c only once
     print("✓ tortoise_traverse diamond (dedup)")
+
+
+def test_tortoise_traverse_reports_edge_idx():
+    """#6101: each hop carries the traversed edge's idx (0 = the operator's
+    SOURCE, >= 1 = a TARGET), so orientation survives the traversal."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    src = _node("src", ["Point"], {"content": "src"})
+    tgt = _node("tgt", ["Point"], {"content": "tgt"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[src, "IMPL", 1], [tgt, "IMPL", 0]],
+        ],
+    })
+    result = tortoise_traverse(db, "tortoise", "root-1", max_hops=1)
+    by_id = {n["node"]["id"]: n for n in result["nodes"]}
+    assert by_id["src"]["idx"] == 1
+    assert by_id["tgt"]["idx"] == 0
+    print("✓ tortoise_traverse reports edge idx")
+
+
+def test_tortoise_traverse_idx_none_on_plain_edge():
+    """#6101: a 2-column row (legacy graph / non-operator edge) degrades to
+    idx=None, never an IndexError and never a fabricated 0."""
+    root = _node("root-1", ["Point"], {"content": "root"})
+    plain = _node("plain", ["Point"], {"content": "plain"})
+
+    db = _mock_db({
+        "tortoise": [
+            [_root_row("Point", root)],
+            [[plain, "TAGGED"]],
+        ],
+    })
+    result = tortoise_traverse(db, "tortoise", "root-1", max_hops=1)
+    assert result["nodes"][0]["idx"] is None
+    assert result["nodes"][0]["relationship"] == "TAGGED"
+    print("✓ tortoise_traverse idx=None on a non-operator edge")
 
 
 def test_parse_node_prefers_public_id_over_internal():
@@ -371,10 +433,13 @@ if __name__ == "__main__":
         test_entity_profile_empty_entity,
         test_entity_profile_single_hop,
         test_entity_profile_multi_hop,
+        test_entity_profile_reports_edge_idx,
         test_entity_profile_filter_pointKind,
         test_entity_profile_categorize_types,
         test_tortoise_traverse_basic,
         test_tortoise_traverse_diamond,
+        test_tortoise_traverse_reports_edge_idx,
+        test_tortoise_traverse_idx_none_on_plain_edge,
         test_parse_node_prefers_public_id_over_internal,
         test_tortoise_traverse_returns_public_ids,
         test_entity_profile_returns_public_ids,

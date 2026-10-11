@@ -327,7 +327,7 @@ def test_navigation_parity_real_graph():
     g = p.g
     g.query("CREATE (a:Point {id:'p1', content:'c1', pointKind:'statement', is_operator:false})")
     g.query("CREATE (b:Point {id:'p2', content:'c2', pointKind:'statement', is_operator:false})")
-    g.query("MATCH (a:Point {id:'p1'}), (b:Point {id:'p2'}) CREATE (a)-[:IMPL]->(b)")
+    g.query("MATCH (a:Point {id:'p1'}), (b:Point {id:'p2'}) CREATE (a)-[:IMPL {idx:0}]->(b)")
     # Epic #1647 P4 (Task 10): query by the projection's ACTUAL graph name —
     # the literal "tortoise" matched only the embedded default; under a
     # docker session the redirect derives per-path names
@@ -336,8 +336,15 @@ def test_navigation_parity_real_graph():
     prof = entityProfile(p.db, p.graph_name, "p1", hops=1)
     assert prof["entity"]["id"] == "p1"
     assert any(n.get("id") == "p2" for n in prof["connected"]["points"])
+    # #6101: both navigation surfaces must surface the traversed edge's idx.
+    # This assertion lives HERE (not only in test_sdk.py) because
+    # test_indexes.py is the file a `tortoise/navigation.py` diff selects —
+    # see tools/ci_selection.py. Dropping `, r.idx` from `_hop_query` would
+    # silently falsify the response_fields records without this guard running.
+    assert [n["_idx"] for n in prof["connected"]["points"] if n.get("id") == "p2"] == [0]
     trav = tortoise_traverse(p.db, p.graph_name, "p1", max_hops=1)
     assert trav["entity"]["id"] == "p1" and len(trav["nodes"]) >= 1
+    assert [n["idx"] for n in trav["nodes"] if n["node"].get("id") == "p2"] == [0]
     p.close()
 
 
