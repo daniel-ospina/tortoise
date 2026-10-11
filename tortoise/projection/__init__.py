@@ -3683,14 +3683,17 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
 }
 #: The labels whose graph fold MERGEs the NODE by ``name``
 #: (``_upsert_object`` / ``_upsert_subject``), so a second registration of ONE
-#: name under a fresh id RE-IDS the single node and the earlier id stops
+#: name under a fresh id RE-IDS the matched node(s) and the earlier id stops
 #: existing. ``Event`` is absent: ``_upsert_event`` MERGEs on its id
 #: (``eventId``), so it never collapses. This is the MERGE-by-name SUBSET of
 #: the node table :func:`journal_epistemic_existence` simulates: that table
 #: covers every ``_EPISTEMIC_BOUNDARY_LABELS`` label, but only these two key
 #: their MERGE on ``name`` (the others key it on ``id``/``eventId``, so they
 #: never collapse a second node). ``journal_object_surviving_keys``
-#: tracks the same collapse Object-only, and ``consistency._NAME_MERGE_LABELS``
+#: models the SAME collapse for Object ALONE, with a 1:1 carrier that is
+#: deliberately fail-OPEN when a MERGE key has more than one carrier (it cannot
+#: represent the 1:N re-id every matched node receives) — so it is a bounded
+#: sibling, NOT the same collapse in general. ``consistency._NAME_MERGE_LABELS``
 #: declares the set for the state-op guard. Kept local (not imported from
 #: ``consistency``, which already imports this module) so the belief boundary
 #: does not reach upward. The two declarations are pinned equal by
@@ -4336,8 +4339,10 @@ def journal_epistemic_existence(events) -> dict:
 
     def _hashable(value) -> bool:
         """Can ``value`` be a dict/set key? A corrupt journal line can carry a
-        list/map where a scalar belongs; the GRAPH fold rejects that at the
-        parameter boundary, but this simulation must not raise on it."""
+        list/map where a scalar belongs; the GRAPH fold STORES it (FalkorDB
+        degrades a MAP to null and keeps a LIST as an array) and the old key
+        stops matching, so this simulation must not raise on it — it models
+        the move with an unmatchable (``None``) key instead."""
         try:
             hash(value)
         except TypeError:
@@ -4361,8 +4366,17 @@ def journal_epistemic_existence(events) -> dict:
             affected.add(state["id"])
         was = {k: _id_live(label, k) for k in affected}
         for n in matches:
-            if "name" in state and _hashable(state["name"]):
-                newname = state["name"]
+            if "name" in state:
+                # A PRESENT-but-unhashable name value still moves the Object/
+                # Subject MERGE key. The graph stores it (FalkorDB degrades a
+                # MAP to null and keeps a LIST as an array) and the node stops
+                # matching the old key, so skipping the move would leave the
+                # simulated node carrying a name the graph no longer has — a
+                # false RED (the FIX 1
+                # shape: a later registration of the OLD name then re-ids this
+                # node away). ``None`` is the "no longer matchable" slot,
+                # mirroring the ``id`` branch below.
+                newname = state["name"] if _hashable(state["name"]) else None
                 _reindex(label, n, by_name, n.name, newname)
                 n.name = newname
             if prop in state:

@@ -1026,6 +1026,26 @@ _BOUNDARY_MATRIX = [
      [_m_object(_MATRIX_ID, "matrix-dictid"),
       _m_rename(state={"id": {"k": "matrix-moved"}}),
       _m_belief()], True),
+    # #7853 round-6 P1 (FIX 1): a PRESENT-but-UNHASHABLE `state.name`. The
+    # previous head guarded the Object/Subject MERGE-key move on
+    # `_hashable(state["name"])`, so a list/map `name` skipped the move and the
+    # simulated node KEPT its old name — while the graph runs `SET n += $state`
+    # (FalkorDB degrades the list to null), the old name stops matching, and a
+    # later registration of the OLD name creates a NEW node instead of
+    # re-id'ing this one. The boundary then buried this id the graph still
+    # carries: a false RED. The move must be recorded, `None` marking the
+    # unmatchable key.
+    ("state-op-list-name-value-moves-the-merge-key",
+     [_m_object(_MATRIX_ID, "matrix-listname"),
+      _m_rename(state={"name": ["matrix-moved"]}),
+      _m_object("matrix-third", "matrix-listname"),
+      _m_belief(_MATRIX_ID)], False),
+    # The :Subject twin of the same unhashable-`name` false RED.
+    ("subject-state-op-list-name-value-moves-the-merge-key",
+     [_m_subject(_MATRIX_ID, "matrix-sub-listname"),
+      _m_rename(state={"name": ["matrix-moved"]}, label="Subject"),
+      _m_subject("matrix-sub-third", "matrix-sub-listname"),
+      _m_belief(_MATRIX_ID)], False),
 ]
 
 
@@ -1040,7 +1060,7 @@ def test_boundary_matrix_reference_and_graph_agree(
     (`consistency._fold_journal`, the arm `check_consistency` runs). Graph side
     — every separately-threaded replay engine: `FalkorProjection.rebuild_all`,
     `FalkorProjection.rebuild(log)`, `consistency.recover_from_log` and
-    `backup.restore`. All three REFERENCE verdicts and all four GRAPH engines
+    `backup.restore`. Both reference verdicts and all four graph engines
     must agree, so a future drift in either the exemption predicate or one
     engine's `journal_existence=` threading reds a row here instead of shipping
     a false red/green.
