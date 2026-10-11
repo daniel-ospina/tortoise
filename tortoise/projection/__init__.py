@@ -3681,6 +3681,17 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
     "SubjectAdded": "Subject",
     "EventRecorded": "Event",
 }
+#: The labels whose graph fold MERGEs the NODE by ``name``
+#: (``_upsert_object`` / ``_upsert_subject``), so a second registration of ONE
+#: name under a fresh id RE-IDS the single node and the earlier id stops
+#: existing. ``Event`` is absent: ``_upsert_event`` MERGEs on its id
+#: (``eventId``), so it never collapses. This is the name-keyed carrier
+#: ``journal_epistemic_existence`` models; ``journal_object_surviving_keys``
+#: tracks the same collapse Object-only, and ``consistency._NAME_MERGE_LABELS``
+#: declares the set for the state-op guard. Kept local (not imported from
+#: ``consistency``, which already imports this module) so the belief boundary
+#: does not reach upward.
+_NAME_KEYED_ENTITY_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The non-Point canonical labels the REFERENCE entity fold models. This is
 #: the same set the GRAPH fold reads to decide whether a state-op miss is
 #: recordable at all (``_warn_entity_mutation_fold_miss``), so the two
@@ -4156,7 +4167,21 @@ def journal_epistemic_existence(events) -> dict:
     Creations are read through the SAME arms :func:`journal_first_materialization`
     uses (``_JOURNAL_POINT_MATERIALIZATION_TYPES`` for Point/Operator, the
     ``_ENTITY_CREATION_EVENT_LABEL`` records for Object/Subject/Event), so the
-    two maps cannot read one record differently. Deletes are the hard deletes
+    two maps cannot read one record differently. Two name-keyed-shape
+    corrections are applied to the Object/Subject arms, because their graph
+    fold does NOT key existence by id alone:
+      * ``_upsert_object`` / ``_upsert_subject`` MERGE the NODE by ``name``,
+        so a later registration of ONE name under a fresh id RE-IDS the single
+        node — the earlier id stops existing with NO journaled delete. The
+        carrier below records that burial at the displacing registration's seq
+        (the same collapse :func:`journal_object_surviving_keys` models);
+        without it the boundary answers EXISTS for the collapsed-away id and
+        exempts a belief ``rebuild_all`` refuses.
+      * Both folds early-return before their MERGE when the name cannot serve
+        as the MERGE key (``_writable_id``), so such a record materializes NO
+        node and must not open an incarnation here.
+
+    Deletes are the hard deletes
     the replay folds: an ``EntityMutated`` op=delete removes its own canonical
     label only (``_delete_entity_by_id(label=...)``, #3860; a missing/unknown
     label falls back id-wide across ``_HARD_DELETE_LABELS``), and a
@@ -4170,6 +4195,20 @@ def journal_epistemic_existence(events) -> dict:
     """
     creates: dict[tuple[str, str], list[int]] = {}
     deletes: dict[tuple[str, str], list[int]] = {}
+    #: The NAME-keyed carrier, mirroring :func:`journal_object_surviving_keys`:
+    #: ``(label, name) -> id`` and its reverse ``(label, id) -> name``. A later
+    #: registration of one name under a fresh id displaces the carrier and
+    #: BURIES the previous id; a rename MOVES the carrier (the graph fold's
+    #: ``SET n += $state``); a delete FREES it. All three mirror the graph
+    #: fold's merge-key semantics or the boundary disagrees with it.
+    carrier: dict[tuple[str, str], str] = {}
+    name_of: dict[tuple[str, str], str] = {}
+
+    def _release_name(lbl: str, rid: str) -> None:
+        nm = name_of.pop((lbl, rid), None)
+        if nm is not None and carrier.get((lbl, nm)) == rid:
+            carrier.pop((lbl, nm), None)
+
     for seq, raw in enumerate(events):
         ev = _norm(raw) if isinstance(raw, dict) else {}
         t = ev.get("type")
@@ -4180,8 +4219,22 @@ def journal_epistemic_existence(events) -> dict:
         elif t in _ENTITY_CREATION_EVENT_LABEL:
             eid = _creation_entity_id_from_record(t, ev)
             if isinstance(eid, str) and eid:
-                creates.setdefault(
-                    (_ENTITY_CREATION_EVENT_LABEL[t], eid), []).append(seq)
+                label = _ENTITY_CREATION_EVENT_LABEL[t]
+                if label in _NAME_KEYED_ENTITY_LABELS:
+                    name = ev.get("name")
+                    # `_upsert_object`/`_upsert_subject` early-return before
+                    # the MERGE when the name is not a writable MERGE key, so
+                    # the record materializes NO node — do not open an
+                    # incarnation the graph fold never created.
+                    if not _writable_id(name):
+                        continue
+                    prev = carrier.get((label, name))
+                    if prev is not None and prev != eid:
+                        deletes.setdefault((label, prev), []).append(seq)
+                        name_of.pop((label, prev), None)
+                    carrier[(label, name)] = eid
+                    name_of[(label, eid)] = name
+                creates.setdefault((label, eid), []).append(seq)
         elif t == "EntityMutated" and ev.get("op") == "delete":
             rid = ev.get("id")
             if not isinstance(rid, str):
@@ -4192,6 +4245,37 @@ def journal_epistemic_existence(events) -> dict:
                       else _HARD_DELETE_LABELS)
             for lbl in labels:
                 deletes.setdefault((lbl, rid), []).append(seq)
+                # The delete removes the node, so the name it carried is no
+                # longer taken. Without this, a later registration of the SAME
+                # name would falsely displace the deleted id and a RENAME of it
+                # could not be modelled at all.
+                if lbl in _NAME_KEYED_ENTITY_LABELS:
+                    _release_name(lbl, rid)
+        elif (t == "EntityMutated"
+              and ev.get("op") in _ENTITY_MUTATION_STATE_OPS
+              and isinstance(ev.get("label"), str)
+              and ev.get("label") in _NAME_KEYED_ENTITY_LABELS):
+            # A state op is the graph fold's `SET n += $state` on
+            # `(label, id)`; when the applied map carries a new `name` it is a
+            # RENAME and it MOVES the merge key. Mirror
+            # `journal_object_surviving_keys`: read the applied `name`, act
+            # only when the id currently carries one, and only for a CANONICAL
+            # label (the fold's own pre-clause — a missing/unknown label
+            # returns 0 rather than renaming id-wide).
+            rid = ev.get("id")
+            label = ev.get("label")
+            state = ev.get("state")
+            newname = state.get("name") if isinstance(state, dict) else None
+            if not (isinstance(rid, str) and isinstance(newname, str)
+                    and newname):
+                continue
+            old = name_of.get((label, rid))
+            if old is None:
+                continue
+            if carrier.get((label, old)) == rid:
+                carrier.pop((label, old), None)
+            name_of[(label, rid)] = newname
+            carrier[(label, newname)] = rid
         elif t == "PointsMerged":
             # #331: `or []` also covers an explicit "merge_ids": null.
             for mid in ev.get("merge_ids") or []:

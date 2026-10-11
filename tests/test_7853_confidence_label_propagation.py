@@ -775,8 +775,22 @@ def test_dream_writeback_persists_full_precision_for_non_point(sdk):
 _MATRIX_ID = "n-7936-matrix"
 
 
-def _m_object(nid: str = _MATRIX_ID) -> dict:
-    return {"type": "ObjectRegistered", "id": nid, "name": "matrix-obj"}
+def _m_object(nid: str = _MATRIX_ID, name: str = "matrix-obj") -> dict:
+    # ``name`` is the graph MERGE key (`_upsert_object`): a second registration
+    # of one name under a fresh id is the collapse these rows pin.
+    return {"type": "ObjectRegistered", "id": nid, "name": name}
+
+
+def _m_subject(nid: str = _MATRIX_ID, name: str = "matrix-sub") -> dict:
+    return {"type": "SubjectAdded", "id": nid, "name": name}
+
+
+def _m_rename(nid: str = _MATRIX_ID,
+              new_name: str = "matrix-renamed") -> dict:
+    # The graph fold's `SET n += $state` carries the full APPLIED map, so
+    # `state.name` MOVES the Object MERGE key (`_fold_entity_mutation`).
+    return {"type": "EntityMutated", "op": "rename", "label": "Object",
+            "id": nid, "state": {"name": new_name}}
 
 
 def _m_delete(label=None, nid: str = _MATRIX_ID) -> dict:
@@ -825,6 +839,38 @@ _BOUNDARY_MATRIX = [
     # the P2-2 shape: the write PRECEDES its own materialization.
     ("belief-forward-references-its-materialization",
      [_m_belief(), _m_object()], False),
+    # #7936 round-5 P1: the graph MERGEs Object/Subject by NAME, so a second
+    # registration of ONE name under a FRESH id RE-IDS the single node and the
+    # earlier id stops existing with NO journaled delete. The boundary must
+    # model that collapse (the disposition `journal_object_surviving_keys`
+    # already takes for supersedes) or it answers EXISTS for the collapsed
+    # id and exempts a belief `rebuild_all` refuses — the fail-open class.
+    ("name-reuse-buries-the-earlier-id",
+     [_m_object(), _m_object("n-7936-matrix-2"), _m_belief()], True),
+    # CONTROL: the same collapse AFTER the write — at the write the earlier id
+    # is still the carrier, so the belief folds and every engine accepts.
+    ("name-reuse-after-the-write-is-accepted",
+     [_m_object(), _m_belief(), _m_object("n-7936-matrix-2")], False),
+    # the :Subject twin of the same collapse (`_upsert_subject` MERGEs by name).
+    ("subject-name-reuse-buries-the-earlier-id",
+     [_m_subject(), _m_subject("n-7936-matrix-2"), _m_belief()], True),
+    # an UNWRITABLE merge key materializes no node, so the record must not open
+    # an incarnation the graph fold never created.
+    ("unwritable-name-materializes-nothing",
+     [{"type": "ObjectRegistered", "id": _MATRIX_ID, "name": ""},
+      _m_belief()], True),
+    # A rename MOVES the carrier. Reusing the OLD name after a rename must NOT
+    # bury the renamed id — it still exists under its new name, so every engine
+    # accepts. (A carrier that ignored the rename would falsely refuse here.)
+    ("rename-away-then-reuse-old-name-is-accepted",
+     [_m_object(), _m_rename(), _m_object("n-7936-matrix-2"), _m_belief()],
+     False),
+    # The mirror: a registration of the RENAMED-TO name re-ids the node, so the
+    # original id stops existing and the belief refuses — same collapse, reached
+    # through the rename rather than a second registration of the original name.
+    ("rename-into-a-reused-name-buries-the-earlier-id",
+     [_m_object(), _m_rename(new_name="matrix-renamed"),
+      _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
 ]
 
 
@@ -842,8 +888,10 @@ def test_boundary_matrix_reference_and_graph_agree(
     gate reds a row here instead of shipping a false red/green.
     """
     import json
+    import shutil
 
-    from tortoise.consistency import _fold_journal
+    from tortoise.backup import restore
+    from tortoise.consistency import _fold_journal, recover_from_log
     from tortoise.projection import FalkorProjection, fold
     from tortoise.projection.nonfolded import (
         NonFoldedEventsError,
@@ -864,18 +912,80 @@ def test_boundary_matrix_reference_and_graph_agree(
     with open(events_dir / "events.jsonl", "w") as fh:
         for ev in events:
             fh.write(json.dumps(ev) + "\n")
-    proj = FalkorProjection(path=str(tmp_path / "matrix.db"),
-                            skip_health_check=True)
-    graph_refused = False
-    try:
-        proj.rebuild_all(str(events_dir), confirm_destructive=True)
-    except NonFoldedEventsError:
-        graph_refused = True
-    finally:
-        proj.close()
-    assert graph_refused == refused, (
-        f"[{row}] graph rebuild_all: refused={graph_refused}, "
-        f"expected={refused}")
+
+    def _refused_by(engine: str) -> bool:
+        """True when ``engine`` REFUSES this journal.
+
+        EVERY graph replay engine is driven, not just `rebuild_all`: the
+        boundary is THREADED into each one separately (`journal_existence=`),
+        so a dropped kwarg on a single engine is invisible to the other three.
+        `recover_from_log` reports refusal as `recovered=False`; `backup.restore`
+        and `rebuild_all` raise `NonFoldedEventsError`. This is the P2 (#7936
+        round-5) hole: the fourth engine's threading had no test (mutating
+        `if "journal_existence" in _apply_params:` to `if False:` left 115
+        passing).
+        """
+        tag = engine.replace(".", "_")
+        # Each engine's DB gets its OWN directory. The embedded lane
+        # auto-recovers a 0-node graph from any `*.jsonl` ADJACENT to the DB
+        # (`FalkorProjection._find_local_jsonl_dir`), which would replay the
+        # journal through `recover_from_log` during OPEN — before the engine
+        # under test runs — and mask the `journal_existence` threading. An
+        # empty db dir has no adjacent log.
+        db_dir = tmp_path / f"matrix-{tag}-dbdir"
+        db_dir.mkdir()
+        db = str(db_dir / "tortoise.db")
+        if engine == "recover_from_log":
+            proj = FalkorProjection(path=db, skip_health_check=True)
+            try:
+                # It only replays a store it believes was LOST — node-free.
+                proj.g.query("MATCH (n) DETACH DELETE n")
+                res = recover_from_log(str(events_dir), proj)
+                if res["recovered"]:
+                    return False
+                # `recovered=False` has TWO causes here: the belief boundary
+                # refusing (the signal under test, carried as
+                # `non_folded_events`) and a journal whose final graph is
+                # EMPTY (a delete-only tail) — an orthogonal discriminator,
+                # not the boundary. Only the former is a refusal.
+                return any(_MATRIX_ID in e
+                           for e in res.get("non_folded_events", []))
+            finally:
+                proj.close()
+        if engine == "backup.restore":
+            src = tmp_path / f"matrix-{tag}-backup"
+            src.mkdir()
+            shutil.copy2(events_dir / "events.jsonl", src / "events.jsonl")
+            (src / "manifest.json").write_text(
+                '{"backed_up_at":"2026-01-01","db":"tortoise.db",'
+                '"events":"events.jsonl"}')
+            try:
+                # No tortoise.db in the backup: the JSONL replay fallback, the
+                # arm that threads `journal_existence` into `apply()`. The
+                # restore's events copy lives in a DIFFERENT dir from the DB
+                # (see above), so it cannot be auto-recovered on open.
+                restore_events = tmp_path / f"matrix-{tag}-restore-events"
+                restore_events.mkdir()
+                restore(str(src), db_path=db,
+                        events_path=str(restore_events / "events.jsonl"),
+                        into_falkor=True)
+            except NonFoldedEventsError:
+                return True
+            return False
+        proj = FalkorProjection(path=db, skip_health_check=True)
+        try:
+            proj.rebuild_all(str(events_dir), confirm_destructive=True)
+        except NonFoldedEventsError:
+            return True
+        finally:
+            proj.close()
+        return False
+
+    for engine in ("rebuild_all", "recover_from_log", "backup.restore"):
+        graph_refused = _refused_by(engine)
+        assert graph_refused == refused, (
+            f"[{row}] graph {engine}: refused={graph_refused}, "
+            f"expected={refused}")
 
 
 def test_boundary_matrix_non_point_labels_all_agree():
