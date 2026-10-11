@@ -59,8 +59,7 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
-from .live import (  # #7902 epistemic-label write widening (shared with #7853 read widening)
-    EPISTEMIC_LABELS, epistemic_disjunction, epistemic_label_queries)
+from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
     RAW_PRESENT,
