@@ -351,7 +351,33 @@ def test_no_repo_and_no_about_entities_never_fabricates_an_object(corpus):
     ).result_set[0][0] == 0
 
 
-def test_entity_name_resolution_refuses_two_live_holders(corpus):
+@pytest.fixture
+def ent_graph(tmp_path):
+    """A graph of its OWN, per test, for the entity-resolution tests.
+
+    They create Objects directly, so they must NOT ride the shared corpus
+    graph: the CI lane runs several pytest workers against one
+    namespace-keyed embedded store, and a stray Object (or a shared name) is
+    visible to every other test using that store — which is how this file came
+    back green locally and red in the shard. A private NAMESPACE is the
+    isolation, and every SDK opened here is closed on teardown.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    opened = []
+
+    def make(namespace: str):
+        sdk = TortoiseSDK(str(tmp_path / f"{namespace}.db"),
+                          namespace=namespace)
+        opened.append(sdk)
+        return sdk
+
+    yield make
+    for sdk in opened:
+        sdk.close()
+
+
+def test_entity_name_resolution_refuses_two_live_holders(ent_graph):
     """#3633 route-then-refuse, on the miner's NAME arm: two LIVE Objects
     sharing a name must REFUSE, not hand back the first one.
 
@@ -366,7 +392,7 @@ def test_entity_name_resolution_refuses_two_live_holders(corpus):
     from tortoise.docs_miner import _ensure_entities
     from tortoise.entity_identity import AmbiguousEntityName
 
-    sdk, _root, _base = corpus
+    sdk = ent_graph("test_docs_two_live")
     proj = sdk._get_proj()
     for oid in ("obj-a", "obj-b"):
         proj.g.query("MERGE (o:Object {id:$id}) "
@@ -384,12 +410,12 @@ def test_entity_name_resolution_refuses_two_live_holders(corpus):
             "externalId": "github:repo:acme/acme"}])
 
 
-def test_entity_name_resolution_returns_the_single_live_holder(corpus):
+def test_entity_name_resolution_returns_the_single_live_holder(ent_graph):
     """…and exactly ONE live holder is still resolved — the happy path the
     route must not break — without minting a second Object for that name."""
     from tortoise.docs_miner import _ensure_entities
 
-    sdk, _root, _base = corpus
+    sdk = ent_graph("test_docs_one_live")
     proj = sdk._get_proj()
     proj.g.query("MERGE (o:Object {id:$id}) "
                  "SET o.name = $name, o.status = 'live'",
@@ -405,7 +431,7 @@ def test_entity_name_resolution_returns_the_single_live_holder(corpus):
         "externalId": "github:repo:acme/acme"}]) == ["obj-only"]
 
 
-def test_entity_name_resolution_refuses_a_terminal_only_name(corpus):
+def test_entity_name_resolution_refuses_a_terminal_only_name(ent_graph):
     """Minting is for a genuinely UNHELD name only.
 
     `resolve_entity_id` returns ``None`` for a name with NO holder AND for one
@@ -423,7 +449,7 @@ def test_entity_name_resolution_refuses_a_terminal_only_name(corpus):
     """
     from tortoise.docs_miner import _ensure_entities
 
-    sdk, _root, _base = corpus
+    sdk = ent_graph("test_docs_terminal")
     proj = sdk._get_proj()
     for oid in ("dead-1", "dead-2"):
         proj.g.query("MERGE (o:Object {id:$id}) "
