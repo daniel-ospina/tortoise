@@ -115,16 +115,34 @@ alone reports n=1 — a dogfood read.
 **This is not a success gate.** The owner withdrew the proposed "≥5 of 10" aha
 bar and the minimum-N requirement on #3497 §7.4 (2026-09-15): *"there should eb
 no number. stop creating bureocracy and focus on shipping and iterating with
-feedback."* Beta exit is shipping-and-iterating. The tool reports a funnel over
-whatever cohort the operator names — there is no N anyone must reach, and no
-rate.
+feedback."* Beta exit is shipping-and-iterating. The surface reports a funnel
+over whatever cohort the operator names — there is no N anyone must reach, and
+no rate.
+
+`GET /v1/internal/activation/cohort` (#3676) is the served roll-up. It takes an
+**explicit** org list and returns the same five-stage shape folded across the
+named orgs.
+
+```bash
+# The operator/internal credential — NOT a tenant `tt_` key.
+export BASE=https://tortoise-y4mjjq.fly.dev
+curl -sG "$BASE/v1/internal/activation/cohort" \
+  -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+  --data-urlencode "orgs=org_alpha" --data-urlencode "orgs=org_beta" \
+  --data-urlencode "since=2026-09-16T00:00:00Z" \
+  --data-urlencode "until=2026-09-17T00:00:00Z" | jq
+```
+
+The committed client is preferred over the curl above: it refuses a plain-http
+base, never follows a redirect (CPython's redirect handler copies request
+headers, so a redirect would hand the internal key to whatever host answered),
+and never lets the credential reach an error message.
 
 ```bash
 # Run with the PROJECT interpreter via uv (this package requires Python >= 3.12;
 # the tool uses `zip(..., strict=True)`, so a system Python 3.9/3.8 fails).
 uv run python tools/activation_cohort.py \
-  --api-base https://api.premiselabs.co \
-  --org "$ORG_A=$KEY_A" --org "$ORG_B=$KEY_B" \
+  --api-base "$BASE" --org org_alpha --org org_beta \
   --since 2026-09-16T00:00:00Z --until 2026-09-17T00:00:00Z \
   --out /tmp/b7-cohort.json
 ```
@@ -134,13 +152,35 @@ and dogfood orgs are excluded by naming the cohort, not by a heuristic that
 could silently redefine the number. Output always carries `cohort_definition`
 and `dogfood_only`. A one-org run is flagged `dogfood_only: true` (the product's
 own internal-gate vs public-gate vocabulary). An org that could not be read
-makes its stage `partial` with the org named, or `unavailable` when no org
-produced a measurable value at all — never silently summed as 0, and never
-described as `not_measurable` (which means the org answered, and the answer was
-"nothing to measure").
+makes its stage `partial` with the org named (and the reason in `org_errors`),
+or `unavailable` when no org produced a measurable value at all — never
+silently summed as 0, and never described as `not_measurable` (which means the
+org answered, and the answer was "nothing to measure").
 
-A cross-tenant admin cohort endpoint is possible but needs its own
-tenant-isolation security review; it is filed separately, not smuggled here.
+## Tenancy review — the cross-tenant cohort endpoint (#3676)
+
+A cross-org read is a genuine tenant-boundary change, so the decisions below are
+recorded rather than assumed.
+
+| Question | Decision |
+| --- | --- |
+| **Auth** | The internal MACHINE plane (`FASTAPI_INTERNAL_KEY`, `_check_internal`). ADR-010 splits credentials into HUMAN (session JWT) and MACHINE (durable key/agent identity); an operator is the machine plane, and there is no admin *role* in the human plane to reuse. An org-scoped `tt_` key can never satisfy `_check_internal`, so the separation is structural (pinned by a test). |
+| **Why not a new admin secret** | `FASTAPI_INTERNAL_KEY` already gates `/v1/internal/backups/restore`, `/purge` and `/sweep` — operations that read and REWRITE every tenant's graph. A read-only count over an operator-named list adds no capability to the holder, while a second long-lived master credential would widen the blast radius of a leak and need its own rotation path. |
+| **Plane / prefix** | `GET /v1/internal/activation/cohort`. `/v1/internal/` is the documented operator/cron prefix and carries the recorded #3834 transport-wait-bound exemption (these routes "have no user and no user-patience budget to derive from"); a cohort of N orgs is exactly that class of batch job, so it inherits the ruling instead of widening it. A `/v1/admin/` prefix would have needed a new exemption decision and a new path family to secure. |
+| **Enumeration** | The list is explicit; there is no wildcard token (`all`/`any`/`every`/`*`/`%`/`-1` are refused by name), no registry lookup, and the response contains no org the caller did not name — pinned by a test that seeds an unrequested org and asserts its id appears nowhere at any depth. |
+| **Duplicates** | Refused (422), never deduped: deduping hides a copy-paste error, summing both inflates the number and its denominator. |
+| **Size** | At most 100 orgs per request — a blast-radius bound, **not** a cohort-size requirement. |
+| **Blast radius** | Each org is read independently, bounded by a 30 s per-org timeout and a concurrency of 4. An unreadable, refused, or hung org costs THAT org's cells and is NAMED in `orgs_unavailable` + `org_errors`; a partial cohort whose sum would be `0` refuses the number (`partial_zero_from_an_unreadable_cohort`) because a lower bound is not a fact. |
+| **Nonexistent org name** | The endpoint does **NOT** verify that an org exists (there is no registry lookup — see *Enumeration*). A well-formed name with no org behind it reads as an empty graph and is reported as a **measured `0`**, counted in `orgs_measured` with no `org_errors` entry — indistinguishable from an existing org with genuinely zero activity. An entirely-typo'd cohort therefore returns a confident `0`; verify the names against the org list before acting on a `0`. Adding an existence check would itself be a registry lookup, so it is a new decision rather than a silent addition (recorded in `COHORT_LIMITATIONS`). |
+| **Audit** | ONE append-only `audit_events` row per request, `operation=activation_cohort_read`, `org_id=""` (the operator plane — the non-org-scoped shape `identity_link` uses), naming every target org in `detail`. One row, not N: the action is one operator action and the actor is the operator, and `audit_events.team_id` is what RLS makes tenant-visible — N rows would present one operator action as N tenant operations and put a row in every tenant's trail for a read of a *count*. Tenant-visible notification is a product/privacy decision with its own RLS answer and is not invented here; the backup sweep reads every tenant's full graph and emits no audit rows at all. The write is FAIL-OPEN (#1529: bookkeeping must not 500 a serving path) — an abuser holds the key, so blocking the read while the sink is down would not stop them. |
+| **Attribution** | No actor is bound for a cohort read: the operator is not the tenant's actor. |
+
+`tools/activation_cohort.py` is now a thin, stdlib-only client of this endpoint
+(it previously drove the org-scoped endpoint once per org with **one tenant API
+key per org on the command line** — keys in `argv`/history, a second roll-up
+implementation, and no durable record of the read). The roll-up itself lives in
+`tortoise/activation_scorecard.roll_up_cohort`, so the org-scoped scorecard, the
+cohort endpoint and the client cannot disagree about the same org.
 
 ## Measured baseline (production, 2026-09-17)
 

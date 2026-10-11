@@ -15203,6 +15203,19 @@ class TortoiseSDK:
     #: reason to window a graph this small; one pass drains it). Simple,
     #: documented count-query heuristic: ``MATCH (n:Point
     #: {is_operator:true}) RETURN count(n)`` — cheap and deterministic.
+    #:
+    #: #1338 verification (indicator 3): this is a SMALL-GRAPH rule, not a
+    #: production routing rule. With the recorded production range being
+    #: 5k-500k operators — 100x-10,000x this threshold — auto-select routes a
+    #: production graph to ``local`` from BOTH branches that can fire:
+    #: dirty roots present (write context, W1) → local, and no dirty roots →
+    #: operator count >= this threshold → local. Auto-select therefore never
+    #: picks ``stale-first``; the production window strategy is reachable ONLY
+    #: by an explicit ``mode="stale-first"``, which is exactly what the
+    #: scheduled path must pass (903-C8 wiring). Raising this threshold would
+    #: turn a 5k-operator production graph into a whole-graph full pass on a
+    #: plain ``dream()`` call — i.e. the O(whole-graph) pass the epic exists to
+    #: avoid — so it must stay far below the production floor.
     _AUTO_FULL_OPERATOR_THRESHOLD = 50
 
     def dream(self, dirty_only: bool = True, full: bool = False,
@@ -15258,14 +15271,28 @@ class TortoiseSDK:
                   censoring. False → a from-scratch pass (the fast path /
                   oracle captures, e.g. F4's frozen ground truth, which must
                   be bit-reproducible without censoring).
-            budget: per-pass operator cap. None → the existing 200-op
-                  selector cap (every pass bounded by construction); an
+            budget: per-pass operator cap — ALSO the claim-window size the
+                  scheduler walks, which is what bounds the pass's cost.
+                  None → the CONFIGURED default
+                  (``TORTOISE_DREAM_WINDOW_BUDGET`` when set, else
+                  ``dream.DEFAULT_WINDOW_BUDGET``); every pass is bounded by
+                  construction. The shipped value is deliberately
+                  conservative — #1338 measured a 5,000-claim window raising
+                  the engine's query timeout on a 5k-claim graph while
+                  windows <= 2,000 completed, so raising it is an operator
+                  decision taken against their own deployment's numbers
+                  (passes per coverage cycle = ceil(operators / budget):
+                  25/2,500 at the default for 5k/500k operators). An
                   explicit budget overrides it; budget=0 → no-op result
                   (not an error — exact key-set, all zeros, no stamps).
                   An explicit budget a full pass cannot satisfy raises
                   BudgetExceededError (tortoise/exceptions.py) — full is
                   complete-in-one-pass by contract; stale-first never
-                  raises (deferral is its design).
+                  raises (deferral is its design). A DEFAULT-budget full
+                  pass whose graph exceeds the 200_000-operator DoS cap is
+                  truncated and reports ``converged_all=False`` — an
+                  incomplete pass, never a silent success (#1338; full mode
+                  is non-viable above the cap: use mode="stale-first").
 
         Returns (per-mode key-sets, pinned per I1 — exact):
             local: {mode, iterations, converged, affected_claims,
@@ -15636,11 +15663,21 @@ class TortoiseSDK:
         An explicit budget the graph cannot satisfy raises
         BudgetExceededError inside dream_all (full is complete-in-one-pass
         by contract — never silently truncate an explicit budget).
+
+        #1338: a default-budget pass that the 200_000-operator DoS cap
+        truncates comes back ``converged_all=False`` (incomplete, not a
+        success) with no freshness stamped on the uncovered regions; the
+        Dreamer's internal ``truncated`` flag is dropped here because the
+        I1 full key-set is pinned — the failure is visible through
+        ``converged_all``, the WARNING log, and the failure_rate the
+        ``_record_dream_metrics`` call below records.
         """
         result = dreamer.dream_all(
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget, warm_start=warm_start,
         )
+        # #1338: scheduler-internal — not part of the pinned I1 full key-set.
+        result.pop("truncated", None)
         # #3139: fail closed before the dirty-root sweep — a full pass that
         # scanned zero anchors over a populated graph must not report success.
         self._guard_dream_progress(dreamer, "full", result, window=None)

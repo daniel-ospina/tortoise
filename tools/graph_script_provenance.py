@@ -130,8 +130,9 @@ MARKER_SPELLINGS: tuple[str, ...] = (
     '"""⚠️ SUPERSEDED — THE OPTION SET BELOW IS NOT OUR PRICE LIST. Do not use this to file pricing.',
 )
 
-#: Declared markerless residue — the retrofit's remaining scope, measured at
-#: #4830 (24 marked + 33 unmarked = the 57 tracked ``graph-scripts/*.py``).
+#: Declared markerless residue — the retrofit's remaining scope. Measured at
+#: #4830 as 24 marked + 33 unmarked = the 57 tracked ``graph-scripts/*.py``;
+#: #1338's ``dream-scale-bench.py`` added one markerless script (58 tracked).
 #: NOT a claim that these are live drivers: it says only that they carry no
 #: marker TODAY. A new script must pick a side: mark it, or add it here — and
 #: adding it is bounded by ``UNMARKED_CEILING`` below, so the residue cannot grow
@@ -159,6 +160,7 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
         "connectivity_gate.py",
         "context_removal_audit.py",
         "decide.py",
+        "dream-scale-bench.py",
         "e2e_live_reconcile.py",
         "graph-diagnostics.py",
         "merge_endometriosis.py",
@@ -177,7 +179,7 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
 #: The ratchet: the markerless residue may never GROW. Raised only deliberately,
 #: in its own diff — and lowered by the retrofit as it marks files, so the count
 #: is a progress reading, not a fact that re-stales silently.
-UNMARKED_CEILING = 33
+UNMARKED_CEILING = 34
 
 #: Scripts that assert a price **of this product**. #4830's sharpest gap: both
 #: ``bp_approach_cycle3``/``cycle4`` assert non-canonical tiers as ours and

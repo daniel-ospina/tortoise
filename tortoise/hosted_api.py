@@ -15671,6 +15671,49 @@ async def activation_scorecard(
     never a 500 and never a fabricated 0.
     """
     from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+
+    _require_scope(org, "graphs:read", "activation_scorecard")
+    _reject_graph_bound_org_surface(org, "the activation scorecard")
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return await _scorecard_for_org(
+        org, since_iso, until_iso, logging.getLogger("tortoise.api"))
+
+
+async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
+                             log) -> dict:
+    """Compute ONE org's scorecard payload over an already-validated window.
+
+    ONE code path, TWO callers: the org-scoped endpoint
+    (``activation_scorecard``) and the operator cohort endpoint
+    (``activation_cohort``, #3676). A second implementation would let the two
+    surfaces disagree about the same org while both calling themselves "the
+    scorecard" — the quiet-mislabelling class this module exists to remove.
+
+    The CALLER owns authentication and window validation; this function owns the
+    per-org fail-soft behaviour. It is TOTAL against store failures (an
+    unreadable graph or analytics store yields ``unavailable``, never a 500)
+    and re-raises ONLY an ``HTTPException``: an authorization/tenancy denial
+    must not be swallowed into a 200 carrying `unavailable` stages.
+
+    ``org`` is the resolved tenancy dict on the org path and a minimal
+    ``{"org_id": ..., "graph_id": None}`` on the cohort path. That is
+    deliberate and behaviour-identical: the org path has already refused
+    graph-bound keys (``_reject_graph_bound_org_surface``), so ``_data_sdk``'s
+    graph-bound branch is unreachable for BOTH callers. The cohort path binds
+    no actor ON PURPOSE — the operator is not the tenant's actor, and
+    ``_bind_actor_context`` writes the ContextVar only when the dict actually
+    carries one.
+    """
+    from tortoise.activation_scorecard import (
         FUNNEL_QUERY as _FUNNEL,
     )
     from tortoise.activation_scorecard import (
@@ -15686,21 +15729,6 @@ async def activation_scorecard(
     from tortoise.activation_scorecard import (
         RECALL_PAGE_CAP as _CAP,
     )
-    from tortoise.activation_scorecard import (
-        WindowError as _WindowError,
-    )
-    from tortoise.activation_scorecard import (
-        normalize_window as _norm_window,
-    )
-
-    _require_scope(org, "graphs:read", "activation_scorecard")
-    _reject_graph_bound_org_surface(org, "the activation scorecard")
-    try:
-        since_iso, until_iso = _norm_window(since, until)
-    except _WindowError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    log = logging.getLogger("tortoise.api")
 
     def _read_graph() -> tuple[list, dict | None]:
         sdk = _data_sdk(org)
@@ -15838,6 +15866,262 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                     org["org_id"], exc_info=True)
         return _recall_stages(
             None, None, reason="analytics_store_unreachable")
+
+
+# ── #3676: the cross-tenant cohort endpoint ────────────────────────────────
+# The beta cohort is structurally MULTI-ORG (the free tier allows one org per
+# person with no invites), so the org-scoped scorecard reports n=1 — a dogfood
+# read. This surface folds an EXPLICIT, operator-named org list into one cohort
+# number, so the cohort is queryable rather than scripted.
+#
+# AUTH — the internal MACHINE plane, and there is no other credential to use.
+# Four recorded reasons, in the order they bite:
+#   1. ADR-010 splits credentials into a HUMAN plane (session JWT, the browser)
+#      and a MACHINE plane (durable API key / agent identity). An operator
+#      running a cohort read is the MACHINE plane; there is no admin ROLE in the
+#      human plane to reuse, and inventing one would put a cross-tenant read
+#      behind a tenant-scoped session.
+#   2. ADR-010's machine plane has exactly one credential today that is not
+#      tenant-scoped: `FASTAPI_INTERNAL_KEY` (`_check_internal`). It already
+#      gates `/v1/internal/backups/restore`, `/purge` and `/sweep` — operations
+#      that read and REWRITE every tenant's graph. A read-only count over a list
+#      the operator names is strictly less than what this key can already do, so
+#      reusing it adds NO capability. A NEW `admin` secret was REJECTED: a second
+#      long-lived master credential widens the blast radius of a leak without
+#      narrowing what the holder can reach, and it would need its own rotation
+#      path (`docs/infra-runbook.md` already rotates this one).
+#   3. An org-scoped `tt_` key can NEVER satisfy `_check_internal`: the check is
+#      `hmac.compare_digest(bearer, FASTAPI_INTERNAL_KEY)` against a value an org
+#      key cannot obtain. That is acceptance criterion 1, by construction.
+#   4. `/v1/internal/` is the DOCUMENTED operator/cron prefix — the #3834
+#      transport-wait-bound exemption (`_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX`)
+#      exists because these routes "have no user and no user-patience budget to
+#      derive from". A cohort of N orgs is exactly such a batch job (no user
+#      waits on it, each org costs a graph scan), so it inherits that recorded
+#      ruling rather than widening it. A `/v1/admin/` prefix would have needed a
+#      THIRD exemption decision and a new path family to secure; the issue's
+#      "something like `/v1/admin/...`" is a suggestion, not a plan.
+#
+# ENUMERATION — the list is explicit and is echoed VERBATIM. There is no
+# wildcard, no "all orgs" token, no registry lookup, and the response contains no
+# org the caller did not name (asserted by a test). The cohort is a question the
+# operator can already answer by naming a list; this endpoint does not help them
+# DISCOVER one.
+#
+# AUDIT — decided explicitly, and it is a decision rather than an omission.
+# ONE `audit_events` row per request, through the existing append-only, RLS'd
+# `_async_audit` writer, with `org_id=""` — the same shape the non-org-scoped
+# `identity_link` operations already use. WHY ONE ROW AND NOT N: the ACTION is
+# one operator action (the cardinality is one), the ACTOR is the operator rather
+# than any tenant, and `audit_events.team_id` is what RLS makes tenant-visible —
+# writing N per-tenant rows would present one operator action as N tenant
+# operations and put a row in each tenant's trail for every read of a COUNT.
+# The cross-tenant-visible-notification question (should a tenant be told its
+# counts were read?) is a product/privacy decision with its own RLS answer and
+# is NOT invented here; the operator-plane row names every target org in
+# `detail`. Tenant-visible reads are also NOT the established posture: the
+# backup sweep reads every tenant's FULL graph and emits no audit rows at all.
+# FAIL-OPEN on the write, deliberately: the audit writer never raises (it falls
+# back to JSONL and counts drops), and #1529 already ruled that bookkeeping must
+# not 500 a serving path. Blocking a read because the sink is down would not
+# stop an abuser either — an abuser holds the key.
+
+#: The same accepted id shape the provisioning path validates
+#: (``provision_tenant`` / ``hosted_backup._validate_org_id``): the id becomes a
+#: graph namespace, so a malformed one is refused here rather than surfacing
+#: later as an opaque connect error.
+_COHORT_ORG_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+#: Refused BY NAME, case-insensitively. A wildcard token is how an explicit
+#: list silently becomes "every tenant on the platform" — the failure mode this
+#: endpoint is explicitly built NOT to have.
+_COHORT_WILDCARDS = frozenset({"all", "any", "*", "%", "every", "-1"})
+
+#: Per-org blast-radius bound. A single unreadable (or hung) org must cost THAT
+#: org's cell and nothing else, so the read is wrapped in a timeout and folds to
+#: `unavailable` with the org NAMED. The underlying worker hand-off is not
+#: cancellable (see ``_run_off_loop``), so the worker itself may finish late
+#: regardless — this bounds the RESPONSE, not the query.
+_COHORT_PER_ORG_TIMEOUT_S = 30.0
+
+#: Bounded parallelism, NOT a throughput target: the graph leg rides
+#: `_SCORECARD_EXECUTOR` (2 workers by default), so a wider fan-out only queues
+#: there while multiplying concurrent load on the shared control plane.
+_COHORT_MAX_CONCURRENCY = 4
+
+
+def _validate_cohort_orgs(raw: list[str] | None, max_orgs: int) -> list[str]:
+    """Validate the operator-supplied cohort list; return it verbatim, in order.
+
+    Every refusal below is deliberate and none of them is a silent repair:
+
+    * ABSENT/EMPTY — refused. A cohort with no members is not a cohort, and
+      defaulting to "everything" is precisely how a metrics endpoint becomes a
+      tenant-enumeration endpoint.
+    * WILDCARDS — refused by name (``all``/``any``/``every``/``*``/``%``/``-1``).
+    * ID FORMAT — the accepted shape (``_COHORT_ORG_ID_RE``).
+    * DUPLICATES — refused, never deduped: deduping hides a copy-paste error,
+      and summing both would inflate the cohort number AND its denominator.
+    * SIZE — at most ``max_orgs``, a blast-radius bound, not a cohort-size
+      requirement.
+    """
+    if not raw:
+        raise HTTPException(
+            status_code=422,
+            detail=("orgs is required and must name at least one org explicitly "
+                    "(repeat the parameter, e.g. ?orgs=org-a&orgs=org-b). This "
+                    "surface takes no wildcard and never enumerates orgs."))
+    seen: set[str] = set()
+    for org_id in raw:
+        if org_id.strip().lower() in _COHORT_WILDCARDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs must be an explicit list of org ids — {org_id!r} "
+                        "is a wildcard token, which this surface refuses: a "
+                        "wildcard is how an explicit cohort becomes an "
+                        "enumeration of every tenant."))
+        if not _COHORT_ORG_ID_RE.match(org_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs entry {org_id!r} is not a valid org id "
+                        "([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})"))
+        if org_id in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs entry {org_id!r} was given more than once — "
+                        "refused rather than deduped, because a copy-paste "
+                        "duplicate silently inflates the cohort and its "
+                        "denominator"))
+        seen.add(org_id)
+    if len(raw) > max_orgs:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"orgs carries {len(raw)} entries; this endpoint accepts at "
+                    f"most {max_orgs} per request (a blast-radius bound, not a "
+                    f"cohort-size requirement) — split the cohort across "
+                    f"requests"))
+    return list(raw)
+
+
+@app.get("/v1/internal/activation/cohort")
+async def activation_cohort(
+    request: Request,
+    orgs: list[str] | None = Query(default=None),  # noqa: B008
+    since: str | None = None,
+    until: str | None = None,
+):
+    """Cross-tenant activation funnel over an EXPLICIT operator-named org list.
+
+    Operator-only (``_check_internal``, `FASTAPI_INTERNAL_KEY`): an org-scoped
+    `tt_` key cannot satisfy it. Read-only. Returns the same five-stage shape as
+    `GET /v1/activation/scorecard`, folded across the named orgs, and
+    deliberately carries NO `activated` field and no activation rate at any
+    depth (see `tortoise/activation_scorecard.py`).
+
+    The org list is echoed verbatim in `cohort_definition`; `dogfood_only` is
+    set for n=1. An org that could not be read — unreachable, refused, or over
+    the per-org timeout — makes its stages `partial`/`unavailable` with the org
+    NAMED, and is never summed as 0 (see `roll_up_cohort`).
+
+    The whole request is one window, validated once and passed to every org, so
+    the cohort is comparable across orgs and the boundary instant is treated
+    identically by every per-org read.
+    """
+    _check_internal(request)
+
+    from tortoise.activation_scorecard import (
+        MAX_COHORT_ORGS,
+        assemble_cohort,
+    )
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+    from tortoise.activation_scorecard import (
+        org_failure_reason as _org_failure_reason,
+    )
+
+    cohort = _validate_cohort_orgs(orgs, MAX_COHORT_ORGS)
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    log = logging.getLogger("tortoise.api")
+    limiter = asyncio.Semaphore(min(_COHORT_MAX_CONCURRENCY, len(cohort)))
+
+    async def _one_org(org_id: str) -> tuple[str, dict | None, str | None]:
+        """Read ONE org, total against every store failure.
+
+        The minimal org dict is the tenancy seam on purpose: `graph_id=None`
+        resolves the org DEFAULT graph through the same `_data_sdk` path the
+        org-scoped endpoint uses (graph-bound keys were already refused there),
+        and no actor is bound — the operator is not the tenant's actor.
+        """
+        try:
+            async with limiter:
+                payload = await asyncio.wait_for(
+                    _scorecard_for_org({"org_id": org_id, "graph_id": None},
+                                       since_iso, until_iso, log),
+                    timeout=_COHORT_PER_ORG_TIMEOUT_S)
+        except TimeoutError:
+            # NOTE: this arm also catches a builtin TimeoutError raised INSIDE
+            # the read (a driver's own timeout is not a builtin, but the
+            # distinction is not worth a wrong-shape error): either way the org
+            # did not answer in time and the honest report is `unavailable`.
+            log.warning("activation cohort: org %s exceeded %ss (fail-soft)",
+                        org_id, _COHORT_PER_ORG_TIMEOUT_S)
+            return org_id, None, "org_read_timeout"
+        except HTTPException as exc:
+            # A tenancy/authorization refusal for ONE org is that org's failure,
+            # not the cohort's — same fail-soft contract as an unreadable graph.
+            log.warning("activation cohort: org %s refused (%s)",
+                        org_id, exc.status_code)
+            return org_id, None, f"org_read_refused:{exc.status_code}"
+        except Exception as exc:
+            # Class NAME only, never `str(exc)`: an exception message can carry
+            # a DSN, a host or a credential fragment.
+            log.warning("activation cohort: org %s read failed (fail-soft): %s",
+                        org_id, type(exc).__name__, exc_info=True)
+            return org_id, None, f"org_read_failed:{type(exc).__name__}"
+        # A read that SUCCEEDED at the transport level can still have folded to
+        # `unavailable` (an unreadable graph or analytics store is absorbed into
+        # the payload rather than raised — see `_scorecard_for_org`). Surface
+        # THAT reason too, so `org_errors` explains every org the roll-up names
+        # in `orgs_unavailable` instead of leaving the operator to re-read it one
+        # org at a time. The predicate is the module's own, so the error map and
+        # the roll-up's verdict cannot disagree.
+        return org_id, payload, _org_failure_reason(payload)
+
+    results = await asyncio.gather(*(_one_org(o) for o in cohort))
+    payload = assemble_cohort(
+        orgs=cohort,
+        payloads=[cell[1] for cell in results],
+        errors=[cell[2] for cell in results],
+        since=since_iso, until=until_iso,
+        limits={"max_orgs": MAX_COHORT_ORGS,
+                "max_concurrency": _COHORT_MAX_CONCURRENCY,
+                "per_org_timeout_s": _COHORT_PER_ORG_TIMEOUT_S,
+                "auth": "internal_key"},
+    )
+
+    # Audit BEFORE returning, fail-open (see the block note): one row for one
+    # operator action, on the operator plane (`org_id=""`), naming every target
+    # org. `_async_audit` is off-loaded and its writer counts its own drops.
+    try:
+        await _async_audit(
+            request, "", "activation_cohort_read",
+            resource_type="activation_cohort",
+            detail={"orgs": list(cohort), "window": payload["window"],
+                    "orgs_measured": payload["orgs_measured"],
+                    "org_errors": payload["org_errors"]},
+        )
+    except Exception:
+        # #1529 precedent: bookkeeping must never turn a served read into a 500.
+        log.exception("activation cohort audit write failed (non-fatal)")
+    return payload
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings

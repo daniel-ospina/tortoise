@@ -198,6 +198,9 @@ routes:
   - method: GET
     path: /v1/index/github/{job_id}
     class: tenant
+  - method: GET
+    path: /v1/internal/activation/cohort
+    class: control-plane
   - method: POST
     path: /v1/internal/backups/acl-reconcile
     class: control-plane
