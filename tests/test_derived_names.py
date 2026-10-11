@@ -325,6 +325,11 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],
+    # #7813: the live lane's read-back helper `_stored_directions(uri)` opens a
+    # `_live_utils.docker_uri(graph)` handle — the `tortoise_test_t7813_*` graph
+    # minted by the calling test — and only MATCHes `o.direction` on it (no
+    # DETACH anywhere in the file), so the shared env-URI graph is never touched.
+    "test_decide_direction_7813.py": [r"from_uri\(uri\)"],
     # #4290: declared per the new-test-file registration rule. ZERO sites by
     # construction — the finding-provenance gate opens no graph (hermetic temp
     # git repo, subprocess git only); test_from_uri_routing_table_keys_exist

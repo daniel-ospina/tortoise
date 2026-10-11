@@ -32,6 +32,10 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tortoise.activation_scorecard import (
+    assert_no_activation_claim,
+    roll_up_cohort,
+)
 from tortoise.hosted_api import (
     app,
     get_current_org_session_ungated,
@@ -56,13 +60,19 @@ ORG = {
 WINDOW = {"since": "2026-09-16T00:00:00Z", "until": "2026-09-17T00:00:00Z"}
 
 
-def _seed(sid: str, created_at: str, events: int, claims: int) -> None:
-    """Seed one session into the ORG's graph — the same namespace the endpoint
+def _seed(sid: str, created_at: str, events: int, claims: int,
+          org_id: str = ORG["org_id"]) -> None:
+    """Seed one session into ONE org's graph — the same namespace the endpoint
     reads (``_data_sdk(org)`` -> ``_make_sdk(namespace=org_id)``). Seeding the
     process default graph instead would write to a different graph and the
-    scorecard would legitimately report 0."""
+    scorecard would legitimately report 0.
+
+    ``org_id`` is a parameter since #3676: the cross-tenant cohort endpoint
+    reads several org namespaces in one request, so the fixture has to be able
+    to seed more than the ambient ``ORG``.
+    """
     import tortoise.hosted_api as ha
-    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
+    proj = ha._make_sdk(namespace=org_id)._get_proj()
     proj.g.query("MERGE (s:Session {id:$i}) SET s.created_at=$c",
                  params={"i": sid, "c": created_at})
     for n in range(events):
@@ -1066,17 +1076,12 @@ def test_analytics_props_allowlist_is_respected(monkeypatch, tmp_path):
     assert event["properties"] == {"tool_name": "t"}
 
 
-# ── Cohort roll-up (tools/activation_cohort.py) ──────────────────────────
-
-def _cohort_module():
-    import importlib.util
-    import pathlib
-    path = (pathlib.Path(__file__).resolve().parents[1]
-            / "tools" / "activation_cohort.py")
-    spec = importlib.util.spec_from_file_location("_b7_activation_cohort", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+# ── Cohort roll-up (tortoise/activation_scorecard.roll_up_cohort) ───────
+# #3676 moved the fold OUT of `tools/activation_cohort.py` and INTO the module:
+# the cross-tenant endpoint is now a caller, so there is ONE implementation of
+# the cohort number. When the script owned it, the scripted cohort and the
+# served cohort were two code paths that could silently disagree about the same
+# orgs — which is what these tests exist to prevent, in either home.
 
 
 def _payload(captured, stored, memory, recall_state="unavailable",
@@ -1096,8 +1101,7 @@ def test_cohort_does_not_call_a_not_measurable_stage_a_reporting_failure():
     would assert that healthy orgs failed to report — the state inversion this
     lane exists to prevent. The cohort stage must be ``not_measurable``, with no
     org accused."""
-    mod = _cohort_module()
-    report = mod.roll_up(["a", "b"], [_payload(5, 5, 1), _payload(7, 6, 0)])
+    report = roll_up_cohort(["a", "b"], [_payload(5, 5, 1), _payload(7, 6, 0)])
     cell = report["stages"]["value_confirmed"]
     assert cell["state"] == "not_measurable", cell
     assert cell["value"] is None, cell
@@ -1111,8 +1115,7 @@ def test_cohort_partial_when_some_orgs_measured_and_others_had_nothing():
     """Mixed cohort: one org measured recall, the other has never produced
     memory (so genuinely has nothing to measure). That is `partial`, and the
     org with nothing to measure is NOT accused of failing to report."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(5, 5, 1, "measured", 4),
          _payload(7, 6, 0, "not_measurable", None)])
@@ -1126,8 +1129,7 @@ def test_cohort_partial_when_some_orgs_measured_and_others_had_nothing():
 def test_cohort_still_accuses_an_org_that_really_failed_to_report():
     """The distinction must not swing the other way: a genuinely unreadable
     org is still named, and never lets the cohort read `not_measurable`."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(5, 5, 1, "not_measurable", None), None],
         [None, "HTTP 500"])
@@ -1138,8 +1140,7 @@ def test_cohort_still_accuses_an_org_that_really_failed_to_report():
 
 
 def test_cohort_rollup_sums_measured_and_echoes_its_denominator():
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["org-a", "org-b"],
         [_payload(5, 5, 1), _payload(7, 6, 0)],
     )
@@ -1155,8 +1156,7 @@ def test_cohort_rollup_sums_measured_and_echoes_its_denominator():
 
 
 def test_cohort_rollup_refuses_to_sum_an_unreadable_org_as_zero():
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["org-a", "org-b"],
         [_payload(5, 5, 1), None],
         [None, "HTTP 500"],
@@ -1165,16 +1165,20 @@ def test_cohort_rollup_refuses_to_sum_an_unreadable_org_as_zero():
     assert cell["state"] == "partial", cell
     assert cell["value"] == 5, cell
     assert cell["orgs_unavailable"] == ["org-b"], cell
-    assert report["org_errors"] == {"org-b": "HTTP 500"}
+    assert report["org_errors"] == [{"org_id": "org-b", "reason": "HTTP 500"}]
+    # `org_errors` is a LIST of records, never a map keyed by org id: an org id
+    # is caller-supplied text and a key containing "activat" would trip the
+    # claim guard (see `roll_up_cohort`'s docstring).
+    assert isinstance(report["org_errors"], list)
+    assert not [k for k in _all_keys(report) if "activat" in k.lower()], report
 
 
 def test_cohort_rollup_does_not_invent_a_value_for_a_malformed_measured_cell():
     """A `measured` cell with no value is a malformed upstream payload. Counting
     it as 0 would invent a measurement the org never reported."""
-    mod = _cohort_module()
     payload = _payload(5, 5, 1)
     payload["stages"]["captured"] = {"state": "measured", "value": None}
-    report = mod.roll_up(["a", "b"], [payload, _payload(7, 6, 0)])
+    report = roll_up_cohort(["a", "b"], [payload, _payload(7, 6, 0)])
     cell = report["stages"]["captured"]
     assert cell["state"] == "partial", cell
     assert cell["value"] == 7, cell
@@ -1182,8 +1186,7 @@ def test_cohort_rollup_does_not_invent_a_value_for_a_malformed_measured_cell():
 
 
 def test_single_org_cohort_is_flagged_dogfood_only():
-    mod = _cohort_module()
-    assert mod.roll_up(["solo"], [_payload(1, 1, 1)])["dogfood_only"] is True
+    assert roll_up_cohort(["solo"], [_payload(1, 1, 1)])["dogfood_only"] is True
 
 
 def test_cohort_output_never_derives_an_activation_rate():
@@ -1191,8 +1194,7 @@ def test_cohort_output_never_derives_an_activation_rate():
     it would be exactly the mislabelling the scorecard exists to remove.
     Checked on KEYS, not prose — the note is allowed to name the thing it
     refuses to compute."""
-    mod = _cohort_module()
-    report = mod.roll_up(["a", "b"], [_payload(1, 1, 1, "measured", 4),
+    report = roll_up_cohort(["a", "b"], [_payload(1, 1, 1, "measured", 4),
                                         _payload(1, 1, 0, "measured", 2)])
     keys: list[str] = []
     stack = [report]
@@ -1205,20 +1207,30 @@ def test_cohort_output_never_derives_an_activation_rate():
             stack.extend(node)
     assert not [k for k in keys if "activat" in k.lower()], keys
     assert report["stages"]["recall_attempted"]["value"] == 6
-    assert mod.roll_up(["a"], [_payload(1, 1, 1, "measured", 4)])["stages"][
+    assert roll_up_cohort(["a"], [_payload(1, 1, 1, "measured", 4)])["stages"][
         "recall_attempted"]["state"] == "measured"
 
 
 def test_cohort_refuses_a_payload_that_claims_activation():
-    mod = _cohort_module()
-    with pytest.raises(SystemExit):
-        mod._assert_no_activation_claim({"stages": {"activated": {"value": 1}}})
+    """The MODULE's guard raises `ValueError` (not SystemExit): it runs inside a
+    request handler, where exiting the process would be absurd. The operator
+    CLIENT's own copy raises SystemExit (see `TestCohortGuards`)."""
+    with pytest.raises(ValueError, match="claims activation"):
+        assert_no_activation_claim({"stages": {"activated": {"value": 1}}})
+    # The guard is recursive and KEY-based — a nested claim is caught.
+    with pytest.raises(ValueError, match="claims activation"):
+        assert_no_activation_claim(
+            {"cohort_definition": {"orgs": [{"activation_rate": 0.5}]}})
+    # ...but the prose that NAMES the refusal is allowed through.
+    assert_no_activation_claim(
+        {"note": "no activation rate is derivable from this output"})
 
 
 # ── The cohort tool's guards (re-review P2-4: they had zero coverage) ───────
 
 class TestCohortGuards:
-    """`tools/activation_cohort.py` transmits full tenant API keys, so its
+    """`tools/activation_cohort.py` transmits the platform's MOST privileged
+    credential (`FASTAPI_INTERNAL_KEY`, the operator/internal plane), so its
     pre-flight guards are security controls. They behave correctly but nothing
     pinned them — a regression would have been silent."""
 
@@ -1247,15 +1259,16 @@ class TestCohortGuards:
             _assert_https(good)
 
     def test_header_illegal_key_is_refused_without_echoing_it(self):
-        from tools.activation_cohort import _validate_key
+        from tools.activation_cohort import _validate_credential
         secret = "tt_" + "A" * 40
-        _validate_key("org-1", secret)  # a real key passes
+        _validate_credential("--operator-key", secret)  # a real key passes
         for bad in (secret + "\n", secret + "\t", "with space", "ünicode",
                     "tab\there", ""):
             with pytest.raises(SystemExit) as exc:
-                _validate_key("org-1", bad)
-            # The whole point: the message names the ORG, never the key. A key
-            # that reaches `putheader` raises a ValueError embedding it whole.
+                _validate_credential("--operator-key", bad)
+            # The whole point: the message names the CREDENTIAL'S LABEL, never
+            # its value. A key that reaches `putheader` raises a ValueError
+            # embedding it whole.
             assert secret not in str(exc.value), "the key leaked into the error"
 
     def test_redirects_are_not_followed(self):
@@ -1276,7 +1289,7 @@ class TestCohortGuards:
                     if type(h).__name__ == "_RefuseRedirects"]
         assert handlers, "the refusing handler was not installed"
         req = urllib.request.Request(
-            "https://api.example/v1/activation/scorecard",
+            "https://api.example/v1/internal/activation/cohort",
             headers={"Authorization": "Bearer SECRET"})
         with pytest.raises(urllib.error.HTTPError) as exc:
             handlers[0].redirect_request(
@@ -1284,15 +1297,15 @@ class TestCohortGuards:
         assert exc.value.code == 302, exc.value
         assert "evil.example" in str(exc.value), exc.value
 
-    def test_fetch_scorecard_uses_the_refusing_opener(self):
-        """The handler being correct is not enough — `fetch_scorecard` must
+    def test_fetch_cohort_uses_the_refusing_opener(self):
+        """The handler being correct is not enough — `fetch_cohort` must
         actually route through it. Swapping it for `urlopen` would restore the
         header-copying default."""
         import inspect
 
         from tools import activation_cohort as ac
 
-        src = inspect.getsource(ac.fetch_scorecard)
+        src = inspect.getsource(ac.fetch_cohort)
         assert "_no_redirect_opener().open(" in src, src
         assert "urllib.request.urlopen(" not in src, src
 
@@ -1301,33 +1314,52 @@ class TestCohortGuards:
         denominator."""
         from tools.activation_cohort import main
         argv = ["--api-base", "https://api.example",
-                "--org", "org-a=k1", "--org", "org-a=k2"]
+                "--org", "org-a", "--org", "org-a"]
         with pytest.raises(SystemExit):
             main(argv)
+
+    def test_the_old_org_key_syntax_is_refused_with_a_reason(self):
+        """#3676 replaced `--org <org_id>=<tenant_key>` with ONE operator
+        credential. Silently reading the left half of an old command would send
+        a tenant key to the server as an org id — refuse it, and say why."""
+        from tools.activation_cohort import main
+        with pytest.raises(SystemExit) as exc:
+            main(["--api-base", "https://api.example", "--org", "org-a=tt_live"])
+        assert "operator" in str(exc.value)
+        assert "tt_live" not in str(exc.value)
 
     def test_empty_org_id_is_rejected(self):
         from tools.activation_cohort import main
         with pytest.raises(SystemExit):
-            main(["--api-base", "https://api.example", "--org", "=k1"])
+            main(["--api-base", "https://api.example", "--org", ""])
+
+    def test_a_missing_operator_credential_is_refused_before_any_request(
+            self, monkeypatch):
+        """An org-scoped `tt_` key cannot authenticate against the cohort
+        endpoint, so the tool must fail loudly rather than send nothing."""
+        from tools import activation_cohort as ac
+        monkeypatch.delenv(ac.OPERATOR_KEY_ENV, raising=False)
+        monkeypatch.setattr(ac, "_assert_https", lambda *a, **k: None)
+        with pytest.raises(SystemExit) as exc:
+            ac.main(["--api-base", "https://api.example", "--org", "org-a"])
+        assert ac.OPERATOR_KEY_ENV in str(exc.value)
 
     def test_roll_up_arity_mismatch_raises(self):
-        from tools.activation_cohort import roll_up
         # `match=` is load-bearing: `zip(..., strict=True)` ALREADY raised a bare
         # ValueError, so asserting only the type would pass with this guard
         # reverted (mutation-verified by review cycle 3).
         with pytest.raises(ValueError, match="one entry per org"):
-            roll_up(["a", "b"], [None])
+            roll_up_cohort(["a", "b"], [None])
 
     def test_duplicate_orgs_cannot_double_count(self):
         """Belt and braces: even if a caller bypasses the CLI, the
         operator-supplied list is echoed verbatim so the inflated cohort is
         visible rather than silent."""
-        from tools.activation_cohort import roll_up
         body = {"stages": {n: {"state": "measured", "value": 1, "unit": "x",
                                "reason": None} for n in (
             "captured", "stored", "memory_produced", "recall_attempted",
             "value_confirmed")}}
-        report = roll_up(["a", "a"], [body, body])
+        report = roll_up_cohort(["a", "a"], [body, body])
         assert report["cohort_definition"]["orgs"] == ["a", "a"]
         assert report["cohort_definition"]["size"] == 2
         # The tool MUST NOT invent a rate; a duplicate stays visible as size=2.
@@ -1522,8 +1554,7 @@ def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
     """A partial cohort's sum is a LOWER BOUND — the unreadable orgs are exactly
     the ones that might carry the activity. A lower bound of 0 must not be
     emitted as a confident 0."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(0, 0, 0, "measured", 0), None],
         [None, "HTTP 500"])
@@ -1537,8 +1568,7 @@ def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
 def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
     """A 0 from `not_measurable` orgs alone IS a fact (they genuinely have
     nothing), so only `unavailable` triggers the refusal."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(3, 3, 1, "measured", 0),
          _payload(0, 0, 0, "not_measurable", None)])
@@ -1548,22 +1578,27 @@ def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
     assert cell["orgs_unavailable"] == [], cell
 
 
-def test_cohort_refuses_a_payload_whose_org_id_is_not_the_org_asked_for(
+def test_cohort_client_refuses_a_response_bound_to_another_org_list(
         monkeypatch, capsys):
-    """A mistyped `--org A=key_of_B` must not produce a report whose
-    `cohort_definition` names A while the summed numbers are B's."""
-    import json
-    mod = _cohort_module()
-    payload = _payload(5, 5, 1)
-    payload["org_id"] = "b"
-    monkeypatch.setattr(mod, "fetch_scorecard", lambda *a, **k: payload)
-    monkeypatch.setattr(mod, "_assert_https", lambda *a, **k: None)
-    assert mod.main(["--api-base", "https://api.example",
-                     "--org", "a=KEY"]) == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["org_errors"] == {"a": "org_id_mismatch"}, report
-    assert report["stages"]["captured"]["state"] == "unavailable", report
-    assert report["stages"]["captured"]["value"] is None, report
+    """The client binds the report to the orgs it ASKED FOR. The server echoes
+    `cohort_definition` from the request, so a mismatch means the response did
+    not come from the requested cohort (a wrong/old endpoint, or a proxy) — and
+    an operator would otherwise read a denominator that does not describe the
+    numbers beneath it. The credential must never appear in the error."""
+    from tools import activation_cohort as ac
+
+    monkeypatch.setattr(
+        ac, "fetch_cohort",
+        lambda *a, **k: {"cohort_definition": {"orgs": ["b"], "size": 1,
+                                              "source": "operator_supplied"},
+                         "stages": {}, "org_errors": {}})
+    monkeypatch.setattr(ac, "_assert_https", lambda *a, **k: None)
+    monkeypatch.setenv(ac.OPERATOR_KEY_ENV, "operator-secret")
+    with pytest.raises(SystemExit) as exc:
+        ac.main(["--api-base", "https://api.example", "--org", "a"])
+    assert "cohort_definition" in str(exc.value)
+    assert "operator-secret" not in str(exc.value)
+    assert capsys.readouterr().out == ""
 
 
 def test_an_out_of_window_analytics_row_refuses_the_recall_count(client, monkeypatch):
@@ -1727,3 +1762,493 @@ def test_the_graph_read_is_dispatched_off_the_shared_default_executor(client,
     resp = client.get("/v1/activation/scorecard", params=WINDOW)
     assert resp.status_code == 200, resp.text
     assert calls == [ha._SCORECARD_EXECUTOR], calls
+
+
+# ══ #3676: the cross-tenant cohort endpoint ═══════════════════════════════════
+# `GET /v1/internal/activation/cohort` — operator-only, EXPLICIT org list. These
+# are the tenancy review's executable half: the credential, the enumeration
+# refusal, the per-org blast radius, the no-activation-claim rule and the audit
+# decision are each pinned, because each fails SILENTLY if it regresses.
+
+COHORT_PATH = "/v1/internal/activation/cohort"
+_INTERNAL_KEY = "test-internal-cohort-secret"
+INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+COHORT_ORGS = ["org-cohort-a", "org-cohort-b"]
+
+
+@pytest.fixture
+def internal_key(monkeypatch):
+    """The cohort endpoint's operator credential. `_check_internal` reads it at
+    CALL time (#880), so setting it inside the test is enough."""
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    return dict(INTERNAL_HEADERS)
+
+
+def _cohort(client, headers, orgs=None, window=None, **kwargs):
+    params = [("orgs", o) for o in (COHORT_ORGS if orgs is None else orgs)]
+    for key, value in (window if window is not None else WINDOW).items():
+        params.append((key, value))
+    return client.get(COHORT_PATH, params=params, headers=headers, **kwargs)
+
+
+def _all_keys(payload) -> list[str]:
+    keys: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            keys.extend(str(k) for k in node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return keys
+
+
+def _all_strings(payload) -> list[str]:
+    out: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            out.append(node)
+    return out
+
+
+# ── The credential (acceptance criterion 1) ────────────────────────────────
+
+def test_cohort_requires_the_internal_operator_credential(client, monkeypatch):
+    """An org-scoped `tt_` key — every tenant's credential — must NOT open this
+    surface. `_check_internal` compares against `FASTAPI_INTERNAL_KEY`, a value
+    an org key cannot obtain, so the separation is structural rather than a
+    scope check."""
+    monkeypatch.delenv("FASTAPI_INTERNAL_KEY", raising=False)
+    # Unconfigured server: fail closed (503), never "no key needed".
+    assert _cohort(client, {}).status_code == 503
+
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    # No credential at all.
+    assert _cohort(client, {}).status_code == 401
+    # A well-formed ORG key (`tt_`, the tenant plane).
+    org_key = {"Authorization": "Bearer tt_" + "A" * 40}
+    assert _cohort(client, org_key).status_code == 401
+    # A wrong internal key.
+    assert _cohort(client, {"Authorization": "Bearer nope"}).status_code == 401
+    # The right one.
+    assert _cohort(client, INTERNAL_HEADERS).status_code == 200
+
+
+def test_cohort_a_near_miss_credential_is_refused(client, internal_key):
+    """Prefix/suffix near-misses must not authenticate — the comparison is on
+    the FULL bearer value (`hmac.compare_digest`), not a prefix test."""
+    for bad in (_INTERNAL_KEY[:-1], _INTERNAL_KEY + "x", _INTERNAL_KEY.upper()):
+        resp = _cohort(client, {"Authorization": f"Bearer {bad}"})
+        assert resp.status_code == 401, (bad, resp.text)
+
+
+# ── Enumeration refusal (acceptance criterion 2) ────────────────────────────
+
+def test_cohort_refuses_wildcard_tokens(client, internal_key):
+    """A wildcard is how an explicit list silently becomes "every tenant on the
+    platform" — refused by NAME, case-insensitively, and the message says so."""
+    for token in ("all", "ALL", "any", "every", "*", "%", "-1"):
+        resp = _cohort(client, internal_key, orgs=[token])
+        assert resp.status_code == 422, (token, resp.text)
+        assert "wildcard" in resp.text, (token, resp.text)
+
+
+def test_cohort_refuses_an_empty_org_list(client, internal_key):
+    """No list, and no "default to everything": an absent cohort is not a
+    cohort."""
+    assert client.get(COHORT_PATH, params=WINDOW,
+                      headers=internal_key).status_code == 422
+    assert _cohort(client, internal_key, orgs=[]).status_code == 422
+
+
+def test_cohort_refuses_a_malformed_org_id(client, internal_key):
+    """The id becomes a graph namespace, so the accepted shape is the same one
+    the provisioning path validates. `")/"`-style input must never reach the
+    namespace seam as an opaque connect error."""
+    for bad in ("org a", "../etc", "a/b", "-leading", "x" * 65, "org;drop"):
+        resp = _cohort(client, internal_key, orgs=[bad])
+        assert resp.status_code == 422, (bad, resp.text)
+
+
+def test_cohort_refuses_a_duplicate_org(client, internal_key):
+    """Refused rather than deduped: a copy-paste duplicate silently inflates
+    the cohort number AND its denominator."""
+    resp = _cohort(client, internal_key, orgs=["org-cohort-a", "org-cohort-a"])
+    assert resp.status_code == 422, resp.text
+    assert "more than once" in resp.text, resp.text
+
+
+def test_cohort_org_cap_is_a_blast_radius_bound():
+    """The cap is enforced at the boundary and is an OPERATIONAL limit, not a
+    cohort-size requirement (the owner withdrew the minimum-N bar). Asserted
+    against the validator so the boundary costs no I/O."""
+    from tortoise.activation_scorecard import MAX_COHORT_ORGS
+    from tortoise.hosted_api import _validate_cohort_orgs
+
+    at_cap = [f"org-{n:03d}" for n in range(MAX_COHORT_ORGS)]
+    assert _validate_cohort_orgs(at_cap, MAX_COHORT_ORGS) == at_cap
+    with pytest.raises(Exception) as exc:
+        _validate_cohort_orgs([*at_cap, "org-one-too-many"], MAX_COHORT_ORGS)
+    assert "at most" in str(getattr(exc.value, "detail", exc.value))
+
+
+def test_cohort_never_returns_an_org_the_caller_did_not_name(client, internal_key):
+    """The endpoint is not a registry probe: a seeded org that was NOT asked
+    for appears nowhere in the response, at any depth."""
+    _seed("s-unasked", "2026-09-16T10:00:00+00:00", 2, 1,
+          org_id="org-cohort-unasked")
+    _seed("s-asked", "2026-09-16T10:00:00+00:00", 1, 0,
+          org_id="org-cohort-a")
+    body = _cohort(client, internal_key, orgs=["org-cohort-a"]).json()
+    assert body["cohort_definition"]["orgs"] == ["org-cohort-a"]
+    assert not [s for s in _all_strings(body) if "unasked" in s], body
+
+
+# ── The fold, end to end ────────────────────────────────────────────────────
+
+def test_cohort_rolls_up_the_named_orgs_and_echoes_its_denominator(
+        client, internal_key):
+    _seed("c-a", "2026-09-16T10:00:00+00:00", 2, 1, org_id="org-cohort-a")
+    _seed("c-b", "2026-09-16T11:00:00+00:00", 1, 0, org_id="org-cohort-b")
+    body = _cohort(client, internal_key).json()
+
+    assert body["surface"] == "activation_cohort"
+    assert body["cohort_definition"] == {
+        "orgs": COHORT_ORGS, "size": 2, "source": "operator_supplied"}
+    assert body["dogfood_only"] is False
+    assert body["window"] == {"since": "2026-09-16T00:00:00+00:00",
+                              "until": "2026-09-17T00:00:00+00:00"}
+    assert body["org_errors"] == []
+    # The shared analytics stage is unmeasured here (no SUPABASE_URL in the test
+    # env), so the cause is hoisted ONCE at the cohort level instead of being
+    # repeated as a per-org failure.
+    assert body["notes"] == [
+        "recall_attempted is unavailable for 2 org(s): "
+        "analytics_write_path_unconfigured — this stage reads ONE shared "
+        "analytics store, so it is a server-level condition rather than a "
+        "per-org read failure"], body["notes"]
+    assert body["stages"]["captured"] == {
+        "state": "measured", "value": 2, "reason": None,
+        "orgs_measured": 2, "orgs_unavailable": [], "orgs_not_measurable": []}
+    assert body["stages"]["stored"]["value"] == 2, body["stages"]
+    assert body["stages"]["memory_produced"]["value"] == 1, body["stages"]
+    # `value_confirmed` is a refusal for every org, so the cohort state is
+    # `not_measurable` — that is the HEALTHY answer, not a failure.
+    assert body["stages"]["value_confirmed"]["state"] == "not_measurable"
+    assert body["stages"]["value_confirmed"]["value"] is None
+
+
+def test_cohort_payload_never_claims_activation(client, internal_key):
+    """Acceptance criterion 5: no `activated` field and no rate, at any depth.
+    `assert_no_activation_claim` in the module makes this a RUNTIME refusal on
+    the endpoint too, not only a test."""
+    _seed("c-a2", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    body = _cohort(client, internal_key).json()
+    keys = _all_keys(body)
+    assert not [k for k in keys if "activat" in k.lower()], keys
+    assert not [k for k in keys if k.lower() in ("rate", "ratio",
+                                                "conversion")], keys
+
+
+def test_cohort_single_org_is_flagged_dogfood_only(client, internal_key):
+    _seed("c-solo", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    body = _cohort(client, internal_key, orgs=["org-cohort-a"]).json()
+    assert body["dogfood_only"] is True
+    assert body["cohort_definition"]["size"] == 1
+
+
+def test_cohort_window_is_validated_once_and_echoed(client, internal_key):
+    """One window for the whole cohort — validated once, so every per-org read
+    sees the same interval and the boundary instant is treated identically."""
+    resp = _cohort(client, internal_key,
+                   window={"since": "2026-09-16T00:00:00",
+                           "until": "2026-09-17T00:00:00Z"})
+    assert resp.status_code == 422, resp.text
+    for bad in ({"since": "2026-09-17T00:00:00Z", "until": "2026-09-16T00:00:00Z"},
+                {"since": "2026-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z"}):
+        assert _cohort(client, internal_key, window=bad).status_code == 422
+
+
+def test_cohort_agrees_with_the_org_scoped_endpoint_for_the_same_org(
+        client, internal_key):
+    """ONE code path (#3676): the cohort's per-org number must equal what that
+    org reads through `GET /v1/activation/scorecard`. A second implementation
+    would let the two surfaces quietly disagree about the same org."""
+    _seed("c-agree", "2026-09-16T10:00:00+00:00", 3, 2)
+    scoped = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    body = _cohort(client, internal_key, orgs=[ORG["org_id"]]).json()
+    for name in ("captured", "stored", "memory_produced", "recall_attempted",
+                 "value_confirmed"):
+        cohort_cell, scoped_cell = body["stages"][name], scoped["stages"][name]
+        # The per-org VERDICT must be identical. The cohort cell additionally
+        # carries the roll-up's own bookkeeping (`orgs_measured` / the two
+        # org-name lists) and does not repeat `unit` — that difference is the
+        # fold's, and it is asserted so it stays deliberate.
+        assert (cohort_cell["state"], cohort_cell["value"]) == (
+            scoped_cell["state"], scoped_cell["value"]), name
+        assert set(cohort_cell) - set(scoped_cell) == {
+            "orgs_measured", "orgs_unavailable", "orgs_not_measurable"}, name
+    # The REASON differs exactly where the read does: stages 1-3 are read per
+    # org and keep the org's own reason, while stage 4's is the roll-up's
+    # umbrella reason — its cause is server-level and is hoisted once into
+    # `notes` instead of being repeated for every org.
+    for name in ("captured", "stored", "memory_produced"):
+        assert body["stages"][name]["reason"] == scoped["stages"][name]["reason"]
+    assert body["stages"]["recall_attempted"]["reason"] == "no_org_measurable"
+    assert any("analytics_write_path_unconfigured" in n for n in body["notes"]), \
+        body["notes"]
+
+
+# ── Blast radius (acceptance criterion 3) ───────────────────────────────────
+
+def test_cohort_an_unreadable_org_is_named_and_never_summed_as_zero(
+        client, internal_key, monkeypatch):
+    """org-b's graph is unreachable while org-a's reads fine. org-a's number
+    must stand, org-b must be NAMED, and the cohort must never present the
+    unreadable org as a 0."""
+    import tortoise.hosted_api as ha
+    _seed("c-ok", "2026-09-16T10:00:00+00:00", 2, 1, org_id="org-cohort-a")
+    real = ha._data_sdk
+
+    def _sdk(org):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("graph unreachable")
+        return real(org)
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] == 1, cell          # org-a's 1, NOT 0 and NOT 2
+    assert cell["orgs_unavailable"] == ["org-cohort-b"], cell
+    assert cell["orgs_measured"] == 1, cell
+    # The error map explains the roll-up's own verdict rather than leaving a
+    # bare name the operator has to re-read the org to explain.
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_graph_unavailable"}], body
+    # A partial cohort with a non-zero sum keeps its value; the lower-bound
+    # refusal only fires at 0 (a 0 it never established).
+    assert body["stages"]["memory_produced"]["value"] == 1, body["stages"]
+
+
+def test_cohort_names_an_org_whose_read_raised(client, internal_key, monkeypatch):
+    """A per-org read that RAISES (a bug, or a shape the fold does not absorb)
+    must cost that org's cells only. The exception class is reported; the
+    exception MESSAGE never is (it can carry a DSN/host/credential)."""
+    import tortoise.hosted_api as ha
+    _seed("c-raise", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    real = ha._scorecard_for_org
+
+    async def _one(org, since_iso, until_iso, log):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("postgres://user:pw@host/db")
+        return await real(org, since_iso, until_iso, log)
+
+    monkeypatch.setattr(ha, "_scorecard_for_org", _one)
+    body = _cohort(client, internal_key).json()
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_read_failed:RuntimeError"}], body
+    assert body["stages"]["captured"]["value"] == 1, body["stages"]
+    assert not [s for s in _all_strings(body) if "postgres://" in s], body
+
+
+def _canned_cell(state, value, reason=None):
+    return {"state": state, "value": value, "reason": reason}
+
+
+def _canned_payload(captured: int) -> dict:
+    """A well-formed per-org scorecard payload, for tests whose subject is the
+    BLAST RADIUS rather than the read (so they cost no graph/store latency)."""
+    return {
+        "stages": {
+            "captured": _canned_cell("measured", captured),
+            "stored": _canned_cell("measured", captured),
+            "memory_produced": _canned_cell("measured", captured),
+            "recall_attempted": _canned_cell(
+                "unavailable", None, "analytics_store_unreachable"),
+            "value_confirmed": _canned_cell("not_measurable", None),
+        },
+        "integrity": [],
+    }
+
+
+def test_cohort_a_hung_org_read_becomes_a_named_unavailable(client, internal_key,
+                                                           monkeypatch):
+    """A HANG is the blast radius that matters most: without the per-org bound
+    one dead org would hold the whole cohort. The hung org is named, and the
+    healthy org still reports."""
+    import asyncio
+
+    import tortoise.hosted_api as ha
+    monkeypatch.setattr(ha, "_COHORT_PER_ORG_TIMEOUT_S", 1.0)
+
+    async def _one(org, since_iso, until_iso, log):
+        if org["org_id"] == "org-cohort-b":
+            await asyncio.sleep(60)
+        return _canned_payload(1)
+
+    monkeypatch.setattr(ha, "_scorecard_for_org", _one)
+    body = _cohort(client, internal_key).json()
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_read_timeout"}], body
+    assert body["stages"]["captured"]["value"] == 1, body["stages"]
+    assert body["stages"]["captured"]["orgs_unavailable"] == ["org-cohort-b"]
+
+
+def test_cohort_a_partial_zero_from_an_unreadable_org_is_refused(
+        client, internal_key, monkeypatch):
+    """The sharpest edge: org-a genuinely measured 0 captured sessions and
+    org-b could not be read. `0` there would be a LOWER BOUND presented as a
+    fact — the exact misreading this lane exists to remove."""
+    import tortoise.hosted_api as ha
+    real = ha._data_sdk
+
+    def _sdk(org):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("graph unreachable")
+        return real(org)
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "partial_zero_from_an_unreadable_cohort", cell
+
+
+def test_cohort_every_org_unreadable_reads_unavailable_not_not_measurable(
+        client, internal_key, monkeypatch):
+    """If nothing could be read, the cohort is `unavailable` — never
+    `not_measurable`, which would claim the orgs answered "nothing to measure".
+    That distinction is the state inversion the lane exists to prevent."""
+    import tortoise.hosted_api as ha
+
+    def _sdk(org):
+        raise RuntimeError("graph unreachable")
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "no_org_measurable", cell
+    assert sorted(cell["orgs_unavailable"]) == sorted(COHORT_ORGS), cell
+
+
+# ── The audit decision ──────────────────────────────────────────────────────
+
+def test_cohort_audits_once_on_the_operator_plane(client, internal_key,
+                                                 monkeypatch):
+    """A cross-tenant read is recorded: ONE append-only `audit_events` row per
+    request, with `org_id=""` (the operator plane — the non-org-scoped shape
+    `identity_link` already uses), naming every target org in `detail`."""
+    import tortoise.hosted_api as ha
+    seen: list[dict] = []
+
+    async def _audit(request, org_id, operation, **kwargs):
+        seen.append({"org_id": org_id, "operation": operation, **kwargs})
+
+    monkeypatch.setattr(ha, "_async_audit", _audit)
+    _seed("c-audit", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    resp = _cohort(client, internal_key)
+    assert resp.status_code == 200, resp.text
+
+    assert len(seen) == 1, seen
+    row = seen[0]
+    assert row["org_id"] == "", row
+    assert row["operation"] == "activation_cohort_read", row
+    assert row["resource_type"] == "activation_cohort", row
+    assert row["detail"]["orgs"] == COHORT_ORGS, row
+    assert row["detail"]["window"] == {"since": "2026-09-16T00:00:00+00:00",
+                                      "until": "2026-09-17T00:00:00+00:00"}, row
+
+
+def test_cohort_a_failing_audit_sink_does_not_fail_the_read(
+        client, internal_key, monkeypatch):
+    """Fail-OPEN on the audit write (#1529's ruling: bookkeeping must not 500 a
+    serving path). Blocking the read would not stop an abuser either — an
+    abuser holds the key."""
+    import tortoise.hosted_api as ha
+
+    async def _boom(*a, **k):
+        raise RuntimeError("audit sink down")
+
+    monkeypatch.setattr(ha, "_async_audit", _boom)
+    _seed("c-audit2", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    resp = _cohort(client, internal_key)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["stages"]["captured"]["value"] == 1, resp.text
+
+
+# ── The operator client ────────────────────────────────────────────────────
+
+def test_operator_client_sends_one_authenticated_request(monkeypatch, capsys):
+    """The thin client: ONE GET to the operator endpoint, bearer credential,
+    every org as a repeated `orgs=` parameter — and it echoes the server's
+    payload unchanged (the roll-up is the server's, not the client's)."""
+    import json
+
+    from tools import activation_cohort as ac
+    captured: dict = {}
+    payload = {"cohort_definition": {"orgs": COHORT_ORGS, "size": 2,
+                                     "source": "operator_supplied"},
+               "dogfood_only": False, "stages": {}, "org_errors": {},
+               "window": {"since": "s", "until": "u"}}
+
+    def _fetch(api_base, key, orgs, since, until, timeout):
+        captured.update(api_base=api_base, key=key, orgs=orgs, since=since,
+                        until=until, timeout=timeout)
+        return payload
+
+    monkeypatch.setattr(ac, "fetch_cohort", _fetch)
+    monkeypatch.delenv(ac.OPERATOR_KEY_ENV, raising=False)
+    assert ac.main(["--api-base", "https://api.example",
+                    "--org", "org-cohort-a", "--org", "org-cohort-b",
+                    "--operator-key", "operator-secret",
+                    "--since", "2026-09-16T00:00:00Z",
+                    "--until", "2026-09-17T00:00:00Z"]) == 0
+    assert captured == {"api_base": "https://api.example",
+                        "key": "operator-secret",
+                        "orgs": COHORT_ORGS,
+                        "since": "2026-09-16T00:00:00Z",
+                        "until": "2026-09-17T00:00:00Z",
+                        "timeout": 900.0}, captured
+    out = capsys.readouterr().out
+    assert json.loads(out) == payload
+    assert "operator-secret" not in out
+    assert ac.COHORT_PATH == COHORT_PATH
+    # The client's path must be a route the server actually registers — a
+    # renamed route would otherwise leave the committed client pointing at a
+    # 404, and only an operator would find out.
+    assert COHORT_PATH in {r.path for r in app.routes}, [
+        r.path for r in app.routes if "cohort" in r.path]
+
+
+def test_operator_client_prefers_flag_over_env_and_writes_out(
+        monkeypatch, tmp_path):
+    """`--operator-key` wins over the env (so a rotation can be tested without
+    exporting a secret into the shell), and `--out` writes the payload."""
+    import json
+
+    from tools import activation_cohort as ac
+    payload = {"cohort_definition": {"orgs": ["org-cohort-a"], "size": 1,
+                                     "source": "operator_supplied"},
+               "dogfood_only": True, "stages": {}, "org_errors": {}}
+    seen: dict = {}
+    monkeypatch.setattr(ac, "fetch_cohort",
+                        lambda api_base, key, orgs, since, until, timeout: (
+                            seen.update(key=key) or payload))
+    monkeypatch.setenv(ac.OPERATOR_KEY_ENV, "from-env")
+    out = tmp_path / "cohort.json"
+    ac.main(["--api-base", "https://api.example", "--org", "org-cohort-a",
+             "--operator-key", "from-flag", "--out", str(out)])
+    assert seen["key"] == "from-flag"
+    assert json.loads(out.read_text()) == payload

@@ -13,9 +13,12 @@
 #   .codex/hooks.json       → "UserPromptSubmit": "…/volunteer-turn.sh codex"
 #   .claude/settings.json   → "UserPromptSubmit": "…/volunteer-turn.sh claude"
 #   .cline/…                → "UserPromptSubmit": "…/volunteer-turn.sh cline"
-#   .devin/hooks.v1.json    → "UserPromptSubmit": "…/volunteer-turn.sh devin"
-# or agent-first: `tortoise install codex` (writes the registration file —
-# the #2123/#2124 agent-first onboarding mandate).
+#   .devin/hooks.v1.json    → "UserPromptSubmit": [{"hooks": [{"type":
+#                              "command", "command": "…/volunteer-turn.sh devin"}]}]
+#                             (Devin's file IS the hooks object — no "hooks"
+#                              wrapper key; docs.devin.ai/cli/extensibility/hooks)
+# or agent-first: `tortoise install codex|claude|cline|devin` (writes the
+# registration file — the #2123/#2124 agent-first onboarding mandate).
 #
 # Fail-open contract: if Tortoise is unreachable / misconfigured / the graph
 # has nothing above the confidence gate, the script exits 0 with EMPTY output

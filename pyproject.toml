@@ -154,7 +154,13 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # wheel without it fails the install with "shipped capture extension
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
-          "pi-hooks/tortoise-capture.ts"]
+          "pi-hooks/tortoise-capture.ts",
+          # #3517: the capture disclosure's SINGLE SOURCE OF TRUTH ships in the
+          # wheel beside `config/routing.yaml`. `tortoise session disclosure`
+          # renders from it and the dashboard imports the same file — a wheel
+          # without it would make the one surface that exists to be accurate
+          # the one surface that cannot run.
+          "config/capture_disclosure.json"]
 # Quoted key (TOML dot-key): ships every packs/<ns>/manifest.yaml as
 # tortoise/packs/<ns>/manifest.yaml in the wheel (recursive glob — a pack
 # added by a later slice, e.g. #1933 agent-ops, needs no pyproject change).

@@ -289,6 +289,33 @@ SOURCE_PATTERNS = {
                    # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
                    "website/apps/dashboard/public/skills/",
                    "website/apps/dashboard/public/install-tortoise-skills.sh",
+                   # #3517: the capture disclosure's single source of truth and
+                   # the non-LLM renderer. Both own guards registered below
+                   # (`test_capture_disclosure_template.py`,
+                   # `test_onboarding_session_recording_parity.py`) — the
+                   # cross-surface "one home" scan reads the JSON, and the
+                   # parity test reads the CLI the SKILL names. Without these
+                   # entries an edit to either file matched no pattern and fell
+                   # back to `core`, where neither guard is registered: the
+                   # guard would not run on the PR that can break it (the same
+                   # #3673 silent-drop class as the served-skill entries above).
+                   "tortoise/capture_disclosure.py",
+                   "tortoise/config/capture_disclosure.json",
+                   # #3517: the false-promise grep's file set INCLUDES the 1714
+                   # research briefs (the plan's own requirement — the withdrawn
+                   # 403 consent contract still reads as live in this one).
+                   # `docs/` is in NON_PYTHON_PREFIXES, so without this entry a
+                   # docs-only PR that re-adds the dead contract selects NO
+                   # surface and the gate never runs on the only change that can
+                   # break it. Named as the CONCRETE file, not a glob: `select()`
+                   # matches with `startswith` and has no glob support, so a
+                   # `docs/research/1714-` prefix would satisfy nothing while
+                   # reading as coverage (`test_source_patterns_all_name_
+                   # something_real` reds on it — that is how dead entries are
+                   # caught). `test_capture_disclosure_template.py::test_every_
+                   # hit_carrying_brief_is_selected_by_ci` keeps this list honest
+                   # as new briefs land.
+                   "docs/research/1714-solution-converge.md",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and
@@ -955,12 +982,16 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
-    # #B7 (#3674): the activation-scorecard cohort roll-up. Its `roll_up`
-    # summing logic owns part of tests/test_activation_scorecard.py; without
-    # this carve-out a cohort-script-only change selects NO surface and the
-    # suite that pins it never runs. No SOURCE_PATTERN matches this path, so it
-    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs,
-    # which is the safe outcome for a file that a metrics number depends on.
+    # #B7 (#3674, restated by #3676): the activation-scorecard cohort client.
+    # Its transport guards (https-only, no-redirect, credential hygiene) are
+    # security controls pinned by tests/test_activation_scorecard.py; without
+    # this carve-out a client-only change selects NO surface and the suite that
+    # pins them never runs. No SOURCE_PATTERN matches this path, so it lands in
+    # the unknown-path fail-closed branch -> FULL matrix + both legs, which is
+    # the safe outcome for a metrics number and for the platform's most
+    # privileged credential. (The cohort FOLD moved out of this file and into
+    # tortoise/activation_scorecard.py in #3676 — which the `core` surface
+    # already covers, so the carve-out's reason narrowed rather than vanished.)
     "tools/activation_cohort.py",
     # #3261: the pre-dispatch collision check (#3061) owns
     # tests/test_collision_preflight.py. Without this carve-out a

@@ -227,6 +227,49 @@ LIFETIME_MEMORY_QUERY = (
     "count(DISTINCT s) AS sessions_with_memory"
 )
 
+# ── The activation-claim refusal (one home for BOTH surfaces) ─────────────
+# The rule that no payload may carry an activation claim is the lane's whole
+# point (see VALUE_CONFIRMED_REFUSAL), so it is enforced at the assemblers —
+# not only asserted by a test. ONE implementation, TWO callers (`assemble` for
+# the org surface, `assemble_cohort` for the operator cohort surface).
+# `tools/activation_cohort.py` carries its own copy ON PURPOSE: it is a
+# stdlib-only operator client and must be able to refuse a payload the server
+# should never have produced, without importing this package (see its note).
+def activation_claim_keys(payload: object) -> list[str]:
+    """Every KEY at any depth whose name claims activation.
+
+    Deliberately key-based, not prose-based: ``LIMITATIONS`` and the cohort's
+    ``note`` must be free to name the claim they refuse to make.
+    """
+    found: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if "activat" in str(key).lower():
+                    found.append(str(key))
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
+def assert_no_activation_claim(payload: object) -> None:
+    """Fail closed if a payload fabricates an activation claim.
+
+    Raises ``ValueError`` — never a bare ``assert`` (a ``-O`` interpreter
+    would strip it) and never a silent filter (a metric mislabelled at the
+    source is what this lane exists to remove).
+    """
+    claims = activation_claim_keys(payload)
+    if claims:
+        raise ValueError(
+            f"refusing to emit a payload that claims activation ({claims}) — "
+            f"recall_attempted is an ATTEMPT and value_confirmed is a "
+            f"REFUSAL, so no activation field or rate is derivable")
+
+
 # ── Stage state vocabulary (one home for the whole surface) ────────────────
 STATE_MEASURED = "measured"
 STATE_UNAVAILABLE = "unavailable"
@@ -808,7 +851,7 @@ def assemble(*, org_id: str, since: str, until: str, graph_stages: dict,
         "stages_1_3_granularity": "session",
         "stage_4_granularity": "org_time",
     }
-    return {
+    payload = {
         "surface": SURFACE,
         "schema_version": SCHEMA_VERSION,
         "org_id": org_id,
@@ -819,3 +862,280 @@ def assemble(*, org_id: str, since: str, until: str, graph_stages: dict,
         "limitations": list(LIMITATIONS),
         "notes": [],
     }
+    assert_no_activation_claim(payload)
+    return payload
+
+
+# ══ The cohort roll-up (#3676) ═════════════════════════════════════════════
+# The beta cohort is structurally MULTI-ORG (the free tier allows one org per
+# person with no invites), so an org-scoped scorecard alone reports n=1 — a
+# dogfood read. `roll_up_cohort` folds N per-org payloads into ONE cohort
+# number, and it lives HERE (not in the operator script that first carried it)
+# because the cross-tenant endpoint is now a caller: one implementation, so the
+# scripted and the served cohort number cannot drift.
+#
+# It is PURE: no I/O, no globals. The caller owns the reads, the auth, and the
+# org list.
+COHORT_SURFACE = "activation_cohort"
+
+#: The stages a cohort roll-up folds. Pinned as a literal (not derived from
+#: ``assemble``'s output) so a stage added to one surface and not the other is
+#: a visible omission in the cohort payload rather than a silent one.
+COHORT_STAGE_NAMES = ("captured", "stored", "memory_produced",
+                      "recall_attempted", "value_confirmed")
+
+#: Blast-radius bound on an operator-supplied cohort (see
+#: ``hosted_api.activation_cohort``): the endpoint reads every named org, so an
+#: unbounded list is an unbounded batch job on shared provider capacity. This is
+#: an OPERATIONAL bound, NOT a cohort-size requirement — the owner withdrew the
+#: minimum-N aha bar on #3497 §7.4 ("there should eb no number"), and nothing
+#: here says a cohort must reach any size. Exceeding it is a 422 that names the
+#: bound and tells the caller to split the request.
+MAX_COHORT_ORGS = 100
+
+COHORT_LIMITATIONS: tuple[str, ...] = (
+    "The cohort is an OPERATOR-SUPPLIED list, echoed verbatim in "
+    "cohort_definition. This surface never enumerates orgs, accepts no "
+    "wildcard, and returns no org the caller did not name.",
+    "Every stage is folded from the SAME per-org payload shape the org-scoped "
+    "scorecard returns, read through the same code path — the two surfaces "
+    "cannot disagree about one org. A stage counted over fewer orgs than the "
+    "cohort is still `partial`/`unavailable` with the org NAMED, never summed "
+    "as 0.",
+    "`value_confirmed` is `not_measurable` for every org by construction, so "
+    "its cohort state is normally `not_measurable` — that is the healthy "
+    "answer, not a reporting failure.",
+    "`org_errors` explains PER-ORG read failures only (the graph funnel, the "
+    "stages read once per org). A failure of the SHARED `recall_attempted` "
+    "store is a server-level condition, reported once in `notes` rather than "
+    "attributed to every org; that stage's per-org verdict still appears in "
+    "its `orgs_unavailable`.",
+    # #3676 review: a well-formed name that names NO org is not detected. The
+    # endpoint does no registry lookup (the entry above), so a typo reads as an
+    # empty graph and is reported as a MEASURED 0 with no `org_errors` entry —
+    # indistinguishable from an org with genuinely zero activity. Adding an
+    # existence check would BE a registry lookup and is a new decision.
+    "A well-formed name that names NO org is NOT detected: with no registry "
+    "lookup, it reads as an empty graph and is reported as a measured `0` with "
+    "no `org_errors` entry, indistinguishable from an existing org with "
+    "genuinely zero activity — so an entirely-typo'd cohort returns a "
+    "confident 0. Verify the names against the org list before acting on a 0.",
+    LIMITATIONS[1],
+)
+
+
+def roll_up_cohort(orgs: Sequence[str], payloads: Sequence[dict | None],
+                   errors: Sequence[str | None] | None = None) -> dict:
+    """Sum the per-org stages into one cohort number.
+
+    ONLY ``state == "measured"`` stages are summed. The two non-measured states
+    are NOT collapsed into one another:
+
+    * ``unavailable`` — the org failed to report (unreadable, timed out, or a
+      malformed cell). Named in ``orgs_unavailable``.
+    * ``not_measurable`` — the org answered correctly and there is nothing to
+      measure (e.g. ``value_confirmed`` always; ``recall_attempted`` for an org
+      that has never produced memory). Named in ``orgs_not_measurable``.
+
+    Collapsing the second into the first would assert that a healthy org failed
+    to report — the exact state inversion this lane exists to prevent. So the
+    cohort stage is ``not_measurable`` only when every org said so, ``partial``
+    when some orgs measured and others did not report or had nothing to
+    measure, and ``unavailable`` when nothing was measurable for a reason that
+    is not "there is nothing to measure".
+
+    ``payloads`` carries ``None`` for an org that could not be read; ``errors``
+    carries the reason per org (only for the orgs that failed). ``errors`` must be
+    the SAME LENGTH as ``orgs``.
+
+    ``org_errors`` is a LIST of ``{"org_id", "reason"}`` records, never a map
+    keyed by org id: an org id is caller-supplied text, and `org-b7-activation`
+    as a KEY trips `assert_no_activation_claim` (the claim rule is a substring
+    test on every key, deliberately). No caller-supplied string is a key in this
+    payload.
+    """
+    errors = list(errors) if errors is not None else [None] * len(orgs)
+    if len(payloads) != len(orgs) or len(errors) != len(orgs):
+        raise ValueError(
+            f"roll_up_cohort needs one entry per org: {len(orgs)} orgs, "
+            f"{len(payloads)} payloads, {len(errors)} errors")
+    stages: dict[str, dict] = {}
+    for name in COHORT_STAGE_NAMES:
+        values: list[int] = []
+        orgs_unavailable: list[str] = []
+        orgs_not_measurable: list[str] = []
+        for org_id, payload in zip(orgs, payloads, strict=True):
+            if payload is None:
+                orgs_unavailable.append(org_id)
+                continue
+            cell = (payload.get("stages") or {}).get(name)
+            if not cell:
+                orgs_unavailable.append(org_id)
+                continue
+            state = cell.get("state")
+            if state == "measured" and cell.get("value") is not None:
+                values.append(int(cell["value"]))
+            elif state == "not_measurable":
+                orgs_not_measurable.append(org_id)
+            else:
+                # `unavailable`, or a `measured` cell with no value — a
+                # malformed upstream payload. Counting it as 0 would invent a
+                # measurement the org never reported.
+                orgs_unavailable.append(org_id)
+
+        measured = len(values)
+        if measured and (orgs_unavailable or orgs_not_measurable):
+            total = sum(values)
+            cell = {"state": "partial", "value": total,
+                    "reason": "some_orgs_unavailable_or_not_measurable",
+                    "orgs_measured": measured,
+                    "orgs_unavailable": orgs_unavailable,
+                    "orgs_not_measurable": orgs_not_measurable}
+            if total == 0 and orgs_unavailable:
+                # A partial cohort's sum is a LOWER BOUND: the orgs we could
+                # not read are exactly the ones that might carry the activity.
+                # A lower bound of 0 is not a fact, so refuse the number rather
+                # than emit a zero the cohort never established. (A 0 from
+                # `not_measurable` orgs alone IS a fact — they genuinely have
+                # nothing — so only `unavailable` triggers the refusal.)
+                cell["value"] = None
+                cell["reason"] = "partial_zero_from_an_unreadable_cohort"
+            stages[name] = cell
+        elif measured:
+            stages[name] = {"state": "measured", "value": sum(values),
+                            "reason": None, "orgs_measured": measured,
+                            "orgs_unavailable": [], "orgs_not_measurable": []}
+        elif orgs_unavailable:
+            stages[name] = {"state": "unavailable", "value": None,
+                            "reason": "no_org_measurable",
+                            "orgs_measured": 0,
+                            "orgs_unavailable": orgs_unavailable,
+                            "orgs_not_measurable": orgs_not_measurable}
+        elif orgs_not_measurable:
+            # Every org answered, and every answer was "nothing to measure".
+            stages[name] = {"state": "not_measurable", "value": None,
+                            "reason": "no_org_has_a_measurable_value",
+                            "orgs_measured": 0,
+                            "orgs_unavailable": [],
+                            "orgs_not_measurable": orgs_not_measurable}
+        else:
+            # Unreachable: the endpoint refuses an empty list (422) before
+            # folding. Refuse rather than report a fabricated measured zero.
+            stages[name] = {"state": "unavailable", "value": None,
+                            "reason": "no_orgs", "orgs_measured": 0,
+                            "orgs_unavailable": [], "orgs_not_measurable": []}
+    return {
+        "cohort_definition": {
+            "orgs": list(orgs),
+            "size": len(orgs),
+            "source": "operator_supplied",
+        },
+        # A one-org cohort is a dogfood measurement, not stranger activation —
+        # the product's own gate vocabulary (product-success-eval.md: internal
+        # gate vs public gate).
+        "dogfood_only": len(orgs) == 1,
+        "stages": stages,
+        "org_errors": [{"org_id": o, "reason": e}
+                       for o, e in zip(orgs, errors, strict=True) if e],
+        "note": ("recall_attempted is an ATTEMPT, not an answer; value_confirmed "
+                 "is a refusal. No activation rate is derivable from this output."),
+    }
+
+
+#: The stages whose read is PER ORG — the graph funnel. `recall_attempted` is
+#: deliberately absent: it reads ONE shared analytics store, so its failures are
+#: a property of the SERVER rather than of any single org (see
+#: `shared_stage_notes`).
+COHORT_ORG_READ_STAGES = ("captured", "stored", "memory_produced")
+
+#: The stage read from ONE shared store for the whole cohort.
+COHORT_SHARED_STAGE = "recall_attempted"
+
+
+def org_failure_reason(payload: dict | None) -> str | None:
+    """The reason this org's OWN READ failed, or ``None`` if it reported.
+
+    A per-org read can fail at the TRANSPORT level (unreadable store, timeout)
+    or at the FOLD level — ``_scorecard_for_org`` deliberately absorbs the
+    latter into the payload as ``unavailable`` stages rather than raising. Both
+    are the same fact to the cohort: this org's number is missing. This helper
+    makes the cohort's ``org_errors`` entry agree with the roll-up's own verdict
+    instead of leaving fold-level failures visible only as a bare name in
+    ``orgs_unavailable``.
+
+    SCOPED TO ``COHORT_ORG_READ_STAGES`` (the graph funnel) ON PURPOSE. The
+    shared `recall_attempted` stage's failures are not attributable to an org:
+    `analytics_write_path_unconfigured` would be repeated for all 100 members of
+    a cohort on a box whose analytics writer is dark — accusing every healthy
+    org of a server misconfiguration, the state inversion this lane exists to
+    prevent. That cause is hoisted ONCE by `shared_stage_notes`; the stage's
+    per-org verdict still lives in the roll-up's `orgs_unavailable`.
+
+    ``value_confirmed`` is excluded for the same reason it always is: it is
+    ``not_measurable`` for every org by construction, so counting it would
+    accuse every healthy org. A ``measured`` cell with no value is a malformed
+    upstream payload and IS reported.
+    """
+    if payload is None:
+        return "org_unreadable"
+    for name in COHORT_ORG_READ_STAGES:
+        cell = (payload.get("stages") or {}).get(name) or {}
+        if cell.get("state") == STATE_UNAVAILABLE:
+            return str(cell.get("reason") or "unavailable")
+        if cell.get("state") == STATE_MEASURED and cell.get("value") is None:
+            return "malformed_measured_cell"
+    return None
+
+
+def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
+    """ONE cohort-level note per distinct reason the SHARED stage is unmeasured.
+
+    The counterpart to `org_failure_reason`'s scoping: a condition that belongs
+    to the shared analytics store must not be repeated per org, but it must not
+    be dropped either — that would leave the operator with `unavailable` and no
+    cause anywhere in the payload. Hoisting it here keeps it visible exactly
+    once, and the count says how much of the cohort it covers.
+    """
+    counts: dict[str, int] = {}
+    for payload in payloads:
+        if payload is None:
+            continue
+        cell = (payload.get("stages") or {}).get(COHORT_SHARED_STAGE) or {}
+        if cell.get("state") == STATE_UNAVAILABLE:
+            reason = str(cell.get("reason") or "unavailable")
+            counts[reason] = counts.get(reason, 0) + 1
+    return [
+        f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} — this "
+        f"stage reads ONE shared analytics store, so it is a server-level "
+        f"condition rather than a per-org read failure"
+        for reason, n in sorted(counts.items())
+    ]
+
+
+def assemble_cohort(*, orgs: Sequence[str], payloads: Sequence[dict | None],
+                    errors: Sequence[str | None] | None,
+                    since: str, until: str,
+                    limits: dict | None = None) -> dict:
+    """Compose the cohort response: the roll-up plus its own provenance.
+
+    The WINDOW is carried at the top level because the number is meaningless
+    without it and the per-org payloads are not returned (they are N full
+    scorecards — the operator reads one org through the org-scoped endpoint).
+    ``cohort_definition`` and ``dogfood_only`` come from the roll-up, and the
+    payload carries BOTH of the roll-up's standing ``note`` (a string: the
+    one-line "no rate is derivable" disclaimer) and its own ``notes`` (a list of
+    conditions observed on THIS request, as the org-scoped payload does) — the
+    two are different kinds of statement, not a typo.
+    """
+    payload = roll_up_cohort(orgs, payloads, errors)
+    payload.update({
+        "surface": COHORT_SURFACE,
+        "schema_version": SCHEMA_VERSION,
+        "window": {"since": since, "until": until},
+        "orgs_measured": len([p for p in payloads if p is not None]),
+        "limits": dict(limits or {}),
+        "limitations": list(COHORT_LIMITATIONS),
+        "notes": shared_stage_notes(payloads),
+    })
+    assert_no_activation_claim(payload)
+    return payload
