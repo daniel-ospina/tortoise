@@ -243,7 +243,8 @@ prescription:
    `NON_DERIVABLE_DOC_KEYS`. The base guard sees `pending` (passes) and `check` excludes the keys
    (passes). The guard's provenance comparison is scoped to a manifest that *claims* an approval, so
    the empty `pending` copy is skipped rather than treated as a stale copy.
-2. **The follow-up PR** — after the new guard is on `main` — removes the four keys from
+2. **The follow-up PR** ([#8144](https://github.com/daniel-ospina/tortoise/issues/8144)) — after
+the new guard is on `main` — removes the four keys from
    `NON_DERIVABLE_DOC_KEYS` and flips the committed copy to the derived `approved`. The base-pinned
    guard is now the *new* guard, which no longer demands per-row approvals, so the flip is green.
 

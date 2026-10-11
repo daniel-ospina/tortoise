@@ -978,6 +978,25 @@ def test_a_re_cut_CARRIES_the_high_water_pin_forward(monkeypatch, tmp_path):
     )
 
 
+def test_a_re_cut_REFUSES_a_manifest_that_lost_the_high_water_pin(monkeypatch, tmp_path, capsys):
+    """Absent-from-an-existing-manifest is NOT a first cut (#4185 review).
+
+    Returning the freshly derived counts there re-bases the ceiling silently — which is the
+    failure the pin exists to prevent. The fallback belongs to a MISSING manifest.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    prior.pop("high_water_counts")
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "high_water_counts" in out, out
+    # And the refusal wrote NOTHING: the pin-less manifest is exactly as it was.
+    assert "high_water_counts" not in yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
 def test_the_guard_reds_on_a_duplicate_registry_entry():
     """P3 from review: a duplicate NAME was invisible to a set-based comparison.
 
@@ -1642,6 +1661,25 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
             lineterm="",
         )
     )
+
+
+def test_the_committed_manifest_is_the_STAGED_pending_copy():
+    """#4185 lands in two PRs, so THIS head must not carry the flip (#4185 review).
+
+    The guard's provenance comparison is scoped to a manifest that CLAIMS an approval, so
+    flipping here would arm a comparison the base-pinned guard cannot survive (242 rows).
+    The staged state is the split's contract; the follow-up (#8144) owns the flip.
+    """
+    doc = _manifest()
+    assert doc["approval_status"] == "pending-owner-approval", (
+        "the committed manifest flipped to the approved copy — that is the FOLLOW-UP "
+        "(#8144) change, not this PR's (#4185 lands in two PRs)"
+    )
+    for key in ("approval_principal", "approval_pr", "approval_date"):
+        assert doc[key] is None, (
+            f"{key} is staged but non-null — the committed copy must not claim an approval "
+            "at this head (#8144 owns the flip)"
+        )
 
 
 def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):

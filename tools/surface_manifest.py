@@ -202,9 +202,9 @@ MANIFEST_HEADER = (
     "# The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by\n"
     "# `tools/surface_manifest.py::read_approval`; the committed copy is still\n"
     "# `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,\n"
-    "# whose per-row `approval` rule fires on `approved`. A follow-up PR flips it once the\n"
-    "# new guard is on main; do not hand-edit the four values — re-cut (the cut copies the\n"
-    "# doc).\n"
+    "# whose per-row `approval` rule fires on `approved`. A follow-up PR (#8144) flips it\n"
+    "# once the new guard is on main; do not hand-edit the four values — re-cut (the cut\n"
+    "# copies the doc).\n"
     "#\n"
     "# `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and\n"
     "# `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a\n"
@@ -956,7 +956,13 @@ def _carried_high_water_counts(fallback: dict) -> dict:
             "Refusing to reset the growth ceiling silently."
         ) from exc
     if not isinstance(doc, dict) or "high_water_counts" not in doc:
-        return dict(fallback)
+        raise SurfaceEvidenceUnreadable(
+            f"{MANIFEST_FILE} exists but carries no `high_water_counts` pin — refusing to "
+            "re-base the growth ceiling silently. The fallback above is for a MISSING manifest "
+            "(the first cut); one that exists and lost the pin must not quietly adopt the "
+            "freshly derived counts as its ceiling — that is the failure the pin exists to "
+            "prevent. Restore the pin (or delete the manifest for a first cut)."
+        )
     pin = doc.get("high_water_counts")
     if not isinstance(pin, dict):
         raise SurfaceEvidenceUnreadable(
