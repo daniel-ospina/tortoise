@@ -910,6 +910,16 @@ COHORT_LIMITATIONS: tuple[str, ...] = (
     "store is a server-level condition, reported once in `notes` rather than "
     "attributed to every org; that stage's per-org verdict still appears in "
     "its `orgs_unavailable`.",
+    # #3676 review: a well-formed name that names NO org is not detected. The
+    # endpoint does no registry lookup (the entry above), so a typo reads as an
+    # empty graph and is reported as a MEASURED 0 with no `org_errors` entry —
+    # indistinguishable from an org with genuinely zero activity. Adding an
+    # existence check would BE a registry lookup and is a new decision.
+    "A well-formed name that names NO org is NOT detected: with no registry "
+    "lookup, it reads as an empty graph and is reported as a measured `0` with "
+    "no `org_errors` entry, indistinguishable from an existing org with "
+    "genuinely zero activity — so an entirely-typo'd cohort returns a "
+    "confident 0. Verify the names against the org list before acting on a 0.",
     LIMITATIONS[1],
 )
 
