@@ -59,6 +59,7 @@ and production.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import os
@@ -232,6 +233,20 @@ def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
         head, _, tail = rendered.partition(".")
         return f"{head}.{_quote_in_logic_tree(tail)}"
     return rendered
+
+
+# ── #4038: the keyset walk ─────────────────────────────────────────────────
+#: Default page size for :meth:`SupabaseControlPlane.query_all`. Chosen to
+#: match PostgREST's own default ``db-max-rows`` (1000) so the common case is
+#: one row per row; it is a HINT, not an assumption — the walk is sound when a
+#: deployment is capped LOWER, because the end-of-walk signal is an EMPTY page
+#: rather than a page shorter than this (see the method).
+PAGE_READ_SIZE = 1000
+#: The most pages :meth:`SupabaseControlPlane.query_all` walks before it
+#: REFUSES to certify the read. A bound is required — the walk's length is the
+#: caller's latency and memory — but exceeding it is reported as "not
+#: certified", never as a partial result presented as complete.
+PAGE_READ_MAX_PAGES = 100
 
 
 def _content_range_total(raw: str | None) -> int | None:
@@ -594,6 +609,148 @@ class SupabaseControlPlane:
                 f"Supabase control-plane bad response ({table}): {e}"
             ) from e
         return (data if isinstance(data, list) else [data]), total
+
+    def query_all(self, table: str, *, select: list[str] | None = None,
+                  filters: list[tuple[str, str, object]] | None = None,
+                  cursor: str = "id",
+                  page_size: int = PAGE_READ_SIZE,
+                  max_pages: int = PAGE_READ_MAX_PAGES,
+                  timeout: httpx.Timeout | float | None = None,
+                  ) -> tuple[list[dict], bool]:
+        """Walk EVERY row matching ``filters``; return ``(rows, complete)``.
+
+        #4038. The single-page :meth:`query` cannot count a busy tenant: a full
+        page is only a LOWER BOUND, so every caller that needs a real count
+        had to either refuse (the activation scorecard's stage 4 read did) or
+        assume the page was the whole set. This is the seam for the first.
+
+        KEY, and chosen over ``offset``/``Range`` paging deliberately:
+
+        * **Keyset, not offset.** ``offset`` paginates a MOVING window. The
+          filter here is on ``created_at``, so rows are still being written
+          INTO the window while the walk runs; a concurrent INSERT shifts
+          every later page by one, so one row is served TWICE and an original
+          is SKIPPED. Additive counts then over-count the duplicate and
+          under-count the skipped row, with no signal at all — the walk still
+          ends on an empty page and certifies. The cursor is the LAST cursor
+          value we SAW, which no concurrent write can move, and ``cursor`` must
+          therefore name a UNIQUE, IMMUTABLE column (the default ``id``).
+        * **An EMPTY page is the only sound end-of-walk signal.** A page
+          shorter than ``page_size`` is NOT: it is indistinguishable from a
+          deployment whose ``db-max-rows`` (or a proxy's) caps responses below
+          our request — the exact silent under-count class #5388 fixed one
+          layer down. So a short page continues the walk.
+        * **The server total may only DOWNGRADE.** ``count_exact`` is asked for
+          on the first page only, and a walk that reached an empty page but
+          walked FEWER distinct rows than the server said it would is refused.
+          The total is a page-1 SNAPSHOT (concurrent inserts pass it), so it
+          can never promote a walk that did not reach an empty page — see
+          ``_iter_registered_orgs``, which this mirrors.
+
+        ``complete`` is the certificate. It is True ONLY when the walk reached
+        an empty page AND the server's own count (when it stated one) was met.
+        ``False`` means ``rows`` is a LOWER BOUND: never publish it as a count.
+        Failures RAISE (``RuntimeError``) rather than returning a short list —
+        an outage is not an incomplete result, and a caller that fails closed
+        on an outage must not receive something that looks like data.
+
+        ``cursor`` must be in ``select`` when ``select`` is given: the cursor
+        value of the page's last row is what continues the walk, and a walker
+        that silently added the column would change the row shape its caller
+        asked for.
+        """
+        if select is not None and cursor not in select:
+            raise ValueError(
+                f"query_all: select must include the cursor column {cursor!r} "
+                "— the cursor is read from the rows to continue the walk")
+        if page_size < 1 or max_pages < 1:
+            raise ValueError(
+                "query_all: page_size and max_pages must both be >= 1")
+
+        # Prefer the total-aware read; a seam double that predates it can still
+        # WALK (it honours the cursor filter either way) — it simply cannot
+        # state a total, which is the documented no-total case. Same dispatch
+        # as ``_iter_registered_orgs``, so both walkers degrade identically.
+        _total_aware = getattr(self, "query_with_total", None)
+        if callable(_total_aware):
+            def _read_page(page_filters, asked_for_count):
+                return _total_aware(
+                    table, select=select, filters=page_filters, order=cursor,
+                    limit=page_size, timeout=timeout,
+                    count_exact=asked_for_count)
+        else:
+            def _read_page(page_filters, asked_for_count):
+                return self.query(
+                    table, select=select, filters=page_filters, order=cursor,
+                    limit=page_size, timeout=timeout), None
+
+        rows: list[dict] = []
+        seen: set = set()
+        total: int | None = None
+        exhausted = False
+        last_cursor: object | None = None
+        for _ in range(max_pages):
+            page_filters = list(filters or [])
+            if last_cursor is not None:
+                page_filters.append((cursor, "gt", last_cursor))
+            # The total is a property of the FILTER, not of the page, so one
+            # exact count is enough — and a later, cursor-filtered page would
+            # state the REMAINDER instead. Only page 1 may state the fleet.
+            asked_for_count = last_cursor is None
+            page, page_total = _read_page(page_filters or None,
+                                          asked_for_count)
+            if not isinstance(page, list):
+                raise RuntimeError(
+                    f"Supabase control-plane query_all ({table}): the store "
+                    f"returned {type(page).__name__}, not a list of rows")
+            if asked_for_count and page_total is not None:
+                total = page_total
+            if not page:
+                # THE sound end-of-walk signal (see the docstring).
+                exhausted = True
+                break
+            cursors = [r.get(cursor) if isinstance(r, dict) else None
+                       for r in page]
+            # Every element is KEPT, mapping or not: a non-mapping element is a
+            # row the caller must be able to SEE (the activation scorecard's
+            # fold counts it as unclassifiable, which makes its count a lower
+            # bound) — what it cannot be is a CURSOR. A cursor is unique, so
+            # re-serving one is not progress: the set published here is the
+            # same SET the certificate counts (first occurrence wins, order
+            # preserved — ``_iter_registered_orgs``'s rule). Kept BEFORE the
+            # advance checks below, so a page the walk cannot ADVANCE from is
+            # still returned to a best-effort caller.
+            for row, value in zip(page, cursors, strict=True):
+                if value:
+                    if value in seen:
+                        continue
+                    seen.add(value)
+                rows.append(row)
+            advanceable = [c for c in cursors if c]
+            if not advanceable:
+                # Not one row carried a usable cursor, so the walk cannot move
+                # and CANNOT certify — fall out rather than re-request page 1
+                # until the cap. A falsy id is not a filter (`id > None` is a
+                # restart), so certification is refused, not faked.
+                break
+            # The page must be STRICTLY ascending on the cursor, or the server
+            # did not honour ``order``: `page[-1]` would then not be the page
+            # maximum, the next cursor would step OVER rows that were never
+            # served, and the walk would still end on an empty page and report
+            # COMPLETE. Refusing to certify is the only correct response, and
+            # this is the one place that can check it.
+            if any(a >= b for a, b in itertools.pairwise(advanceable)):
+                break
+            max_cursor = advanceable[-1]
+            if last_cursor is not None and max_cursor <= last_cursor:
+                # We asked for `cursor > last_cursor` and got nothing above it:
+                # the filter was not applied. The cursor cannot advance, so the
+                # walk would serve the same page until the cap — stop now, and
+                # do not certify.
+                break
+            last_cursor = max_cursor
+        complete = exhausted and (total is None or len(seen) >= total)
+        return rows, complete
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────
