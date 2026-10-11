@@ -258,6 +258,46 @@ def test_demand_store_read_failure_is_503_not_an_empty_list(
     assert client.get("/v1/data-sources/demand").status_code == 503
 
 
+def test_a_malformed_2xx_store_body_is_unavailable_not_a_crash(monkeypatch):
+    """#3514 review P2: the read must not trust a 2xx to be a list of rows.
+
+    ``list(response.json())`` accepted a dict (yielding its KEYS) or a string
+    (yielding its CHARACTERS). The resulting rows then blew up in the
+    aggregator's ``row.get(...)`` — and on the write path that happened AFTER
+    the record was written and the ping dispatched, so a malformed store answer
+    turned a SUCCESSFUL write into a 500.
+
+    This drives the real ``_demand_store_rows`` (the neighbouring 503 test
+    stubs it out, which is why the gap was invisible): a body that is not a
+    list of row objects must come back as the established unavailable shape.
+    """
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "service-key")
+
+    class _Client:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def get(self, *a, **kw):
+            return self
+
+        def json(self):
+            return self._payload
+
+    # A list of row objects stays a list of dicts; anything else is unavailable.
+    cases = [
+        ({"error": "nope"}, (None, "unavailable")),
+        ("oops", (None, "unavailable")),
+        (7, (None, "unavailable")),
+        ([{"org_id": "o"}, "junk", 3], ([{"org_id": "o"}], "supabase")),
+    ]
+    for payload, expected in cases:
+        monkeypatch.setattr(hosted_api, "_analytics_http_client",
+                            lambda url, key, p=payload: _Client(p))
+        assert hosted_api._demand_store_rows(None) == expected, payload
+
+
 # ── The ping: dedupe, failure, non-blocking ────────────────────────────
 
 def test_click_record_persisted_before_send(client, telegram, monkeypatch):

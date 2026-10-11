@@ -34603,7 +34603,21 @@ def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
             )
             if not 200 <= response.status_code < 300:
                 return None, "unavailable"
-            return list(response.json()), "supabase"
+            # #3514 review P2: a 2xx is not a promise that the body is a list of
+            # row objects. A dict/string body previously escaped as `list(body)`
+            # and blew up later in `_demand_aggregate`/`_demand_click_count`
+            # (`row.get(...)`) — AFTER the record was written and the ping sent,
+            # so a malformed store answer turned a successful write into a 500.
+            # The local branch below is defensive about the same shape; this
+            # one now is too.
+            body = response.json()
+            if not isinstance(body, list):
+                _logger.warning(
+                    "demand read: store returned a non-list body (%s)",
+                    type(body).__name__,
+                )
+                return None, "unavailable"
+            return [row for row in body if isinstance(row, dict)], "supabase"
         except Exception as exc:  # noqa: BLE001, RUF100 — a read failure is not a 500
             _logger.warning("demand read failed: %s", exc)
             return None, "unavailable"
