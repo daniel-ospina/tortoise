@@ -80,7 +80,10 @@ import logging
 import re
 from pathlib import Path
 
-from tortoise.entity_identity import resolve_entity_id  # #3633 route-then-refuse
+from tortoise.entity_identity import (  # #3633 route-then-refuse
+    all_name_holder_ids,
+    resolve_entity_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -462,13 +465,20 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
     through #3633's ``resolve_entity_id`` rather than a raw
     ``MATCH (o:Object {name:$name})`` read. A raw read silently picks the first
     of N same-name carriers, so a name held by two live Objects would attach
-    every claim to an arbitrary one; the resolver returns the single live id,
-    REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`) on two or
-    more, and returns ``None`` when no LIVE holder exists — which is when this
-    mints. (A terminal-only holder is a refusal, not a hit: the identity it
-    named is gone, so minting the current one is the truthful answer.)
-    ``mine_docs`` catches the refusal and records it in ``result["errors"]``,
-    so one ambiguous name cannot abort the run silently.
+    every claim to an arbitrary one; the resolver returns the single live id
+    and REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`) on two
+    or more.
+
+    MINTING IS FOR A GENUINELY UNHELD NAME ONLY. The resolver returns ``None``
+    both for a name with NO holder and for one whose holder(s) are all
+    TERMINAL, so the holder set is read back before minting: the projection's
+    object write MERGEs ``(o:Object {name:$name})``, so minting onto a held
+    name would write the new id onto EVERY same-name holder — two terminal
+    holders would end up both claiming one id (the ``duplicate-id`` corruption
+    the resolver itself refuses), and a single terminal holder would be
+    silently re-keyed and served as if live. A terminal-only reference is
+    #3633 D2's refusal; refusing here lets ``mine_docs`` record it in
+    ``result["errors"]`` instead of corrupting or resurrecting an identity.
 
     Re-minting is idempotent: the projection MERGEs Object by name, and the
     deterministic id is derived from the same anchor on every run, so a second
@@ -488,6 +498,12 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
         if resolved is not None:
             ids.append(resolved)
             continue
+        if all_name_holder_ids(proj.g, "Object", name):
+            raise ValueError(
+                f"docs miner: Object {name!r} is held only by terminal "
+                f"node(s) — refusing to mint a name-keyed replacement that "
+                f"the projection's MERGE would stamp onto every holder "
+                f"(#3633)")
         oid = ent["id"]
         api.add_object(name, ent["object_kind"], id=oid,
                        canonical_name=name, title=name,

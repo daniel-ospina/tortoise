@@ -405,6 +405,48 @@ def test_entity_name_resolution_returns_the_single_live_holder(corpus):
         "externalId": "github:repo:acme/acme"}]) == ["obj-only"]
 
 
+def test_entity_name_resolution_refuses_a_terminal_only_name(corpus):
+    """Minting is for a genuinely UNHELD name only.
+
+    `resolve_entity_id` returns ``None`` for a name with NO holder AND for one
+    whose holder(s) are all TERMINAL, so minting on the second would write the
+    new id onto EVERY same-name holder (the projection's object write MERGEs
+    ``(o:Object {name:$name})``): two terminal holders would both then claim
+    one id — the ``duplicate-id`` corruption the resolver itself refuses — and
+    a single terminal holder would be silently re-keyed and served as if live.
+    A terminal-only reference is #3633 D2's refusal; the miner must refuse it
+    (and `mine_docs` records that refusal in ``result["errors"]``) rather than
+    corrupt or resurrect an identity.
+
+    MUTATION THAT REDS THIS: mint whenever `resolve_entity_id` returns None,
+    without reading the holder set back.
+    """
+    from tortoise.docs_miner import _ensure_entities
+
+    sdk, _root, _base = corpus
+    proj = sdk._get_proj()
+    for oid in ("dead-1", "dead-2"):
+        proj.g.query("MERGE (o:Object {id:$id}) "
+                     "SET o.name = $name, o.status = 'superseded'",
+                     params={"id": oid, "name": "Acme"})
+
+    class _NoMint:
+        def add_object(self, *a, **k):  # pragma: no cover - must not be hit
+            raise AssertionError("a held name must not mint")
+
+    with pytest.raises(ValueError, match="held only by terminal"):
+        _ensure_entities(_NoMint(), proj, [{
+            "id": "obj-new", "name": "Acme",
+            "object_kind": REPO_OBJECT_KIND,
+            "externalId": "github:repo:acme/acme"}])
+
+    held = sorted(r[0] for r in proj.g.query(
+        "MATCH (o:Object {name:$name}) RETURN o.id",
+        params={"name": "Acme"}).result_set)
+    assert held == ["dead-1", "dead-2"], \
+        "no id may be stamped onto the terminal holders"
+
+
 def test_cli_verb_runs_the_pipeline_and_prints_the_zero_new_line(corpus, capsys):
     """The CLI wiring: ``tortoise mine-docs`` is the #1724 target verb."""
     from tortoise.__main__ import _cmd_mine_docs
