@@ -1,10 +1,10 @@
 """#5109 — the CLI must not interpolate a credential into printed output.
 
 The invariant is NOT "no key is ever printed". `tortoise signup` (its success
-path and `--claim`) and `tortoise team keys create` still echo a freshly minted
-value — deliberately, and with a `#5109 NOTE` saying why. What this gate
-enforces is that no print SITE interpolates a value by accident: every
-remaining one is labelled and owner-visible, and what the onboarding
+path and `--claim`), `tortoise team keys create` and `tortoise key create` all
+still echo a freshly minted value — deliberately, and each with a `#5109 NOTE`
+saying why. What this gate enforces is that no print SITE interpolates a value
+by accident: every remaining one is labelled, and what the onboarding
 instructions emit is the resolution expression, not the value.
 
 WHY THIS GATE EXISTS (the mechanism, measured 2026-10-11)
@@ -170,12 +170,11 @@ def _live_key_print_sites(src: str) -> list[tuple[int, str]]:
 
 def test_every_live_key_print_carries_a_5109_note() -> None:
     """The invariant is not "no key is ever printed" — it is "every remaining
-    value echo is a DELIBERATE, documented, owner-routed exception".
+    value echo is DELIBERATE and carries a `#5109 NOTE` saying why".
 
     The success paths carry the note; the ORPHAN echoes (mint/recover OK, save
-    failed — the key exists nowhere else) were missing it, so the PR's
-    deliberate/owner-routed coverage claim was false. Pin it: every live-key
-    print must have a `#5109 NOTE` within the 5 lines above it. A new
+    failed — the key exists nowhere else) were missing it. Pin it: every
+    live-key print must have a `#5109 NOTE` within the 5 lines above it. A new
     `print(f"... {data['key']}")` with no note reds this gate.
     """
     src = (
@@ -287,8 +286,9 @@ def test_json_payload_uses_the_env_form_not_the_literal() -> None:
     """The `--json` payload is the AGENT-consumed path (#304).
 
     Asserted at the SOURCE, because that is where the regression lands: the
-    payload is built inline in `_main`'s init flow, so the honest guard is that
-    no `auth_header` is ever interpolated from a key variable again.
+    payload is built inline in `_cmd_init` (and its already-connected branch),
+    so the honest guard is that no `auth_header` is ever interpolated from a
+    key variable again.
     """
     src = (
         Path(__file__).resolve().parent.parent / "tortoise" / "__main__.py"
