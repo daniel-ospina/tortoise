@@ -6,10 +6,10 @@ Loads the REAL packs from the repo and verifies the converted manifests:
     architecture — 7 steps, #405 step-0; the problem family anchors it via
     the feature → customerProblem relation), `architecture` expansion
     (subclassOf Document), customerProblem subclassOf Problem, `requirement`
-    ≡ dev:requirement (bidirectional), 2 extractable chain edges, extraction
-    activation + enforcement defaults (useCase → retry).
-  - dev: epicToCode chain (epic → issue → code) + kindDefs (requirement ≡
-    ps:requirement, architectureDoc link note); problem-family kinds
+    declared once as an Object kind (#7848 owner ruling), 2 extractable chain
+    edges, extraction activation + enforcement defaults (useCase → retry).
+  - dev: epicToCode chain (epic → issue → code) + kindDefs (architectureDoc
+    link note); problem-family kinds
     (bug/incident subclassOf Problem) + typed relations (causes/fixes/
     addresses/hasPart) + enforcement (incident → retry).
   - marketing: campaign→content→channel chain (real kind names).
@@ -124,16 +124,22 @@ class TestArchitectureExpansion:
         assert "product-strategy:requirement" in expanded
 
 
-class TestRequirementEquivalence:
-    """ps:requirement ≡ dev:requirement — bidirectional (DE2E-9)."""
+class TestRequirementSingleDeclaration:
+    """#7848 owner ruling: `requirement` is an Object kind declared ONCE.
 
-    def test_ps_side(self, registry):
-        expanded = registry.expand_kind("product-strategy:requirement")
-        assert "dev:requirement" in expanded
+    It was a dev pointKind AND a product-strategy objectKind, bridged by
+    `equivalentTo`. The ruling makes it an Object declared by product-strategy
+    only, so the bridge is gone and dev no longer declares the spelling. (The
+    registry still carries `dev:requirement` as a READ alias for stored Points —
+    see `test_requirement_legacy_spelling_is_a_read_alias`.)
+    """
 
-    def test_dev_side(self, registry):
-        expanded = registry.expand_kind("dev:requirement")
-        assert "product-strategy:requirement" in expanded
+    def test_ps_declares_it_and_dev_does_not(self, registry):
+        ps = registry.get_pack("product-strategy")
+        dev = registry.get_pack("dev")
+        assert "requirement" in ps.object_kinds
+        assert "requirement" not in dev.point_kinds
+        assert "requirement" in ps.kind_defs
 
 
 class TestExtractableRelations:
@@ -187,7 +193,7 @@ class TestProductStrategyEnforcement:
 
 
 class TestDevManifest:
-    """dev: epicToCode chain + kindDefs (requirement, architectureDoc link),
+    """dev: epicToCode chain + kindDefs (architectureDoc link),
     problem-family kinds/relations/enforcement/eventKinds."""
 
     def test_epic_to_code_chain(self, registry):
@@ -294,9 +300,12 @@ class TestDevManifest:
         for kind in ("epic", "issue", "code"):
             assert kind in dev.kind_defs
 
-    def test_requirement_kinddef_links_ps(self, registry):
+    def test_requirement_is_not_a_dev_kinddef(self, registry):
+        # #7848: dev no longer declares `requirement` at all — the Object kind
+        # is product-strategy's. The former cross-pack link note is gone with it.
         dev = registry.get_pack("dev")
-        assert "product-strategy:requirement" in dev.kind_defs["requirement"]["description"]
+        assert "requirement" not in dev.kind_defs
+        assert "requirement" not in dev.point_kinds
 
     def test_architecture_doc_link_note(self, registry):
         dev = registry.get_pack("dev")

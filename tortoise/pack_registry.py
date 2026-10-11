@@ -130,6 +130,24 @@ CORE_KINDS = (
     | CANONICAL_DOCUMENT_KINDS | CANONICAL_ACTION_KINDS | CORE_ENTITY_TYPES
 )
 
+# Kinds that persist in STORED graphs but are no longer DECLARED by any pack, so
+# they cannot ride `equivalentTo` (whose targets must resolve to a declared
+# kind). Read paths still expand through them, so a query keeps finding
+# pre-migration data — `migrate_kinds` is an opt-in normaliser, never a
+# precondition for a read (#6146).
+# #7848 moved two kind declarations:
+#   * `requirement` — dev pointKind → product-strategy objectKind, so the old
+#     `dev:requirement` spelling lives on stored Points;
+#   * `deployment`  — dev objectKind → core EVENT kind, so `dev:deployment`
+#     lives on stored Objects (and the relation names `core:deployment`).
+# A legacy spelling is a READ-ONLY alias: it is deliberately NOT in
+# `known_kinds`, so writing it still warns.
+LEGACY_KIND_ALIASES: dict[str, tuple[str, ...]] = {
+    "requirement": ("dev:requirement",),
+    "product-strategy:requirement": ("dev:requirement",),
+    "deployment": ("dev:deployment",),
+}
+
 # kindDefs value keys (R6 §3.1/§3.5)
 VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
@@ -385,8 +403,8 @@ class PackManifest:
     # Parent must exist in core CANONICAL_OBJECT_KINDS or another pack's kinds.
     kind_subclasses: dict[str, str] = dataclasses.field(default_factory=dict)
 
-    # Equivalence declarations: {kind: [other_ns:kind, ...]} — e.g., {"issue": ["pm:task"]}
-    # Means "this pack's 'issue' is the same concept as 'pm:task'."
+    # Equivalence declarations: {kind: [other_ns:kind, ...]} — e.g., {"issue": ["pm:issue"]}
+    # Means "this pack's 'issue' is the same concept as 'pm:issue'."
     # Bidirectional: the registry makes it symmetric at query time.
     kind_equivalences: dict[str, list[str]] = dataclasses.field(default_factory=dict)
 
@@ -1355,13 +1373,27 @@ class PackRegistry:
 
         # Check every relation's fromKind/toKind
         for ns, pack in self.packs.items():
+            rel_pack_kinds = self._pack_kind_set(pack)
             for rel in pack.relations:
                 pred = rel.get("predicate", "?")
                 for direction in ("fromKind", "toKind"):
                     kind_val = rel.get(direction, "")
                     if not kind_val:
                         continue  # old-format, already validated
-                    if kind_val not in all_known:
+                    # #7848: resolve through the SAME helper chains/nearMisses
+                    # use, so a `core:<kind>` reference (a core camelCase kind
+                    # such as `core:deployment`) resolves here too. The old
+                    # `kind_val not in all_known` test rejected it, because
+                    # `_all_known_kinds()` stores core kinds BARE — which left a
+                    # pack unable to point a relation at a core camelCase kind
+                    # without re-declaring it (the deformation #7848 fixes).
+                    # WIDENING only: every previously-valid ref still resolves.
+                    # (No `ambiguous` branch: `_validate` rejects an unprefixed
+                    # camelCase relation ref before this pass, and only a bare
+                    # ref can be ambiguous.)
+                    status = self._resolve_kind_ref(
+                        kind_val, rel_pack_kinds, all_known, bare_index)
+                    if status == "unknown":
                         msg = (
                             f"relation '{pred}': {direction} '{kind_val}' "
                             f"does not resolve to any known kind "
@@ -1586,7 +1618,7 @@ class PackRegistry:
         """Expand a kind to include subclasses and equivalents.
 
         Returns list of kind strings for Cypher IN clause.
-        Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:task"]
+        Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:issue", …]
 
         INVARIANT (#6146): the argument is ALWAYS in its own expansion —
         ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
@@ -1680,6 +1712,20 @@ class PackRegistry:
                         expansions[bare].append(f)
             else:
                 expansions[bare] = [bare, *fulls]
+
+        # Legacy aliases (LEGACY_KIND_ALIASES): a kind whose spelling moved
+        # namespaces still has nodes in stored graphs. Add the old spelling to
+        # the new kind's expansion (and the reverse) so read paths keep seeing
+        # them — the pack cannot declare it, because `equivalentTo` targets must
+        # resolve to a declared kind.
+        for new_kind, legacy_kinds in LEGACY_KIND_ALIASES.items():
+            bucket = expansions.setdefault(new_kind, [new_kind])
+            for old_kind in legacy_kinds:
+                if old_kind not in bucket:
+                    bucket.append(old_kind)
+                old_bucket = expansions.setdefault(old_kind, [old_kind])
+                if new_kind not in old_bucket:
+                    old_bucket.append(new_kind)
 
         self._kind_expansions = expansions
 

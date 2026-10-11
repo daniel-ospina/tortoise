@@ -97,7 +97,7 @@ CORE_SEMANTICS = {
 NEAR_MISS_ENTITY_KINDS = (
     "product-strategy:useCase, product-strategy:userJourney, "
     "product-strategy:jobToBeDone, product-strategy:valueProposition, "
-    "dev:requirement, dev:bug, dev:technicalDebt, marketing:contentBrief, "
+    "product-strategy:requirement, dev:bug, dev:technicalDebt, marketing:contentBrief, "
     "marketing:contentPerformance, pm:estimate, pm:retrospective"
 )
 POINT_KINDS = "decision, vision, strategy, plan, goal, target (decisions) · statement, observation, hypothesis (claims) · event (events)"
@@ -156,7 +156,7 @@ MARKETING ({', '.join(mkt)}):
 PM ({', '.join(pm)}):
 {_render_kind_semantics(vocab, 'pm', pm)}
 
-NEAR-MISS entity kinds (pointKinds pressed into entity service — ALWAYS ⚠-flagged): {NEAR_MISS_ENTITY_KINDS}
+NEAR-MISS entity kinds (entity kinds routinely missed by extraction — ALWAYS ⚠-flagged): {NEAR_MISS_ENTITY_KINDS}
 NOT entities: relations (IMPL/NAND/MITIGATES), operators, edges, file paths/module names (quota.py), HTTP codes, git refs/branches, REFERENCE NUMBERS (masked as [REF] in the transcript — never entities; the artifact itself may be an entity, the reference number is not), version tags, or generic plural mentions ("open issues", "live epics", "competitors" — only specific named instances). WORK ITEMS that are not a named issue/epic ("quota fix", "the pricing refactor") → core:WorkItem, never dev:issue (dev:issue is for NAMED issues like "issue #953" — references are masked as [REF]).
 PACK PROPOSALS: recurring mentions with no kind (test, model, session, ...) are collected in entities[] with near_miss: "pack proposal: <kind>" — never minted.
 

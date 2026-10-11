@@ -347,6 +347,12 @@ def _seed_chain_violations(sdk: TortoiseSDK) -> dict:
     ids["wf"] = sdk.create_point(
         "workflow", "wf dangling", enables_jtbd="JTBD-MISSING-405",
         status="live")
+    # #7848: `requirement` is now an Object kind, but stored graphs still hold
+    # the LEGACY point shape `dev:requirement` (`migrate_kinds` wrote it before
+    # the kind moved to product-strategy). The rule must still see it — the
+    # registry keeps `dev:requirement` as a read alias in
+    # `expand_kind('requirement')` (LEGACY_KIND_ALIASES). The Object shape is
+    # covered by test_object_requirement_fires_dangling_workflow_ref below.
     ids["req"] = sdk.create_point(
         "dev:requirement", "req dangling", enabled_workflow="WF-MISSING-405",
         status="live")
@@ -498,6 +504,31 @@ class TestGraphValidators:
         rules = {v["rule"] for v in res["violations"]}
         assert {"dangling_use_case_ref", "dangling_jtbd_ref",
                 "dangling_workflow_ref"} <= rules
+
+    def test_object_requirement_fires_dangling_workflow_ref(self, graph_sdk):
+        """#7848: `requirement` is an OBJECT kind (owner ruling), so the rule
+        must see an Object-shaped requirement. Before the widening the query
+        matched `(req:Point)` only and this node was invisible to it."""
+        graph_sdk.create_entity(
+            "object", "object-shaped requirement",
+            objectKind="product-strategy:requirement",
+            enabled_workflow="WF-MISSING-405",
+        )
+        res = graph_sdk.validate_domain("product-strategy")
+        assert any(v["rule"] == "dangling_workflow_ref"
+                   for v in res["violations"]), res["violations"]
+
+    def test_legacy_dev_requirement_point_still_checked(self, graph_sdk):
+        """#7848 regression guard: removing the dev↔ps `equivalentTo` bridge
+        must not drop the legacy `dev:requirement` Points `migrate_kinds` wrote.
+        `expand_kind('requirement')` carries the old spelling as a read alias
+        (LEGACY_KIND_ALIASES), so the rule still sees them."""
+        graph_sdk.create_point(
+            "dev:requirement", "legacy-shaped requirement",
+            enabled_workflow="WF-MISSING-405", status="live")
+        res = graph_sdk.validate_domain("product-strategy")
+        assert any(v["rule"] == "dangling_workflow_ref"
+                   for v in res["violations"]), res["violations"]
 
     def test_wired_use_case_not_orphan(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)

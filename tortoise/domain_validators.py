@@ -170,13 +170,20 @@ def validate_chain_integrity(graph) -> list[dict]:
         })
 
     # 4. dangling_workflow_ref — batched; 'ALL' is a sentinel, not a ref.
+    # #7848: `requirement` is an OBJECT kind (owner ruling), so the node may be
+    # an Object, not a Point — match both labels and both kind properties, or
+    # the rule goes silently dead for the kind it exists for. `_expand` also
+    # carries the legacy `dev:requirement` point spelling as a read alias
+    # (LEGACY_KIND_ALIASES), so stored Points stay covered.
     rows = graph.g.query(
-        "MATCH (req:Point) WHERE req.pointKind IN $req_kinds "
+        "MATCH (req) WHERE (req:Point OR req:Object) "
+        "AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds) "
         f"AND {_live_clause('req')} "
         "AND req.enabled_workflow IS NOT NULL AND req.enabled_workflow <> '' "
         "AND req.enabled_workflow <> 'ALL' "
-        "OPTIONAL MATCH (w:Point {wf_id: req.enabled_workflow}) "
-        "WHERE w.pointKind IN $wf_kinds "
+        "OPTIONAL MATCH (w) WHERE (w:Point OR w:Object) "
+        "AND (w.pointKind IN $wf_kinds OR w.objectKind IN $wf_kinds) "
+        "AND w.wf_id = req.enabled_workflow "
         "WITH req, w WHERE w IS NULL "
         "RETURN req.id, req.enabled_workflow",
         params={"req_kinds": req_kind, "wf_kinds": wf_kind},
