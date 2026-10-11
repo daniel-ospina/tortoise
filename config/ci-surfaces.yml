@@ -376,6 +376,15 @@ surfaces:
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
   - test_dashboard_client_paths_resolve.py  # #4446: the client's literal call paths vs the runtime route table + the Pages function tree; replaces the text scan dropped in `ed0079b73`
   - test_dashboard_login.py
+  # #7813: DUAL-REGISTERED with `ep` — the same silent-drop trap as #7809
+  # above. The guard drives `tortoise/__main__.py`'s `decide` subcommand, and
+  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback: measured, a `tortoise/__main__.py`-only PR selects
+  # `['api']` (219 files), so the `ep` arm alone would leave the test unrun on
+  # the one change it exists to guard (deleting `**_direction_kw()` from a
+  # wiring loop). `ep` stays because `test_decide.py` and
+  # `test_directional_impl*.py` live there.
+  - test_decide_direction_7813.py
   - test_direct_edge.py
   - test_dr_endpoints.py
   # #4491: egress (response bytes) per org — the network cost dimension. On
@@ -2138,6 +2147,7 @@ surfaces:
   # change. Dual-registered under `core` (above) for its
   # `tortoise/projection/entities.py` subject.
   - test_2884_ep_state_journaled.py
+  - test_decide_direction_7813.py
   # #4097: the env-truthiness non-divergence guard scans ALL of `tortoise/**` —
   # including this surface's mapped modules (`dream.py`, `analyze.py`, `ranking.py`).
   # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so without this
