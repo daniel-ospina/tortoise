@@ -161,7 +161,7 @@ stats to size the window budget), but the strategy decision is made.
 
 ---
 
-# Production-scale validation + tuning — issue #1338 (epic 903 follow-up)
+## Production-scale validation + tuning — issue #1338 (epic 903 follow-up)
 
 **Date:** 2026-10-10 · **Team:** epistemic-team · **Complexity:** standard
 **Instrument:** `graph-scripts/dream-scale-bench.py` (added by #1338)
@@ -172,7 +172,7 @@ product-owner data point, not on a measurement. #1338 validates the machinery
 at that scale and tunes the scale-sensitive defaults. Five items; each is
 resolved below with either a measurement or a recorded reason it is not.
 
-## 1. `dream_all`'s cap at the top of the range — DEFINED (fixed)
+### 1. `dream_all`'s cap at the top of the range — DEFINED (fixed)
 
 `max_total_operators` (200,000) is below the top of the recorded production
 range (500k operators), so a default-budget full pass on such a graph cannot
@@ -195,7 +195,7 @@ data-integrity bug (fixed above) for a DoS one. **Full mode is non-viable
 above 200,000 operators: use `mode="stale-first"`.** An operator who wants an
 intentional one-shot full pass raises `max_total_operators` explicitly.
 
-## 2. The default per-pass budget — CONFIGURABLE, value deliberately unchanged
+### 2. The default per-pass budget — CONFIGURABLE, value deliberately unchanged
 
 `DEFAULT_WINDOW_BUDGET = 200` stays. **It is now configurable**, resolved on
 every call through `dream.resolve_window_budget`:
@@ -225,7 +225,7 @@ arithmetic the issue's "2,500 passes" note is about:
 
 Pinned as arithmetic by `tests/test_epic903_scale.py::TestCoverageCycleScalesWithTheBudget`.
 
-## 3. `_AUTO_FULL_OPERATOR_THRESHOLD` (50) — VERIFIED, no change needed
+### 3. `_AUTO_FULL_OPERATOR_THRESHOLD` (50) — VERIFIED, no change needed
 
 Recorded production graphs are 100×–10,000× this threshold, so **auto-select
 routes a production graph to `local` from both branches that can fire**:
@@ -241,7 +241,7 @@ The config is documented at the constant
 (`TortoiseSDK._AUTO_FULL_OPERATOR_THRESHOLD`, `tortoise/sdk.py`) and pinned by
 `tests/test_epic903_scale.py::TestRoutingAtScale`.
 
-## 4. Perf validation at scale — PARTIAL (instrument shipped; production-scale numbers OPEN)
+### 4. Perf validation at scale — PARTIAL (instrument shipped; production-scale numbers OPEN)
 
 `graph-scripts/dream-scale-bench.py` builds a synthetic graph at a chosen
 scale and measures the four quantities this item asks for: staleness-ranking
@@ -285,7 +285,7 @@ a decision gate — and it cannot move the strategy decision (item 1's
 STALE-FIRST record stands; the budget default in item 2 is what the ceiling
 governs).
 
-## 5. Deferred W7 refinement (shared operator-hour budget accounting) — RE-EVALUATED, stays v1
+### 5. Deferred W7 refinement (shared operator-hour budget accounting) — RE-EVALUATED, stays v1
 
 Plan W7: only full-mode passes count against the #329 hourly bucket; window
 passes are bounded solely by their per-pass budget. #1338 asked whether the
@@ -303,7 +303,7 @@ recorded a single production-scale window pass. Re-open when a real
 production graph's measured per-pass cost shows the budget bound is not what
 limits throughput — i.e. after the §4 measurement above.
 
-## Files
+### Files
 
 | File | Change |
 |---|---|
