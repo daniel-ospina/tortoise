@@ -2559,6 +2559,115 @@ _GRAPH_EVENT_TYPES = frozenset({
     "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #7951 — THE JOURNAL ORDERING CONTRACT. Read this before adding a writer.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# THE RULE:  **journal first, then project.**
+#
+#   A live write appends its record to the TRUTH journal and only THEN folds it
+#   into the DERIVED graph. **The append is the COMMIT POINT:** if it fails,
+#   the write is not committed and the fold must NOT run. `docs/architecture/
+#   STORAGE-ARCHITECTURE.md` §3 states the protocol — *"Writes go to the truth
+#   first, then project"* — and §17.1 mechanism (1) names its endpoint: journal
+#   + projection in ONE atomic write (the #7951 chokepoint). Until that
+#   transaction exists, the ORDER is the contract, and it is fixed here once
+#   for the whole codebase so that no remaining site has to choose for itself.
+#
+# WHY — the failure-mode argument, not a preference. The design invariant is
+# `derived = replay(journal)` (§3). A crash leaves exactly one of two windows:
+#
+#   (a) APPLY-FIRST — the process dies between the graph write and the append.
+#       The DERIVED store now holds a node the journal — the TRUTH — never
+#       recorded. `rebuild_all` replays the journal, does NOT reproduce the
+#       node, and the write is GONE. No replay can recover it; only an
+#       out-of-band repair that reconstructs the record from the graph could,
+#       and none exists. The loss is SILENT (rebuild reports success), and it
+#       compounds: a later mutation of the orphan journals a record whose
+#       target the journal never created, i.e. a journal that is not itself
+#       replayable (the "input source … does not resolve" class).
+#
+#   (b) JOURNAL-FIRST — the process dies between the append and the fold. The
+#       journal holds the record; the derived store merely LAGS. The next
+#       `rebuild_all` applies the record and the graph catches up. **Replay
+#       heals it** — and healing a lagging derived store is the entire reason
+#       the recovery path exists. Nothing is lost, and `derived =
+#       replay(journal)` is restored by the recovery path itself.
+#
+#   ⇒ Choose the order whose residual window is replay-healable. Apply-first
+#     leaves the DERIVED store AHEAD of the TRUTH — exactly "a derived cache
+#     that is also written to directly is not derived" — and no recovery path
+#     can undo it.
+#
+# THE CONSTRAINT THAT PUTS THE DECISION IN THE CALLER — `FalkorProjection.apply`
+# (`tortoise/projection/__init__.py`) is ALSO the REPLAY TARGET: `rebuild_all`,
+# `recover_from_log`, `rebuild` and `backup` drive it once per journal record.
+# It can therefore NEVER journal itself — a replayed record would journal
+# itself, grow the log on every rebuild, and make replay non-idempotent at the
+# log level. The fold cannot know whether it is live or a replay; only the
+# CALLER does. So the order is drawn at the caller-side live doors. The two
+# that state it explicitly are:
+#   * `EventAPI._emit`                      (tortoise/api.py)
+#   * `TortoiseSDK._apply_and_journal` / `_journal_entity_event` (this module)
+# The live doors that do NOT yet conform are listed under KNOWN DEVIATIONS at
+# the end of this block.
+#
+# THE ONLY TWO PERMITTED EXCEPTIONS — neither is "apply-first by preference":
+#
+#   1. REPLAY (apply-only — it must not journal at all). A fold driven by
+#      READING the journal — `rebuild_all`, `recover_from_log`, `rebuild`,
+#      `tortoise reconcile` (`__main__.py`), `backup`, `consistency` — applies
+#      and does NOT journal. This is not the other order; it is the ABSENCE of
+#      a write. Routing one of these through a live door is a BUG: it would
+#      append to the journal the very record it just read from it.
+#
+#   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
+#      cannot be constructed until the fold has produced it, there is no
+#      pre-fold record to append. The dominant case is `create_point`, whose
+#      `PointAdded` payload IS `get_point(pid)` — the applied node — and whose
+#      canonical id can be an apply result (dedup / name MERGE). Such a site
+#      applies first and inherits window (a); the window closes only at §17.1's
+#      one atomic write. A site that CAN form its record before the fold MUST
+#      NOT take this exception.
+#
+# KNOWN DEVIATIONS in this tree (recorded, not concealed):
+# `TortoiseSDK._create_entity`'s Object/Subject/Event registration blocks are
+# apply-first although their payload (`event`) is fully built BEFORE the fold,
+# so they qualify for neither exception; they also fold after a FAILED append
+# (`_emit_event` is best-effort). They are left as-is in this increment because
+# reordering them rides the #2194/#2295/#2309 first-registration hardening and
+# its pinned tests; `create_point`'s payload is genuinely post-apply
+# (exception 2). The chokepoint's atomic write removes both windows by
+# construction. Every OTHER live door reaches the journal FIRST and treats the
+# append as the commit point (`_apply_and_journal` does).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
+# from an already-built event dict must not carry its own copy of these — a
+# caller prop of the same name would shadow the envelope on replay (see
+# ``_emit_event``'s ``event.update(extra)``). Kept as one tuple so the live
+# entity doors cannot drift from each other.
+_JOURNAL_ENVELOPE_KEYS = (
+    "type", "id", "point", "payload",
+    "event_id", "ts", "initiated_by", "projection_version",
+)
+
+#: The canonical record types a live entity door may journal.
+_JOURNALED_ENTITY_EVENT_TYPES = (
+    "ObjectRegistered", "SubjectAdded", "EventRecorded",
+)
+
+
+def _journal_record_payload(event: dict) -> dict:
+    """``event``'s payload minus the keys ``_emit_event`` owns.
+
+    THE single source of the rule every entity-door journal call uses
+    (``_create_entity`` and ``_journal_entity_event``), so live and replay
+    fold a byte-identical record — ``derived = replay(journal)``.
+    """
+    return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
+
+
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
 # _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
 # NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
@@ -5334,6 +5443,99 @@ class TortoiseSDK:
                 "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
+
+    def _journal_entity_event(self, event: dict) -> None:
+        """Append a canonical entity record to the journal (the WRITE half).
+
+        The emission half of :meth:`_apply_and_journal`; split out so a
+        caller that must fold through a different path can still record. It
+        obeys THE JOURNAL ORDERING CONTRACT (module top): appending is the
+        COMMIT POINT of a live write, so this runs BEFORE the fold. No-ops for
+        a non-entity record type, a missing id, or an unconfigured journal —
+        ``_emit_event`` owns the last case.
+
+        ⛔ This is for a LIVE write. A REPLAY engine must never call it: the
+        record being folded came FROM the journal, so journalling it again
+        would grow the log on every rebuild and (worse) make replay
+        non-idempotent at the log level.
+        """
+        type_ = event.get("type")
+        if type_ not in _JOURNALED_ENTITY_EVENT_TYPES:
+            return
+        id_ = event.get("id") or event.get("eventId")
+        if id_ is None:
+            return
+        self._emit_event(type_, id=id_, **_journal_record_payload(event))
+
+    def _apply_and_journal(self, proj, event: dict, *,
+                           journal: bool = True) -> None:
+        """THE live-write door for a pre-built Object/Subject/Event record.
+
+        Obeys THE JOURNAL ORDERING CONTRACT (module top): **append first, then
+        fold.** `proj.apply` is the fold the REPLAY engines drive —
+        `rebuild_all` / `recover_from_log` call it once per journal record — so
+        it must NEVER journal itself (a replayed record would journal itself
+        and double-apply). This is that fold's LIVE twin: a caller holding a
+        record it means to PERSIST comes through here instead of calling
+        `proj.apply` directly.
+
+        Journal-first is not a preference — it is the order whose crash window
+        is replay-healable. If the process dies after the append and before
+        the fold, the journal (TRUTH) holds the record and the graph (DERIVED)
+        merely lags; the next `rebuild_all` materialises it. Apply-first would
+        die with the derived store AHEAD of truth, where a replay silently
+        LOSES the write and no repair can recover it. §3: *"Writes go to the
+        truth first, then project."* `docs/architecture/STORAGE-ARCHITECTURE.md`
+        §17.1 mechanism (1) closes even this window with one atomic write.
+
+        A record whose payload cannot exist before the fold (`create_point`'s
+        post-apply snapshot) is the ONE permitted apply-first case — see the
+        contract's exception 2; it does NOT come through this door's normal
+        mode.
+
+        ``journal=False`` folds WITHOUT appending: for a replay-safe
+        RE-application of an already-registered record (the GitHub indexer's
+        poll re-runs), which must not grow the journal once per run.
+
+        The APPEND IS THE COMMIT POINT. `_emit_event` is deliberately
+        best-effort (it logs ERROR + counts the failure instead of raising, so
+        a log-write failure never crashes a write that DID persist — #4240),
+        so this door reads the failure counter and does NOT fold when the
+        append failed. Folding anyway would put the DERIVED store ahead of the
+        journal on a failed append — window (a) of the contract, the one a
+        replay cannot undo.
+        """
+        if journal:
+            # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
+            # the journaling path, BEFORE the append (so the record and the
+            # fold carry the SAME instant). `_create_entity` stamps
+            # `event["createdAt"] = now_iso()` exactly to close the #2164-P4
+            # "a replay stamps rebuild time" class: without it a journaled
+            # record carries no create instant, so `_upsert_subject` /
+            # `_upsert_object`'s `coalesce($ca, $now)` stamps the REBUILD
+            # time on replay and live != replayed for the same journal.
+            # `_journal_record_payload` shares the payload-KEY rule between
+            # the two doors; this shares the value-SYNTHESIS rule, which the
+            # reviewer found had drifted (the Subject payloads the indexer
+            # mints carry no `createdAt` of their own).
+            #
+            # Gate on is-None (not key-absence), exactly like `_create_entity`:
+            # an explicit `createdAt=None` caller prop must not slip a NULL
+            # onto the journal line (replay ON CREATE would stamp rebuild
+            # time). A producer-supplied instant (`issue_to_object` carries
+            # one) is kept verbatim.
+            if (event.get("type") in _JOURNALED_ENTITY_EVENT_TYPES
+                    and event.get("createdAt") is None):
+                from .ids import now_iso
+                event["createdAt"] = now_iso()
+            _failures_before = self._journal_write_failures
+            self._journal_entity_event(event)
+            if self._journal_write_failures > _failures_before:
+                # Append failed → not committed → do not fold (contract).
+                # `_emit_event` already logged at ERROR and incremented
+                # `tortoise_journal_write_failures_total`.
+                return
+        proj.apply(event)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -15203,6 +15405,19 @@ class TortoiseSDK:
     #: reason to window a graph this small; one pass drains it). Simple,
     #: documented count-query heuristic: ``MATCH (n:Point
     #: {is_operator:true}) RETURN count(n)`` — cheap and deterministic.
+    #:
+    #: #1338 verification (indicator 3): this is a SMALL-GRAPH rule, not a
+    #: production routing rule. With the recorded production range being
+    #: 5k-500k operators — 100x-10,000x this threshold — auto-select routes a
+    #: production graph to ``local`` from BOTH branches that can fire:
+    #: dirty roots present (write context, W1) → local, and no dirty roots →
+    #: operator count >= this threshold → local. Auto-select therefore never
+    #: picks ``stale-first``; the production window strategy is reachable ONLY
+    #: by an explicit ``mode="stale-first"``, which is exactly what the
+    #: scheduled path must pass (903-C8 wiring). Raising this threshold would
+    #: turn a 5k-operator production graph into a whole-graph full pass on a
+    #: plain ``dream()`` call — i.e. the O(whole-graph) pass the epic exists to
+    #: avoid — so it must stay far below the production floor.
     _AUTO_FULL_OPERATOR_THRESHOLD = 50
 
     def dream(self, dirty_only: bool = True, full: bool = False,
@@ -15258,14 +15473,28 @@ class TortoiseSDK:
                   censoring. False → a from-scratch pass (the fast path /
                   oracle captures, e.g. F4's frozen ground truth, which must
                   be bit-reproducible without censoring).
-            budget: per-pass operator cap. None → the existing 200-op
-                  selector cap (every pass bounded by construction); an
+            budget: per-pass operator cap — ALSO the claim-window size the
+                  scheduler walks, which is what bounds the pass's cost.
+                  None → the CONFIGURED default
+                  (``TORTOISE_DREAM_WINDOW_BUDGET`` when set, else
+                  ``dream.DEFAULT_WINDOW_BUDGET``); every pass is bounded by
+                  construction. The shipped value is deliberately
+                  conservative — #1338 measured a 5,000-claim window raising
+                  the engine's query timeout on a 5k-claim graph while
+                  windows <= 2,000 completed, so raising it is an operator
+                  decision taken against their own deployment's numbers
+                  (passes per coverage cycle = ceil(operators / budget):
+                  25/2,500 at the default for 5k/500k operators). An
                   explicit budget overrides it; budget=0 → no-op result
                   (not an error — exact key-set, all zeros, no stamps).
                   An explicit budget a full pass cannot satisfy raises
                   BudgetExceededError (tortoise/exceptions.py) — full is
                   complete-in-one-pass by contract; stale-first never
-                  raises (deferral is its design).
+                  raises (deferral is its design). A DEFAULT-budget full
+                  pass whose graph exceeds the 200_000-operator DoS cap is
+                  truncated and reports ``converged_all=False`` — an
+                  incomplete pass, never a silent success (#1338; full mode
+                  is non-viable above the cap: use mode="stale-first").
 
         Returns (per-mode key-sets, pinned per I1 — exact):
             local: {mode, iterations, converged, affected_claims,
@@ -15636,11 +15865,21 @@ class TortoiseSDK:
         An explicit budget the graph cannot satisfy raises
         BudgetExceededError inside dream_all (full is complete-in-one-pass
         by contract — never silently truncate an explicit budget).
+
+        #1338: a default-budget pass that the 200_000-operator DoS cap
+        truncates comes back ``converged_all=False`` (incomplete, not a
+        success) with no freshness stamped on the uncovered regions; the
+        Dreamer's internal ``truncated`` flag is dropped here because the
+        I1 full key-set is pinned — the failure is visible through
+        ``converged_all``, the WARNING log, and the failure_rate the
+        ``_record_dream_metrics`` call below records.
         """
         result = dreamer.dream_all(
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget, warm_start=warm_start,
         )
+        # #1338: scheduler-internal — not part of the pinned I1 full key-set.
+        result.pop("truncated", None)
         # #3139: fail closed before the dirty-root sweep — a full pass that
         # scanned zero anchors over a populated graph must not report success.
         self._guard_dream_progress(dreamer, "full", result, window=None)
@@ -16995,9 +17234,16 @@ class TortoiseSDK:
             )
             # GAP-07 (partially closed by #432 _emit_event — graph mutations
             # now emit :GraphEvent; this EventRecorded path is session-capture
-            # provenance and stays separate)
+            # provenance and stays separate).
+            # #7951: this provenance Event went through a bare ``proj.apply`` —
+            # the projection's REPLAY fold — so it never reached the journal
+            # and a rebuild LOST it. It now goes through
+            # ``_apply_and_journal`` (the sanctioned live door; journal first,
+            # then fold), which is added to the same try/except for the same
+            # reason the fold already was: a provenance-record failure must not
+            # fail the checkpoint batch.
             try:
-                proj.apply({
+                self._apply_and_journal(proj, {
                     "type": "EventRecorded",
                     "id": ulid(),
                     "eventKind": "pointAdded",
@@ -22340,10 +22586,7 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -22366,10 +22609,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         if label == "Subject" and _journal_subject_registration:
             # (#2295) Subject mirror of the ObjectRegistered block above —
@@ -22387,10 +22627,7 @@ class TortoiseSDK:
             self._emit_event(
                 event["type"],
                 id=event["id"],
-                **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload",
-                                "event_id", "ts", "initiated_by",
-                                "projection_version")},
+                **_journal_record_payload(event),
             )
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the

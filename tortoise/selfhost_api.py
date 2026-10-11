@@ -181,6 +181,18 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:  # noqa: F821
     return proj._probe_ok()
 
 
+def _init_selfhost_onboarding(sdk, target: str) -> None:
+    """#2007 (W12): the selfhost SDK/API init seam.
+
+    Rides the SDK factory BOTH surfaces already go through (this module's
+    REST routes; ``mcp_auth._get_org_sdk`` for the selfhost MCP transport), so
+    the selfhost OnboardingState node exists from the first agent interaction.
+    Memoized per target and best-effort — a graph failure must never fail an
+    unrelated request, and the node self-heals on the next init."""
+    from tortoise.onboarding import selfhost as _sh
+    _sh.ensure_selfhost_onboarding_once(sdk, target=target)
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
     if not os.environ.get("TORTOISE_DB_URI"):
@@ -218,8 +230,12 @@ def _sdk():
                     _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
         # Thread the SAME resolved path into the request SDK so anchor and
         # request share one server (path mismatch would defeat keepalive).
-        return TortoiseSDK(db_path=db_path, namespace="selfhost")
-    return TortoiseSDK(namespace="selfhost")
+        sdk = TortoiseSDK(db_path=db_path, namespace="selfhost")
+        _init_selfhost_onboarding(sdk, db_path)
+        return sdk
+    sdk = TortoiseSDK(namespace="selfhost")
+    _init_selfhost_onboarding(sdk, os.environ.get("TORTOISE_DB_URI", ""))
+    return sdk
 
 
 def _point_out(result: dict) -> dict:
@@ -496,3 +512,61 @@ async def volunteer_context(body: VolunteerContextRequest):
         if completed:
             sdk.close()
     return result
+
+
+# ── Onboarding (self-hosted leg of #2001 W5 / #1999 W3 — #2007 W12) ──────
+# The SAME registry RestSpec paths the hosted surface serves, so an agent
+# pointed at a self-hosted daemon needs no new client contract: `GET
+# /v1/onboarding/state` + `POST /v1/onboarding/seed`. No Supabase, no hosted
+# control plane — the FLOW state is the graph node and the anchors are the
+# two Subjects from the two prompts (see tortoise/onboarding/selfhost.py).
+
+
+class SelfhostSeedRequest(BaseModel):
+    """The self-hosted user's two answers. Both REQUIRED — self-hosted has no
+    JWT / ``teams.name`` / email to derive from, so a missing answer is a
+    422, never an invented identity (DM-3). ``extra="forbid"``: an unknown
+    field is a 422, never a silent ignore (the hosted seed request's
+    contract)."""
+    org_name: str = Field(..., min_length=1, max_length=200)
+    person_name: str = Field(..., min_length=1, max_length=200)
+    model_config = {"extra": "forbid"}
+
+
+@router.get("/onboarding/state", dependencies=[Depends(_require_key)])
+async def selfhost_onboarding_state():
+    """Self-hosted onboarding FLOW projection (registry: GET
+    /v1/onboarding/state).
+
+    Graph-DOWN → 200 with the ``'unavailable'`` markers (never fabricated
+    defaults, never a false "N of M complete") — the same contract the
+    hosted projection serves."""
+    from tortoise.onboarding import selfhost as _sh
+    sdk = _sdk()
+    try:
+        return _sh.read_selfhost_state(sdk)
+    finally:
+        sdk.close()
+
+
+@router.post("/onboarding/seed", dependencies=[Depends(_require_key)])
+async def selfhost_onboarding_seed(body: SelfhostSeedRequest):
+    """File the two onboarding anchor Subjects (Organization/organization +
+    User/naturalPerson linked memberOf) from the self-hosted user's two
+    answers (registry: POST /v1/onboarding/seed).
+
+    Idempotent (replay reuses the anchors); a same-name Subject that is not
+    this deployment's anchor returns ``status='collision'`` with ZERO writes
+    (disambiguate, never a silent merge). Graph-down / unexpected failure →
+    500 with the sibling routes' contract — retry-safe (the seed is
+    all-or-nothing, and the step writes are first-write-wins)."""
+    from tortoise.onboarding import selfhost as _sh
+    sdk = _sdk()
+    try:
+        return _sh.seed_selfhost_anchors(
+            sdk, org_name=body.org_name, person_name=body.person_name)
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.exception("selfhost onboarding seed failed")
+        raise HTTPException(status_code=500, detail="Internal error") from e
+    finally:
+        sdk.close()

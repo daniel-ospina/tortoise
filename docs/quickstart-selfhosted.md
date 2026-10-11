@@ -637,6 +637,44 @@ skill teaches the same flow at `tortoise/onboarding/SKILL.md` (the
 AGENT_ONBOARDING.md prompt it replaced is archived under
 `tortoise/onboarding/archive/`, M8).
 
+## GitHub docs — claim mining (#1724)
+
+Once a docs corpus is indexed (the GitHub docs fetcher stages it under
+`$TORTOISE_INGEST_BASE_DIR/<org>/<repo>/`, or you point at any local markdown
+directory), you can extract the **claims** the docs make into your graph:
+
+```bash
+tortoise mine-docs --dir ~/ingest/acme/repo1 --db ~/.tortoise/tortoise.db \
+  --repo acme/repo1
+```
+
+What it does:
+
+- walks every `*.md` classified as a **document**, and writes one **draft**
+  `statement` Point per extracted claim: `(Point)-[:extractedFrom]->(Source)`
+  pointing at the document's Source, plus `(Point)-[:aboutObject]->(Object)` to
+  the repo/project entity you name with `--repo` (or, when the corpus sits in
+  the staged `<org>/<repo>` layout, the one derived from the path).
+- expects a claim to carry a cue — normative (`must`, `never`, `always`,
+  `required`), decision (`decision`, `ruling`, `overrides`) or lifecycle
+  (`deprecated`, `superseded`, `retired`). Fenced code, tables, checkbox items
+  and cue-less prose are **not** claims. There is no model call: the extractor
+  is deterministic and offline, so a run costs no tokens and no network.
+- **dedups two ways** — an unchanged document is skipped outright, and a claim's
+  Point id is a hash of its normalized text, so re-extracting the same sentence
+  lands on the same Point. Re-mining an unchanged corpus prints
+  `NEW Points: 0`.
+
+Output is the run summary (`documents`, `claims`, `NEW Points`, `Objects
+wired`, plus any per-file errors); every Point is `status=draft`, so nothing
+enters the live belief set until you promote it
+(`TortoiseSDK.promote_point(point_id)`, or the `tortoise_promote_point` MCP
+tool).
+
+**Honest difference from the meeting path:** docs mining has **no MCP tool and
+no hosted endpoint** — it is a self-hosted CLI verb only. `tortoise
+mine-conversation` / `tortoise_mine_conversations` remain the transcript path.
+
 ### Automatic capture (optional Minutes integration)
 
 The flow above is manual by design. A separate, operator-installed integration

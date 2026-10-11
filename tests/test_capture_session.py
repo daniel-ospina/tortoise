@@ -804,7 +804,7 @@ def test_capture_session_idempotent(sdk):
     assert turns[0][0] == 3, "re-capture must not duplicate turn points"
 
 
-def test_capture_session_no_provider_stores_turns(sdk, monkeypatch):
+def test_capture_session_no_provider_stores_turns(sdk, no_provider_keys):
     """#3892 (owner ruling 2026-09-18): no provider key NO LONGER refuses the
     capture — the key gates EXTRACTION, not storage. The full keyless write
     behaviour is pinned by
@@ -815,10 +815,6 @@ def test_capture_session_no_provider_stores_turns(sdk, monkeypatch):
 
     Supersedes the pre-#3892 ``..._fails_closed`` expectation (ValueError
     before any write), which the owner's ruling reversed."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     res = sdk.capture_session(CONV)
     assert res["ok"] is True
     assert res["extraction_mode"] == "no-provider"
@@ -835,7 +831,7 @@ def test_capture_session_no_provider_stores_turns(sdk, monkeypatch):
     assert sessions == 1, "the empty gate must not write a Session stub"
 
 
-def test_keyless_capture_stores_turns_and_stays_searchable(sdk, monkeypatch):
+def test_keyless_capture_stores_turns_and_stays_searchable(sdk, no_provider_keys):
     """#3892: with ALL provider keys absent, a capture still STORES its turns
     — the Session is merged and the mechanical turn Points (+ CONTAINS edges)
     are written by the unchanged loop — ONLY the LLM extraction into memory
@@ -849,10 +845,6 @@ def test_keyless_capture_stores_turns_and_stays_searchable(sdk, monkeypatch):
     NO LLM runs anywhere in this test: every provider key is absent AND the
     mock seam is cleared, so any extraction attempt would fail loudly rather
     than quietly serve a mock."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     # Guard the test's own premise: no extractor can be built at all.
     from tortoise.sdk import _build_session_llm_extractor
     assert _build_session_llm_extractor() is None, "keys leaked into the test"
@@ -911,7 +903,8 @@ def test_keyless_capture_stores_turns_and_stays_searchable(sdk, monkeypatch):
         f"keyless search did not surface the stored turn: {hits}"
 
 
-def test_keyless_capture_is_extraction_upgradable_with_a_key(sdk, monkeypatch):
+def test_keyless_capture_is_extraction_upgradable_with_a_key(
+        sdk, monkeypatch, no_provider_keys):
     """#3892/#3996: a keyless capture must NOT block the later extraction of
     the same session once a key exists.
 
@@ -926,10 +919,6 @@ def test_keyless_capture_is_extraction_upgradable_with_a_key(sdk, monkeypatch):
 
     No network and no real provider: the "key appearing" is the offline
     MockModel seam appearing."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     sid = "sess-3892-upgrade"
     first = sdk.capture_session(CONV, session_id=sid)
     assert first["extraction_mode"] == "no-provider"
@@ -955,7 +944,8 @@ def test_keyless_capture_is_extraction_upgradable_with_a_key(sdk, monkeypatch):
     assert turns == len(CONV), turns
 
 
-def test_m2_lane_refuses_the_keyless_retry_and_says_so(sdk, monkeypatch):
+def test_m2_lane_refuses_the_keyless_retry_and_says_so(
+        sdk, monkeypatch, no_provider_keys):
     """#3892 (review cycles 2/4/5): the #2335 retry gate's m2 exclusion is
     KEPT for a keyless prior. M2 dedups per-capture only, and a claim minted
     by a crashed or concurrent attempt is not yet ``:CONTAINS``-wired, so no
@@ -965,11 +955,6 @@ def test_m2_lane_refuses_the_keyless_retry_and_says_so(sdk, monkeypatch):
 
     What must NOT happen is a silent, misleading replay: the receipt carries
     an additive warning naming the keyless-pending state and the remedy."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     sid = "sess-3892-m2-refused"
     first = sdk.capture_session(CONV, session_id=sid)
     assert first["extraction_mode"] == "no-provider"
@@ -992,15 +977,12 @@ def test_m2_lane_refuses_the_keyless_retry_and_says_so(sdk, monkeypatch):
     assert claims == 0, claims
 
 
-def test_keyless_recapture_does_not_remint_the_session_event(sdk, monkeypatch):
+def test_keyless_recapture_does_not_remint_the_session_event(
+        sdk, no_provider_keys):
     """#3892 (review cycle 2, P3): a keyless RE-capture extracts nothing, so
     there is nothing to stamp — it must NOT re-run the sessionCaptured Event
     mint (which re-journals EventRecorded and refreshes startedAt per call).
     The Event count stays 1 across repeated keyless captures."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     sid = "sess-3892-remint"
     sdk.capture_session(CONV, session_id=sid)
     proj = sdk._get_proj()
@@ -1017,7 +999,8 @@ def test_keyless_recapture_does_not_remint_the_session_event(sdk, monkeypatch):
         f"keyless re-capture refreshed startedAt: {rows[1]}")
 
 
-def test_keyless_recapture_never_clobbers_a_recorded_lane(sdk, monkeypatch):
+def test_keyless_recapture_never_clobbers_a_recorded_lane(
+        sdk, monkeypatch, no_provider_keys):
     """#3892 (review cycle 3, P2): a keyless re-capture of a session whose
     prior KEYED attempt FAILED must record NOTHING — the prior lane is the
     evidence the #2473 M2 exclusion reads ("live content-addressed claims a
@@ -1026,11 +1009,6 @@ def test_keyless_recapture_never_clobbers_a_recorded_lane(sdk, monkeypatch):
 
     No LLM runs: the keyless legs are keyless, and the final M2-lane leg is
     the offline MockModel seam (a REPLAY, so no extraction happens at all)."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     sid = "sess-3892-lane-preserve"
     sdk.capture_session(CONV, session_id=sid)
     proj = sdk._get_proj()
@@ -1612,7 +1590,8 @@ def test_capture_session_v2_default_routes_and_writes(sdk):
     assert src[0][0] == 1, "session Source must exist"
 
 
-def test_capture_session_v2_mock_seam_satisfies_provider_gate(sdk, monkeypatch):
+def test_capture_session_v2_mock_seam_satisfies_provider_gate(
+        sdk, monkeypatch, no_provider_keys):
     """#1468: TORTOISE_SESSION_LLM_MOCK=1 must satisfy _extract_session_v2's
     provider gate even with ALL provider keys absent — the hosted e2e server
     scrubs keys and runs the offline seam. The gate previously checked only
@@ -1621,10 +1600,6 @@ def test_capture_session_v2_mock_seam_satisfies_provider_gate(sdk, monkeypatch):
     (normalized like the sibling gates — strict == "1" would diverge the
     inner gate from the outer gates and 500 again)."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", " 1 ")
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     res = sdk.capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extracted"] >= 1
@@ -1745,14 +1720,63 @@ def _install_fake_provider(monkeypatch, requests_log):
     monkeypatch.setattr(_requests.Session, "post", _fake_post)
 
 
-def test_capture_session_gate_match_openai_key_alone_rejected(sdk, monkeypatch):
+def test_no_provider_keys_fixture_scrubs_every_ambient_key(
+        no_provider_keys, monkeypatch):
+    """#3695 regression pin: the hermeticity fixture must scrub EVERY key the
+    gate stack reads, DERIVED rather than re-listed.
+
+    Both drift directions are pinned, because the gate stack reads TWO
+    registries that have already drifted apart once:
+
+    * v2-side — ``model_adapters._PROVIDER_KEY_ENV`` carries VENICE_API_KEY
+      (#1549), which re-opened the v2 inner gate on six tests green in CI and
+      red on a venice-configured box (#3695/#5477).
+    * lane-side — ``hosted_api._llm_provider_keys()`` (from
+      ``ingest._PROVIDERS``) carries GEMINI_API_KEY, which builds an M2
+      gemini extractor and so suppresses the ValueError these same tests
+      expect (#3699).
+
+    ANTHROPIC/MOONSHOT/ZAI are deliberately NOT scrubbed and need not be: no
+    module under ``tortoise/`` reads them, and ``test_provider_availability``
+    pins that a foreign key cannot open the gate.
+
+    The pin is non-vacuous: the ambient keys that caused each class of red are
+    shown to REALLY open their gate below, so a fixture that scrubbed nothing
+    could not pass."""
+    from tortoise.hosted_api import _llm_provider_keys
+    from tortoise.model_adapters import (
+        _PROVIDER_KEY_ENV,
+        resolve_extractor_provider,
+    )
+
+    scrubbed = set(no_provider_keys)
+    assert set(_PROVIDER_KEY_ENV.values()) <= scrubbed, \
+        "a provider key the v2 resolver honours escaped the fixture scrub"
+    assert set(_llm_provider_keys()) <= scrubbed, \
+        "a lane-gate key escaped the fixture scrub"
+    assert "VENICE_API_KEY" in scrubbed, \
+        "the #1549 venice key is the one that reddened six tests (#3695)"
+    assert "GEMINI_API_KEY" in scrubbed, \
+        "the lane-side key that reddened the same tests (#3699)"
+    assert resolve_extractor_provider() == (None, None)
+    # non-vacuous, both directions: each ambient key alone opens its own gate
+    monkeypatch.setenv("VENICE_API_KEY", "ambient-venice")
+    assert resolve_extractor_provider() == ("venice", ["venice"])
+    monkeypatch.delenv("VENICE_API_KEY")
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini")
+    from tortoise.sdk import _session_llm_provider
+    assert _session_llm_provider() == "gemini"
+
+
+def test_capture_session_gate_match_openai_key_alone_rejected(
+        sdk, monkeypatch, no_provider_keys):
     """#1530 gate match: OPENAI_API_KEY alone no longer opens the v2 inner
     gate — the adapter cannot consume it (the #1468 failure class). The gate
-    raises ValueError naming the routing-usable keys."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    raises ValueError naming the routing-usable keys.
+
+    ``no_provider_keys`` is load-bearing (#3695/#5477): the resolver honours
+    VENICE_API_KEY too, so without the scrub this test raises nothing at all
+    on a venice-configured machine."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         sdk.capture_session([{"role": "user", "content": "x"},
@@ -1776,16 +1800,18 @@ def test_capture_session_gate_match_explicit_provider_with_wrong_key(sdk, monkey
                               "content": "we decided to ship serve first."}])
 
 
-def test_capture_session_deepseek_direct_route_recorded(sdk, monkeypatch):
+def test_capture_session_deepseek_direct_route_recorded(
+        sdk, monkeypatch, no_provider_keys):
     """DEEPSEEK_API_KEY alone → the direct adapter is used; the response
-    records the resolved route + provider (#1530 D8)."""
+    records the resolved route + provider (#1530 D8).
+
+    Hermetic provider env (#3695/#5477): DEEPSEEK is the ONLY key present, so
+    the resolved pool is RoutingModel(deepseek-direct) with no fallback.
+    An ambient VENICE_API_KEY would add a second lane."""
     from tortoise.model_adapters import _reset_failover_cooldown
     _reset_failover_cooldown()
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     res = sdk.capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
@@ -1797,11 +1823,18 @@ def test_capture_session_deepseek_direct_route_recorded(sdk, monkeypatch):
     assert all("api.deepseek.com" in u for u in requests_log)
 
 
-def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
+def test_capture_session_failover_records_fallback_route(
+        sdk, monkeypatch, no_provider_keys):
     """E2E-8 failover variant: the primary (deepseek-direct) fails its first
     call with ConnectionError → the extraction succeeds via the OpenRouter
     fallback, the response records the fallback route, and the primary is
-    never re-tried mid-extraction (D5 sticky, no flip-flop)."""
+    never re-tried mid-extraction (D5 sticky, no flip-flop).
+
+    ``no_provider_keys`` + exactly the two fake keys pin the pool to
+    RoutingModel(deepseek-direct → openrouter). Without it an ambient
+    VENICE_API_KEY makes the pool THREE providers, which switches the build to
+    the venice-first RotatingModel and changes the recorded primary (#3695/
+    #5477 — how this test reddened on a venice-configured box)."""
     import requests as _requests
 
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
@@ -1809,10 +1842,6 @@ def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
     _reset_failover_cooldown()
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
-    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
@@ -1840,9 +1869,12 @@ def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
     assert any("openrouter.ai" in u for u in requests_log)
 
 
-def test_capture_session_failover_meta_flags(sdk, monkeypatch):
+def test_capture_session_failover_meta_flags(sdk, monkeypatch, no_provider_keys):
     """The (extracted, meta) contract surfaces failover_used + errors through
-    _extract_session_v2 (P1 consumes meta — shared contract, D8)."""
+    _extract_session_v2 (P1 consumes meta — shared contract, D8).
+
+    Hermetic provider env via ``no_provider_keys`` (#3695/#5477): the two fake
+    keys are the whole pool, so the primary is deepseek-direct."""
     import requests as _requests
 
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
@@ -1850,9 +1882,6 @@ def test_capture_session_failover_meta_flags(sdk, monkeypatch):
     _reset_failover_cooldown()
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
@@ -1879,9 +1908,12 @@ def test_capture_session_failover_meta_flags(sdk, monkeypatch):
     assert len(extracted) >= 1
 
 
-def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
+def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch, no_provider_keys):
     """E2E-8 fatal-4xx negative: the primary raises 401 → the extraction
-    fails closed with NO fallback attempt (fatal is never failed over)."""
+    fails closed with NO fallback attempt (fatal is never failed over).
+
+    Hermetic provider env via ``no_provider_keys`` (#3695/#5477) — the 401
+    must be attributed to deepseek-direct, the primary this test configured."""
     import requests as _requests
 
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
@@ -1889,9 +1921,6 @@ def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
     _reset_failover_cooldown()
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
@@ -5688,15 +5717,13 @@ def test_off_switch_keeps_existing_sessions(consent_client):
         "off-switch must never remove already-captured sessions nor write"
 
 
-def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
+def test_off_switch_409_first_before_provider_gate(
+        consent_client, no_provider_keys):
     """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
     a disabled team with NO provider key gets 409, never the stored keyless
-    capture path."""
+    capture path. ``no_provider_keys`` (#3695) is the whole gate key set, so
+    the 409 cannot be satisfied by an ambient provider key."""
     _opt_in(enabled=False)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     r = consent_client.post("/v1/sessions",
                             json={"conversation": _CONV, "harness": "claude"})
     assert r.status_code == 409, r.text

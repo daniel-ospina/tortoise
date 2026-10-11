@@ -3710,11 +3710,20 @@ async def _org_onboarding_complete() -> bool:
 
 def _onboarding_state() -> dict:
     """Read this org's onboarding progress — the merged projection (jsonb
-    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable')."""
-    from tortoise.hosted_api import _get_onboarding_projection as _read_state
+    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable').
+
+    #2007 (W12): the selfhost placeholder org has no control plane at all —
+    its FLOW projection is read straight off the graph node (REST twin GET
+    /v1/onboarding/state self-host leg; no Supabase, no hosted_api)."""
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    if org_id == SELFHOST_ORG_ID:
+        from tortoise.mcp_auth import _get_org_sdk
+        from tortoise.onboarding import selfhost as _sh
+        return _sh.read_selfhost_state(_get_org_sdk())
+    from tortoise.hosted_api import _get_onboarding_projection as _read_state
     return _read_state(org_id)
 
 
@@ -3935,12 +3944,22 @@ def _maybe_onboarding_auto_complete(*,
     reports a real transition to complete; that helper pops the entry itself,
     so a completion is visible immediately.
 
-    Only fires in HTTP (hosted) mode with a real org_id — stdio and
-    self-host calls are no-ops."""
+    Only fires in HTTP (hosted) mode with a real org_id — stdio is a no-op;
+    the SELFHOST placeholder org is delegated to the self-hosted twin
+    (``onboarding/selfhost.py`` — graph-only, no Supabase, #2007 W12)."""
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
-    if not org_id or org_id == SELFHOST_ORG_ID:
-        return  # stdio / self-host: no hosted onboarding state
+    if not org_id:
+        return  # stdio/operator: no onboarding state
+    if org_id == SELFHOST_ORG_ID:
+        # #2007 (W12): the self-hosted observation lane. Same rule (#3784),
+        # no control plane: a successful agent write observes
+        # harness-connected + first-points-filed, a decision-shaped write
+        # additionally observes decide-completed, and the canonical
+        # fork-aware gate decides completion (monotonic). Fail-open.
+        from tortoise.onboarding import selfhost as _sh
+        _sh.observe_selfhost_write(decision_observed=decision_observed)
+        return
     # Fast check: if the 60s cache says complete, skip.
     now = _time.time()
     cached = _onboarding_state_cache.get(org_id)

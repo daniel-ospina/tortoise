@@ -45,6 +45,15 @@ class EventAPI:
     # -- internals -----------------------------------------------------------
     def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
               **payload) -> dict:
+        # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
+        # project.** The full contract (and the failure-mode argument) lives at
+        # the top of `tortoise/sdk.py`; read it before adding a writer. It is
+        # `docs/architecture/STORAGE-ARCHITECTURE.md` §3's write protocol —
+        # *"Writes go to the truth first, then project"* — and the live doors
+        # that state it explicitly are this method and
+        # `TortoiseSDK._apply_and_journal`. The append below is the COMMIT
+        # POINT: it must precede the fold, and it is deliberately not
+        # best-effort (a failed append must not let the fold run).
         event = {
             "event_id": ulid(),
             "ts": now_iso(),
