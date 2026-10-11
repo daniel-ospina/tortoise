@@ -703,9 +703,11 @@ def test_the_manifest_approval_is_DERIVED_from_the_canonical_doc(tmp_path):
     """#4185: approving the canonical doc must be READ INTO the manifest by a `cut`, not typed.
 
     Point `read_approval` at a FIXTURE doc and prove the returned approval follows it.
-    No `26`/`40` and no approval value is typed into the manifest by hand: `check`
-    compares the committed manifest against this derivation (the exclusion set no longer
-    hides the approval keys), so a hand-set field cannot disagree.
+    No `26`/`40` and no approval value is typed into the manifest by hand: `cut` copies the
+    four values from the doc. In THIS PR `check` still excludes them (the exclusion is removed
+    by the #4185 follow-up), and what catches a hand-set field that disagrees is the guard's
+    provenance comparison, scoped to a manifest that CLAIMS an approval. This test pins the
+    READING, not the `check`-side comparison.
     """
     sm = _load_manifest_tool()
     fixture = tmp_path / "canonical-mcp-tools.md"
@@ -1619,6 +1621,28 @@ def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_b
     # the only place the owner's `26/40` appears, quoted verbatim as the approval record.
     assert "26 MCP tools" not in sm.MANIFEST_HEADER
     assert "40 SDK" not in sm.MANIFEST_HEADER
+
+
+def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
+    """`cut` re-emits MANIFEST_HEADER verbatim, so the committed header must match it.
+
+    Otherwise the next re-cut silently re-wraps the comments and the artifact a reviewer
+    diffs is not the artifact `cut` produces (found by review). `check` cannot see this:
+    YAML drops comments, so the header is outside every derived comparison.
+    """
+    import difflib
+
+    sm = _load_manifest_tool()
+    committed = MANIFEST.read_text(encoding="utf-8").split("manifest_version:")[0]
+    assert committed == sm.MANIFEST_HEADER, "\n".join(
+        difflib.unified_diff(
+            sm.MANIFEST_HEADER.splitlines(),
+            committed.splitlines(),
+            "MANIFEST_HEADER",
+            "config/surface-manifest.yml",
+            lineterm="",
+        )
+    )
 
 
 def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):

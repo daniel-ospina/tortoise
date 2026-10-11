@@ -3,8 +3,9 @@
 # The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by
 # `tools/surface_manifest.py::read_approval`; the committed copy is still
 # `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,
-# whose per-row `approval` rule fires on `approved`. A follow-up PR flips it once the new
-# guard is on main; do not hand-edit the four values — re-cut (the cut copies the doc).
+# whose per-row `approval` rule fires on `approved`. A follow-up PR flips it once the
+# new guard is on main; do not hand-edit the four values — re-cut (the cut copies the
+# doc).
 #
 # `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and
 # `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a

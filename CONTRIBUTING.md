@@ -109,10 +109,13 @@ The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the s
 are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEYS` and
 `NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
 `basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
-flag, and the doc-level `cut_at_commit` / `response_fields`. The top-level `approval_status` /
-`approval_principal` / `approval_pr` / `approval_date` are **not** in that list: since #4185 they are
-**derived** from `docs/product/canonical-mcp-tools.md`, the owner's approval record, so a hand-edit that
-disagrees with that document is a red build. One
+flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
+`approval_date` / `response_fields`. The top-level `approval_*` keys are **read from**
+`docs/product/canonical-mcp-tools.md` by `tools/surface_manifest.py::read_approval`, but in this PR they
+are still **excluded** from that comparison (#4185 lands in two PRs — see "CI's `surface-guard` pins
+the BASE copy" below). What catches a hand-edit that disagrees with the document is
+`tools/surface-guard.py`, whose provenance comparison applies whenever a manifest **claims** an
+approval; the follow-up removes them from this list when it flips the committed copy. One
 consequence worth stating plainly: the remaining columns **are** editable in a PR, so the review evidence a reader
 sees in the generated document is not gate-verified — the served surface is. So hand-editing the
 baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived
