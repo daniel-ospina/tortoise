@@ -191,13 +191,24 @@ def test_the_other_live_door_still_keeps_its_label(sdk_and_events):
 
 def test_non_operator_points_keep_the_status_chain(sdk_and_events):
     sdk, events = sdk_and_events
+    # #1088 (owner ruling): live is the default for anything added to the graph;
+    # draft is explicit. Pin the default, then pin the case with real protective
+    # power — a no-status point lands 'live', which is ALSO the replay writer's
+    # own `coalesce($st, n.status, 'live')` fallback, so only an EXPLICIT draft
+    # can catch that fallback silently promoting a point on replay.
     pid = sdk.create_point("statement", "no status arg", dedup=False)["id"]
-    assert _props(sdk, pid).get("status") == "draft", (
-        "the born status for a point with no explicit status is 'draft' — "
-        "pinning it keeps a 'live' fallback from being reintroduced silently")
+    assert _props(sdk, pid).get("status") == "live", (
+        "#1088: a point created with no explicit status lands live")
+
+    draft = sdk.create_point("statement", "explicit draft", status="draft",
+                             dedup=False)["id"]
+    assert _props(sdk, draft).get("status") == "draft"
 
     _rebuild(sdk, events)
-    assert _props(sdk, pid).get("status") == "draft"
+    assert _props(sdk, pid).get("status") == "live"
+    assert _props(sdk, draft).get("status") == "draft", (
+        "a 'live' fallback was reintroduced: the replay promoted an explicit "
+        "draft instead of preserving the status the writer stored")
 
 
 def test_check_consistency_agrees_after_rebuilding_an_operator(sdk_and_events):
