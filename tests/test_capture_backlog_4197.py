@@ -185,7 +185,9 @@ def test_store_only_import_records_the_backlog_and_writes_no_receipt(places,
     assert record["harness"] == "pi"
     assert record["turns"] == 4
     assert record["estimate"] > 0, "the offer must be priceable from the record"
-    assert "no LLM provider key" in record["reason"]
+    assert record["reason"] == "no-provider", \
+        "the recorded reason is `_deferral_reason`, the same value capture/drain " \
+        "write for this body — not a second spelling minted here"
 
 
 def test_summary_reports_all_three_states_with_cost(places):
@@ -1420,3 +1422,376 @@ def test_future_only_write_failure_goes_to_stderr(places, capsys):
     assert rc == 1
     assert "Could not record the choice" not in captured.out
     assert "Could not record the choice" in captured.err
+
+
+# ── A `replayed` receipt with a REFUSED upgrade is a deferral, not success ──
+
+
+def _refused_replay_body(session_id: str, *, disabled: bool = False) -> dict:
+    """A `replayed` 2xx carrying an upgrade-refused warning — the SDK's way of
+    saying the prior store-only capture was replayed and the upgrade was
+    REFUSED, so the session still has no memory points."""
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+    )
+    body = _store_only_body(session_id)
+    body.update({
+        "extraction_mode": "replayed", "extracted": 0, "ok": True,
+        "warnings": [_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING
+                     if disabled
+                     else _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING],
+    })
+    return body
+
+
+def test_a_refused_upgrade_on_the_capture_path_is_recorded(places, tmp_path,
+                                                           capsys):
+    """`replayed` is NOT proof that extraction ran. Reading it as proof made
+    `session capture` print "already captured — replayed (no new extraction)" —
+    the exact false statement the SDK's upgrade-refused warning exists to
+    correct — and record nothing.
+
+    MUTATION THAT REDS THIS: return on `replayed` before consulting
+    `_deferral_reason`.
+    """
+    home, _ = places
+    transient = _text_transcript(home, "hook-tmp.jsonl")
+    durable = _claude_transcript(home, "project.jsonl")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _refused_replay_body("s_ref"))[0]):
+        rc = main.main(["session", "capture", "--file", str(transient),
+                        "--harness", "claude",
+                        "--transcript-path", str(durable),
+                        "--session-id", "s_ref"])
+
+    assert rc == 0, "a replay is not a hard failure"
+    err = capsys.readouterr().err
+    assert "replayed (no new extraction)" not in err
+    assert "capture deferred" in err, "the refusal must be said out loud"
+    record = backlog.sessions()[0]
+    assert record["reason"] == "upgrade refused: no provider key"
+    assert record["file"] == str(durable)
+
+
+def test_the_recorded_reason_is_single_sourced_across_the_writers(
+        places, tmp_path):
+    """`_deferral_reason` is the SINGLE definition of "this 2xx still needs a
+    re-attempt" — so the ledger `reason` every writer records for one body must
+    be identical, because that field is the only diagnosis the offer and the
+    report render. `sessions import` recorded its own `_why` spelling ("no LLM
+    provider key") while `session capture` and `session drain` recorded
+    `_deferral_reason(body)` ("upgrade refused: no provider key"), so one body
+    produced two different diagnoses.
+
+    MUTATION THAT REDS THIS: record `_why` instead of `_deferral_reason(result)`
+    on the import deferral path (the pre-fix shape).
+    """
+    transcript = _transcript(tmp_path, "import.jsonl")
+    body = _refused_replay_body("s_imp_ref")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: body)[0]):
+        rc = main._cmd_sessions_import(main.argparse.Namespace(
+            file=str(transcript), harness="pi", session_id="s_imp_ref"))
+
+    assert rc == 0, "a refused upgrade is a deferral, not a failure"
+    record = backlog.sessions()[0]
+    assert record["reason"] == "upgrade refused: no provider key", \
+        "the import writer must record `_deferral_reason`, exactly as " \
+        "`session capture` and `session drain` do for the same body"
+
+
+def test_a_refused_upgrade_on_the_drain_is_recorded(places, capsys, tmp_path,
+                                                    monkeypatch):
+    """The same body through the drain used to be recorded NOWHERE: the mode
+    filter accepted only the two store-only modes, and `flush_spool` stamps
+    `filed_key` on any 2xx — so the entry was never re-POSTed and the stored,
+    un-extracted session was invisible to the offer forever. Reachable on an
+    upgrade, for exactly the population this backfill exists to recover.
+
+    MUTATION THAT REDS THIS: filter the drain on `extraction_mode` alone again.
+    """
+    from tortoise.capture_spool import PostOutcome, Snapshot, spool_dir, write_spool_entry
+
+    home, _ = places
+    (home / ".tortoise" / "credentials.json").write_text(
+        json.dumps({"api_key": "tt_test",
+                    "api_url": "https://legit.example.com"}), encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    write_spool_entry(spool_dir(), Snapshot(
+        session_id="s_ref_drain",
+        turns=[{"role": "user", "content": "stored turn"},
+               {"role": "assistant", "content": "stored reply"}],
+        source="t", machine_id="m", harness="claude"))
+
+    monkeypatch.setattr(
+        main, "_session_post",
+        lambda api_key, api_url: (lambda payload: PostOutcome(
+            ok=True, status=200,
+            body=_refused_replay_body("s_ref_drain", disabled=True))))
+    rc = main.main(["session", "drain"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    assert backlog.sessions()[0]["reason"] == "upgrade refused: extraction disabled"
+
+
+# ── A missed retirement must SELF-HEAL, and a dead end must be clearable ────
+
+
+def test_the_run_reconciles_an_entry_whose_receipt_already_landed(places,
+                                                                  capsys,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+    """The receipt and the retirement are two independent writes. A kill
+    between them (or a `mark_processed` write failure, which the module
+    documents as possible) left BOTH a receipt and a `not-processed` entry —
+    and every later `--process` then short-circuited at the receipt check
+    BEFORE the POST, counted the entry failed and exited 1 forever, with
+    `doctor` warning and no command able to clear it. A receipt is PROOF
+    extraction ran (every deferring shape returns before the receipt write), so
+    it must reconcile.
+
+    MUTATION THAT REDS THIS: drop the `_import_receipt_for(...).exists()` branch.
+    """
+    home, receipts = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_recon", harness="pi",
+                                 file=str(transcript), turns=4, estimate=12)
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "s_recon.json").write_text(
+        json.dumps({"session_id": "s_recon", "turns": 4}), encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+    with mock.patch("urllib.request.urlopen", side_effect=AssertionError(
+            "the receipt proves the POST already happened — no re-POST")):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "reconciled from its import receipt" in out
+    assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
+
+
+def test_a_failed_reconciliation_is_reported_as_failed_not_processed(
+        places, capsys, tmp_path, monkeypatch):
+    """A receipt proves extraction ran, but retiring the ledger entry is a
+    SEPARATE write and the module documents it as best-effort. When it does not
+    land, counting the entry processed is the exact lie this feature exists to
+    prevent: the run printed "N processed, 0 still not-processed" and exited 0
+    while the ledger still said `not-processed` and `doctor` kept warning.
+
+    MUTATION THAT REDS THIS: ignore `mark_processed`'s return value (the
+    pre-fix reconciliation branch).
+    """
+    home, receipts = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_recon_fail", harness="pi",
+                                 file=str(transcript), turns=4, estimate=12)
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "s_recon_fail.json").write_text(
+        json.dumps({"session_id": "s_recon_fail", "turns": 4}),
+        encoding="utf-8")
+    monkeypatch.setattr(backlog, "mark_processed", lambda *a, **k: False)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+    with mock.patch("urllib.request.urlopen", side_effect=AssertionError(
+            "the receipt proves the POST already happened — no re-POST")):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "0 processed, 1 still not-processed" in out
+    assert "could not retire the record from its import receipt" in out
+    assert "reconciled from its import receipt" not in out, \
+        "a failed retirement must not claim the entry was reconciled"
+    counts = backlog.summary()["counts"]
+    assert counts[backlog.STATUS_PROCESSED] == 0
+    assert counts[backlog.STATUS_NOT_PROCESSED] == 1
+
+
+def test_a_record_nothing_can_act_on_can_be_dropped(places, capsys):
+    """A `session drain` record carries no transcript path (the spool keeps the
+    turns, not the path), so `--process` can only skip it. Without a way out,
+    the record inflates the pending count, the price and the `doctor` row while
+    no command clears it — a surface that can never converge.
+
+    MUTATION THAT REDS THIS: drop the `--forget` branch from
+    `_cmd_sessions_backlog`.
+    """
+    backlog.record_not_processed(session_id="s_dead", harness="claude",
+                                 turns=2, estimate=6, file=None)
+
+    main.main(["sessions", "backlog", "--process"])
+    skipped = capsys.readouterr().out
+    assert "no transcript path was recorded" in skipped
+    assert "tortoise sessions backlog --forget" in skipped, \
+        "the way out must be named where the dead end is reported"
+
+    assert main.main(["sessions", "backlog", "--forget", "s_dead"]) == 0
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+    assert "Dropped the saved-backlog record for s_dead." in \
+        capsys.readouterr().out
+
+    # An unknown id is refused, not silently ignored.
+    assert main.main(["sessions", "backlog", "--forget", "s_missing"]) == 1
+    assert "No saved-backlog record for s_missing." in capsys.readouterr().err
+
+
+def test_forget_also_reaches_a_legacy_named_record(places):
+    """The record's identity is its `session_id` FIELD, not its filename: an
+    earlier layout wrote `<sanitised id>.json` with no digest, and such a record
+    must be findable for every state transition — otherwise it could never be
+    retired (or dropped) and would be counted forever."""
+    legacy = backlog.backlog_dir() / "s_legacy.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        "session_id": "s_legacy", "harness": "pi", "file": None, "turns": 3,
+        "estimate": 9, "reason": "no LLM provider key",
+        "recorded_at": "2026-01-01T00:00:00Z", "status": "not-processed",
+    }), encoding="utf-8")
+
+    # The transition must address the record it FOUND, not the canonical path
+    # it would write: a second file at the canonical name would leave the old
+    # one reading `not-processed` (so the entry could never be retired).
+    assert backlog.mark_processed("s_legacy", processed_at="t") is True
+    records = backlog.sessions()
+    assert [r["status"] for r in records] == ["processed"]
+    assert len(list(backlog.backlog_dir().glob("*.json"))) == 1, \
+        "no second file may be written beside the legacy-named record"
+
+    # …and the monotonic guard SEES the legacy `processed` record instead of
+    # resurrecting it as a fresh not-processed entry.
+    assert backlog.record_not_processed(session_id="s_legacy", turns=3,
+                                        estimate=9) is False
+    assert [r["status"] for r in backlog.sessions()] == ["processed"]
+
+    # …and a record nothing can act on is droppable by identity too.
+    assert backlog.forget("s_legacy") is True
+    assert backlog.sessions() == []
+
+
+def test_forget_drops_every_record_for_an_id_not_just_the_first(places):
+    """An earlier layout left `<sanitised>.json` orphans beside the canonical
+    `<sanitised>-<digest>.json`. Resolving ONE path let `forget` unlink the
+    canonical file, report "Dropped …", and leave the legacy orphan still
+    listed by `sessions()` — the dead end the flag exists to clear, still there,
+    with the command asserting the opposite.
+
+    MUTATION THAT REDS THIS: resolve a single path in `forget` (the pre-fix
+    `_existing_path` shape).
+    """
+    canonical = backlog._session_path("s_dup")
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "session_id": "s_dup", "harness": "pi", "file": None, "turns": 3,
+        "estimate": 9, "reason": "no LLM provider key",
+        "recorded_at": "2026-01-02T00:00:00Z", "status": "not-processed",
+    }
+    canonical.write_text(json.dumps(record), encoding="utf-8")
+    legacy = backlog.backlog_dir() / "s_dup.json"
+    legacy.write_text(json.dumps(dict(
+        record, recorded_at="2026-01-01T00:00:00Z")), encoding="utf-8")
+    assert {p.name for p in backlog.backlog_dir().glob("*.json")} == \
+        {canonical.name, legacy.name}
+    assert [r["session_id"] for r in backlog.sessions()] == ["s_dup"]
+
+    assert backlog.forget("s_dup") is True
+    assert list(backlog.backlog_dir().glob("*.json")) == [], \
+        "forget must drop EVERY record for the id, not just the first path"
+    assert backlog.sessions() == []
+
+
+# ── The reports must not contradict the run they introduce ─────────────────
+
+
+def test_the_run_report_does_not_recommend_the_running_command(places, capsys,
+                                                               tmp_path,
+                                                               monkeypatch):
+    """The report is rendered IMMEDIATELY before the run it describes, so the
+    `--process` recommendation told the user to run the command already
+    executing.
+
+    MUTATION THAT REDS THIS: drop `suppress_recommendation=True` from the
+    `--process` report call.
+    """
+    home, _ = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_run", harness="pi",
+                                 file=str(transcript), turns=4, estimate=12)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _extracted_body("s_run"))[0]):
+        assert main.main(["sessions", "backlog", "--process"]) == 0
+
+    out = capsys.readouterr().out
+    run_report = out.split("Not processed")[0] if "Not processed" in out else out
+    assert "Recommended: `tortoise sessions backlog --process`" not in run_report
+    assert "extracted ✓" in out
+
+
+def test_future_only_announces_the_choice_once(places, capsys):
+    """`--future-only` printed its own confirmation and then the declined
+    recommendation, which re-announced the same choice in a second wording —
+    reading as a duplicate confirmation rather than a confirmation followed by
+    the way back.
+
+    MUTATION THAT REDS THIS: restore the `Choice recorded:` prefix on
+    `recommendation()`'s declined text.
+    """
+    backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
+                                 estimate=12, file=None)
+    assert main.main(["sessions", "backlog", "--future-only"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("Choice recorded:") == 1
+    assert "to change that (recommended)" in out
+
+
+def test_the_empty_state_speaks_for_the_local_record_only(places, capsys):
+    """The ledger is written by three paths and NOT by the Pi capture
+    extension, so an empty ledger cannot support "nothing was captured without
+    extraction" — a host that DID capture store-only sessions reaches this
+    branch.
+
+    MUTATION THAT REDS THIS: restore the unqualified sentence.
+    """
+    assert main.main(["sessions", "backlog"]) == 0
+    out = capsys.readouterr().out
+    assert "LOCALLY RECORDED" in out
+    assert "nothing was captured without extraction" not in out
+
+
+def test_an_unwritable_policy_does_not_make_the_report_contradict_the_run(
+        places, capsys, tmp_path, monkeypatch):
+    """`--process` ignored `set_policy`'s result while `--future-only` failed
+    loudly on the same call. When the write failed, the report rendered just
+    before the run still said the backlog was NOT extracted — the exact
+    contradiction the ordering exists to prevent — and the failure was silent.
+
+    MUTATION THAT REDS THIS: drop the `_policy_recorded` check.
+    """
+    home, _ = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_nw", harness="pi",
+                                 file=str(transcript), turns=4, estimate=12)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    calls = {"n": 0}
+    real = backlog.set_policy
+
+    def _flaky(choice, **kw):
+        calls["n"] += 1
+        if choice == backlog.CHOICE_BACKLOG:
+            return False
+        return real(choice, **kw)
+
+    with mock.patch.object(backlog, "set_policy", side_effect=_flaky), \
+            mock.patch("urllib.request.urlopen",
+                       _posting(lambda payload: _extracted_body("s_nw"))[0]):
+        assert main.main(["sessions", "backlog", "--process"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Could not record the choice" in captured.err
+    assert "NOT extracted" not in captured.out
