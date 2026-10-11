@@ -1804,7 +1804,14 @@ def registered_commands(root: str | os.PathLike[str],
 
 
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
-    """Load a settings file.  Returns ``(data, error)`` — never raises."""
+    """Load a settings file.  Returns ``(data, error)`` — never raises.
+
+    "Never raises" is the contract the entry points that route through this
+    loader state in their own words (``registered_commands`` and
+    ``detect_install``: a malformed file is simply no registration / itself a
+    finding; ``upgrade_install``: refuse, never raise), so the boundary below
+    must cover the PARSER's raise-set, not one member of it (#3928).
+    """
     if path is None:
         return {}, None
     if not path.exists():
@@ -1831,6 +1838,23 @@ def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
         data = json.loads(text)
     except ValueError:
         return None, f"{path} is not valid JSON — refusing to touch it"
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the caller allocates
+    except Exception as e:
+        # A syntactically VALID document can still defeat the parser: deep
+        # nesting raises ``RecursionError`` (a ``RuntimeError``, not a
+        # ``ValueError``), and the previous one-member handler let it unwind
+        # ``detect_install``/``upgrade_install``/``registered_commands`` and
+        # reach ``session_verify`` — the entry points whose documented
+        # contract is a refusal (#3928).  Deliberately NOT a second
+        # enumerated tuple: a finite enumeration is refutable by the next
+        # unenumerated member, which is how ``RecursionError`` escaped
+        # ``capture_install``'s old ``except OSError`` (#3999) and the CLI's
+        # (#4024 P2-2).  The class name is carried in the message because
+        # the document IS valid JSON — "not valid JSON" would misdirect the
+        # user to the syntax of a file that has none to fix.
+        return None, (f"{path} could not be parsed as JSON "
+                      f"({e.__class__.__name__}) — refusing to touch it")
     if not isinstance(data, dict):
         return None, f"{path} top level is not a JSON object — refusing to touch it"
     hooks = data.get("hooks")
