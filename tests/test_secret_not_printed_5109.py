@@ -5,8 +5,9 @@ WHY THIS GATE EXISTS (the mechanism, measured 2026-10-11)
 ``tortoise init`` prints per-harness MCP config. In this fleet that command is
 run *by an agent*, so its stdout is a tool result — and a tool result is
 persisted **verbatim** into the session transcript, the task-session log and
-``audit.jsonl``. That is the channel by which the live key reached **326 files
-under ``~/.pi``** (322 of them session records going back to 2026-09-05).
+``audit.jsonl``. A literal printed here is therefore one channel by which a live
+key reaches those stores (harness-side capture of the same bytes is another);
+every captured copy keeps the credential.
 
 The functions below already *claim* the correct behaviour in their own prose —
 "env expansion … no literal key on disk" — while emitting the literal value on
@@ -18,9 +19,9 @@ Print the *resolution*, never the *value*: an instruction that reads the key
 from its 0600 config at use time. A user pasting it still gets a working
 ``$TORTOISE_API_KEY``; a process that merely captures stdout gets no credential.
 
-The failure this prevents has already happened (326 files). Deleting this test
-would harm the PRODUCT, not the process: it is the only check standing between a
-one-line ``print(...)`` and another 300 leaked copies.
+The failure this prevents has already happened. Deleting this test would harm
+the PRODUCT, not the process: it is the only check standing between a one-line
+``print(...)`` and another leaked copy.
 """
 
 from __future__ import annotations

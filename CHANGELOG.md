@@ -7,10 +7,9 @@ All notable changes to this project will be documented in this file.
 ### `init --json` `auth_header` is a template, not a ready-to-use value (#5109)
 
 `tortoise init --json` reports `mcp.auth_header`. It used to be a ready-to-send
-header value (`"Bearer " + <live key>`) — which is why the live key reached the
-session transcripts, task logs and `audit.jsonl` of every agent that ran the
-CLI. It is now the template `"Bearer ${TORTOISE_API_KEY}"`, so nothing on stdout
-carries the credential.
+header value (`"Bearer " + <live key>`), so the credential sat in every captured
+copy of that payload. It is now the template `"Bearer ${TORTOISE_API_KEY}"`, so
+this payload no longer carries the key.
 
 - **This changes a machine-readable contract.** A consumer that assigns the
   field straight into a request header now sends the literal

@@ -2097,8 +2097,9 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 # This CLI is run BY AN AGENT in this fleet, so its stdout is a tool result — and
 # a tool result is persisted VERBATIM into the session transcript, the task-session
 # log and audit.jsonl. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
-# credential DISCLOSURE, not a convenience: it is the channel by which the live key
-# reached 326 files under ~/.pi (322 session records, oldest 2026-09-05).
+# credential DISCLOSURE, not a convenience: every captured copy of that output keeps
+# the key. It is one channel into those stores, not the only one — harness-side
+# capture of the same bytes is the other.
 #
 # The printed instruction still WORKS — it resolves the value at use time from the
 # very file this CLI wrote, passed in rather than hard-coded: `init --api-key` saves
