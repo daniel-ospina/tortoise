@@ -8,8 +8,8 @@ capstone run on ``origin/main`` found a divergence ``#7882`` (the
     live     {direction, id, is_operator, op_type}
     rebuilt  {… the same …, content: 'IMPL(src, claim)', status: 'live'}
 
-The two halves are NOT the same defect, and this file pins both facts — one
-fixed, one a door question:
+The two halves are NOT the same defect, and this file pins both facts — both
+now fixed, one in the EMITTER and one at the DOOR:
 
 **``content`` — FIXED, in the EMITTER.** ``sdk._emit_event`` SYNTHESIZED the
 ``IMPL(inputs)`` label into the record's payload under a comment asserting
