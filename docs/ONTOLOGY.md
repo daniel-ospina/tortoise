@@ -1413,8 +1413,8 @@ optional free data). It carries an operator **only when it needs one**.
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
 support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
-`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap;
-#7813/#7853).** The operator node itself is always a
+`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap,
+per #7813/#7853).** The operator node itself is always a
 `:Point {is_operator:true}`; its children/targets may carry any of the four
 labels. ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902
 lands — the write path admits `:Point`/`:Event` only (the #7853 READ widening
