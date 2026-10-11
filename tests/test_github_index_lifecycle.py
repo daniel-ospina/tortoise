@@ -271,18 +271,120 @@ def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
 
 
 def test_stuck_started_evicted(provisioned, mock_github):
-    """A `started` entry older than the 30-min TTL is presumed-dead and
-    evicted — a hung run never bricks the team."""
-    from tortoise.hosted_api import _INDEX_JOB_TTL_S
+    """NEGATIVE CONTROL (#3539 §D): a `started` entry whose HEARTBEAT has
+    gone stale is presumed-dead and evicted — a stopped heartbeat MUST expire
+    the claim, so a hung/cancelled run never bricks the team.
+
+    The test is on the HEARTBEAT, never on entry age (see
+    ``test_long_live_run_not_duplicated_by_ttl_expiry`` for the other half of
+    the rule). Both stamps are backdated because a dead run stops beating."""
+    from tortoise.hosted_api import _INDEX_JOB_STALE_S
     org_id = provisioned.org_id
     stale, _ = _start_index_job(org_id)
-    _INDEX_JOBS[stale]["started_at"] = time.time() - _INDEX_JOB_TTL_S - 10
+    dead_at = time.time() - _INDEX_JOB_STALE_S - 10
+    _INDEX_JOBS[stale]["started_at"] = dead_at
+    _INDEX_JOBS[stale]["heartbeat_at"] = dead_at
     r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
     assert r.status_code == 200
     new_job = r.json()["job_id"]
     assert new_job != stale
-    assert stale not in _INDEX_JOBS, "stale started entry must be evicted"
+    assert stale not in _INDEX_JOBS, (
+        "a stale-heartbeat entry must be evicted — a stopped heartbeat MUST "
+        "expire the claim")
     _poll_until(provisioned.tc, new_job, "completed")  # settle the spawned task
+
+
+def test_long_live_run_not_duplicated_by_ttl_expiry(provisioned, mock_github,
+                                                    monkeypatch):
+    """#3539 §D: eviction is a LIVENESS check, NOT entry age.
+
+    A cursor-correct walk of a 1,700-issue org can outlive any fixed TTL. A
+    run that is merely LONG keeps beating, so a re-poll must REUSE its claim —
+    the age-based rule evicted it and spawned a SECOND concurrent walk
+    (duplicate statement ids, version inflation, job-status races)."""
+    import asyncio as _asyncio
+
+    import tortoise.hosted_api as ha
+    from tortoise.hosted_api import _INDEX_JOB_STALE_S
+    calls = []
+    orig_run = ha._run_indexing
+
+    async def _counting(*args, **kw):
+        calls.append(args)
+        # keep the run IN-FLIGHT across both POSTs (the mock walk is
+        # millisecond-fast — without the hold the portal settles it before
+        # the second POST and the entry turns terminal)
+        await _asyncio.sleep(0.2)
+        await orig_run(*args, **kw)
+
+    monkeypatch.setattr(ha, "_run_indexing", _counting)
+    r1 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r1.status_code == 200
+    job_id = r1.json()["job_id"]
+    assert _INDEX_JOBS[job_id]["status"] == "started"
+    # the run has been going for FOUR stale-windows — far past the old 30-min
+    # TTL — and it is STILL BEATING (the heartbeat is kept fresh by progress).
+    _INDEX_JOBS[job_id]["started_at"] = time.time() - _INDEX_JOB_STALE_S * 4
+    _INDEX_JOBS[job_id]["heartbeat_at"] = time.time()
+    r2 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r2.status_code == 200
+    assert r2.json()["job_id"] == job_id, (
+        "a LONG but LIVE run must keep its claim — entry age is not a "
+        "liveness test")
+    assert job_id in _INDEX_JOBS, "the live claim must not be evicted"
+    _poll_until(provisioned.tc, job_id, "completed")  # settle the run
+    assert len(calls) == 1, (
+        "a long LIVE run must not be duplicated by its claim expiring")
+
+
+def test_progress_beat_stamps_heartbeat(provisioned, mock_github, monkeypatch):
+    """POSITIVE CONTROL (#3539 §D): the run must ACTUALLY beat while it walks.
+
+    Without this, heartbeat-only eviction would evict a genuinely live long
+    run — the exact failure mode it exists to prevent: a mint-stamp-only
+    heartbeat goes stale while the run is still working. Asserts both halves
+    of the wiring: `_run_indexing` HANDS the walk its beat, and the beat
+    stamps the job's heartbeat while the run is still `started`."""
+    import asyncio as _asyncio
+
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    beats: list = []
+    orig_index_repo = GitHubIndexer.index_repo
+
+    async def _held_index_repo(self, sdk, repo, **kw):
+        cb = kw.get("on_progress")
+        assert cb is not None, (
+            "_run_indexing must hand the walk its progress beat")
+        beats.append(cb)
+        # loop-friendly hold: the portal advances background tasks only while
+        # servicing a request, so the run stays `started` across the poll GETs
+        # below (a threading barrier would deadlock the portal loop).
+        await _asyncio.sleep(0.5)
+        return await orig_index_repo(self, sdk, repo, **kw)
+
+    monkeypatch.setattr(GitHubIndexer, "index_repo", _held_index_repo)
+    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    # pump the portal (the poll GET both advances and observes the run) until
+    # the walk has been entered
+    deadline = time.time() + 10.0
+    while not beats and time.time() < deadline:
+        provisioned.tc.get(f"/v1/index/github/{job_id}")
+        time.sleep(0.02)
+    assert beats, "the walk was never entered with an on_progress beat"
+    assert _INDEX_JOBS[job_id]["status"] == "started", (
+        "the hold must keep the run in flight for a mid-walk assertion")
+
+    # the mint stamp is NOT liveness — zero it and prove the run's beat raises
+    # it again, mid-walk
+    _INDEX_JOBS[job_id]["heartbeat_at"] = 0.0
+    beats[0]()
+    assert _INDEX_JOBS[job_id]["heartbeat_at"] > 0.0, (
+        "the run's progress beat must stamp the liveness heartbeat")
+
+    _poll_until(provisioned.tc, job_id, "completed")  # settle the run
 
 
 def test_terminal_jobs_evicted_on_enqueue(provisioned, mock_github):
@@ -345,13 +447,14 @@ def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch
 
     orig_index_repo = GitHubIndexer.index_repo
 
-    async def _slow_repo2(self, sdk, repo, *, cursor=None):
-        # _run_indexing calls index_repo(team_sdk, repo_name, cursor=...) —
-        # do NOT pass cap/quota_check explicitly (None would break the
-        # `len(items) >= cap` default); delegate to inherit the contract.
+    async def _slow_repo2(self, sdk, repo, **kw):
+        # _run_indexing calls index_repo(team_sdk, repo_name, cursor=...,
+        # on_progress=...) — pass through, do NOT rebuild the kwargs (an
+        # explicit cap/quota_check=None would break the `len(items) >= cap`
+        # default); delegate to inherit the contract.
         if repo.endswith("/repo2"):
             await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
-        return await orig_index_repo(self, sdk, repo, cursor=cursor)
+        return await orig_index_repo(self, sdk, repo, **kw)
 
     monkeypatch.setattr(GitHubIndexer, "index_repo", _slow_repo2)
     r = provisioned.tc.post("/v1/index/github/re-poll")
@@ -409,10 +512,10 @@ def test_midwalk_fetch_error_stamps_indexed_at(provisioned, mock_github,
 
     orig_index_repo = GitHubIndexer.index_repo
 
-    async def _fail_repo2(self, sdk, repo, *, cursor=None):
+    async def _fail_repo2(self, sdk, repo, **kw):
         if repo.endswith("/repo2"):
             raise GitHubFetchError("injected 429 on repo2 (test)")
-        return await orig_index_repo(self, sdk, repo, cursor=cursor)
+        return await orig_index_repo(self, sdk, repo, **kw)
 
     monkeypatch.setattr(GitHubIndexer, "index_repo", _fail_repo2)
     r = provisioned.tc.post("/v1/index/github/re-poll")

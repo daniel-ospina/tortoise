@@ -86,6 +86,49 @@ def test_fetch_pins_sort_updated_desc(sdk):
     assert params[0]["state"] == "all"
 
 
+# ── Liveness progress beats (#3539 §D) ───────────────────────────
+
+def test_index_repo_beats_progress_during_walk(sdk):
+    """#3539 §D: ``index_repo`` beats ``on_progress`` DURING the walk.
+
+    The caller's single-flight claim is kept alive by REAL progress, so the
+    walk must beat (a) on every completed GitHub API call — the network-yield
+    boundary, where a long paginated fetch spends its time — and (b) every
+    ``_PROGRESS_EVERY_ITEMS`` processed items, because the projection loop is
+    synchronous and would otherwise go silent for a whole repo.
+    """
+    from tortoise.indexer.github_indexer import _PROGRESS_EVERY_ITEMS
+    n = _PROGRESS_EVERY_ITEMS * 2 + 1
+    t = MockGitHubTransport(issues=[gh_issue(i) for i in range(1, n + 1)],
+                            page_size=_PROGRESS_EVERY_ITEMS)
+    beats: list[int] = []
+    stats = _run(_indexer(t), sdk, on_progress=lambda: beats.append(1))
+    assert stats["processed"] == n
+    pages = len(t.issue_query_params())
+    assert pages >= 3, "the walk must paginate — per-page beats are the point"
+    # ≥ one beat per completed API call + one per _PROGRESS_EVERY_ITEMS items
+    assert len(beats) >= pages + n // _PROGRESS_EVERY_ITEMS, (
+        "the walk must beat per API call AND every _PROGRESS_EVERY_ITEMS "
+        f"items (saw {len(beats)} beats over {pages} pages / {n} items)")
+
+
+def test_index_repo_beats_across_retry_backoff(sdk):
+    """#3539 §D: a bounded retry/backoff wait is a LIVE run waiting.
+
+    The beat after each backoff keeps the claim from going stale across a
+    long ``Retry-After``, so a rate-limited-but-healthy walk is never
+    presumed dead and duplicated."""
+    t = MockGitHubTransport(issues=[gh_issue(1)], failures=[(500, 1)])
+    beats: list[int] = []
+    stats = _run(_indexer(t), sdk, on_progress=lambda: beats.append(1))
+    assert stats["processed"] == 1
+    # the injected 500 forces one backoff sleep — WITHOUT its beat the run
+    # records only the one successful response (1 beat), so a long
+    # rate-limited wait could go stale mid-run.
+    assert len(beats) >= 2, (
+        "a retry backoff must beat — a waiting run is not a dead run")
+
+
 # ── Phase 2: object-only writes (#1844) ──────────────────────────
 
 def test_index_creates_objects_and_events_only(sdk):
