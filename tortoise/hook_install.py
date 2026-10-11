@@ -698,16 +698,25 @@ def _cursor_layout() -> HarnessLayout:
       per-turn reflex is deliberately NOT registered here — claiming it would
       be claiming an unshipped seam.
 
-    ``timeout`` is declared for NEITHER script: ``sessionEnd`` is IDE-only
-    and joined by Cursor's shutdown, and ``sessionStart`` is fire-and-forget —
-    Cursor's third-party-hooks reference lists "Timeout configuration" as
-    supported, but the UNIT and the kill semantics for a fire-and-forget
-    session event are not documented, and writing a value Cursor reads as
-    milliseconds (60 ⇒ 60 ms) would kill the digest before it is produced and
-    silently disable the injection. The verified-current install (what Cursor
-    3.20.21 reads today) carries no ``timeout`` key, so ``None`` is the
-    non-speculative choice; the spec field stays available for the day that
-    semantic is measured.
+    This second script is the SEVENTH copy of the HOME-scoped local-state
+    derivation whose claude twin is ``claude-hooks/session-start.sh`` — that
+    copy's comment no longer restates the count, so a count note cannot itself
+    red an already-installed host as "local edit" (see ``detect_install``'s
+    byte comparison).  TWO of the seven drop a trailing ``/.`` — the claude
+    helper and this one — so a ``TORTOISE_IMPORT_RECEIPT_DIR`` ending in
+    ``/.`` still splits them from the five copies that do not; that residual
+    is the #4373 duplication, tracked in #5503.
+
+    ``timeout`` is declared for NEITHER script.  Cursor's hook reference DOES
+    document the unit — ``timeout number ... Execution timeout in seconds`` —
+    but the kill semantics for a fire-and-forget ``sessionStart`` are not
+    documented, and Cursor's own default applies when the key is absent.  The
+    verified-current install (what Cursor 3.20.21 reads today) carries no
+    ``timeout`` key, so omitting it inherits that platform default rather than
+    pinning a budget we would have to defend; ``None`` is the
+    non-speculative choice, and the spec field stays available for the day a
+    budget must be pinned (``sessionEnd`` is IDE-only and joined by Cursor's
+    shutdown, so neither half needs one today).
     """
     return HarnessLayout(
         harness="cursor",

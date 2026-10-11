@@ -3441,10 +3441,11 @@ def test_shipped_install_contract_generations(harness):
     deletes), so claude moved 9→10 — and that bump is what carries the fix to
     already-installed hosts, whose hook bytes are frozen at install time and
     whose ledger entries would otherwise stay permanently un-processable.
-    The codex/cursor seams take the same slot split, but their marker was
-    already at 3 on main (#5919) and this branch agreed, so NO number moved for
-    them: their stale installed copies are caught by the installed-copy byte
-    comparison (`modified-script`), not by a generation bump.  `pi` moved 1→2 on
+    The codex seam took the same slot split and its marker was already at 3 on
+    main (#5919), so NO number moved for it: a stale codex install is caught by
+    the installed-copy byte comparison (`modified-script`), not by a generation
+    bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
+    sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
     a #5838 bump.  Those
     numbers are a reviewed decision, not a detail, so they are pinned once and

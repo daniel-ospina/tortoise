@@ -24,8 +24,7 @@ UserPromptSubmit hook  →  volunteer-turn.sh <harness>  →  `tortoise voluntee
 ```
 
 Install (agent-first onboarding, #2123/#2124 mandate): `tortoise install
-<<<<<<< origin/main
-<harness>` for codex / claude / cline / devin. Everything else in this matrix
+<harness>` for codex / claude / cline / devin / cursor. Everything else in this matrix
 is the documented manual registration.
 
 One shape note for reading the table: `codex`, `claude` and `devin` are all
@@ -36,13 +35,6 @@ while `.codex/hooks.json` and `.claude/settings.json` nest theirs under
 `"hooks"`. Devin also reads `.claude/settings.json` hooks when
 `read_config_from.claude` is on (the default), which is why `install devin`
 warns when a claude registration would make the reflex fire twice per turn.
-||||||| 1abe17a40
-<harness>` for codex / claude / cline. Everything else in this matrix is the
-documented manual registration.
-=======
-<harness>` for codex / claude / cline / cursor. Everything else in this matrix
-is the documented manual registration.
->>>>>>> fe5f4d97eb
 
 ## Contracts (verified against harness primary docs)
 
@@ -93,10 +85,10 @@ Two further findings from the same pass:
    fire-and-forget and the field is documented, but community reports of
    `additional_context` not reaching the model are unresolved. We therefore
    claim the EMITTED CONTRACT (what the hook prints, graded by tests), not
-   delivery to the model, and no per-hook `timeout` is written: Cursor
-   documents "Timeout configuration" support without documenting the unit or
-   the kill semantics for a fire-and-forget session event, and a value read as
-   milliseconds would silently kill the digest.
+   delivery to the model, and no per-hook `timeout` is written: Cursor's
+   reference documents the unit (`Execution timeout in seconds`) but not the
+   kill semantics for a fire-and-forget session event, and an omitted key
+   inherits Cursor's own default rather than a budget we would have to defend.
 3. **Indicator 1's tool list is stale too.** #2122 names
    `tortoise_search`/`tortoise_ask`/`tortoise_recall`/`tortoise_analyze` as the
    enriched pull surface, but `tortoise_ask` was removed from the MCP / SDK /

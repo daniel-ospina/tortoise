@@ -234,10 +234,17 @@ export TORTOISE_SESSION_CONTEXT="$DIGEST"
 # the session workspace would execute at every session start. This source is a
 # DOUBLE-quoted shell string, so the predicate avoids quotes and the comment
 # carries NO backticks (the shell would command-substitute them).
-"$PY3" -c "
+if ! "$PY3" -c "
 import sys
 sys.path[:] = [p for p in sys.path if p and p != '.']
 import json, os
 print(json.dumps({'additional_context': os.environ.get('TORTOISE_SESSION_CONTEXT', '')}))
-" 2>/dev/null || true
+" 2>/dev/null; then
+  # The encoder is a hard requirement once we emit (#4314): a python3 that
+  # EXISTS but cannot run this source (an Xcode-CLT-less /usr/bin/python3 is
+  # the stock macOS case) leaves stdout empty, so record the same kind of
+  # breadcrumb the missing-`PY3` branch above does instead of reporting
+  # silence as health.
+  _record_breadcrumb "the Cursor sessionStart hook produced a digest (${#DIGEST} chars) but its python3 encoder (${PY3}) failed to emit Cursor's JSON output contract; Cursor injected nothing"
+fi
 exit 0

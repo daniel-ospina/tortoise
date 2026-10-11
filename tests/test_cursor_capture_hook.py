@@ -18,8 +18,11 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shlex
+import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -756,9 +759,32 @@ def _installed_session_start(home: Path) -> Path:
     return dst
 
 
+def _python3_shim(bindir: Path) -> Path:
+    """A WORKING ``python3`` for the hook to find on its controlled PATH.
+
+    The encoder path resolves ``command -v python3``, and letting that fall to
+    the HOST's ``/usr/bin/python3`` made these tests depend on a usable system
+    interpreter (a stock macOS ``/usr/bin/python3`` without Xcode CLT exits
+    non-zero).  Plant a shim that execs THIS test process's interpreter so the
+    suite is hermetic.  A caller that needs a FAILING interpreter writes its
+    own ``bindir/python3`` first and this leaves it alone."""
+    shim = bindir / "python3"
+    if shim.exists():
+        return shim
+    bindir.mkdir(parents=True, exist_ok=True)
+    shim.write_text("#!/usr/bin/env bash\n"
+                    f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    return shim
+
+
 def _run_session_start(stdin_json: str = "", *, home: Path, bindir: Path,
                        hook: Path | None = None,
-                       extra_env: dict[str, str] | None = None):
+                       extra_env: dict[str, str] | None = None,
+                       python3: bool = True):
+    if python3:
+        _python3_shim(bindir)
     env = {
         "HOME": str(home),
         "PATH": f"{bindir}:/usr/bin:/bin",
@@ -890,6 +916,68 @@ def test_session_start_falls_through_a_broken_path_shim_to_the_checkout_venv(
         "and this hook only falls through when that candidate REFUSES")
 
 
+def test_session_start_resolves_the_owning_venv_wheel_candidate(tmp_path):
+    """#2385: a WHEEL install puts this hook in ``site-packages/tortoise/
+    cursor-hooks/``, so there is no ``.venv`` beneath the module dir.  The hook
+    walks UP to the ``pyvenv.cfg`` marker and runs ``<venv>/bin/tortoise`` —
+    the owning-venv candidate — instead of giving up.
+
+    Mutation: drop the ``pyvenv.cfg`` walk (the owning-venv candidate) —
+    nothing on PATH answers, ``<module>/.venv`` does not exist, so no candidate
+    answers and the digest never lands → RED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()  # deliberately no `tortoise` here: PATH must not answer
+
+    module = tmp_path / "site-packages"
+    (module / "tortoise").mkdir(parents=True)  # accepted as a module dir
+    (module / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    console = module / "bin" / "tortoise"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env bash\n"
+                       "printf '%s\\n' 'from the owning venv'\n"
+                       "exit 0\n", encoding="utf-8")
+    console.chmod(0o755)
+
+    r = _run_session_start("{}", home=home, bindir=bindir,
+                           extra_env={"TORTOISE_SRC_DIR": str(module)})
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == \
+        "from the owning venv", r.stdout
+
+
+def test_session_start_falls_back_to_the_module_under_the_interpreter(tmp_path):
+    """The LAST candidate: no console script anywhere, but a checkout on
+    ``$TORTOISE_SRC_DIR`` and an interpreter.  The hook runs
+    ``python3 -c '…from tortoise.__main__ import main…'`` with the module dir
+    passed via ARGV (never ``-m``, never string-interpolated).
+
+    Mutation: drop the module fallback — no other candidate can answer, so
+    stdout is empty and the digest never lands → RED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+
+    module = tmp_path / "checkout"
+    pkg = module / "tortoise"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__main__.py").write_text(
+        "def main(argv):\n"
+        "    print('from the module fallback')\n"
+        "    return 0\n", encoding="utf-8")
+
+    r = _run_session_start("{}", home=home, bindir=bindir,
+                           extra_env={"TORTOISE_SRC_DIR": str(module)})
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == \
+        "from the module fallback", r.stdout
+
+
 def test_session_start_is_inert_with_evidence_when_no_reflex_resolves(tmp_path):
     """No reflex at all → exit 0 with EMPTY stdout (content fail-open) AND the
     local `install-inert` breadcrumb, so `session verify` reports INERT rather
@@ -911,6 +999,70 @@ def test_session_start_is_inert_with_evidence_when_no_reflex_resolves(tmp_path):
     assert record["harness"] == "cursor", record
     assert record["kind"] == "install-inert", record
     assert "sessionStart" in record["detail"], record
+
+
+def test_session_start_records_evidence_when_the_json_encoder_fails(tmp_path):
+    """#4314: an encoder that EXISTS but cannot run must not be silent.  A
+    digest is present but `python3` dies (stock macOS `/usr/bin/python3`
+    without Xcode CLT is the real case) — the hook emits nothing, so it must
+    record the SAME `install-inert` breadcrumb the missing-`PY3` branch does,
+    rather than reporting silence as health.
+
+    Mutation: restore ``|| true`` on the encoder — stdout is empty, NO
+    breadcrumb is written anywhere, and the breadcrumb assertion REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _fake_reflex(bindir, digest="# Tortoise memory\n- point/pt_1\n")
+    # A python3 that runs but cannot encode anything (the stub-interpreter
+    # class).  Written BEFORE `_run_session_start`, whose helper leaves an
+    # existing `bindir/python3` alone.
+    shim = bindir / "python3"
+    shim.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    shim.chmod(0o755)
+
+    r = _run_session_start("{}", home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    record = json.loads(_breadcrumb(home).read_text(encoding="utf-8"))
+    assert record["harness"] == "cursor", record
+    assert record["kind"] == "install-inert", record
+    assert "python3" in record["detail"], record
+
+
+def test_session_start_records_evidence_when_no_interpreter_can_encode(tmp_path):
+    """#4314: a digest with NO ``python3`` to encode it must still leave
+    EVIDENCE.  The hook emits nothing (a malformed document would be worse)
+    but records the install-inert breadcrumb, so `session verify` reads INERT
+    rather than silence-as-health.
+
+    Mutation: drop the missing-``PY3`` breadcrumb — stdout is empty and NOTHING
+    anywhere records that the seam did not fire → the breadcrumb assertion
+    REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # A CONTROLLED PATH with no interpreter but with the shell utilities the
+    # hook itself needs (`tr` gates the empty-digest check before the encoder
+    # is ever reached; `dirname` resolves the last-resort module candidate).
+    for tool in ("bash", "cat", "date", "dirname", "mkdir", "tr"):
+        real = shutil.which(tool)
+        if real is None:
+            pytest.skip(f"{tool!r} unavailable on this host")
+        (bindir / tool).symlink_to(real)
+    _fake_reflex(bindir, digest="# Tortoise memory\n- point/pt_1\n")
+
+    r = _run_session_start("{}", home=home, bindir=bindir, python3=False,
+                           extra_env={"PATH": str(bindir)})
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    record = json.loads(_breadcrumb(home).read_text(encoding="utf-8"))
+    assert record["harness"] == "cursor", record
+    assert record["kind"] == "install-inert", record
+    assert "no python3" in record["detail"], record
 
 
 def test_session_start_says_nothing_when_the_reflex_has_nothing(tmp_path):
@@ -995,11 +1147,12 @@ def test_upgrade_from_a_generation_3_install_adds_the_injection_half(tmp_path):
     install before #2122) is DRIFT, and `upgrade` repairs it: the missing
     sessionStart script + registration land, the stale script is re-written.
 
-    Mutation: skip the generation bump (leave it at 3) — the missing script and
-    `sessionStart` entry are repaired regardless of the marker, so `upgrade` is
-    NOT a no-op and the injection half DOES land; what the mutation leaves
-    behind is the stale generation, so `detect_install` keeps reporting
-    `stale-script` and this test's `detect_install(...) == []` assertion REDs."""
+    Mutation: skip the generation bump (leave the shipped marker at 3) — the
+    missing script and `sessionStart` entry are still repaired by `upgrade`,
+    so the injection half lands and the final `detect_install(...) == []`
+    stays green; what the mutation removes is the STALE generation on the
+    frozen session-end copy, so the `{"stale-script", …} <= kinds` assertion
+    REDs (the same marker test #4314 leaves behind)."""
     home = tmp_path / "home"
     home.mkdir()
     assert install_capture("cursor", home=home).ok
