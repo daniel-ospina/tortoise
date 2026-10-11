@@ -81,14 +81,17 @@ __all__ = [
 #: :func:`tortoise.hook_install.local_state_dir`, never re-derived here.
 BACKLOG_DIR_LEAF = "capture-backlog"
 
-#: The filename of the policy record.  The session-id namespace and this name
-#: are kept apart by :func:`_session_path`, which RELOCATES a session whose
-#: sanitised id would land on the reserved stem.  Reserving it in the WRITE
-#: path — not only in the scan that skips it — is load-bearing: the "a v4-style
-#: id can never be ``policy``" assumption is false for the CLI, which accepts a
-#: free-form ``--session-id``.
-_POLICY_FILE = "policy.json"
-_RESERVED_LEAF = "policy"
+#: The policy record lives in its OWN subdirectory.  ``sessions()`` globs the
+#: ledger's TOP level only, so no session id — free-form text, sanitised by
+#: substitution rather than by encoding — can address the policy record, and the
+#: id-to-path mapping stays INJECTIVE.  The relocating rule this replaced
+#: ("prefix a reserved stem") was neither: `policy` and `_policy` collided on a
+#: session record, and a case-insensitive filesystem (macOS APFS) collapsed
+#: `POLICY` onto `policy.json`.  A subdirectory cannot be spelled from a session
+#: id at all, because :func:`_session_path` always yields a top-level
+#: ``<name>.json``.
+_POLICY_DIR = "policy"
+_POLICY_FILE = "choice.json"
 
 #: The three states.  Taken from #4197's own acceptance criteria — "the read
 #: path's status reflects all three states (not processed / processed /
@@ -112,9 +115,34 @@ def backlog_dir() -> Path:
     Fallible exactly as its base is (``Path.home()`` can raise when ``$HOME``
     is a literal ``~``): every caller treats the derivation as fallible, and
     the writers catch, never propagate.
+
+    Fail-safe in tests: a test (or a PROCESS a test spawns) must never reach
+    the developer machine's real ledger (#3721's trap — the same rule
+    :func:`tortoise.capture_spool.spool_dir` and `hook_install`'s src-dir base
+    follow).  Under pytest, and with no explicit
+    ``TORTOISE_IMPORT_RECEIPT_DIR``, the base is derived DETERMINISTICALLY from
+    the test id, so every process of one test shares one ledger and none of
+    them touches ``~/.tortoise``.  An explicit override still wins.
     """
+    import hashlib
+    import os
+    import tempfile
+
     from tortoise.hook_install import local_state_dir
+
+    if not os.environ.get("TORTOISE_IMPORT_RECEIPT_DIR"):
+        test_id = os.environ.get("PYTEST_CURRENT_TEST")
+        if test_id:
+            digest = hashlib.sha256(
+                test_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            return (Path(tempfile.gettempdir())
+                    / "tortoise-capture-backlog-tests" / digest)
     return local_state_dir(BACKLOG_DIR_LEAF)
+
+
+def _policy_path() -> Path:
+    """The policy record's path — derived once, like every other path here."""
+    return backlog_dir() / _POLICY_DIR / _POLICY_FILE
 
 
 def _session_path(session_id: str) -> Path:
@@ -131,12 +159,6 @@ def _session_path(session_id: str) -> Path:
     for bad in ("/", "\\"):
         safe = safe.replace(bad, "_")
     safe = safe.replace("..", "_") or "_unnamed"
-    if safe == _RESERVED_LEAF:
-        # A session id may not address the policy record: ``sessions()`` skips
-        # this leaf by NAME, so a session record written at it would be
-        # invisible to every read surface AND would corrupt the recorded
-        # choice — two silent losses from one free-form `--session-id policy`.
-        safe = f"_{safe}"
     return backlog_dir() / f"{safe}.json"
 
 
@@ -296,7 +318,7 @@ def read_policy() -> dict:
     has already committed.
     """
     try:
-        return _read_json(backlog_dir() / _POLICY_FILE) or {}
+        return _read_json(_policy_path()) or {}
     except Exception:
         return {}
 
@@ -311,7 +333,7 @@ def set_policy(choice: str, *, decided_at: str | None = None) -> bool:
     if choice not in _POLICY_CHOICES:
         return False
     try:
-        return _write_json(backlog_dir() / _POLICY_FILE,
+        return _write_json(_policy_path(),
                            {"choice": choice, "decided_at": decided_at})
     except Exception:
         return False
@@ -333,8 +355,7 @@ def sessions() -> list[dict]:
         return []
     try:
         paths = [p for p in directory.glob("*.json")
-                 if p.name not in (_POLICY_FILE,)
-                 and not p.name.endswith(".tmp")]
+                 if not p.name.endswith(".tmp")]
     except Exception:
         return []
     records: list[dict] = []

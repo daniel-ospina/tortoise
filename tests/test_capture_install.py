@@ -3393,7 +3393,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # instead of cutting it silently, so the bytes the seam POSTs changed and every
 # installed generation-1 copy must read as stale.  The branch predates it, so
 # this number comes from main, not from #5838.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 9, "codex": 3, "cursor": 3,
+_EXPECTED_INSTALL_CONTRACT = {"claude": 10, "codex": 3, "cursor": 3,
                              "pi": 2}
 
 
@@ -3415,7 +3415,13 @@ def test_shipped_install_contract_generations(harness):
     already-installed copy.  #5838 changed the claude hooks' BEHAVIOUR once
     more (the two breadcrumb kinds now occupy SEPARATE slots, so an inert
     install cannot overwrite a live capture-failure refusal), so claude moved
-    8→9.  The codex/cursor seams take the same slot split, but their marker was
+    8→9.  #4197 changed the claude hooks' BEHAVIOUR once more (session-end.sh
+    now forwards `--transcript-path`, so a store-only deferral records the
+    DURABLE project transcript instead of the `mktemp` file its own `trap`
+    deletes), so claude moved 9→10 — and that bump is what carries the fix to
+    already-installed hosts, whose hook bytes are frozen at install time and
+    whose ledger entries would otherwise stay permanently un-processable.
+    The codex/cursor seams take the same slot split, but their marker was
     already at 3 on main (#5919) and this branch agreed, so NO number moved for
     them: their stale installed copies are caught by the installed-copy byte
     comparison (`modified-script`), not by a generation bump.  `pi` moved 1→2 on

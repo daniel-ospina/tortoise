@@ -32,6 +32,7 @@ MUTATIONS THAT RED THESE:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -536,12 +537,15 @@ def test_the_stored_backlog_survives_an_unwritable_ledger(places, capsys):
 # ── The contracts the read path and the run must not violate ───────────────
 
 
-def test_a_degraded_extraction_does_not_retire_the_entry(places, tmp_path):
+def test_a_degraded_extraction_does_not_retire_the_entry(places, tmp_path,
+                                                        monkeypatch, capsys):
     """A receipt is NOT proof that extraction ran. A DEGRADED 2xx
-    (`extraction_mode` error/empty, or a non-empty `errors` list) writes a
-    receipt while extracting nothing — retiring the ledger entry there would
-    mark a session `processed` that gained no memory points, which is the one
-    lie this feature exists to prevent."""
+    (`extraction_mode` error/empty, or a non-empty `errors` list) stored the
+    turns and extracted nothing, so it DEFERS like a store-only response:
+    retiring the entry would mark a session `processed` that gained no memory
+    points, and writing a receipt would make every later re-import
+    short-circuit BEFORE the POST, so the entry could never be retired either.
+    This runs the whole loop twice, so it also reds the livelock."""
     _, receipts = places
     transcript = _transcript(tmp_path)
     backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
@@ -555,37 +559,79 @@ def test_a_degraded_extraction_does_not_retire_the_entry(places, tmp_path):
         rc = main._cmd_sessions_import(main.argparse.Namespace(
             file=str(transcript), harness="pi", session_id="s_1"))
 
-    assert rc == 0, "a degraded 2xx is still a 2xx — the receipt rule is unchanged"
-    assert (receipts / "s_1.json").exists()
+    assert rc == 0, "a degraded 2xx is a deferral, not a hard failure"
+    assert not (receipts / "s_1.json").exists(), \
+        "a receipt would make every later re-import skip the POST, so the " \
+        "session could never gain its memory points"
     state = backlog.summary()
     assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1, \
         "the entry must stay pending: no extraction ever ran for it"
     assert state["counts"][backlog.STATUS_PROCESSED] == 0
 
+    # …and the pending entry must still be ACTIONABLE: the recommended run has
+    # to be able to re-POST it, or every read surface offers it forever.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    urlopen, posted = _posting(lambda payload: _extracted_body("s_1"))
+    with mock.patch("urllib.request.urlopen", urlopen):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert [p["session_id"] for p in posted] == ["s_1"], \
+        "the re-offer must actually re-POST, not be skipped by a stale receipt"
+    assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
 
-def test_a_session_may_not_address_the_policy_record(places):
-    """`sessions()` skips `policy.json` by NAME, so a session record written
-    there would be invisible to every read surface AND would destroy the
-    recorded choice — two silent losses from one free-form `--session-id`."""
+
+def test_a_session_id_cannot_shadow_the_policy_record(places):
+    """The policy record lives in its OWN subdirectory, so no session id can
+    address it — including the spellings a naive reserved-name rule misses.
+    A relocating rule (`policy` -> `_policy`) is also not injective, and a
+    case-insensitive filesystem collapses `POLICY` onto `policy`; both left
+    the user's recorded choice destroyed and the session record invisible,
+    since the scan skipped that name."""
     assert backlog.set_policy(backlog.CHOICE_FUTURE_ONLY, decided_at="t") is True
-    assert backlog.record_not_processed(session_id="policy", turns=2,
-                                        estimate=6) is True
+    for sid in ("policy", "POLICY", "Policy", "_policy", "s-policy"):
+        assert backlog.record_not_processed(session_id=sid, turns=2,
+                                            estimate=6) is True
 
     assert backlog.read_policy()["choice"] == backlog.CHOICE_FUTURE_ONLY, \
-        "the session record must not overwrite the policy"
-    assert [r["session_id"] for r in backlog.sessions()] == ["policy"], \
-        "the entry must still be visible to the read surfaces"
-    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+        "no session id may overwrite the recorded policy"
+    ids = {r["session_id"] for r in backlog.sessions()}
+    assert {"policy", "POLICY", "Policy"} & ids, \
+        "a session id spelled like the old reserved name must be VISIBLE"
+    # The separation is injective: `_policy` is its own record, not the
+    # policy's and not `policy`'s (which the relocating rule this replaced
+    # would have collided).
+    assert {"_policy", "s-policy"} <= ids
+    # …and the policy record sits in its own namespace, so it can never be one
+    # of the session records.
+    policy_dir = backlog.backlog_dir() / "policy"
+    assert (policy_dir / "choice.json").is_file()
+    assert not any(p.parent == policy_dir for p in backlog.backlog_dir().glob("*.json"))
     assert backlog.summary()["declined"] is True
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] >= 3
+
+
+def test_the_ledger_never_reaches_the_developers_real_home(monkeypatch):
+    """A test (or a PROCESS a test spawns) must never write into the
+    developer machine's real ledger (#3721's trap — the same rule
+    `capture_spool.spool_dir` and `hook_install`'s src-dir base follow).
+    Without an explicit override the path is derived from the test id."""
+    monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+    monkeypatch.setenv("HOME", os.path.expanduser("~"))
+    assert "tortoise-capture-backlog-tests" in backlog.backlog_dir().parts
 
 
 def test_an_unresolvable_home_cannot_break_the_read_path(monkeypatch):
     """`Path.home()` is fallible (`$HOME` as a literal `~`) and these run on a
     capture's SUCCESS path — a local-bookkeeping failure must degrade to the
     neutral state, never to a traceback after the POST has committed.
-    Precedent: `test_hook_run_observation.py`'s resolvable-home guard."""
-    monkeypatch.setenv("HOME", "~")
+    Precedent: `test_hook_run_observation.py`'s resolvable-home guard.
+
+    `PYTEST_CURRENT_TEST` is cleared so the derivation really is reached (the
+    test-id fail-safe would otherwise mask it)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+    monkeypatch.setenv("HOME", "~")
     assert backlog.sessions() == []
     assert backlog.read_policy() == {}
     assert backlog.set_policy(backlog.CHOICE_BACKLOG) is False
@@ -618,7 +664,9 @@ def test_a_malformed_record_reads_as_unpriced_not_as_a_traceback(places):
 def test_the_offer_price_is_the_product_estimator(places):
     """The number the offer shows and the number the hosted 402 gate charges
     are the SAME unit (`sdk._session_extraction_estimate`), so a regression
-    that re-priced the offer locally would show up here."""
+    that re-priced the offer locally would show up here. An estimator FAILURE
+    is `None` (unpriced), never `0` — a free-looking run that spends budget is
+    the inverse of the cost-visible-before-the-spend promise."""
     from tortoise.sdk import _session_extraction_estimate
 
     conversation = [{"role": "user", "content": "a" * 400},
@@ -628,6 +676,20 @@ def test_the_offer_price_is_the_product_estimator(places):
     assert backlog.estimate_units(conversation) > 0
     assert backlog.estimate_units(None) == 0
     assert backlog.estimate_units([]) == 0
+
+    with mock.patch("tortoise.sdk._session_extraction_estimate",
+                    side_effect=RuntimeError("estimator unavailable")):
+        assert backlog.estimate_units(conversation) is None, \
+            "a failed price is UNKNOWN, not free"
+
+    # …and an unpriced entry must read as unpriced end to end, rather than
+    # being summed as a zero-cost run.
+    assert backlog.record_not_processed(session_id="s_unpriced", turns=3,
+                                        estimate=None) is True
+    state = backlog.summary()
+    assert state["cost_units"] == 0
+    assert state["cost_unknown"] == 1
+    assert "could not be priced" in backlog.format_report(state)
 
 
 def test_a_verify_probe_is_never_recorded_in_the_backlog(places, tmp_path):
@@ -780,3 +842,108 @@ def test_a_legacy_claude_harness_record_still_processes(places, capsys,
     assert rc == 0, out
     assert "1 processed, 0 still not-processed" in out
     assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
+
+
+def test_the_transcript_path_flag_reaches_the_ledger_through_the_parser(
+        places, tmp_path):
+    """The flag must be wired in the REAL parser, not only in a hand-built
+    Namespace: the consumer reads it with `getattr(args, "transcript_path",
+    None)`, which SILENTLY falls back to the transient `--file` if the flag
+    ever leaves the parser — reintroducing the deleted-temp-path defect with
+    the suite still green."""
+    home, _ = places
+    transient = _text_transcript(home, "hook-tmp.jsonl")
+    durable = _claude_transcript(home, "project.jsonl")
+
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _store_only_body("s_cli"))[0]):
+        rc = main.main(["session", "capture", "--file", str(transient),
+                        "--harness", "claude",
+                        "--transcript-path", str(durable),
+                        "--session-id", "s_cli"])
+    transient.unlink()
+
+    assert rc == 0
+    record = backlog.sessions()[0]
+    assert record["file"] == str(durable)
+    assert record["harness"] == "claude-desktop"
+
+
+def test_a_hook_capture_that_extracts_retires_a_deferred_entry(places,
+                                                               tmp_path):
+    """The hook path's OTHER half: once the hook captures a previously
+    deferred session WITH extraction, its ledger entry must be retired. Only
+    the `sessions import` half is otherwise pinned, so deleting this call left
+    a session deferred once and forever re-offered."""
+    home, _ = places
+    first = _text_transcript(home, "hook-tmp.jsonl")
+    args = main.argparse.Namespace(file=str(first), harness="claude",
+                                   transcript_path=None,
+                                   session_id="s_retire", model=None)
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _store_only_body("s_retire"))[0]):
+        assert main._cmd_session_capture(
+            args, "tt_test", "https://legit.example.com") == 0
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+
+    # The second capture carries MORE turns, so the spool sees new content and
+    # actually re-files it (an unchanged entry is "already filed — nothing to
+    # capture" and never reaches the extraction branch).
+    args.file = str(_text_transcript(home, "hook-tmp.jsonl", turns=6))
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _extracted_body("s_retire"))[0]):
+        assert main._cmd_session_capture(
+            args, "tt_test", "https://legit.example.com") == 0
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_PROCESSED] == 1, \
+        "a hook capture that extracted must retire the entry"
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+
+
+def test_process_names_an_entry_with_no_recorded_transcript(places, capsys,
+                                                            monkeypatch):
+    """A record with no `file` (a hand-edited ledger, or an older build) must
+    be NAMED as skipped rather than silently counted as processed."""
+    home, _ = places
+    good = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_file", harness="pi", turns=4,
+                                 estimate=12, file=str(good))
+    backlog.record_not_processed(session_id="s_nofile", harness="pi", turns=2,
+                                 estimate=6, file=None)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _extracted_body("s_file"))[0]):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "1 processed, 0 still not-processed" in out
+    assert "skipped s_nofile" in out
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_PROCESSED] == 1
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    # The skipped entry stays not-processed, so the run must not report a
+    # fully-drained backlog.
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+
+
+def test_process_with_nothing_to_do_does_not_blame_the_provider_key(
+        places, capsys):
+    """An empty backlog on a keyless machine is a no-op, not a missing-key
+    error: the stated cause would be false."""
+    rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "No saved backlog to process." in out
+    assert "no LLM provider key" not in out
+
+
+def test_json_refuses_to_be_combined_with_an_action(places):
+    """`--json` is the state document, not an action. Both action branches
+    return before the report, so combining them used to print prose and NO
+    document while the flag was silently ignored. argparse must refuse it."""
+    with pytest.raises(SystemExit):
+        main.main(["sessions", "backlog", "--future-only", "--json"])
+    with pytest.raises(SystemExit):
+        main.main(["sessions", "backlog", "--process", "--json"])
