@@ -1364,6 +1364,11 @@ class DistinctStageCostModel:
             bucket["cost_usd"] = round(bucket["cost_usd"] + cost, 6)
         return {
             "session_id": session_id,
+            # #3843: the harness dimension of the decided per-capture record.
+            # The capture below declares harness="pi" on a FRESH session, and
+            # this stub's team is an agent credential, so the server RESOLVES
+            # it and the row must carry it back.
+            "harness": "pi",
             "calls": len(self.calls),
             "retries": 0,
             "prompt_tokens": sum(c[1] for c in self.calls),
@@ -2735,6 +2740,9 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
     # count itself is lane chunking's property (any >= 1 is the contract).
     assert props == {
         "session_id": "sess-b7-unattributed",
+        # #3843: the harness rides the F2 row too — an unattributed capture
+        # still attributes its spend to the harness that made the calls.
+        "harness": "pi",
         "calls": 0, "retries": 0,
         "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
         "calls_without_cost": 0, "calls_without_usage": 0,
@@ -3171,9 +3179,15 @@ def test_capture_lane_analytics_emit_rides_the_telemetry_pool(monkeypatch):
         return None
 
     monkeypatch.setattr(ha, "_cp_offload", _record_offload)
-    monkeypatch.setattr(
-        ha, "_capture_cost_props",
-        lambda session_id, meta: {"session_id": session_id, "cost_usd": 0.001})
+
+    # #3843: the props builder gained the resolved harness as its third
+    # argument; the stub mirrors the shipped signature so a call site that
+    # stops threading it is caught here and not only at the emission boundary.
+    def _props_stub(session_id, meta, harness=None):
+        seen["props_harness"] = harness
+        return {"session_id": session_id, "cost_usd": 0.001}
+
+    monkeypatch.setattr(ha, "_capture_cost_props", _props_stub)
     # The ledger write (the other, unchanged ``asyncio.to_thread`` call) needs
     # no real registry here; it must not short-circuit before the emit.
     monkeypatch.setattr("tortoise.metering.record_capture_usage",
@@ -3185,6 +3199,9 @@ def test_capture_lane_analytics_emit_rides_the_telemetry_pool(monkeypatch):
 
     asyncio.run(ha._emit_capture_ledger("org-4468", "sess-4468", {}))
 
+    assert seen.get("props_harness") is None, (
+        "the harness argument did not reach the props builder — the ledger-only "
+        f"caller passes none, but the call must still carry it (#3843): {seen!r}")
     assert seen.get("offloads") == [("analytics_event", True)], (
         "the capture-lane analytics emit did not ride the shared off-loop "
         f"entry point on the telemetry pool (#4468): {seen.get('offloads')!r}")
@@ -3216,8 +3233,8 @@ def test_capture_lane_swallows_the_strict_mode_registration_raise(
     monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
     monkeypatch.setattr(
         ha, "_capture_cost_props",
-        lambda session_id, meta: {"cost_usd": 0.001,
-                                  "unregistered_probe_key": 1})
+        lambda session_id, meta, harness=None: {"cost_usd": 0.001,
+                                                "unregistered_probe_key": 1})
     monkeypatch.setattr("tortoise.metering.record_capture_usage",
                         lambda *a, **k: None)
 
@@ -3264,3 +3281,168 @@ def test_hosted_capture_emits_that_session_s_graph_op_row(
     # comparing the two is true by construction and can never fail. The independent oracle
     # is tests/test_capture_graph_ops.py::test_capture_reports_nonzero_phase_attributed_ops,
     # which counts the graph queries actually issued and compares THAT to the emitted total.
+
+
+# ── #3843: the harness dimension of the decided per-capture record ─────────
+#
+# The owner's decision (2026-09-17) fixes the record's shape as
+# *team · session · timestamp · harness · model(s) · calls · input tokens ·
+# output tokens · cost*. Measured against the shipped row, every element but
+# ``harness`` already had a carrier: team = the row's ``org_id``, timestamp =
+# ``created_at``, model(s) = the ``by_stage`` keys. Without ``harness`` the
+# record cannot answer "which harness is this team failing on" — the second of
+# the three purposes the decision names — from the record alone.
+
+def test_capture_cost_props_carries_the_captures_harness():
+    """The row names the harness it was captured through — including on the
+    #3824 F2 row (calls made, no roll-up), which is the shape an M2 lane
+    emits and the one a harness attribution is most needed on."""
+    from tortoise import hosted_api as ha
+
+    props = ha._capture_cost_props(
+        "sess-3843", {"stats": {"llm": {
+            "calls": 2, "prompt_tokens": 10, "completion_tokens": 5,
+            "cost_usd": 0.002, "by_stage": {}}}}, "claude")
+    assert props is not None
+    assert props["harness"] == "claude"
+
+    # F2: an M2/unattributed capture still attributes its spend to a harness.
+    f2 = ha._capture_cost_props(
+        "sess-3843-m2", {"stats": {"unattributed": 3}}, "cursor")
+    assert f2 is not None
+    assert f2["harness"] == "cursor"
+
+
+def test_capture_cost_props_names_an_unproven_harness_rather_than_omitting_it():
+    """A capture the server cannot name (a session-JWT/browser capture observes
+    no harness — ``_observed_capture_harness`` returns ``None``) still carries
+    the KEY, valued ``"unknown"``. Omitting it would collapse two facts into
+    one shape: a pre-#3843 row and a harness merely unproven would both read as
+    "no harness", which is the #3824 F1/F2 error in miniature. ``"unknown"`` is
+    the sentinel this codebase already uses for exactly this quantity on the
+    Session node (``source_harness=capture_harness or "unknown"``)."""
+    from tortoise import hosted_api as ha
+
+    props = ha._capture_cost_props(
+        "sess-3843-browser", {"stats": {"llm": {
+            "calls": 1, "prompt_tokens": 5, "completion_tokens": 1,
+            "cost_usd": 0.0, "by_stage": {}}}}, None)
+    assert props is not None
+    assert props["harness"] == "unknown"
+    # and the pre-existing defaulted callers keep the same shape
+    assert ha._capture_cost_props(
+        "sess-3843-default", {"stats": {"llm": {"calls": 1}}})["harness"] \
+        == "unknown"
+
+
+def test_hosted_capture_cost_row_carries_the_request_harness(
+        tmp_path, monkeypatch, _b7_capture_client):
+    """Emission boundary: the REAL REST capture handler resolves the harness
+    and the REAL analytics writer persists it on the ``capture_cost`` row —
+    so the decided record's harness dimension is readable from the stored row
+    and not only from the Session node it would otherwise take a graph join
+    (which the report's analytics-only reader cannot do) to reach.
+
+    REDs on: ``_emit_capture_ledger`` dropping the resolved ``capture_harness``
+    before the props build — the exact shape of the measured defect."""
+    from tortoise import sdk as sdk_mod
+
+    monkeypatch.setattr(sdk_mod, "_V2SessionMock",
+                        lambda: DistinctStageCostModel())
+
+    resp = _b7_capture_client.post("/v1/sessions", json={
+        "conversation": _conv(), "harness": "claude",
+        "session_id": "sess-3843-harness"})
+    assert resp.status_code == 200, resp.text
+
+    rows = [r for r in _b7_rows(tmp_path)
+            if r.get("event_name") == "capture_cost"]
+    assert len(rows) == 1, rows
+    assert rows[0]["org_id"] == _B7_TEAM["org_id"]      # the team dimension
+    props = rows[0]["properties"]
+    assert props["session_id"] == "sess-3843-harness"   # the session dimension
+    assert props["harness"] == "claude"                 # #3843
+    # the harness is a real measurement on this row, not a lone field: the
+    # spend and the stage breakdown rode the same emit.
+    assert props["cost_usd"] > 0
+    assert props["by_stage"]
+
+
+def _team_row(team, session_id, cost, harness="pi", tokens=100):
+    staged = {"s1": {_PROVIDER: {_MODEL: {
+        "calls": 1, "prompt_tokens": tokens, "completion_tokens": 10,
+        "cost_usd": cost, "usage_present": True, "calls_without_usage": 0,
+        "calls_without_cost": 0}}}}
+    props = {"session_id": session_id, "calls": 1, "retries": 0,
+             "prompt_tokens": tokens, "completion_tokens": 10,
+             "cost_usd": cost, "calls_without_cost": 0,
+             "deadline_aborts": 0, "by_stage": staged}
+    if harness is not None:
+        props["harness"] = harness
+    return {"org_id": team, "event_name": "capture_cost",
+            "created_at": "2026-09-16T12:00:00+00:00", "properties": props}
+
+
+def test_report_reads_the_record_at_team_level_with_its_harnesses(
+        tmp_path, capsys):
+    """#3843: the record is readable at the two levels the decision names —
+    TEAM level ("this team's usage is climbing", "which harness") and CAPTURE
+    level (the heaviest-sessions list) — from the analytics-only reader, with
+    the spend taken from the SAME repricing the launch-gate number uses."""
+    from tools import capture_cost_report as report
+
+    rows = [_team_row("team-alpha", "a1", 0.001, "pi"),
+            _team_row("team-alpha", "a2", 0.002, "cursor"),
+            _team_row("team-beta", "b1", 0.004, "claude")]
+    fixture = tmp_path / "capture_cost.jsonl"
+    fixture.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                       encoding="utf-8")
+    out_json = tmp_path / "report.json"
+
+    assert report.main(["--jsonl", str(fixture), "--out", str(out_json)]) == 0
+    text = capsys.readouterr().out
+    assert "harness ids      : claude, cursor, pi" in text
+    assert "per-team split (#3843: team · harness · spend)" in text
+    assert "team-beta: rows=1 priced=1/1 calls=1" in text
+    assert "$0.004000" in text
+    assert "team-alpha: rows=2 priced=2/2" in text
+    assert "harness=cursor, pi" in text
+
+    payload = json.loads(out_json.read_text())
+    assert payload["harness_ids"] == ["claude", "cursor", "pi"]
+    # heaviest first: the team whose usage needs a look is on top
+    assert [t["team"] for t in payload["by_team"]] == ["team-beta",
+                                                       "team-alpha"]
+    alpha = payload["by_team"][1]
+    assert alpha["rows"] == 2
+    assert alpha["total_usd"] == pytest.approx(0.003, abs=1e-9)
+    assert alpha["harnesses"] == ["cursor", "pi"]
+    # a per-team figure is that TEAM's priced count, not a share of the global
+    assert sum(t["priced_sessions"] for t in payload["by_team"]) == \
+        payload["priced_sessions"]
+
+
+def test_report_does_not_read_a_pre_3843_row_as_a_named_harness(
+        tmp_path, capsys):
+    """A row written before the harness was carried has NO ``harness`` key —
+    a third fact, distinct from the ``"unknown"`` sentinel (a capture the
+    server could not name). The report must not invent a harness for it: the
+    window's harness set is the harnesses it actually names."""
+    from tools import capture_cost_report as report
+
+    rows = [_team_row("team-alpha", "a1", 0.001, "pi"),
+            _team_row("team-alpha", "a2", 0.001, harness=None)]
+    fixture = tmp_path / "capture_cost.jsonl"
+    fixture.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                       encoding="utf-8")
+    out_json = tmp_path / "report.json"
+
+    assert report.main(["--jsonl", str(fixture), "--out", str(out_json)]) == 0
+    text = capsys.readouterr().out
+    assert "harness ids      : pi" in text
+    assert "unknown" not in text.split("harness ids")[1].split("\n")[0]
+    payload = json.loads(out_json.read_text())
+    assert payload["harness_ids"] == ["pi"]
+    # the unrecorded row is still in the team's row count — the missing
+    # dimension must not silently drop the capture from the usage record
+    assert payload["by_team"][0]["rows"] == 2

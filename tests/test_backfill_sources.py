@@ -969,21 +969,32 @@ def test_e2e8_concurrent_backfill_and_index(tmp_path):
                        ).result_set[0][0] == 1
         assert _required_sweep(g) == 0
         assert _hash_pair_sweep(g) == 0
-        # honest counters: created counts Sources created, linked counts
-        # Events whose edge was written (a fresh Source always counts in BOTH,
-        # as in the main fixture) — so the valid outcomes are (created=1,
-        # linked=1, skipped=0) if backfill won the race, or (0, 0, 1) if the
-        # index thread completed the unit first
+        # honest counters — THREE valid outcomes, exactly one accounting
+        # category each (issue #3593: the third was reachable but
+        # undocumented, so this leg fired once in CI with created=0/skipped=0
+        # and failed an invariant that assumed only two categories; the
+        # deterministic pin is test_e2e8_race_repair_accounting below):
+        #   * (created=1, linked=1, skipped=0) — backfill won the race: it
+        #     created the Source AND wrote the edge (a fresh Source counts in
+        #     BOTH, as in the main fixture);
+        #   * (0, 1, 0) — the index thread had already fully linked the unit
+        #     before backfill's probe (backfill had nothing to do);
+        #   * (0, 0, 1) — the index thread's Source MERGE landed inside
+        #     backfill's probe→merge window: backfill's conditional MERGE
+        #     MATCHED (no create to count) and its link step ran — the
+        #     repair-work category the crash-repair leg pins as
+        #     created=0/linked=1/skipped=0.
+        # `errors == []` excludes the (0, 0, 0) hole: only the honest `db`
+        # failure class can produce it, and it always journals an errors[]
+        # entry — never a silent miss.
         bf = results[0]
-        assert bf["created"] in (0, 1) and bf["linked"] in (0, 1)
-        assert bf["skipped"] in (0, 1)
-        assert bf["created"] + bf["skipped"] == 1
-        # P2 (review gate): the index thread's Source MERGE can land between
-        # backfill's probe and its own merge → edge-linked-while-not-created
-        # (linked=1, created=0) is legitimate repair-work accounting under the
-        # race; the graph-level count(references)==1 assertion pins the real
-        # contract.
-        assert bf["linked"] in (bf["created"], 1)
+        assert bf["errors"] == []
+        assert (bf["created"], bf["skipped"], bf["linked"]) in {
+            (1, 0, 1),   # backfill created the Source and linked the edge
+            (0, 1, 0),   # index thread had already fully linked the unit
+            (0, 0, 1),   # repair: index thread created the Source first
+        }
+        # the graph-level count(references)==1 assertion pins the real contract
         assert bf["degraded_no_file"] == 0
         idx = results[1]
         assert (idx["indexed"] + idx["updated"] + idx["skipped"] + idx["failed"]
@@ -999,6 +1010,77 @@ def test_e2e8_concurrent_backfill_and_index(tmp_path):
             sdk2.close()
     finally:
         check.close()
+
+
+def test_e2e8_race_repair_accounting(tmp_path, monkeypatch):
+    """E2E-8 race-repair accounting pin (issue #3593): the THIRD counter
+    category, reproduced DETERMINISTICALLY.
+
+    ``test_e2e8_concurrent_backfill_and_index`` reaches it only when the OS
+    interleaves the two threads so that the index thread's Source MERGE lands
+    between backfill's existence probe and backfill's own merge — which is why
+    it fired once in CI run 35016772514 (``created=0, skipped=0``) and cannot
+    be relied on. This test forces that exact interleaving through the probe
+    seam: the probe takes the real PRE-RACE snapshot, then the REAL forward
+    path (``index_directory``) completes the whole unit (Source + Event +
+    references edge) before backfill continues with its stale snapshot.
+
+    Backfill must then report repair work — ``created=0`` (its conditional
+    MERGE MATCHED — another writer created the Source, so there is no create
+    to count), ``linked=1`` (its link step ran) and ``skipped=0`` (the unit
+    was NOT already fully linked at probe time). This is the same accounting
+    as the crash-repair leg (``created=0/linked=1/skipped=0``); the graph
+    contract is unchanged (ONE Source, ONE Event, ONE references edge) and a
+    re-run converges to ``skipped=1``."""
+    import tortoise.sdk as sdkmod
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    (c / "conv.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
+    sdk = _sdk()
+    try:
+        g = sdk._get_proj().g
+        _create_legacy_event(g, event_id="session_legacy1",
+                             kind="AgentSession", rel_path="conv.md",
+                             file_hash=compute_file_hash(str(c / "conv.md")),
+                             title="Conv")
+        real_probe = sdkmod.TortoiseSDK._backfill_probe
+        raced = {"fired": False}
+
+        def _probe_then_index_thread_wins(self, url, eid):
+            # the PRE-RACE snapshot backfill acts on ...
+            out = real_probe(self, url, eid)
+            if not raced["fired"] and not out[0]:
+                raced["fired"] = True
+                # ... while the index thread completes the SAME unit first, on
+                # the real forward path (Source + Event + references edge)
+                self.index_directory(str(c), extract_metadata=False)
+            return out
+
+        monkeypatch.setattr(sdkmod.TortoiseSDK, "_backfill_probe",
+                            _probe_then_index_thread_wins)
+
+        r = sdk.backfill_sources(str(c))
+        assert raced["fired"] is True
+        # the reachable outcome the issue reports: repair accounting
+        assert (r["created"], r["skipped"], r["linked"]) == (0, 0, 1)
+        assert r["degraded_no_file"] == 0
+        assert r["errors"] == []
+        # accounting is EXHAUSTIVE: the unit lands in exactly one category
+        # (created | skipped | repair) — it is never left uncounted
+        assert (r["created"] + r["skipped"]
+                + (1 if r["linked"] and not r["created"] else 0)) == 1
+        # the graph converged across the two code paths
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
+        assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 1
+        assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                       ).result_set[0][0] == 1
+        assert _required_sweep(g) == 0
+        assert _hash_pair_sweep(g) == 0
+        # a re-run sees the fully-linked unit and skips it (monkeypatch still
+        # installed: out[0] is now True, so the seam is inert)
+        r2 = sdk.backfill_sources(str(c))
+        assert r2["created"] == 0 and r2["linked"] == 0 and r2["skipped"] == 1
+    finally:
+        sdk.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════

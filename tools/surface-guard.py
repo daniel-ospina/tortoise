@@ -4,9 +4,12 @@
 WHAT THIS CATCHES
     An UNRECORDED change to the agent-facing surface: a new (or removed, or
     re-bound, or re-served) MCP tool or public SDK method that the approved
-    baseline in `config/surface-manifest.yml` does not declare. The MCP tool
-    surface and the SDK endpoints are the contract every agent depends on;
-    drifting in a diff nobody reads is the defect this gate exists to prevent.
+    baseline in `config/surface-manifest.yml` does not declare, and a changed
+    DECLARATION behind an approved name — a parameter default or an annotation,
+    which the MCP `inputSchema` publishes and the code object does not contain
+    (#4192). The MCP tool surface and the SDK endpoints are the contract every
+    agent depends on; drifting in a diff nobody reads is the defect this gate
+    exists to prevent.
 
 WHAT THIS DOES NOT DO — READ IT BEFORE TRUSTING A GREEN RUN
     It does NOT prove that a human approved an expansion. It compares two
@@ -80,6 +83,10 @@ def _code_digest(code) -> str:
     hash identically (verified: 98 tools collapsed to 62 digests, and a read
     tool shared one with a destructive write tool).  `co_firstlineno` is
     excluded on purpose — a pure code move is not a served change.
+
+    This is the CODE OBJECT only, and it is the `served_from` half of a tool's recorded
+    identity. The other half — the parts of the function that live outside its code object
+    and are still caller-visible — is `_served_attributes`; a tool is frozen by BOTH cells.
     """
     import hashlib
 
@@ -92,6 +99,81 @@ def _code_digest(code) -> str:
         # a memory address and is not stable)
         h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
                  else repr(const).encode())
+    return h.hexdigest()[:16]
+
+
+def _attribute_digest(value) -> bytes:
+    """A STABLE encoding of one function attribute: a default, a kw-default, an annotation.
+
+    `repr` is the fallback, and it is stable for every value on this surface today (all 53
+    defaulted tool functions carry only `None`/`int`/`float`/`str`/`bool`, and every
+    annotation is a string under `from __future__ import annotations`). A code-bearing value
+    must be RECURSED, never repr'd: a lambda default's repr carries a memory address
+    (`<function <lambda> at 0x…>`), so repr'ing it would make the fingerprint differ between
+    two runs over an UNCHANGED tree — the same reason `_code_digest` recurses into `co_consts`
+    rather than repr'ing a nested code object.
+    """
+    if isinstance(value, types.CodeType):
+        return _code_digest(value).encode()
+    if isinstance(value, types.FunctionType):
+        # A callable default has BOTH halves too, and its code object is in NEITHER cell by
+        # itself: a `def` statement's default is evaluated in the DEFINING scope, so a lambda's
+        # code lands in the MODULE's `co_consts` — which nothing here digests. Recursing into
+        # both halves is what makes a changed lambda BODY visible; `_served_attributes` alone
+        # does not (measured: a test that only compared it stayed green on a changed body).
+        return f"{_code_digest(value.__code__)}:{_served_attributes(value)}".encode()
+    return repr(value).encode()
+
+
+def _served_attributes(fn) -> str:
+    """The parts of a SERVED function that live OUTSIDE its code object, which a caller sees.
+
+    `_code_digest` reads the code object — bytecode, names, constants. A function's
+    `__defaults__`, `__kwdefaults__` and `__annotations__` are NOT in it: they hang off the
+    function object, built by the `def` statement's `MAKE_FUNCTION` in the DEFINING module's
+    code object. All three are served behaviour — the MCP `tools/list` JSON schema publishes
+    each of them as a `type` / `default` / `anyOf` — so
+
+        def tortoise_search(q, limit=10): ...
+        def tortoise_search(q, limit=99): ...
+
+    is a different advertised surface under ONE code object. #4192 (verified on this tree: a
+    `types.FunctionType` over a served tool's `__code__` with a tampered `__defaults__`
+    replaced the handler behind `tortoise_search` while this gate stayed at exit 0).
+
+    WHY ITS OWN MANIFEST CELL, NOT FOLDED INTO `served_from` (#4192). The two halves answer two
+    questions — "which implementation" and "which declaration" — so recording them apart
+    keeps a diff readable: an edit inside a handler moves `served_from` alone, a changed
+    default or annotation moves `served_attributes` alone. The load-bearing reason is CI:
+    `surface-guard.py` is PINNED TO THE BASE REF (#5132/#4606), so the run that measures a PR
+    uses the BASE ref's copy of this file and cannot know an input added here. Folding these
+    attributes into `served_from` would re-stamp all 82 rows, and the pinned guard would then
+    red on every one of them — measured on this change: 82 findings and exit 1 while the
+    tree's OWN guard was green, i.e. the required check was unsatisfiable by ANY PR. A new
+    cell leaves `served_from` byte-identical, so the pin keeps enforcing the implementation
+    half while this half is enforced by `tools/surface_manifest.py::check` (the derivation
+    against the artifact) at PR time and by this guard on the tree itself.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    # Positional defaults, in order: the order IS served (the schema's parameters follow the
+    # signature), so the tuple is hashed as given.
+    for value in getattr(fn, "__defaults__", None) or ():
+        h.update(b"\x00default\x00")
+        h.update(_attribute_digest(value))
+    # Keyword-only defaults, in DECLARATION order (`__kwdefaults__` is a dict, and the order
+    # the schema publishes is the signature's).
+    for key, value in (getattr(fn, "__kwdefaults__", None) or {}).items():
+        h.update(b"\x00kwdefault\x00")
+        h.update(repr(key).encode())
+        h.update(b"\x1f")
+        h.update(_attribute_digest(value))
+    for key, value in (getattr(fn, "__annotations__", None) or {}).items():
+        h.update(b"\x00annotation\x00")
+        h.update(repr(key).encode())
+        h.update(b"\x1f")
+        h.update(_attribute_digest(value))
     return h.hexdigest()[:16]
 
 
@@ -374,6 +456,10 @@ def main(argv: list[str]) -> int:
         (an edit elsewhere in the file) is not a change to the served implementation,
         yet it shifts every handler below it and reddened the gate on an unchanged
         surface.
+
+        The half of a served tool that is NOT a code object — its defaults and
+        annotations — is fingerprinted separately, by `_served_attributes` and the
+        `served_attributes` cell below (#4192).
         """
         code = getattr(fn, "__code__", None)
         if code is None:
@@ -388,11 +474,15 @@ def main(argv: list[str]) -> int:
         return f"{rel}:{_code_digest(code)}"
 
     live_components: dict[str, str] = {}
+    live_attributes: dict[str, str | None] = {}
     for _key, _tool in mcp_server.mcp._local_provider._components.items():
         if not _key.startswith("tool:"):
             continue
-        live_components[getattr(_tool, "name", None) or _key.split(":", 1)[1].split("@")[0]] = (
-            _fingerprint(getattr(_tool, "fn", None))
+        _name = getattr(_tool, "name", None) or _key.split(":", 1)[1].split("@")[0]
+        _fn = getattr(_tool, "fn", None)
+        live_components[_name] = _fingerprint(_fn)
+        live_attributes[_name] = (
+            _served_attributes(_fn) if getattr(_fn, "__code__", None) is not None else None
         )
     # --- a declared tool that is no longer SERVED ---------------------------------
     # The union check above only asks whether anything undeclared is served. The inverse
@@ -443,6 +533,28 @@ def main(argv: list[str]) -> int:
                 f"{stored!r}, the server now serves {live!r}. Replacing an approved tool's "
                 "implementation is a surface change and needs explicit approval — rename the "
                 "new tool, or re-cut the baseline in the approved PR."
+            )
+        # --- the SERVED DECLARATION of each approved tool (#4192) --------------------
+        # A parameter default / annotation is not in the code object, and the MCP schema
+        # publishes it, so `add_tool` over the same `__code__` with a tampered `__defaults__`
+        # served different behaviour under ONE `served_from` (verified: exit 0 before this
+        # check existed). Same doctrine as the cell above: a null is malformed EVIDENCE, not
+        # "nothing to check".
+        stored_decl = row.get("served_attributes")
+        if stored_decl is None:
+            return die(
+                f"the baseline records no `served_attributes` fingerprint for `{name}`, so "
+                "the guard cannot tell whether the caller-visible defaults or annotations "
+                "behind that name changed. Re-cut the baseline."
+            )
+        live_decl = live_attributes.get(name)
+        if live_decl is not None and live_decl != stored_decl:
+            problems.append(
+                f"the served declaration of `{name}` changed: the baseline recorded "
+                f"{stored_decl!r}, the server now serves {live_decl!r}. A parameter default "
+                "or an annotation IS served behaviour — the MCP inputSchema is derived from "
+                "them — so one of them changed the advertised surface and needs explicit "
+                "approval: restore it, or re-cut the baseline in the approved PR."
             )
 
     # A duplicate-name entry is an unapproved registry entry the name-set comparison

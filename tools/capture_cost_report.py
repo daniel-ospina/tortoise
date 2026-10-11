@@ -16,7 +16,8 @@ measured field zeroed; the report counts those calls into
 $0 one.
 
     row.properties = {
-        session_id, calls, retries, prompt_tokens, completion_tokens,
+        session_id, harness,    # #3843: which harness captured it
+        calls, retries, prompt_tokens, completion_tokens,
         cost_usd,             # the provider's OWN reported charge
         calls_without_cost,   # calls the provider served without a charge
         calls_without_usage,  # calls that carried no usage block at all
@@ -59,6 +60,17 @@ Exit codes: ``0`` report produced (including an empty window — an empty
 window prints the loud "no measurement yet" notice, it is NOT a pass with
 numbers); ``2`` unusable input (bad file, unreadable JSON, missing
 credentials for a live pull).
+
+#3843 (lane B7, owner-decided). The owner's per-capture record shape is
+*team · session · timestamp · harness · model(s) · calls · input tokens ·
+output tokens · cost*, read at two levels: team and capture. ``harness`` is
+now written on every row (``"unknown"`` when the server could not name one);
+this reader reports the window's harness set in its header and payload and
+adds the TEAM-level view (``per-team split`` / ``by_team``) that the decision
+exists for — per team: rows, priced sessions, spend, calls, tokens and the
+harnesses captured through. The spend per group comes from the SAME
+``costing`` repricing the launch-gate number uses, never a second sum of
+``cost_usd``.
 """
 from __future__ import annotations
 
@@ -192,6 +204,77 @@ def fetch_rows(days: int, *, timeout: float = 30.0) -> list[dict]:
             start += page
 
 
+def _harness_ids(rows: list[dict]) -> list[str]:
+    """#3843: the harnesses the window's per-capture records actually name.
+
+    The DECIDED per-capture record shape is *team · session · timestamp ·
+    harness · model(s) · calls · input tokens · output tokens · cost* (owner,
+    2026-09-17); ``harness`` is the element that had no carrier on the row
+    until now, so it is surfaced here rather than left to a hand-written query
+    (the #4493 ``tortoise_team_cost_cents`` lesson: a recorded dimension with
+    no reader reads as a measurement that does not exist).
+
+    Rows written before the harness was carried — and any row from a
+    deployment that predates this — carry NO ``harness`` key. That is a THIRD
+    fact, not the same one as ``"unknown"`` (a capture the server could not
+    name because no agent credential made it, #3700), so it is not folded
+    into it: a missing key is simply not listed.
+    """
+    seen: set[str] = set()
+    for row in rows:
+        props = costing._row_props(row) or {}
+        value = props.get("harness")
+        if isinstance(value, str) and value.strip():
+            seen.add(value.strip())
+    return sorted(seen)
+
+
+def team_rollup(rows: list[dict]) -> list[dict]:
+    """#3843: the per-capture record read at TEAM level, heaviest first.
+
+    One entry per ``org_id``: rows, priced sessions, spend, measured calls and
+    tokens, and the harnesses that team captured through. This is the read the
+    owner's record exists for — "this team's usage is climbing", "how fast",
+    and *which* of a struggling team's harnesses the spend sits on — as
+    opposed to the capture-level drill-down the rest of this report already
+    serves (``heaviest sessions``).
+
+    The spend is taken from ``costing.cost_per_session_distribution`` per
+    group — the SAME repricing the launch-gate number uses — rather than
+    re-summing ``cost_usd`` here: two pricings of the same row is how a second
+    cost basis appears. A group is priced over ITS OWN sessions, so a team's
+    ``priced_sessions`` is that team's, not a share of the global figure.
+    """
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        raw = row.get("org_id") if isinstance(row, dict) else None
+        team = raw.strip() if isinstance(raw, str) and raw.strip() else "<no team>"
+        groups.setdefault(team, []).append(row)
+    out: list[dict] = []
+    for team, group in groups.items():
+        dist = costing.cost_per_session_distribution(group)
+        props = [costing._row_props(r) or {} for r in group]
+        out.append({
+            "team": team,
+            "rows": dist["n_rows"],
+            "sessions": dist["n"],
+            "priced_sessions": dist["priced_sessions"],
+            "total_usd": dist["total_usd"],
+            "fully_priced": dist["fully_priced"],
+            "calls": sum(costing._as_int(p.get("calls")) for p in props),
+            "prompt_tokens": sum(
+                costing._as_int(p.get("prompt_tokens")) for p in props),
+            "completion_tokens": sum(
+                costing._as_int(p.get("completion_tokens")) for p in props),
+            "harnesses": _harness_ids(group),
+        })
+    # Heaviest first, team id breaking ties: the report's whole posture is that
+    # the number which needs a look is the one on top, and a stable order keeps
+    # two runs over the same window diffable.
+    out.sort(key=lambda e: (-float(e["total_usd"] or 0.0), e["team"]))
+    return out
+
+
 def _fmt_usd(value: float) -> str:
     return f"${value:.6f}"
 
@@ -269,6 +352,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
     add(f"pricing map      : {dist['map_version']}")
     models = _model_ids(rows)
     add(f"model ids        : {', '.join(models) if models else '(none)'}")
+    harnesses = _harness_ids(rows)
+    add(f"harness ids      : {', '.join(harnesses) if harnesses else '(none)'}")
     add("")
     if dist["n_rows"] == 0:
         add("NO capture_cost ROWS IN THIS WINDOW — no measurement exists yet.")
@@ -363,6 +448,22 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
                     f" mapped={_fmt_usd(lane['map_priced_usd'])}"
                     f" [NOT additive]{flag}")
     add("")
+    add("── per-team split (#3843: team · harness · spend) ──────────────")
+    teams = team_rollup(rows)
+    if not teams:
+        add("  (no teams in this window)")
+    for entry in teams[:top]:
+        named = ", ".join(entry["harnesses"]) if entry["harnesses"] else "(none)"
+        add(f"  {entry['team']}: rows={entry['rows']} "
+            f"priced={entry['priced_sessions']}/{entry['sessions']} "
+            f"calls={entry['calls']} "
+            f"in={entry['prompt_tokens']} out={entry['completion_tokens']} "
+            f"total={_fmt_usd(entry['total_usd'])} harness={named}"
+            + ("" if entry["fully_priced"] else "  [PARTIALLY PRICED]"))
+    if len(teams) > top:
+        add(f"  … {len(teams) - top} more team(s) — raise --top, or read "
+            "`by_team` from --out")
+    add("")
     add(f"── {top} heaviest sessions ──────────────────────────────────────")
     for entry in dist["heaviest"][:top]:
         add(f"  {_fmt_usd(entry['cost_usd'])}  "
@@ -382,7 +483,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=7,
                         help="live-pull window in days (default 7)")
     parser.add_argument("--top", type=int, default=10,
-                        help="how many heaviest sessions to list (default 10)")
+                        help="how many heaviest sessions AND teams to list "
+                             "(default 10)")
     parser.add_argument("--out", help="also write the raw report as JSON")
     args = parser.parse_args(argv)
 
@@ -413,6 +515,11 @@ def main(argv: list[str] | None = None) -> int:
             "window": label,
             "rows": len(rows),
             "model_ids": _model_ids(rows),
+            # #3843: the harness dimension of the per-capture record, plus the
+            # team-level read. Both are additive to the launch-gate payload so
+            # the decided record is readable without walking raw rows.
+            "harness_ids": _harness_ids(rows),
+            "by_team": team_rollup(rows),
             # Explicit, so a mechanical launch gate can never read
             # ``p50 == 0.0`` as a pass. Keyed on the PRICED-session count,
             # not merely on how many sessions were counted: an all-unpriced

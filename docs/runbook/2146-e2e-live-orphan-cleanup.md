@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-09-02
 ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
 ---
 
 # 2146 — e2e-live Orphan Cleanup: Runbook & Verified Inventory
@@ -21,6 +23,13 @@ ownedBy: epistemic-team
 > remaining. Issues #2140/#2146 closed.** The scripts + queries below stay as
 > the standing remediation for any future recurrence (see #2189's weekly
 > reconcile for automatic detection).
+>
+> **#5971 (2026-10-10): the recurrence path.** A recurrence is NEWER than this
+> runbook's historical window and may sit off the strict email guard shape, so
+> the default procedure below finds nothing in its DELETE set — see **§6.1** for
+> `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 are the record of the
+> original red window (figures as measured on 2026-09-02); §6.1 is the 2026-10-10
+> recurrence path.
 
 ---
 
@@ -36,7 +45,8 @@ loaded (~15 s/run) and ran #1566 welcome-mode provisioning:
 `provisionInApp`) → Supabase edge fn **`tenant-provision`**
 (`supabase/functions/tenant-provision/index.ts`) → **`provision_team` RPC**
 (migration 0010) → atomic `teams` + `org_memberships` + `api_keys` rows,
-then FastAPI `/internal/demo` seeds the FalkorDB **graph `org_{org_id}`**
+then FastAPI `/internal/demo` seeds the FalkorDB **graph `team_{org_id}`**
+(the red-window convention; #3543 later generalized the prefix to `org_`)
 where `org_id = sha256(user_id).hexdigest()[:26]` (deterministic per user),
 team `name`/`email` = `e2e-live-<8 hex>@premise-labs.dev`, key `tt_<64 hex>`
 (one api_keys row per team; `created_via='provisioned'`).
@@ -53,7 +63,7 @@ endpoint in-repo).
 
 | Resource | Window scope (default) | All e2e-live (with `--all-e2e-live`) |
 |---|---|---|
-| `public.teams` (`email LIKE 'e2e-live-%@premise-labs.dev'`) | **154** | **222** |
+| `public.organizations` (`email LIKE 'e2e-live-%@premise-labs.dev'`) | **154** | **222** |
 | `auth.users` remaining (`e2e-live-*`) | 1 | **12** |
 | `public.api_keys` (orphan teams) | 154 | 222 |
 | `public.org_memberships` (orphan teams) | 2 | 2 |
@@ -101,7 +111,7 @@ curl -sS -X POST "https://api.supabase.com/v1/projects/ybetwichurajbfswfeqa/data
 
 ```sql
 SELECT t.id, t.name, t.email, t.graph_name, t.created_at::text, t.deleted_at::text
-FROM public.teams t
+FROM public.organizations t
 WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
   AND t.email ~ '^e2e-live-[0-9a-f]{8}@premise-labs\.dev$'
   AND t.created_at >= '2026-08-19T22:20:00Z'
@@ -148,8 +158,9 @@ UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
 
 ```sql
 SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
-WHERE conrelid IN ('public.teams','public.api_keys','public.org_memberships',
-                   'public.invitations','public.abuse_events')::regclass
+WHERE conrelid IN ('public.organizations'::regclass, 'public.api_keys'::regclass,
+                   'public.org_memberships'::regclass, 'public.invitations'::regclass,
+                   'public.abuse_events'::regclass)
   AND contype = 'f';
 ```
 
@@ -171,14 +182,20 @@ legitimate prod teams (create_team/register_user mints).
 
 ## 4. Deletion semantics (evidence)
 
-Live FK catalog (`pg_constraint`, 2026-09-02):
+Live FK catalog (`pg_constraint`). Constraint **names** are the ones live on
+2026-09-02 (#3543 later renamed `user_teams_user_id_fkey` →
+`org_memberships_user_id_fkey` and `abuse_events_team_id_fkey` →
+`abuse_events_org_id_fkey`). The **Def** column mixes eras deliberately: the
+referenced tables keep the red-window `teams` spelling (today's
+`public.organizations`), while the referencing columns use the current `org_id`
+(#3543 renamed `team_id` → `org_id`):
 
 | Constraint | Def | Effect of deleting the parent |
 |---|---|---|
 | `user_teams_user_id_fkey` (on `org_memberships`) | `user_id → auth.users(id) ON DELETE CASCADE` | Deleting an auth user removes their membership rows (this is the ONLY cascade the monitor teardown relies on) |
 | `api_keys` FK | `org_id → teams(id) ON DELETE CASCADE` | Deleting the teams row removes its api_keys rows |
 | `invitations` FK | `org_id → teams(id) ON DELETE CASCADE` | same |
-| `abuse_events_org_id_fkey` | `org_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
+| `abuse_events_team_id_fkey` | `org_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
 | `org_memberships.org_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
 | `analytics_events` (0004) | **no FK + `analytics_events_immutable` trigger** | append-only (BEFORE UPDATE OR DELETE, statement-level, not role-gated) — survives by design; check-only in the script (a bare DELETE would fire the trigger and strand the purge). Operator decision required if rows are ever deleted |
 | `audit_events` | **no FK + immutable trigger** | the append-only trail — survives by design; never deleted |
@@ -188,7 +205,7 @@ There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
 /v1/organizations/{org_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
 (soft delete → 24 h grace → purge) and the orphan users are gone — an
 operator cannot act as an owner. The sanctioned **purge machinery** is
-`purge_team_control_plane` (`supabase_control.py` — deletes
+`purge_org_control_plane` (`supabase_control.py` — deletes
 api_keys → org_memberships → invitations, teams row **last** as retry anchor)
 
 + the in-repo mint-failure compensation graph calls
@@ -201,11 +218,13 @@ purged team (`operation='e2e_live_orphan_purged'`, per-run uuid in the id so
 re-runs after a partial failure never collide) written **before** the
 teams-row delete.
 
-NOTE on the sweep's graph drop: `_drop_team_graph_impl` (`hosted_api.py`)
-branches on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
-has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skips
-on FalkorDB Cloud (tracked as daniel-ospina/tortoise#2163; the sweep helper
-`_drop_team_graph` / `_drop_team_graph_strict` is the #2163-broken path).
+NOTE on the sweep's graph drop: `_drop_org_graph_impl` (`hosted_api.py`)
+branched on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
+has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skipped
+on FalkorDB Cloud, deleting the orgs row and orphaning the graph with no retry
+(daniel-ospina/tortoise#2163, **since fixed**: it now calls
+`select_graph(target).delete()` on both lanes — the same call THIS cleanup's
+graph drop uses — and treats an already-absent graph as success).
 THIS cleanup's
 graph drop uses `select_graph(...).delete()` (GRAPH.DELETE) which works on
 both clients.
@@ -229,7 +248,7 @@ these teams — only the per-team `team_<id>` knowledge graphs.
 **NOT reachable from this machine (the gap):**
 
 - **`FALKORDB_CLOUD_URI` value** (prod FalkorDB Cloud). Exists only as a gh
-  secret + Fly app secret (entrypoint.sh:91-93 resolves it to
+  secret + Fly app secret (entrypoint.sh:289-293 resolves it to
   `TORTOISE_DB_URI`). No cloud creds in any local `.env`; `redis-cli` not
   installed; `fly` CLI not installed. → **FalkorDB graph enumeration/deletion
   must run where the secret is injectable** (GH Actions `workflow_dispatch`,
@@ -282,29 +301,134 @@ uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-l
 ```
 
 Delete order (children first, teams last — retry-anchor semantics of the
-product purge): **auth users** (GoTrue) → **org_memberships** →
-**api_keys** → **invitations** → **abuse_events** → `audit_events` append →
-**teams** (last). FalkorDB graphs may run before or after the teams-row delete
+product purge): **auth users** (GoTrue) → **api_keys** →
+**org_memberships** → **invitations** → **abuse_events** → `audit_events` append →
+**teams** (last). (`api_keys` and `org_memberships` are independent children of
+the teams row; their relative order is immaterial and matches §4 + `phase_db`.) FalkorDB graphs may run before or after the teams-row delete
 (manifest-driven; a graph left behind is a benign orphan with no DB row).
 
-Guards (in code): email/name must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$`;
+Guards (in code): email must match `^e2e-live-[0-9a-f]{8}@premise-labs\.dev$` (the
+`name` column is not pattern-checked);
 teams are limited to the window unless `--all-e2e-live`; every delete is
-enumerated up-front; graphs must match `team_[0-9a-f]{26}` exactly; nothing
+enumerated up-front; graphs must match `<org|team>_[0-9a-f]{26}` exactly (#3543:
+pre-rename `team_`, post-rename `org_`); nothing
 runs without `--execute`.
+
+### 6.1 Recurrence (the #2189 case) and the Guard-A residue (#5971)
+
+The default scope above is a **one-shot artifact of the #2140 red window**
+(2026-08-19 → 2026-09-03). A *recurrence* — the whole point of the weekly
+reconcile — is by definition NEWER than that window, so a plain
+`--phase enumerate` finds **nothing in its delete set** for a reconcile issue and
+an operator can wrongly conclude the detection was stale. Two things are needed
+instead:
+
+1. **`--all-e2e-live`** drops the window entirely (the flag predates this and
+   exists for exactly this reason; its help text used to read as "the 68
+   pre-window mints", which is why it was easy to miss here).
+2. **`--include-residue`** adds the rows the strict guard shape excludes — see
+   Guard D below. Without it those rows are **reported but never deleted**, and
+the reconcile check can never go green.
+
+The live instance: the weekly reconcile (#2189) has been RED since 2026-09-21 —
+the deviant row below was filed first as #4445 and then as #5971. It is
+**not** a monitor mint and **not** a legacy survivor of the red
+window: it is the #3781 manual-verification account that PR #3790's own commit
+message hands to the operator ("the live verification created one account … the
+environment has no `SUPABASE_SERVICE_KEY`, so the Admin-API teardown the repo's
+own live-signup monitor uses could not run — delete it before/at merge if that
+matters"). The reconcile run on 2026-09-14 was green (`users=0`), so the row
+postdates the window and was created 2026-09-17. Its email deliberately names
+the issue (`e2e-live-3781-<hex>`), which is why it does **not** match the
+`<8 hex>` guard shape — the manual probe chose a readable local part.
+
+**Guard D — residue.** `graph-scripts/2146_e2e_live_orphan_cleanup.py`'s DELETE
+scope was only the strict shape AND the historical window, while the detector
+counts the whole namespace all-time; its residue ENUMERATION is separate and
+all-time (the `RESIDUE_*_SQL` predicates carry no window clause). A row inside
+the namespace but OFF the guard shape was therefore excluded **silently** by a
+SQL regex, so nothing in-repo could DELETE it
+while the detector kept filing. The script now:
+
++ **always** enumerates the residue on `--phase enumerate|all` and PRINTS it on
+  every phase (teams + auth users, ALL-TIME,
+  explicitly `!~` the guard shape) and records it in the manifest's `residue`
+  key — nothing is silent, even on a run that does not delete it;
++ refuses to proceed (guard logic error) if a "residue" row actually matches the
+  guard shape — the two predicates disagreeing is a declared-scope bug, not a
+  row to skip;
++ promotes the residue into the delete set only behind the explicit
+  `--include-residue`, after the operator has read the printed list. This is the
+  `--all-e2e-live` shape (explicit, review-gated inclusion) — the regex is
+  deliberately NOT widened: the guard is what keeps a non-test row out.
+
+Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
+`SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
+separate `--manifest`** in every case: the default
+`2146-e2e-live-orphans.manifest.json` (154 team rows) is the FalkorDB companion's
+drop record for those teams (the 2026-09-03 red-window run's own record is
+the committed `graph-scripts/2146-orphan-manifest.json`, 222 graph entries). The
+clobber guard refuses to overwrite a manifest that holds team graph names
+whenever the new enumeration found no Guard-A (strict-shape) teams — a promoted
+residue team still refuses; only a recurrence that mints Guard-A teams would
+overwrite it. Using a separate manifest
+is therefore unconditional —
+`2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
+do" on an empty list. The separate path keeps both:
+
+```bash
+RECUR=2146-recurrence.manifest.json
+# 1. enumerate the recurrence + the residue; REVIEW both lists
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase enumerate --all-e2e-live --manifest "$RECUR"
+#    prints e.g.: [residue] Guard-A residue — in the e2e-live namespace, OFF the
+#    guard shape …  [residue]   user <id>  e2e-live-3781-…@premise-labs.dev  created …
+#    [residue]   1 row(s) NOT in the delete set — pass --include-residue …
+# 2. dry-run — write it to a SCRATCH manifest, and remove the scratch first: a
+#    dry-run re-enumerates and writes its own --manifest, and for a residue TEAM
+#    that write would leave prior_n>0 with Guard-A=0, so the execute below would
+#    refuse (and a scratch left over from a previous recurrence would refuse
+#    here). The scratch keeps the execute's manifest team-empty.
+rm -f "$RECUR.dryrun"
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase all --all-e2e-live --include-residue --manifest "$RECUR.dryrun"
+# 3. execute (writes $RECUR, so its residue team's graph_name reaches the
+#    FalkorDB companion; a retry after a partial failure needs $RECUR removed)
+uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py \
+    --phase all --all-e2e-live --include-residue --manifest "$RECUR" --execute
+# 4. verify: re-run step 1 → teams=0 users=0 residue=0, and the next weekly
+#    reconcile run is green (that check is the end-to-end proof, not this list).
+#    For any $RECUR that now holds team rows this re-run refuses by design —
+#    a promoted residue TEAM, or the Guard-A teams step 3 just deleted (Guard-A
+#    finds none of either) — so verify with a fresh --manifest instead, or after
+#    the graphs are dropped and $RECUR is removed:
+#    rm -f "$RECUR" "$RECUR.dryrun"
+```
+
+For a residue **team** (none today: every `organizations` row in the namespace
+matched
+the strict shape in the 2026-09-02 inventory), `--include-residue` also puts its
+`graph_name` in the manifest, so run the FalkorDB companion the same way. A
+residue **auth user** has no control-plane rows of its own (`users=4 teams=0` in
+the #5971 run), so phase `users` is all it needs.
 
 **Rollback notes:** irreversible once executed — the free-tier test teams had
 `backup_enabled=false` (no R2 backups). Mitigations: (a) keep the manifest
 JSON (full rows); (b) optional `--dump-csv` for a CSV snapshot before any
 delete; (c) the audit_events append-only rows survive the team deletion as the
 purge trail; (d) re-running any phase is a no-op (idempotent) — with one
-exception: the manifest refuses to be overwritten with an EMPTY team list
-(post-success re-enumeration) so the FalkorDB phase always has its target
-list; remove the manifest file to force a fresh empty enumeration. If an operator
+exception: a manifest that holds team graph names refuses to be overwritten when
+the new enumeration has no Guard-A (strict-shape) team rows (a post-success
+re-enumeration, or a recurrence whose rows are all users — its `teams` is the
+FalkorDB companion's drop record), so the FalkorDB phase
+always has its target list; re-enumerate a recurrence to its own `--manifest`
+(see §6.1) to keep that list, or remove the file to force a fresh empty
+enumeration. If an operator
 wants DB-level insurance, `pg_dump` the four tables scoped to the orphan ids
 first.
 
 **Verify (post-cleanup, expect 0):** re-run Q1–Q3; then
-`supabase db query --linked "SELECT count(*) FROM public.teams WHERE email LIKE 'e2e-live-%@premise-labs.dev';"` → 0;
+`supabase db query --linked "SELECT count(*) FROM public.organizations WHERE email LIKE 'e2e-live-%@premise-labs.dev';"` → 0;
 FalkorDB: `GRAPH.LIST` contains none of the manifest `graph_name`s; the
 welcome-e2e-monitor's next scheduled run is green (it already route-blocks, #2144).
 
@@ -314,7 +438,7 @@ The #2144 tripwire stops new mints (deployed). To also stop future
 accumulation of test-minted state from ANY e2e path, recommend a follow-up
 issue for a **service-role purge endpoint** (e.g. `POST /v1/internal/teams/
 purge-e2e`, gated by `FASTAPI_INTERNAL_KEY`) that runs the existing
-`purge_team_control_plane` + `_drop_team_graph_strict` machinery for teams
+`purge_org_control_plane` + `_drop_org_graph_strict` machinery for teams
 whose `email` matches the test domain — rather than a SQL-only reaper. Also
 consider teaching the monitor teardown to call it, so a red-window recurrence
 self-heals.

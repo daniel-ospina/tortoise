@@ -267,8 +267,11 @@ class TestQuery:
             sdk.paginated_query(kind="statement", **{"kind": "goal"})
 
     def test_filter_key_legit_still_works(self, sdk):
-        sdk.create_point("statement", "A", confidence=0.9)
-        sdk.create_point("statement", "B", confidence=0.1)
+        # #1088: a draft must be asked for explicitly now that live is the
+        # default — this keeps the test about the status FILTER, not the
+        # retired implicit draft default.
+        sdk.create_point("statement", "A", confidence=0.9, status="draft")
+        sdk.create_point("statement", "B", confidence=0.1, status="live")
         results = sdk.query(confidence=0.9, status="draft")
         assert len(results) == 1
         assert results[0]["content"] == "A"
@@ -384,6 +387,90 @@ class TestTraverse:
         p = _make_point(sdk)
         with pytest.raises(ValueError, match="Invalid direction"):
             sdk.traverse(p["id"], "IMPL", direction="sideways")
+
+    def test_operator_orientation_is_surfaced(self, sdk):
+        """#6101: an operator and its reverse must not read identically.
+
+        create_operator writes IMPL{idx=0} to the SOURCE and IMPL{idx>=1} to
+        each TARGET, so traverse has to hand the edge's idx back — without it
+        the two endpoints are an unordered pair and a cycle reads as its
+        reverse.
+        """
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        forward = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+        reverse = sdk.create_operator("IMPL", b["id"], [a["id"]], label="produces")
+
+        fwd = {c["id"]: c for c in sdk.traverse(forward["id"], "IMPL", direction="outgoing")}
+        assert fwd[a["id"]]["idx"] == 0  # forward's SOURCE
+        assert fwd[b["id"]]["idx"] == 1  # forward's TARGET
+
+        rev = {c["id"]: c for c in sdk.traverse(reverse["id"], "IMPL", direction="outgoing")}
+        assert rev[b["id"]]["idx"] == 0  # reverse's SOURCE
+        assert rev[a["id"]]["idx"] == 1  # reverse's TARGET
+
+        # The two reads are distinguishable ONLY by idx (same ids, same
+        # content): this is the property the issue reported as lost.
+        assert (sorted(sdk.traverse(forward["id"], "IMPL"), key=lambda c: c["id"])
+                != sorted(sdk.traverse(reverse["id"], "IMPL"), key=lambda c: c["id"]))
+
+    def test_incoming_idx_locates_the_queried_point(self, sdk):
+        """#6101: reading a point's incoming IMPL edge reports where the
+        QUERIED point sits in the operator (0 = source, >= 1 = target)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        src_side = {c["id"]: c for c in sdk.traverse(a["id"], "IMPL", direction="incoming")}
+        tgt_side = {c["id"]: c for c in sdk.traverse(b["id"], "IMPL", direction="incoming")}
+        assert src_side[op["id"]]["idx"] == 0
+        assert tgt_side[op["id"]]["idx"] == 1
+
+    def test_non_operator_edges_carry_no_idx(self, sdk):
+        """#6101: idx is None where the graph holds no operator position — the
+        key is additive, never a fabricated 0."""
+        old = _make_point(sdk, content="old")
+        new = sdk.create_point("statement", "new")
+        sdk.supersede_point(old["id"], new["id"])
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert corrected and corrected[0]["idx"] is None
+        assert corrected[0]["id"] == old["id"]
+
+    def test_input_mirror_reports_the_queried_position(self, sdk):
+        """#6101: the :INPUT mirror points the other way from the operator's own
+        edge — with direction="outgoing" from an input, the RETURNED operator's
+        idx is the QUERIED node's position, not the operator's (the swap the
+        traverse docstring calls out)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        out_a = sdk.traverse(a["id"], "INPUT", direction="outgoing")
+        assert len(out_a) == 1 and out_a[0]["id"] == op["id"]
+        assert out_a[0]["idx"] == 0  # a is the operator's SOURCE
+
+        in_op = {c["id"]: c for c in sdk.traverse(op["id"], "INPUT", direction="incoming")}
+        assert in_op[a["id"]]["idx"] == 0
+        assert in_op[b["id"]]["idx"] == 1
+
+    def test_navigation_surfaces_the_idx_from_a_real_graph(self, sdk):
+        """#6101: `tortoise_traverse` and `entityProfile` read `r.idx` in
+        `navigation._hop_query` — a REAL-graph test, because the navigation
+        mocks hand back pre-seeded 3-column rows and so cannot fail when the
+        `, r.idx` projection is dropped from the emitted Cypher (the recorded
+        response fields for both surfaces need a producer-side guard)."""
+        from tortoise.navigation import entityProfile, tortoise_traverse
+
+        proj = sdk._get_proj()
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        hops = {n["node"]["id"]: n
+                for n in tortoise_traverse(proj.db, proj.graph_name, op["id"], 2)["nodes"]}
+        assert hops[a["id"]]["idx"] == 0  # a is the operator's SOURCE
+        assert hops[b["id"]]["idx"] == 1  # b is its TARGET
+
+        profile = entityProfile(proj.db, proj.graph_name, op["id"], hops=1)
+        connected = {p["id"]: p for p in profile["connected"]["points"]}
+        assert connected[a["id"]]["_idx"] == 0
+        assert connected[b["id"]]["_idx"] == 1
 
 
 # ── verify_chain ─────────────────────────────────────────────────────
@@ -1357,3 +1444,106 @@ def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
     TortoiseSDK._maybe_purge_events(object(), None)
     assert len(purges) == first, (
         "interval=0 made the purge gate always false — a DELETE on every poll")
+
+
+# ── #1088: live is the default; an explicit draft is honoured ─────────
+
+class TestExplicitDraftIsHonoured1088:
+    """#1088 ruling: LIVE is the default for everything added to the graph;
+    an agent that deliberately asks for draft gets draft, and no OTHER
+    command may move it to live. Only an explicit promotion (``promote_point``
+    or ``update_point(status="live")``) may do that.
+
+    Non-vacuous because the pre-#1088 code did the opposite on every path
+    pinned here: a non-decide kind defaulted to 'draft', and each promotion
+    clause moved an explicitly-drafted source to live.
+    """
+
+    def test_create_point_defaults_to_live_for_non_decide_kind(self, sdk):
+        # 'statement' is NOT in DECIDE_PART_KINDS ({decision, option,
+        # criterion, evidence}), so the pre-#1088 code defaulted it to
+        # 'draft' — this test is non-vacuous only for a genuine non-decide
+        # kind.
+        p = sdk.create_point("statement", "the sky is blue")
+        assert p["status"] == "live"
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_survives_default_operator_promotion(self, sdk):
+        """#1088 REGRESSION: a point explicitly created draft is NOT promoted
+        to live as a side effect of create_operator's DEFAULT promote_source
+        (the exact call the tortoise_create_operator MCP tool makes).
+        """
+        draft = sdk.create_point("statement", "deliberately staged",
+                                 status="draft")
+        other = sdk.create_point("statement", "second operand")
+        assert sdk.get_point(draft["id"])["status"] == "draft"
+        sdk.create_operator("IMPL", draft["id"], [other["id"]])
+        assert sdk.get_point(draft["id"])["status"] == "draft", (
+            "explicit draft must not be moved to live by create_operator"
+        )
+
+    def test_1088_explicit_draft_survives_default_direct_edge(self, sdk):
+        """#1088 REGRESSION: the direct-edge promotion-on-created path is
+        narrowed the same way — an explicit draft stays draft."""
+        draft = sdk.create_point("statement", "staged draft", status="draft")
+        other = sdk.create_point("statement", "peer")
+        sdk.create_direct_edge("IMPL", draft["id"], other["id"])
+        assert sdk.get_point(draft["id"])["status"] == "draft"
+
+    def test_1088_null_status_is_still_filled_with_live(self, sdk):
+        """The narrowed clause still fills in a never-set status: promotion
+        is not simply disabled. A raw NULL-status node goes live on the first
+        operator edge."""
+        p = sdk.create_point("statement", "legacy node")
+        _set_status(sdk, p["id"], None)
+        other = sdk.create_point("statement", "peer")
+        sdk.create_operator("IMPL", p["id"], [other["id"]])
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_still_promotable(self, sdk):
+        """The explicit routes still work: promote_point moves a
+        deliberately-drafted point to live."""
+        p = sdk.create_point("statement", "ready to ship", status="draft")
+        assert sdk.get_point(p["id"])["status"] == "draft"
+        res = sdk.promote_point(p["id"])
+        assert res["promoted"] is True
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_explicit_draft_promotable_via_update_point(self, sdk):
+        p = sdk.create_point("statement", "ready", status="draft")
+        sdk.update_point(p["id"], status="live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_update_point_live_on_live_is_idempotent(self, sdk):
+        """#1088: with live as the create default, ordinary flows reach
+        update_point(status="live") on an ALREADY-live point. That is an
+        idempotent success (mirrors promote_point's DE2E-N9 already_live
+        no-op), not the draft-born guard's illegal transition."""
+        p = sdk.create_point("statement", "already live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+        sdk.update_point(p["id"], status="live")
+        sdk.update_point(p["id"], status="live")
+        assert sdk.get_point(p["id"])["status"] == "live"
+
+    def test_1088_update_point_live_plus_props_still_applies_props(self, sdk):
+        """#1088: when status="live" rides along with other props on an
+        ALREADY-live point, only the status is dropped as already-satisfied —
+        the remaining props are still the caller's and must be applied (the
+        `len(props) > 1` branch), never silently discarded."""
+        p = sdk.create_point("statement", "already live with props")
+        assert sdk.get_point(p["id"])["status"] == "live"
+        out = sdk.update_point(p["id"], status="live", confidence=0.42)
+        assert out["confidence"] == 0.42
+        after = sdk.get_point(p["id"])
+        assert after["status"] == "live"
+        assert after["confidence"] == 0.42
+
+    def test_1088_update_point_still_refuses_terminal_resurrection(self, sdk):
+        """The narrowing is only for the already-live case: a terminal point
+        cannot be resurrected through the promote guard."""
+        p = sdk.create_point("statement", "retracted claim", status="live")
+        sdk.retract_point(p["id"])
+        assert sdk.get_point(p["id"])["status"] == "retracted"
+        with pytest.raises(ValueError):
+            sdk.update_point(p["id"], status="live")
+

@@ -6,7 +6,10 @@
 # (aws CLI) is the only signal that covers the app-down case. The direct-R2
 # leg runs BEFORE the APP_DOWN early-exit (review P2-2) — it is genuinely
 # app-independent.
-#   1. aws preflight (R2_DOWN on failure) + DIRECT R2 freshness (per-team)
+#   1. aws preflight (R2_DOWN on failure) + DIRECT R2 freshness (per-team,
+#      POOLED into ONE subject-less POOL_STALE incident naming the N stale
+#      tenants — #4994: one systemic fault is one issue, not one per tenant;
+#      per-tenant STALE stays watcher-owned)
 #   2. GET /status (classify: connect-fail → APP_DOWN; app-503/429 → up)
 #   3. kill-switch check — a DISABLED sweep is NOT automatically intentional:
 #      config_error → SWEEP_CONFIG_ERROR; storage_error → R2_DOWN; stale R2
@@ -28,7 +31,9 @@
 #   7. self-heal: close an incident only on the evidence that proves it gone —
 #      APP_DOWN / resolved SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE on a completed
 #      round trip; R2_DOWN on a passing R2 preflight; WATCHER_DOWN on a fresh
-#      watcher heartbeat; SWEEP_NO_COVERAGE on a run that actually backed up
+#      watcher heartbeat; SWEEP_NO_COVERAGE on a run that actually backed up;
+#      POOL_STALE on a WHOLE-POOL measured-fresh reading held for
+#      BACKUP_POOL_RESOLVE_STREAK consecutive runs (#4994)
 set -euo pipefail
 
 API="${INTERNAL_API_URL:-}"
@@ -173,6 +178,14 @@ kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#31
   case "$1" in
     # driver: its own R2 preflight + /status.storage_error + a measured pool.
     R2_DOWN|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
+      echo driver ;;
+    # #4994: the POOLED pool-stale incident. Driver-owned because the driver is
+    # its filer AND the only surface whose probe covers its recovery (the
+    # direct-R2 freshness leg, whole pool). It is deliberately NOT `STALE`: the
+    # per-tenant residual stays watcher-owned, because the watcher resolves
+    # per ORG in-process while the driver cannot — a per-tenant incident filed
+    # here would never close (#5047 ruling, 2026-09-24).
+    POOL_STALE)
       echo driver ;;
     # #4612: a ride-along leg's OWN success is the recovery evidence — the
     # driver is the only surface that invokes the leg, so it is the only writer
@@ -346,6 +359,16 @@ gh_find_open() { # kind id(subject) -> open issue number, "" when none, $GH_SEAR
   # made `file_alert` file a duplicate and let `resolve_global` close an
   # unverified target. The sentinel rides STDOUT (not a global) because callers
   # read this function through a command substitution, i.e. in a subshell.
+  #
+  # #4994: since the direct-R2 leg pools its per-tenant staleness, EVERY driver
+  # call site now passes `""` (the platform, subject-less key). The subject
+  # branch below is deliberately KEPT: the R2 dedup spelling is a contract
+  # mirrored by `AlertStore._keys()` in Python, per-subject adoption is what the
+  # watcher's per-org `STALE` relies on, and a future driver leg (e.g. a
+  # per-team ride-along) may legitimately file a subject-scoped incident. Its
+  # behaviour is pinned directly by the driver harness (case 68), not through a
+  # filing — a grep for a bare `STALE` would match `POOL_STALE` and pass
+  # vacuously.
   [ -n "$GH_TOKEN" ] || return 0
   local kind="$1" id="${2:-}" q items
   # One query shape for BOTH branches; the verification is applied to the
@@ -740,6 +763,34 @@ file_alert() { # kind title body dedup_id
   rm -f "$tmp"
 }
 
+# #4994: the resolve-side recovery threshold for the pooled pool-stale incident.
+# A SINGLE fresh reading is not enough to clear it — the incident is filed from
+# a whole-pool measurement that can flap at the freshness boundary, so the clear
+# is gated on N CONSECUTIVE measured-fresh runs (the decision on #5047 pins the
+# start at N=2; see BACKUP_POOL_RESOLVE_STREAK). The streak is carried ON the
+# incident's own dedup object (a field beside `issue_number`), so it is created
+# with the incident and deleted with it by `gh_close`/delete-to-resolve — a
+# separate state object could be stranded and would then immediately clear a
+# freshly re-filed recurrence.
+pool_set_streak() { # n — persist the fresh streak on the incident object
+  # No incident on record (no object, or a placeholder whose filing was
+  # deferred) → nothing to count: the streak is not written at all, so a
+  # recurrence starts at zero rather than inheriting a stale count.
+  local n="$1" key body tmp
+  key="$(alert_key POOL_STALE "")"
+  body="$(r2_get "$key")"
+  printf '%s' "$body" | jq -e 'type == "object" and (.issue_number != null)' >/dev/null 2>&1 || return 0
+  tmp="$(mktemp)"
+  # An unreadable body writes NOTHING (the `jq -e` gate above fails): a read
+  # failure must never be read as "the streak is 0 either way", because it could
+  # overwrite the authoritative dedup object with a fabricated one.
+  if printf '%s' "$body" | jq -c --argjson s "$n" '.fresh_streak = $s' > "$tmp" 2>/dev/null; then
+    aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
+      --key "$key" --body "$tmp" >/dev/null 2>&1 || true
+  fi
+  rm -f "$tmp"
+}
+
 # ── 0. aws preflight + DIRECT R2 freshness (the app-down/crash-loop leg) ─────
 # A failed listing is NEVER confirmed-empty (no STALE/NEVER from a failed
 # read); a broken R2 auth preflight files R2_DOWN loudly (review P3).
@@ -749,6 +800,14 @@ R2_OK=1
 # (enabled but 0 teams backed up) below.
 POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
 R2_TEAM_COUNT=0     # team prefixes present under backups/
+# #4994: the direct-R2 leg's PER-TEAM staleness is accumulated here instead of
+# being filed as one `[DR] STALE` per tenant. One systemic pool fault therefore
+# becomes ONE driver-owned, subject-less POOL_STALE incident naming the N
+# tenants (filed after the loop), not N issues. Per-tenant `STALE` stays the
+# watcher's: it resolves per ORG in-process, so a per-tenant incident filed by
+# the driver — which has no per-org probe — would strand open forever.
+STALE_TEAM_COUNT=0  # measured stale (> STALE_MIN) default archives this run
+STALE_TEAMS=""     # the same teams, one `- <org> — <age>m` line each
 # #2796 (review P1): `aws --output text` renders a LIST as ONE tab-separated
 # line, so a bare `while read` measured only the LAST team. Split on tabs first
 # (process substitution keeps the current shell, so the counters propagate).
@@ -915,8 +974,14 @@ if [ "$R2_OK" = "1" ]; then
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
           if [ "$age_min" -gt "$STALE_MIN" ]; then
-            log "team ${org_id}: newest archive ${age_min}m old — filing STALE (direct leg)"
-            file_alert STALE "[DR] STALE — ${org_id}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$org_id"
+            # #4994: ACCUMULATE, never file per tenant — the pooled incident is
+            # written once after the loop, naming every stale team. The tenants
+            # are also recorded in the log so a run's evidence survives even
+            # when the pooled create fails.
+            log "team ${org_id}: newest archive ${age_min}m old — pool stale (direct leg)"
+            STALE_TEAM_COUNT=$((STALE_TEAM_COUNT + 1))
+            STALE_TEAMS="${STALE_TEAMS}- ${org_id} — newest archive ${age_min}m old
+"
           fi
           if [ "$age_min" -gt "$DRIVER_DOWN_MIN" ]; then
             POOL_STALE=1
@@ -957,6 +1022,84 @@ if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" != "1" ]; then
     "head-bucket succeeded but one or more list-objects-v2 calls failed (R2_LIST_OK=0). The pool cannot be measured, so archive freshness and coverage cannot be verified. Check the R2 access key's ListObjects permission." ""
 fi
 
+# ── 0b. the POOLED pool-stale incident (#4994) ──────────────────────────────
+# ONE systemic pool fault = ONE incident naming the N tenants.
+#
+# Why pooled and why driver-owned (recorded decision, #5047 comment
+# 2026-09-24; option A1 of this issue): the direct-R2 leg is the only freshness
+# signal that survives an app-down crash-loop, so it must file — but it cannot
+# resolve PER TENANT. `STALE` is watcher-owned (tortoise/alert_store.py
+# KIND_OWNERS) because the watcher reads each org's archive in-process; a
+# per-tenant incident filed here would never be cleared by the driver
+# (`resolve_global` refuses a non-driver kind) and its sentinel would then
+# swallow the next genuine recurrence — the exact stranding this pooling
+# avoids. Per-tenant residual visibility therefore stays with the watcher's own
+# per-org `STALE`, and the tenants this leg measured are named in THIS body.
+#
+# Recovery uses a resolve-side threshold (N consecutive measured-fresh runs),
+# not a single reading: the pool measurement can flap at the freshness
+# boundary, and an immediate clear would close an incident on the reading that
+# proves least (anti-flap — the convergent practice: Datadog recovery
+# thresholds, Grafana `keep_firing_for`).
+POOL_RESOLVE_STREAK="${BACKUP_POOL_RESOLVE_STREAK:-2}"
+case "$POOL_RESOLVE_STREAK" in ''|*[!0-9]*) POOL_RESOLVE_STREAK=2 ;; esac
+[ "$POOL_RESOLVE_STREAK" -ge 1 ] || POOL_RESOLVE_STREAK=2
+POOL_KEY="$(alert_key POOL_STALE "")"
+# "Measured fresh" is a POSITIVE measurement of the WHOLE pool: every listing
+# answered (R2_LIST_OK=1), the preflight passed (R2_OK=1), and no team is stale
+# or archive-less (STALE_TEAM_COUNT=0, POOL_STALE=0). An unmeasurable pool is
+# never read as fresh — the same rule as everywhere else in this driver.
+POOL_MEASURED_FRESH=0
+if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" = "1" ] && [ "$STALE_TEAM_COUNT" = "0" ] && [ "$POOL_STALE" = "0" ]; then
+  POOL_MEASURED_FRESH=1
+fi
+
+if [ "$STALE_TEAM_COUNT" != "0" ]; then
+  POOL_LIST_NOTE=""
+  if [ "$R2_LIST_OK" != "1" ]; then
+    # The tenants below WERE measured; the pool as a whole was not. Say so in
+    # the body rather than letting a partial measurement read as the full pool.
+    POOL_LIST_NOTE="
+⚠️ The pool listing did NOT complete this run (R2_LIST_OK=0), so this is what WAS measured, not the whole pool (see the R2_DOWN incident for the storage fault)."
+  fi
+  POOL_STALE_BODY="The driver's direct R2 freshness leg (app-independent) measured ${STALE_TEAM_COUNT} team default archive(s) older than BACKUP_STALE_THRESHOLD_MIN (${STALE_MIN}m):
+
+${STALE_TEAMS}
+Per-tenant STALE incidents are watcher-owned (the watcher resolves them per org, in-process); this pooled incident is the driver-side record of the same systemic fault and self-heals once the pool is measured fresh on ${POOL_RESOLVE_STREAK} consecutive runs.${POOL_LIST_NOTE}"
+  file_alert POOL_STALE \
+    "[DR] POOL_STALE — ${STALE_TEAM_COUNT} team default archive(s) older than ${STALE_MIN}m" \
+    "$POOL_STALE_BODY" ""
+  # The pool is NOT fresh this run, so any accumulated recovery streak is
+  # reset: a stale run between two fresh readings must restart the count, or a
+  # flapping pool would clear on two readings that were never consecutive.
+  pool_set_streak 0
+elif [ "$POOL_MEASURED_FRESH" = "1" ]; then
+  POOL_BODY="$(r2_get "$POOL_KEY")"
+  POOL_ISSUE="$(printf '%s' "$POOL_BODY" | jq -r 'if type == "object" then (.issue_number // empty) else empty end' 2>/dev/null || true)"
+  if [ -z "$POOL_ISSUE" ] || [ -n "${POOL_ISSUE//[0-9]/}" ]; then
+    : # no pooled incident on record — nothing to count and nothing to clear
+  else
+    POOL_STREAK="$(printf '%s' "$POOL_BODY" | jq -r 'if type == "object" then (.fresh_streak // 0) else 0 end' 2>/dev/null || echo 0)"
+    case "$POOL_STREAK" in ''|*[!0-9]*) POOL_STREAK=0 ;; esac
+    POOL_STREAK=$((POOL_STREAK + 1))
+    if [ "$POOL_STREAK" -ge "$POOL_RESOLVE_STREAK" ]; then
+      resolve_global POOL_STALE "Resolved — the direct-R2 leg measured the WHOLE pool fresh on ${POOL_STREAK} consecutive runs (a team's archive must not recover on one reading; ${POOL_RESOLVE_STREAK} is the recovery threshold)."
+    else
+      log "self-heal: POOL_STALE measured-fresh reading ${POOL_STREAK}/${POOL_RESOLVE_STREAK} — not resolving yet"
+      pool_set_streak "$POOL_STREAK"
+    fi
+  fi
+else
+  # Measured but NOT fresh (a team with no archive at all, or a pool the
+  # listings could not measure). There is no recovery evidence here, so the
+  # incident stays open and the streak resets. Never resolve off a reading that
+  # did not measure.
+  pool_set_streak 0
+  if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" = "1" ]; then
+    log "self-heal: the R2 pool is measured but NOT fresh (a team has no default archive, or one is older than ${DRIVER_DOWN_MIN}m) — leaving POOL_STALE open"
+  fi
+fi
+
 # ── 1. pre-flight status ────────────────────────────────────────────────────
 STATUS=""
 if [ "$SIMULATE_APP_DOWN" = "true" ]; then
@@ -968,8 +1111,9 @@ else
 fi
 
 if [ -z "$STATUS" ]; then
-  # connect/DNS/timeout/5xx-without-app-body → APP_DOWN. The direct-R2 STALE
-  # filings above already ran, so the app-down case still surfaces staleness.
+  # connect/DNS/timeout/5xx-without-app-body → APP_DOWN. The direct-R2 pooled
+  # POOL_STALE filing above already ran, so the app-down case still surfaces
+  # staleness (that leg is deliberately app-independent).
   # #2796 (review P2-3): an app-down run is a BROKEN pipeline — file the
   # incident and go RED (finish reads the LOUD flag). The old exit 0 is what
   # let a 31-day outage hide behind 40 green runs.

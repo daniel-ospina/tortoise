@@ -53,7 +53,9 @@ def sdk():
 
 
 def _claim(sdk: TortoiseSDK, content: str) -> str:
-    # #992/#943: EP tests model live claims (create_point defaults to draft).
+    # #992: EP tests model live claims — status="live" is explicit for intent;
+    # create_point's implicit status is live since #1088 (it was draft from
+    # #943).
     return sdk.create_point("statement", content, dedup=False,
                             status="live")["id"]
 
