@@ -171,6 +171,29 @@ def test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it(tmp_p
     )
 
 
+def test_the_green_banner_reports_the_STAGED_status_and_the_documents_separately():
+    """A green run must not claim the manifest's staged status came from the doc (#4185).
+
+    The banner used to print `approval_status=<status> is READ from <doc>`. Two things were
+    wrong: the value printed is the MANIFEST's, and a staged `pending-owner-approval`
+    approves nothing. At this head the two files disagree by design (#8144 owns the flip),
+    so a green run has to say which of them claimed what — and whether anything was
+    actually compared.
+    """
+    result = _run("tools/surface-guard.py")
+    assert result.returncode == 0, result.stdout
+    assert "The manifest is STAGED on approval_status=pending-owner-approval" in result.stdout, (
+        f"the banner did not report the manifest's staged status as staged:\n{result.stdout}"
+    )
+    assert "which records 'approved'" in result.stdout, (
+        "the banner did not report the DOCUMENT's recorded status separately — the manifest "
+        f"is not the file that recorded it:\n{result.stdout}"
+    )
+    assert "makes NO claim, so nothing was compared" in result.stdout, (
+        f"the banner did not say that no comparison ran:\n{result.stdout}"
+    )
+
+
 def test_unknown_approval_status_is_a_failure(tmp_path):
     doc = _manifest()
     doc["approval_status"] = "mostly-fine"

@@ -114,7 +114,8 @@ def _frontmatter(path: Path) -> dict:
 # span a markdown bold boundary and a line wrap.
 # The canonical doc states it as `MCP target count is unchanged at 26` AND as `MCP target
 # is 26`; the single optional-chain pattern matches both. It must NEVER be `beta target`,
-# which names a DIFFERENT number (the beta list's own count).
+# which names the beta list's OWN count rather than the MCP target's — the two can move
+# independently, so reading the wrong phrase is a wrong number waiting to happen.
 _CANONICAL_MCP_PATTERNS = (
     re.compile(
         r"MCP[\s*]*target[\s*]*(?:count[\s*]*)?is[\s*]*(?:unchanged[\s*]*at[\s*]*)?(\d+)",

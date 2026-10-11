@@ -36,8 +36,11 @@ HOW IT WORKS
 
     THE APPROVAL IS READ, NOT TYPED (#4185). The top-level
     `approval_status`/`approval_principal`/`approval_pr`/`approval_date` are READ
-    from `docs/product/canonical-mcp-tools.md`, so this gate reds when they
-    disagree with that document (a hand-edit made the copy lie). The old PER-ROW
+    from `docs/product/canonical-mcp-tools.md`. This gate reds when a manifest that
+    CLAIMS an approval disagrees with that document (a hand-edit made the copy
+    lie). A manifest staged on `pending-owner-approval` with all four fields null
+    makes NO claim and is skipped on purpose — that is the pre-flip state of a
+    change that lands in two PRs (#4185; the flip is #8144). The old PER-ROW
     `approval` requirement is GONE — it belonged to the frozen-snapshot model the
     #4282/#4185 ruling overrides. The per-row field is still carried as an audit
     record and a re-cut still refuses to blank it silently (#4598); it is no
@@ -58,7 +61,7 @@ FAIL-CLOSED
     Exit 0 = declaration matches the FROZEN baseline (the freeze is not the approved
     target — see docs/product/canonical-mcp-tools.md and tools/surface-target-check.py).
     Exit 1 = expansion, removal, a served-surface change, an exemption
-             transition, an approval that disagrees with
+             transition, a CLAIMED approval that disagrees with
              docs/product/canonical-mcp-tools.md, an unresolvable retired name, or
              unreadable evidence.
 
@@ -838,13 +841,13 @@ def main(argv: list[str]) -> int:
     # --- 6. approval: READ from the canonical doc, never typed here (#4185) ------
     # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
     #
-    # The manifest used to carry a hand-maintained `approval_status: pending-owner-approval`
-    # while `docs/product/canonical-mcp-tools.md` recorded `approved` / `daniel-ospina` /
-    # PR 4120 — two files disagreeing about one fact, with the gate reading the wrong one.
-    # The approval is now DERIVED from that document
+    # The manifest's `approval_status` is still the staged `pending-owner-approval` while
+    # `docs/product/canonical-mcp-tools.md` records `approved` / `daniel-ospina` / PR 4120 —
+    # two files that disagree about one fact BY DESIGN until the flip lands (#8144). The
+    # approval is DERIVED from that document
     # (`tools/surface_manifest.py::read_approval`), so what this section verifies is the
-    # one thing a derived field can still get wrong: a manifest whose approval was
-    # HAND-EDITED away from the source it is supposed to mirror.
+    # one thing a derived field can still get wrong: a manifest that CLAIMS an approval
+    # and was HAND-EDITED away from the source it is supposed to mirror.
     #
     # READ IT HERE, INDEPENDENTLY. The guard is deliberately self-contained, and the doc is
     # the evidence the approval rests on. A manifest claiming `approved` must be backed by a
@@ -860,9 +863,10 @@ def main(argv: list[str]) -> int:
     # CI's `surface-guard` pins the BASE copy of THIS file: it copies `origin/main`'s guard
     # over the PR's and runs it against the PR tree, so a change to what the guard
     # ENFORCES cannot be green in its own PR. This change derives `approval_status` from
-    # the canonical doc, which flips the manifest to `approved`; the base copy still
-    # enforces the per-row `approval` rule, which fires on that status and demands a
-    # recorded approval on every row and every `retired:` entry that lacks one.
+    # the canonical doc, so a re-cut FLIPS the manifest to `approved` — which is why the
+    # committed copy is still staged here (#8144) — while the base copy still enforces the
+    # per-row `approval` rule, which fires on that status and demands a recorded approval
+    # on every row and every `retired:` entry that lacks one.
     status = doc.get("approval_status")
     if status not in ("pending-owner-approval", "approved"):
         problems.append(
@@ -976,12 +980,29 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
+    # The banner states the MANIFEST's staged status and the DOCUMENT's recorded status as
+    # two separate facts (#4185 review). It used to print `approval_status=<status> is READ
+    # from <doc>`, which was wrong twice over: the value printed came from the manifest, and
+    # a staged `pending-owner-approval` approves nothing. On a manifest that CLAIMS an
+    # approval the claim was compared; on a staged one nothing was compared, and saying so
+    # is the difference between a green run that means something and one that does not.
+    if claimed:
+        approval_line = (
+            f"The manifest CLAIMS an approval (approval_status={status}) and it matches "
+            f"{approval_doc} (which records {canonical['status']!r})"
+        )
+    else:
+        approval_line = (
+            f"The manifest is STAGED on approval_status={status} and makes NO claim, so "
+            f"nothing was compared against {approval_doc} (which records "
+            f"{canonical['status']!r}) — the flip is a separate change (#8144)"
+        )
     print(
         f"OK — the declaration matches the FROZEN baseline: "
         f"{len(declared_tools)} MCP tools, {len(declared_sdk)} public SDK methods "
-        f"({len(exemptions)} exempt). approval_status={status} is READ from "
-        f"{approval_doc}; it approves the owner's TARGET, which this freeze does NOT "
-        f"measure — run tools/surface-target-check.py for compliance with the target."
+        f"({len(exemptions)} exempt). {approval_line}. The frozen baseline is NOT the "
+        f"owner's approved TARGET — run tools/surface-target-check.py for compliance "
+        f"with the target."
     )
     return 0
 
