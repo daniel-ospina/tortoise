@@ -24,10 +24,12 @@ import {
   FLOW_COOKIE,
   FLOW_MAX_AGE_S,
   buildCookie,
+  ensureAuthFlowIndexes,
   ensureColumn,
   json,
   redirect,
   safeNext,
+  sweepExpiredFlows,
 } from "../_shared/auth/session";
 import { bytesToB64url } from "../_shared/auth/jwt";
 
@@ -81,6 +83,10 @@ export async function ensureFlowTable(db: D1Database) {
   // CREATE ... IF NOT EXISTS cannot add a column to a table that already exists,
   // so `next` must be added explicitly or INSERT breaks on an existing database.
   await ensureColumn(db, "auth_flows", "next", "TEXT");
+  // The sweep below is only cheap because `expires_at` is indexed, and a
+  // runtime-created table never got the migration's index. Created here, with
+  // the table (see `ensureAuthFlowIndexes`).
+  await ensureAuthFlowIndexes(db);
 }
 
 /**
@@ -130,6 +136,15 @@ export const onRequestGet: PagesFunction<FlowEnv> = async ({ request, env }) => 
       now + FLOW_MAX_AGE_S * 1000,
     )
     .run();
+
+  // #3647: expired rows accumulated because deletion was only ever coupled to a
+  // flow COMPLETING, which an abandoned flow never does — and the scheduled
+  // probe (#3628) abandons one flow per run by design. Swept HERE because this
+  // route is the producer: collection is unconditional (every real sign-in and
+  // every probe run sweeps) and self-healing, with no new schedule and no new
+  // route to secure. It stops when the writing stops. The row above has already
+  // landed, and never has `expires_at < now`, so it cannot be swept.
+  await sweepExpiredFlows(env.SESSIONS);
 
   const redirectTo = env.AUTH_CALLBACK_URL ?? `${url.origin}/auth/callback`;
   const authorize = new URL(`${env.SUPABASE_URL}/auth/v1/authorize`);

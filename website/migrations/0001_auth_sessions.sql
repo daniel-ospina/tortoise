@@ -9,7 +9,9 @@
 --  `ensureSchema()` for this table, `ensureSchemaTokenColumns()` (token.ts) for the three
 --  token-cache columns, and the per-route flow-table bootstraps in `auth/start.ts` /
 --  `auth/confirm.ts` for `auth_flows` / `email_flow_pending` — so a fresh local database is
---  self-establishing.)
+--  self-establishing. Those bootstraps also create `idx_auth_flows_expires`
+--  (`ensureAuthFlowIndexes`), because a database established by the runtime alone never
+--  receives the index below, and `sweepExpiredFlows` (#3647) depends on it for cost.)
 
 CREATE TABLE IF NOT EXISTS sessions (
   handle        TEXT PRIMARY KEY,
