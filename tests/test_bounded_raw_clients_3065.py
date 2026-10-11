@@ -376,44 +376,89 @@ def test_an_absent_read_bound_parks_the_caller_in_recv():
 # 4. The systemic half — no product client may skip the bound
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _constructs_a_client(node: ast.Call) -> bool:
+#: Class/function names that reach the socket. Kept in one place so the
+#: predicate, the alias scan and the negative controls cannot drift apart.
+_CLIENT_NAMES = {"FalkorDB", "guarded_client", "Redis", "StrictRedis", "from_url"}
+
+#: Modules whose ``from … import Redis as R`` makes a construction take a name
+#: the predicate would otherwise never see.
+_CLIENT_MODULES = {"redis", "falkordb"}
+
+
+def _client_aliases(tree: ast.AST) -> set[str]:
+    """Local names that resolve to a client class through an ``as`` import.
+
+    A name-based predicate is blind to ``from redis import Redis as R`` — so
+    ``R(host=…)`` reached the socket and matched nothing, neither offender nor
+    inventory. MEASURED on this branch. The alias set is collected per module
+    and threaded into the predicate so an import cannot hide a client.
+    """
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if (node.module or "").split(".")[0] not in _CLIENT_MODULES:
+            continue
+        for a in node.names:
+            if a.name in _CLIENT_NAMES and a.asname:
+                aliases.add(a.asname)
+    return aliases
+
+
+def _constructs_a_client(node: ast.Call, aliases: set[str] | None = None) -> bool:
     """True for a raw client construction, whatever its class is called.
 
     Three class shapes reach the same socket: the falkordb wrapper
     (``FalkorDB(...)``), the package's guard seam (``guarded_client(...)``),
     and a BARE redis client (``redis.Redis(...)`` / ``redis.StrictRedis(...)``
-    / ``redis.from_url(...)``). Recognising only the first two is a blind spot
-    that was MEASURED, not assumed: a bare unbounded ``redis.Redis`` added to
-    ``tortoise/`` left this guard green, because no predicate matched it and
-    the inventory therefore never changed (#3065 follow-up).
+    / ``redis.from_url(...)``) — plus an ``as``-aliased import of any of them.
+    Recognising only the first two is a blind spot that was MEASURED, not
+    assumed: a bare unbounded ``redis.Redis`` added to ``tortoise/`` left this
+    guard green, because no predicate matched it and the inventory therefore
+    never changed (#3065 follow-up).
+
+    COVERAGE, stated so this guard does not over-claim: it recognises those
+    call shapes and aliases. A construction reached through indirection this
+    scan cannot follow — a factory that returns a client, a name bound at
+    runtime — is NOT counted, and is what the `_EXPECTED_SITES` inventory's
+    explicit-edit requirement is there to make someone look at.
     """
     func = node.func
     if isinstance(func, ast.Name):
-        return func.id in {"FalkorDB", "guarded_client", "Redis",
-                           "StrictRedis", "from_url"}
+        return func.id in _CLIENT_NAMES or bool(aliases and func.id in aliases)
     if isinstance(func, ast.Attribute):
-        return func.attr in {"FalkorDB", "guarded_client", "Redis",
-                             "StrictRedis", "from_url"}
+        return func.attr in _CLIENT_NAMES
     return False
 
 
 def _carries_a_read_bound(node: ast.Call) -> bool:
     """A bound is present as ``socket_timeout=…`` or as a ``**`` spread of the
-    shared resolver (``**_bounded_server_socket_kwargs()``)."""
+    shared resolver (``**_bounded_server_socket_kwargs()``).
+
+    ``socket_timeout=None`` is NOT a bound — it IS the #3065 bug written down.
+    ``falkordb.FalkorDB.__init__`` defaults it to ``None`` and hands that to
+    redis-py explicitly, so an explicit ``None`` is the same unbounded
+    ``recv()`` that a missing kwarg is, and accepting it would let the exact
+    forbidden shape ship green. Only the LITERAL is rejected: a name may
+    resolve to a real number at runtime, and this is a static scan.
+    """
     for kw in node.keywords:
         if kw.arg == "socket_timeout":
-            return True
+            return not (isinstance(kw.value, ast.Constant)
+                        and kw.value.value is None)
         if kw.arg is None and "socket_kwargs" in ast.unparse(kw.value):
             return True
     return False
 
 
 def test_every_product_client_is_constructed_with_a_read_bound():
-    """#3065's systemic pin: the next raw client cannot ship unbounded.
+    """#3065's systemic pin: a product client cannot ship without a read bound.
 
     The defect was not "two call sites forgot a kwarg" — it was that each site
     re-derived its own socket policy, so adding a site silently added a hole.
-    This guard closes the class: a construction in ``tortoise/`` carries a
+    This guard closes that class for the construction shapes it recognises
+    (see ``_constructs_a_client`` for what those are, and what it does NOT
+    follow): a recognised construction in ``tortoise/`` carries a
     ``socket_timeout`` or the shared resolver, and the site inventory is pinned
     so a new one must be considered deliberately.
     """
@@ -425,12 +470,12 @@ def test_every_product_client_is_constructed_with_a_read_bound():
         rel = str(path.relative_to(REPO_ROOT))
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text, filename=str(path))
+        aliases = _client_aliases(tree)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not _constructs_a_client(node):
+            if not isinstance(node, ast.Call) or not _constructs_a_client(node, aliases):
                 continue
             found[rel] = found.get(rel, 0) + 1
-            if (_constructs_a_client(node)
-                    and not _carries_a_read_bound(node)
+            if (not _carries_a_read_bound(node)
                     and rel not in _BOUND_LIVES_ELSEWHERE):
                 offenders.append(f"{rel}:{node.lineno}")
 
@@ -472,12 +517,26 @@ def test_the_guard_itself_reads_the_shapes_it_claims_to():
     assert _constructs_a_client(_only_call("redis.StrictRedis(host='h')"))
     assert _constructs_a_client(_only_call("redis.from_url('redis://h')"))
 
+    # …and an `as` alias is the same blind spot wearing a different name.
+    assert not _constructs_a_client(_only_call("R(host='h', port=1)"))
+    assert _constructs_a_client(
+        _only_call("R(host='h', port=1)"), {"R"})
+    assert _client_aliases(ast.parse("from redis import Redis as R")) == {"R"}
+    assert _client_aliases(ast.parse("import redis")) == set()
+    assert _client_aliases(ast.parse("from something_else import Redis as R")) == set()
+
     assert not _carries_a_read_bound(_only_call("guarded_client(FalkorDB, host='h')"))
     assert not _carries_a_read_bound(_only_call("redis.Redis(host='h', port=1)"))
     assert _carries_a_read_bound(
         _only_call("guarded_client(FalkorDB, host='h', socket_timeout=10)"))
     assert _carries_a_read_bound(
         _only_call("guarded_client(FalkorDB, **_bounded_server_socket_kwargs())"))
+    # `socket_timeout=None` is the #3065 bug written down, not a bound.
+    assert not _carries_a_read_bound(
+        _only_call("redis.Redis(host='h', port=1, socket_timeout=None)"))
+    # …but a NAME is not statically resolvable, so it must stay accepted.
+    assert _carries_a_read_bound(
+        _only_call("redis.Redis(host='h', port=1, socket_timeout=cfg.read_to)"))
 
 
 def test_every_bound_elsewhere_claim_names_a_live_test():
