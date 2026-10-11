@@ -5275,12 +5275,16 @@ class TortoiseSDK:
             if stamp_journal_embedding is not None:
                 clean = stamp_journal_embedding(
                     clean, creating=type_ in ("PointAdded", "OperatorAdded"))
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # #5089: NO content synthesis here. Operators store no 'content' as
+            # a node property, so synthesizing the `IMPL(inputs)` label put a
+            # value in the record that NO writer ever stored — and the replay
+            # persisted it, so a rebuilt operator carried a label live never had.
+            # What the live SDK door actually produces is an omitted key; the
+            # replay writer's `_WRITER_DEFAULTS` empty string is the journal-side
+            # asymmetry `consistency` already models for operators, and this no
+            # longer fabricates a label on top of it. (The display label is
+            # derived at the point of display, `api._point`; nothing reads an
+            # operator's content back off the node.)
             # Similarly, operators may lack 'pointKind' — default to empty.
             if "pointKind" not in clean:
                 clean["pointKind"] = ""
@@ -19906,6 +19910,17 @@ class TortoiseSDK:
         - Uncalibrated points fall back to documented neutral confidence 0.5
           (absence of measurement is NOT low support).
 
+        #2598 — drafts render honestly. A DRAFT is EP-inert (``live._live_only``
+        excludes it at every factor-extraction call site), so when EP has not
+        measured the claim its ``recall_ranking`` carries ``confidence: None``
+        and ``confidence_source: "uncomputed"`` plus ``draft: True`` — "no
+        belief computed", never the fabricated 0.5 that used to outrank
+        measured live claims below 0.5. Drafts are still RECALLED (never
+        hidden), and the ranker places them after every live row via an explicit
+        status tiebreaker. The ``min_confidence`` floor therefore refuses an
+        uncomputed draft for any positive floor (no measured belief to meet it)
+        while the default 0.0 keeps it. Live rows are unchanged.
+
         Returns the same SearchResult shape as ``tortoise_fts_query`` (list
         of dicts), each annotated with ``entity_type``, ``recall_ranking``
         (score breakdown), and state-context keys (``contested``,
@@ -20042,10 +20057,21 @@ class TortoiseSDK:
         ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
-        ranked = [
-            r for r in ranked
-            if r["recall_ranking"]["confidence"] >= min_confidence
-        ][:limit]
+        # #2598: a DRAFT whose belief EP has not measured carries
+        # ``confidence: None`` ("no belief computed" — never the fabricated
+        # neutral 0.5). It cannot satisfy a POSITIVE belief floor, because there
+        # is no measured belief to meet it; the default 0.0 floor means "no
+        # floor" and therefore keeps drafts (they stay recallable, ranked after
+        # every live row by the ranker's status tiebreaker). A bare
+        # ``None >= min_confidence`` would raise TypeError, so the two cases are
+        # decided explicitly rather than left to comparison semantics.
+        def _passes_floor(row: dict) -> bool:
+            conf = row["recall_ranking"]["confidence"]
+            if conf is None:
+                return min_confidence <= 0.0
+            return conf >= min_confidence
+
+        ranked = [r for r in ranked if _passes_floor(r)][:limit]
 
         # 5. State context surfacing (batched, not N+1).
         point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
@@ -21809,13 +21835,25 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+org
+        # Reject duplicate pending invitations for same email+org.
+        #
+        # #1890: expiry is a DERIVED terminal state — an invite whose
+        # ``expires_at`` has passed is dead even though nothing ever writes
+        # ``status`` (this method does not even set it). Without the
+        # ``expires_at`` arm an expired invite blocks the re-invite FOREVER,
+        # exactly as the hosted registry mint did (hosted_api.py). The
+        # predicate matches the hosted dup-check and
+        # ``cleanup_expired_invitations``, so the three cannot disagree about
+        # whether an invite is live.
         reg = self._get_registry()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i) > 0",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -21825,7 +21863,6 @@ class TortoiseSDK:
         token = str(uuid.uuid4())
         token_hash = hash_api_key(token)
         iid = ulid()
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(

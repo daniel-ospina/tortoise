@@ -85,6 +85,16 @@ def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
       OBJECT vocabulary — superseded / deprecated / archived / retracted)
       and NO flag conjunct: no Object writer sets ``outdated``, so the Point
       flag would hide an Object nobody can mark.
+
+    #2598: ``draft`` is deliberately in NEITHER set. A draft is CURRENT, not
+    dead (``live.CURRENT_POINT_STATUS_VALUES``), so every retrieval leg — and
+    therefore ``recall_state``/``tortoise_recall``/``tortoise_search`` — RETURNS
+    a draft. Recall never hides one; what #2598 fixed is how it RENDERS: the
+    row is badged (``status`` + ``recall_ranking.draft``), carries no computed
+    belief while EP has not measured it (``confidence: null`` /
+    ``confidence_source: "uncomputed"``), and is ranked after every live row.
+    Adding ``draft`` here would silently HIDE staged material instead — the
+    opposite of what was asked for.
     """
     if label == "Point":
         return TERMINAL_EXCLUDED_STATUSES, True

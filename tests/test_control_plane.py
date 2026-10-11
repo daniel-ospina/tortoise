@@ -475,6 +475,36 @@ class TestInvitationCRUD:
         # rows deleted (registry list_members ghost cleanup).
         assert result["ghosts_deleted"] >= 0
 
+    def test_invitation_create_allows_remint_after_expiry(self, sdk, team):
+        """#1890: an expired invite is DEAD — the dup-check must derive expiry
+        from ``expires_at``.
+
+        This method does not even write ``status``, so the pre-fix
+        status-only predicate left an expired invite blocking a re-invite
+        with "already exists" FOREVER. The same live predicate must still
+        reject a genuinely pending duplicate.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        first = sdk.invitation_create(team["id"], "remint@test.com", "admin",
+                                      "user-1")
+        reg = sdk._get_registry()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
+            params={"id": first["id"], "exp": past},
+        )
+
+        second = sdk.invitation_create(team["id"], "remint@test.com", "admin",
+                                       "user-1")
+        assert second["id"] != first["id"], (
+            "an expired invite must not block a re-invite — expiry is derived "
+            "from expires_at, not from a status this method never writes")
+        # The live invite just minted is a real duplicate: still refused.
+        with pytest.raises(ControlPlaneError, match="already exists"):
+            sdk.invitation_create(team["id"], "remint@test.com", "admin",
+                                  "user-1")
+
     def test_invitation_create_rejects_invalid_role(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="Invalid role"):
             sdk.invitation_create(team["id"], "bad@test.com", "bogus", "user-1")
