@@ -62,19 +62,24 @@ source named is the flag-alone form the ruling rejects.
 
 from __future__ import annotations
 
-import argparse
-import contextlib
-import json
 import sys
-from collections.abc import Mapping, Sequence
 
 # #5128 precedent (tools/source_dedup_report.py): refuse an old interpreter
-# BEFORE the module-level imports below, so the failure names the real cause.
+# BEFORE the imports below, so the failure names the real cause. The preamble
+# must be exactly [docstring] [__future__] `import sys` <guard> — every other
+# stdlib import belongs BELOW the guard (tests/test_entry_point_python_guard.py
+# ::test_entry_point_guards_the_interpreter_before_its_imports pins it).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/source_currency.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]})."
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/source_currency.py`"
     )
+
+import argparse
+import contextlib
+import json
+from collections.abc import Mapping, Sequence
 
 from tortoise.search_engine import (
     FYI_REASON_SOURCE_DRIFT,
