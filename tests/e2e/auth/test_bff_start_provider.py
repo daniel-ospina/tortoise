@@ -233,7 +233,7 @@ def _headers(r) -> dict:
     return h
 
 
-def _warm_up(j: "Jar") -> None:
+def _warm_up(j: Jar) -> None:
     """Drive one real `/auth/start`, which is what materialises local D1.
 
     Two things depend on this and neither is incidental:
