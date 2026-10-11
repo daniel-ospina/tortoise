@@ -84,7 +84,7 @@ trust a description:
 |---|---|
 | `extensions/tortoise-capture/index.ts` + `index.test.ts` | **real files** (26,864 B + 26,768 B) |
 | `extensions/reflect-hook.ts` + `reflect-hook.test.ts` | **real files** (12,330 B + 9,684 B) — **not** a symlink |
-| CI | both are executed by agent-infra's `.github/workflows/ci-main.yml` (`reflect-hook.test.ts` has its own step) |
+| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml`; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
 | Ship-list | `manifest.json` lists **both** (`reflect-hook.ts`, `tortoise-capture/`), so `bin/agent-infra.js` materializes both on a farm machine |
 | `extensions/shared/capture-attribution.ts` | imported by the two recorders only — no other extension imports it |
 
