@@ -437,6 +437,38 @@ def test_fold_confidence_changed_keeps_a_label_index_anchor(sdk, monkeypatch):
         f"the fold must sweep one query per label; saw {len(seen)}")
 
 
+def test_fold_confidence_changed_sweeps_every_label_not_just_the_first(sdk):
+    """The replay belief fold must write EVERY epistemic label an id is carried
+    under, exactly as the live writers do.
+
+    ``TortoiseEP._write_node`` / ``_flush_cache``, ``TortoiseSDK.compute_confidence``
+    and ``Dreamer._ep_run_batch`` all sweep all four labels and never ``break``.
+    The replay fold used to stop at the first matching label, so when one id is
+    carried by a ``:Point`` node AND a separate ``:Object`` node — a reachable
+    duplicate-id shape (``PointAdded X`` + ``ObjectRegistered X``) — replay
+    updated only the Point while live updated both: a silent live/replay
+    divergence. The SET is idempotent, so all four are swept and the matched
+    count accumulates.
+    """
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (p:Point {id:'dup-7853', pointKind:'statement', "
+        "content:'p', status:'live'})")
+    proj.g.query(
+        "CREATE (o:Object {id:'dup-7853', name:'dup-obj', status:'live'})")
+
+    matched = proj._fold_confidence_changed(
+        {"id": "dup-7853", "confidence": 0.42})
+
+    assert matched == 2, matched
+    point_conf = proj.g.query(
+        "MATCH (n:Point {id:'dup-7853'}) RETURN n.confidence").result_set
+    object_conf = proj.g.query(
+        "MATCH (n:Object {id:'dup-7853'}) RETURN n.confidence").result_set
+    assert point_conf and point_conf[0][0] == 0.42, point_conf
+    assert object_conf and object_conf[0][0] == 0.42, object_conf
+
+
 # ── P2-2 (#7936) — the reference fold, BOTH directions ─────────────
 
 _NON_POINT_BELIEF_JOURNAL = [
@@ -786,11 +818,15 @@ def _m_subject(nid: str = _MATRIX_ID, name: str = "matrix-sub") -> dict:
 
 
 def _m_rename(nid: str = _MATRIX_ID,
-              new_name: str = "matrix-renamed") -> dict:
+              new_name: str = "matrix-renamed",
+              label: str = "Object",
+              state: dict | None = None) -> dict:
     # The graph fold's `SET n += $state` carries the full APPLIED map, so
-    # `state.name` MOVES the Object MERGE key (`_fold_entity_mutation`).
-    return {"type": "EntityMutated", "op": "rename", "label": "Object",
-            "id": nid, "state": {"name": new_name}}
+    # `state.name` MOVES the Object MERGE key (`_fold_entity_mutation`) — and
+    # a `state.id` moves IDENTITY.
+    return {"type": "EntityMutated", "op": "rename", "label": label,
+            "id": nid,
+            "state": state if state is not None else {"name": new_name}}
 
 
 def _m_delete(label=None, nid: str = _MATRIX_ID) -> dict:
@@ -871,6 +907,55 @@ _BOUNDARY_MATRIX = [
     ("rename-into-a-reused-name-buries-the-earlier-id",
      [_m_object(), _m_rename(new_name="matrix-renamed"),
       _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
+    # #7936 round-5 P1: `_upsert_object` MERGEs by NAME, so when MORE THAN ONE
+    # node already carries the MERGE key the MERGE matches EVERY one of them and
+    # `ON MATCH SET o.id=$id` re-ids them ALL. A 1:1 `(label,name) -> id`
+    # carrier modelled the graph as a bijection, answered EXISTS for the ids the
+    # graph had already re-id'd away, and exempted a belief `rebuild_all`
+    # refuses — the reported fail-open. The node table below must instead leave
+    # duplicated nodes as SEPARATE records and bury EVERY id that stops being
+    # carried. (Two ids here are re-id'd to `matrix-third`; the belief targets
+    # the first of them, which must be buried.)
+    ("rename-collision-buries-every-dup-named-id",
+     [_m_object(_MATRIX_ID, "matrix-collide"),
+      _m_object("matrix-other", "matrix-other-name"),
+      _m_rename("matrix-other", new_name="matrix-collide"),
+      _m_object("matrix-third", "matrix-collide"),
+      _m_belief(_MATRIX_ID)], True),
+    # The :Subject twin: `_upsert_subject` MERGEs by name too, so the same
+    # multi-node collapse applies.
+    ("subject-rename-collision-buries-every-dup-named-id",
+     [_m_subject(_MATRIX_ID, "matrix-sub-collide"),
+      _m_subject("matrix-sub-other", "matrix-sub-other-name"),
+      _m_rename("matrix-sub-other", new_name="matrix-sub-collide",
+                label="Subject"),
+      _m_subject("matrix-sub-third", "matrix-sub-collide"),
+      _m_belief(_MATRIX_ID)], True),
+    # A state op's `SET n += $state` lands the WHOLE map, so a `state.id` moves
+    # IDENTITY: the node keeps existing as `(matrix-moved, name)` and the OLD
+    # id is gone. The boundary must record that burial at the op's seq or it
+    # exempts a belief `rebuild_all` refuses.
+    ("state-op-id-change-buries-the-old-id",
+     [_m_object(_MATRIX_ID, "matrix-idmove"),
+      _m_rename(_MATRIX_ID, state={"id": "matrix-moved"}),
+      _m_belief(_MATRIX_ID)], True),
+    # FALSE-RED TWIN: the SAME id registered under TWO names leaves TWO nodes,
+    # so re-id'ing the first name does NOT remove the id (the other node still
+    # carries it) — the graph keeps `(n-7936-matrix, name=matrix-n2)` and
+    # `rebuild_all` folds the belief. The boundary must NOT bury the id.
+    ("same-id-two-names-then-name-reuse-keeps-the-id",
+     [_m_object(_MATRIX_ID, "matrix-n1"),
+      _m_object(_MATRIX_ID, "matrix-n2"),
+      _m_object("matrix-third", "matrix-n1"),
+      _m_belief(_MATRIX_ID)], False),
+    # #7936 P2: a non-Point belief whose EVERY carried value fails the value gate
+    # makes `_fold_confidence_changed` fold 0 rows and `rebuild_all` RECORDS a
+    # `point-belief-miss`. The reference fold must not exempt it on key presence
+    # alone — the exemption is gated on a value surviving the gate.
+    ("non-point-belief-with-an-unfoldable-value-is-refused",
+     [_m_object(_MATRIX_ID, "matrix-valuegate"),
+      {"type": "ConfidenceChanged", "id": _MATRIX_ID,
+       "confidence": "nope"}], True),
 ]
 
 
@@ -1084,3 +1169,64 @@ def test_content_comparison_known_gap_non_point_belief_is_invisible(tmp_path):
     assert after["ok"] is True, after
     assert after["divergence"] is None, after
     assert after["hash_match"] is True, after
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 10. `_promote_incident_operators` — the widened endpoint read
+# ═══════════════════════════════════════════════════════════════════
+#
+# #7853 widened this method's endpoint read from `:Point`-only to
+# `epistemic_disjunction('s')`, so a non-Point endpoint participates in the
+# all-endpoints-live gate. It had no test: reverting the read left the whole
+# suite green.
+
+def test_promote_incident_operators_gates_on_non_point_endpoint_status(sdk):
+    """A draft operator with a live ``:Point`` AND a draft ``:Event`` endpoint
+    must NOT be promoted.
+
+    ``_promote_incident_operators`` reads every endpoint through
+    ``epistemic_disjunction('s')`` so the all-live gate sees non-Point
+    endpoints. Reverting that read to ``:Point``-only hides the draft Event,
+    computes ``all_live`` from the live Point alone, and promotes the operator
+    onto a draft endpoint — the exact pollution the draft lifecycle prevents.
+    A live-endpoints control pins that the sweep is still reached, so the
+    negative assertion cannot pass vacuously (a broken sweep would promote
+    nothing at all).
+    """
+    proj = sdk._get_proj()
+    point_id = make_point(sdk, "a live point")
+    draft_event = make_labeled_node(sdk, "Event", "evt-draft-7853", "drafty")
+    proj.g.query(
+        "MATCH (e:Event {id:$id}) SET e.status = 'draft'",
+        params={"id": draft_event})
+
+    def _draft_operator(op_id: str, endpoints: tuple[str, str]) -> None:
+        proj.g.query(
+            "CREATE (o:Point {id:$opid, is_operator:true, op_type:'IMPL', "
+            "direction:'bidirectional', status:'draft'})",
+            params={"opid": op_id})
+        for idx, sid in enumerate(endpoints):
+            proj.g.query(
+                "MATCH (o:Point {id:$opid}), (s) WHERE s.id = $sid "
+                "CREATE (o)-[:IMPL {idx:$idx}]->(s) "
+                "CREATE (s)-[:INPUT {idx:$idx}]->(o)",
+                params={"opid": op_id, "sid": sid, "idx": idx})
+
+    # Control: every endpoint is live (the Point + an implicit-live Event).
+    live_event = make_labeled_node(sdk, "Event", "evt-live-7853", "lively")
+    clean_op = f"op-clean-{point_id}"
+    _draft_operator(clean_op, (point_id, live_event))
+    # Under test: one live Point, one DRAFT Event endpoint.
+    mixed_op = f"op-mixed-{point_id}"
+    _draft_operator(mixed_op, (point_id, draft_event))
+
+    now = "2026-01-01T00:00:00+00:00"
+    promoted = sdk._promote_incident_operators(proj, point_id, now)
+
+    assert clean_op in promoted, promoted
+    assert mixed_op not in promoted, promoted
+    statuses = dict(proj.g.query(
+        "MATCH (o:Point) WHERE o.id IN $ids RETURN o.id, o.status",
+        params={"ids": [clean_op, mixed_op]}).result_set)
+    assert statuses[clean_op] == "live", statuses
+    assert statuses[mixed_op] == "draft", statuses

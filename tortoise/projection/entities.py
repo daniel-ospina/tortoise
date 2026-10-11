@@ -2473,11 +2473,13 @@ class _EntityHandlers:
         with null writes null (removes the property), mirroring the live SET.
 
         Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
-        signal): 1 = the target epistemic node (:Point, :Subject, :Object or
-        :Event — #7853) was found and folded, 0 = no such node matched
-        (hard-deleted / never re-created) or the record carries no foldable
-        value. Idempotent — a replayed/duplicate event re-applies the same
-        SET.
+        signal): 0 = no such node matched (hard-deleted / never re-created) or
+        the record carries no foldable value; 1 = the target epistemic node
+        (:Point, :Subject, :Object or :Event — #7853) was found and folded on
+        its single label; >1 when one id is carried by a node under several
+        epistemic labels (each label's query returns at most one row), which is
+        the live writers' multi-label sweep. Idempotent — a replayed/duplicate
+        event re-applies the same SET.
 
         #7853: the target is NOT always a Point. The EP write-back journals a
         ``ConfidenceChanged`` for every node it writes, and the widening makes
@@ -2532,17 +2534,23 @@ class _EntityHandlers:
             params[key] = value
         if not set_parts:
             return 0
-        # The SET is idempotent, so a multi-labelled id matching twice is
-        # harmless; stop at the first non-empty result to keep the hot
-        # ``:Point`` lookup first.
+        # #7853 P2 divergence: the LIVE writers (``TortoiseEP._write_node`` /
+        # ``_flush_cache``, ``TortoiseSDK.compute_confidence``,
+        # ``Dreamer._ep_run_batch``) all sweep ALL FOUR labels and never stop
+        # at the first match, so a node carrying more than one epistemic label
+        # (``:Point:Object``) is written under every one of them. The replay
+        # fold used to ``break`` after the first non-empty result, so replay
+        # updated only that first label — silently disagreeing with live on
+        # exactly that node. The SET is idempotent, so sweep them all and
+        # ACCUMULATE the count (never overwrite with a later empty label's 0,
+        # which would manufacture a false ``point-belief-miss``).
         matched = 0
         for _q in epistemic_label_queries(
                 "MATCH (n:{label} {id:$id}) SET " + ", ".join(set_parts) +
                 " RETURN n.id LIMIT 1"):
             r = self.g.query(_q, params=params)
             if r.result_set:
-                matched = len(r.result_set)
-                break
+                matched += len(r.result_set)
         return matched
 
     # ── Entity nodes ───────────────────────────────────────────────

@@ -26471,9 +26471,13 @@ class TortoiseSDK:
                     "outcomes": []}
         match_clause = "s.id = $sid"
 
-        # Direct: Event connects directly to claim Points via IMPL/NAND
-        # (operators connect only epistemic targets per ONTOLOGY.md §8 —
-        # :Point/:Subject/:Object/:Event)
+        # Direct: Event connects directly to claim Points via IMPL/NAND.
+        # ONTOLOGY.md §8: operators connect only epistemic targets
+        # (:Point/:Subject/:Object/:Event). ⚠️ this reader is still
+        # `:Point`-only — the #7853 read widening covers the EP/confidence
+        # path, not reputation; widening it to the other three labels is
+        # tracked by #7902 (the write path admits :Point/:Event only until
+        # then, so a :Subject/:Object endpoint is spec-only here too).
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "

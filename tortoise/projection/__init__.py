@@ -3690,7 +3690,9 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
 #: tracks the same collapse Object-only, and ``consistency._NAME_MERGE_LABELS``
 #: declares the set for the state-op guard. Kept local (not imported from
 #: ``consistency``, which already imports this module) so the belief boundary
-#: does not reach upward.
+#: does not reach upward. The two declarations are pinned equal by
+#: ``tests/test_rebuild_parity_fail_loud_3585.py::
+#: TestReferenceFoldEntityLabelSetHasOneHome::test_the_name_merge_label_sets_have_one_home``.
 _NAME_KEYED_ENTITY_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The non-Point canonical labels the REFERENCE entity fold models. This is
 #: the same set the GRAPH fold reads to decide whether a state-op miss is
@@ -4164,22 +4166,40 @@ def journal_epistemic_existence(events) -> dict:
     write exposes only the later delete (the burial is invisible). Both shapes
     are reproduced in the boundary matrix test.
 
-    Creations are read through the SAME arms :func:`journal_first_materialization`
-    uses (``_JOURNAL_POINT_MATERIALIZATION_TYPES`` for Point/Operator, the
-    ``_ENTITY_CREATION_EVENT_LABEL`` records for Object/Subject/Event), so the
-    two maps cannot read one record differently. Two name-keyed-shape
-    corrections are applied to the Object/Subject arms, because their graph
-    fold does NOT key existence by id alone:
-      * ``_upsert_object`` / ``_upsert_subject`` MERGE the NODE by ``name``,
-        so a later registration of ONE name under a fresh id RE-IDS the single
-        node — the earlier id stops existing with NO journaled delete. The
-        carrier below records that burial at the displacing registration's seq
-        (the same collapse :func:`journal_object_surviving_keys` models);
-        without it the boundary answers EXISTS for the collapsed-away id and
-        exempts a belief ``rebuild_all`` refuses.
-      * Both folds early-return before their MERGE when the name cannot serve
-        as the MERGE key (``_writable_id``), so such a record materializes NO
-        node and must not open an incarnation here.
+    Creations are read through the SAME record arms
+    :func:`journal_first_materialization` uses
+    (``_JOURNAL_POINT_MATERIALIZATION_TYPES`` for Point/Operator, the
+    ``_ENTITY_CREATION_EVENT_LABEL`` records for Object/Subject/Event). For the
+    ID-keyed labels (Point, Event) the two maps read a record, and existence,
+    identically. For the NAME-keyed labels (Object, Subject) they deliberately
+    do NOT: ``_upsert_object`` / ``_upsert_subject`` MERGE the NODE by
+    ``name``, and when more than one node already carries that name the MERGE
+    matches EVERY one of them and re-ids ALL of them — so the node table is
+    many-to-many and no id-keyed map can answer existence. Those two labels are
+    therefore modelled by SIMULATING the graph's node table (``nodes`` below)
+    and deriving the boundary from presence transitions. The EXACT shape where
+    the two maps disagree: a registration or state op that RE-IDS a name-keyed
+    node. ``journal_first_materialization`` still reports the collapsed-away id
+    as materialized (its ``first`` entry predates the collapse), while this map
+    reports it BURIED — and because the graph is the ground truth the belief
+    callers must follow, THIS map wins for Object/Subject. Two corrections
+    follow:
+      * a registration or state op that RE-IDS the node(s) carrying one name
+        BURIES every id that stops being carried, at that record's seq, with NO
+        journaled delete (the same collapse
+        :func:`journal_object_surviving_keys` models Object-only); without it
+        the boundary answers EXISTS for a collapsed-away id and exempts a belief
+        ``rebuild_all`` refuses — the exact shape the #7936 round-5 P1 reported.
+      * both creation folds early-return before their MERGE when the name
+        cannot serve as the MERGE key (``_writable_id``), so such a record
+        materializes NO node and must not open an incarnation here.
+
+    A state op (``_ENTITY_MUTATION_STATE_OPS``) is the graph fold's
+    ``MATCH (n:$label {id:$rid}) SET n += $state``: the whole applied map lands
+    on EVERY node carrying that id, so a ``state["name"]`` MOVES the merge key
+    and a ``state["id"]`` MOVES IDENTITY — the node keeps existing under the
+    new coordinate and the old one stops (this is the second name-keyed
+    correction: an earlier cut read only ``state["name"]``).
 
     Deletes are the hard deletes
     the replay folds: an ``EntityMutated`` op=delete removes its own canonical
@@ -4195,19 +4215,116 @@ def journal_epistemic_existence(events) -> dict:
     """
     creates: dict[tuple[str, str], list[int]] = {}
     deletes: dict[tuple[str, str], list[int]] = {}
-    #: The NAME-keyed carrier, mirroring :func:`journal_object_surviving_keys`:
-    #: ``(label, name) -> id`` and its reverse ``(label, id) -> name``. A later
-    #: registration of one name under a fresh id displaces the carrier and
-    #: BURIES the previous id; a rename MOVES the carrier (the graph fold's
-    #: ``SET n += $state``); a delete FREES it. All three mirror the graph
-    #: fold's merge-key semantics or the boundary disagrees with it.
-    carrier: dict[tuple[str, str], str] = {}
-    name_of: dict[tuple[str, str], str] = {}
 
-    def _release_name(lbl: str, rid: str) -> None:
-        nm = name_of.pop((lbl, rid), None)
-        if nm is not None and carrier.get((lbl, nm)) == rid:
-            carrier.pop((lbl, nm), None)
+    class _Node:
+        """One live graph node for a NAME-keyed label.
+
+        IDENTITY-hashed (Python's default object hash) so a set can hold two
+        records with equal ``id``/``name`` — exactly what a non-unique MERGE
+        leaves behind — and so an in-place ``id``/``name`` update through one
+        view is visible through every other.
+        """
+        __slots__ = ("id", "name")
+
+        def __init__(self, rid, name):
+            self.id = rid
+            self.name = name
+
+    #: The simulated graph NODE TABLE for the NAME-keyed labels, mirroring
+    #: ``_upsert_object`` / ``_upsert_subject``. A COLLECTION per label (not a
+    #: ``(label, name) -> id`` bijection, and not one slot per name):
+    #: ``MERGE (n:L {name:$name})`` on a name carried by MORE THAN ONE node
+    #: matches every one of them and the ``ON MATCH SET n.id=...`` re-ids them
+    #: ALL, so one name can map to several live nodes — the #7936 round-5 P1 a
+    #: 1:1 carrier could not express. ``by_name``/``by_id`` are lookup INDICES
+    #: over the SAME records, so a consult is O(1); the graph itself does the
+    #: O(#matches) re-id work, so the model cannot be cheaper than the fold it
+    #: simulates.
+    nodes: dict[str, set] = {
+        label: set() for label in _NAME_KEYED_ENTITY_LABELS}
+    by_name: dict[tuple[str, object], set] = {}
+    by_id: dict[tuple[str, object], set] = {}
+
+    def _track(label: str, node: _Node) -> None:
+        nodes[label].add(node)
+        by_name.setdefault((label, node.name), set()).add(node)
+        by_id.setdefault((label, node.id), set()).add(node)
+
+    def _untrack(label: str, node: _Node) -> None:
+        nodes[label].discard(node)
+        for idx, key in ((by_name, (label, node.name)),
+                         (by_id, (label, node.id))):
+            bucket = idx.get(key)
+            if bucket is not None:
+                bucket.discard(node)
+                if not bucket:
+                    idx.pop(key, None)
+
+    def _id_live(label: str, rid) -> bool:
+        return bool(by_id.get((label, rid)))
+
+    def _note_presence(label: str, rid, seq: int, was_live: bool) -> None:
+        """Record the presence TRANSITION for ``(label, rid)`` at ``seq``.
+
+        Only a transition is recorded: an id that was already live does not
+        open a new incarnation, and an id that was not live is not "deleted".
+        The boundary lists are replayed by :func:`_existence_state`, which
+        ignores a delete that precedes the latest creation anyway.
+        """
+        if not isinstance(rid, str):
+            return
+        now_live = _id_live(label, rid)
+        if now_live and not was_live:
+            creates.setdefault((label, rid), []).append(seq)
+        elif was_live and not now_live:
+            deletes.setdefault((label, rid), []).append(seq)
+
+    def _hashable(value) -> bool:
+        """Can ``value`` be a dict/set key? A corrupt journal line can carry a
+        list/map where a scalar belongs; the GRAPH fold rejects that at the
+        parameter boundary, but this simulation must not raise on it."""
+        try:
+            hash(value)
+        except TypeError:
+            return False
+        return True
+
+    def _apply_node_state(label: str, rid: str, state: dict,
+                          seq: int) -> None:
+        """The graph fold's ``SET n += $state`` over every node with id
+        ``rid``, plus the identity transitions it causes."""
+        prop = _ENTITY_ID_PROP[label]
+        matches = list(by_id.get((label, rid), ()))
+        if not matches:
+            return
+        # Only identity keys matter to the boundary: `name` moves the MERGE
+        # key, the label's id prop moves identity. Every other applied key
+        # (status, title, ...) is invisible here.
+        affected = {n.id for n in matches if isinstance(n.id, str)}
+        if isinstance(state.get(prop), str):
+            affected.add(state[prop])
+        was = {k: _id_live(label, k) for k in affected}
+        for n in matches:
+            if "name" in state and _hashable(state["name"]):
+                newname = state["name"]
+                bucket = by_name.get((label, n.name))
+                if bucket is not None:
+                    bucket.discard(n)
+                    if not bucket:
+                        by_name.pop((label, n.name), None)
+                n.name = newname
+                by_name.setdefault((label, newname), set()).add(n)
+            if prop in state and _hashable(state[prop]):
+                newid = state[prop]
+                bucket = by_id.get((label, n.id))
+                if bucket is not None:
+                    bucket.discard(n)
+                    if not bucket:
+                        by_id.pop((label, n.id), None)
+                n.id = newid
+                by_id.setdefault((label, newid), set()).add(n)
+        for k in affected:
+            _note_presence(label, k, seq, was[k])
 
     for seq, raw in enumerate(events):
         ev = _norm(raw) if isinstance(raw, dict) else {}
@@ -4228,13 +4345,35 @@ def journal_epistemic_existence(events) -> dict:
                     # incarnation the graph fold never created.
                     if not _writable_id(name):
                         continue
-                    prev = carrier.get((label, name))
-                    if prev is not None and prev != eid:
-                        deletes.setdefault((label, prev), []).append(seq)
-                        name_of.pop((label, prev), None)
-                    carrier[(label, name)] = eid
-                    name_of[(label, eid)] = name
-                creates.setdefault((label, eid), []).append(seq)
+                    # `MERGE (n:L {name:$name}) ON MATCH SET n.id=$eid` — the
+                    # MERGE matches EVERY node already carrying this name and
+                    # the SET re-ids ALL of them; with no match it creates ONE
+                    # node. Modelling that 1:many is the whole point (see
+                    # `nodes`).
+                    matches = list(by_name.get((label, name), ()))
+                    if matches:
+                        affected = {n.id for n in matches
+                                    if isinstance(n.id, str)}
+                        affected.add(eid)
+                        was = {k: _id_live(label, k) for k in affected}
+                        for n in matches:
+                            if n.id == eid:
+                                continue
+                            bucket = by_id.get((label, n.id))
+                            if bucket is not None:
+                                bucket.discard(n)
+                                if not bucket:
+                                    by_id.pop((label, n.id), None)
+                            n.id = eid
+                            by_id.setdefault((label, eid), set()).add(n)
+                        for k in affected:
+                            _note_presence(label, k, seq, was[k])
+                    else:
+                        was_live = _id_live(label, eid)
+                        _track(label, _Node(eid, name))
+                        _note_presence(label, eid, seq, was_live)
+                else:
+                    creates.setdefault((label, eid), []).append(seq)
         elif t == "EntityMutated" and ev.get("op") == "delete":
             rid = ev.get("id")
             if not isinstance(rid, str):
@@ -4244,38 +4383,31 @@ def journal_epistemic_existence(events) -> dict:
                       and label in _CANONICAL_ENTITY_LABELS
                       else _HARD_DELETE_LABELS)
             for lbl in labels:
+                if (lbl in _NAME_KEYED_ENTITY_LABELS
+                        and _id_live(lbl, rid)):
+                    # The delete removes EVERY node carrying the id, freeing
+                    # the names they held. Without this, a later registration
+                    # of the SAME name could not be modelled at all. The
+                    # `deletes` record below is unconditional (matching the
+                    # pre-existing behaviour); only the node table changes.
+                    for node in list(by_id.get((lbl, rid), ())):
+                        _untrack(lbl, node)
                 deletes.setdefault((lbl, rid), []).append(seq)
-                # The delete removes the node, so the name it carried is no
-                # longer taken. Without this, a later registration of the SAME
-                # name would falsely displace the deleted id and a RENAME of it
-                # could not be modelled at all.
-                if lbl in _NAME_KEYED_ENTITY_LABELS:
-                    _release_name(lbl, rid)
         elif (t == "EntityMutated"
               and ev.get("op") in _ENTITY_MUTATION_STATE_OPS
               and isinstance(ev.get("label"), str)
               and ev.get("label") in _NAME_KEYED_ENTITY_LABELS):
             # A state op is the graph fold's `SET n += $state` on
-            # `(label, id)`; when the applied map carries a new `name` it is a
-            # RENAME and it MOVES the merge key. Mirror
-            # `journal_object_surviving_keys`: read the applied `name`, act
-            # only when the id currently carries one, and only for a CANONICAL
-            # label (the fold's own pre-clause — a missing/unknown label
-            # returns 0 rather than renaming id-wide).
+            # `(label, id)` — and the WHOLE map lands, so `state.id` moves
+            # identity exactly as `state.name` moves the MERGE key. Apply it
+            # to every node carrying the id, and record what the mutation did
+            # to (label, id) presence. Only for a CANONICAL label (the fold's
+            # own pre-clause — a missing/unknown label returns 0 rather than
+            # mutating id-wide).
             rid = ev.get("id")
-            label = ev.get("label")
             state = ev.get("state")
-            newname = state.get("name") if isinstance(state, dict) else None
-            if not (isinstance(rid, str) and isinstance(newname, str)
-                    and newname):
-                continue
-            old = name_of.get((label, rid))
-            if old is None:
-                continue
-            if carrier.get((label, old)) == rid:
-                carrier.pop((label, old), None)
-            name_of[(label, rid)] = newname
-            carrier[(label, newname)] = rid
+            if isinstance(rid, str) and isinstance(state, dict):
+                _apply_node_state(ev["label"], rid, state, seq)
         elif t == "PointsMerged":
             # #331: `or []` also covers an explicit "merge_ids": null.
             for mid in ev.get("merge_ids") or []:
@@ -4372,6 +4504,13 @@ def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
     A creation that arrives ONLY LATER is a forward reference the live write
     no-op'd; the caller's next arm (:func:`_epistemic_forward_reference`)
     skips it, so this predicate answers EXISTENCE alone.
+
+    ⛔ EXISTENCE alone is NOT enough to exempt: the graph fold also requires a
+    value that survives the value gate (a record whose every belief value is
+    corrupt makes ``_fold_confidence_changed`` fold 0 rows and refuse), so the
+    CALLER must AND this with that gate — see ``_apply_one``'s ``_foldable_prop``
+    (#7936 P2). Adding the value gate here would change what this predicate
+    means for its existence-only readers.
 
     NOTE the index itself is still point-only: the exemption suppresses the
     false miss, it does not fold the belief into ``fold()`` /
@@ -4782,6 +4921,20 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # corrupt line (#330 parity).
         rid = ev.get("id")
         _has_prop = any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
+        # #7936 P2: the NON-POINT exemption below must be gated on a value that
+        # SURVIVES the value gate, not on key presence alone. A record whose
+        # every carried belief value is corrupt (``confidence: "nope"``) makes
+        # ``_fold_confidence_changed`` take an empty SET list and return 0, so
+        # `rebuild_all` RECORDS a ``point-belief-miss`` and refuses the journal;
+        # an exemption that asked `_has_prop` alone called the same journal
+        # healthy — a false green that, tested first, also masks a genuine
+        # content divergence on the node.
+        _foldable_prop = (
+            any(_belief_prop_value_ok(k, ev[k])
+                for k in BELIEF_PROPS if k in ev)
+            or any(_belief_bool_value_ok(ev[k])
+                   for k in BELIEF_BOOL_PROPS if k in ev)
+        )
         p = points.get(rid) if _writable_id(rid) else None
         if p:
             for key in BELIEF_PROPS:
@@ -4802,15 +4955,19 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
-        elif (_writable_id(rid) and _has_prop
+        elif (_writable_id(rid) and _foldable_prop
                 and _reference_fold_non_point_target(
                     journal_existence, rid, journal_seq)):
             # #7936 interim: the id IS materialized by the journal — as a
-            # `:Subject`/`:Object`/`:Event`. `points` cannot represent it, so
-            # this point-only fold DROPS the belief (the graph fold does not).
-            # Say so instead of dropping it silently, and do NOT record a miss:
-            # a false `non-folded` reds a healthy graph and, tested first,
-            # masks a genuine content divergence on it (#7936).
+            # `:Subject`/`:Object`/`:Event` — AND at least one carried belief
+            # value survives the value gate, so the graph fold WILL resolve and
+            # write it. `points` cannot represent it, so this point-only fold
+            # DROPS the belief (the graph fold does not). Say so instead of
+            # dropping it silently, and do NOT record a miss: a false
+            # `non-folded` reds a healthy graph and, tested first, masks a
+            # genuine content divergence on it (#7936). The `_foldable_prop`
+            # half is the P2: with every value corrupt `rebuild_all` refuses,
+            # so the exemption must fall through to the miss arm below.
             logger.warning(
                 "reference fold: ConfidenceChanged targets the non-Point "
                 "epistemic node %r; the in-memory {id: point} index cannot "

@@ -1192,7 +1192,9 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > layer split being unwound (objects ARE in the epistemic layer). The
 > *operator* node itself stays `:Point {is_operator:true}`; only its children
 > and targets may be any of the four labels. The departure from the pre-#7813
-> "write-only" rule is marked at §8 (`OVERRIDES`).
+> "write-only" rule is marked at §8 (`OVERRIDES`). ⚠️ `:Subject`/`:Object`
+> operator endpoints are spec-only until #7902 lands — the write path admits
+> `:Point`/`:Event` only (the read/EP path already admits all four, §3.1).
 >
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
