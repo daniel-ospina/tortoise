@@ -53,12 +53,14 @@ fi
 # ── The ONE HOME-scoped local-state derivation (#3797) ───────────────────
 # The two HOME-scoped writers in THIS script — the capture-error breadcrumb
 # and the hook-run observation — resolve their directory here, so they cannot
-# disagree about where the state tree is.  FIVE sibling hooks still carry their
+# disagree about where the state tree is.  SIX sibling hooks still carry their
 # own copies of this surgery and must be kept in step BY HAND: `session-end.sh`
 # and `session-turn.sh` in this directory, `volunteer-turn.sh`,
-# `codex-hooks/session-end.sh` and `cursor-hooks/session-end.sh`.  This helper
-# is the only one of the six that also drops a trailing `/.` — the copies do
-# not — so a `TORTOISE_IMPORT_RECEIPT_DIR` ending in `/.` still splits them.
+# `codex-hooks/session-end.sh`, `cursor-hooks/session-end.sh` and
+# `cursor-hooks/session-start.sh` (added by #2122).  TWO of the seven drop a
+# trailing `/.` — this helper and `cursor-hooks/session-start.sh` — so a
+# `TORTOISE_IMPORT_RECEIPT_DIR` ending in `/.` still splits them from the five
+# copies that do not.
 # That residual is the #4373 duplication, tracked in #5503 (with the measured
 # per-copy matrix, the receipt writer/reader empty-override split, and the
 # fallible-derivation traceback); a sourced shared snippet would close it, and

@@ -995,10 +995,11 @@ def test_upgrade_from_a_generation_3_install_adds_the_injection_half(tmp_path):
     install before #2122) is DRIFT, and `upgrade` repairs it: the missing
     sessionStart script + registration land, the stale script is re-written.
 
-    Mutation: leave the generation at 3 — `detect_install` reports nothing
-    stale, `upgrade` is a no-op, and an already-installed host never receives
-    the injection half. (The byte comparison would still flag the stale script;
-    the missing script/entry are what carry the half.)"""
+    Mutation: skip the generation bump (leave it at 3) — the missing script and
+    `sessionStart` entry are repaired regardless of the marker, so `upgrade` is
+    NOT a no-op and the injection half DOES land; what the mutation leaves
+    behind is the stale generation, so `detect_install` keeps reporting
+    `stale-script` and this test's `detect_install(...) == []` assertion REDs."""
     home = tmp_path / "home"
     home.mkdir()
     assert install_capture("cursor", home=home).ok

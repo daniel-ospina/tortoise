@@ -2934,13 +2934,14 @@ def _install_capture_seam(args, install_capture) -> int:
         # hook emits is `additional_context`; whether Cursor delivers it to the
         # model is Cursor's side of the seam (community-reported reliability
         # caveats), so this names the artifact, not a delivery promise.
-        print(
-            f"Cursor memory is installed in {cursor_root / 'hooks.json'}: "
-            "the sessionEnd capture hook, plus the sessionStart hook that "
-            "injects the cold-context digest as Cursor's "
-            "`additional_context` (sessionStart is Cursor's only context-"
-            "injection seam — its per-turn beforeSubmitPrompt event can "
-            "observe/block a prompt but cannot inject).")
+        if result.changed:
+            print(
+                f"Cursor memory is installed in {cursor_root / 'hooks.json'}: "
+                "the sessionEnd capture hook, plus the sessionStart hook that "
+                "injects the cold-context digest as Cursor's "
+                "`additional_context` (sessionStart is Cursor's only context-"
+                "injection seam — its per-turn beforeSubmitPrompt event can "
+                "observe/block a prompt but cannot inject).")
         print(
             f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
             f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "

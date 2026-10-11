@@ -189,7 +189,9 @@ def local_state_dir(leaf: str) -> Path:
       and its reader ``session_verify._local_import_receipt`` — a copy whose
       EMPTY-override behaviour differs (the writer takes ``""`` as a value,
       the reader as unset);
-    * the five sibling shell hooks, which do not drop a trailing ``/.``.
+    * the six sibling shell hooks — five of which, unlike this resolver, do not
+      drop a trailing ``/.`` (``cursor-hooks/session-start.sh``, added by
+      #2122, does).
 
     ``TORTOISE_IMPORT_RECEIPT_DIR`` names the RECEIPT dir, so the base is its
     ``.parent``.  An override that is UNSET **or EMPTY** falls back to

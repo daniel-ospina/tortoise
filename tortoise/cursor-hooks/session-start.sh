@@ -224,7 +224,7 @@ fi
 # a JSON encoder. python3 is a hard requirement once we emit: without it the
 # digest cannot be escaped into valid JSON, so the hook leaves EVIDENCE and
 # exits 0 rather than emitting a possibly-malformed document.
-PY3="$(command -v python3 || true)"
+PY3="${PYTHON_BIN:-$(command -v python3 || true)}"
 if [ -z "$PY3" ]; then
   _record_breadcrumb "the Cursor sessionStart hook produced a digest (${#DIGEST} chars) but found no python3 to encode Cursor's JSON output contract; Cursor injected nothing"
   exit 0
