@@ -15897,7 +15897,12 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
     an uncertified walk is a lower bound, and a lower bound is not a count),
     and `not_measurable` for an org that has never produced memory, where
     there is nothing to recall from and no retry would change it. Conflating
-    those two would accuse a healthy org of failing to report.
+    those two would accuse a healthy org of failing to report — and the
+    converse (#4039) is just as wrong: an org whose DEFAULT graph has no
+    memory while its org-wide windowed retrieval count is exactly positive is
+    not an org that has nothing to recall from, it is one whose memory may lie
+    outside the graph this read opens, so the fold refuses it as `unavailable`
+    / `no_memory_in_default_graph_org_scope_unknown`.
 
     #4038: the read WALKS the window to completion through
     ``SupabaseControlPlane.query_all`` (keyset on `id`, ending on an EMPTY

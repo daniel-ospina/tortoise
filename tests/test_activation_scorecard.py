@@ -1151,9 +1151,56 @@ def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeyp
     assert stage["reason"] == "first_memory_at_missing", stage
 
 
-def test_no_memory_in_lifetime_means_recall_is_unmeasurable(client, monkeypatch):
+def test_no_memory_in_lifetime_without_org_wide_activity_is_not_measurable(
+        client, monkeypatch):
+    """The GREEN half of #4039's verification table: an org that has produced
+    no memory anywhere — and whose org-wide windowed retrieval count is an exact
+    `0`, so nothing contradicts the graph-scoped absence — stays
+    `not_measurable`/`no_memory_produced_in_lifetime`. There is nothing to
+    recall FROM and no retry changes that, so the state must not be upgraded to
+    `unavailable` merely because the gate is graph-scoped."""
     import tortoise.supabase_control as sc
     _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)  # stored, no memory
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _CP:
+        def query(self, *a, **kw):
+            return []
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
+    # `not_measurable`, NOT `unavailable`: the org has never produced memory, so
+    # there is nothing to recall FROM and no retry changes that. Asserting the
+    # state is what keeps the two vocabularies from collapsing into each other.
+    assert stage["state"] == "not_measurable", stage
+    # The exact zero IS reported: 0 org-wide retrieval calls in the window is
+    # the evidence that this absence is not merely a graph-scope artifact.
+    assert body["detail"]["recall_attempted_any"] == 0, body["detail"]
+
+
+def test_no_memory_in_lifetime_with_an_org_wide_retrieval_call_is_ambiguous(
+        client, monkeypatch):
+    """The RED half of #4039's verification table (the MUTATION this test
+    exists to fail on): a multi-graph org — memory in graph B, a retrieval call
+    in the window — must NOT read `not_measurable` as a fact about the org.
+
+    Stage 4 is GATED on the org DEFAULT graph's `first_memory_at` while it
+    COUNTS the org-wide analytics stream. Graph B is INVISIBLE to this read (the
+    endpoint opens the org namespace graph only), so the fixture models the
+    shape the surface can actually observe for that org: no default-graph
+    memory, and an EXACT, POSITIVE org-wide retrieval count. That pair is the
+    graph-scope ambiguity showing itself, and the stage must refuse —
+    `unavailable` + the scope-qualified reason — instead of asserting an
+    org-scope absence this read cannot establish. Before #4039 this fixture
+    returned `not_measurable` / `no_memory_produced_in_lifetime`.
+    """
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)  # no memory in the DEFAULT graph
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -1167,11 +1214,32 @@ def test_no_memory_in_lifetime_means_recall_is_unmeasurable(client, monkeypatch)
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     stage = body["stages"]["recall_attempted"]
     assert stage["value"] is None, stage
-    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
-    # `not_measurable`, NOT `unavailable`: the org has never produced memory, so
-    # there is nothing to recall FROM and no retry changes that. Asserting the
-    # state is what keeps the two vocabularies from collapsing into each other.
-    assert stage["state"] == "not_measurable", stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "no_memory_in_default_graph_org_scope_unknown", stage
+    # The evidence for the refusal is IN the payload, not inferred from the
+    # reason string: the exact count that contradicts the graph-scoped gate.
+    assert body["detail"]["recall_attempted_any"] == 1, body["detail"]
+    # The payload's own graph_scope field still says what the GATE read, so a
+    # consumer is not told the gate became org-wide.
+    assert body["detail"]["graph_scope"] == "org_default_graph", body["detail"]
+
+
+def test_the_graph_scope_refusal_is_disclosed_in_the_payload():
+    """#4039 asks for the ambiguity to be SURFACED, not only detected. A reason
+    string nobody can interpret is not disclosure, so the distinct reason must
+    appear in the payload's own `limitations` — with the residual stated (the
+    rows where the count is withheld or 0 still read as an org-scope absence).
+    """
+    from tortoise.activation_scorecard import (
+        GRAPH_SCOPE_UNKNOWN_REASON,
+        LIMITATIONS,
+    )
+    disclaimers = " ".join(LIMITATIONS)
+    assert GRAPH_SCOPE_UNKNOWN_REASON in disclaimers, disclaimers
+    # The gate's scope is still disclosed separately, so the refusal reason and
+    # `detail.graph_scope` cannot be read as contradicting each other.
+    assert "graph_scope" in disclaimers, disclaimers
+    assert "RESIDUAL" in disclaimers, disclaimers
 
 
 def test_unavailable_is_reserved_for_the_recoverable_failures(client, monkeypatch):
@@ -1949,6 +2017,46 @@ def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
     assert cell["orgs_unavailable"] == [], cell
 
 
+def test_cohort_attributes_the_graph_scope_refusal_to_each_org():
+    """#4039 leaves `recall_attempted`'s `unavailable` reachable with a reason
+    that is a property of ONE ORG, not of the shared store. The cohort's hoisted
+    note is a claim ABOUT THE STORE ("server-level condition rather than a
+    per-org read failure"), so writing it for this reason would introduce a NEW
+    false claim while fixing an old one.
+
+    The three things that must hold: the note is attributed per-org, the
+    affected orgs stay named in `orgs_unavailable`, and a genuine server-level
+    reason still gets the original store-level sentence (pinned by the endpoint
+    test that asserts the exact text).
+    """
+    from tortoise.activation_scorecard import (
+        GRAPH_SCOPE_UNKNOWN_REASON,
+        shared_stage_notes,
+    )
+    scoped = _payload(1, 1, 0, "unavailable")
+    scoped["stages"]["recall_attempted"]["reason"] = GRAPH_SCOPE_UNKNOWN_REASON
+    shared = _payload(1, 1, 0, "unavailable")
+    shared["stages"]["recall_attempted"]["reason"] = "analytics_store_unreachable"
+
+    notes = shared_stage_notes([scoped, shared])
+    assert len(notes) == 2, notes
+    scope_note = next(n for n in notes if GRAPH_SCOPE_UNKNOWN_REASON in n)
+    store_note = next(n for n in notes if "analytics_store_unreachable" in n)
+    assert "property of EACH named org" in scope_note, scope_note
+    assert "server-level" not in scope_note, scope_note
+    assert "orgs_unavailable" in scope_note, scope_note
+    assert "server-level condition" in store_note, store_note
+
+    # ...and the roll-up bins the org as NOT measurable-for-this-stage, naming
+    # it: an ambiguous read is not "the org answered, and there was nothing".
+    report = roll_up_cohort(["a", "b"], [scoped, _payload(1, 1, 1, "measured", 4)])
+    cell = report["stages"]["recall_attempted"]
+    assert cell["state"] == "partial", cell
+    assert cell["orgs_unavailable"] == ["a"], cell
+    assert cell["orgs_not_measurable"] == [], cell
+    assert cell["value"] == 4, cell
+
+
 def test_cohort_client_refuses_a_response_bound_to_another_org_list(
         monkeypatch, capsys):
     """The client binds the report to the orgs it ASKED FOR. The server echoes
@@ -2043,9 +2151,13 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     """`detail.recall_attempted_any` must mean the same thing everywhere: the
     allowlisted count over the WINDOW, emitted only when it is EXACT (window
     verified, page not truncated, every row placeable/classifiable).
-    Otherwise it is withheld AND the exclusion counters name the reason. The
-    STAGE precedence is unchanged: an org with no memory stays `not_measurable`,
-    it does not become `unavailable`."""
+    Otherwise it is withheld AND the exclusion counters name the reason.
+
+    #4039 narrows the old blanket "an org with no memory stays `not_measurable`":
+    it stays `not_measurable` only while the exact count does NOT contradict the
+    graph-scoped gate (withheld, or an exact `0`). An exact POSITIVE count is
+    org-wide evidence against an org-scope absence, so that path refuses with
+    the scope-qualified reason instead. Both directions are asserted below."""
     from tortoise.activation_scorecard import recall_stages
     window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
     clean = [{"properties": {"tool_name": "tortoise_search"},
@@ -2053,23 +2165,42 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     rows = [*clean, {"properties": {"tool_name": "tortoise_recall"},
                      "created_at": "2027-01-01T00:00:00+00:00"}]
 
-    # Out-of-window row: the window failure is named, the count withheld.
+    # Out-of-window row: the window failure is named, the count withheld — so
+    # the graph-scoped gate is NOT contradicted and `not_measurable` stands.
     stage, detail = recall_stages(rows, None, memory_sessions=0, window=window)
     assert stage["state"] == "not_measurable", stage
     assert stage["reason"] == "no_memory_produced_in_lifetime", stage
     assert detail["analytics_window_out_of_range"] == 1, detail
     assert detail["recall_attempted_any"] is None, detail
 
-    # Exact read: the raw count IS reported.
-    _, ok = recall_stages(clean, None, memory_sessions=0, window=window)
+    # Exact read: the raw count IS reported — and a positive one is the
+    # evidence that turns the stage into the scope-qualified refusal.
+    stage_pos, ok = recall_stages(clean, None, memory_sessions=0, window=window)
     assert ok["recall_attempted_any"] == 1, ok
+    assert stage_pos["state"] == "unavailable", stage_pos
+    assert stage_pos["reason"] == "no_memory_in_default_graph_org_scope_unknown", stage_pos
 
-    # Unplaceable rows: withheld, and the COUNTER names why.
+    # An exact 0 contradicts nothing: no org-wide activity, so the org-scope
+    # absence is unsupported rather than contradicted — `not_measurable`.
+    stage_zero, zero = recall_stages(
+        [{"properties": {"tool_name": "tortoise_health"},
+          "created_at": "2026-09-16T13:00:00+00:00"}],
+        None, memory_sessions=0, window=window)
+    assert zero["recall_attempted_any"] == 0, zero
+    assert stage_zero["state"] == "not_measurable", stage_zero
+    assert stage_zero["reason"] == "no_memory_produced_in_lifetime", stage_zero
+
+    # Unplaceable rows: withheld, and the COUNTER names why — the gate is not
+    # contradicted by an unreadable row, so the state stays `not_measurable`
+    # (the disclosed RESIDUAL: a multi-graph org is indistinguishable from a
+    # single-graph one here; see the module's LIMITATIONS).
     bad_stamp = [{"properties": {"tool_name": "tortoise_search"},
                   "created_at": "not-a-timestamp"}]
-    _, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
+    withheld, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
     assert s1["recall_attempted_any"] is None, s1
     assert s1["unparseable_analytic_rows"] == 1, s1
+    assert withheld["state"] == "not_measurable", withheld
+    assert withheld["reason"] == "no_memory_produced_in_lifetime", withheld
     _, s2 = recall_stages([42, *clean], None, memory_sessions=0, window=window)
     assert s2["recall_attempted_any"] is None, s2
     assert s2["unclassifiable_analytic_rows"] == 1, s2
