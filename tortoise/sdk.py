@@ -15703,7 +15703,7 @@ class TortoiseSDK:
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
-        reachable = self._reachable_claim_count()
+        reachable = self._reachable_claim_count(max_hops)
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
         result["coverage"] = coverage
@@ -15883,15 +15883,27 @@ class TortoiseSDK:
             frontier = _hop(frontier)
         return closure
 
-    def _reachable_claim_count(self) -> int:
+    def _reachable_claim_count(self, max_hops: int) -> int:
         """Live non-operator claims reachable from EP (full-mode coverage
         denominator: total_affected / reachable non-operator claims).
 
         Reachable = claims participating in ≥1 IMPL|NAND edge (operator-
-        mediated or direct) — the EP-run universe. Operator-less claims with
-        no edges are reported separately via ``scanned_count`` and are NOT
-        in the denominator (EP cannot reach them; DE2E-1 keeps
-        total_affected reachable-only).
+        mediated or direct) that the FULL pass can actually reach. The full
+        pass anchors at the non-operator Points (`dream_all`'s scan), so its
+        universe is bounded by the claim-hop closure of those anchors —
+        `_window_closure`, the same superset the local/stale-first passes use
+        as their denominator (#6597). Intersecting with the edged set keeps
+        two exclusions the ratio depends on:
+
+        - Operator-less claims with no edges are reported separately via
+          ``scanned_count`` and are NOT in the denominator (EP cannot reach
+          them; DE2E-1 keeps total_affected reachable-only).
+        - A component with NO Point anchor — e.g. an isolated
+          ``:Subject-[:IMPL]->:Object`` — is not reachable by the full pass,
+          so it must not inflate the denominator either. #7902 makes such a
+          component writable, but the full-mode anchor scan is still
+          Point-only (#7927); the closure is what keeps the two sides of the
+          ratio consistent in the meantime.
 
         P2-review (#1244): the FAR endpoint is draft-filtered too — a live
         claim whose only IMPL edge connects to a draft cannot be affected by
@@ -15900,19 +15912,30 @@ class TortoiseSDK:
         converged pass reports coverage < 1.0 forever).
         """
         proj = self._get_proj()
-        # #7853: the EP-run universe widened to every epistemic label, so
-        # this denominator must too — else `coverage = total_affected /
-        # reachable` exceeds 1.0 for a non-`:Point` operator input.
+        # The anchors are dream_all's own scan (drafts included; the closure
+        # seed applies the live predicate).
         rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id"
+        ).result_set
+        anchors = [r[0] for r in rows]
+        if not anchors:
+            return 0
+        closure = self._window_closure(anchors, max_hops)
+        # The EP-run universe: claims with ≥1 IMPL|NAND edge, any epistemic
+        # label on either endpoint (#7902).
+        edged_rows = proj.g.query(
             "MATCH (n)-[r:IMPL|NAND]-(m) "
             f"WHERE {epistemic_disjunction('n')} "
             f"AND {epistemic_disjunction('m')} "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status <> 'draft') "
             "AND (m.status IS NULL OR m.status <> 'draft') "
-            "RETURN count(DISTINCT n)"
+            "RETURN DISTINCT n.id"
         ).result_set
-        return int(rows[0][0])
+        edged = {r[0] for r in edged_rows}
+        return len(closure & edged)
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",

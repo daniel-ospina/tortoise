@@ -675,3 +675,41 @@ def test_affected_claims_tolerates_unresolved_and_duplicate_seeds(sdk):
     baseline = ep._affected_claims([p1], 2)
     assert ep._affected_claims([p1, p1], 2) == baseline
     assert ep._affected_claims([p1, "no-such-7902-seed"], 2) == baseline
+
+
+def test_full_coverage_excludes_unreachable_non_point_component(sdk):
+    """Full-mode coverage denominator is the Point-anchored closure, not
+    every edged claim: a non-Point component the full pass cannot reach must
+    not deflate coverage below 1.0 (the #1244 docstring forbids a fully
+    converged pass reporting coverage < 1.0 forever).
+    """
+    p1 = _point(sdk, "p1-7902-fullA")
+    p2 = _point(sdk, "p2-7902-fullA")
+    sdk.create_direct_edge("IMPL", p1, p2)
+    sub = _node(sdk, "Subject", "sub-7902-fullA")
+    obj = _node(sdk, "Object", "obj-7902-fullA")
+    sdk.create_direct_edge("IMPL", sub, obj)
+
+    result = sdk.dream(mode="full", require_calibration=False)
+    assert result["converged_all"] is True
+    assert result["total_affected"] == 2
+    assert result["coverage"] == 1.0, (
+        f"coverage={result['coverage']} — an unreachable non-Point component "
+        "inflated the full-mode denominator")
+
+
+def test_full_coverage_includes_point_reachable_non_point_neighbour(sdk):
+    """The dual of the above: a non-Point neighbour the full pass DOES reach
+    must be in the denominator, or `total_affected / reachable` exceeds 1.0.
+    """
+    p1 = _point(sdk, "p1-7902-fullB")
+    p2 = _point(sdk, "p2-7902-fullB")
+    sdk.create_direct_edge("IMPL", p1, p2)
+    sub = _node(sdk, "Subject", "sub-7902-fullB")
+    sdk.create_direct_edge("IMPL", p1, sub)
+
+    result = sdk.dream(mode="full", require_calibration=False)
+    assert result["converged_all"] is True
+    assert 0.0 <= result["coverage"] <= 1.0, (
+        f"coverage={result['coverage']} — the full-mode denominator trails "
+        "the widened affected set")
