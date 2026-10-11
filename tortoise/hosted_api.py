@@ -96,6 +96,7 @@ from tortoise.hosted_backup import (
     prune_backups,
     restore_backup,
 )
+from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
@@ -14194,8 +14195,14 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
     ).result_set
     state.entities = {(r[0], r[1] or "") for r in rows}
     rows = proj.g.query(
+        # #7902: the operator-input endpoint may carry any of the four
+        # epistemic labels (the same widening as sdk._find_operator and the
+        # commit_ops MITIGATES dedup below) — a hand-spelled (t:Point OR
+        # t:Event) here left a :Subject/:Object input operator invisible to
+        # reconciliation, so a re-sent payload burned the new-operator budget.
         "MATCH (o:Point {is_operator:true})-[r]->(t) "
-        "WHERE type(r) IN ['IMPL','NAND'] AND (t:Point OR t:Event) "
+        "WHERE type(r) IN ['IMPL','NAND'] "
+        f"AND {epistemic_disjunction('t')} "
         "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
     ).result_set
     ops: dict[str, dict] = {}
@@ -14214,8 +14221,10 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         t = op.target
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-            "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
-            "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set

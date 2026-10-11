@@ -259,83 +259,114 @@ def test_nand_object_input_lowers_target(sdk):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 6. The direct-edge (operator-less) path stays :Point-only
+# 6. The operator-less direct edge — widened on BOTH sides (#7926)
 # ═══════════════════════════════════════════════════════════════════
 #
-# The operator-mediated read widening (the ruling's substance) must NOT be
-# extended to the operator-less DIRECT edge. The direct-edge WRITE path only
-# ever creates `:Point`→`:Point` edges and `_affected_factors` Batch 3 reads
-# the factor as `(a:Point)-[r:IMPL|NAND]->(b:Point)` — so admitting a non-Point
-# endpoint to the affected set puts the two sides out of lockstep: it forms no
-# factor, and `_update_claim_posterior` then recomputes the node from empty
-# natural parameters, `_flush_cache` overwriting its persisted prior with
-# Beta(1,1). Widen BOTH or neither.
+# #7853 left the operator-less DIRECT edge `:Point`-only and stated the choice
+# as a rule: the read side (`_affected_claims`) and the factor side
+# (`_affected_factors` Batch 3) move together — "Widen BOTH or neither". The
+# hazard is the HALF-widened state: admitting a non-Point endpoint to the
+# affected set while Batch 3 still reads `(a:Point)-[r:IMPL|NAND]->(b:Point)`
+# forms no factor, so `_update_claim_posterior` recomputes that node from EMPTY
+# natural parameters and `_flush_cache` overwrites whatever it held with
+# Beta(1,1).
+#
+# #7926 takes the rule's OTHER licensed branch: it widens the direct-edge BFS
+# hop AND Batch 3 in lockstep (the write path already admits the four labels,
+# #7902), so a non-Point endpoint is a genuine factor participant with a real
+# message. Measured (2026-10-11), it lands on the SAME posterior an identical
+# `:Point` endpoint gets — a proper belief, not Beta(1,1). The two tests below
+# pin that by running each shape twice, once with a `:Point` target and once
+# with a non-Point one, and comparing. They go RED if the widening is reverted:
+# the non-Point target is then never admitted, no posterior is written, and its
+# stale `ep_alpha` survives.
 
-def test_operatorless_direct_edge_to_non_point_does_not_clobber_prior(sdk):
-    """#7853 P1-A: a direct IMPL edge to an :Event must not admit it.
+def _direct_edge_target_outcome(tmp_path, label: str, shape: str) -> tuple:
+    """Run an operator-less direct-edge shape; return the target's written values.
 
-    A separate operator factor keeps `factors` non-empty (an empty factor set
-    early-returns before the write-back, masking the defect), so the admitted
-    Event is reached by `_update_claim_posterior` and would be reset.
+    ``shape='one_hop'``: a real operator factor plus one direct edge from the
+    seed to the target (the shape of #7853's first test). ``shape='two_hop'``:
+    seed —direct— pivot —direct— target, so the target is reached by the BFS
+    direct hop rather than the seed's own admission.
+    Returns ``(ep_alpha, ep_beta, posterior_alpha, posterior_beta)``.
     """
+    sdk = TortoiseSDK(db_path=str(tmp_path / f"direct-{shape}-{label}.db"))
     proj = sdk._get_proj()
-    src = make_point(sdk, "direct source")
-    tgt = make_point(sdk, "operator target")
-    event = make_labeled_node(sdk, "Event", "evt-7853-direct", "direct target")
-    # A real factor, so the run does not early-return before write-back.
-    sdk.create_operator("IMPL", src, [tgt], direction="bidirectional")
+    src = make_point(sdk, "seed")
+    if label == "Point":
+        target = make_point(sdk, "target")
+    else:
+        target = make_labeled_node(sdk, label, f"tgt-{shape}-{label}", "target")
+    if shape == "two_hop":
+        pivot = make_point(sdk, "pivot")
+        edges = [(src, pivot), (pivot, target)]
+    else:
+        # A real factor, so the run does not early-return before write-back.
+        sdk.create_operator("IMPL", src, [make_point(sdk, "op target")],
+                            direction="bidirectional")
+        edges = [(src, target)]
     set_evidence(sdk, src, 12.0, 1.0)
-    # A PERSISTED PRIOR on the Event — NOT baseline_set (a baseline is
-    # immutable and would mask the clobber this test exists to catch).
+    # A value the target did NOT derive itself — under an empty-parameter
+    # recompute this is what the Beta(1,1) clobber replaces. NOT baseline_set
+    # (a baseline is immutable and would mask the clobber).
     proj.g.query(
-        "MATCH (n:Event {id:$id}) SET n.ep_alpha=7.0, n.ep_beta=2.0",
-        params={"id": event})
-    # Operator-less direct edge — the #888 W5 shape, non-Point target.
-    proj.g.query(
-        "MATCH (a:Point {id:$a}), (b:Event {id:$b}) "
-        "CREATE (a)-[:IMPL {direction:'bidirectional'}]->(b)",
-        params={"a": src, "b": event})
-
-    run_ep(sdk, [src])
-
-    rows = proj.g.query(
-        "MATCH (n:Event {id:$id}) RETURN n.ep_alpha, n.ep_beta",
-        params={"id": event}).result_set
-    assert rows == [[7.0, 2.0]], (
-        f"the operator-less direct edge admitted the Event and reset its prior "
-        f"to Beta(1,1): {rows}")
-
-
-def test_operatorless_direct_edge_to_non_point_not_widened_at_bfs_hop(sdk):
-    """#7853 P1-A: the BFS direct hop must stay `:Point`-only too.
-
-    The non-Point node sits two hops from the seed (seed —direct— pivot
-    —direct— Event), so it is reached by the BFS direct-edge expansion rather
-    than the seed's own admission. The seed↔pivot direct edge is itself a
-    factor, so the run does not early-return before write-back.
-    """
-    proj = sdk._get_proj()
-    src = make_point(sdk, "bfs source")
-    pivot = make_point(sdk, "bfs pivot")
-    event = make_labeled_node(sdk, "Event", "evt-7853-bfs", "bfs target")
-    set_evidence(sdk, src, 12.0, 1.0)
-    proj.g.query(
-        "MATCH (n:Event {id:$id}) SET n.ep_alpha=7.0, n.ep_beta=2.0",
-        params={"id": event})
-    for a, b in ((src, pivot), (pivot, event)):
+        "MATCH (n) WHERE n.id=$id SET n.ep_alpha=7.0, n.ep_beta=2.0",
+        params={"id": target})
+    for a, b in edges:
         proj.g.query(
-            "MATCH (x:Point {id:$a}), (y {id:$b}) "
+            "MATCH (x:Point {id:$a}), (y) WHERE y.id=$b "
             "CREATE (x)-[:IMPL {direction:'bidirectional'}]->(y)",
             params={"a": a, "b": b})
 
     run_ep(sdk, [src])
 
-    rows = proj.g.query(
-        "MATCH (n:Event {id:$id}) RETURN n.ep_alpha, n.ep_beta",
-        params={"id": event}).result_set
-    assert rows == [[7.0, 2.0]], (
-        f"the BFS direct hop admitted the Event and reset its prior to "
-        f"Beta(1,1): {rows}")
+    row = proj.g.query(
+        "MATCH (n) WHERE n.id=$id "
+        "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta",
+        params={"id": target}).result_set[0]
+    return tuple(row)
+
+
+def test_operatorless_direct_edge_to_non_point_gets_a_proper_posterior(tmp_path):
+    """#7926 (the rule's other branch): a direct IMPL edge to an :Event is a
+    factor participant, so the Event lands on a PROPER posterior.
+
+    A separate operator factor keeps `factors` non-empty (an empty factor set
+    early-returns before the write-back), so the admitted Event really is
+    reached by `_update_claim_posterior` — and, because Batch 3 was widened in
+    lockstep, it gets a message rather than an empty-parameter recompute.
+    """
+    control = _direct_edge_target_outcome(tmp_path, "Point", "one_hop")
+    event = _direct_edge_target_outcome(tmp_path, "Event", "one_hop")
+    assert event[2] is not None and event[3] is not None, (
+        f"the Event was not EP-live — no posterior written: {event}")
+    assert (event[0], event[1]) != (1.0, 1.0), (
+        f"the Event was recomputed from empty natural parameters and "
+        f"clobbered with Beta(1,1): {event}")
+    assert event == control, (
+        f"the Event's outcome {event} differs from the identical :Point "
+        f"control {control}")
+
+
+def test_operatorless_direct_edge_to_non_point_is_admitted_at_bfs_hop(tmp_path):
+    """The BFS direct hop is widened too, so a two-hop non-Point endpoint is
+    EP-live.
+
+    The target sits two hops from the seed (seed —direct— pivot —direct—
+    target), so it is reached by the BFS direct-edge expansion rather than the
+    seed's own admission. Same rule, same evidence: the non-Point outcome must
+    equal the `:Point` control's and must not be Beta(1,1).
+    """
+    control = _direct_edge_target_outcome(tmp_path, "Point", "two_hop")
+    event = _direct_edge_target_outcome(tmp_path, "Event", "two_hop")
+    assert event[2] is not None and event[3] is not None, (
+        f"the Event was not EP-live — no posterior written: {event}")
+    assert (event[0], event[1]) != (1.0, 1.0), (
+        f"the Event was recomputed from empty natural parameters and "
+        f"clobbered with Beta(1,1): {event}")
+    assert event == control, (
+        f"the Event's outcome {event} differs from the identical :Point "
+        f"control {control}")
 
 
 # ═══════════════════════════════════════════════════════════════════
