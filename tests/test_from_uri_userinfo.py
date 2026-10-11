@@ -219,6 +219,37 @@ def test_acl_admin_client_decodes_userinfo(monkeypatch):
     assert captured["password"] == "p@ss"
 
 
+def test_acl_admin_client_takes_its_socket_bounds_from_the_one_resolver(
+        monkeypatch):
+    """#3065: this client's bound must come from the product's resolution point.
+
+    It used to pass the literals ``socket_connect_timeout=3`` /
+    ``socket_timeout=5``. Those are bounded, so the hang was not this site's
+    bug — but they are KNOB-BLIND: ``TORTOISE_DB_SOCKET_TIMEOUT`` never reached
+    an ACL client, which is the same defect one step milder. The inventory in
+    ``test_bounded_raw_clients_3065`` pins that a client EXISTS here; this test
+    pins that its bound is the shared one, which a revert to literals would not
+    otherwise red.
+    """
+    import redis
+
+    from tortoise import acl_graph_users as acl
+
+    captured: dict = {}
+    monkeypatch.setenv("TORTOISE_DB_URI", _uri("pw", user="admin"))
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", "0.5")
+    monkeypatch.setattr(
+        redis, "Redis", lambda **kw: (captured.update(kw), object())[1]
+    )
+
+    assert acl._admin_client() is not None
+    assert captured["socket_timeout"] == 3.0, (
+        "the ACL admin client ignored TORTOISE_DB_SOCKET_TIMEOUT — its bound "
+        "is not coming from _bounded_server_socket_kwargs (#3065)")
+    assert captured["socket_connect_timeout"] == 0.5
+
+
 # ── 2. Negative controls ─────────────────────────────────────────────────
 
 def test_plus_is_a_literal_plus_not_a_space(monkeypatch):

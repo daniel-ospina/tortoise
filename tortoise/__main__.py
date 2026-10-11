@@ -8350,10 +8350,16 @@ def _cmd_doctor(args):
             from falkordb import FalkorDB
 
             from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            from tortoise.projection import _bounded_server_socket_kwargs
+            # #3065: the probe's bounds come from the product's ONE resolution
+            # point too. The 5s/10s literals it carried were the pre-#2850
+            # hardcoded values, so `doctor` ignored an operator's
+            # TORTOISE_DB_SOCKET_TIMEOUT — a diagnostic run against a wedged
+            # server parked for the literal instead of the configured bound.
             dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
                                  username=probe_user, password=probe_pass,
                                  ssl=(parsed.scheme == "rediss"),
-                                 socket_connect_timeout=5, socket_timeout=10)
+                                 **_bounded_server_socket_kwargs())
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:

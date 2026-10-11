@@ -41,7 +41,8 @@ score the legs that are not.
 | `stored` | ≥1 transcript-turn `(:Point)` (`pointKind: 'event'`) wired `(:Session)-[:CONTAINS]->` — the transcript was actually persisted | graph-scoped, sessions |
 | `memory_produced` | ≥1 point that is NOT a transcript turn (`pointKind IS NULL OR pointKind <> 'event'`), i.e. extraction produced memory | graph-scoped, sessions |
 | `recall_attempted` | A retrieval tool call (`tortoise_search` / `tortoise_recall` / `tortoise_search_sessions`) at or after the org's `first_memory_at`. `tortoise_ask` is excluded — it is eval-only, not a product surface (#3849) | **org-wide, event count** |
-| `value_confirmed` | **Not measurable** — permanent refusal | — |
+| `recall_returned` | Of those calls, the ones whose `result_count` ≥ 1 — i.e. the retrieval **handed back** at least one item. Emitted by the MCP dispatch seam (#3675) on the narrow retrieval allowlist. A retrieval row with no `result_count` (pre-deploy) or an unreadable one refuses the stage rather than counting as “returned nothing” | **org-wide, event count** |
+| `value_confirmed` | **Not measurable** — a refusal, for a narrower reason since #3675 | — |
 
 ### Two traps this is built to avoid
 
@@ -53,8 +54,8 @@ The two non-measured states are **not** interchangeable:
 
 | State | Means | Examples |
 | --- | --- | --- |
-| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated`, `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows` |
-| `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (no instrument exists — the stage always reports this) |
+| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated`, `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection) |
+| `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (the surviving gap is whether a returned item was *used*, which no surface records) |
 
 The window guard **fails closed**: a row that is out of window, or that cannot
 be placed on the timeline at all (unparseable, naive, an unexpected type),
@@ -83,16 +84,44 @@ instant was counted, letting the funnel disagree with itself on the boundary
 instant. If you change one leg's bounds, the other must move with it.
 
 **`recall_attempted` is an ATTEMPT, not an answer.** `mcp_tool_call.status ==
-"ok"` means only that the tool did not raise. `result_count` / `abstained` are
-not in the analytics props allowlist
-(`hosted_api.py::_ALLOWED_ANALYTICS_PROPS`), so "answered from
-memory" is currently unknowable. No `activated` field and no activation rate is
-emitted anywhere, and `tools/activation_cohort.py` fails loudly if a payload
-ever grows one.
+"ok"` means only that the tool did not raise.
 
-Note the legs mix granularity: stages 1–3 are per-graph session counts, stage 4
-is an org-wide event count with no `graph_id` (`analytics_events` has none) and
-no `session_id`. This is an activation **funnel** view, not a per-session claim.
+**`recall_returned` is a RETURN, not an answer.** Since #3675 the
+`mcp_tool_call` props carry `result_count` — the number of items the call
+returned, or `null` when the result shape makes the count unknowable — so the
+attempt/answer split IS measured. It is an **upper bound** on “answered from
+memory”: it says the retrieval surface handed back candidates, never that a
+candidate was relevant, read or used.
+
+Two things make stage 5 refuse rather than report a count (the count would be a
+lower bound presented as exact): a retrieval row with **no** `result_count` at
+all (a window predating the prop's deploy — the emitter writes the key
+unconditionally, so absence means the row is older than #3675), and one whose
+`result_count` is present but not a count (`result_count_unreadable`: a call
+that failed inside `_safe`, an unrecognised recall mode, or a result shape that
+no longer matches the three measured ones). The counters
+`detail.rows_without_result_count` and `detail.rows_uncountable_result_count`
+name which fired.
+
+Stage 5 uses the **narrow** retrieval allowlist only, where stage 4 reports both.
+The wide set adds known-id reads (`tortoise_get_point` et al) whose result is a
+single object with no item collection — uncountable by construction — so folding
+them in would refuse the stage for any org that ever read a point by id.
+
+The paired `abstained` prop #3675’s body names was **not** shipped: its only
+producer was the `POST /v1/ask` abstention path, retired with `tortoise_ask`
+(#3849/#3929), so the key would have had no producer at all. No `activated`
+field and no activation rate is emitted anywhere, and
+`tools/activation_cohort.py` fails loudly if a payload ever grows one.
+
+**`value_confirmed` remains a refusal** — and a narrower one. Nothing recorded
+says whether a returned candidate was *used*, and the two historical blockers
+it used to name (#3518/#3519) are closed, as is the missing-instrument one.
+
+Note the legs mix granularity: stages 1–3 are per-graph session counts, stages
+4–5 are org-wide event counts with no `graph_id` (`analytics_events` has none)
+and no `session_id`. This is an activation **funnel** view, not a per-session
+claim.
 
 ## Querying it
 
@@ -120,7 +149,7 @@ over whatever cohort the operator names — there is no N anyone must reach, and
 no rate.
 
 `GET /v1/internal/activation/cohort` (#3676) is the served roll-up. It takes an
-**explicit** org list and returns the same five-stage shape folded across the
+**explicit** org list and returns the same six-stage shape folded across the
 named orgs.
 
 ```bash
@@ -241,8 +270,10 @@ straddles it. This is in the payload's `limitations` too.
 ## Known limitations
 
 Carried in the payload's `limitations` list — read it before citing a number.
-`recall_attempted` cannot distinguish an answered query from an empty one; it
-cannot be attributed to a session or a graph; the analytics read is capped at
-1000 rows (a truncated page reports `unavailable`, never a partial count);
-`value_confirmed` is not measurable; and `memory_produced` is
-extraction-succeeded, not memory-that-helped.
+`recall_attempted` cannot distinguish an answered query from an empty one on its
+own (that is what `recall_returned` adds) and neither can be attributed to a
+session or a graph; the analytics read is capped at 1000 rows (a truncated page
+reports `unavailable`, never a partial count); `recall_returned` is an upper
+bound — a returned candidate is not a used one; `value_confirmed` is not
+measurable; and `memory_produced` is extraction-succeeded, not
+memory-that-helped.
