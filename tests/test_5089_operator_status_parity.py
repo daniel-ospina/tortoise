@@ -21,7 +21,8 @@ the rebuilt operator satisfies and the live one did not.
 
 **Scope of that claim, stated precisely (review P2).** The divergence is a GROUNDING
 participation difference, not a whole-EP one: the EP factor-extraction read path treats a
-NULL status as live (`live.py`'s `_live_only` spares `NULL` and only excludes `'draft'`),
+NULL status as live (`live.py`'s `_live_only` spares `NULL`, and excludes `'draft'`
+plus every terminal status),
 so the pre-fix SDK operator was already an EP participant *there*. Only the strict
 grounding selector excluded it. The fix closes that — it does not claim a wider EP effect
 than it has.

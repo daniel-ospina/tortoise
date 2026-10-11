@@ -552,7 +552,7 @@ class TestPromotionPolicy:
 
     def test_gated_rejects_terminal_status(self, sdk):
         # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
-        # gated ( _live_only excludes only exact 'draft') and no fresh point
+        # gated ( _live_only excludes 'draft' and every terminal status) and no fresh point
         # can legitimately carry them (terminal states come from retract/-
         # supersede flows) — fail-closed under gated, top-level and nested.
         for bad in ("retracted", "superseded", "outdated", "archived"):
