@@ -107,6 +107,13 @@ KIND_OWNERS: dict[str, str] = {
     "SWEEP_OFF_STALE": WRITER_DRIVER,
     "SWEEP_NO_COVERAGE": WRITER_DRIVER,
     "LIVENESS_NO_WORK": WRITER_DRIVER,
+    # #4994: the POOLED pool-stale incident — ONE driver-owned, subject-less
+    # incident naming the N tenants whose default archive the driver's
+    # app-independent direct-R2 leg measured as stale. The per-tenant residual
+    # stays on `STALE` (watcher-owned, below): the watcher resolves it per ORG
+    # in-process, while the driver has no per-org probe, so a per-tenant
+    # incident filed by the driver could never be cleared by its own writer.
+    "POOL_STALE": WRITER_DRIVER,
     # #4612: the ride-along legs' OWN success is the recovery evidence — the
     # driver is the only surface that invokes them. Driver-only by construction,
     # so an explicit entry (not "unspecified") stops any future surface from

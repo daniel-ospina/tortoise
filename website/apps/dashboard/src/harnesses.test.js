@@ -17,6 +17,7 @@ import {
   CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE, CLAUDE_WEB_FILING, HARNESS_CAPTURE_REQUIRES_OPT_IN,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
+  HARNESS_ANALYTICS_ALIASES, analyticsHarnessOf,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
@@ -125,6 +126,49 @@ test('#2912: family resolution + preferred surface + display names', () => {
   assert.equal(knownHarnessName('claude-desktop'), 'Claude Desktop')
   assert.equal(knownHarnessName('pi'), 'Pi')
   assert.equal(knownHarnessName('not-a-harness'), null)
+})
+
+// ── #2936: the copy-attribution vocabulary bridge ──────────────────────────
+// The beacon may only name a harness the SERVER's frozen analytics vocabulary
+// accepts. This module owns the exception table; the server owns the
+// vocabulary itself, and the cross-surface contract that every chooser leaf
+// resolves INTO it lives in
+// `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract`
+// (a JS test cannot restate a Python Literal without duplicating it here,
+// which is the drift the contract test exists to prevent).
+test('#2936: analyticsHarnessOf maps the UI-only leaf, and refuses the unattributable one', () => {
+  // The one SURFACE leaf: its copy installs the `codex` capture seam, so it is
+  // attributed to `codex` — the server Literal is deliberately NOT widened
+  // (#1701's recorded decision).
+  assert.equal(HARNESS_ANALYTICS_ALIASES.codexDesktop, 'codex')
+  assert.equal(analyticsHarnessOf('codexDesktop'), 'codex')
+  // A leaf with no attributable value returns null, so the caller emits
+  // NOTHING — never a value the server drops (and reports, #3821).
+  assert.equal(HARNESS_ANALYTICS_ALIASES.chatgpt, null)
+  assert.equal(analyticsHarnessOf('chatgpt'), null)
+  // The identity-valued leaves (the server's own vocabulary) are unchanged.
+  for (const h of HARNESS_ORDER.filter((h) => h !== 'chatgpt')) {
+    assert.equal(analyticsHarnessOf(h), h, `${h} is its own analytics value`)
+  }
+  // Defensive: no leaf, no value.
+  assert.equal(analyticsHarnessOf(null), null)
+  assert.equal(analyticsHarnessOf(undefined), null)
+  // EVERY leaf the LIVE chooser can select is attributable — a new surface
+  // whose id is not a capture harness needs an alias entry (or the server
+  // vocabulary would have to grow, which #1701 forbids). This is the client
+  // half of the drift guard; the server half asserts the resolved set EQUALS
+  // the server vocabulary.
+  const chooserLeaves = new Set([
+    ...HARNESS_FAMILIES.map((f) => f.id),
+    ...HARNESS_FAMILIES.flatMap((f) => f.surfaces.map((s) => s.id)),
+  ])
+  assert.deepEqual([...chooserLeaves].sort(),
+    ['claude', 'claude-desktop', 'claude-web', 'codex', 'codexDesktop', 'cursor', 'pi'],
+    'the chooser leaf population moved — re-check the analytics mapping for the new leaf')
+  for (const leaf of chooserLeaves) {
+    assert.ok(analyticsHarnessOf(leaf) != null,
+      `${leaf} is reachable from the chooser but has no analytics value — the beacon would emit nothing`)
+  }
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {

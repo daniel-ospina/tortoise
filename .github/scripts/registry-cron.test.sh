@@ -170,6 +170,13 @@
 #      900 (the period is never re-typed in bash)
 #  108. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
 #      19-digit magnitude compares successfully, so without the bound it files
+#  109. #4994: a stale multi-team pool files ONE pooled POOL_STALE naming EVERY
+#      tenant and ZERO per-tenant [DR] STALE issues (cardinality, not dedupe)
+#  110. #4994: the pooled incident clears only on N consecutive measured-fresh
+#      runs; a stale run in between resets the count, and a single fresh
+#      reading never resolves
+#  111. #4994: an UNMEASURED (partially listed) pool still names what WAS
+#      measured, and the body says so rather than reading as the whole pool
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -398,7 +405,7 @@ case "$url" in
           emit "$STUB_GH_SEARCH_BODY" "${STUB_SEARCH_CODE:-200}"
         else
           items="[]"
-          for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN STALE PURGE_FAILED RECONCILE_FAILED; do
+          for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN POOL_STALE STALE PURGE_FAILED RECONCILE_FAILED; do
             var="GH_ISSUE_$kind"
             val="${!var:-}"
             if [ -n "$val" ] && grep -q "$kind" <<<"$url"; then
@@ -528,8 +535,10 @@ reset_case() {
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
         GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE \
+        GH_ISSUE_POOL_STALE \
         GH_ISSUE_PURGE_FAILED GH_ISSUE_RECONCILE_FAILED \
-        STUB_COMMENTS_JSON STUB_COMMENT_FAIL STUB_COMMENT_CODE || true
+        STUB_COMMENTS_JSON STUB_COMMENT_FAIL STUB_COMMENT_CODE \
+        BACKUP_POOL_RESOLVE_STREAK || true
   export R2_FLAT_LIST="[]"
 }
 
@@ -1127,7 +1136,11 @@ run_driver
 assert_eq "$RC" 0 "46. a healthy degraded sweep exits 0"
 assert_match "$(cat "$LOG")" "GH PATCH .*/issues/123" "46. SWEEP_NO_COVERAGE self-heals on a degraded sweep"
 
-# ── 47. a per-team STALE while ENABLED also makes the run RED ─────────────
+# ── 47. a stale pool while ENABLED also makes the run RED ─────────────────
+# #4994: the driver no longer files a per-tenant `[DR] STALE` — the detection is
+# the SAME (the pooled POOL_STALE names the tenant), so the run must still be
+# RED, and the per-tenant title must provably NOT be filed. A bare `STALE`
+# assertion would pass vacuously here ("POOL_STALE" contains "STALE").
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
@@ -1135,7 +1148,8 @@ export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
 assert_eq "$RC" 1 "47. an enabled run with a stale team exits RED (1)"
-assert_filed "$(cat "$LOG")" STALE "47. the per-team STALE is filed"
+assert_filed "$(cat "$LOG")" POOL_STALE "47. the stale pool files the POOLED incident"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues .*\[DR\] STALE' "47. NO per-tenant [DR] STALE is filed"
 
 # ── 48. enum_failed is the catch-all family → SWEEP_NO_COVERAGE + RED ─────
 reset_case
@@ -1276,8 +1290,9 @@ export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
 export STUB_STATUS_BODY="$(status_body false null null)"
 run_driver
 assert_eq "$RC" 1 "58. a failed default call with a measured flat leg while OFF exits RED (1)"
-assert_contains "$OUT" "filing STALE (direct leg)" "58. the legacy-flat archive is measured (direct-leg STALE)"
-assert_filed "$(cat "$LOG")" "STALE — teamA" "58. the legacy-flat archive files the per-team STALE"
+assert_contains "$OUT" "pool stale (direct leg)" "58. the legacy-flat archive is measured (direct-leg)"
+assert_filed "$(cat "$LOG")" "POOL_STALE" "58. the legacy-flat archive files the POOLED incident"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues .*\[DR\] STALE' "58. no per-tenant [DR] STALE is filed"
 assert_contains "$OUT" "default-archive listing FAILED" "58. the genuine call failure is surfaced"
 
 # ── 59. a genuine listing failure surfaces the CLI stderr ────────────────
@@ -1418,15 +1433,45 @@ assert_not_match "$(cat "$LOG")" "issues/777" "67. the colliding kind's issue is
 # `[DR] STALE — teamA:g_x` must never satisfy a search for subject teamA —
 # adopting it would let teamA's recovery close the custom graph's live issue
 # (#2413/#2375 cross-talk).
+#
+# #4994: the DRIVER no longer files a subject-scoped incident (its one
+# tenant-scoped leg is pooled), so this case drives the real `gh_find_open`
+# directly instead of riding on a filing — asserting it through a filing that
+# no longer happens passes VACUOUSLY (a bare `STALE` grep matches
+# `POOL_STALE`). The contract still matters: it is what the watcher's per-org
+# `STALE` adoption depends on, and it is the R2-side half of the identity rule
+# the Python side enforces in `github_issue.incident_title_matches`. Extracted
+# from the SHIPPING script, never a copy, so deleting the check fails here.
 reset_case
-export R2_TEAMS=$'backups/teamA/'
-export R2_DEFAULT_LIST="$TS_STALE"
-export STUB_STATUS_BODY="$(status_body true null null)"
-export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
-export STUB_GH_SEARCH_BODY='{"items":[{"number":555,"title":"[DR] STALE — teamA:g_x — last backup 3h"}]}'
-run_driver
-assert_filed "$(cat "$LOG")" STALE "68. a per-graph subject does not satisfy the team subject"
-assert_not_match "$(cat "$LOG")" "issues/555" "68. the per-graph issue is not adopted by the team incident"
+FIND_EXT="$(mktemp)"
+sed -n '/^GH_SEARCH_FAILED_SENTINEL=/p; /^gh_find_open()/,/^}/p' "$DRIVER" > "$FIND_EXT"
+run_find() { # kind id items-json — the real gh_find_open, search stubbed
+  # NB: the fixture variable must NOT be named `items` — bash scopes dynamically,
+  # so a `$items` read inside the stub would resolve to gh_find_open's OWN local
+  # `items` (unbound at call time) and raise under `set -u`.
+  local kind="$1" id="$2" FIND_ITEMS="$3"
+  (
+    GH_TOKEN=test-token
+    REPO=daniel-ospina/tortoise
+    gh_search_items() { printf '%s' "$FIND_ITEMS"; }
+    # shellcheck disable=SC1090
+    . "$FIND_EXT"
+    gh_find_open "$kind" "$id"
+  ) 2>/dev/null || true
+}
+assert_eq "$(run_find STALE teamA '[{"number":555,"title":"[DR] STALE — teamA:g_x — last backup 3h"}]')" "" \
+  "68. a per-graph subject does not satisfy the team subject"
+assert_eq "$(run_find STALE teamA '[{"number":555,"title":"[DR] STALE — teamA"}]')" "555" \
+  "68. the EXACT team subject IS adopted"
+assert_eq "$(run_find STALE teamA '[{"number":555,"title":"[DR] STALE — teamABC — old"}]')" "" \
+  "68. a longer subject is not a prefix match"
+assert_eq "$(run_find STALE '' '[{"number":556,"title":"[DR] STALE — some prose"}]')" "556" \
+  "68. a subject-less incident accepts any ' — prose' tail"
+assert_eq "$(run_find STALE '' '[{"number":557,"title":"[DR] STALEISH — x"}]')" "" \
+  "68. a longer KIND is not the subject-less incident"
+assert_eq "$(run_find POOL_STALE '' '[{"number":42,"title":"[DR] POOL_STALE — 3 team default archive(s) older than 90m"}]')" "42" \
+  "68. the pooled incident is adopted by its own subject-less title shape"
+rm -f "$FIND_EXT"
 
 # ── 69. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
 # The Python twin RAISES in this case (`hosted_backup.create_if_not_exists`:
@@ -1723,15 +1768,15 @@ export R2_DEFAULT_LIST="$(python3 -c "import datetime;print((datetime.datetime.n
 export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_SEARCH_FILLER=1
-export GH_ISSUE_STALE=42
-export GH_ISSUE_TITLE='[DR] STALE — teamA'
+export GH_ISSUE_POOL_STALE=42
+export GH_ISSUE_TITLE='[DR] POOL_STALE — 1 team default archive(s) older than 90m'
 export GH_ISSUE_STATE=open
 export STUB_COMMENTS_JSON='[]'
 run_driver
 assert_eq "$RC" 1 "74. a page-2 exact match exits RED (1)"
 assert_match "$(cat "$LOG")" "GH GET .*search/issues.*page=2" "74. the search walk reached page 2"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "74. the page-2 exact match files NO duplicate"
-assert_match "$(cat "$LOG")" 'AWS put-object body=\{"kind":"STALE","issue_number":42' "74. the page-2 issue number is adopted (only the walk could see it)"
+assert_match "$(cat "$LOG")" 'AWS put-object body=\{"kind":"POOL_STALE","issue_number":42' "74. the page-2 issue number is adopted (only the walk could see it)"
 
 # ── 75. a FAILED issue CREATE files nothing and claims no filing (P2) ─────
 # The pre-fix create was a bare curl whose `.number // empty` conflated an HTTP
@@ -2387,6 +2432,138 @@ assert_not_match "$OUT" "analytics sink silent" \
 # wrong file would genuinely POST there and the line can fail.
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "108. an over-long magnitude never resolves the open incident"
+
+# ── 109. #4994: ONE pooled incident for N stale tenants ────────────────────
+# The acceptance of #4994: one systemic pool fault must produce ONE issue
+# naming the N tenants, not N issues. Pre-fix the driver filed one
+# `[DR] STALE — <org>` per tenant from inside its freshness loop, so a fault
+# affecting 3 tenants opened 3 issues (measured: 51 issues/day, one per
+# tenant). The per-tenant residual stays with the WATCHER's own STALE, which
+# can resolve per ORG; the driver has no per-org probe, so a per-tenant
+# incident filed here could never close.
+reset_case
+export R2_TEAMS=$'backups/teamA/\tbackups/teamB/\tbackups/teamC/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":3}'
+run_driver
+assert_eq "$RC" 1 "109. a 3-team stale pool exits RED (1)"
+assert_eq "$(grep -cE 'GH POST .*/issues \{' "$LOG" || true)" "1" \
+  "109. exactly ONE issue is created for the 3 stale teams"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*\[DR\] POOL_STALE — 3 team' \
+  "109. the pooled title carries the tenant COUNT"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*teamA — newest archive' \
+  "109. the pooled body names every tenant (teamA)"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*teamB — newest archive' \
+  "109. the pooled body names every tenant (teamB)"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*teamC — newest archive' \
+  "109. the pooled body names every tenant (teamC)"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues .*\[DR\] STALE' \
+  "109. NO per-tenant [DR] STALE is filed for any of the 3 teams"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/POOL_STALE/_.json" \
+  "109. the pooled incident uses the subject-less canonical key (one create-once point)"
+
+# ── 110. #4994: the pooled incident clears only on N CONSECUTIVE fresh runs ─
+# A whole-pool freshness reading can flap at the boundary, so the clear is a
+# recovery THRESHOLD (decision on #5047: start N=2), not a single reading — the
+# same anti-flap shape as Datadog recovery thresholds / Grafana keep_firing_for.
+# The streak rides ON the incident's own dedup object, so it is created with
+# the incident and deleted with it; a stale run in between resets it.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_POOL_STALE=77
+export GH_ISSUE_STATE=open
+export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"filed_at":"2026-09-19T00:00:00Z"}'
+run_driver
+assert_eq "$RC" 0 "110. a measured-fresh pool with an open POOL_STALE stays green (1)"
+assert_contains "$OUT" "POOL_STALE measured-fresh reading 1/2" \
+  "110. the FIRST fresh reading does not clear the incident"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
+  "110. a single fresh reading never resolves (no close)"
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":1' \
+  "110. the streak is persisted on the incident object"
+
+# …the SECOND consecutive fresh reading DOES clear it (and delete-to-resolve
+# drops the sentinel, so a recurrence re-files rather than being swallowed).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_POOL_STALE=77
+export GH_ISSUE_STATE=open
+export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"fresh_streak":1}'
+run_driver
+assert_eq "$RC" 0 "110. the second consecutive fresh run stays green"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
+  "110. the recovery threshold is reached and the incident is closed"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/POOL_STALE/_.json" \
+  "110. the sentinel is deleted with the close (a recurrence re-files)"
+
+# …a STALE run between two fresh readings RESETS the count. Without the reset,
+# two readings that were never consecutive would clear a pool that is still
+# broken on every other run (the flapping case the threshold exists for).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_POOL_STALE=77
+export GH_ISSUE_STATE=open
+export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"fresh_streak":1}'
+run_driver
+assert_eq "$RC" 1 "110. a stale run between two fresh readings is RED (1)"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
+  "110. a stale run never resolves the incident"
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+  "110. the interleaved stale run RESETS the recovery count"
+
+# …an UNMEASURABLE pool is not freshness: no resolve, and the count resets.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_POOL_STALE=77
+export GH_ISSUE_STATE=open
+export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"fresh_streak":1}'
+run_driver
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
+  "110. an unmeasurable pool never resolves the incident"
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+  "110. an unmeasurable pool resets the recovery count (no evidence, no credit)"
+
+# …and the threshold is a KNOB (BACKUP_POOL_RESOLVE_STREAK), so N=2 is a start
+# value rather than a magic number buried in the comparison.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_POOL_STALE=77
+export GH_ISSUE_STATE=open
+export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77}'
+export BACKUP_POOL_RESOLVE_STREAK=1
+run_driver
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
+  "110. BACKUP_POOL_RESOLVE_STREAK=1 resolves on the first fresh reading"
+
+# ── 111. #4994: a partial listing still names what WAS measured ───────────
+# The pooled body is the incident's DIAGNOSTIC PAYLOAD (the #5047 direction:
+# "a filing that cannot name what broke is a filing defect"). When the listing
+# did not complete, the body must say so rather than let a partial measurement
+# read as the whole pool.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_FLAT_FAIL=1              # default leg answers, legacy-flat leg does not → R2_LIST_OK=0
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_filed "$(cat "$LOG")" POOL_STALE "111. measured-stale tenants are still named on a partial listing"
+assert_match "$(cat "$LOG")" 'GH POST .*/issues .*listing did NOT complete' \
+  "111. the body says the list is not the whole pool"
+assert_filed "$(cat "$LOG")" R2_DOWN "111. the storage fault is filed as its own incident"
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

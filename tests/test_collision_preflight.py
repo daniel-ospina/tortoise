@@ -1666,16 +1666,32 @@ class CollisionPreflightTest(unittest.TestCase):
         # at add_argument time, so a typo'd env value raised an uncaught
         # ValueError -> traceback + exit 1, which is EXIT_COLLISION: a
         # misconfiguration read as "another lane is on it".
-        for env, value in (("COLLISION_PREFLIGHT_TIMEOUT", "abc"),
-                           ("COLLISION_PREFLIGHT_TIMEOUT", "nan"),
-                           ("COLLISION_PREFLIGHT_TIMEOUT", ""),
-                           ("COLLISION_PREFLIGHT_PR_LIMIT", "abc"),
-                           ("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", "1.5")):
-            with self.subTest(env=env, value=value):
-                rc, out = self.run_tool(env_extra={env: value})
-                self.assertEqual(rc, 3, f"{env}={value!r}\n{out}")
-                self.assertNotIn("VERDICT: COLLISION", out)
-                self.assertNotIn("Traceback", out)
+        #
+        # The message must NAME the seam, not just exit 3: the operator set an
+        # env var, and "--timeout must be a number > 0" is what tells them the
+        # variable they exported is the one being rejected (the env name is
+        # documented on the flag's own `help=`). And no `VERDICT` may appear at
+        # all — a usage failure is a fact about the INVOCATION, so printing a
+        # verdict would assert something no surface was queried to produce.
+        # `nan`/`inf`/`1.5` are the trap values: `nan <= 0` and `inf <= 0` are
+        # both False, so a bare positivity check passes the timeouts through to
+        # `subprocess.run(timeout=…)` and lets a fractional limit reach `int()`.
+        env_seams = (
+            ("COLLISION_PREFLIGHT_TIMEOUT", "--timeout",
+             ("abc", "nan", "inf", "", "0", "-1", "60s")),
+            ("COLLISION_PREFLIGHT_PR_LIMIT", "--pr-limit",
+             ("abc", "nan", "inf", "1.5", "", "0", "-1", "60s")),
+            ("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", "--closed-pr-limit",
+             ("abc", "nan", "inf", "1.5", "", "0", "-1", "60s")),
+        )
+        for env, flag, values in env_seams:
+            for value in values:
+                with self.subTest(env=env, value=value):
+                    rc, out = self.run_tool(env_extra={env: value})
+                    self.assertEqual(rc, 3, f"{env}={value!r}\n{out}")
+                    self.assertIn(flag, out, f"{env}: message does not name {flag}")
+                    self.assertNotIn("Traceback", out)
+                    self.assertNotIn("VERDICT", out)
 
     def test_bad_timeout_flag_is_usage_not_collision(self):
         for bad in ("abc", "nan", "inf", "0", "-1", "60s"):
@@ -1684,6 +1700,36 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertEqual(rc, 3, f"{bad}: {out}")
                 self.assertIn("--timeout", out)
                 self.assertNotIn("Traceback", out)
+
+    def test_bad_limit_flags_are_usage_not_collision(self):
+        # #3619 acceptance, the CLI half: "a test per flag per form (CLI +
+        # env)". The env form of these two seams is pinned above; the CLI form
+        # was left uncovered by the #5129 merge.
+        #
+        # What this pins is the SEMANTIC arm of the validator, not argparse.
+        # `0` and `-1` are the load-bearing cases: both are syntactically valid
+        # integers, so argparse accepts them (with or without `type=int`) and
+        # only the explicit `value < 1` arm rejects them — measured: deleting
+        # that arm turns this test red on exactly those four subtests, because a
+        # zero or negative cap is otherwise not a usage error at all, just a
+        # silently different measurement.
+        #
+        # By contrast `abc` / `nan` / `inf` / `1.5` / `""` would STILL exit 3
+        # even if the validator were bypassed, because argparse's own error path
+        # goes through `_UsageParser.error`, which exits EXIT_USAGE (measured
+        # with `type=int` reintroduced). Passing on those alone proves nothing.
+        #
+        # The empty form (`--pr-limit=`) is included deliberately: it is the
+        # CLI analogue of the empty-forwarded-variable case that motivates the
+        # issue, and it is the one an `or default` idiom would silently swallow.
+        for flag in ("--pr-limit", "--closed-pr-limit"):
+            for bad in ("abc", "nan", "inf", "1.5", "", "0", "-1", "60s"):
+                with self.subTest(flag=flag, bad=bad):
+                    rc, out = self.run_tool(extra_args=[f"{flag}={bad}"])
+                    self.assertEqual(rc, 3, f"{flag}={bad!r}\n{out}")
+                    self.assertIn(flag, out, f"{flag}: message does not name it")
+                    self.assertNotIn("Traceback", out)
+                    self.assertNotIn("VERDICT", out)
 
     def test_remote_branch_hit(self):
         _git(self.repo, "update-ref", "refs/remotes/origin/fix/3061-collision", "HEAD")

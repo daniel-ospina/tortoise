@@ -4827,6 +4827,13 @@ def test_reap_only_safe_refuses_unconfirmed_live_candidate(monkeypatch):
 #   component; final-component refusal + the action-time ownership read are
 #   what is covered here). No override/allowlist for cross-uid reaping exists
 #   BY DECISION (#4136).
+#   #4237 (surfaced by this section's adversarial review, rated out of scope
+#   there): the final-component refusal above is defeated by the path's
+#   SPELLING — a trailing separator makes the kernel resolve the final
+#   component as a directory — so `_normalize_candidate_dir` now runs first
+#   and the guard and its action share one path string. Same class, closed
+#   in scope: `test_dir_owned_by_euid_refuses_a_trailing_separator_symlink`,
+#   `test_cleanup_tempdir_leaves_a_trailing_separator_symlink_target_intact`.
 # A second local uid cannot be created from a test process without root, so
 # the foreign-uid precondition is simulated the way the guard READS it: the
 # invoking `os.geteuid()` is made to differ from the directory's real
@@ -4979,6 +4986,84 @@ def test_cleanup_tempdir_still_removes_a_same_uid_dir(monkeypatch, tmp_path):
     result = R._cleanup_tempdir(owned)
     assert result is not False, "same-uid removal must never be refused"
     assert not os.path.exists(owned)
+
+
+def test_dir_owned_by_euid_refuses_a_trailing_separator_symlink(tmp_path):
+    """#4237: a trailing separator must not turn a REFUSED final symlink into
+    an authorized one.
+
+    `O_NOFOLLOW` protects the final component only, and a trailing separator
+    (or its POSIX-identical `/.` spelling) makes the kernel resolve that
+    component as a directory — `os.open("<link>/", O_RDONLY|O_DIRECTORY|
+    O_NOFOLLOW)` SUCCEEDS on macOS and `fstat` then reports the TARGET's
+    `st_uid`. The guard must return the same no-follow verdict for every
+    spelling of the same path, so the record can never authorize an action on
+    a directory it never proved ours.
+    """
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tm4237_owned")
+    link = tmp_path / "tm4237_link"
+    link.symlink_to(owned, target_is_directory=True)
+    assert R._dir_owned_by_euid(str(link)) is False
+    for form in (str(link) + os.sep,
+                 str(link) + os.sep + ".",
+                 str(link) + os.sep + "." + os.sep):
+        assert R._dir_owned_by_euid(form) is False, (
+            f"{form!r} followed the final symlink through the "
+            f"trailing-separator spelling (#4237)")
+    # The separator itself is not what fails — a GENUINE owned dir stays
+    # accepted with one (normalization, not rejection), so legitimate
+    # `dir=/tmp/x/` registry values are not silently stranded.
+    assert R._dir_owned_by_euid(owned + os.sep) is True
+    assert R._dir_owned_by_euid(owned + os.sep + ".") is True
+    # A path that is only separators IS the filesystem root: fail closed.
+    assert R._dir_owned_by_euid(os.sep) is False
+    assert R._dir_owned_by_euid(os.sep + os.sep) is False
+
+
+def test_cleanup_tempdir_leaves_a_trailing_separator_symlink_target_intact(
+        tmp_path):
+    """#4237 end-to-end: `_cleanup_tempdir("<symlink-to-our-dir>/")` must
+    REFUSE, not rmtree the TARGET.
+
+    `shutil.rmtree` refuses a symlink at the top level only when it can see
+    one (`os.path.islink("<link>/")` is False and the fd it opens is the
+    target), so BOTH the guard and the removal follow the symlink through the
+    separator. The target here is same-uid — the declared-in-scope half of
+    #4136 — which makes the guard's own verdict the only thing between the
+    call and the target's contents.
+    """
+    from tortoise import embedded_reaper as R
+    target = tmp_path / "tm4237_target"
+    target.mkdir()
+    (target / "important.txt").write_text("keep\n")
+    link = tmp_path / "tm4237_link"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert R._cleanup_tempdir(str(link) + os.sep) is False
+    assert R._cleanup_tempdir(str(link) + os.sep + ".") is False
+    assert (target / "important.txt").read_text() == "keep\n", (
+        "the trailing separator made _cleanup_tempdir rmtree the symlink's "
+        "target (#4237)")
+    # Control: the bare symlink was already refused, and stays refused.
+    assert R._cleanup_tempdir(str(link)) is False
+    assert (target / "important.txt").exists()
+
+
+def test_cleanup_tempdir_binds_rmtree_to_the_normalized_path(
+        monkeypatch, tmp_path):
+    """#4237 guard/action agreement: the path handed to `shutil.rmtree` is the
+    SAME string the ownership verdict was read from, so rmtree's own
+    top-level symlink refusal cannot be defeated by the spelling the caller
+    used (a verdict read from one path and an action taken on another is the
+    defect class, not just the symlink)."""
+    from tortoise import embedded_reaper as R
+    seen = []
+    monkeypatch.setattr(R.shutil, "rmtree",
+                        lambda p, **kw: seen.append(p))
+    owned = _owned_dir(tmp_path, "tm4237_owned")
+    assert R._cleanup_tempdir(owned + os.sep) is True
+    assert seen == [owned], f"rmtree got {seen!r}, not the guarded path"
 
 
 def test_stale_action_refuses_a_foreign_owned_dir(monkeypatch):

@@ -1307,6 +1307,56 @@ def test_kind_owner_contract_with_driver():
                 f"the self-heal loop resolves {kind}, owned by {kind_owner(kind)}")
 
 
+def test_pooled_pool_stale_replaces_the_per_tenant_driver_filing():
+    """#4994: the driver files ONE pooled POOL_STALE, not N per-tenant STALE.
+
+    The cardinality acceptance is a property of the SHIPPING script, not of a
+    Python unit, so it is pinned across the language boundary the same way the
+    owner contract above is: the driver's direct-R2 freshness leg must contain
+    NO `file_alert STALE` call site (the per-tenant residual belongs to the
+    WATCHER, which resolves `STALE` per ORG in-process — a per-tenant incident
+    filed by the driver has no per-org probe behind it and could never be
+    closed by its own writer), and it must file the pooled, SUBJECT-LESS kind
+    once per run. Without the subject-less key the pooled incident would be
+    per-tenant again, which is the defect.
+    """
+    import re
+    from pathlib import Path
+
+    sh = (Path(__file__).resolve().parent.parent
+          / ".github/scripts/registry-cron.sh").read_text(encoding="utf-8")
+
+    assert not re.search(r"\bfile_alert\s+STALE\b", sh), (
+        "registry-cron.sh files a per-tenant `[DR] STALE` again — #4994: one "
+        "systemic fault must be ONE pooled incident naming the N tenants")
+    assert re.search(r"^\s*file_alert POOL_STALE\b", sh, re.M), (
+        "registry-cron.sh no longer files the pooled POOL_STALE incident")
+    # The pooled filing must be SUBJECT-LESS (its dedup id is `""` = the
+    # platform key) — a tenant subject would re-introduce one create-once
+    # point per tenant, which is the defect.
+    assert re.search(
+        r"file_alert POOL_STALE[^;]*?\"\$POOL_STALE_BODY\"\s+\"\"", sh, re.S
+    ), "the POOL_STALE call site must stay subject-less (dedup id `\"\"`)"
+
+    from tortoise.alert_store import KIND_OWNERS, kind_owner
+
+    assert kind_owner("POOL_STALE") == "driver", (
+        "POOL_STALE must stay driver-owned: the driver is both its filer and "
+        "the only surface whose probe covers the whole-pool recovery")
+    assert KIND_OWNERS["STALE"] == "watcher", (
+        "the per-tenant residual must stay watcher-owned (per-ORG resolution)")
+    assert "POOL_STALE" != "STALE"
+
+    # …and the runbook must document it, or the operator triaging the incident
+    # has no row to read (the #3033 doc-writer drift scan only covers the
+    # documented -> emitted direction).
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
+    assert re.search(r"^\| POOL_STALE \|", table, re.M), (
+        "POOL_STALE has no triage row in docs/ops/registry-backup-dr.md")
+
+
 # ── #3820 cycle-7: the tri-state resolve fact ──────────────────────────────
 
 def test_resolve_state_reports_the_three_facts():

@@ -60,6 +60,7 @@ import {
   FLOW_MAX_AGE_S,
   SESSION_COOKIE,
   buildCookie,
+  ensureAuthFlowIndexes,
   ensureColumn,
   ensureSchema,
   getSession,
@@ -67,6 +68,7 @@ import {
   readCookie,
   redirect,
   safeNext,
+  sweepExpiredFlows,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
 import { guardStateChangingRequest } from "../_shared/auth/csrf";
@@ -132,6 +134,10 @@ async function ensureLinkFlowTable(db: D1Database): Promise<void> {
   // The binding column. Nullable by design: existing rows (sign-in, recovery)
   // have no user at flow-start time, and this route does not rewrite them.
   await ensureColumn(db, "auth_flows", "user_id", "TEXT");
+  // This route writes `auth_flows` too, so it is a second producer of the
+  // abandoned rows #3647 is about — the index the sweep depends on is created
+  // here as well (see `ensureAuthFlowIndexes`).
+  await ensureAuthFlowIndexes(db);
 }
 
 /** Best-effort cleanup of the flow row when the upstream call never started a flow. */
@@ -216,6 +222,13 @@ export const onRequestGet: PagesFunction<LinkEnv> = async ({ request, env }) => 
   } catch {
     return json({ error: "session_store_unavailable" }, { status: 503 });
   }
+
+  // #3647: a link flow abandoned before it completes (the user closes the tab
+  // between here and GoTrue, or the provider hop is never taken) leaves its row
+  // behind exactly as a sign-in flow does — the same reason `/auth/start`
+  // sweeps, and the same reason it is done here rather than only there: this is
+  // the other producer.
+  await sweepExpiredFlows(env.SESSIONS);
 
   // --- authenticated, server-side start of GoTrue's link-identity flow -------
   //

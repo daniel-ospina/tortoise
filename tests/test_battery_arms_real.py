@@ -134,4 +134,15 @@ class TestA4Graph:
         a.record(_ctx(a, scenarios[0], prior=prior), Memory(
             id="e1", content="finding", kind="nand"))
         assert a.decide_cycles >= 1  # R2 mechanism-gate trajectory field
+        # FIX 1 regression (#1088 review P2): the promotion is
+        # update_point(status="live"), NOT the reviewer-gated promote_point —
+        # so the evidence is live but carries NEITHER the fabricated derived
+        # reviewer flag nor a promotedAt stamp (promote_point sets both).
+        evidence = [p for p in a._sdk(scenarios[0]).query(content="finding")
+                    if not p.get("is_operator")]
+        assert evidence, "record must persist the live evidence point"
+        for p in evidence:
+            assert p["status"] == "live", p
+            assert p.get("reviewed") is not True, p
+            assert p.get("promotedAt") is None, p
         a.close()

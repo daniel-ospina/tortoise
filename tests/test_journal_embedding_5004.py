@@ -986,7 +986,10 @@ def test_update_point_with_a_caller_vector_marks_the_node(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "upd.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "update vector probe").get("id")
+            # Draft is explicit since #1088 (a no-status create is LIVE) —
+            # this pin exercises the draft→live promote re-emit.
+            pid = sdk.create_point("statement", "update vector probe",
+                                   status="draft").get("id")
             sdk.update_point(pid, embedding=caller_vec)
             assert _vector(sdk, pid) == caller_vec, (
                 "premise: the live update took the caller vector")
@@ -1255,7 +1258,10 @@ def test_update_entity_caller_vector_rides_a_re_emit_verbatim(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "entityreemit.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "entity re-emit probe").get("id")
+            # Draft is explicit since #1088 (a no-status create is LIVE) —
+            # this pin exercises the draft→live promote re-emit.
+            pid = sdk.create_point("statement", "entity re-emit probe",
+                                   status="draft").get("id")
             sdk.update_entity(pid, embedding=caller_vec)
             sdk.promote_point(pid)
 
@@ -1418,7 +1424,8 @@ def test_a_stale_promote_after_recreate_is_a_declared_exemption(tmp_path):
                           event_log_path=str(events / "events.jsonl"))
         try:
             pid = sdk.create_point("statement", "first incarnation",
-                                   embedding=[0.1] * _DIM).get("id")
+                                   embedding=[0.1] * _DIM,
+                                   status="draft").get("id")
             sdk.promote_point(pid)
             sdk.delete_point(pid)
             sdk.create_point("statement", "second incarnation", id=pid)
