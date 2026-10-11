@@ -229,6 +229,9 @@ intra-record `previousValidTo == validFrom`, with monotone opens).
 - [x] §4.6's Impl column, §4.7's footnote and the R2 table state exactly what landed,
       with the ⚠️ convention rather than a ✅ that the node's `validTo` would not earn.
 - [ ] (not this PR) the node's `validTo`/`expiredAt` — needs #3590 S2's removal decision.
+- [ ] (not this PR) the two further `:Source` `contentHash` writers (`_upsert_document`,
+      `_materialize_session_source`) do not maintain the window — pinned wrong by
+      `test_pinned_gap__*`, to be inverted when #3644 closes it.
 
 ## 7. What remains on #3644 (recorded so it is not silently absorbed)
 
@@ -244,3 +247,21 @@ intra-record `previousValidTo == validFrom`, with monotone opens).
    the §4.5 cell is still ⚠️. The issue's cited write paths are **stale** (see §1);
    the remaining paths need to be enumerated before this can be closed, which is a
    separate change from the window.
+4. **The two non-`create_source` `:Source` version writers** (PR #8016 code-review
+   ISSUE 2, P1). `_upsert_document` (the `DocumentCreated` fold) bumps
+   `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`;
+   `_materialize_session_source` (the capture path) rewrites `contentHash` without
+   advancing `version` and is replayed by nothing. Both therefore leave a
+   **present-but-stale** window start on any source the `create_source` path already
+   stamped — the node asserts the new version has been valid since the *previous*
+   version's start, which is the stale-window failure §4.6 exists to prevent, and
+   is reachable only because this PR introduced `validFrom`. Extending the gate to
+   them is not a boundary fix: each needs a minted instant that is **also
+   replayable** (`_upsert_document` journals `DocumentCreated`;
+   `_materialize_session_source` has no replay arm at all), i.e. a clock/mint
+   decision this PR deliberately does not take. **Recorded, not silenced**: the
+   current wrong behaviour is PINNED by
+   `tests/test_source_version_window_3644.py::test_pinned_gap__upsert_document_moves_the_anchor_without_the_window`
+   and `…::test_pinned_gap__session_capture_moves_the_anchor_without_the_window`,
+   which must be **inverted** when this item closes. #3644's own *Writers* section
+   already names `_upsert_document` among the writers the temporal model must reach.

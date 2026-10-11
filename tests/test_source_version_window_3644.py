@@ -58,7 +58,19 @@ WHAT IS DELIBERATELY *NOT* DONE HERE (`Refs`, not `Closes`)
     `#5360`); until it exists, the server-minted instant is guarded by
     `_mint_source_window_instant`, which clamps the mint strictly above the
     prior mint so the wall clock cannot open a zero-width or inverted version
-    window.
+    window;
+  * **the two OTHER `:Source` version writers** (`#3644`, PR #8016 code-review
+    ISSUE 2): `_upsert_document` (the `DocumentCreated` fold — it bumps
+    `contentHash` + `version` on the same hash-diff gate but writes no
+    `validFrom`) and `_materialize_session_source` (the capture path — it
+    rewrites `contentHash` without advancing `version` and is replayed by
+    nothing). Both leave a PRESENT-but-stale window start, which is why §4.6's
+    "the prior window is closed in the same act" is scoped to the
+    `create_source`/`_upsert_source` path in the docs. Extending the gate to
+    them needs a minted-and-replayable instant (a clock/mint decision, not a
+    boundary fix); the gap is PINNED — not silenced — by the two
+    `test_pinned_gap__*` tests at the bottom of this file, which must be
+    inverted when #3644 closes it.
 
 DISCLOSURE (review note, not a hidden defect): five of these tests are FORWARD
 guards for rejected alternatives — they assert an ABSENCE the pre-#3644 writer
@@ -561,11 +573,202 @@ def test_the_entity_surface_refuses_window_and_transition_keys(src):
             sdk.update_entity(_URL, **{key: "2020-01-01T00:00:00+00:00"})
 
 
-def test_the_mcp_boundary_refuses_window_and_transition_keys():
-    """The MCP `props=` splat route is the boundary the SDK guard cannot see."""
+def test_the_mcp_boundary_keeps_only_the_transition_keys():
+    """PR #8016 code-review ISSUE 1 (P1): the entity-agnostic MCP boundary
+    must NOT refuse the Point-legitimate window spellings.
+
+    `_reject_server_managed_props` is the choke point for every MCP entity
+    tool, and `tortoise_create_point`/`tortoise_update_point` splat caller
+    `props` straight into `sdk.create_point`/`sdk.update_point`, for which
+    `validFrom`/`validTo` are first-class caller props (§4.7 keeps the Point
+    column caller-writable; `sdk._refuse_inverted_point_window`'s docstring
+    states it). FAILS BEFORE: all five keys were in the shared set, so a
+    legitimate Point write was refused at the boundary with `-32003` (the
+    regression this PR introduced — origin/main did not carry the keys).
+
+    The TRANSITION facts are Source-only and can never be a legitimate caller
+    prop on any entity, so they stay in the shared set. The `:Source` window is
+    guarded on the Source routes instead (`sdk.create_source`'s `**props`
+    reject; `sdk._update_entity`'s `_SOURCE_SERVER_MANAGED_PROPS`), pinned by
+    `test_the_mcp_source_route_still_refuses_a_forged_window` below and by
+    `test_a_caller_asserted_window_or_transition_key_is_refused`.
+    """
     from tortoise import mcp_server
-    for key in _WINDOW_KEYS:
+    for key in ("validFrom", "validTo", "valid_to"):
+        assert key not in mcp_server._SERVER_MANAGED_PROPS, (
+            f"{key} is a Point caller prop — the entity-agnostic MCP boundary "
+            f"must not refuse it")
+        assert not mcp_server._reject_server_managed_props({key: "X"}), (
+            f"{key} was refused at the entity-agnostic MCP boundary")
+    for key in ("previousValidTo", "previousContentHash"):
         assert key in mcp_server._SERVER_MANAGED_PROPS, (
             f"{key} left the MCP server-managed boundary")
         assert mcp_server._reject_server_managed_props({key: "X"}), (
             f"{key} was not rejected at the MCP boundary")
+
+
+@pytest.fixture
+def mcp_sdk(monkeypatch, tmp_path):
+    """(mcp_server, sdk) — an embedded SDK wired into the MCP boundary.
+
+    Mirrors `tests/test_mcp_server.py`'s autouse transport fixture: `_safe`'s
+    auth gate fail-CLOSES on an unset transport mode, so stdio dev mode must be
+    set even though `_get_org_sdk` is patched.
+    """
+    from tortoise import mcp_server
+    from tortoise.mcp_auth import (
+        _current_org_id,
+        _current_org_limits,
+        _transport_mode,
+    )
+    sdk = TortoiseSDK(str(tmp_path / "mcp_window_3644.db"))
+    monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    token = _transport_mode.set("stdio")
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
+    try:
+        yield mcp_server, sdk
+    finally:
+        _transport_mode.reset(token)
+        sdk.close()
+
+
+def test_the_mcp_point_tools_accept_a_caller_window(mcp_sdk):
+    """PR #8016 code-review ISSUE 1 (P1) — the Point window is writable.
+
+    FAILS BEFORE: `tortoise_create_point(props={"validFrom": …})` returned
+    `{'error': "server-managed field(s) cannot be set via props: ['validFrom']",
+    'code': -32003}` before any write, and the same for
+    `tortoise_update_point(props={"validTo": …})`. §4.7 keeps the Point column
+    caller-writable, so this is a legitimate write the PR broke.
+    """
+    mcp_server, sdk = mcp_sdk
+    start = "2020-01-01T00:00:00+00:00"
+    end = "2021-01-01T00:00:00+00:00"
+
+    def _point_props(pid: str) -> dict:
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$i}) RETURN properties(n)",
+            params={"i": pid}).result_set
+        assert rows, f"point {pid!r} missing from the graph"
+        return rows[0][0]
+
+    created = mcp_server.tortoise_create_point(
+        kind="observation", content="point with a caller window",
+        props={"validFrom": start})
+    assert not created.get("error"), created
+    pid = created["id"]
+    assert _point_props(pid)["validFrom"] == start, (
+        "the caller's validFrom did not reach the Point")
+    updated = mcp_server.tortoise_update_point(
+        id=pid, props={"validTo": end})
+    assert not updated.get("error"), updated
+    assert _point_props(pid)["validTo"] == end, (
+        "the caller's validTo did not reach the Point")
+
+
+def test_the_mcp_source_route_still_refuses_a_forged_window(mcp_sdk):
+    """The Source routes stay fail-closed after the boundary narrowing.
+
+    Narrowing `_SERVER_MANAGED_PROPS` must not re-open the `:Source` window.
+    `tortoise_create_source` splats caller `props` into `create_source(**props)`,
+    whose own reject fires before `ev` is built; `tortoise_update_entity` on a
+    reachable `:Source` is refused through `_SOURCE_SERVER_MANAGED_PROPS`. Both
+    surface as a structured error via `_safe` — and neither writes.
+    """
+    mcp_server, sdk = mcp_sdk
+    forged = "2020-01-01T00:00:00+00:00"
+    for key in ("validFrom", "validTo", "valid_to"):
+        out = mcp_server.tortoise_create_source(
+            url=_URL, sourceKind="document", props={key: forged})
+        assert out.get("error"), (
+            f"{key} was accepted on the MCP create_source route: {out}")
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Source {url:$u}) RETURN count(n)",
+        params={"u": _URL}).result_set[0][0] == 0, (
+        "a refused MCP create_source still landed a :Source")
+
+    sdk.create_source(_URL, "document", contentHash="h-0")
+    minted = _props(sdk, _URL)["validFrom"]
+    for key in ("validFrom", "validTo", "valid_to"):
+        out = mcp_server.tortoise_update_entity(
+            id=_URL, props={key: forged})
+        assert out.get("error"), (
+            f"{key} was accepted on the MCP update_entity route: {out}")
+    assert _props(sdk, _URL)["validFrom"] == minted, (
+        "a forged window landed on the node through the MCP entity route")
+
+
+# ── 9. the OTHER :Source version writers do NOT maintain the window ──────
+#
+# PR #8016 code-review ISSUE 2 (P1) — PINNED GAP, not silence.
+#
+# `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash`
+# and `version` on the same hash-diff gate as `_upsert_source`) and
+# `_materialize_session_source` (the session-capture path, which rewrites
+# `contentHash` without advancing `version` and is replayed by nothing) are
+# two further writers that move a `:Source`'s version anchor. Neither moves
+# `validFrom`, so a source whose window this change created keeps the
+# PREVIOUS version's start after either write: the node then asserts the new
+# version has been valid since the old version's start — the stale-window
+# failure §4.6 exists to prevent.
+#
+# These two tests PIN that current behaviour so it cannot change silently.
+# They assert the WRONG value ON PURPOSE and must be inverted (assert the
+# window MOVES) when the gap closes. Extending the window gate here is not a
+# boundary fix: each writer needs a minted instant that is ALSO replayable —
+# `_upsert_document` journals `DocumentCreated`, and
+# `_materialize_session_source` has no replay arm at all — i.e. a clock/mint
+# decision this PR does not take. #3644's own "Writers" section names
+# `_upsert_document` among the writers the temporal model must reach, so the
+# gap is tracked there; the docs (§4.6 / §4.7 † and the plan doc) state it.
+
+def test_pinned_gap__upsert_document_moves_the_anchor_without_the_window(src):
+    """#3644 (PR #8016 code-review ISSUE 2, P1) — PINNED, deliberately wrong.
+
+    `_upsert_document` is the `DocumentCreated` fold for a document `:Source`.
+    It bumps `contentHash` + `version` on the same hash-diff gate
+    `_upsert_source` uses, and writes no `validFrom` — so the window start
+    stays the one the PRIOR version opened. Asserting `validFrom == before`
+    is asserting the defect; this test exists so the defect cannot change
+    silently and is inverted when #3644 closes it.
+    """
+    _events, sdk = src
+    sdk.create_source(_URL, "document", contentHash="h-1", title="d1")
+    before = _props(sdk, _URL)["validFrom"]
+    sdk._get_proj()._upsert_document(
+        {"id": _URL, "contentHash": "h-2", "title": "d2"})
+    p = _props(sdk, _URL)
+    assert p["contentHash"] == "h-2" and p["version"] == 2, p
+    assert p["validFrom"] == before, (
+        "PINNED GAP (#3644): `_upsert_document` moved the version anchor — "
+        "validFrom MUST equal the PRIOR version's start only while the gap is "
+        f"open. Got {p['validFrom']!r}, prior start {before!r}. If the window "
+        f"now moves, invert this assertion.")
+
+
+def test_pinned_gap__session_capture_moves_the_anchor_without_the_window(src):
+    """#3644 (PR #8016 code-review ISSUE 2, P1) — PINNED, deliberately wrong.
+
+    `_materialize_session_source` rewrites the session `:Source`'s
+    `contentHash` (and summary/topics) and writes no `validFrom`, so the
+    capture path leaves the prior version's window start in place. It does not
+    even advance `version`, so the ordinal and the hash already disagree here —
+    a pre-existing §4.6 inconsistency this PR does not own. Asserting
+    `validFrom == before` is asserting the defect; invert when #3644 closes it.
+    """
+    _events, sdk = src
+    url = "session:pinned-gap-3644"
+    sdk.create_source(url, "agentSession", contentHash="h-1")
+    before = _props(sdk, url)["validFrom"]
+    sdk._materialize_session_source(
+        "pinned-gap-3644", None, "2026-01-02T00:00:00+00:00",
+        [{"role": "user", "content": "hello pinned window gap"}])
+    p = _props(sdk, url)
+    assert p["contentHash"] not in (None, "", "h-1"), p
+    assert p["validFrom"] == before, (
+        "PINNED GAP (#3644): the session-capture writer moved the version "
+        "anchor — validFrom MUST equal the PRIOR version's start only while "
+        f"the gap is open. Got {p['validFrom']!r}, prior start {before!r}. If "
+        f"the window now moves, invert this assertion.")
