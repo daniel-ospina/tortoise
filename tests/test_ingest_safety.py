@@ -351,7 +351,7 @@ def test_track_b_e2e7_2_direct_edge_subgraph_converges(sdk):
     traversal + #780's Batch-3 filter — not dead wiring — explain 7.1."""
     x = sdk.create_point("statement", "X.", status="live")["id"]
     y = sdk.create_point("statement", "Y.", status="live")["id"]
-    sdk.create_operator("IMPL", x, [y])  # live by projection (default)
+    sdk.create_operator("IMPL", x, [y])  # status 'live' (#5089, promoting posture)
     sdk.set_point_baseline(x, 8.0, 2.0)
     sdk.set_point_baseline(y, 2.0, 8.0)
     sdk._mark_dirty([x, y])

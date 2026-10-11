@@ -1371,7 +1371,7 @@ class TestA3OperatorDedupRicherReturn:
         assert second["deduped"]["connections"] == 1
 
     def test_partial_absorb_completes_input_set(self, sdk):
-        """§5.5 partial-absorb: a NULL-status partial operator on a PROPER
+        """§5.5 partial-absorb: a draft partial operator on a PROPER
         SUBSET absorbs the retry — completes the written set on the REAL
         operator (is_operator:true, per-input multiplicity 1), one node per
         id, operator_absorb_completed warning."""

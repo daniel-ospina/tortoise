@@ -13672,9 +13672,11 @@ class TortoiseSDK:
         label-absent appends `o.label IS NULL` (no-label requests match only
         unlabeled operators).
 
-        Partial-absorb: on an exact miss, a NOT-YET-LIVE operator
+        Partial-absorb: on an exact miss, a PARTIAL operator
         (`status IS NULL`, `'draft'`, or `'live'` — the promoting posture writes
-        'live', so admitting only NULL/draft went blind on it, #5089) whose input
+        'live', so admitting only NULL/draft went blind on it, #5089; the
+        distinguishing property is SUBSET, not liveness, hence "partial" rather
+        than "not-yet-live") whose input
         set is a PROPER SUBSET of the requested set AND whose
         label/direction STRICT-MATCH the declared values (a label-absent
         request must NOT absorb a labeled operator — the cross-absorption
@@ -13724,7 +13726,8 @@ class TortoiseSDK:
             return {"id": rows[0][0], "status": rows[0][1],
                     "kind": "exact", "written": list(inputs)}
         # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
-        # NULL-status partial whose written set is a PROPER SUBSET of the
+        # PARTIAL operator (any non-terminal status — see the status clause in
+        # pcond below) whose written set is a PROPER SUBSET of the
         # requested set with STRICT label/direction matching (the declared
         # values — absent↔default canonicalized the same way).
         #
