@@ -290,3 +290,34 @@ def test_json_payload_uses_the_env_form_not_the_literal() -> None:
     assert '"auth_header": "Bearer ${TORTOISE_API_KEY}"' in src, (
         "the --json payload must name the env var explicitly"
     )
+
+
+def test_the_setter_is_printed_before_any_consumer_of_the_variable() -> None:
+    """#5109: the emitted command READS `$TORTOISE_API_KEY`, so the line that
+    SETS it must print first.
+
+    Pre-fix the command embedded the literal and was order-independent;
+    replacing the literal with the variable introduced the dependency — and
+    the claude branch then shipped with the export *below* the command, so a
+    user following the instruction literally ran `--header "Authorization:
+    Bearer "` and `claude mcp add` stored a broken config while the step
+    appeared to succeed. `test_harness_filter` only pins the command prefix
+    and the rest of this file only pins the ABSENCE of a literal, so this
+    order — the invariant this change establishes — had no guard.
+    """
+    import tortoise.__main__ as main
+
+    for harness, consumer in (("claude", "claude mcp add"), ("codex", "codex mcp add")):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main._print_mcp_configs(
+                "tt_" + "12" * 16, "https://api.premiselabs.co", harness, None
+            )
+        text = out.getvalue()
+        assert "export TORTOISE_API_KEY=" in text, f"{harness}: no setter printed"
+        assert consumer in text, f"{harness}: no consumer printed"
+        assert text.index("export TORTOISE_API_KEY=") < text.index(consumer), (
+            f"{harness}: the command that reads $TORTOISE_API_KEY is printed "
+            "BEFORE the line that sets it — with the var unset the header is "
+            "empty and the registration is silently broken"
+        )

@@ -15,9 +15,10 @@ carries the credential.
 - **This changes a machine-readable contract.** A consumer that assigns the
   field straight into a request header now sends the literal
   `Bearer ${TORTOISE_API_KEY}` and gets a 401. Resolve the key yourself from
-  `mcp.configs` (or from the config file the command reports as
-  `config_path`) before building the header. Reverting is not an option — the
-  leak is the reason the field changed.
+  the file the command reports at the top-level `config_path` before building
+  the header — `mcp.configs` carries only env-expansion templates and config
+  file names, no key material. Reverting is not an option — the leak is the
+  reason the field changed.
 
 ### Reaper pass-2 discovery is scoped and in-process (#4068)
 
