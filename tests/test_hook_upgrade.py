@@ -92,6 +92,13 @@ def _run(argv: list[str], root: Path, tmp_path: Path) -> subprocess.CompletedPro
 # marker — this is what the pre-#3795 installed copies look like.
 _HOOK_BODY = "from tortoise.__main__ import main"
 
+#: A syntactically VALID JSON document nested deeper than any interpreter's
+#: JSON recursion limit (#3928).  200k levels is ~200x CPython's default
+#: ``sys.getrecursionlimit()`` (1000), so this deliberately does not track the
+#: limit: `json.loads` raises `RecursionError` for it on every configuration,
+#: which is the point — the document has no syntax error to report.
+_DEEP_JSON = "[" * 200000 + "]" * 200000
+
 
 def _write_script(path: Path, version: int | None, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +204,51 @@ class TestDetection:
         assert "SessionStart" in r.stdout       # missing settings entry
         assert "timeout" in r.stdout            # #3801
         assert "hooks upgrade" in r.stdout      # actionable
+
+    def test_deeply_nested_settings_is_a_finding_never_a_raise(self, tmp_path):
+        """#3928 class (a): a deep-nesting bomb is DRIFT, not an exception.
+
+        ``json.loads`` on a syntactically VALID, deeply nested document raises
+        ``RecursionError`` — a ``RuntimeError``, NOT the ``ValueError`` the
+        loader caught — so it unwound every entry point that routes through
+        ``_load_settings``: ``detect_install`` ("never raises for a malformed
+        user file — a malformed file is itself a finding"), ``upgrade_install``
+        ("refuse, never raise") and ``registered_commands`` ("never raises for
+        a user file").  ``.claude/settings.json`` is user-editable, which is
+        exactly the input those three contracts are about.
+
+        MUTATION: narrow the loader back to ``except ValueError`` — every call
+        below unwinds with ``RecursionError`` and this REDs.
+        """
+        root = _old_install(tmp_path)          # a real, writable install
+        settings = root / ".claude" / "settings.json"
+        settings.write_text('{"hooks": ' + _DEEP_JSON + "}")
+        before_settings = settings.read_bytes()
+        before_script = (root / ".claude/hooks/session-start.sh").read_bytes()
+
+        findings = detect_install(root)
+        unreadable = [f for f in findings if f.kind == "unreadable-settings"]
+        assert len(unreadable) == 1, findings
+        assert unreadable[0].blocking, unreadable[0]
+        # The class name is carried so the user is not sent to fix the SYNTAX
+        # of a document that has none: this file is valid JSON, and its
+        # depth is the obstacle.
+        assert "RecursionError" in unreadable[0].detail, unreadable[0].detail
+        assert "refusing to touch it" in unreadable[0].detail
+
+        # The repair path refuses the WHOLE run, before any write: a
+        # half-repaired seam beside an unreadable settings file is worse than
+        # none, because the hook would then fire from a file Tortoise cannot
+        # read back.
+        result = upgrade_install(root, dry_run=True)
+        assert not result.ok, result
+        assert result.refused and "RecursionError" in result.refused
+        assert settings.read_bytes() == before_settings
+        assert (root / ".claude/hooks/session-start.sh").read_bytes() == before_script
+
+        # `session verify`'s registration read degrades to "nothing registers"
+        # — the same shape as any other malformed file, never an exception.
+        assert hook_install.registered_commands(root) == []
 
     def test_detect_api_reports_both_halves(self, tmp_path):
         """The library API (used by doctor) sees script + settings drift.
@@ -1359,34 +1411,39 @@ class TestUpgrade:
 
     def test_hooks_status_and_upgrade_never_traceback_on_a_deep_settings_file(
             self, tmp_path):
-        """``tortoise hooks status|upgrade`` reads and parses the settings
-        file, and the parser's raise-set is open-ended: ``json.loads`` on a
-        deeply nested document raises ``RecursionError`` — a ``RuntimeError``,
-        NOT an ``OSError`` — which the old enumerated ``except OSError``
-        boundary let escape as a raw traceback (#4024 P2-2; the same shape that
-        let ``TypeError`` #3987 and ``UnicodeDecodeError`` #3988 escape
-        ``capture_install``).  The CLI must surface a populated message and a
-        non-zero exit, never a traceback, because the fail-closed install path
-        tells the user to run exactly this command to repair.
+        """``tortoise hooks status|upgrade`` surface the deep-nesting bomb as
+        the refusal it is — populated message, exit 1, never a traceback.
 
-        MUTATION: enumerate the boundary (``except OSError as e:``) — the
-        traceback escapes, no populated ``Cannot inspect`` / ``Upgrade failed``
-        line is printed, and this REDs."""
+        The CLI is the surface the fail-closed install path tells the user to
+        run, so it must never crash.  Before #3928, the loader let the
+        ``RecursionError`` out and only this command's catch-all (#4024 P2-2)
+        stood between it and a traceback — the user got an opaque ``Cannot
+        inspect`` and no repair path.  The refusal is now the loader's own
+        ``unreadable-settings`` finding, named on ``status`` and refused on
+        ``upgrade``, with the settings file left byte-identical.
+
+        MUTATION: narrow ``_load_settings`` back to ``except ValueError`` —
+        the finding never appears, the output reverts to the catch-all's
+        ``Cannot inspect`` / ``Upgrade failed``, and this REDs.
+        """
         root = tmp_path / "cursor-root"
         root.mkdir()
-        deep = "[" * 200000 + "]" * 200000
-        (root / "hooks.json").write_text('{"hooks": ' + deep + "}")
+        settings = root / "hooks.json"
+        settings.write_text('{"hooks": ' + _DEEP_JSON + "}")
 
-        for argv, prefix in (
-            (("hooks", "status", "--harness", "cursor"), "Cannot inspect"),
-            (("hooks", "upgrade", "--harness", "cursor"), "Upgrade failed"),
-        ):
-            r = _run(list(argv), root, tmp_path)
-            assert r.returncode == 1, r
-            assert prefix in r.stderr, r.stderr
-            assert "RecursionError" in r.stderr, r.stderr
-            assert "Traceback (most recent call last)" not in r.stderr, r.stderr
-            assert "RecursionError" not in r.stdout, r.stdout
+        r = _run(["hooks", "status", "--harness", "cursor"], root, tmp_path)
+        assert r.returncode == 1, r
+        assert "unreadable-settings" in r.stdout, r.stdout + r.stderr
+        assert "RecursionError" in r.stdout, r.stdout + r.stderr
+        assert "Cannot inspect" not in r.stderr, r.stderr
+        assert "Traceback (most recent call last)" not in r.stderr, r.stderr
+
+        r = _run(["hooks", "upgrade", "--harness", "cursor"], root, tmp_path)
+        assert r.returncode == 1, r
+        assert "Refusing" in r.stderr, r.stdout + r.stderr
+        assert "RecursionError" in r.stderr, r.stdout + r.stderr
+        assert "Traceback (most recent call last)" not in r.stderr, r.stderr
+        assert settings.read_text() == '{"hooks": ' + _DEEP_JSON + "}"
 
     def test_installed_ahead_of_source_is_not_downgraded(self, tmp_path):
         """An install whose marker is NEWER than this CLI's is reported but
@@ -1455,6 +1512,35 @@ class TestDoctorIntegration:
         upgrade_install(root)
         lines = self._doctor_lines(capsys)
         assert lines and "✅" in lines[0]
+
+    def test_doctor_reports_a_deep_settings_bomb_as_drift(
+            self, doctor_env, capsys):
+        """A deep-nesting bomb is a ❌ row naming the refusal — the SAME
+        ``unreadable-settings`` finding ``hooks status`` prints.
+
+        #3928 class (a): doctor's per-harness catch-all could only contain the
+        loader's ``RecursionError`` as a ⚠️ ``check unavailable`` row, which
+        names no obstacle, offers no repair, and loses the detector's own
+        finding.  With the loader holding its never-raise contract the loop is
+        never asked to contain it, and the row is the diagnosis.
+
+        MUTATION: narrow ``_load_settings`` back to ``except ValueError`` —
+        the row degrades to ``⚠️ ... check unavailable: maximum recursion
+        depth exceeded`` and this REDs.
+        """
+        root = _old_install(doctor_env, root=doctor_env)
+        # A CURRENT install first, so the only drift scored is the bomb: the
+        # row renders the FIRST blocking finding's detail, and a stale script
+        # would be reported instead of the settings refusal.
+        upgrade_install(root)
+        (root / ".claude" / "settings.json").write_text(
+            '{"hooks": ' + _DEEP_JSON + "}")
+        lines = self._doctor_lines(capsys)
+        assert lines, "doctor must report the capture-hook install"
+        assert "❌" in lines[0], lines
+        assert "unreadable-settings" in lines[0], lines
+        assert "RecursionError" in lines[0], lines
+        assert "check unavailable" not in lines[0], lines
 
     def test_doctor_skips_when_no_capture_install(self, doctor_env, capsys):
         """A project that never installed the hooks is not nagged.

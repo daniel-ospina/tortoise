@@ -346,6 +346,185 @@ def test_recall_is_conditioned_on_lifetime_memory(client, monkeypatch):
     assert body["detail"]["recall_attempted_any"] == 2, body["detail"]
 
 
+# ── Stage 5 (#3675): recall_returned — a RETURN is not an ATTEMPT ─────────
+
+_ABSENT = object()  # "the prop was never written on this row"
+_W = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
+_MEMORY_AT = "2026-09-16T01:00:00+00:00"
+
+
+def _retrieval_row(stamp, count=None, tool="tortoise_search"):
+    """One analytics row. ``count`` defaults to an explicit ``None`` (the
+    post-#3675 "the result was not countable" shape); pass ``_ABSENT`` for a row
+    that predates the prop, where the key is not there at all."""
+    props = {"tool_name": tool}
+    if count is not _ABSENT:
+        props["result_count"] = count
+    return {"event_name": "mcp_tool_call", "created_at": stamp,
+            "properties": props}
+
+
+def test_recall_returned_counts_only_calls_that_returned_content():
+    """Stage 5 separates the attempt from the answer: a retrieval that returned
+    items and one that returned nothing are the same row for stage 4 and
+    different rows here. Everything else — a call BEFORE memory, a non-retrieval
+    tool, a zero-result retrieval — must not be counted."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [
+        _retrieval_row("2026-09-16T00:30:00+00:00", 8),   # before memory
+        _retrieval_row("2026-09-16T02:00:00+00:00", 8),   # returned content
+        _retrieval_row("2026-09-16T02:05:00+00:00", 0),   # ran, returned nothing
+        _retrieval_row("2026-09-16T02:10:00+00:00", 5,
+                       tool="tortoise_health"),           # not a retrieval tool
+    ]
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["state"] == "measured" and stage["value"] == 2, stage
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert cell["unit"] == "calls", cell
+    assert detail["recall_returned_after_memory"] == 1, detail
+    assert detail["rows_without_result_count"] == 0, detail
+
+
+def test_recall_returned_zero_is_a_measured_zero_not_a_refusal():
+    """The true-zero direction: retrievals that ran and returned NOTHING are a
+    real, exact 0 — the finding the funnel exists to report. Refusing it would
+    hide "the read side is answering nothing" behind "we could not read"""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 0),
+            _retrieval_row("2026-09-16T02:01:00+00:00", 0)]
+    _, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 0, cell
+    assert cell["reason"] is None, cell
+
+
+def test_a_retrieval_without_result_count_refuses_stage_5_never_zero():
+    """THE #3675 core rule, at the consumer. ``result_count`` is forward-only:
+    an allowlisted retrieval row written before the prop shipped cannot be read
+    either way, so counting it as "returned nothing" would manufacture a
+    confident zero from missing data. Stage 5 refuses and names the counter —
+    while stage 4, which needs no result information, stays measured 2.
+    Absence is not zero."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 8),
+            _retrieval_row("2026-09-16T02:01:00+00:00", _ABSENT)]  # key absent
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["state"] == "measured" and stage["value"] == 2, stage
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "result_count_not_recorded", cell
+    assert detail["rows_without_result_count"] == 1, detail
+    assert detail["rows_uncountable_result_count"] == 0, detail
+
+
+@pytest.mark.parametrize("unreadable", [None, "8", 8.0, True, -1])
+def test_a_present_but_unreadable_result_count_refuses_under_its_own_name(
+        unreadable):
+    """A PRESENT-but-not-a-count value is a different fact from an absent key,
+    and it gets its own reason (``result_count_unreadable``) so an operator can
+    tell a deploy-boundary window from a shape regression or a failed call.
+
+    ``True`` is the sharp one: Python says ``isinstance(True, int)``, so a naive
+    check would silently count a malformed row as one returned item."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", unreadable)]
+    _, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["reason"] == "result_count_unreadable", cell
+    assert detail["rows_without_result_count"] == 0, detail
+    assert detail["rows_uncountable_result_count"] == 1, detail
+
+
+def test_stage_5_inherits_every_stage_4_refusal():
+    """Stage 5 asks a strictly narrower question, so it must never be MORE
+    readable than stage 4. A truncated page, an out-of-window row and an org
+    with no lifetime memory all refuse BOTH stages with the SAME reason — two
+    copies of that ladder would drift."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 3)]
+
+    _, truncated = recall_stages(rows, _MEMORY_AT, memory_sessions=1,
+                                 window=_W, truncated=True)
+    assert truncated["recall_returned_cell"]["reason"] == \
+        "analytics_page_cap_truncated", truncated["recall_returned_cell"]
+
+    outside = [_retrieval_row("2026-09-15T02:00:00+00:00", 3)]
+    stage, out = recall_stages(outside, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["reason"] == "analytics_window_predicate_not_applied", stage
+    assert out["recall_returned_cell"]["state"] == "unavailable", out
+    assert out["recall_returned_cell"]["reason"] == stage["reason"], out
+
+    stage, nomem = recall_stages([], None, memory_sessions=0, window=_W)
+    assert stage["state"] == "not_measurable", stage
+    assert nomem["recall_returned_cell"]["state"] == "not_measurable", nomem
+    assert nomem["recall_returned_cell"]["value"] is None, nomem
+
+
+def test_recall_returned_uses_the_narrow_allowlist_only():
+    """The wide set exists as a sensitivity bound on the ATTEMPT (stage 4). Its
+    known-id reads return a single object with no item collection, so they are
+    uncountable BY SHAPE forever — folding them into stage 5 would refuse the
+    stage for any org that ever read a point by id. Stage 4 still reports both.
+    """
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 4),
+            _retrieval_row("2026-09-16T02:01:00+00:00", None,
+                           tool="tortoise_get_point")]  # wide-only, uncountable
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    # Stage 4's cell is the NARROW count; the wide sensitivity bound is in
+    # `detail`, and it is the wide one that sees both rows.
+    assert stage["value"] == 1, stage
+    assert detail["recall_attempted_after_memory"] == 1, detail
+    assert detail["recall_attempted_after_memory_wide"] == 2, detail
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert "recall_returned_after_memory_wide" not in detail, detail
+
+
+def test_recall_returned_stage_rides_in_the_payload_not_in_detail(client, monkeypatch):
+    """The cell is produced by ``recall_stages`` (it shares stage 4's
+    precedence) but it is a STAGE, so it must be lifted out of ``detail`` into
+    ``stages`` by ``assemble`` — and ``detail`` must not carry the transport
+    key. The predicate travels with the number, as ``stage3_predicate``
+    already does for stage 3, so a consumer cannot read the count without its
+    definition."""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    rows = [
+        _retrieval_row("2026-09-16T02:00:00+00:00", 4),
+        _retrieval_row("2026-09-16T02:01:00+00:00", 0),
+    ]
+
+    class _CP:
+        def query(self, *a, **kw):
+            return rows
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    assert "recall_returned" in body["stages"], body["stages"]
+    cell = body["stages"]["recall_returned"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert "recall_returned_cell" not in body["detail"], body["detail"]
+    assert "result_count" in body["detail"]["recall_returned_predicate"], body
+    assert body["detail"]["result_count_prop"] == "result_count", body["detail"]
+    # The five/six-stage granularity disclosure moved with the funnel.
+    assert body["detail"]["stage_5_granularity"] == "org_time", body["detail"]
+    # Nothing in this stage claims activation.
+    flat = _flatten_keys(body)
+    assert not [k for k in flat if "activat" in k.lower()], flat
+
+
 def test_recall_measured_zero_is_reported_as_zero(client, monkeypatch):
     """The suite must exercise the TRUE-ZERO direction too, not only the
     false-zero direction. Patching `recall_stages` to refuse every zero passed
@@ -790,8 +969,11 @@ def test_analytics_write_path_unset_is_unavailable_never_zero(client):
 
 
 def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypatch):
-    """The read helper has no offset/Range, so a full page is a LOWER BOUND.
-    A lower bound is not a count."""
+    """A seam that CANNOT page (no ``query_all``) still gets the pre-#4038
+    single-page contract: a full page is a LOWER BOUND, and a lower bound is not
+    a count. #4038 pages the leg to completion, so this refusal is now scoped to
+    a store that offers no way to advance — dropping the fallback would let such
+    a seam silently under-report."""
     import tortoise.supabase_control as sc
     from tortoise.activation_scorecard import RECALL_PAGE_CAP
     _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=1, extracted=1)
@@ -800,6 +982,7 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
 
     class _Full:
+        # `query` only — no `query_all`, so the walk is unavailable to the read.
         def query(self, *a, **kw):
             return [{"properties": {"tool_name": "tortoise_search"},
                      "created_at": "2026-09-16T13:00:00+00:00"}] * RECALL_PAGE_CAP
@@ -810,6 +993,137 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     assert stage["value"] is None, stage
     assert stage["state"] == "unavailable", stage
     assert stage["reason"] == "analytics_page_cap_truncated", stage
+
+
+def _window_rows(n: int) -> list[dict]:
+    """``n`` in-window, allowlisted ``mcp_tool_call`` rows as the seam returns
+    them (``id`` included — it is the walk's cursor)."""
+    return [{"id": f"ev-{i:06d}", "event_name": "mcp_tool_call",
+             "created_at": "2026-09-16T13:00:00+00:00",
+             "properties": {"tool_name": "tortoise_search"}}
+            for i in range(n)]
+
+
+def test_a_busy_org_pages_to_completion_and_reports_a_measured_count(client, monkeypatch):
+    """#4038, THE regression. Every hosted MCP tool call emits a row, so an
+    actively-used org fills the 1000-row page by mid-morning; the read then
+    reported `unavailable` (`analytics_page_cap_truncated`) for being BUSY —
+    the blind spot landing on exactly the most interesting orgs. Paged to
+    completion, the same window is a MEASURED count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    n = RECALL_PAGE_CAP + 5
+    rows = _window_rows(n)
+
+    class _Paging:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_all(self, table, **kw):
+            self.calls.append(kw)
+            # Two pages, then the empty one that CERTIFIES — `complete=True`.
+            return rows, True
+
+        def query(self, table, **kw):
+            # The pre-#4038 `query` shape, kept HERE as the mutation probe: on
+            # the old single-request read this is a FULL page, so the stage
+            # reads `unavailable` — the failure #4038 names.
+            return rows[:RECALL_PAGE_CAP]
+
+    seam = _Paging()
+    monkeypatch.setattr(sc, "get_control_plane", lambda: seam)
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == n, stage
+    assert body["detail"]["recall_rows_fetched"] == n, body["detail"]
+    assert body["detail"]["recall_truncated"] is False, body["detail"]
+    # The payload states the BOUND it read under, so a reader can tell "counted"
+    # from "counted up to a limit".
+    from tortoise.activation_scorecard import RECALL_MAX_PAGES
+    assert body["detail"]["recall_page_cap"] == RECALL_PAGE_CAP, body["detail"]
+    assert body["detail"]["recall_page_limit"] == RECALL_MAX_PAGES, body["detail"]
+    # The walk is asked with the module's OWN page size and bound, and — the
+    # half that keeps the paging from quietly changing the question — with the
+    # SAME window predicate the single-page read used, cursor column included.
+    assert seam.calls and len(seam.calls) == 1, seam.calls
+    call = seam.calls[0]
+    assert call["page_size"] == RECALL_PAGE_CAP, call
+    assert call["max_pages"] == RECALL_MAX_PAGES, call
+    assert "id" in call["select"], call
+    assert ("created_at", "gte", "2026-09-16T00:00:00+00:00") in call["filters"], call
+    assert ("created_at", "lt", "2026-09-17T00:00:00+00:00") in call["filters"], call
+    assert ("org_id", "eq", ORG["org_id"]) in call["filters"], call
+
+
+def test_an_incomplete_walk_is_unavailable_never_a_lower_bound(client, monkeypatch):
+    """A walk that could not CERTIFY completion (a page cap, a server that
+    ignored `order`, a store that will not advance past the cursor) is a lower
+    bound however many rows it did return. It must read `unavailable`, exactly
+    as the pre-#4038 single full page did — the fix widens what CAN be counted,
+    it does not loosen what may be called a count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    rows = _window_rows(RECALL_PAGE_CAP + 5)
+
+    class _Uncertified:
+        def query_all(self, table, **kw):
+            return rows, False
+
+        def query(self, table, **kw):
+            return rows[:RECALL_PAGE_CAP]
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _Uncertified())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_page_cap_truncated", stage
+    # The rows that WERE read are still reported for visibility — the refusal is
+    # the count, not the observation.
+    assert body["detail"]["recall_rows_fetched"] == len(rows), body["detail"]
+    assert body["detail"]["recall_truncated"] is True, body["detail"]
+    # ...and no lower bound is published under the exact-count name.
+    assert body["detail"]["recall_attempted_after_memory"] is None, body["detail"]
+
+
+def test_a_walk_that_raises_is_unavailable_not_a_partial_count(client, monkeypatch):
+    """A read FAILURE mid-walk is not an incomplete result: the seam raises, the
+    read's fail-soft guard turns it into `analytics_store_unreachable`, and no
+    prefix of the rows reaches any count. (A short page followed by an error is
+    the case the fix direction names.)"""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _DiesMidWalk:
+        def query_all(self, table, **kw):
+            raise RuntimeError("supabase down after page 1")
+
+        def query(self, table, **kw):
+            # A failure is a failure whichever seam shape the store offers: the
+            # read must not get a count out of either.
+            raise RuntimeError("supabase down after page 1")
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _DiesMidWalk())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_store_unreachable", stage
+    assert body["detail"]["recall_rows_fetched"] is None, body["detail"]
 
 
 def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeypatch):
@@ -917,8 +1231,19 @@ def test_value_confirmed_is_a_refusal_and_no_activated_key_exists(client):
     assert value["state"] == "not_measurable", value
     assert value["value"] is None, value
     assert "not_measurable" in value["reason"]
-    assert "result_count" in value["reason"]
-    assert "#3518" in value["reason"]
+    # #3675 narrowed this refusal: the result-bearing instrument now EXISTS, so
+    # the string must name the surviving gap (a returned item was not observed
+    # to be USED) and must NOT keep claiming the two stale blockers it used to
+    # name — `result_count`/`abstained` (built here) and #3518/#3519 (closed).
+    # A test that kept asserting the old text would pin a false statement into
+    # the payload.
+    assert "USED" in value["reason"]
+    assert "not zero" in value["reason"]
+    assert "(result_count/abstained)" not in value["reason"]
+    assert "#3518" not in value["reason"]
+    assert "#3519" not in value["reason"]
+    # And it points at the stage that replaced the missing instrument.
+    assert "recall_returned" in value["reason"]
 
     # No key anywhere claims activation. A surface that emitted an
     # ``activated`` field would reintroduce exactly the mislabelling this lane
@@ -927,6 +1252,11 @@ def test_value_confirmed_is_a_refusal_and_no_activated_key_exists(client):
     offenders = [k for k in flat if "activat" in k.lower()]
     assert not offenders, offenders
     assert "value_confirmed" in body["stages"]
+    # The full stage set, pinned: the funnel gained stage 5 in #3675 and the
+    # refusal moved to 6. A silent rename/drop would otherwise be invisible.
+    assert list(body["stages"]) == [
+        "captured", "stored", "memory_produced", "recall_attempted",
+        "recall_returned", "value_confirmed"], list(body["stages"])
 
 
 def _flatten_keys(obj, out=None):
@@ -1085,14 +1415,55 @@ def test_analytics_props_allowlist_is_respected(monkeypatch, tmp_path):
 
 
 def _payload(captured, stored, memory, recall_state="unavailable",
-             recall_value=None, value_confirmed_state="not_measurable"):
+             recall_value=None, value_confirmed_state="not_measurable",
+             returned_state="unavailable", returned_value=None):
     return {"stages": {
         "captured": {"state": "measured", "value": captured},
         "stored": {"state": "measured", "value": stored},
         "memory_produced": {"state": "measured", "value": memory},
         "recall_attempted": {"state": recall_state, "value": recall_value},
+        # #3675: the served payload carries six stages, and this fixture must
+        # mirror it — a stage the fixture omits folds to `unavailable` for every
+        # org, which would quietly make the cohort tests exercise a shape the
+        # product never returns.
+        "recall_returned": {"state": returned_state, "value": returned_value},
         "value_confirmed": {"state": value_confirmed_state, "value": None},
     }}
+
+
+def test_cohort_rolls_up_the_result_bearing_stage():
+    """#3675: `recall_returned` is a STAGE on the served payload, so the cohort
+    fold must carry it. `COHORT_STAGE_NAMES` is the roll-up's only stage list,
+    and a stage missing from it disappears from the cohort silently — the
+    per-org endpoint would report it while the operator's number did not."""
+    report = roll_up_cohort(
+        ["a", "b"],
+        [_payload(5, 5, 1, "measured", 4, returned_state="measured",
+                  returned_value=3),
+         _payload(7, 6, 1, "measured", 2, returned_state="measured",
+                  returned_value=1)])
+    cell = report["stages"]["recall_returned"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 4, cell
+    assert cell["orgs_unavailable"] == [], cell
+
+
+def test_cohort_calls_a_refused_result_stage_partial_not_a_zero():
+    """A pre-#3675 window (or an unreadable result) refuses the stage PER ORG.
+    That org must be NAMED as unavailable — folding it to 0 would publish a
+    lower bound as the cohort's answer, which is the failure the per-org
+    refusal exists to prevent."""
+    report = roll_up_cohort(
+        ["a", "b"],
+        [_payload(5, 5, 1, "measured", 4, returned_state="measured",
+                  returned_value=3),
+         _payload(7, 6, 1, "measured", 2,
+                  returned_state="unavailable", returned_value=None)])
+    cell = report["stages"]["recall_returned"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] == 3, cell
+    assert cell["orgs_unavailable"] == ["b"], cell
+    assert cell["orgs_measured"] == 1, cell
 
 
 def test_cohort_does_not_call_a_not_measurable_stage_a_reporting_failure():

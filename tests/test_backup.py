@@ -214,14 +214,21 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
 
     assert status == "ok"
     assert len(instances) == 1, "exactly one client must be constructed"
+    # #3065: the socket pair comes from the product's shared resolver
+    # (``projection._bounded_server_socket_kwargs``), not from literals — the
+    # 5s/10s pair that used to be pinned here was the pre-#2850 hardcoded
+    # values, so ``TORTOISE_DB_SOCKET_TIMEOUT`` / ``..._CONNECT_TIMEOUT`` never
+    # reached the snapshot path. The connect bound is therefore the product's
+    # 2s (the value #2850 chose to beat a 5s health-check budget), and
+    # ``test_bounded_raw_clients_3065.py`` pins the knob override end to end.
     assert instances[0].kwargs == {
         "host": "falkordb-cloud.example.com",
         "port": 6380,
         "username": None,
         "password": "s3cret",
         "ssl": True,
-        "socket_connect_timeout": 5,
-        "socket_timeout": 10,
+        "socket_connect_timeout": 2.0,
+        "socket_timeout": 10.0,
     }
     assert instances[0].connection.commands == [("BGSAVE",)]
 

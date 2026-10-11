@@ -652,10 +652,19 @@ def _bgsave(uri: str | None = None) -> str:
         from falkordb import FalkorDB
 
         from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+        from tortoise.projection import _bounded_server_socket_kwargs
+        # #3065: the socket bounds come from the product's ONE resolution
+        # point, not from a pair of literals. The literals this replaces (5s
+        # connect / 10s read) were the pre-#2850 hardcoded values, so an
+        # operator's TORTOISE_DB_SOCKET_TIMEOUT / TORTOISE_DB_SOCKET_CONNECT_
+        # TIMEOUT never reached the snapshot path — the same knob-blindness
+        # #3065 was filed for, one symptom less severe (bounded, but not
+        # tunable). The connect default is now the product's 2s, which is the
+        # deliberate bound #2850 chose to beat a 5s health-check budget.
         db = guarded_client(FalkorDB, host=endpoint.host, port=endpoint.port,
                             username=endpoint.username, password=endpoint.password,
                             ssl=endpoint.ssl,
-                            socket_connect_timeout=5, socket_timeout=10)
+                            **_bounded_server_socket_kwargs())
         db.connection.execute_command("BGSAVE")
     except Exception as e:
         reason = f"BGSAVE against {endpoint.host}:{endpoint.port} failed: {e}"

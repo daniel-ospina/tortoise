@@ -759,7 +759,14 @@ def test_every_emitted_prop_key_is_allowlisted():
     # ``graph_ops_read``/``graph_ops_write``/``graph_ops_turns``/
     # ``graph_ops_by_phase``) registered in ``_ALLOWED_ANALYTICS_PROPS``. The
     # union is 14, not 13: each side incremented the SAME 12 independently.
-    assert len(calls) == 14, (
+    # #3514 added the 15th: the coming-soon demand record (`data_source_demand`),
+    # whose four props (`integration_key`/`action`/`surface`/`org_key`) are
+    # registered in ``_ALLOWED_ANALYTICS_PROPS``. It is recorded — not skipped —
+    # because its props dict is written as a LITERAL at the emit site inside
+    # ``_demand_record_write``: passed as a parameter it would resolve to
+    # ``keys=None`` and fall out of the subset check below, which is exactly the
+    # silent hole this pin exists to expose. 14 + 1 = 15.
+    assert len(calls) == 15, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
@@ -770,6 +777,13 @@ def test_every_emitted_prop_key_is_allowlisted():
     # The billing site's event name is a variable, so pin the walk to it by
     # its keys: if `plan`/`tier` are not inspected, the walk has a hole.
     assert {"plan", "tier"} <= all_keys
+    # #3514: pin the demand site by its keys for the same reason — its event
+    # name is an attribute (``_demand.DEMAND_EVENT_NAME``), not a constant, so
+    # a refactor that made its props unresolvable must FAIL here instead of
+    # quietly dropping the four demand props from the guard.
+    assert {"integration_key", "action", "surface", "org_key"} <= all_keys, (
+        "the demand record's emit site did not resolve — its props would be "
+        "unregistered in silence (#3514)")
     # Pin the two sites whose props are NOT a bare literal dict, so a future
     # refactor that makes either unresolvable FAILS here instead of silently
     # dropping it from the guard. #4468 moved the capture_cost site off the

@@ -150,6 +150,17 @@ routes:
   - method: POST
     path: /v1/context
     class: tenant
+  # #3514 (epic #1714 J4): coming-soon demand capture. NEW TENANT SURFACE —
+  # declared here deliberately: the POST records a click and the GET is the
+  # store's team-scoped read half. Declared rather than exempt because this is
+  # the public /v1 API, which is exactly the case #3875's check exists to force
+  # into review.
+  - method: GET
+    path: /v1/data-sources/demand
+    class: tenant
+  - method: POST
+    path: /v1/data-sources/demand
+    class: tenant
   - method: POST
     path: /v1/demo
     class: tenant
@@ -233,6 +244,14 @@ routes:
     class: control-plane
   - method: POST
     path: /v1/internal/driver/heartbeat
+    class: control-plane
+  # #3514 (epic #1714 J4): the CROSS-ORG demand count behind `_check_internal`
+  # (FASTAPI_INTERNAL_KEY) — the operator plane, deliberately outside tenant
+  # registry scope: it aggregates every team's demand rows, which is what the
+  # monthly onboarding-cohort review reads and what #3541's threshold gate
+  # evaluates. Control-plane rather than tenant for exactly that reason.
+  - method: GET
+    path: /v1/internal/data-sources/demand
     class: control-plane
   - method: POST
     path: /v1/internal/reconcile
