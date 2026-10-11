@@ -146,6 +146,17 @@ def test_epistemic_label_queries_expands_once_per_label():
         assert "{id:$id}" in q
 
 
+def test_epistemic_boundary_labels_are_the_belief_targets():
+    """#7903: the boundary node table must cover EXACTLY the labels the belief
+    fold can target — no more (a label with no belief verdict has no boundary)
+    and no fewer (a missing label makes the state-op identity model a no-op
+    for it, the P1a fail-open).
+    """
+    from tortoise.projection import _EPISTEMIC_BOUNDARY_LABELS
+
+    assert frozenset(EPISTEMIC_LABELS) == _EPISTEMIC_BOUNDARY_LABELS
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. :Event operator input (the reachable half — create_operator path)
 # ═══════════════════════════════════════════════════════════════════
@@ -840,6 +851,17 @@ def _m_belief(nid: str = _MATRIX_ID) -> dict:
     return {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77}
 
 
+def _m_event(nid: str = _MATRIX_ID, name: str = "matrix-evt") -> dict:
+    # `Event` is the one epistemic label whose GRAPH match key is `eventId`,
+    # not `id`; both are set to the same value at creation.
+    return {"type": "EventRecorded", "id": nid, "name": name,
+            "eventKind": "test", "startedAt": "2026-01-01T00:00:00Z"}
+
+
+def _m_point(nid: str = _MATRIX_ID, content: str = "matrix point") -> dict:
+    return {"type": "PointAdded", "point": {"id": nid, "content": content}}
+
+
 #: ``(row, events, refused?)`` — ``refused`` is the verdict BOTH folds must
 #: reach. A row is "refused" when the belief write cannot be reproduced:
 #: the reference fold records a `point-belief-miss` and `rebuild_all` raises
@@ -956,6 +978,54 @@ _BOUNDARY_MATRIX = [
      [_m_object(_MATRIX_ID, "matrix-valuegate"),
       {"type": "ConfidenceChanged", "id": _MATRIX_ID,
        "confidence": "nope"}], True),
+    # #7903 P2: an EXISTING `:Point` whose every carried belief value fails the
+    # value gate — `_fold_confidence_changed` builds an empty SET list and
+    # returns 0, so `rebuild_all` (and `apply()`) RECORD a `point-belief-miss`.
+    # The point-only fold used to take the `if p:` branch and record NOTHING, a
+    # false green.
+    ("point-with-an-unfoldable-belief-value-is-refused",
+     [_m_point(), {"type": "ConfidenceChanged", "id": _MATRIX_ID,
+                   "confidence": "nope"}], True),
+    # ── #7903 P1a/P1b: state-op IDENTITY moves for the ID-keyed labels ──
+    # The state-op arm was NAME-keyed-only, but `_fold_entity_mutation` applies
+    # `SET n += $state` for ANY canonical label, and `_fold_confidence_changed`
+    # matches the node's `id` property for ALL four epistemic labels — so a
+    # `revise` that MOVES an `:Event`'s `id` buries the old boundary key and
+    # `rebuild_all` refuses the belief. Event's GRAPH match key is `eventId`,
+    # not `id`, so the model must carry both coordinates.
+    ("event-state-op-id-change-buries-the-old-id",
+     [_m_event(), _m_rename(state={"id": "matrix-moved"}, label="Event"),
+      _m_belief()], True),
+    # CONTROL: moving `eventId` (the graph's MATCH key) does NOT move the belief
+    # key, so the node still carries `id == _MATRIX_ID` and the write folds. A
+    # model that keyed the boundary on `eventId` would falsely refuse here.
+    ("event-state-op-eventid-change-keeps-the-id",
+     [_m_event(),
+      _m_rename(state={"eventId": "matrix-moved"}, label="Event"),
+      _m_belief()], False),
+    # The `:Point` twin — its graph key and belief key are BOTH `id`, so the
+    # reference index must re-key as well as the boundary recording the move.
+    ("point-state-op-id-change-buries-the-old-id",
+     [_m_point(), _m_rename(state={"id": "matrix-moved"}, label="Point"),
+      _m_belief()], True),
+    # ... and the mirror: the belief lands on the NEW id the node now carries,
+    # so both verdicts accept. A model that only buried the old key would false
+    # RED this.
+    ("point-state-op-id-change-accepts-a-belief-on-the-new-id",
+     [_m_point(), _m_rename(state={"id": "matrix-moved"}, label="Point"),
+      _m_belief("matrix-moved")], False),
+    # #7903 P1b: a PRESENT-but-unwritable identity value. `_hashable` returned
+    # False, so the boundary skipped the move and left the OLD id live — while
+    # the graph stores the value (FalkorDB degrades it to null) and the old id
+    # stops matching. The transition is a DELETE, not a no-op.
+    ("state-op-list-id-value-buries-the-old-id",
+     [_m_object(_MATRIX_ID, "matrix-listid"),
+      _m_rename(state={"id": ["matrix-moved"]}),
+      _m_belief()], True),
+    ("state-op-dict-id-value-buries-the-old-id",
+     [_m_object(_MATRIX_ID, "matrix-dictid"),
+      _m_rename(state={"id": {"k": "matrix-moved"}}),
+      _m_belief()], True),
 ]
 
 
@@ -968,15 +1038,20 @@ def test_boundary_matrix_reference_and_graph_agree(
 
     Reference side — the pure fold AND the diagnostic's own reference fold
     (`consistency._fold_journal`, the arm `check_consistency` runs). Graph side
-    — the production replay (`FalkorProjection.rebuild_all`). All three must
-    agree, so a future drift in either the exemption predicate or the graph
-    gate reds a row here instead of shipping a false red/green.
+    — every separately-threaded replay engine: `FalkorProjection.rebuild_all`,
+    `FalkorProjection.rebuild(log)`, `consistency.recover_from_log` and
+    `backup.restore`. All three REFERENCE verdicts and all four GRAPH engines
+    must agree, so a future drift in either the exemption predicate or one
+    engine's `journal_existence=` threading reds a row here instead of shipping
+    a false red/green.
     """
+    import copy
     import json
     import shutil
 
     from tortoise.backup import restore
     from tortoise.consistency import _fold_journal, recover_from_log
+    from tortoise.log import EventLog
     from tortoise.projection import FalkorProjection, fold
     from tortoise.projection.nonfolded import (
         NonFoldedEventsError,
@@ -986,7 +1061,12 @@ def test_boundary_matrix_reference_and_graph_agree(
 
     for name, folder in (("fold", fold), ("_fold_journal", _fold_journal)):
         with collect_non_folded() as entries:
-            folder(list(events))
+            # DEEP copy: `_apply_one` stores a `PointAdded`'s nested `point`
+            # dict BY REFERENCE (`points[p["id"]] = p`), so a shallow copy
+            # lets the first fold mutate the shared record out from under the
+            # second — the two reference verdicts would then differ for a
+            # reason that has nothing to do with either fold.
+            folder(copy.deepcopy(events))
         got = any(_MATRIX_ID in str(e) for e in refused_events(entries))
         assert got == refused, (
             f"[{row}] reference {name}: refused={got}, expected={refused}; "
@@ -1003,12 +1083,14 @@ def test_boundary_matrix_reference_and_graph_agree(
 
         EVERY graph replay engine is driven, not just `rebuild_all`: the
         boundary is THREADED into each one separately (`journal_existence=`),
-        so a dropped kwarg on a single engine is invisible to the other three.
-        `recover_from_log` reports refusal as `recovered=False`; `backup.restore`
-        and `rebuild_all` raise `NonFoldedEventsError`. This is the P2 (#7936
-        round-5) hole: the fourth engine's threading had no test (mutating
-        `if "journal_existence" in _apply_params:` to `if False:` left 115
-        passing).
+        so a dropped kwarg on a single engine is invisible to the others.
+        `recover_from_log` reports refusal as `recovered=False`; `backup.restore`,
+        `rebuild(log)` and `rebuild_all` raise `NonFoldedEventsError`. This is
+        the P2 (#7936 round-5) hole: the fourth engine's threading had no test
+        (mutating `if "journal_existence" in _apply_params:` to `if False:` left
+        115 passing). #7903 P3 adds `rebuild(log)` — the apply()-based engine
+        with its OWN `journal_existence=` kwarg (~projection/__init__.py:6934),
+        whose loss falsely refuses a forward-referenced belief write.
         """
         tag = engine.replace(".", "_")
         # Each engine's DB gets its OWN directory. The embedded lane
@@ -1057,6 +1139,20 @@ def test_boundary_matrix_reference_and_graph_agree(
             except NonFoldedEventsError:
                 return True
             return False
+        if engine == "rebuild":
+            proj = FalkorProjection(path=db, skip_health_check=True)
+            try:
+                # The `EventLog` apply() replay — a DIFFERENT threading site
+                # from `rebuild_all` (and the one a literal `if False:` on the
+                # kwarg would silently starve).
+                proj.rebuild(
+                    EventLog(str(events_dir / "events.jsonl")),
+                    confirm_destructive=True)
+            except NonFoldedEventsError:
+                return True
+            finally:
+                proj.close()
+            return False
         proj = FalkorProjection(path=db, skip_health_check=True)
         try:
             proj.rebuild_all(str(events_dir), confirm_destructive=True)
@@ -1066,7 +1162,8 @@ def test_boundary_matrix_reference_and_graph_agree(
             proj.close()
         return False
 
-    for engine in ("rebuild_all", "recover_from_log", "backup.restore"):
+    for engine in ("rebuild_all", "rebuild", "recover_from_log",
+                   "backup.restore"):
         graph_refused = _refused_by(engine)
         assert graph_refused == refused, (
             f"[{row}] graph {engine}: refused={graph_refused}, "

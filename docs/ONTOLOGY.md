@@ -630,7 +630,7 @@ Each layer answers a different question. All four are live mechanisms.
 | performs / produces / uses / authoredBy / ownedBy / memberOf / managedBy | **Structural** (plain) | None (factual) | (:Subject "Daniel")-[performs]->(:Event), (:Object "Customer Profile")-[ownedBy]->(:Subject "Daniel") |
 | Any of `:Point`/`:Subject`/`:Object`/`:Event` ↔ same (e.g. Event↔Point, Point↔Point) | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — both propagate EP under #7813 (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES) |
 
-**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
+**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. ⚠️ The `:Subject`/`:Object` operator endpoints are **spec-only until #7902** — the write path admits `:Point`/`:Event` only. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
 
 ---
 
