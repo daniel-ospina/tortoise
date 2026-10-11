@@ -941,9 +941,10 @@ def _carried_high_water_counts(fallback: dict) -> dict:
     a deliberate, reviewable edit in the approving PR — the machine half of "a re-cut
     over a grown surface cannot be green by construction" (review P1).
 
-    Missing pin (e.g. the first cut, or an older manifest): fall back to the fresh counts
-    so the field is always emitted. PRESENT but malformed: refuse rather than silently
-    reset the ceiling — a silent reset is exactly the failure this pin exists to prevent.
+    No manifest at all (the first cut): fall back to the fresh counts so the field is
+    always emitted. The manifest EXISTS but has no pin, or holds a malformed one: refuse
+    rather than silently reset the ceiling — a silent reset is exactly the failure this pin
+    exists to prevent.
     """
     try:
         with MANIFEST_FILE.open() as fh:
@@ -1312,8 +1313,10 @@ def build_doc(commit: str | None = None) -> dict:
         # READ from `docs/product/canonical-mcp-tools.md`, never typed here (#4185).
         # This is the one field pair the manifest no longer maintains itself: the `cut`
         # COPIES it from the canonical doc at cut time, so an approval recorded after the
-        # cut needs a re-cut to land. `check` compares them against a fresh
-        # `read_approval`, so a hand-edit cannot make the manifest disagree.
+        # cut needs a re-cut to land. `check` does NOT compare them yet — the four keys are
+        # still in `NON_DERIVABLE_DOC_KEYS` (see the header block). What catches a hand-edit
+        # that disagrees with the doc is `tools/surface-guard.py`, whose provenance
+        # comparison runs whenever the manifest CLAIMS an approval.
         "approval_status": approval["status"],
         "approval_principal": approval["principal"],
         "approval_pr": approval["pr"],
