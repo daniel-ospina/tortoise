@@ -5,6 +5,8 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.live import epistemic_disjunction
+
 # #5048: the ONE home for the two mitigation predicates, shared with
 # `_upsert_point_props` in this package (imported before this module by
 # `projection/__init__.py`): the identity rule, and the separate requirement
@@ -559,9 +561,11 @@ class _EdgeHandlers:
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source endpoints referenced by short IDs (#6713).
-        Operator endpoints may be Point OR Event nodes (A1b #1272) — the
-        existence checks and edge MERGEs match both (#1919 fold-parity: live
-        create_operator writes the same typed + INPUT edges this replay does)."""
+        Operator endpoints may carry any of the four epistemic labels
+        :Point/:Subject/:Object/:Event (#7902, owner ruling #7813) — the
+        existence checks and edge MERGEs match all four
+        (#7902 fold-parity: live create_operator writes the same typed +
+        INPUT edges this replay does)."""
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r4): a truthy non-dict operator value must
@@ -574,6 +578,13 @@ class _EdgeHandlers:
                      "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
         import logging as _logging
         _log = _logging.getLogger(__name__)
+        # #7902: the operator endpoint may carry any of :Point/:Subject/
+        # :Object/:Event (owner ruling #7813). The fold is the SHARED
+        # live+replay writer, so its existence probes and edge MERGEs must
+        # admit the same labels the live ``create_operator`` writer does —
+        # otherwise a non-Point input is skipped (long id) or phantom-stubbed
+        # (short id) on replay, diverging live from rebuilt.
+        _epi_s = epistemic_disjunction("s")
         for idx, src in enumerate(op.get("inputs") or []):
             # #331 (review r4): non-string inputs members are malformed —
             # skip (len()/Cypher param would raise).
@@ -599,7 +610,7 @@ class _EdgeHandlers:
                     )
                     continue
                 exists = self.g.query(
-                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "MATCH (s) WHERE " + _epi_s + " "
                     "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src}
                 ).result_set[0][0]
@@ -627,14 +638,14 @@ class _EdgeHandlers:
                 # A source that doesn't resolve would silently match nothing
                 # in the MERGE below; warn instead of dropping the input.
                 exists = self.g.query(
-                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "MATCH (s) WHERE " + _epi_s + " "
                     "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src},
                 ).result_set[0][0]
                 if not exists:
                     _log.warning(
                         "input source %r (id length %d >= 20) does not "
-                        "resolve to an existing Point or Event — INPUT edge "
+                        "resolve to an existing epistemic node — INPUT edge "
                         "skipped",
                         src, len(src),
                     )
@@ -643,7 +654,7 @@ class _EdgeHandlers:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(
                     f"MATCH (o:Point {{id:$oid}}), (s) "
-                    f"WHERE (s:Point OR s:Event) AND s.id = $sid "
+                    f"WHERE {_epi_s} AND s.id = $sid "
                     f"MERGE (o)-[:{rel_type} {{idx:$idx}}]->(s) "
                     f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
@@ -706,7 +717,7 @@ class _EdgeHandlers:
                         and has_usable_mitigation_strength(p)):
                     self.g.query(
                         "MATCH (o:Point {id:$oid}), (s) "
-                        "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                        "WHERE " + _epi_s + " AND s.id = $sid "
                         "MERGE (s)-[:mitigated_by]->(o)",
                         params={"oid": p["id"], "sid": src},
                     )
@@ -714,7 +725,7 @@ class _EdgeHandlers:
                 # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
                     "MATCH (o:Point {id:$oid}), (s) "
-                    "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                    "WHERE " + _epi_s + " AND s.id = $sid "
                     "MERGE (s)-[:INPUT {idx:$idx}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
