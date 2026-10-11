@@ -21,6 +21,18 @@ response_fields:
   field: status
   emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
+# #2294: the OTHER half of the terminal vocabulary. ``status`` alone cannot
+# express ``invalidate_point``'s terminal state — that writer sets
+# ``outdated=true`` and leaves ``status`` untouched (``supersede_point`` is the
+# one that stamps ``status='superseded'``), so a status-only reader served an
+# invalidated claim as CURRENT. Emitted only when true, so every live hit stays
+# byte-identical; the flag rides the search-result wire so every consumer can
+# apply the shared ``live.is_terminal_status`` (#2901) instead of re-declaring
+# a status subset at a call site.
+- response: tortoise_search
+  field: outdated
+  emitted_when: 'the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises WITHOUT stamping status) — present only when true'
+  unchanged_when_off: 'n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay byte-identical'
 - response: tortoise_session_capture
   field: capture_redactions
   emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'

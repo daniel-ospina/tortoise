@@ -794,6 +794,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
@@ -2287,6 +2288,12 @@ surfaces:
   - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
+  # #2294: the D8 decoration gate must see the LEGACY flag-only terminal state
+  # (``invalidate_point`` leaves ``status`` untouched) — guards
+  # ``tortoise/ask_lane.py``'s gate, so an ask_lane-only PR must run it (a
+  # SOURCE_PATTERNS match REPLACES the core fallback). Also under `core` for
+  # the ``tortoise/search_engine.py`` half (the additive ``outdated`` key).
+  - test_2294_ask_degradation_gate.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge

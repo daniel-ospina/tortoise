@@ -415,6 +415,13 @@ class SearchResult:
     source_path: str = ""  # #167: file path for agent to open/search
     # #1353 promoted epistemic state (D8) — first-class, absent when unknown:
     status: str = ""  # live / superseded / deprecated / retracted / draft
+    # #2294: the legacy flag-based dead marker. ``invalidate_point`` sets
+    # ``outdated=true`` and leaves ``status`` untouched, so a status-only
+    # terminal test cannot see it — the reader must combine the two through
+    # ``live.is_terminal_status`` (#2901: ONE declaration, imported by every
+    # reader that must skip non-current Points). Additive in ``to_dict``
+    # (emitted only when true), so live hits stay byte-identical.
+    outdated: bool = False
     superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
     supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
     # E6 (#1538) D5/D7: promoted validity-window fields — additive, emitted
@@ -473,6 +480,13 @@ class SearchResult:
         # #1353 promoted state — additive keys, emitted only when known (#1353 D8)
         if self.status:
             d["status"] = self.status
+        # #2294: the flag half of the terminal vocabulary, emitted only when
+        # set (the same additive D8 rule as ``status`` above). Without it the
+        # ``invalidate_point`` terminal state is INVISIBLE to consumers that
+        # only see the wire — e.g. the ask lane's decoration gate, which must
+        # never render a terminal hit as current.
+        if self.outdated:
+            d["outdated"] = True
         if self.superseded_by:
             d["superseded_by"] = self.superseded_by
         if self.supersedes:
@@ -2945,7 +2959,13 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  old.id, old.content, old.createdAt, "
             "  new.id, new.status, new.content, new.createdAt, "
             "  s.id, s.name, s.subjectKind, "
-            "  es.id, es.name, es.subjectKind",
+            "  es.id, es.name, es.subjectKind, "
+            # #2294: the legacy flag half of the terminal vocabulary, appended
+            # LAST so the 0-17 index mapping above is untouched. The reader
+            # that EXCLUDES on it (``_terminal_excluded``) and the reader that
+            # must MARK it (the ask lane's D8 gate / ``to_dict``) now read the
+            # same fact.
+            "  coalesce(n.outdated, false)",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -2954,6 +2974,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             pid = row[0]
             st = out.setdefault(pid, {
                 "status": row[1] or "",
+                "outdated": bool(row[18]) if len(row) > 18 else False,
                 "superseded_by": None,
                 "supersedes": [],
                 "subject": None,
