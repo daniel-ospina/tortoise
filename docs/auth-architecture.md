@@ -475,6 +475,13 @@ key model. The epic kept that line: scope allowlisting stays flat and
 machine-readable; per-graph ACL *users* (C4) are defense-in-depth for graph
 mints, not a policy engine.
 
+The full authorization design — Principal / Scope / Capability, the
+security-bindings-by-resource-ID layer, provenance-derived scoping with
+explicit promotion, and the re-measured audit of everything §6 describes —
+lives in `docs/authorization-architecture.md` (#2082; design + audit, NOT
+frozen). §6 here is the **as-built** credential model; that doc is the
+**target** model plus the decision/deferral record.
+
 ### 6.4 Supabase storage parity
 
 The supabase `api_keys` table mirrors the registry shape exactly

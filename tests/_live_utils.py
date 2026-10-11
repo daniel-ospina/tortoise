@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import os
 
-# #3339: the ONE live-URI skip reason. tools/skip-guard.py exempts the
-# intentional availability-class families by REASON PREFIX, and only this
-# string is on that list for the URI gate. Anything that needs to skip on a
-# missing TORTOISE_DB_URI must use this constant (directly or via
-# _skip_unless_live_uri below) — a hand-written reason is how
-# test_scan_eval_graph_live_smoke redded `test (a)` for every PR whose
-# selection landed in the tier-2 URI-less lane.
+# #3339: the ONE live-URI skip reason. tools/skip-guard.py keys the
+# intentional URI-gate family on this reason's PREFIX, and since #3592 the
+# guard's verdict is LANE-AWARE: the family is exempt on a lane that declared
+# itself URI-less (or declared nothing) and is a VIOLATION on a lane that
+# promised the URI. Anything that needs to skip on a missing TORTOISE_DB_URI
+# must still use this constant (directly or via _skip_unless_live_uri below) —
+# a hand-written reason is how test_scan_eval_graph_live_smoke redded
+# `test (a)` for every PR whose selection landed in the tier-2 URI-less lane.
+# An UNDECLARED lane (the carve-out job, a local run) is the case where the
+# prefix is still load-bearing, so routing through this constant remains
+# required everywhere; the lane awareness only stops a reason from excusing a
+# skip the lane had promised to run.
 LIVE_URI_SKIP_REASON = (
     "requires TORTOISE_DB_URI (live FalkorDB sidecar; see CI job "
     "test-concurrency-falkor)"

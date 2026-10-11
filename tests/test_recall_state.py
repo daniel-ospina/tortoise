@@ -173,6 +173,85 @@ def test_state_ranker_inputs_not_mutated():
     assert results[0] == original
 
 
+# ── Unit: #2598 draft honesty (no DB) ──────────────────────────────────────
+
+def test_draft_at_equal_relevance_sorts_after_low_confidence_live():
+    """#2598 repro, pinned. At EQUAL relevance a draft's fabricated neutral 0.5
+    used to OUTRANK a genuinely measured live claim at 0.29 (0.5 > 0.29) — the
+    "neutral-0.5 does NOT sort below contested live claims for free" defect. The
+    ordering is now an EXPLICIT status tiebreaker, not a side effect of the
+    numbers, so the live row wins whatever the scores say."""
+    out = StateRanker().rerank([
+        {"id": "draft", "scores": {"rrf": 0.05}, "status": "draft",
+         "state_confidence": 0.5, "state_has_ep": False},
+        {"id": "live_low", "scores": {"rrf": 0.05}, "status": "live",
+         "state_confidence": 2 / 7, "state_has_ep": True},
+    ])
+    assert [r["id"] for r in out] == ["live_low", "draft"]
+    # The demotion is NOT a score effect — the draft's score is still higher.
+    by_id = _ranked(out)
+    assert by_id["draft"]["final_score"] > by_id["live_low"]["final_score"]
+
+
+def test_draft_without_measured_belief_renders_uncomputed():
+    """#2598 (c): a draft EP has not measured shows NO computed belief —
+    ``confidence: None`` + ``confidence_source: "uncomputed"`` + the additive
+    ``draft: True`` badge — never the neutral 0.5 that reads as a measurement."""
+    out = StateRanker().rerank([
+        {"id": "d", "scores": {"rrf": 0.05}, "status": "draft",
+         "state_confidence": 0.5, "state_has_ep": False},
+    ])
+    rr = out[0]["recall_ranking"]
+    assert rr["confidence"] is None
+    assert rr["confidence_source"] == "uncomputed"
+    assert rr["draft"] is True
+
+
+def test_measured_draft_keeps_its_measured_number():
+    """A draft that DOES carry a persisted posterior (demoted after a real EP
+    run) keeps the measured number: the number is real, only the STAGING is the
+    news. It is still badged and still demoted below live."""
+    out = StateRanker().rerank([
+        {"id": "d", "scores": {"rrf": 0.05}, "status": "draft",
+         "state_confidence": 0.95, "state_has_ep": True},
+        {"id": "l", "scores": {"rrf": 0.05}, "status": "live",
+         "state_confidence": 0.4, "state_has_ep": True},
+    ])
+    assert [r["id"] for r in out] == ["l", "d"]
+    rr = _ranked(out)["d"]
+    assert rr["confidence"] == 0.95
+    assert rr["confidence_source"] == "posterior"
+    assert rr["draft"] is True
+
+
+def test_live_rows_render_byte_identically():
+    """No live row changes: no ``draft`` key, the same numeric confidence, the
+    same source, and the same relative order (live rows keep the stable order
+    they had under the pre-#2598 reverse-score sort)."""
+    results = [
+        {"id": "a", "scores": {"rrf": 0.05}, "state_confidence": 0.8,
+         "state_has_ep": True, "state_degree": 1},
+        {"id": "b", "scores": {"rrf": 0.05}, "state_confidence": 0.7,
+         "state_has_ep": True, "state_degree": 3},
+        {"id": "c", "scores": {"rrf": 0.04}, "state_confidence": 0.9,
+         "state_has_ep": True, "state_degree": 0},
+    ]
+    out = StateRanker().rerank(results)
+    assert [r["id"] for r in out] == ["a", "b", "c"]
+    for r in out:
+        assert "draft" not in r["recall_ranking"], r
+        assert isinstance(r["recall_ranking"]["confidence"], float)
+        assert r["recall_ranking"]["confidence_source"] == "posterior"
+    # An uncalibrated LIVE row keeps the documented #898 neutral fallback —
+    # only DRAFTS are gated by #2598 (a recorded decision, not reopened here).
+    live_uncalibrated = StateRanker().rerank([
+        {"id": "u", "scores": {"rrf": 0.05}, "status": "live"},
+    ])[0]["recall_ranking"]
+    assert live_uncalibrated["confidence"] == NEUTRAL_CONFIDENCE
+    assert live_uncalibrated["confidence_source"] == "neutral"
+    assert "draft" not in live_uncalibrated
+
+
 # ── Integration: embedded FalkorDBLite ─────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -255,6 +334,66 @@ def test_golden_set_integration():
         assert by_id[g["well"]]["recall_ranking"]["final_score"] > \
                by_id[g["low"]]["recall_ranking"]["final_score"] > \
                by_id[g["cont"]]["recall_ranking"]["final_score"]
+    finally:
+        sdk.close()
+
+
+def test_draft_recalled_after_live_uncomputed_end_to_end():
+    """#2598 indicator 2, end-to-end on the real graph: an explicit
+    ``status="draft"`` Point is RECALLED alongside live Points (never hidden),
+    is badged (row ``status`` + ``recall_ranking.draft``), shows "no belief
+    computed" (``confidence`` None / ``confidence_source`` "uncomputed") instead
+    of a 0.5, and is ranked AFTER every live row even though its own gate score
+    is the highest of the three."""
+    sdk = _fresh_sdk()
+    try:
+        live_low = sdk.create_point("statement", "zephyr launch window alpha")
+        draft = sdk.create_point("statement", "zephyr launch window beta",
+                                 status="draft")
+        live_high = sdk.create_point("statement", "zephyr launch window gamma")
+        # live_low is measured BELOW the draft's fabricated neutral 0.5; both
+        # live claims are MEASURED while the draft is EP-inert. The 10x
+        # confidence gap keeps the "not score-driven" assertion below robust to
+        # ordinary FTS relevance jitter.
+        _set_posterior(sdk, live_low["id"], 1.0, 19.0)   # 0.05
+        _set_posterior(sdk, live_high["id"], 14.0, 1.0)  # 0.933
+
+        results = sdk.recall_state("zephyr launch window", kind="statement",
+                                   limit=10)
+        ids = [r["id"] for r in results]
+        by_id = {r["id"]: r for r in results}
+        assert set(ids) == {live_low["id"], draft["id"], live_high["id"]}
+
+        # (b) ranked after EVERY live row — a status tiebreaker, not a score
+        # coincidence (the draft's own final_score outranks live_low's here, and
+        # the draft is still placed below it).
+        assert ids[-1] == draft["id"]
+        assert by_id[draft["id"]]["recall_ranking"]["final_score"] > \
+            by_id[live_low["id"]]["recall_ranking"]["final_score"]
+
+        # (a) visibly badged draft.
+        assert by_id[draft["id"]]["status"] == "draft"
+        assert by_id[draft["id"]]["recall_ranking"]["draft"] is True
+
+        # (c) no computed belief — never the neutral 0.5.
+        draft_rr = by_id[draft["id"]]["recall_ranking"]
+        assert draft_rr["confidence"] is None
+        assert draft_rr["confidence_source"] == "uncomputed"
+
+        # Live rows are untouched: numeric posterior + no draft badge.
+        live_rr = by_id[live_low["id"]]["recall_ranking"]
+        assert live_rr["confidence_source"] == "posterior"
+        assert live_rr["confidence"] == pytest.approx(0.05, abs=1e-6)
+        assert "draft" not in live_rr
+
+        # The min_confidence floor: a POSITIVE floor cannot be met by a row with
+        # no measured belief, so the draft drops (and so does the 0.40 live
+        # claim); the default 0.0 floor is "no floor" and keeps it recallable.
+        assert len(sdk.recall_state("zephyr launch window", kind="statement",
+                                    limit=10, min_confidence=0.0)) == 3
+        floored = sdk.recall_state("zephyr launch window", kind="statement",
+                                  limit=10, min_confidence=0.5)
+        assert [r["id"] for r in floored] == [live_high["id"]]
     finally:
         sdk.close()
 

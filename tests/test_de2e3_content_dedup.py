@@ -187,6 +187,34 @@ class TestDe2e3:
         r2 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r2["filed"] == 0 and r2["duplicates"] == 1
 
+    def test_7951_checkpoint_provenance_event_reaches_journal_and_replays(
+            self, sdk, tmp_path):
+        """#7951: checkpoint()'s per-item provenance EventRecorded went
+        through a bare ``proj.apply`` — the projection's REPLAY fold — so it
+        lived in the graph only and a replay LOST it. It now goes through the
+        sanctioned live door (``_apply_and_journal``): journal first, then
+        fold. RED at the pre-#7951 source: the journal carries no
+        ``EventRecorded/pointAdded`` and ``rebuild_all`` drops the Event."""
+        from tortoise.log import EventLog
+
+        sdk.checkpoint([{"wing": "w", "room": "r", "content": "prov"}])
+        proj = sdk._get_proj()
+        journal = EventLog(str(tmp_path / "events.jsonl")).read_all()
+        prov = [e for e in journal
+                if e.get("type") == "EventRecorded"
+                and e.get("eventKind") == "pointAdded"]
+        assert prov, ("checkpoint's provenance Event did not reach the journal "
+                      "— a replay would LOSE it (#7951)")
+        event_id = prov[0]["id"]
+        assert proj.g.query(
+            "MATCH (e:Event {eventId:$id}) RETURN count(e)",
+            params={"id": event_id}).result_set[0][0] == 1
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert proj.g.query(
+            "MATCH (e:Event {eventId:$id}) RETURN count(e)",
+            params={"id": event_id}).result_set[0][0] == 1, (
+            "the checkpoint provenance Event did not survive replay (#7951)")
+
     def test_2892_hashless_fallback_after_rebuild(self, sdk, tmp_path):
         """#2892: when a graph carries NO ``content_hash`` the bare hash MATCH
         in ``_content_exists`` returns None and ``checkpoint()``'s Tier-1

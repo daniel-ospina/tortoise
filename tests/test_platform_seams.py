@@ -317,6 +317,194 @@ def test_install_cline_uninstall_removes_own_hook(tmp_path):
     assert not hook.exists()
 
 
+# ── Devin CLI (#2124) — `.devin/hooks.v1.json`, the ONE JSON seam whose
+#    file IS the hooks object (no `"hooks"` wrapper) ───────────────────────
+# Contract verified against docs.devin.ai/cli/extensibility/hooks:
+#   * the hooks object is the entire file (no wrapper key needed);
+#   * the event → matcher-group shape ({"hooks": [{type, command}]}) is
+#     identical to codex/claude — Devin's own PreToolUse example uses it;
+#   * UserPromptSubmit stdin carries `prompt` and the output contract is
+#     `hookSpecificOutput.additionalContext` (what volunteer-turn.sh emits
+#     for the `devin` arg);
+#   * `matcher` is tool-event-only — "use "" or omit" for UserPromptSubmit.
+
+
+def test_install_devin_writes_unwrapped_registration(tmp_path):
+    """`tortoise install devin` writes .devin/hooks.v1.json with the
+    UserPromptSubmit key at the TOP LEVEL — a `"hooks"` wrapper is the codex/
+    claude shape and would register nothing in Devin (it would read the file
+    as an event named `hooks`)."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    assert target.exists()
+    cfg = json.loads(target.read_text())
+    assert "hooks" not in cfg, f"devin's file must not be wrapped: {cfg}"
+    cmd = cfg["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd.endswith("volunteer-turn.sh devin")
+    assert Path(cmd.split()[0]).exists()  # the live shipped hook, quoted
+
+
+def test_install_devin_preserves_other_events_and_foreign_hooks(tmp_path):
+    """A pre-existing .devin/hooks.v1.json keeps every other event and the
+    user's own UserPromptSubmit hook, on install AND on --uninstall."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    target.parent.mkdir(parents=True)
+    cfg = {
+        "PreToolUse": [{"matcher": "exec", "hooks": [
+            {"type": "command", "command": "./guard.sh"}]}],
+        "UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "./user-hook.sh"}]}],
+    }
+    target.write_text(json.dumps(cfg))
+    assert _run(["install", "devin", "--dir", str(tmp_path)],
+                env).returncode == 0
+    merged = json.loads(target.read_text())
+    assert merged["PreToolUse"] == cfg["PreToolUse"]  # other event intact
+    cmds = [h["command"] for e in merged["UserPromptSubmit"]
+            for h in e["hooks"]]
+    assert "./user-hook.sh" in cmds, "the user's own hook was destroyed"
+    assert any(c.endswith("volunteer-turn.sh devin") for c in cmds)
+    # Uninstall removes ONLY our entry — never the user's hook or other events.
+    r = _run(["install", "devin", "--dir", str(tmp_path), "--uninstall"], env)
+    assert r.returncode == 0, r.stderr
+    left = json.loads(target.read_text())
+    assert left["PreToolUse"] == cfg["PreToolUse"]
+    cmds = [h["command"] for e in left["UserPromptSubmit"]
+            for h in e["hooks"]]
+    assert cmds == ["./user-hook.sh"], cmds
+
+
+def test_install_devin_idempotent_reinstall(tmp_path):
+    """A second install is a byte-identical no-op (a re-run is the upgrade
+    path) and never appends a duplicate registration."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    assert _run(["install", "devin", "--dir", str(tmp_path)],
+                env).returncode == 0
+    first = target.read_text()
+    r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert target.read_text() == first
+    cfg = json.loads(first)
+    assert len(cfg["UserPromptSubmit"]) == 1, cfg
+
+
+def test_install_devin_uninstall_when_absent_is_clean_noop(tmp_path):
+    """--uninstall with no registration is a clean no-op that creates NO
+    file (the #2383 inversion) and does not traceback."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    r = _run(["install", "devin", "--dir", str(tmp_path), "--uninstall"], env)
+    assert r.returncode == 0, r.stderr
+    assert "nothing to remove" in r.stdout
+    assert "Traceback" not in r.stderr
+    assert not target.exists()
+
+
+def test_install_devin_refuses_malformed_config(tmp_path):
+    """Invalid JSON, a non-object top level, and a non-list UserPromptSubmit
+    are each REFUSED untouched — never clobbered, never a traceback."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    target.parent.mkdir(parents=True)
+    for bad in ("{not json", "[1, 2]", '{"UserPromptSubmit": {"a": 1}}'):
+        target.write_text(bad)
+        r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+        assert r.returncode == 1, (bad, r.stdout)
+        assert "Refusing" not in r.stdout
+        assert target.read_text() == bad, f"config was clobbered: {bad}"
+        assert "Traceback" not in r.stderr
+
+
+def test_install_devin_rejects_non_devin_intent(tmp_path):
+    """`install pi` (no read seam) must NOT fall into the devin target — and
+    `install devin` must not touch a codex/claude/cline registration."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "pi", "--dir", str(tmp_path)], env)
+    assert not (tmp_path / ".devin" / "hooks.v1.json").exists()
+    assert r.returncode == 0  # pi installs its capture extension
+    # A devin install leaves a codex registration alone.
+    assert _run(["install", "codex", "--dir", str(tmp_path)],
+                env).returncode == 0
+    codex_cfg = (tmp_path / ".codex" / "hooks.json").read_text()
+    assert _run(["install", "devin", "--dir", str(tmp_path)],
+                env).returncode == 0
+    assert (tmp_path / ".codex" / "hooks.json").read_text() == codex_cfg
+
+
+def test_install_devin_refuses_symlink_escape(tmp_path):
+    """A .devin/hooks.v1.json symlinked OUTSIDE the install root is refused —
+    a repo symlink must not write through to a real user file."""
+    outside = tmp_path / "outside" / "hooks.v1.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text('{"UserPromptSubmit": []}')
+    proj = tmp_path / "proj"
+    (proj / ".devin").mkdir(parents=True)
+    (proj / ".devin" / "hooks.v1.json").symlink_to(outside)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "devin", "--dir", str(proj)], env)
+    assert r.returncode == 1
+    assert "Refusing" in r.stderr
+    assert "volunteer-turn.sh" not in outside.read_text()  # untouched
+
+
+def test_install_devin_warns_when_claude_hook_also_registered(tmp_path):
+    """Devin reads `.claude/` hooks by default (read_config_from.claude), so a
+    repo carrying BOTH registrations runs the reflex twice per turn. The
+    install must SAY so (the duplicate is otherwise silent)."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    assert _run(["install", "claude", "--dir", str(tmp_path)],
+                env).returncode == 0
+    r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert "read_config_from.claude" in r.stdout
+    assert "twice" in r.stdout
+    # No warning when nothing else registers the hook.
+    clean = tmp_path / "clean"
+    r = _run(["install", "devin", "--dir", str(clean)], env)
+    assert "read_config_from.claude" not in r.stdout
+
+
+def test_install_devin_advisory_never_fails_the_install(tmp_path):
+    """The duplicate-injection note is ADVISORY: a .claude/settings.json it
+    cannot parse (non-object JSON, a non-dict `hooks`, non-UTF-8 bytes) must
+    leave the devin install a SUCCESS — never a reported FAILURE over a file
+    the install already wrote."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    (tmp_path / ".claude").mkdir()
+    settings = tmp_path / ".claude" / "settings.json"
+    for bad in (b"[1, 2, 3]", b'{"hooks": "nope"}', b"\xff\xfe not utf-8"):
+        settings.write_bytes(bad)
+        if target.exists():
+            target.unlink()
+        r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+        assert r.returncode == 0, (bad, r.stderr)
+        assert "FAILED" not in r.stderr and "Traceback" not in r.stderr
+        assert target.exists(), bad
+        assert "Installed" in r.stdout
+
+
+def test_install_devin_repairs_stale_script_path(tmp_path):
+    """Same stale-path repair as codex/claude — a dead volunteer-turn.sh
+    path is rewritten in place, not left as a silent dead hook."""
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    target = tmp_path / ".devin" / "hooks.v1.json"
+    target.parent.mkdir(parents=True)
+    stale = "/old/vanished/path/volunteer-turn.sh devin"
+    target.write_text(json.dumps({"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": stale}]}]}))
+    r = _run(["install", "devin", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert "Repaired" in r.stdout
+    cmd = json.loads(target.read_text())["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd != stale and cmd.endswith("volunteer-turn.sh devin")
+    assert Path(cmd.split()[0]).exists()
+
+
 def test_install_refuses_symlink_escape(tmp_path):
     """A .claude/settings.json symlinked OUTSIDE the install dir is refused
     — a repo symlink must not write through to a real user file."""
@@ -498,6 +686,24 @@ def test_volunteer_turn_hook_cline_contract(env, tmp_path):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert "point/" in out["contextModification"]["context"]
+
+
+def test_volunteer_turn_hook_devin_contract(env, tmp_path):
+    """Devin UserPromptSubmit (stdin carries `prompt`) →
+    hookSpecificOutput.additionalContext, the contract docs.devin.ai
+    documents for UserPromptSubmit injection."""
+    stdin = json.dumps({
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "How is CI deploy triggered?",
+        "session_id": "3f8d1c2a-0000-0000-0000-000000000000",
+        "prompt_id": "b71e9d40-0000-0000-0000-000000000000",
+    })
+    r = _hook_run(env, "devin", stdin, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "point/" in ctx and "CI pipeline deploys" in ctx
 
 
 def test_volunteer_turn_hook_fail_open_empty_graph(tmp_path):

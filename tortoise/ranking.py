@@ -36,9 +36,20 @@ from .search_engine import (  # noqa: E402, RUF100
     CONTESTED_VARIANCE_THRESHOLD,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
-from .live import is_terminal_status  # #2490: terminal rows are never contested
+from .live import is_draft_status, is_terminal_status  # #2490: terminal rows are never contested; #2598: the draft predicate
 
 logger = logging.getLogger(__name__)
+
+
+#: #2598 — the ``confidence_source`` value for a DRAFT whose belief EP has not
+#: measured. A draft is EP-INERT (``live._live_only`` excludes it from EVERY
+#: factor-extraction call site), so no posterior is computed for it and there is
+#: no measurement to report. ``"neutral"`` (the #898 fallback for an uncalibrated
+#: LIVE claim) is the wrong word here: it asserts a measurement verdict about a
+#: row that is not in the belief network at all, and it let a draft's fabricated
+#: Beta(1,1) mean of 0.5 read as graded belief — and OUTRANK a genuinely measured
+#: live claim whose posterior is below 0.5 (#2598's repro).
+UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 
 
 def _w4_flag_on() -> bool:
@@ -592,7 +603,33 @@ class StateRanker:
         returned with a ``recall_ranking`` breakdown:
 
         ``{relevance_norm, confidence, confidence_source, centrality_norm,
-          base_score, final_score, degree, variance, contested}``
+          base_score, final_score, degree, variance, contested}`` plus, on a
+        DRAFT row only, ``draft: True`` (see #2598 below).
+
+        #2598 — DRAFT HONESTY. A draft is EP-inert (``live._live_only``), so no
+        belief is computed for it. Three consequences, all keyed off the row's
+        own ``status`` (or the batch-read signal, which reads the same column):
+
+        1. ``confidence`` is ``None`` and ``confidence_source`` is
+           ``"uncomputed"`` when EP has not measured the claim — a draft is
+           never displayed with the fabricated neutral 0.5 (#2598: "drafts are
+           EP-inert — don't fake measurement"). A draft that DOES carry a
+           persisted posterior (demoted after a real EP run) keeps its measured
+           number: the number is real, only the row's staging is the news.
+        2. the explicit ``draft`` key is emitted (only when true, so live hits
+           stay byte-identical), so a consumer can badge without knowing the
+           status vocabulary.
+        3. drafts sort AFTER every live row. Ordering is
+           ``(is_draft, -final_score)`` — an EXPLICIT status tiebreaker, not a
+           side effect of the numbers. Today the question is answered by
+           whichever fabricated 0.5 happens to win: a draft's neutral 0.5 and a
+           contested live claim's measured 0.5 are the SAME number, and at equal
+           relevance a draft OUTRANKS a measured live claim at 0.29 (#2598
+           repro). Neither is an acceptable basis for the order.
+
+        Live rows are unaffected: no ``draft`` key, the same numeric
+        ``confidence``, the same score, and the same relative order (live rows
+        keep their stable relative ordering under the new sort key).
 
         W4-b (issue #2102): ``query`` is OPTIONAL.  When a query is present
         AND the W4 flag is on, contested POINTS whose conflict is
@@ -642,18 +679,42 @@ class StateRanker:
         for r, norm_r in zip(results, norm_rel):  # noqa: B905
             sig = signals.get(r.get("id"), {})
             confidence, source = self._confidence_of(r, sig)
+            # #2598: the row's STAGED state, read from the batch signal when the
+            # graph was queried and from the row itself otherwise (the embedded
+            # unit path, or an id the signal query did not return). Both read
+            # the same ``n.status`` column, so the two cannot disagree on a
+            # graph-backed read.
+            draft = sig.get("draft")
+            if draft is None:
+                draft = is_draft_status(r.get("status"))
+            draft = bool(draft)
+            # #2598: EP has not measured this claim → there is no belief to
+            # report. Only a DRAFT is gated here; an uncalibrated LIVE claim
+            # keeps the documented #898 neutral 0.5 + ``confidence_source:
+            # "neutral"`` disclosure (a recorded decision this change does not
+            # reopen).
+            uncomputed = draft and not self._has_ep(r, sig)
             degree = int(sig.get("degree", 0))
             base = (norm_r ** self.relevance_exp) * (confidence ** self.confidence_exp)
             copy = dict(r)
-            copy["recall_ranking"] = {
+            # ``object``-valued: #2598 makes ``confidence`` ``float | None``
+            # (null == "no belief computed"), so the literal's value types no
+            # longer have a single numeric kind.
+            ranking: dict[str, object] = {
                 "relevance_norm": round(norm_r, 6),
-                "confidence": round(confidence, 6),
-                "confidence_source": source,
+                "confidence": None if uncomputed else round(confidence, 6),
+                "confidence_source": (
+                    UNCOMPUTED_CONFIDENCE_SOURCE if uncomputed else source),
                 "degree": degree,
                 "centrality_norm": 0.0,  # filled after the min-max pass
                 "base_score": round(base, 6),
                 "final_score": round(base, 6),  # updated with centrality below
             }
+            if draft:
+                # Additive, emitted only when true (the #1353 D8 / #2294 rule):
+                # every live hit stays byte-identical.
+                ranking["draft"] = True
+            copy["recall_ranking"] = ranking
             if "variance" in sig:
                 copy["recall_ranking"]["variance"] = round(sig["variance"], 6)
                 copy["recall_ranking"]["contested"] = sig.get("contested", False)
@@ -680,10 +741,26 @@ class StateRanker:
             a["recall_ranking"]["final_score"] = round(
                 base * (1.0 + self.centrality_weight * nd) * (1.0 + cb), 6)
 
-        ann.sort(key=lambda r: r["recall_ranking"]["final_score"], reverse=True)
+        ann.sort(key=lambda r: (
+            1 if r["recall_ranking"].get("draft") else 0,
+            -r["recall_ranking"]["final_score"],
+        ))
         return ann
 
     # ── Signal computation ────────────────────────────────────────────
+
+    def _has_ep(self, result: dict, signals: dict) -> bool:
+        """Whether EP has MEASURED this claim (#3276 semantics).
+
+        The graph signal (``has_ep``) wins when the batch read returned the id;
+        the embedded ``state_has_ep`` is the projection=None unit-path fallback.
+        Extracted so :meth:`_confidence_of` and #2598's uncomputed-draft gate
+        cannot drift on the same question.
+        """
+        has_ep = signals.get("has_ep")
+        if has_ep is None:
+            has_ep = bool(result.get("state_has_ep", False))
+        return bool(has_ep)
 
     def _confidence_of(self, result: dict, signals: dict) -> tuple[float, str]:
         """Confidence (posterior mean) + source label for one result.
@@ -693,9 +770,7 @@ class StateRanker:
         low support. Source is "posterior" when EP actually measured the
         claim, "neutral" otherwise.
         """
-        has_ep = signals.get("has_ep")
-        if has_ep is None:
-            has_ep = bool(result.get("state_has_ep", False))
+        has_ep = self._has_ep(result, signals)
         if "confidence" in signals:
             conf = float(signals["confidence"])
             return conf, ("posterior" if has_ep else "neutral")
@@ -730,7 +805,10 @@ class StateRanker:
             pid, alpha, beta, has_ep, degree = (
                 row[0], float(row[1]), float(row[2]), bool(row[3]), int(row[4]))
             # #2490: terminal rows never surface as measured/contested EP (len
-            # guard — see GraphRanker).
+            # guard — see GraphRanker). #2598: the len guard also covers the
+            # test fakes' 5-tuple row shape, so an absent status column reads
+            # as "not a draft" rather than raising.
+            status = row[5] if len(row) > 5 else ""
             if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
                 has_ep = False
             variance = _beta_variance(alpha, beta)
@@ -739,6 +817,10 @@ class StateRanker:
                 "has_ep": has_ep,
                 "degree": degree,
                 "variance": variance,
+                # #2598: the staged state rides the SAME batch read EP already
+                # needs — no extra query on the recall path.
+                "status": status or "",
+                "draft": is_draft_status(status),
                 # Uncalibrated (no persisted α/β) is NOT contested — unmeasured.
                 "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
             }
@@ -773,6 +855,12 @@ class StateRanker:
                 "degree": about_degree,
                 "variance": 0.0,
                 "contested": False,
+                # #2598: the Object status family has NO ``draft`` member
+                # (``commit_ops.OBJECT_TERMINAL_STATUSES``), so an Object can
+                # never be a staged row — declared explicitly rather than left
+                # absent so the rerank gate reads one shape for both families.
+                "status": "",
+                "draft": False,
             }
         return out
 
@@ -795,6 +883,10 @@ class StateRanker:
             if isinstance(r.get("state_variance"), (int, float)):
                 sig["variance"] = float(r["state_variance"])
                 sig["contested"] = bool(r.get("state_contested", False))
+            # #2598: the staged state, read from the row's own status column
+            # (this path exists precisely because there is no graph to query).
+            sig["status"] = r.get("status") or ""
+            sig["draft"] = is_draft_status(sig["status"])
             out[rid] = sig
         return out
 

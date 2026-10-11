@@ -732,6 +732,29 @@ class TestMcpAuthFlip:
             body = _parse_sse_json(r)
             assert body is not None and "result" in body
 
+    def test_mcp_supabase_resolution_writes_last_used_at(self, monkeypatch,
+                                                         supabase_fake):
+        """#1872 (item 2): the SUPABASE branch of the MCP #685/#1854 write-
+        through — an MCP resolution in Supabase mode must bump the resolved
+        api_keys row's last_used_at. The registry twin is locked by
+        test_mcp_http.py::TestAuthPreLeak::test_successful_auth_writes_last_used_at;
+        the Supabase wiring (mcp_auth's `is_supabase_enabled()` branch calling
+        update_last_used) had no boundary test at all. Without it, a recovery
+        key used ONLY via MCP in Supabase mode reads as never-used to the
+        NULL-first #1854 rotation and is rotated away while live."""
+        supabase_fake.seed("api_keys", [_key_row()])
+        assert supabase_fake.tables["api_keys"][0].get("last_used_at") is None
+        _enable_supabase(monkeypatch, supabase_fake)
+        mcp_app = create_http_app(allowed_origins=[])
+        tc = _mounted_test_client(mcp_app)
+        tc.headers.update(_mcp_headers(TOKEN))
+        with tc:
+            r = tc.post("/mcp", json={"jsonrpc": "2.0",
+                                       "method": "tools/list", "id": 1})
+            assert r.status_code == 200, r.text
+            assert supabase_fake.tables["api_keys"][0]["last_used_at"] is not None, (
+                "MCP resolution in Supabase mode must write last_used_at")
+
     def test_mcp_registry_only_key_401(self, monkeypatch, supabase_fake):
         """E2E-7-negative: registry-only key → 401 JSON-RPC on MCP."""
         _enable_supabase(monkeypatch, supabase_fake)  # no key rows at all

@@ -758,15 +758,26 @@ def _patch_gh(monkeypatch, rows: dict) -> None:
 
 
 def _indexer_event(kind: str, repo: str, payload: dict) -> dict:
-    """Drive the indexer's REAL `_project_issue`/`_project_pr` on a REST item."""
+    """Drive the indexer's REAL `_project_issue`/`_project_pr` on a REST item.
+
+    #7951: the write goes through the SDK's live door
+    (``TortoiseSDK._apply_and_journal``) — ONE write path, journal → record →
+    projection — so the indexer's methods REQUIRE an SDK. A REAL embedded
+    ``TortoiseSDK`` is the door here; ``_RecordingProj`` remains the FOLD
+    target the door calls ``apply()`` on, which is what this test captures.
+    ``sdk=None`` was the OLD contract (the write was a bare ``proj.apply``) and
+    is deliberately not restored: a ``None``-tolerant fallback would re-open a
+    second write door, which is exactly the defect #7951 closes.
+    """
     from tortoise.indexer.github_indexer import GitHubIndexer
 
     proj = _RecordingProj()
     indexer = GitHubIndexer(token="t")
-    if kind == "pr":
-        indexer._project_pr(proj, repo, payload)
-    else:
-        indexer._project_issue(None, proj, repo, payload)
+    with fresh_sdk() as sdk:
+        if kind == "pr":
+            indexer._project_pr(sdk, proj, repo, payload)
+        else:
+            indexer._project_issue(sdk, proj, repo, payload)
     return next(r for r in proj.applied if r.get("type") == "EventRecorded")
 
 
