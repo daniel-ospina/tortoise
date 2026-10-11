@@ -1208,6 +1208,8 @@ def _cmd_recover(args) -> int:
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
+    # #5109 NOTE: same DELIBERATE, test-pinned "shown once" contract as
+    # _cmd_signup — see the note there; raised as an owner decision.
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     print(f"   Recovery token kept: {token[:14]}…")
@@ -1763,11 +1765,16 @@ def _cmd_signup(args) -> int:
                   "a signup token; you cannot use `tortoise recover` for this "
                   "team. The API key above is your only access — store it safely.",
                   file=sys.stderr)
+    # #5109 NOTE: this success branch echoes a key that was already persisted
+    # to config_path above. It is DELIBERATE and test-pinned (#1709 "shown
+    # once", tests/test_cli_signup.py) — so it is left as the product decided,
+    # and raised as an owner decision on #5109 rather than changed in flight.
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
         # back into this org if the key is lost). Shown once, like the key.
+        # #5109 NOTE: DELIBERATE (test-pinned) — owner-routed, not reversed here.
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
@@ -1780,6 +1787,10 @@ def _cmd_signup(args) -> int:
         print("🔐 Claim your team (optional but recommended):")
         print(f"   1. Open {dashboard}")
         print(f"   2. Sign in with GitHub or Google")  # noqa: F541
+        # #5109 NOTE: DELIBERATE — this echoes a key already persisted above,
+        # but the dashboard claim flow needs the value in hand, and the
+        # behaviour is test-pinned (tests/test_cli_claim.py). Raised as an owner
+        # decision on #5109 rather than reversed in flight.
         print(f"   3. Paste this key when prompted:")  # noqa: F541
         print(f"      {data['key']}")
         print("   Your verified identity attaches to THIS team — same key,"
@@ -2025,14 +2036,20 @@ def _key_resolution_expr(config_path=None) -> str:
 
     Returns the EXPRESSION, never the key itself. See the #5109 note above for
     why the value must never be interpolated into printed output.
+
+    Both operands are ``shlex.quote``-d, so a config path containing a quote,
+    ``$``, a backtick or a space cannot break the shell line or make it read the
+    wrong file (the path is embedded in a shell command; a Python ``repr`` is not
+    a shell quoting).
     """
+    import shlex
+
     target = str(config_path) if config_path is not None else "~/.tortoise/credentials.json"
-    py = (
-        "import json,pathlib;print(json.loads(pathlib.Path("
-        + repr(target)
-        + ").expanduser().read_text())['api_key'])"
+    prog = (
+        "import json,sys,pathlib;"
+        "print(json.loads(pathlib.Path(sys.argv[1]).expanduser().read_text())['api_key'])"
     )
-    return '"$(python3 -c "' + py + '")"'
+    return '"$(python3 -c ' + shlex.quote(prog) + " " + shlex.quote(target) + ')"'
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
@@ -9444,6 +9461,9 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
+    # #5109 NOTE: DELIBERATE show-once — the plaintext is returned exactly here
+    # and exists nowhere else (only a hash is stored), so printing it is the
+    # only way to hand it to the user. Owner-routed, not changed in flight.
     key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
