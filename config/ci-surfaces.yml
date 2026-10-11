@@ -681,6 +681,14 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
+  # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
+  # change selects `api`, not the full matrix). The file's largest subject is
+  # that CLI half (`sessions backlog`, `--process`, `--future-only`, the
+  # `doctor` row) plus the capture deferral sites, so a `__main__.py`-only
+  # change must run it. Dual-registered with `core`, which covers the ledger
+  # module — see the core entry.
+  - test_capture_backlog_4197.py
   # #2814: guards tortoise/__main__.py's rebuild reporting (the CLI is the
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
@@ -794,6 +802,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
@@ -804,6 +813,16 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
+  # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
+  # named SOURCE_PATTERN, so it falls through to `core` — registering the
+  # guard here is what makes it run on a change to the ledger alone. The CLI
+  # half lives in `tortoise/__main__.py`, an exact `api` SOURCE_PATTERN that is
+  # NOT a SHARED_MODULE: a `__main__.py`-only change selects `api`, NOT the
+  # full matrix, so this `core` entry alone would leave it unguarded. Hence the
+  # dual registration with `api` (the #2938 convention every sibling CLI guard
+  # follows) — see the `api` entry.
+  - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
   - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
@@ -2316,6 +2335,12 @@ surfaces:
   - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
+  # #2294: the D8 decoration gate must see the LEGACY flag-only terminal state
+  # (``invalidate_point`` leaves ``status`` untouched) — guards
+  # ``tortoise/ask_lane.py``'s gate, so an ask_lane-only PR must run it (a
+  # SOURCE_PATTERNS match REPLACES the core fallback). Also under `core` for
+  # the ``tortoise/search_engine.py`` half (the additive ``outdated`` key).
+  - test_2294_ask_degradation_gate.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge

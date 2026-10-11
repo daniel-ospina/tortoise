@@ -3851,6 +3851,10 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
             r["superseded_by"] = st["superseded_by"]
         if st.get("supersedes"):
             r["supersedes"] = st["supersedes"]
+        # #2294: the legacy flag half of the terminal vocabulary — the embedded
+        # fallback owes the same terminality signal as the primary path.
+        if st.get("outdated"):
+            r["outdated"] = True
         # E6 (#1538) D7: promoted window fields — additive, only when present.
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
@@ -19180,6 +19184,13 @@ class TortoiseSDK:
                 superseded_by=point_state.get(pid, {}).get("superseded_by")
                 or pt.get("superseded_by") or None,
                 supersedes=point_state.get(pid, {}).get("supersedes") or [],
+                # #2294: the legacy ``outdated=true`` half of the terminal
+                # vocabulary. ``invalidate_point`` writes this flag WITHOUT
+                # touching ``status``, so a status-only reader cannot see the
+                # point is dead — carried here so every reader (the ask lane's
+                # decoration gate included) can apply the shared
+                # ``live.is_terminal_status``. Additive in ``to_dict``.
+                outdated=bool(point_state.get(pid, {}).get("outdated")),
                 # E6 (#1538) D7: promoted window fields (additive — empty
                 # string when undated ⇒ no marker, byte-identical output).
                 valid_from=point_state.get(pid, {}).get("valid_from")
