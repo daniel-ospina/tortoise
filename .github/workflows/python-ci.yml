@@ -1468,8 +1468,8 @@ jobs:
               test_consistency_divergence_5011 test_control_plane test_dream
               test_embedded_evidence test_ep_selector test_ep_sources
               test_epic903_fixtures test_epic903_scheduler
-              test_epic903_warmstart test_graph_diagnostics
-              test_graphcopy_boolean_index_3154
+              test_epic903_warmstart test_framework_middleware
+              test_graph_diagnostics test_graphcopy_boolean_index_3154
               test_hosted_volunteer_context test_import_endpoint test_indexes
               test_ingest test_ingest_v2_consolidation test_ingest_validation
               test_platform_seams test_projection test_sdk_group3
