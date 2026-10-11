@@ -107,7 +107,7 @@ EXPECTED_KEY_PROP = {
 
 
 def test_structural_rel_labels_is_the_pinned_map():
-    assert DERIVABLE_STRUCTURAL_RELS == frozenset(EXPECTED_REL_LABELS)
+    assert frozenset(EXPECTED_REL_LABELS) == DERIVABLE_STRUCTURAL_RELS
     # every derivable rel MUST carry a target label — a rel with no label
     # resolves by accident and silently mis-points the rebuilt edge.
     assert set(DERIVABLE_STRUCTURAL_RELS) <= set(STRUCTURAL_REL_LABELS)
