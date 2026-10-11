@@ -220,19 +220,38 @@ class TestFailClosedContract:
         mcp._maybe_onboarding_auto_complete()
         assert "decide-completed" not in rec.step_ids
 
-    def test_selfhost_and_stdio_orgs_are_noops(self, monkeypatch):
-        """No hosted onboarding state → zero writes."""
+    def test_stdio_org_is_a_noop(self, monkeypatch):
+        """stdio (no org context at all) has no onboarding state → zero
+        writes and no gate call."""
         rec = _Recorder()
         rec.install(monkeypatch)
-        for org in (None, SELFHOST_ORG_ID):
-            token = _current_org_id.set(org) if org else None
-            try:
-                mcp._maybe_onboarding_auto_complete(decision_observed=True)
-            finally:
-                if token is not None:
-                    _current_org_id.reset(token)
+        mcp._maybe_onboarding_auto_complete(decision_observed=True)
         assert rec.step_ids == []
         assert rec.gate_calls == []
+
+    def test_selfhost_org_delegates_to_the_selfhost_lane(self, monkeypatch):
+        """#2007 (W12): the selfhost placeholder org is NOT a hosted org — its
+        observation is delegated to the graph-only self-hosted lane
+        (``tortoise/onboarding/selfhost.py``). Before W12 this branch was a
+        bare no-op, so a self-hosted agent could never record a decide; what
+        must NOT change is the fail-closed half — the hosted projection, the
+        hosted gate and the control plane are still never consulted for it."""
+        from tortoise.onboarding import selfhost as _selfhost_lane
+        rec = _Recorder()
+        rec.install(monkeypatch)
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            _selfhost_lane, "observe_selfhost_write",
+            lambda *, decision_observed=False, sdk=None:
+                seen.append(decision_observed))
+        token = _current_org_id.set(SELFHOST_ORG_ID)
+        try:
+            mcp._maybe_onboarding_auto_complete(decision_observed=True)
+        finally:
+            _current_org_id.reset(token)
+        assert seen == [True]
+        assert rec.step_ids == []       # never written through the hosted path
+        assert rec.gate_calls == []     # nor through the hosted gate
 
     def test_transient_failure_still_fails_open(self, monkeypatch, org_ctx):
         """A graph/control-plane error must never block the agent's write."""
@@ -451,7 +470,7 @@ class TestCallSiteObservation:
 
     def test_decision_kind_point_write_claims_a_decision(self, handler_env):
         """The documented EP decide protocol: `kind="decision"`
-        (tortoise/onboarding/SKILL.md §5)."""
+        (tortoise/onboarding/SKILL.md §6)."""
         _sdk, recorded = handler_env
         res = mcp.tortoise_create_point("decision", "Decision: Postgres")
         assert "error" not in res, res
@@ -499,7 +518,7 @@ class TestDecideProtocolKinds:
     protocols.
 
     Two shipped protocols file the SAME node (the option set) under two
-    different labels: ``tortoise/onboarding/SKILL.md`` §5 files one ``decision``
+    different labels: ``tortoise/onboarding/SKILL.md`` §6 files one ``decision``
     point per option, while the ``tortoise-decide`` skill files each option as
     ``option`` (its anti-pattern list forbids storing the decision itself as a
     Point). Keying the observation on one label made it a FALSE NEGATIVE for
@@ -551,7 +570,7 @@ class TestDecideProtocolKinds:
 
     def test_onboarding_protocol_decision_write_observes_a_decision(
             self, handler_env):
-        """Protocol A — `tortoise/onboarding/SKILL.md` §5 files one
+        """Protocol A — `tortoise/onboarding/SKILL.md` §6 files one
         `decision` point per option."""
         sdk, recorded = handler_env
         res = mcp.tortoise_create_point("decision", "Decision: Postgres")

@@ -267,19 +267,41 @@ class TestBudgetBoundaries:
         assert (_stamp(proj, _region_by_name(f, "medium").claims[0])
                 == STAMP_MEDIUM)
 
-    def test_budget_none_default_200_cap(self):
-        """budget=None → the existing 200-op _bfs_select_operators cap — a
-        >200-operator graph hits the cap exactly (no unbounded
-        interpretation)."""
-        assert DEFAULT_WINDOW_BUDGET == 200
-        # F2 equivalence: budget=None ≡ budget=200 on a small graph.
+    def test_budget_none_resolves_to_configured_default(self, monkeypatch):
+        """budget=None → the CONFIGURED default budget (epic 903-C3 + #1338).
+
+        Two contracts, both load-bearing:
+
+        - ``budget=None`` resolves through ``resolve_window_budget`` — the
+          configured default, no longer a bare literal at the call site
+          (#1338 indicator 2). The shipped VALUE is unchanged (200) on
+          purpose: the measured window cost at 5k claims says a 50x default
+          is a per-pass reliability regression, so raising it is an operator
+          decision (``TORTOISE_DREAM_WINDOW_BUDGET``) taken with their own
+          numbers — see the constant's comment and
+          ``06-diagnostics.md``. What this file pins is that the RESOLUTION
+          is wired, not the number.
+        - an EXPLICIT budget is still honoured exactly, which preserves the
+          original 200-op selector-cap semantics: a 201-op fan-out with
+          ``budget=200`` truncates to exactly 200 and never runs unbounded.
+        """
+        from tortoise.dream import DREAM_WINDOW_BUDGET_ENV, resolve_window_budget
+        # The env override IS this feature's new configuration; clear any
+        # ambient value so BOTH the default assertion and the window pass below
+        # measure the default, not the developer's shell.
+        monkeypatch.delenv(DREAM_WINDOW_BUDGET_ENV, raising=False)
+        assert DEFAULT_WINDOW_BUDGET > 0
+        assert resolve_window_budget(None) == DEFAULT_WINDOW_BUDGET
+        # F2 equivalence: budget=None ≡ budget=DEFAULT_WINDOW_BUDGET on a
+        # small graph (both bounded by the same configured value).
         f = f2_staleness_regions()
         f.sdk._dirty_roots.clear()
         random.seed(FIXED_SEED)
         r_default = f.sdk._get_dreamer().dream_window()
         assert r_default["budget_used"] <= DEFAULT_WINDOW_BUDGET
         assert r_default["batches"] == 1
-        # 201-operator fan-out: the default cap truncates to exactly 200.
+        # 201-operator fan-out + an EXPLICIT budget=200: truncates to exactly
+        # 200 (the #1241 selector-cap contract, now explicit-only).
         sdk, _db = fresh_sdk(prefix="tortoise_epic903_cap_")
         src = _make_claim(sdk, "cap source")["id"]
         targets = [_make_claim(sdk, f"cap target {i}")["id"]
@@ -288,9 +310,9 @@ class TestBudgetBoundaries:
             sdk.create_operator("IMPL", src, [t])
         sdk._dirty_roots.clear()
         random.seed(FIXED_SEED)
-        r = sdk._get_dreamer().dream_window()  # budget=None
-        assert r["budget_used"] == DEFAULT_WINDOW_BUDGET, (
-            "default cap must be respected, not unbounded"
+        r = sdk._get_dreamer().dream_window(budget=200)
+        assert r["budget_used"] == 200, (
+            "an explicit cap must be respected, not unbounded"
         )
         assert r["batches"] == 1
 

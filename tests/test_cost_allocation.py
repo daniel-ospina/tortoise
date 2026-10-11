@@ -813,6 +813,14 @@ def test_event_retention_loop_awaits_the_cost_refresh():
                 # path's tuple in ``_run_boot_sweeps``.
                 ("deleted-account purge", "_purge_deleted_accounts", "offload"),
                 ("oauth retention", "_sweep_oauth_retention", "offload"),
+                # #1890: the terminal-state invite-ghost sweep (#1908) had no
+                # live caller — only a graph-script an operator ran by hand —
+                # so a ghost left by an invite that expired after that one-off
+                # backfill never went away. Same rationale as the others: a new
+                # periodic step must be DECLARED here, it must sit in the same
+                # relative order as the boot tuple in ``_run_boot_sweeps``, and
+                # it MUST be an offload (the sweep is sync FalkorDB I/O).
+                ("invite ghost sweep", "_sweep_invite_ghosts", "offload"),
                 # #4241: the period-anchor repair. Declared here because the pin
                 # exists to force a new periodic step to be DELIBERATE; it sits
                 # in the same relative order as the boot tuple in
@@ -900,6 +908,9 @@ def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
     monkeypatch.setattr(ha, "_sweep_events", _boom)
     monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
     monkeypatch.setattr(ha, "_sweep_oauth_retention", lambda *_a, **_k: None)
+    # #1890: the invite-ghost sweep does real registry-graph I/O, so it is
+    # neutralised here too — this test owns the guard, not the sweep.
+    monkeypatch.setattr(ha, "_sweep_invite_ghosts", lambda *_a, **_k: None)
     # The 4th step is the one the sibling test owns; keep this test focused.
     monkeypatch.setattr(ha, "_refresh_cost_allocation", _noop)
 
@@ -1306,6 +1317,10 @@ _BOOT_SWEEPS = (
     ("purge", "_purge_deleted_orgs", "boot deleted-team purge sweep"),
     ("account", "_purge_deleted_accounts", "boot deleted-account purge sweep"),
     ("oauth", "_sweep_oauth_retention", "boot oauth retention sweep"),
+    # #1890: the terminal-state invite-ghost sweep's live caller. Declared here
+    # too, so the per-step guard parametrization below covers it (a sweep that
+    # is not listed here is a sweep whose guard nothing exercises).
+    ("invite-ghosts", "_sweep_invite_ghosts", "boot invite ghost sweep"),
     # #4241: the period-anchor repair. Declared HERE so the parametrization
     # below covers it too. It is LAST in this tuple, so an unguarded raise here
     # would not abandon a sweep after it — it is caught because the raise

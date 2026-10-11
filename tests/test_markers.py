@@ -141,6 +141,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    # #2007 W12: the selfhost lane's SDK namespace IS the literal "selfhost"
+    # (`selfhost.py:532`, `selfhost_api.py:222/233/236` construct
+    # `TortoiseSDK(namespace="selfhost")`), and the test drives that same
+    # lane end to end — a `test_*` rename would exercise a namespace prod
+    # never resolves.
+    "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #3517 parity: `_provision_org` seeds the registry Team node directly
+    # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
+    # onboarding state the surfaces under test write lives ON that node — a
+    # `MATCH ... SET`, so the seed and the resolution must be the SAME graph.
+    # A test_* rename would seed a different graph than `hosted_api` resolves.
+    "test_onboarding_session_recording_parity.py": {"registry": "prod-coupled"},
     # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
     # namespace_not_display_name seeds a `Graph` row into the registry graph and
     # then calls `_has_scoped_graphs`, whose OWN body constructs

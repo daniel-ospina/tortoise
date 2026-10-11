@@ -98,6 +98,11 @@ def _admin_client():
     # urlparse does NOT percent-decode, redis.Redis(...) does not either
     # (only redis.from_url does), so a raw read breaks auth silently.
     from tortoise.config import parse_uri_userinfo
+    # #3065: the socket bounds come from the product's ONE resolution point,
+    # not from a pair of literals. The literals this replaces (3s connect /
+    # 5s read) were bounded but KNOB-BLIND — `TORTOISE_DB_SOCKET_TIMEOUT`
+    # never reached this client, which is the same defect one step milder.
+    from tortoise.projection import _bounded_server_socket_kwargs
     username, password = parse_uri_userinfo(uri)
     return redis.Redis(
         host=parsed.hostname,
@@ -105,9 +110,8 @@ def _admin_client():
         username=username,
         password=password,
         ssl=(parsed.scheme == "rediss"),
-        socket_connect_timeout=3,
-        socket_timeout=5,
         decode_responses=False,
+        **_bounded_server_socket_kwargs(),
     )
 
 

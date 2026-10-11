@@ -35,12 +35,14 @@ default-false flag — and it is the one IN-REPO capture seam that reads no
 `TORTOISE_CAPTURE`, unlike the in-repo Claude Code, Codex and Cursor hooks,
 which file nothing until the machine sets `TORTOISE_CAPTURE=1` (#3615). (The
 agent-infra `reflect-hook` is the other ungated producer and lives outside this
-repo — agent-infra#1117.) The server can still refuse the capture POST with a
+repo — agent-infra#1117; the disposition of that copy, and the measured proof
+that it is **real code and not a symlink**, are in §Migration below.) The
+server can still refuse the capture POST with a
 409 while the organization has agent sessions switched off (Memory sources >
 Agent sessions; that toggle is default-ON, ToS-covered, and can only refuse —
 never enable).
 
-## Migration: the install must not leave two capture producers (#3713)
+## Migration: the install must not leave two capture producers (#3713, #3512)
 
 Pi's extension loader (`collectAutoExtensionEntries`) enumerates directory
 entries and does **no basename dedupe**: a top-level `tortoise-capture.ts` and
@@ -66,6 +68,49 @@ hardening (treat the server's `409 already in flight` as a benign "another
 producer has this session_id" rather than `was NOT filed`, and/or a
 server-side producer/idempotency key) belongs to that issue, **not** to this
 install guard.
+
+### The second producer, and the disposition of the agent-infra copy (#3512)
+
+The guard above covers **one** of the two producers agent-infra installs. The
+other is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
+second, independent extension whose only handler is the `session_shutdown`
+(`quit`) capture: it writes a JSONL fallback into
+`~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint on
+**credential presence alone** (it reads no `TORTOISE_CAPTURE`). Measured
+2026-10-11 against `agent-infra@origin/main`, so that a lane does not have to
+trust a description:
+
+| In `agent-infra` | Measured |
+|---|---|
+| `extensions/tortoise-capture/index.ts` + `index.test.ts` | **real files** (26,864 B + 26,768 B) |
+| `extensions/reflect-hook.ts` + `reflect-hook.test.ts` | **real files** (12,330 B + 9,684 B) — **not** a symlink |
+| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml`; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
+| Ship-list | `manifest.json` lists **both** (`reflect-hook.ts`, `tortoise-capture/`), so `bin/agent-infra.js` materializes both on a farm machine |
+| `extensions/shared/capture-attribution.ts` | imported by the two recorders only — no other extension imports it |
+
+**The disposition (recorded decision for #3512):** the agent-infra copy is **kept
+as a shim** — it is reduced to a pointer at this directory and carries **no
+capture code of its own**, so it cannot drift; the farm workflow keeps working
+without a second code path. **Deletion is a later step, not this decision**, and
+its trigger is the first product release that ships this extension as the
+install source. The shim's "source of truth is `tortoise/pi-hooks/`" marker
+**cannot live in the shim itself** — a symlink has no content — so it belongs in
+a **sibling file** beside it.
+
+The cross-repo deliverable (the shim, the dev-machine repoint and the **PR
+ordering** so no window exists where capture is installed but unwired) is
+**daniel-ospina/agent-infra#1671**. The **consolidation of the two recorder
+bodies into ONE** is **#3515**'s — the hybrid architecture is what defines the
+single recorder's shape — and the product-side handling of a live **second**
+producer (this one, and the legacy directory above) is **#3713**'s.
+
+The product half is already landed: the extension here is the artifact
+`capture_install._install_pi` writes, it ships in the wheel, and
+`tests/test_pi_capture_disposition.py` pins the **README** half of the record
+(`#3512`) against this tree, so a `tortoise/pi-hooks/` edit cannot name a home
+that does not exist. (The plan's own copy of the record is covered by review of
+the `.md`: `docs/` selects no Python surface, so a plan-only edit runs no
+assertion — `config/ci-surfaces.yml` says so at the arm.)
 
 ## Verification — what is executable, what is manual-only
 

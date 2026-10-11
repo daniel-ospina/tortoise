@@ -109,6 +109,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_graph_storage.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #5331: embedded lane via delenv (the test_billing pattern — the fixture pins TORTOISE_DB_PATH to a tmp_path db, so the construction never rides the URI)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_selfhost_health_probe_executor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #3331: the probe-lane behavioural tests force the EMBEDDED lane (setenv "" IS the point — the selfhost health handlers are driven without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
+    "test_onboarding_selfhost_w12.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2007 W12: the `db_env` fixture (:71) and `_client` (:471) force the EMBEDDED lane (setenv "" + TORTOISE_DB_PATH to a tmp_path db — the selfhost lane is embedded-only and the env control IS the point; both sit in fixture/helper bodies whose monkeypatch auto-restores, no lane leak)
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
     "test_github_index_lifecycle.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"',
                                         r'monkeypatch\.setenv\("TORTOISE_DB_URI",\s*"docker:'],
@@ -217,6 +218,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3065 (bounded-socket resolver): the indexer case FORCES the docker lane
+    # (setenv IS the input — the real `_graph_entity_keywords` construction must
+    # be observed carrying the resolved read bound, and a URI-less construction
+    # would take the embedded lane and prove nothing), and the doctor-probe case
+    # STRIPS the env URI (DELIBERATE_EMBEDDED_LANE — the probe is driven by an
+    # explicit `--db`, so a leaked ambient URI must not shadow it). Both sites
+    # are the fixture-param monkeypatch, which auto-restores at teardown — no
+    # lane leaks into a later docker-lane test.
+    "test_bounded_raw_clients_3065.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                          r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #3892: the read-path status test points the endpoint at a DECLARED but
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.
@@ -299,6 +310,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # vacuous. The delenv IS the point; the autouse fixture-param monkeypatch
     # auto-restores at teardown (no lane leak).
     "test_7767_restore_rollback.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #7951: the hosted-session fixtures force the EMBEDDED lane for the same
+    # reason #7767's rollback suite does — the behaviour under test is the
+    # JOURNAL (`derived = replay(journal)` around a session delete) against a
+    # temp DB + temp journal, so an ambient docker URI would divert the graph
+    # away from the journal the suite is about and every assertion would be
+    # vacuous. The delenv IS the point; the fixture-param monkeypatch
+    # auto-restores at teardown (no lane leak).
+    "test_7951_delete_resurrection.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #5222/#5188 + #5222's hygiene gate: both files are HERMETIC (the SDK / the
     # reaper is faked, no server is contacted), and both force the embedded or a
     # test-pinned lane on purpose — the delenv/setenv IS the input, so the site

@@ -303,18 +303,28 @@ def _atomic_copy(src: Path, dst: Path, mode: int) -> None:
         raise
 
 
-def _atomic_write_text(dst: Path, text: str) -> None:
+def _atomic_write_text(dst: Path, text: str, mode: int | None = None) -> None:
     """Write ``text`` to ``dst`` via a fresh same-dir temp + ``os.replace``.
 
     Same hard-link / pre-planted-temp-symlink rationale as :func:`_atomic_copy`.
-    The destination's existing mode is preserved (``mkstemp`` creates 0600), so
-    a shared/packaged ``settings.json`` does not silently lose group/other
-    read on upgrade.
+    By default the destination's existing mode is preserved (``mkstemp``
+    creates 0600), so a shared/packaged ``settings.json`` does not silently
+    lose group/other read on upgrade; a file that does not exist yet gets
+    0o644 — the same policy the capture half applies to the SAME
+    ``settings.json`` (``capture_install``'s merge), so the two halves of one
+    ``tortoise install claude`` cannot disagree about the mode.
+
+    Pass ``mode`` to SET one instead of preserving it. The mode is applied to
+    the TEMP, before the replace, so the permission and the content land
+    together: a ``chmod`` after the swap would leave a window in which a crash
+    ships a file whose mode contradicts its content — a non-executable hook
+    script that silently stops firing (#3918).
     """
-    try:
-        mode = os.stat(dst).st_mode & 0o777
-    except OSError:
-        mode = 0o644
+    if mode is None:
+        try:
+            mode = os.stat(dst).st_mode & 0o777
+        except OSError:
+            mode = 0o644
     fd, tmp_name = tempfile.mkstemp(
         dir=str(dst.parent), prefix=dst.name + ".", suffix=".tortoise-tmp")
     tmp = Path(tmp_name)
@@ -1804,7 +1814,14 @@ def registered_commands(root: str | os.PathLike[str],
 
 
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
-    """Load a settings file.  Returns ``(data, error)`` — never raises."""
+    """Load a settings file.  Returns ``(data, error)`` — never raises.
+
+    "Never raises" is the contract the entry points that route through this
+    loader state in their own words (``registered_commands`` and
+    ``detect_install``: a malformed file is simply no registration / itself a
+    finding; ``upgrade_install``: refuse, never raise), so the boundary below
+    must cover the PARSER's raise-set, not one member of it (#3928).
+    """
     if path is None:
         return {}, None
     if not path.exists():
@@ -1831,6 +1848,23 @@ def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
         data = json.loads(text)
     except ValueError:
         return None, f"{path} is not valid JSON — refusing to touch it"
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the caller allocates
+    except Exception as e:
+        # A syntactically VALID document can still defeat the parser: deep
+        # nesting raises ``RecursionError`` (a ``RuntimeError``, not a
+        # ``ValueError``), and the previous one-member handler let it unwind
+        # ``detect_install``/``upgrade_install``/``registered_commands`` and
+        # reach ``session_verify`` — the entry points whose documented
+        # contract is a refusal (#3928).  Deliberately NOT a second
+        # enumerated tuple: a finite enumeration is refutable by the next
+        # unenumerated member, which is how ``RecursionError`` escaped
+        # ``capture_install``'s old ``except OSError`` (#3999) and the CLI's
+        # (#4024 P2-2).  The class name is carried in the message because
+        # the document IS valid JSON — "not valid JSON" would misdirect the
+        # user to the syntax of a file that has none to fix.
+        return None, (f"{path} could not be parsed as JSON "
+                      f"({e.__class__.__name__}) — refusing to touch it")
     if not isinstance(data, dict):
         return None, f"{path} top level is not a JSON object — refusing to touch it"
     hooks = data.get("hooks")

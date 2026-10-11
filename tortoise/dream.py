@@ -37,7 +37,10 @@ compute_confidence. This class is internal; the gate lives on the public
 from __future__ import annotations
 
 import logging
+import os
 import threading
+
+from .live import epistemic_label_queries  # #7853: id-anchored label sweep
 
 _log = logging.getLogger(__name__)
 
@@ -47,11 +50,75 @@ _log = logging.getLogger(__name__)
 DEFAULT_MAX_HOPS = 2
 
 # Default per-pass window budget for the stale-first scheduler (epic 903-C3,
-# #1241) — the existing _bfs_select_operators 200-operator selector cap.
-# budget=None resolves to this (every pass bounded by construction); an
-# explicit budget overrides it; budget=0 → no-op; budget >= graph → single
-# pass (window = whole graph, degenerates to full).
+# #1241; now CONFIGURABLE per #1338 — see resolve_window_budget).
+#
+# WHY IT STAYS 200. #1338 asked for a production-sane default (e.g. 10_000) on
+# the grounds that 200 operators/pass needs 25-2,500 passes to cover the
+# recorded production range (5k-500k operators, ``06-diagnostics.md``). The
+# coverage arithmetic is right, but the MEASUREMENT does not support paying for
+# it with a bigger window: ``dream_window`` passes the budget BOTH as the
+# operator cap AND as the claim-window size, and the claim window is what
+# ``_bfs_select_operators`` walks hop by hop. On a 5,001-claim synthetic graph
+# (``graph-scripts/dream-scale-bench.py``) a 5,000-claim window reliably raised
+# FalkorDB's ``Query timed out`` while windows <= 2,000 completed — so a 50x
+# default is a per-pass RELIABILITY regression, not a free win. Raising the
+# default is therefore left to the operator, who can read their own deployment's
+# numbers, instead of being imposed on every deployment by this file.
+#
+# The coverage cycle is tunable WITHOUT a code change:
+# ``TORTOISE_DREAM_WINDOW_BUDGET``. Passes per cycle =
+# ceil(operators / budget): 25/2,500 at the default for 5k/500k operators,
+# 5/500 at 1,000, 1/50 at 10,000. Raise it only with a measured window cost —
+# the per-pass bound IS the only bound on a window pass (window passes do NOT
+# consume the #329 hourly full-pass bucket; plan W7, re-evaluated at #1338),
+# which is why the shipped value is the conservative one.
+#
+# budget=None resolves to the configured default (every pass bounded by
+# construction); an explicit budget overrides it; budget=0 → no-op;
+# budget >= graph → single pass (window = whole graph, degenerates to full).
 DEFAULT_WINDOW_BUDGET = 200
+
+#: Env override for the stale-first per-pass operator budget (#1338). Read on
+#: EVERY resolution (never cached at import) so an operator can retune a
+#: running deployment without a restart, and so tests stay order-independent.
+DREAM_WINDOW_BUDGET_ENV = "TORTOISE_DREAM_WINDOW_BUDGET"
+
+
+def resolve_window_budget(budget: int | None = None) -> int:
+    """Effective per-pass window budget for the stale-first scheduler (#1338).
+
+    Precedence: an explicit ``budget`` always wins (including ``0`` → the I1
+    no-op contract) → ``TORTOISE_DREAM_WINDOW_BUDGET`` when set to a
+    non-negative integer → :data:`DEFAULT_WINDOW_BUDGET`.
+
+    A malformed or negative value is a WARNING and falls back to the default,
+    never a silent behaviour change: ``-1`` would otherwise read as "unbounded"
+    at every ``budget_used <= budget`` comparison and ``0`` as "no-op for every
+    scheduled pass" — both are the opposite of what an operator typing a typo
+    intended, and both fail silently. ``0`` is therefore only reachable by
+    passing it EXPLICITLY.
+    """
+    if budget is not None:
+        return budget
+    raw = os.environ.get(DREAM_WINDOW_BUDGET_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_WINDOW_BUDGET
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        _log.warning(
+            "#1338: %s=%r is not an integer — using the default window "
+            "budget %d", DREAM_WINDOW_BUDGET_ENV, raw, DEFAULT_WINDOW_BUDGET,
+        )
+        return DEFAULT_WINDOW_BUDGET
+    if value < 0:
+        _log.warning(
+            "#1338: %s=%d is negative — using the default window budget %d",
+            DREAM_WINDOW_BUDGET_ENV, value, DEFAULT_WINDOW_BUDGET,
+        )
+        return DEFAULT_WINDOW_BUDGET
+    return value
+
 
 # Claim-anchor chunk size for windowed passes over large windows (mirrors
 # dream_all's batch_size default) — bounds EP cache memory when the window
@@ -267,23 +334,24 @@ class Dreamer:
         # EP found no factors) — the silent-no-op guard's primary signal.
         self._last_belief_write_count = len(params_list)
         if params_list:
+            # #7853: the run set spans all four epistemic labels, so sweep ONE
+            # query per label to keep the id index-anchored (a label predicate
+            # over the UNWIND drops the per-(label, property) anchor —
+            # ``tortoise/live.py``). The two SET shapes stay both-or-neither
+            # (#1240); ``_journal_belief_writeback`` de-duplicates the rows a
+            # multi-labelled node (``:Point:Object``) returns from >1 sweep.
             if stamp_now:
-                written = proj.g.query(
-                    "UNWIND $params AS p "
-                    "MATCH (n:Point {id: p.id}) "
-                    "SET n.confidence = p.c, n.lastDreamedAt = $now, "
-                    "    n.updatedAt = $now "
-                    "RETURN n.id",
-                    params={"params": params_list, "now": now},
-                ).result_set
+                _set = ("SET n.confidence = p.c, n.lastDreamedAt = $now, "
+                        "    n.updatedAt = $now ")
             else:
-                written = proj.g.query(
+                _set = "SET n.confidence = p.c, n.updatedAt = $now "
+            written: list = []
+            for _q in epistemic_label_queries(
                     "UNWIND $params AS p "
-                    "MATCH (n:Point {id: p.id}) "
-                    "SET n.confidence = p.c, n.updatedAt = $now "
-                    "RETURN n.id",
-                    params={"params": params_list, "now": now},
-                ).result_set
+                    "MATCH (n:{label} {id: p.id}) " + _set +
+                    "RETURN n.id"):
+                written.extend(proj.g.query(
+                    _q, params={"params": params_list, "now": now}).result_set)
             # #2884 D3: journal the write-back — one ConfidenceChanged per
             # committed row, with ``lastDreamedAt`` ONLY when the run
             # converged AND stamping is on (``stamp_now`` — the exact
@@ -306,10 +374,14 @@ class Dreamer:
         if emit is None:
             return
         by_id = {p["id"]: p["c"] for p in params_list}
+        seen: set = set()
         for row in written:
             cid = row[0]
-            if cid not in by_id:
+            # #7853: the per-label sweep returns a multi-labelled node once per
+            # matching label — journal each committed id exactly once.
+            if cid not in by_id or cid in seen:
                 continue
+            seen.add(cid)
             if stamp_now:
                 emit("ConfidenceChanged", id=cid, confidence=by_id[cid],
                      lastDreamedAt=now)
@@ -336,9 +408,10 @@ class Dreamer:
 
         Per-pass cost is bounded by ``budget`` — distinct operators
         processed after operator-set dedup never exceeds it:
-        - ``budget=None`` → DEFAULT_WINDOW_BUDGET (the existing 200-op
-          ``_bfs_select_operators`` selector cap — every pass is bounded by
-          construction).
+        - ``budget=None`` → ``resolve_window_budget(None)`` =
+          ``TORTOISE_DREAM_WINDOW_BUDGET`` (when set) else
+          :data:`DEFAULT_WINDOW_BUDGET` — every pass is bounded by
+          construction.
         - ``budget=0`` → no-op result (no EP, no stamps).
         - ``budget >= graph`` → single pass (window = whole graph,
           degenerates to a full pass).
@@ -374,7 +447,7 @@ class Dreamer:
         so a post-pass recomputation would be wrong — the
         all-null→whole-graph case would blow up entirely).
         """
-        eff_budget = DEFAULT_WINDOW_BUDGET if budget is None else budget
+        eff_budget = resolve_window_budget(budget)
         if eff_budget <= 0:
             self._last_window = []
             return {"mode": "stale-first", "batches": 0, "converged": True,
@@ -566,7 +639,7 @@ class Dreamer:
         retention: failed runs do not rank fresh).
 
         Returns {batches, total_affected, converged_all, scanned_count,
-        budget_used}.
+        budget_used, truncated}.
 
         ``budget`` (epic 903-C6, #1244): an explicit operator cap for the
         pass. ``budget=None`` (default) keeps the existing ``
@@ -579,6 +652,35 @@ class Dreamer:
         surfaces the budget exhaustion; hosted wiring in 903-C8 maps it to
         the 429 quota response). ``budget_used`` = operators selected
         across the pass's chunks (accumulated pre-truncation).
+
+        ``truncated`` (#1338) — DEFINED behaviour at the top of the
+        production range. ``max_total_operators`` (200_000) is below the
+        recorded top of the production range (500k operators,
+        ``06-diagnostics.md``), so a default-budget ``dream_all`` on such a
+        graph CANNOT complete. The pass then:
+
+        - stops at the first chunk that would push ``total_operators`` past
+          the cap (earlier chunks' EP writes stay committed),
+        - returns ``truncated=True``,
+        - reports ``converged_all=False`` — a truncated pass is NOT a
+          completed one, and reporting success here is the silent-partial
+          bug this flag exists to remove: the caller's dirty-root sweep is
+          gated on ``converged_all``, so a partial pass must not clear the
+          backlog it did not cover,
+        - SKIPS the graph-wide operator-less trivial-stamp scan (that scan
+          is gated on a complete converged pass; running it on a partial
+          pass would stamp freshness onto regions the pass never looked at,
+          poisoning the staleness ranking the production scheduler reads),
+        - logs at WARNING with the required count and the remedy.
+
+        Full mode is therefore documented as NON-VIABLE above
+        ``max_total_operators``: use ``mode="stale-first"`` (the recorded
+        production strategy — bounded per pass, ``TORTOISE_DREAM_WINDOW_BUDGET``
+        operators each) or raise ``max_total_operators`` explicitly for an
+        intentional one-shot full pass. The cap is deliberately NOT raised by
+        default: for a direct SDK / self-host call it is the ONLY bound on a
+        whole-graph EP, and weakening it silently would trade a data-integrity
+        bug for a DoS one.
         """
         from .exceptions import BudgetExceededError
         self._snapshot_ep_epoch()
@@ -605,13 +707,17 @@ class Dreamer:
             self._last_belief_write_count = 0
             self._last_affected_claims = set()
             return {"batches": 0, "total_affected": 0, "converged_all": True,
-                    "scanned_count": 0, "budget_used": 0}
+                    "scanned_count": 0, "budget_used": 0,
+                    "truncated": False}
 
         total_affected: set[str] = set()
         total_belief_writes = 0
         converged_all = True
         batches = 0
         total_operators = 0
+        # #1338: the truncation flag — see the docstring. A partial pass must
+        # never be reported as a completed one.
+        truncated = False
         cap = budget if budget is not None else max_total_operators
         for start in range(0, len(anchors), batch_size):
             chunk = anchors[start:start + batch_size]
@@ -642,9 +748,15 @@ class Dreamer:
                     )
                 _log.warning(
                     "dream_all truncated at %d operators (cap %d) — "
-                    "graph larger than budget",
+                    "graph larger than budget; the pass is INCOMPLETE "
+                    "(converged_all=False, no freshness stamped). Use "
+                    "mode='stale-first' (bounded per pass, "
+                    "TORTOISE_DREAM_WINDOW_BUDGET) or raise "
+                    "max_total_operators for an intentional full pass "
+                    "(#1338).",
                     total_operators, max_total_operators,
                 )
+                truncated = True
                 break
             result = self.dream(chunk, max_hops=max_hops,
                                 stamp_dreamed_at=stamp_dreamed_at,
@@ -662,6 +774,12 @@ class Dreamer:
         # reachable-affected set for the caller's dirty-root sweep.
         self._last_belief_write_count = total_belief_writes
         self._last_affected_claims = set(total_affected)
+        # #1338: a truncated pass is not a completed pass. Downstream, the
+        # SDK's dirty-root sweep is gated on converged_all, so flipping it
+        # here is what stops a partial pass from clearing a backlog it never
+        # covered (W4 retention semantics).
+        if truncated:
+            converged_all = False
         # Restore the pass-start epoch + the ANY-chunk stale-run flag so the
         # caller's sweep is guarded against the whole pass, not just the last
         # chunk (#3139 review; #1163).
@@ -696,4 +814,5 @@ class Dreamer:
             "converged_all": converged_all,
             "scanned_count": scanned_count,
             "budget_used": total_operators,
+            "truncated": truncated,
         }

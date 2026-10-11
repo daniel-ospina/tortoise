@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 10
+# tortoise-hook-version: 11
 # Tortoise memory injection for Claude Code — SessionStart hook.
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -12,9 +12,15 @@
 #   cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 #   chmod +x .claude/hooks/session-start.sh
 #   # then add to .claude/settings.json:
-#   # #3754: an explicit timeout is set too — Claude Code's command-hook default on
-#   # SessionStart is 600s, so a hung `tortoise context` would stall the session
-#   # for 10 minutes; 60s bounds it with ~6× headroom over the measured path.
+#   # #3754/#3803: an explicit timeout is set too — Claude Code's command-hook default
+#   # on SessionStart is 600s, so a hung `tortoise context` would stall the session
+#   # for 10 minutes; 60s bounds it. This comment used to say "~6× headroom over
+#   # the measured path" — no SessionStart measurement ever backed that figure;
+#   # the ratio is 60/9.26, the session-END measurement carried across events
+#   # (#3803). The measured digest path is 3.40s cold / 2.1s warm against a
+#   # populated embedded store, and the guard's 20s SessionStart floor — a
+#   # PROJECT bound of 15s API wait + 3.4s measured cold start — is what keeps a
+#   # too-small timeout from being shipped.
 #   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }] } }
 #
 # The hook prints a Tortoise memory digest to stdout, which Claude Code
@@ -272,21 +278,49 @@ _record_hook_run() {
   } 2>/dev/null || true
 }
 
-# Prefer a local install; fall back to the installer's recorded checkout.
-TORTOISE_BIN="$(command -v tortoise || true)"
-# A candidate module dir is accepted ONLY when it actually holds a
-# `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
-# recorded module dir, then `../..` — the LAST resort, because from an
-# installed hook that is `$HOME`, which is not a checkout (#4314).
+# ── Discovery, resolved EXACTLY ONCE (#3796) ─────────────────────────────
+# `TORTOISE_BIN` / `TORTOISE_MODULE` / `PYTHON_BIN` are the WHOLE of discovery:
+# the binary, the module dir, and the interpreter the two best-effort steps
+# below need.  All three are initialised HERE, before any use, so no branch can
+# dereference an unset variable under `set -u`.  That safety is now
+# INITIALISATION, not a control-flow accident in which an earlier branch
+# happened to have assigned one of them: before #3796 `PYTHON_BIN` had no
+# top-level initialiser at all — it was assigned only inside the digest branch,
+# so the probe block re-derived it with a second interpreter lookup, and the
+# drain re-checked it with `${PYTHON_BIN:-…}`.  A single-sided change to the
+# discovery predicate (say, honouring a `TORTOISE_BIN` override in one block
+# only) would then have dereferenced it unset.
+#
+# Resolving once also removes the SECOND binary lookup the probe block used to
+# run, which let discovery disagree with itself: the digest and the beacon now
+# provably execute the SAME binary, and neither can be re-pointed by a PATH
+# change mid-script.
+TORTOISE_BIN=""
 TORTOISE_MODULE=""
-for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
-                 "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
-                 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
-  if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
-    TORTOISE_MODULE="$CANDIDATE"
-    break
-  fi
-done
+PYTHON_BIN=""
+
+_resolve_discovery() {
+  # Prefer a local install; fall back to the installer's recorded checkout.
+  TORTOISE_BIN="$(command -v tortoise || true)"
+  # A candidate module dir is accepted ONLY when it actually holds a
+  # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
+  # recorded module dir, then `../..` — the LAST resort, because from an
+  # installed hook that is `$HOME`, which is not a checkout (#4314).
+  for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
+                   "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
+                   "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
+    if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
+      TORTOISE_MODULE="$CANDIDATE"
+      break
+    fi
+  done
+  # Resolved UNCONDITIONALLY, not only on the module-dir path: the digest and
+  # the beacon must agree on which interpreter they use, and every later reader
+  # (the breadcrumb renderer, the drain) may then rely on it being set.
+  PYTHON_BIN="$(command -v python3 || true)"
+  return 0
+}
+_resolve_discovery
 if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
   # One stamp for the record AND the rendered payload, so they cannot disagree
   # by a second (#4041).
@@ -317,41 +351,83 @@ fi
 # is read by `session verify`, not here. In the inert branch ABOVE it has
 # already run (#5838), so both facts can reach the agent.
 _render_capture_failure_breadcrumb claude
-if [ -z "$TORTOISE_BIN" ]; then
-  PYTHON_BIN="$(command -v python3 || true)"
-  if [ -z "$PYTHON_BIN" ]; then
-    # Same one-stamp pattern as the branch above (#4041): this branch is the
-    # one reached BECAUSE python3 is missing, so the renderer must be shell.
-    INERT_DETAIL="the installed Claude session-start hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing"
-    INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-    _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"
-    _render_breadcrumb_inert claude "$INERT_DETAIL" "$INERT_STAMP" \
-      'a `python3` on the PATH this hook runs with provides the interpreter the capture half needs (the hook resolves it with `command -v python3`), and memory is not filed until one is there.'
-    # #3797: same as the other inert branch — the hook ran, the probe did not.
-    _record_hook_run claude false null
-    exit 0
-  fi
-  # #3755: the digest is BEST-EFFORT — it must never short-circuit this
-  # script, because the install-probe beacon below is independent of it.
-  # `|| exit 0` here (before #3755) skipped the probe whenever the embedded
-  # store was busy, silently dropping install telemetry. The resolved module
-  # dir travels via ARGV and is prepended INSIDE ``-c`` AFTER the process cwd
-  # is dropped from sys.path — never via ``-m`` (CPython prepends the process
-  # CWD ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
-  # the workspace would execute as the user, CWE-427) and never
-  # string-interpolated into the source.
-  "$PYTHON_BIN" -c '
+# The interpreter gate is now a standalone guard rather than the outer arm of
+# the digest branch: with discovery resolved once, "a module dir resolved but no
+# interpreter" is a property of the RESOLUTION, not of which step is running.
+if [ -z "$TORTOISE_BIN" ] && [ -z "$PYTHON_BIN" ]; then
+  # Same one-stamp pattern as the branch above (#4041): this branch is the
+  # one reached BECAUSE python3 is missing, so the renderer must be shell.
+  INERT_DETAIL="the installed Claude session-start hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing"
+  INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"
+  _render_breadcrumb_inert claude "$INERT_DETAIL" "$INERT_STAMP" \
+    'a `python3` on the PATH this hook runs with provides the interpreter the capture half needs (the hook resolves it with `command -v python3`), and memory is not filed until one is there.'
+  # #3797: same as the other inert branch — the hook ran, the probe did not.
+  _record_hook_run claude false null
+  exit 0
+fi
+
+# ── Step 1: the memory digest — BEST-EFFORT, stdout IS the injection ─────
+# #3755: the digest must never short-circuit this script, because the
+# install-probe beacon is independent of it.  `|| exit 0` here (before #3755)
+# skipped the probe whenever the embedded store was busy, silently dropping
+# install telemetry.  The `|| true` is belt-and-braces only: the function ends
+# with an explicit `return 0` below, so no digest outcome can reach the
+# caller's exit status by either route.
+# The resolved module dir travels via ARGV and is prepended INSIDE ``-c`` AFTER
+# the process cwd is dropped from sys.path — never via ``-m`` (CPython
+# prepends the process CWD ahead of PYTHONPATH for ``-m``, so a planted
+# ``tortoise/`` package in the workspace would execute as the user, CWE-427)
+# and never string-interpolated into the source.
+_run_digest() {
+  if [ -n "$TORTOISE_BIN" ]; then
+    "$TORTOISE_BIN" context 2>/dev/null || true
+  elif [ -n "$PYTHON_BIN" ] && [ -d "${TORTOISE_MODULE:-}/tortoise" ]; then
+    "$PYTHON_BIN" -c '
 import sys
 sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 sys.path.insert(0, sys.argv[1])
 from tortoise.__main__ import main
 raise SystemExit(main(["context"]))
 ' "$TORTOISE_MODULE" 2>/dev/null || true
-else
-  # #3755: same as above — a failed digest (busy/unreachable store) is
-  # best-effort and must fall through to the probe, not exit the script.
-  tortoise context 2>/dev/null || true
-fi
+  fi
+  # ALWAYS 0.  The digest is a best-effort CONTRIBUTOR to a session start, so
+  # neither of its failure modes may reach the caller's exit status.
+  return 0
+}
+
+# ── Step 2: the install-probe beacon — BEST-EFFORT, stdout SUPPRESSED ────
+# Whether this machine can attempt the probe at all, decided against the ONE
+# resolution above so the dispatch site and the runner cannot disagree about
+# reachability.
+_probe_reachable() {
+  if [ -n "$TORTOISE_BIN" ]; then
+    return 0
+  fi
+  [ -n "$PYTHON_BIN" ] && [ -d "${TORTOISE_MODULE:-}/tortoise" ]
+}
+
+# The beacon itself.  It writes NO stdout of its own, and the dispatch site
+# redirects both streams to /dev/null regardless: the digest's stdout is the
+# INJECTION channel, so a byte of probe output on it would be injected into the
+# session context as if it were memory (#3796 acceptance criterion).  Its EXIT
+# STATUS is the payload — the backgrounded call site reaps it with `wait`, which
+# is how the #3797 outcome survives the dispatch being concurrent.
+_run_probe() {
+  if [ -n "$TORTOISE_BIN" ]; then
+    "$TORTOISE_BIN" session probe --harness claude
+  else
+    # Reached only through `_probe_reachable`, which has already established
+    # that PYTHON_BIN is set and TORTOISE_MODULE holds a `tortoise/` package.
+    "$PYTHON_BIN" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
+from tortoise.__main__ import main
+raise SystemExit(main(["session", "probe", "--harness", "claude"]))
+' "$TORTOISE_MODULE"
+  fi
+}
 
 # #1727 Slice 2 (Task 14, T2-P1): install-probe beacon.
 #
@@ -366,35 +442,61 @@ fi
 # consent-gated — it's install telemetry; the dashboard reads it for the
 # off → install-pending → waiting → active 4-state before/independent of
 # consent.
+#
+# #3796 — DISPATCH ORDER, and why it is not the textual order.  This beacon is
+# DISPATCHED FIRST, then the digest runs, then the beacon is REAPED.  Before
+# #3796 the digest ran to completion in the foreground and the probe started
+# only after it returned, so the POST was serialized behind a step whose runtime
+# this script does not bound (#3755 closed the exit-STATUS coupling; the
+# latency/hang channel is this issue).  A live-but-slow embedded store can
+# outlive the harness's SessionStart bound, and a harness that kills a slow hook
+# kills the beacon with it — the same "busy store reports capture not
+# installed" symptom family, through the channel `|| true` cannot close.
+# Backgrounding the POST makes the wall clock `max(digest, probe)` instead of
+# `digest + probe`, guarantees the beacon is on the wire before the digest can
+# spend its first second, and lets neither phase starve the other.
+# Concurrency is SAFE here only because the probe's stdout and stderr are BOTH
+# suppressed at this call site: the digest's stdout is the injection channel, so
+# the two cannot interleave bytes into it (pinned by
+# `tests/test_3796_probe_not_serialized.py`).
+# The probe deliberately does NOT join the drain below in the `nohup … &`
+# fire-and-forget shape: its OUTCOME is the payload #3797 requires, and a
+# detached child cannot report one.
 # #3797: the outcome of this attempt is RECORDED, not discarded.  These two
-# are initialised HERE — immediately before the branch — so `set -u` cannot
-# bite and a branch that probes nothing can never read as accepted; a probe
+# are initialised HERE — before the branch — so `set -u` cannot bite and a
+# branch that probes nothing can never read as accepted; a probe
 # that never ran leaves `probe_rc` as the bare JSON token `null`.
 PROBE_RECORDED=false
 PROBE_RC=null
-TORTOISE_BIN="$(command -v tortoise || true)"
-if [ -n "$TORTOISE_BIN" ]; then
+# Initialised even when nothing is dispatched, so the `[ -n "$PROBE_PID" ]`
+# gate below is a check on a DEFINED value under `set -u`, not a lucky one.
+PROBE_PID=""
+# Discovery is NOT re-run here (#3796): `TORTOISE_BIN` / `PYTHON_BIN` /
+# `TORTOISE_MODULE` were resolved exactly once, above.
+if _probe_reachable; then
+  # Mirror of the pre-existing "attempted" sentinel: a SUCCESS leaves it `0`,
+  # and only a failure overwrites it with the observed status below.  A probe
+  # that was never dispatched stays `null`.
   PROBE_RC=0
-  if "$TORTOISE_BIN" session probe --harness claude >/dev/null 2>&1; then
+  _run_probe >/dev/null 2>&1 &
+  PROBE_PID=$!
+fi
+
+# The memory digest, in the FOREGROUND — its stdout IS what Claude Code
+# injects, so it must not be redirected.  Because the beacon above writes to
+# /dev/null, running it concurrently cannot corrupt this stream.
+_run_digest
+
+# Reap the beacon.  `wait` is the ONLY channel for the probe's outcome — the
+# background subshell cannot assign to a parent variable — and it is guarded
+# (`set -euo pipefail` is active; a bare failing `wait` would end the script and
+# break the exit-0 contract).  The `else` arm reads `$?` first, which is the
+# status of the failed `wait` itself, never of an intervening command.
+if [ -n "$PROBE_PID" ]; then
+  if wait "$PROBE_PID"; then
     PROBE_RECORDED=true
   else
     PROBE_RC=$?
-  fi
-else
-  PYTHON_BIN="$(command -v python3 || true)"
-  if [ -n "$PYTHON_BIN" ] && [ -d "$TORTOISE_MODULE/tortoise" ]; then
-    PROBE_RC=0
-    if "$PYTHON_BIN" -c '
-import sys
-sys.path[:] = [p for p in sys.path if p not in ("", ".")]
-sys.path.insert(0, sys.argv[1])
-from tortoise.__main__ import main
-raise SystemExit(main(["session", "probe", "--harness", "claude"]))
-' "$TORTOISE_MODULE" >/dev/null 2>&1; then
-      PROBE_RECORDED=true
-    else
-      PROBE_RC=$?
-    fi
   fi
 fi
 # The hook's own observation that it ran, with the probe's outcome (#3797).

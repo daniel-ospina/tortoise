@@ -158,3 +158,158 @@ stats to size the window budget), but the strategy decision is made.
       5k–500k operators): **STALE-FIRST** — supersedes the F5 FULL decision
 - [ ] Production-snapshot run (optional) — VALIDATION measurement (fan-out,
       neighborhood sizes to size the window budget), not a decision gate
+
+---
+
+## Production-scale validation + tuning — issue #1338 (epic 903 follow-up)
+
+**Date:** 2026-10-10 · **Team:** epistemic-team · **Complexity:** standard
+**Instrument:** `graph-scripts/dream-scale-bench.py` (added by #1338)
+**CI-checked half:** `tests/test_epic903_scale.py`
+
+The recorded decision above (STALE-FIRST at 5k–500k operators) rests on a
+product-owner data point, not on a measurement. #1338 validates the machinery
+at that scale and tunes the scale-sensitive defaults. Five items; each is
+resolved below with either a measurement or a recorded reason it is not.
+
+### 1. `dream_all`'s cap at the top of the range — DEFINED (fixed)
+
+`max_total_operators` (200,000) is below the top of the recorded production
+range (500k operators), so a default-budget full pass on such a graph cannot
+complete. The behaviour was **defined and de-silenced**:
+
+| Before | After |
+|---|---|
+| truncate at the first over-cap chunk, `WARNING`, then `break` | same truncation point |
+| `converged_all: True` (a partial pass reported as a completed one) | **`converged_all: False`** — an incomplete pass |
+| graph-wide operator-less trivial-stamp scan still ran, stamping freshness onto regions the pass never covered | scan **skipped** (it is gated on a complete converged pass) |
+| caller's dirty-root sweep ran and cleared a backlog the pass never covered | sweep skipped (it is gated on `converged_all`) |
+| result shape: `{batches, total_affected, converged_all, scanned_count, budget_used}` | + `truncated` on the internal Dreamer result (dropped by the SDK adapter, whose I1 key-set is pinned); the failure is visible via `converged_all`, the `WARNING`, and `failure_rate` |
+
+**Decision on the cap itself: NOT raised.** The issue offered "raise the cap
+for explicit full requests (the #329 hourly budget becomes the DoS bound)" or
+"document full-mode as non-viable at the top end". The second option is
+recorded, because for a direct SDK / self-host call `max_total_operators` is
+the *only* bound on a whole-graph EP, and weakening it silently trades a
+data-integrity bug (fixed above) for a DoS one. **Full mode is non-viable
+above 200,000 operators: use `mode="stale-first"`.** An operator who wants an
+intentional one-shot full pass raises `max_total_operators` explicitly.
+
+### 2. The default per-pass budget — CONFIGURABLE, value deliberately unchanged
+
+`DEFAULT_WINDOW_BUDGET = 200` stays. **It is now configurable**, resolved on
+every call through `dream.resolve_window_budget`:
+`explicit budget` → `TORTOISE_DREAM_WINDOW_BUDGET` → the constant. A malformed
+or negative value warns and falls back to the default rather than silently
+meaning "unbounded" (-1) or "every scheduled pass is a no-op" (0).
+
+**Why the value did not move to ~10,000 as the issue proposed.** The coverage
+arithmetic in the issue is correct (below), but `dream_window` passes the
+budget as BOTH the operator cap and the claim-window size, and the claim
+window is the frontier `_bfs_select_operators` walks hop by hop. Measured on a
+5,001-claim synthetic graph (see §4): a 5,000-claim window reliably raised
+FalkorDB's `Query timed out` (2/2), while windows ≤ 2,000 completed. A 50×
+default is therefore a per-pass **reliability** regression, not a free win —
+and it is a regression in exactly the direction item 1 was just fixed in.
+The knob is the deliverable; the value is the operator's call, taken against
+their own deployment's numbers.
+
+**Coverage-cycle trade-off** (passes = `ceil(operators / budget)`) — the
+arithmetic the issue's "2,500 passes" note is about:
+
+| operators | 200 (shipped) | 1,000 | 10,000 |
+|---|---|---|---|
+| 5,000 (floor) | 25 | 5 | 1 |
+| 50,000 | 250 | 50 | 5 |
+| 500,000 (top) | 2,500 | 500 | 50 |
+
+Pinned as arithmetic by `tests/test_epic903_scale.py::TestCoverageCycleScalesWithTheBudget`.
+
+### 3. `_AUTO_FULL_OPERATOR_THRESHOLD` (50) — VERIFIED, no change needed
+
+Recorded production graphs are 100×–10,000× this threshold, so **auto-select
+routes a production graph to `local` from both branches that can fire**:
+dirty roots present (write context, W1) → `local`; no dirty roots and
+`n_operators ≥ 50` → `local`. Auto-select never picks `stale-first`; the
+production window strategy is reachable only by an explicit
+`mode="stale-first"`, which is what the scheduled path must pass (903-C8
+wiring; see `tortoise/hosted_api.py` §"Epic 903-C8 (#1246): explicit mode
+routing"). Raising this threshold would turn a 5k-operator production graph
+into a whole-graph pass on a plain `dream()` call — the O(whole-graph) cost
+the epic exists to avoid — so it must stay far below the production floor.
+The config is documented at the constant
+(`TortoiseSDK._AUTO_FULL_OPERATOR_THRESHOLD`, `tortoise/sdk.py`) and pinned by
+`tests/test_epic903_scale.py::TestRoutingAtScale`.
+
+### 4. Perf validation at scale — PARTIAL (instrument shipped; production-scale numbers OPEN)
+
+`graph-scripts/dream-scale-bench.py` builds a synthetic graph at a chosen
+scale and measures the four quantities this item asks for: staleness-ranking
+query time, window selection + per-pass budget adherence, warm-start γ-skip
+savings (the DE2E-6b counter `TortoiseEP._warm_skipped_updates`), and
+coverage-cycle time. Run it as:
+
+```bash
+# private lane (recommended; the shared container accumulates peer graphs)
+uri="$(.venv/bin/python tools/test_lane.py uri)"; eval "$uri"
+export TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=60
+.venv/bin/python graph-scripts/dream-scale-bench.py --operators 100000 --drop
+```
+
+**Measured (5,000 operators / 5,001 claims / 10,000 IMPL edges, private
+`fdb-lane-*` container, 2026-10-10):**
+
+| Query | Time |
+|---|---|
+| `_stale_first_count_stamped` (index, `IS NOT NULL`) | 0.45–0.57 s |
+| `_stale_first_claims(limit=None)` (the I2 report's ranking) | 0.87–1.14 s |
+| `_stale_first_claims(limit=200)` (the scheduler's window) | 0.16–0.20 s |
+| `_bfs_select_operators`, window 50/100/200/1,000/2,000 | completes |
+| `_bfs_select_operators`, window 5,000 | `ResponseError: Query timed out` (2/2) |
+
+**The four indicators are NOT closed at the required ≥100k-operator scale.**
+The host was saturated by peer lanes throughout (load average 14–27; the
+private lane container failed its own 60 s `PING` bound during one run), so the
+individual milliseconds above are not reproducible numbers and no confidence
+interval is claimed. **What is structural and is reported as the finding:** the
+engine's `TIMEOUT` is 1000 ms on every container (`GRAPH.CONFIG GET TIMEOUT` →
+`1000`, `TIMEOUT_MAX` → `0`) and no code path in this repo raises it, so a
+query whose cost tracks graph size — the ranking, and the
+frontier-as-`$ids` hop — already sits on the cap at the *smallest* production
+scale. Recorded in full on **#6211** (same root cause, the `compute_confidence`
+entry point), which now also carries the scheduler's measurements.
+
+**Consequence for this item:** the ≥100k-operator run remains OPEN and needs a
+quiet host. It is a measurement task with the instrument already in place, not
+a decision gate — and it cannot move the strategy decision (item 1's
+STALE-FIRST record stands; the budget default in item 2 is what the ceiling
+governs).
+
+### 5. Deferred W7 refinement (shared operator-hour budget accounting) — RE-EVALUATED, stays v1
+
+Plan W7: only full-mode passes count against the #329 hourly bucket; window
+passes are bounded solely by their per-pass budget. #1338 asked whether the
+deferred *shared operator-hour accounting* becomes relevant now that full
+passes are known to be infeasible at the top of the range.
+
+**Re-evaluation: it stays deferred.** The case for it was "if full passes are
+not the metering unit, window passes need one". But a window pass IS bounded —
+by construction, at `budget` operators, which is the property the deferral
+rests on. What was missing was not a *meter* but a *realistic bound*, and
+item 2 supplies the knob plus the documented trade-off. Adding shared
+operator-hour accounting would introduce a second metering surface for a
+quantity the per-pass budget already bounds, before any deployment has
+recorded a single production-scale window pass. Re-open when a real
+production graph's measured per-pass cost shows the budget bound is not what
+limits throughput — i.e. after the §4 measurement above.
+
+### Files
+
+| File | Change |
+|---|---|
+| `tortoise/dream.py` | `resolve_window_budget` + `DREAM_WINDOW_BUDGET_ENV`; `dream_all` truncation semantics (`truncated`, `converged_all=False`, scan/sweep gating) |
+| `tortoise/sdk.py` | `_dream_full` drops the internal `truncated` (I1 key-set pinned); `dream()` budget docs; `_AUTO_FULL_OPERATOR_THRESHOLD` scale note |
+| `tests/test_epic903_scale.py` | NEW — the #1338 contracts |
+| `tests/test_epic903_scheduler.py` | default-budget test updated to the configured-default contract |
+| `graph-scripts/dream-scale-bench.py` | NEW — the §4 instrument |
+| `config/ci-surfaces.yml` | the new test file registered under `core` + `ep` |

@@ -217,7 +217,15 @@ not extract it by itself: **you choose** (#4197).
 tortoise sessions backlog              # what is saved, what it would cost
 tortoise sessions backlog --process    # extract it now (RECOMMENDED)
 tortoise sessions backlog --future-only  # keep only future conversations
+tortoise sessions backlog --forget <id>  # drop one record you cannot act on
 ```
+
+`--forget` exists for the one record that has no way forward: a session that
+`tortoise session drain` filed after the server stored it without extracting is
+recorded **without a transcript path** (the spool keeps the turns, not the path
+they came from), so `--process` can only report it as skipped. Dropping it is
+your call to make explicitly — the record is the only evidence the session was
+captured without extraction, so nothing removes it for you.
 
 The report is the offer, and it prices the run **before** anything is spent
 (~N estimated extraction units across M turns, with the provider that would be
