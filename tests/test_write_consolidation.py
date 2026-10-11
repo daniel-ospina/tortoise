@@ -148,7 +148,8 @@ class TestCreateEntity:
 
 class TestUpdate:
     def test_update_point_promotes_draft_to_live(self, sdk):
-        p = _make_point(sdk, content="draft claim")
+        # Draft is explicit since #1088 (a no-status create is LIVE).
+        p = _make_point(sdk, content="draft claim", status="draft")
         assert sdk.get_point(p["id"]).get("status") == "draft"
         r = sdk.update(p["id"], status="live")
         assert r["status"] == "live"

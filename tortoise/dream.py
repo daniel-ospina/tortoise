@@ -39,6 +39,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from .live import epistemic_label_queries  # #7853: id-anchored label sweep
+
 _log = logging.getLogger(__name__)
 
 # Default EP subgraph expansion for incremental dreaming. _mark_dirty seeds
@@ -267,23 +269,24 @@ class Dreamer:
         # EP found no factors) — the silent-no-op guard's primary signal.
         self._last_belief_write_count = len(params_list)
         if params_list:
+            # #7853: the run set spans all four epistemic labels, so sweep ONE
+            # query per label to keep the id index-anchored (a label predicate
+            # over the UNWIND drops the per-(label, property) anchor —
+            # ``tortoise/live.py``). The two SET shapes stay both-or-neither
+            # (#1240); ``_journal_belief_writeback`` de-duplicates the rows a
+            # multi-labelled node (``:Point:Object``) returns from >1 sweep.
             if stamp_now:
-                written = proj.g.query(
-                    "UNWIND $params AS p "
-                    "MATCH (n:Point {id: p.id}) "
-                    "SET n.confidence = p.c, n.lastDreamedAt = $now, "
-                    "    n.updatedAt = $now "
-                    "RETURN n.id",
-                    params={"params": params_list, "now": now},
-                ).result_set
+                _set = ("SET n.confidence = p.c, n.lastDreamedAt = $now, "
+                        "    n.updatedAt = $now ")
             else:
-                written = proj.g.query(
+                _set = "SET n.confidence = p.c, n.updatedAt = $now "
+            written: list = []
+            for _q in epistemic_label_queries(
                     "UNWIND $params AS p "
-                    "MATCH (n:Point {id: p.id}) "
-                    "SET n.confidence = p.c, n.updatedAt = $now "
-                    "RETURN n.id",
-                    params={"params": params_list, "now": now},
-                ).result_set
+                    "MATCH (n:{label} {id: p.id}) " + _set +
+                    "RETURN n.id"):
+                written.extend(proj.g.query(
+                    _q, params={"params": params_list, "now": now}).result_set)
             # #2884 D3: journal the write-back — one ConfidenceChanged per
             # committed row, with ``lastDreamedAt`` ONLY when the run
             # converged AND stamping is on (``stamp_now`` — the exact
@@ -306,10 +309,14 @@ class Dreamer:
         if emit is None:
             return
         by_id = {p["id"]: p["c"] for p in params_list}
+        seen: set = set()
         for row in written:
             cid = row[0]
-            if cid not in by_id:
+            # #7853: the per-label sweep returns a multi-labelled node once per
+            # matching label — journal each committed id exactly once.
+            if cid not in by_id or cid in seen:
                 continue
+            seen.add(cid)
             if stamp_now:
                 emit("ConfidenceChanged", id=cid, confidence=by_id[cid],
                      lastDreamedAt=now)

@@ -905,6 +905,12 @@ test('#4637 wiring: the re-entry card RENDERS the member lead-in its key state s
         firstDataSnippet: "'snippet'",
         shownOrgName: "'Acme'",
         setTab: '() => {}',
+        // #2005 (W9): the re-entry card's CTA opens the wizard through the
+        // shared resume door (`onClick={openResumeWizard}`, main.jsx) — the
+        // slice reads the identifier, so the rig must bind it. Its BEHAVIOUR
+        // (the derived entry step) is pinned in wizardResume.test.js; here it
+        // only has to resolve so the card's copy arms can render.
+        openResumeWizard: '() => {}',
       },
     })
     // react-dom entity-escapes apostrophes; the copy is what matters here

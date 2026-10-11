@@ -311,11 +311,22 @@ _PID_MARKER = ".session-pid"
 # pid has a different start time, so a bare pid is not a liveness proof.
 _START_TOLERANCE_S = 2.0
 
+# #7923: the env override the embedded reaper resolves its persisted
+# zero-client state file from. A LITERAL mirror of
+# ``tortoise.embedded_reaper.ZERO_CLIENT_STATE_PATH_ENV`` — this module must not
+# import embedded_reaper at module scope (the redirect below has to land before
+# that module resolves `_LOCK_PATH`/`ACTIVE_SUITES_DIR` at import). Drift is
+# pinned by tests/test_tmpdir_hygiene.py.
+_ZERO_CLIENT_STATE_PATH_ENV = "TORTOISE_ZERO_CLIENT_STATE_PATH"
+
 _SESSION_TMPDIR: str | None = None
 _PREV_HOST_TMPDIR_ENV: str | None = None
 # Value of $TMPDIR before the install (usually unset on Linux CI), restored
 # exactly on teardown.
 _PREV_TMPDIR_ENV: str | None = None
+# #7923: value of $TORTOISE_ZERO_CLIENT_STATE_PATH before the install, restored
+# exactly on teardown (a long-lived harness may call pytest.main() twice).
+_PREV_ZERO_CLIENT_STATE_PATH_ENV: str | None = None
 _GUARD_INSTALLED = False
 _ORIGINALS: dict[str, object] = {}
 #: #7735 — the pre-install ``TemporaryDirectory.cleanup``, kept so the tolerant
@@ -417,8 +428,15 @@ def install_session_tmpdir() -> str:
     process would ignore a bare ``$TMPDIR`` change) and ``os.environ['TMPDIR']``
     (child processes resolve their own temp dir from the env, and must be
     contained too).
+
+    #7923: also pins the embedded reaper's persisted zero-client state file
+    (``TORTOISE_ZERO_CLIENT_STATE_PATH``) inside the private root. The
+    suite-wide end-sweep writes that file on any run where a live embedded
+    server is discovered, and without the pin it landed in the developer's real
+    ``$HOME/.tortoise``. Contained per session, it is thrown away with the root.
     """
     global _SESSION_TMPDIR, _PREV_HOST_TMPDIR_ENV, _PREV_TMPDIR_ENV
+    global _PREV_ZERO_CLIENT_STATE_PATH_ENV
     if _SESSION_TMPDIR is not None:
         return _SESSION_TMPDIR
 
@@ -435,8 +453,12 @@ def install_session_tmpdir() -> str:
     # default it is UNSET, and restoring it to HOST_TMPDIR would leak a new
     # env var into a long-lived harness that calls pytest.main() more than once.
     _PREV_TMPDIR_ENV = os.environ.get("TMPDIR")
+    _PREV_ZERO_CLIENT_STATE_PATH_ENV = os.environ.get(
+        _ZERO_CLIENT_STATE_PATH_ENV)
     os.environ["TORTOISE_HOST_TMPDIR"] = HOST_TMPDIR
     os.environ["TMPDIR"] = root
+    os.environ[_ZERO_CLIENT_STATE_PATH_ENV] = os.path.join(
+        root, ".tortoise", "reaper-zero-client.json")
     tempfile.tempdir = root
     atexit.register(teardown_session_tmpdir)
 
@@ -460,11 +482,13 @@ def teardown_session_tmpdir() -> None:
     """Remove the private root (one rmtree) and drop the redirect.
 
     Never raises: teardown must not convert a green suite red. Restores the
-    process temp resolution AND the exported ``TORTOISE_HOST_TMPDIR`` so a
-    second ``pytest.main()`` in the same interpreter — or the fail-closed abort
-    in ``install_session_tmpdir`` — starts clean.
+    process temp resolution, the exported ``TORTOISE_HOST_TMPDIR`` and the
+    ``TORTOISE_ZERO_CLIENT_STATE_PATH`` pin (#7923) so a second
+    ``pytest.main()`` in the same interpreter — or the fail-closed abort in
+    ``install_session_tmpdir`` — starts clean.
     """
     global _SESSION_TMPDIR, _PREV_HOST_TMPDIR_ENV, _PREV_TMPDIR_ENV
+    global _PREV_ZERO_CLIENT_STATE_PATH_ENV
     root = _SESSION_TMPDIR
     _SESSION_TMPDIR = None
     if not root:
@@ -480,10 +504,19 @@ def teardown_session_tmpdir() -> None:
             os.environ.pop("TORTOISE_HOST_TMPDIR", None)
         else:
             os.environ["TORTOISE_HOST_TMPDIR"] = _PREV_HOST_TMPDIR_ENV
+        # #7923: restore the reaper state override exactly (only when we are
+        # still the installer — a test may have redirected it meanwhile).
+        if os.environ.get(_ZERO_CLIENT_STATE_PATH_ENV, "").startswith(root):
+            if _PREV_ZERO_CLIENT_STATE_PATH_ENV is None:
+                os.environ.pop(_ZERO_CLIENT_STATE_PATH_ENV, None)
+            else:
+                os.environ[_ZERO_CLIENT_STATE_PATH_ENV] = (
+                    _PREV_ZERO_CLIENT_STATE_PATH_ENV)
     except Exception:
         pass
     _PREV_HOST_TMPDIR_ENV = None
     _PREV_TMPDIR_ENV = None
+    _PREV_ZERO_CLIENT_STATE_PATH_ENV = None
     # A live embedded server that deliberately OUTLIVED the suite (the
     # `only_safe` end-sweep defers kills while another suite is active) holds
     # its redis.socket/redis.pid inside this root. Removing it would make the

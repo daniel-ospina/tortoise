@@ -17,6 +17,7 @@ import {
   CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE, CLAUDE_WEB_FILING, HARNESS_CAPTURE_REQUIRES_OPT_IN,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
+  HARNESS_ANALYTICS_ALIASES, analyticsHarnessOf,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
@@ -125,6 +126,49 @@ test('#2912: family resolution + preferred surface + display names', () => {
   assert.equal(knownHarnessName('claude-desktop'), 'Claude Desktop')
   assert.equal(knownHarnessName('pi'), 'Pi')
   assert.equal(knownHarnessName('not-a-harness'), null)
+})
+
+// ── #2936: the copy-attribution vocabulary bridge ──────────────────────────
+// The beacon may only name a harness the SERVER's frozen analytics vocabulary
+// accepts. This module owns the exception table; the server owns the
+// vocabulary itself, and the cross-surface contract that every chooser leaf
+// resolves INTO it lives in
+// `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract`
+// (a JS test cannot restate a Python Literal without duplicating it here,
+// which is the drift the contract test exists to prevent).
+test('#2936: analyticsHarnessOf maps the UI-only leaf, and refuses the unattributable one', () => {
+  // The one SURFACE leaf: its copy installs the `codex` capture seam, so it is
+  // attributed to `codex` — the server Literal is deliberately NOT widened
+  // (#1701's recorded decision).
+  assert.equal(HARNESS_ANALYTICS_ALIASES.codexDesktop, 'codex')
+  assert.equal(analyticsHarnessOf('codexDesktop'), 'codex')
+  // A leaf with no attributable value returns null, so the caller emits
+  // NOTHING — never a value the server drops (and reports, #3821).
+  assert.equal(HARNESS_ANALYTICS_ALIASES.chatgpt, null)
+  assert.equal(analyticsHarnessOf('chatgpt'), null)
+  // The identity-valued leaves (the server's own vocabulary) are unchanged.
+  for (const h of HARNESS_ORDER.filter((h) => h !== 'chatgpt')) {
+    assert.equal(analyticsHarnessOf(h), h, `${h} is its own analytics value`)
+  }
+  // Defensive: no leaf, no value.
+  assert.equal(analyticsHarnessOf(null), null)
+  assert.equal(analyticsHarnessOf(undefined), null)
+  // EVERY leaf the LIVE chooser can select is attributable — a new surface
+  // whose id is not a capture harness needs an alias entry (or the server
+  // vocabulary would have to grow, which #1701 forbids). This is the client
+  // half of the drift guard; the server half asserts the resolved set EQUALS
+  // the server vocabulary.
+  const chooserLeaves = new Set([
+    ...HARNESS_FAMILIES.map((f) => f.id),
+    ...HARNESS_FAMILIES.flatMap((f) => f.surfaces.map((s) => s.id)),
+  ])
+  assert.deepEqual([...chooserLeaves].sort(),
+    ['claude', 'claude-desktop', 'claude-web', 'codex', 'codexDesktop', 'cursor', 'pi'],
+    'the chooser leaf population moved — re-check the analytics mapping for the new leaf')
+  for (const leaf of chooserLeaves) {
+    assert.ok(analyticsHarnessOf(leaf) != null,
+      `${leaf} is reachable from the chooser but has no analytics value — the beacon would emit nothing`)
+  }
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {
@@ -313,6 +357,17 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_STATUS_LABEL, 'object')
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
+  //
+  // #3802: this is the A0 ROLLBACK contract, and it is the only thing the
+  // assertion is: `HARNESS_INSTALL` is READ ONLY by the archived
+  // `{LEGACY_WIZARD_ARCHIVED && …}` render (`src/wizardArchived.test.js` pins
+  // that census), so a green here means "a rollback to the legacy wizard would
+  // render this", NOT "the user receives this". What a user receives on the
+  // live surface is asserted where it renders: the agent prompt
+  // (`wizardPrompts.test.js`, byte-exact snapshot of `wizardPromptText`) and the
+  // capture row (`HARNESS_CAPTURE_INSTALL`, asserted below and by
+  // `tests/test_harness_mcp_config.py`). An edit meant to reach users belongs
+  // there first — #3754 had to patch both copies for exactly this reason.
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
 })
 
@@ -332,14 +387,16 @@ test('#3575: capture support is derived from the seam, and every supported harne
     if (!HARNESS_CAPTURE_SUPPORT[h]) continue
     const artifact = HARNESS_CAPTURE_SEAM[h]
     assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
-    // The install step may live in the MCP-setup copy (Pi/Codex embed it) or
-    // in the capture-install surface (Cursor's copy is a JSON file, so its
-    // capture step is a connect-wizard step + the Memory-sources row).  Either
-    // surface must name the declared artifact — capability is not a claim.
-    const surface = `${HARNESS_INSTALL[h](KEY)}\n${HARNESS_CAPTURE_INSTALL[h] || ''}`
+    // #3802: the claim must be satisfied by the surface a user RECEIVES.
+    // `HARNESS_CAPTURE_INSTALL[h]` is the Memory-sources capture row (main.jsx),
+    // which renders for every supported harness — all four live copies name
+    // their seam on their own. `HARNESS_INSTALL[h]` is deliberately NOT OR'd in:
+    // it renders only inside the archived `LEGACY_WIZARD_ARCHIVED` block, so the
+    // old OR made this capability claim satisfiable by copy no user can see.
+    const surface = HARNESS_CAPTURE_INSTALL[h] || ''
     assert.ok(
       surface.includes(artifact),
-      `HARNESS_INSTALL/${h} capture-install surface must install its declared seam ${artifact}`,
+      `HARNESS_CAPTURE_INSTALL.${h} — the capture row a user receives — must install its declared seam ${artifact}`,
     )
   }
 })
@@ -506,6 +563,19 @@ test('#3661: every capture surface names the opt-in, and none claims capture hap
     'HARNESS_INSTALL.codex must embed the shared Codex capture step')
   assert.ok(HARNESS_INSTALL.pi(KEY).includes(PI_CAPTURE_INSTALL),
     'HARNESS_INSTALL.pi must embed the shared Pi capture step')
+  // #3802: the three legs above are the A0 ROLLBACK copies — `HARNESS_INSTALL`
+  // renders only inside the archived block. The claim that matters here ("the
+  // capture step the user gets is the SHARED one, so it cannot drift from the
+  // Memory-sources row") must therefore also be asserted on the surface that
+  // IS rendered: `HARNESS_CAPTURE_INSTALL`. Without this leg the de-duplication
+  // claim is pinned on copy no user receives — the #3754 shape, where a fix had
+  // to be applied twice and only one application was reachable.
+  assert.ok(HARNESS_CAPTURE_INSTALL.claude.startsWith(CLAUDE_CAPTURE_NOTE),
+    'the RENDERED claude capture row must carry the same shared note as the rollback copy')
+  assert.equal(HARNESS_CAPTURE_INSTALL.codex, CODEX_CAPTURE_INSTALL,
+    'the RENDERED codex capture row must be the shared constant (one source, no drift)')
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL,
+    'the RENDERED pi capture row must be the shared constant (one source, no drift)')
   // The connect-wizard steps (the archived LEGACY_WIZARD_ARCHIVED render, a
   // retained rollback path) carry the Cursor scope disclosure in prose.
   assert.ok(HARNESS_STEPS('cursor', KEY)

@@ -663,12 +663,55 @@ def _kill_quiet(pid) -> None:
         pass
 
 
+def _child_diagnosis(proc) -> str:
+    """Whatever the child printed after the line the test read (#6177).
+
+    A signal test that times out is only diagnosable from inside the child:
+    whether the guard was REFUSED (its inherited disposition was not the
+    default) or installed-and-hung is the difference between an ambient
+    harness defect and a product regression. Drained after the child is dead,
+    so the read cannot block.
+    """
+    out = ""
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        with contextlib.suppress(Exception):
+            out += stream.read() or ""
+    return " ".join(out.split())[-600:] or "<no output>"
+
+
+# #6177: the signal under test is normalized to its DEFAULT disposition (and
+# unblocked) inside the child, BEFORE the seam is called. The precondition the
+# test needs — "this process would die from the signal if nothing closed its
+# servers" — is otherwise inherited from the pytest process, and `SIG_IGN`
+# survives fork+exec (POSIX; Python-level handlers do not). A suite started
+# under `nohup`, as a non-interactive shell's background job, or by a CI
+# runner that ignores SIGHUP therefore handed the child SIGHUP=SIG_IGN, and
+# `install_embedded_signal_cleanup` — which replaces SIGTERM/SIGHUP only while
+# they are SIG_DFL, because a host that ignores a signal keeps that choice —
+# declined to install the guard. The child then CORRECTLY survived, and the
+# test reported the product regression "the #2203 guard did not terminate it".
+# Measured (#6177), one tree and one command: full file green in a foreground
+# shell (77 passed, 1 skipped) and red under `nohup` (1 failed, 76 passed,
+# 1 skipped), and `[1]` red under `nohup` in isolation too — the axis is the
+# LAUNCH ENVIRONMENT, not test order. Normalizing here makes the precondition
+# explicit and the verdict a function of the code under test (#5049 rules 1
+# and 4).
 _SIGNAL_GUARD_CHILD = (
     "import sys, time, os, signal\n"
     "sys.path.insert(0, %(root)r)\n"
     "from tortoise.embedded_lifecycle import install_embedded_signal_cleanup\n"
     "from tortoise import FalkorDB\n"
+    "print('INHERITED_DISPOSITION=%%s' %% (signal.getsignal(%(signum)d),), flush=True)\n"
+    "signal.signal(%(signum)d, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {%(signum)d})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
     "install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(%(signum)d) is not signal.SIG_DFL),"
+    " flush=True)\n"
     "db = FalkorDB(os.path.join(sys.argv[1], 'sig.db'))\n"
     "cli = getattr(db, 'client', db)\n"
     "print('REDIS_PID=%%s' %% cli.pid, flush=True)\n"
@@ -677,17 +720,27 @@ _SIGNAL_GUARD_CHILD = (
 )
 
 
-@pytest.mark.parametrize("signum", [_signal.SIGTERM, _signal.SIGHUP])
-def test_terminating_signal_closes_embedded_server(tmp_path, signum):
-    """#2203 (indicator 4): kill-parent → child-gone for the terminating
-    signals whose default disposition killed the parent WITHOUT atexit —
-    SIGTERM (daemon/stdio/indexer kill) and SIGHUP (terminal/session death).
-    Pre-fix the daemonized redis-server survived both (orphan)."""
-    dbdir = tmp_path / f"sig-{signum}"
+# #6177: ignore SIGHUP and then `exec` the real child. `SIG_IGN` is the one
+# disposition `exec` PRESERVES, so the child really does start with SIGHUP
+# ignored — the state `nohup`/background-job launch hands it — without this
+# suite's own launch environment having to produce it.
+_INHERIT_SIG_IGN_THEN_EXEC = (
+    "import os, signal, sys\n"
+    "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+    "os.execv(sys.executable, [sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+)
+
+
+def _assert_signal_closes_the_server(argv, signum, dbdir, what: str) -> None:
+    """Signal a parent that owns an embedded server; assert BOTH deaths.
+
+    #2203's contract is kill-parent → child-gone → server-gone, and the
+    sequence is shared by the ambient case and the inherited-``SIG_IGN``
+    regression case (#6177): a second copy of it is how the two drift apart.
+    """
     dbdir.mkdir()
     proc = _subprocess.Popen(
-        [sys.executable, "-c", _SIGNAL_GUARD_CHILD % {"root": _REPO_ROOT}, str(dbdir)],
-        stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        argv, stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
         stderr=_subprocess.PIPE, text=True, env=_child_env(),
     )
     redis_pid = None
@@ -700,18 +753,56 @@ def test_terminating_signal_closes_embedded_server(tmp_path, signum):
             proc.wait(timeout=45)
         except _subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
             pytest.fail(f"child survived {_signal.Signals(signum).name} — "
-                        "the #2203 guard did not terminate it")
+                        "the #2203 guard did not terminate it; "
+                        f"child said: {_child_diagnosis(proc)}")
         assert proc.returncode == -signum, (
             f"expected signal death ({-signum}), rc={proc.returncode}")
-        _assert_server_dies_with_parent(
-            redis_pid, proc, f"child's {_signal.Signals(signum).name}ed parent")
+        _assert_server_dies_with_parent(redis_pid, proc, what)
     finally:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
         if redis_pid is not None and _pid_alive(redis_pid):
             _kill_quiet(redis_pid)
+
+
+@pytest.mark.parametrize("signum", [_signal.SIGTERM, _signal.SIGHUP])
+def test_terminating_signal_closes_embedded_server(tmp_path, signum):
+    """#2203 (indicator 4): kill-parent → child-gone for the terminating
+    signals whose default disposition killed the parent WITHOUT atexit —
+    SIGTERM (daemon/stdio/indexer kill) and SIGHUP (terminal/session death).
+    Pre-fix the daemonized redis-server survived both (orphan)."""
+    child = _SIGNAL_GUARD_CHILD % {"root": _REPO_ROOT, "signum": signum}
+    _assert_signal_closes_the_server(
+        [sys.executable, "-c", child, str(tmp_path / f"sig-{signum}")],
+        signum, tmp_path / f"sig-{signum}",
+        f"child's {_signal.Signals(signum).name}ed parent")
+
+
+def test_terminating_signal_closes_embedded_server_with_inherited_sig_ign(
+        tmp_path):
+    """#6177: an inherited ``SIG_IGN`` must not decide the verdict.
+
+    Reproduces the reported `nohup`/background-job condition deterministically,
+    without depending on how this suite was launched: an intermediate process
+    ignores SIGHUP and then ``exec``s the same child (the precondition is
+    asserted IN the child, so a wrapper that stopped working fails loudly
+    instead of silently degrading into a duplicate of the case above).
+    Pre-fix the seam declined the signal and the child survived the kill; the
+    assertion is the full #2203 contract, not merely that a handler was
+    installed.
+    """
+    inner = (
+        "import signal\n"
+        "assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN, "
+        "'#6177 precondition: the child must INHERIT SIGHUP as SIG_IGN'\n"
+    ) + _SIGNAL_GUARD_CHILD % {"root": _REPO_ROOT, "signum": _signal.SIGHUP}
+    dbdir = tmp_path / "inherited-sig-ign"
+    _assert_signal_closes_the_server(
+        [sys.executable, "-c", _INHERIT_SIG_IGN_THEN_EXEC, inner, str(dbdir)],
+        _signal.SIGHUP, dbdir, "child's SIGHUPed parent (inherited SIG_IGN)")
 
 
 def test_sigkill_owner_record_lets_reaper_reclaim_the_server(tmp_path,

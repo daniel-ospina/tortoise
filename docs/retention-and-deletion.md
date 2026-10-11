@@ -17,6 +17,8 @@ related:
     note: "Graph delete = trash: quarantine → 7-day grace → erasure."
   - issue: 302
     note: "Team-account soft delete → grace → hard purge."
+  - issue: 3925
+    note: "Owner ruling: account memory is the ACCOUNT's property — a person's erasure deletes the identity layer and severs the analytics linkage, and never reaches into the account's memory. The account-side PII filter / selective delete is DEFERRED (not prioritised); this document carries the boundary so a well-meaning adjacent change cannot quietly reverse it."
 ---
 
 # Retention and Deletion — the one promise
@@ -175,6 +177,66 @@ remains after about four weeks* — which is why the public copy states the
 graph's 7-day erasure **and** the four-week backup horizon as **separate
 sentences** rather than one number for both. Do **not** "reconcile" the two
 into a single figure in copy: that would make one of them false.
+
+## Whose memory it is — a person's erasure does not reach the account's memory
+
+> **OVERRIDES:** the common erasure practice — a data-subject request reaching
+> every copy of *that person's* personal data held on our side, **including
+> inside the memory of an account that stores it** — because that memory
+> **belongs to the account**: a person's erasure deletes the **identity layer**
+> and severs the **analytics linkage**, and what the account keeps, the account
+> deletes. *(Owner, #3925.)*
+
+Three owner statements, recorded on **#3925**. The third is the one a
+well-meaning implementation is most likely to reverse by accident, so it is
+stated as a rule here rather than left in an issue thread:
+
+1. **Account memory is the account's property.** *"asking to delete the PII
+   can't be done inside team memory. That's the property of the account. IF a
+   user wants that deleted they delete the memory."*
+2. **A person's erasure does not reach into it.** An erasure request deletes the
+   **identity layer (PII)** and severs the **analytics linkage** — it does not
+   reach into the account's memory. If someone wants something gone from that
+   memory, **the account deletes the memory**: that is the account's action, on
+   the account's property.
+3. **The account-side capability is DEFERRED, and no lane owns it.** Letting an
+   organisation account **search its own memory for personal identifiers and
+   selectively delete them** is a *possible future* capability, explicitly not
+   prioritised — *"for now that's their problem, not ours."* **Do not build it
+   as a side-effect** of an erasure, retention, or storage change, and do not
+   read a per-subject erasure request as licence to implement it.
+
+### Why ruling 1B is not a counter-example
+
+Ruling **1B** (above) deletes a **solely-owned** team with its owner's account.
+That is *not* a person's erasure reaching into an account's memory: with no
+other owner, the person **is** the account, so the **account** deletes its own
+memory — the same action, on the same property, reached through the same gate. A
+**member's or co-owner's** erasure cascades **no** team at all: a second active
+owner, a non-owner role, and the anonymous agent anchor (`user_id IS NULL`) each
+keep the org out of the cascade.
+
+### What holds the boundary today
+
+| Anchor | What it does |
+|--------|--------------|
+| `tortoise/supabase_control.py` `sole_owned_org_ids` | the personal-erasure cascade's ownership gate — an org qualifies only when the account holder is its **only** active owner |
+| `tortoise/supabase_control.py` `caller_membership_org_ids` | the replay claim's gate — a claimed org is honoured only while the caller still holds a membership row there, so a stale anchor cannot drive a cascade against a stranger's team |
+| `tests/test_export_delete.py::TestAccountDeletion::test_cascades_only_solely_owned_teams` | the mutation-confirmed regression: a shared team is left untouched |
+| the MCP/SDK surface-approval rule (`CONTRIBUTING.md` → *the MCP tool surface and public SDK methods cannot grow by accident*; `config/surface-manifest.yml`) | a surface change is a reviewable diff that **requires owner approval** — and the tool or method a team-memory filter would need is a surface change |
+
+The last row is why this is written down: the capability is **deferred by
+decision**, so the boundary is the thing that must survive until that decision
+is reopened — never the thing to "finish" while completing something adjacent.
+Reopening it is an owner question on **#3925**; it is not a discovery to be
+absorbed into an adjacent deletion change.
+
+**It is not a small change if it is ever prioritised.** There is **no
+per-entity purge inside a live graph** (see *Accepted gaps the promise carries*
+above — a point removed from a live graph is an ordinary write, bounded only by
+the backup horizon). A selective, per-identifier delete over account memory is
+therefore a **storage-layer** change, not an API convenience on top of the
+existing delete paths.
 
 ## A different axis: the operational event store
 

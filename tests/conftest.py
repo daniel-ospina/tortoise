@@ -44,6 +44,17 @@ os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
 # install gate needs the env early.)
 os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
+# #1789: the S4 delta contract is DEFAULT-ON in production (unset → delta).
+# The pre-existing S4 assertions pin the LEGACY complete-list contract
+# (content pins, byte-identity/revert pins, truncation fixtures), so the
+# suite defaults to LEGACY here and delta-path tests opt in with
+# ``monkeypatch.setenv("TORTOISE_S4_DELTA", "1")``. ``setdefault`` (not an
+# ASSIGN) keeps a caller's explicit choice (e.g. a delta-default E2E run)
+# authoritative; tests that need the UNset state must
+# ``monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)`` because this
+# module-level pin would otherwise shadow them.
+os.environ.setdefault("TORTOISE_S4_DELTA", "0")
+
 # #7015: the embedder autouse opt-out below is a *test* fixture, so it is too
 # late for COLLECTION — and collection is where the race bites. Three shard
 # files (test_3815_mitigation_moves_weight, test_ep_directional,
@@ -1611,6 +1622,23 @@ def _disable_embedder_autowarmup(monkeypatch):
     leaked a real embedder load into the next test.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+    yield
+
+
+# ── #7816: the audit JSONL fallback never lands in the real $HOME ─────────
+# `hosted_api` builds a module-level `AuditLogger` at IMPORT. The logger's
+# Tier-2 JSONL fallback resolves `$HOME/.tortoise/audit_fallback.jsonl`, so
+# any test that reaches an audit write without a Postgres DSN appended into
+# the developer's REAL `$HOME` — the logger was constructed at import, before
+# any per-test HOME fixture, and had frozen that path. The library now
+# resolves the path at WRITE time (#7816); this fixture pins the fallback
+# directory to the per-test tmp tree, so a normal pytest run cannot write an
+# `audit_fallback.jsonl` into the real `$HOME` at all. Deliberately scoped to
+# the audit fallback (NOT a blanket HOME redirect): tests that legitimately
+# consult the ambient `$HOME` keep the value they expect.
+@pytest.fixture(autouse=True)
+def _isolated_audit_fallback_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("TORTOISE_AUDIT_FALLBACK_DIR", str(tmp_path / ".tortoise"))
     yield
 
 

@@ -74,7 +74,7 @@ assert_not_contains() { # <haystack> <needle> <label>
   esac
 }
 assert_match() { # <haystack> <regex> <label>
-  if printf '%s' "$1" | grep -qE -- "$2"; then ok "$3"; else bad "$3 (no match: $2)"; fi
+  if grep -qE -- "$2" <<<"$1"; then ok "$3"; else bad "$3 (no match: $2)"; fi
 }
 
 FIX="$(mktemp -d)"

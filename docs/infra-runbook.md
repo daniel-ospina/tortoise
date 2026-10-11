@@ -1411,8 +1411,13 @@ machinery (§7, §7.7). Two consequences:
 **Both targets are probed on every run**, drills included: the auth step always
 uses its production URL and is hard-disarmed from the restart leg. Note the auth
 probe is **not** side-effect-free — asserting the PKCE header means the GET must
-reach `/auth/start`, which **writes an `auth_flows` row** (one per run; expired
-rows are currently not garbage-collected — tracked in #3647). A drill therefore
+reach `/auth/start`, which **writes an `auth_flows` row** (one per run). That row
+used to leak: the table's only deletion paths ran on flow *completion*, which an
+abandoned probe flow never reaches, so ~288 expired rows/day accumulated
+(#3647). `/auth/start` and `/auth/link` now sweep their own expired rows on
+write (`sweepExpiredFlows`, bounded per call and indexed on `expires_at`), which
+holds the table to roughly one expiry window's worth of rows with no schedule of
+its own. A drill therefore
 exercises the API drill path while still alerting on a genuinely-down auth
 surface.
 

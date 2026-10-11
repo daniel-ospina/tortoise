@@ -191,7 +191,7 @@ def run_staged(edus, model, system):
 EVK = {"decision", "occurrence", "deployment", "review", "extraction",
        "meeting", "experiment", "friction", "turn", "sessionCaptured",
        "AgentSession", "documentCreated", "roleCreated", "pointAdded",
-       "humanApproval"}
+       "humanApproval", "milestone"}
 VOCAB = {"core:concept", "core:standard", "core:other", "core:WorkItem",
          "core:document", "core:tool", "core:workflow", "core:Project",
          "core:tag", "core:user", "core:skill", "core:agent", "core:agreement",
@@ -205,7 +205,7 @@ VOCAB = {"core:concept", "core:standard", "core:other", "core:WorkItem",
          "dev:indicator", "marketing:campaign", "marketing:content",
          "marketing:channel", "marketing:audience", "marketing:keyword",
          "marketing:competitorContent", "pm:issue", "pm:sprint",
-         "pm:kanbanBoard", "pm:card", "pm:milestone"}
+         "pm:kanbanBoard", "pm:card"}
 
 
 def metrics(d: dict) -> dict:

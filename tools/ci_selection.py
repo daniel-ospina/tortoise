@@ -815,7 +815,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
              # `api` match must not drop the core half.
-             "tortoise/oauth.py")
+             "tortoise/oauth.py",
+             # #5581: the source-currency derivation helper owns
+             # tests/test_source_currency_5581.py, registered `core` — but
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a HELPER-ONLY change
+             # selected NO surface, took the docs-only early return and fell
+             # back to tier-1 smoke: the cases pinning §4.6's aggregate rule
+             # (notably that an EMPTY link set reads `unknown`, never the
+             # vacuously-`current` false-fresh) would not have run on the PR
+             # that edits the aggregation. Same #1349/#3332/#3616 silent-drop
+             # class as tools/test_lane.py above. Pinned by
+             # tests/test_ci_selection.py::test_source_currency_tool_change_selects_core_not_tier1.
+             "tools/source_currency.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -1089,6 +1101,15 @@ TOOL_CARVEOUTS = (
     # matrix (fail closed).
     # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
     "tools/pr_lead_time.py",
+    # #4256: the "who is on #N?" verb (tools/who_is_on.py + its wrapper
+    # tools/who-is-on.sh) owns tests/test_who_is_on.py. Same silent-drop class
+    # as the collision_preflight carve-out above: no SOURCE_PATTERNS entry
+    # matches `tools/who_is_on.py`, so a change to the tool alone would be
+    # swallowed by the flat "tools/" prefix, classify as docs-only, and its own
+    # guard test would never run on the PR that changes it. Fail-closed (FULL
+    # matrix) is the safe default for a tool whose answer drives dispatch.
+    "tools/who_is_on.py",
+    "tools/who-is-on.sh",
 )
 
 

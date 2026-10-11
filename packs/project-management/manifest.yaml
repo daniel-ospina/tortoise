@@ -10,7 +10,9 @@ ontology:
   - sprint
   - kanbanBoard
   - card
-  - milestone
+  # `milestone` removed (#2767): a milestone is reached at a moment, so it is
+  # the CORE event kind `milestone` — never an Object. The sprint nearMisses
+  # below still references the bare name, which now resolves to core.
   subclassOf:
     issue: WorkItem
     card: WorkItem

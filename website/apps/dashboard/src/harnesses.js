@@ -141,6 +141,8 @@ const PI_MCP_CONFIG_ENV = {
   },
 }
 
+// #3802: reference-only — the only reader is the archived rollback render; see
+// the reachability note above `HARNESS_INSTALL`.
 // #1694: per-harness UI steps shown above the snippet (NOT part of the
 // copied content). The user follows these, then copies the payload below
 // (prompt / commands / file JSON). Step objects support { label, code,
@@ -225,10 +227,13 @@ export const harnessDisplayName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAM
 // caller owns the user-facing fallback copy.
 export const knownHarnessName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || null
 
+// #3802: reference-only (read only by the archived rollback render) — see the
+// reachability note above `HARNESS_INSTALL`.
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
 export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 
+// #3802: reference-only (read only by the archived rollback render).
 // Harnesses whose install copy embeds the skill-install step in a self-
 // contained prompt (Pi) — nothing extra is appended after the copy.
 export const HARNESS_SKILLS_IN_PROMPT = ['pi']
@@ -400,6 +405,25 @@ tortoise install cursor
 # editor is the supported capture surface for this seam; a cloud-agent chat
 # has no sessionEnd to hook.`
 
+// ⛔ REFERENCE-ONLY COPY (#3802). `HARNESS_INSTALL` — together with
+// `HARNESS_STEPS`, `HARNESS_SKILLS`, `HARNESS_PERSIST`, `HARNESS_SKILLLESS`,
+// `HARNESS_SKILLS_IN_PROMPT` and `HARNESS_SKILLS_IN_STEPS` — has ZERO live
+// render consumers: its only reader is the `{LEGACY_WIZARD_ARCHIVED && …}`
+// render in `main.jsx`, and that flag is a hard `false` (main.jsx's own comment
+// says so). It is KEPT, not dead: that block IS the A0 rollback path (#1997 W1,
+// epic §8), so an edit here reaches no user *until a rollback flips the flag*.
+// What a user receives TODAY comes from other surfaces:
+//   * the agent PROMPT — `wizardPrompts.js` `wizardPromptText` (the dashboard
+//     never shows `claude mcp add`; it hands the agent "Add Tortoise MCP at
+//     <url>"), pinned against the RENDERED value in `wizardPrompts.test.js`;
+//   * `HARNESS_CAPTURE_INSTALL` — the Memory-sources capture row in `main.jsx`,
+//     the copy a user actually pastes for session capture (#1728 / #3754);
+//   * `website/docs.html` — the public install commands for a manual setup.
+// So an edit to a SHIPPED behavior in this block must be mirrored to the
+// carrier above, and the test asserting that behavior must assert the carrier
+// too (#3802). `src/wizardArchived.test.js` pins the reachability itself — this
+// family losing its last live read site, or gaining one, reds there.
+//
 // #1710: the copyable payload is EXACTLY what the user pastes into the
 // harness target (terminal / config file / chat). The lead-in instructions
 // ("Run this command:", "Paste this into...") live in HARNESS_INTRO /
@@ -503,12 +527,16 @@ export const SKILLS_CLAIM = `Install the Tortoise skills (${SKILLS_LIST})`
 export const ONBOARDING_INSTRUCTIONS_URL =
   'https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md'
 
+// #3802: reference-only (read only by the archived rollback render).
 // #1710: harnesses whose skills + persist are rendered as HARNESS_STEPS
 // (with per-step Copy buttons) instead of being appended to the copy —
 // the copy is a JSON file body (Cursor), and a curl/export appended to it
 // would break the file paste.
 export const HARNESS_SKILLS_IN_STEPS = ['cursor']
 
+// #3802: reference-only (read only by the archived rollback render); the live
+// skills-install step is in the agent prompt (`wizardPromptText`) — see the
+// reachability note above `HARNESS_INSTALL`.
 // #1710: bare command with a comment lead-in only (paste-safe in a
 // terminal — the prose used to be plain text inside the copy, which
 // errored when pasted as-is).
@@ -642,6 +670,7 @@ export const HARNESS_CAPTURE_STATUS_LABEL = {
 export const HARNESS_CAPTURE_LAST_ATTEMPT = (detail) =>
   `Last attempt — ${detail}`
 
+// #3802: reference-only (read only by the archived rollback render).
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.
 export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`
@@ -712,6 +741,53 @@ export function preferredSurface(family, current) {
   if (family.surfaces.some((s) => s.id === current)) return current
   if (family.surfaces.length > 0) return family.surfaces[0].id
   return family.id
+}
+
+// ── #2936: the copy-attribution vocabulary bridge ──────────────────────────
+// The wizard's copy-attribution beacon (PATCH /v1/onboarding/state with
+// {harness, section}) may only name a harness the SERVER's analytics
+// vocabulary accepts; the handler drops anything else (and, since #3821,
+// reports it to the unregistered-value sink — so a beacon the server refused
+// stops looking like a beacon that never fired). The wizard's own vocabulary
+// has grown past that set in two directions:
+//
+//   * `codexDesktop` (#2912) is a SURFACE leaf, not a capture harness. It is
+//     the Codex Desktop GUI, which shares ~/.codex/config.toml with the CLI
+//     and whose copy hands the user the `--harness codex` install — so its
+//     copy is attributed to `codex`. The server Literal is NOT widened for it:
+//     the RECORDED decision on #1701 (docs/scoping/2026-09-10-1701-remaining-
+//     slice-scoping.md, "Do NOT 'fix' the missing beacon by widening a
+//     Literal") is that the capture and copy-attribution value sets stay ONE
+//     set, and the session Literal mints a per-harness receipt key per member
+//     — widening it would mint one for a surface that files no session.
+//   * `chatgpt` is key-less OAuth with no local skills and no capture lane, and
+//     `tests/test_onboarding_analytics_patch.py` pins that the server stays
+//     inert for it. #2698/#2912 keep it out of the live chooser, but the
+//     ARCHIVED #1643 render still maps the full HARNESS_ORDER, so the bridge
+//     must answer for it too.
+//
+// A `null` entry means "no attributable value — emit NOTHING", never "send it
+// and let the server drop it". A leaf with NO entry is taken as itself, which
+// is what the server's identity-valued harnesses need; the invariant this
+// rests on — every leaf the chooser can select resolves into the server
+// vocabulary — is enforced by
+// `tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract`
+// (the JS side declares the exceptions; the server side owns the vocabulary,
+// so the set is not restated here where it could drift).
+export const HARNESS_ANALYTICS_ALIASES = Object.freeze({
+  codexDesktop: 'codex',
+  chatgpt: null,
+})
+
+// The value the copy-attribution beacon emits for a wizard leaf, or null when
+// the leaf must not be attributed at all. The ONE place this mapping lives —
+// the live connect step's cards and the archived render's `wizardCopy` both
+// resolve through it (main.jsx `wizardBeacon`).
+export function analyticsHarnessOf(leaf) {
+  if (leaf == null) return null
+  return Object.prototype.hasOwnProperty.call(HARNESS_ANALYTICS_ALIASES, leaf)
+    ? HARNESS_ANALYTICS_ALIASES[leaf]
+    : leaf
 }
 
 // ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────

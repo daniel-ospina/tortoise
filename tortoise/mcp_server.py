@@ -1332,7 +1332,37 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # the Point's journaled snapshot). A tenant setting either would forge
     # provenance and break live/replay parity. Rejected on ALL spellings, at
     # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
-    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
+    "sourceVersion", "sourceVersions", "sourceVersionTransit",
+    # #3644 / PR #8016 code-review ISSUE 1: the version's TRANSITION facts are
+    # server-minted/journalled and name a `:Source` transition — they can never
+    # be a legitimate caller prop on ANY entity, so they belong in this
+    # entity-agnostic set. They are ALSO rejected by `create_source`'s own
+    # `**props` guard and by `_update_entity`'s `_SOURCE_SERVER_MANAGED_PROPS`
+    # (both in sdk.py); this boundary entry is the fail-closed check IN FRONT of
+    # them, so the write is refused before it is attempted. The hazard the
+    # pair closes: a caller `previousValidTo` reaching the `SourceVersioned`
+    # emit's explicit `previousValidTo=` keyword through the payload splat
+    # would `TypeError`, and the swallowed exception would DROP the record while
+    # the live node moved (fail-open, live != replay).
+    #
+    # ⛔ `validFrom`/`validTo`/`valid_to` are deliberately NOT in this set.
+    # This helper is ENTITY-AGNOSTIC — it is the choke point for every MCP
+    # entity tool, including `tortoise_create_point`/`tortoise_update_point`,
+    # for which those ARE first-class caller props (§4.7 keeps the Point
+    # column caller-writable; `sdk._refuse_inverted_point_window`'s docstring
+    # states it). Listing them here refused a legitimate Point temporal write
+    # at the boundary — a regression this PR introduced (PR #8016 code-review
+    # ISSUE 1: measured `props={"validFrom": …}` → `-32003`, origin/main did
+    # not carry the keys). The `:Source` window is guarded where it belongs —
+    # on the Source routes, both fail-closed before any write:
+    #   * `sdk.create_source` rejects the window/transition keys in its
+    #     `**props` (sdk.py, before `ev` is built);
+    #   * `sdk._update_entity` rejects them on a reachable `:Source` through
+    #     `_SOURCE_SERVER_MANAGED_PROPS` (sdk.py).
+    # Both raise before the write and surface as a structured error through
+    # `_safe`, so the MCP Source routes stay closed without a denylist that
+    # also closes the Point route.
+    "previousValidTo", "previousContentHash"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -2804,8 +2834,9 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
 
 def tortoise_update(id: str, props: Any = None) -> dict:
     """Update a Point OR entity by id. Points get point-lifecycle semantics
-    (draft→live promote via status, version increment for Point:Object,
-    status validation); entities get a plain property update."""
+    (draft→live promote via status — an already-live point is an idempotent
+    no-op, version increment for Point:Object, status validation); entities
+    get a plain property update."""
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
@@ -3086,11 +3117,13 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     variants, nested props={...}, and terminal statuses included; use
     promotion_policy='auto' or promote after ingest via the SDK's
     update_point(status='live')).
-    promotion_policy='auto': #131 parity — source points promote on wire
-    (only draft/null-status sources; retracted/deprecated are never
-    resurrected); the operator node is written without a status property
-    (live by projection — the #780 asymmetry). Deduped connections never
-    retro-promote (promotion fires on FIRST edge creation only).
+    promotion_policy='auto': #131 parity — a no-status connection-source
+    point goes live on first edge creation (null-status sources only; an
+    explicit or prior draft is never retro-promoted, #1088; retracted/
+    deprecated are never resurrected); the operator node is written without
+    a status property (live by projection — the #780 asymmetry). Deduped
+    connections never retro-promote (promotion fires on FIRST edge creation
+    only).
     Idempotent-ish: points dedup by content hash + kind, sources by url,
     operators by input set.
     """

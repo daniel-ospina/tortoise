@@ -328,6 +328,74 @@ def _as_int(value, default: int = 0) -> int:
         return default
 
 
+def _as_token_count(value) -> int | None:
+    """Read a stored TOKEN count, or ``None`` when it cannot be one (#3840).
+
+    The reader-side counterpart of ``extractor_v2._normalise_token_count``,
+    and the rules are deliberately THAT function's, not ``_as_int``'s:
+
+    * ``bool`` / non-numeric / non-finite / ``|v| > 1e300`` — not a number
+      (via the shared ``_valid_number`` predicate, so this and
+      ``_price_lane._tok`` cannot drift);
+    * a **negative** is rejected. #5854 established that a token count cannot
+      be negative and that accepting one sign-flips a total while the row
+      still reads priced. ``_price_lane._tok`` already rejects it for the
+      dollar path; the token path must not re-open the hole the same issue
+      closed, or a pre-#5854 row stored in ``analytics_events`` reports a
+      negative calibration total with nothing disclosed;
+    * a **non-integral float** is rejected, never floored — the same
+      reject-and-disclose decision the emit seam makes (``int(100.9)`` would
+      shape a plausible wrong count). ``_price_lane._tok`` is laxer here
+      because it prices a RATE against the number; a COUNT has no such
+      latitude.
+
+    ``None`` is a DISCLOSED ABSENCE — the caller marks the capture's token
+    figure as a floor (``partial_captures``) rather than substituting a
+    shaped ``0``, which would read as a genuinely tiny extraction.
+    """
+    if not _valid_number(value) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
+
+
+def _lane_tokens_absent(props: dict) -> bool:
+    """#3840: a METERED lane in this row carried no token field at all.
+
+    The row-level token totals cannot see this case: a call that reported a
+    CHARGE but no token field has ``has_usage`` true at the accumulator
+    (``extractor_v2._accumulate_call_cost``), so its lane counts as metered
+    (``_measured_calls``), adds 0 to every token total, and inflates nothing
+    the attempt-based disclosures would notice. When such a call shares a
+    capture with a token-bearing one the row total is non-zero, so the
+    session-level ``tokenless`` test misses it too — the measured tokens are
+    silently short, which is the one outcome this measurement must never
+    produce. Reading the lanes is the only place the absence is still
+    visible.
+    """
+    by_stage = props.get("by_stage") or {}
+    if not isinstance(by_stage, dict):
+        return False
+    for providers in by_stage.values():
+        if not isinstance(providers, dict):
+            continue
+        for models in providers.values():
+            if not isinstance(models, dict):
+                continue
+            for bucket in models.values():
+                bucket = bucket if isinstance(bucket, dict) else {}
+                if not bucket.get("usage_present"):
+                    continue
+                if _as_int(bucket.get("calls")) <= 0:
+                    continue
+                if (_as_token_count(bucket.get("prompt_tokens")) or 0) \
+                        + (_as_token_count(bucket.get("completion_tokens"))
+                           or 0) == 0:
+                    return True
+    return False
+
+
 def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     """#3359 report-time ``cost_per_session`` (thresholds.yaml A18) producer.
 
@@ -355,7 +423,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     but produce no tokens, so they are spend this measurement cannot price.
 
     Returns ``{n, n_rows, p50, p95, max, total_usd, provider_reported_usd,
-    map_priced_usd, unpriced_sessions, priced_sessions, fully_priced,
+    map_priced_usd, unpriced_sessions, priced_sessions, fully_priced, tokens,
     calls_without_cost, calls_without_usage, calls_without_tokens,
     deadline_aborts, route_cost_overflows,
     unattributed_calls, unattributed_captures, unmetered_attempts,
@@ -366,6 +434,23 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     surfaced, never silently zeroed. ``heaviest`` lists the costliest
     included sessions individually (the p95/heaviest read the pricing
     decision is actually made from).
+
+    #3840 — ``tokens`` is the TOKEN half of the per-capture record, over the
+    SAME included sessions as the cost percentiles: ``prompt`` / ``completion``
+    / ``total`` summed across them, and ``p50`` / ``p95`` / ``max`` of the
+    per-CAPTURE total. ``total`` is derived (``prompt + completion``) rather
+    than carried as a fourth stored counter, and the median/p95 pair is the
+    figure the issue names — a mean is dominated by outliers. Three
+    disclosures ride it: ``partial_captures`` (the capture's tokens are a
+    floor — unmetered, #3824-unrolled, a metered call reporting a charge but
+    no token field, or a stored value the reader rejected),
+    ``tokenless_captures`` (calls were metered yet produced no usable token
+    count — absent, zero, or rejected — so the 0 is an absence, not a tiny
+    extraction) and
+    ``invalid_token_captures`` (a negative or non-integral stored count,
+    rejected rather than shaped — #5854's reject-don't-shape rule on the
+    reader side); ``lower_bound`` is true when any capture's figure is a
+    floor.
 
     ``provider_reported_usd`` and ``map_priced_usd`` OVERLAP and are NOT
     additive: both are accumulated over every row carrying the respective
@@ -419,6 +504,15 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     # session key -> aggregate. A row without a ``session_id`` gets its own
     # synthetic key (it cannot be attributed to another session).
     sessions: dict[str, dict] = {}
+    # #3840: the token figures, accumulated over the SAME included population
+    # as ``costs``. ``token_totals`` is the per-CAPTURE sample the issue asks
+    # for (median + p95, not a mean — a mean is dominated by outliers).
+    token_totals: list[int] = []
+    prompt_tokens_total = 0
+    completion_tokens_total = 0
+    tokens_lower_bound = 0
+    tokenless_captures = 0
+    invalid_token_captures = 0
     for row in rows or []:
         props = _row_props(row)
         if props is None:
@@ -468,12 +562,35 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             str(sid) if sid else f"__row{n_rows}",
             {"session_id": sid, "cost": 0.0, "rows": 0, "attempts": 0,
              "measured": 0, "without": 0, "unattributed": 0,
+             "prompt_tokens": 0, "completion_tokens": 0,
+             "token_gap": False, "invalid_tokens": 0,
              "used_map": False, "used_provider": False, "unpriced": False})
         sess["rows"] += 1
         sess["attempts"] += _as_int(props.get("calls")) + unattributed
         sess["unattributed"] += unattributed
         sess["measured"] += measured
         sess["without"] += without
+        # #3840: the TOKEN half of the per-capture record. Summed per session
+        # by the SAME grouping the cost percentiles use — a second session
+        # key here would let the cost figure and the token figure disagree
+        # about which captures they describe (#3843's one-record rule).
+        # ``_as_token_count`` is the reader-side counterpart of the emit
+        # seam's normaliser (#5854): a value that cannot be a token count —
+        # a negative above all — contributes NO number and marks the
+        # capture's token figure as a floor, instead of being truncated, or
+        # sign-flipped, into a plausible-looking wrong one.
+        for key in ("prompt_tokens", "completion_tokens"):
+            raw_tokens = props.get(key)
+            parsed_tokens = _as_token_count(raw_tokens)
+            if parsed_tokens is None:
+                # an ABSENT key is the ordinary zero (a metered call may
+                # report none); a PRESENT, unusable value is a rejection
+                if raw_tokens is not None:
+                    sess["invalid_tokens"] += 1
+                continue
+            sess[key] += parsed_tokens
+        if _lane_tokens_absent(props):
+            sess["token_gap"] = True
         if without == 0 and provider_reported:
             sess["cost"] += provider_usd
             sess["used_provider"] = True
@@ -511,6 +628,35 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             continue
         session_cost = round(sess["cost"], 6)
         costs.append(session_cost)
+        # #3840: the token sample for THIS capture, over the SAME included
+        # population as ``costs`` — the two distributions must never describe
+        # different sets of captures.
+        session_tokens = sess["prompt_tokens"] + sess["completion_tokens"]
+        token_totals.append(session_tokens)
+        prompt_tokens_total += sess["prompt_tokens"]
+        completion_tokens_total += sess["completion_tokens"]
+        # #3840 disclosure, the token-side mirror of ``unpriced``: the token
+        # count is a FLOOR whenever we know a call happened that we could not
+        # see the tokens of — an unmetered/timeout attempt, an #3824 unrolled
+        # call, a METERED call that carried a charge but no token field (the
+        # mixed case ``_lane_tokens_absent`` finds, which no attempt-based
+        # counter can see), or a token value the reader rejected (a negative
+        # or a fraction — #5854's reject-don't-shape rule, reader half).
+        # Counted ONCE per capture: three overlapping causes must not read as
+        # three captures.
+        if sess["unmetered"] or sess["token_gap"] or sess["invalid_tokens"]:
+            tokens_lower_bound += 1
+        if sess["invalid_tokens"]:
+            invalid_token_captures += 1
+        # A capture whose calls were all metered yet produced NO usable token
+        # count — absent, an honest zero, or rejected. An absence wearing a 0,
+        # counted separately rather than left to deflate p50 as a genuinely
+        # tiny extraction. It CAN overlap ``invalid_token_captures`` (a
+        # rejected value with no other usable count in the capture is both; a
+        # rejected value beside a usable one is only invalid), so the rendered
+        # wording must not claim "no token field" for a capture that had one.
+        if sess["measured"] > 0 and session_tokens == 0:
+            tokenless_captures += 1
         if sess["unpriced"]:
             unpriced += 1
         # Count only what was actually used. A session whose lanes were all
@@ -538,6 +684,13 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             "calls_without_cost": sess["without"],
             "unattributed_calls": sess["unattributed"],
             "unmetered_attempts": sess["unmetered"],
+            # #3840: the capture-level token read, so the "this capture was
+            # unusually expensive" drill-down can be read in tokens too —
+            # the whole point of a calibration figure that is comparable
+            # across providers and models.
+            "prompt_tokens": sess["prompt_tokens"],
+            "completion_tokens": sess["completion_tokens"],
+            "total_tokens": session_tokens,
             "source": heaviest_source,
         })
     if used_map == 0:
@@ -566,6 +719,50 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         # its provider-reported lower bound, which may be $0), so a consumer
         # needs this to tell "measured" from "nothing could be priced".
         "priced_sessions": max(0, len(costs) - unpriced),
+        # #3840 — THE TOKEN SET. The issue's metric list asks for input
+        # tokens, output tokens, and TOTAL tokens as a tracked figure; the
+        # "total" is the one that is comparable across providers and models,
+        # and it is DERIVED here (prompt + completion) rather than stored as
+        # a fourth redundant counter on the row. A stored total is a second
+        # representation of the same quantity and can drift from the parts
+        # (the #5868 lesson: a sub-total that will not reconcile is worse
+        # than no sub-total). Every model route we call is OpenAI-compatible,
+        # where ``usage.total_tokens == prompt_tokens + completion_tokens``,
+        # so the derivation is exact rather than an approximation.
+        #
+        # THE POPULATION IS THE COST POPULATION — the same included sessions
+        # as ``costs``, so "tokens per capture" and "$ per capture" can never
+        # describe different captures.
+        "tokens": {
+            "sessions": len(token_totals),
+            "prompt": prompt_tokens_total,
+            "completion": completion_tokens_total,
+            "total": prompt_tokens_total + completion_tokens_total,
+            "p50": _percentile([float(t) for t in token_totals], 0.50),
+            "p95": _percentile([float(t) for t in token_totals], 0.95),
+            "max": max(token_totals) if token_totals else 0,
+            # Captures whose token count is a FLOOR: at least one call
+            # happened whose tokens we could not see — an unmetered or
+            # #3824-unrolled attempt, a metered call that reported a charge
+            # but no token field, or a value the reader rejected.
+            "partial_captures": tokens_lower_bound,
+            # Captures whose calls were all metered yet produced NO usable
+            # token count (the field was absent, was an honest zero, or was
+            # rejected). An absence wearing a 0, disclosed rather than left
+            # to deflate p50 as a genuinely tiny extraction. A SUBSET of
+            # ``partial_captures``; it CAN overlap ``invalid_token_captures``
+            # (a rejected value with no other usable count is both), which is
+            # why the rendered cause says "no usable token count" and not
+            # "no token field".
+            "tokenless_captures": tokenless_captures,
+            # Captures carrying a token value the reader REJECTED (a negative
+            # or a non-integral float — #5854's reject-don't-shape rule
+            # applied on the reader side). A subset of ``partial_captures``,
+            # named separately so a pre-#5854 row in ``analytics_events`` is
+            # visible rather than merely present in a count.
+            "invalid_token_captures": invalid_token_captures,
+            "lower_bound": bool(tokens_lower_bound or tokenless_captures),
+        },
         # True only when EVERY counted session was fully priced — no unpriced
         # lanes AND no attempt that produced no meterable response.
         "fully_priced": bool(costs) and unpriced == 0
@@ -641,8 +838,17 @@ def cost_by_stage(rows: list[dict] | None) -> dict:
                 for model, lane in models.items():
                     lane = lane if isinstance(lane, dict) else {}
                     calls = _as_int(lane.get("calls"))
-                    ptoks = _as_int(lane.get("prompt_tokens"))
-                    ctoks = _as_int(lane.get("completion_tokens"))
+                    # #3840: the lane token reads obey the SAME
+                    # reject-don't-shape rule the distribution's token block
+                    # does (``_as_token_count``: no negative, no fraction, no
+                    # poison), because these values now feed the report's
+                    # per-stage and per-model ``in=``/``out=``/``total=`` —
+                    # part of the metric set. Reading them with ``_as_int``
+                    # would let ONE metric set render a negative token count on
+                    # the stage line while the capture line rejected and
+                    # disclosed the very same row: two readers, two rules.
+                    ptoks = _as_token_count(lane.get("prompt_tokens")) or 0
+                    ctoks = _as_token_count(lane.get("completion_tokens")) or 0
                     raw_reported = lane.get("cost_usd")
                     if (isinstance(raw_reported, bool)
                             or not isinstance(raw_reported, (int, float))

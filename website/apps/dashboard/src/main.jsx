@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -25,6 +25,10 @@ import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizard
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
+// #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
+// doors — ONE function so the Setup pill, the re-entry card and the Settings
+// Setup guide cannot drift from each other (or from the card the user read).
+import { resumeStep } from './wizardResume.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
@@ -953,7 +957,7 @@ const COPY_FAILED = '__copy_failed__'
 // whose payload was never attempted — and carried that onto the next harness.
 const copyFailedKey = (text) => `${COPY_FAILED}|${text}`
 
-function WizardPromptCard({ text, label }) {
+function WizardPromptCard({ text, label, onCopied }) {
   const [copied, setCopied] = React.useState(false)
   const [copyFailed, setCopyFailed] = React.useState(false)
   // #2935 (review 4): the success flash timer must be CANCELLED, not merely
@@ -993,7 +997,12 @@ function WizardPromptCard({ text, label }) {
     setCopied(true)
     clearTimeout(copyTimerRef.current)
     copyTimerRef.current = setTimeout(() => setCopied(false), 1600)
-  }, [text])
+    // #2936: the card REPORTS a resolved write; the surface that knows what the
+    // copy MEANS decides whether it is attributed (main.jsx `wizardBeacon`).
+    // Only on success — the analytics must never count a copy the user could
+    // not paste (#2935).
+    if (onCopied) onCopied()
+  }, [text, onCopied])
   return (
     <div className="wizard-prompt-card">
       {/* #2912 (review cycle 2): the long prompts scroll, so the <pre> is a
@@ -3348,6 +3357,34 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
+  // #2936: the ONE copy-attribution beacon. The live connect step's cards
+  // (via WizardPromptCard's `onCopied`) and the ARCHIVED #1643 render's
+  // `wizardCopy` both go through here, so the server-vocabulary mapping in
+  // harnesses.js is applied on every path and the request shape has one home
+  // (the PATCH call-site count in tests/test_dashboard_client_paths_resolve.py
+  // stays 6 because sites MOVE here rather than being added).
+  //
+  // The leaf is resolved FIRST and an unresolvable one sends NOTHING. Handing
+  // the server a value outside its frozen vocabulary is not harmless: the
+  // handler reports it to the unregistered-value sink (#3821) — a beacon that
+  // never fired and a beacon the server dropped must not look the same.
+  //
+  // `section` follows #235/#529's vocabulary by ARTIFACT, which is why the
+  // connect step's cards are 'both' and not 'prompt': 'config' is the setup
+  // command / config block, 'prompt' is a prompt the user hands their agent,
+  // and 'both' is ONE copy carrying the config instructions AND the prompt.
+  // The connect-step bodies interpolate the MCP URL, the key and the skills
+  // install in the same block as the instruction to the agent, so they are the
+  // live wizard's replacement for the legacy setup-command copy ('config').
+  // The section population is pinned against the server enum by
+  // tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract.
+  function wizardBeacon(harness, section) {
+    const attributed = analyticsHarnessOf(harness)
+    if (attributed == null) return
+    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ harness: attributed, section }) }).catch(() => {})
+  }
+
   async function wizardCopy(text, label) {
     // #2935: see wizardCopyStep — same decorative try, same false 'Copied ✓'.
     if (!(await copyText(text))) {
@@ -3369,8 +3406,10 @@ function claimIntentInFlight() {
       // it). It resets on harness-tab switch and on step change instead.
       setTimeout(() => { if (mountedRef.current) setWizardCopied((c) => (c === label ? '' : c)) }, 1600)  // review: mounted-guard the flash timer
     }
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
+    // #2936: the shared emitter, so this ARCHIVED render cannot drift from the
+    // live connect step's cards. The legacy setup-command copy is the CONFIG
+    // artifact (`section: 'config'`).
+    wizardBeacon(wizardHarness, 'config')
   }
 
   const stopGithubPoll = () => {
@@ -7259,6 +7298,30 @@ function claimIntentInFlight() {
     (Array.isArray(teams)
       ? ((teams.find((t) => t.org_id === orgIdRef.current) || teams[0] || {}).org_name || '')
       : '') || ''
+  // #2005 (W9): THE resume door. Every re-entry affordance (the header Setup
+  // pill, the re-entry card's Continue-setup CTA, the Settings Setup guide's
+  // Resume setup) opens the wizard through THIS function, so the doors cannot
+  // drift: the entry step is derived once (wizardResume.js) from the per-org
+  // projection the door is rendered from. It replaces the three hardcoded
+  // `setWizardStep(0)` calls — the #2327 defect ("resume setup goes back to
+  // creating a new org again"; #2327 was closed as a duplicate of #2005 with
+  // its evidence transferred).
+  //
+  // The step is computed from the SAME `onboarding` value the Setup-guide card
+  // renders, so the landing always agrees with the N-of-4 the user just read —
+  // no second store, no persisted client step (DM-1 keeps the completed-step
+  // edges canonical).
+  //
+  // `onboardingRefreshedAtDoneRef` is reset on entry so the existing
+  // step-3 landing refresh re-reads the server projection on this visit (its
+  // once-per-landing latch, see the effect near its declaration).
+  function openResumeWizard() {
+    setWizardPaused(false)
+    onboardingRefreshedAtDoneRef.current = false
+    setWizardStep(resumeStep(onboarding, { hasOrg: welcomeHasOrg }))
+    setWelcomeMode(true)
+  }
+
   // #2328/#2912: the connect step renders one of two Codex surfaces — 'codex'
   // (CLI) or 'codexDesktop' (GUI). The surface IS the leaf harness value now,
   // so this is an identity mapping kept as the single read-point for every
@@ -7979,14 +8042,16 @@ function claimIntentInFlight() {
                         procedure = (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'both')} />
                           </>
                         )
                         procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
                         procedureTail = (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.verify}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
                           </>
                         )
                       } else if (agentDriven1Step.includes(wizardHarness)) {
@@ -7996,12 +8061,14 @@ function claimIntentInFlight() {
                         procedure = wizardConnectHarness === 'codexDesktop' ? (
                           <>
                             <p className="wizard-caption">{HARNESS_INTRO.codexDesktop}</p>
-                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'config')} />
                           </>
                         ) : (
                           <>
                             <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel} />
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'both')} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -8051,7 +8118,8 @@ function claimIntentInFlight() {
                             <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
                             {/* #2865: composed KEY-LESS — a connector surface
                                 never carries a key. */}
-                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel} />
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel}
+                              onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
                           </>
                         )
                       }
@@ -8779,10 +8847,12 @@ function claimIntentInFlight() {
             atomic cluster — the CSS keeps them grouped at every width and
             never lets them scatter onto separate wrapped rows. */}
         <div className="header-cluster">
-        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
-            step 0 (skills). (The nav wraps via flex-wrap on narrow windows
-            since #1874, so Setup is no longer displaced by nav overflow.) */}
-        <button className="ghost small setup-header" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
+        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard.
+            (The nav wraps via flex-wrap on narrow windows since #1874, so
+            Setup is no longer displaced by nav overflow.)
+            #2005 (W9): the reopen DERIVES its entry step (openResumeWizard) —
+            it used to hardcode step 0, which is #2327's restart. */}
+        <button className="ghost small setup-header" onClick={openResumeWizard}>Setup</button>
         {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
             the avatar menu is the personal-account surface (identity block
             + Profile entry + workspace switch + Log out); the trigger shows
@@ -9284,7 +9354,9 @@ function claimIntentInFlight() {
                         : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
+              {/* #2005 (W9): door — the empty-state CTA drives the same state
+                  machine as every other entry point (openResumeWizard). */}
+              <button className="btn-primary" onClick={openResumeWizard}>
                 Continue setup →
               </button>
               {keyTabAffordance({ snippetKey, connectGate }) && (
@@ -9437,7 +9509,10 @@ function claimIntentInFlight() {
           <SettingsTab
             state={onboarding}
             loading={onboardingLoading}
-            onResumeSetup={() => { setWizardStep(0); setWelcomeMode(true) }}
+            // #2005 (W9): door — Settings owns the Setup-guide home; the
+            // resume button opens the wizard at the step THIS card reports as
+            // open (openResumeWizard), so the card and the door agree.
+            onResumeSetup={openResumeWizard}
             github={wizardGithub}
             githubConnected={!!(onboarding && onboarding.github_connected)}
             reposCount={reposLoaded ? reposList.length : null}

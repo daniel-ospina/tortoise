@@ -11,7 +11,7 @@
 | `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
-| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (non-`Point` labels: `restatus` when `status` is written, else `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
+| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (`restatus` when `status` is written — on a `:Point`-carrying node the value is first validated against `POINT_STATUS_VALUES` and the record is written against the `:Point` label so it folds, #3311; otherwise `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
@@ -67,16 +67,26 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
-- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+- **`SourceVersioned`** (#5024, T6; the WINDOW half in #3644) — the `:Source` **version transition**. A
   re-fetched source whose `contentHash` differs is a *new version of the same
   identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
   `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
   `contentHash` (the NEW version), **`previousContentHash`** (the superseded
   one — this is what makes the prior version addressable after the single
-  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
-  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  `:Source` node has moved on), **`validFrom`** (the new version's valid-time
+  start, and the node's new window start) and **`previousValidTo`** (the prior
+  version's window close — equal to `validFrom` by construction: the same
+  instant mints both, which is §4.6's *"the journal record that opens a new
+  version closes the old one in the same act"*), plus the usual
+  `sourceKind`/`title`/`ingestedAt`/`updatedAt`/extras. There is ONE node per
+  `url`, so the prior version's window is **a journal fact**, never a second
+  node: `previousValidTo` is therefore a record-only key (`_SOURCE_HANDLED`
+  keeps it off the node).
+  The transition instant is **not** a separate key: the
   payload's own `updatedAt` (minted once by `create_source`, so the live node
-  and the record cannot disagree) is it, and the fold reads exactly that. The
+  and the record cannot disagree) is it, and the fold reads exactly that —
+  `validFrom` is the SAME minted instant, i.e. one clock read under two names,
+  not a second derivation. The
   record carries **no** recomputed ordinal — `version` is reproduced on replay
   through the same hash-diff gate the live write used, so recording it too
   would be a second derivation that can disagree. Folded by

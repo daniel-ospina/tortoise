@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { analyticsHarnessOf } from './harnesses.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -157,9 +158,10 @@ test('#2935 (review P1): a stale failure timer must not wipe a later STICKY succ
       wizardHarness: 'pi',
       onboardingTeamQ: () => '',
       api: () => ({ catch: () => {} }),
+      analyticsHarnessOf,
       COPY_FAILED: '__copy_failed__',
     },
-    ['async function copyText', 'async function wizardCopy'],
+    ['async function copyText', 'function wizardBeacon', 'async function wizardCopy'],
   )
   await wizardCopy('payload', 'harness')       // refused -> sentinel + a 4s clear
   state.push('harness')                        // a later successful copy (sticky)
@@ -179,14 +181,90 @@ test('#2935: wizardCopy claims NOTHING when the clipboard refuses', async () => 
       wizardHarness: 'pi',
       onboardingTeamQ: () => '',
       api: () => ({ catch: () => {} }),
+      analyticsHarnessOf,
       COPY_FAILED: '__copy_failed__',
     },
-    ['async function copyText', 'async function wizardCopy'],
+    ['async function copyText', 'function wizardBeacon', 'async function wizardCopy'],
   )
   await wizardCopy('payload', 'harness')
   assert.deepEqual(marked, ['__copy_failed__'], 'the button must not flip to Copied ✓ over an unchanged clipboard')
   assert.ok(!marked.includes('harness'), 'a refused write must never set the copied label')
 })
+
+// ── #2936: the copy-attribution beacon ────────────────────────────────────
+// The beacon is driven by the writes above: the shipped connect step's cards
+// report a resolved copy through `WizardPromptCard`'s `onCopied`, and the
+// ARCHIVED render's `wizardCopy` calls the same emitter. Both resolve the
+// wizard LEAF through `analyticsHarnessOf` (the REAL one, imported — a stub
+// here would certify a mapping that does not ship), so the value on the wire is
+// checked end to end.
+test('#2936: a resolved copy emits artifact_copied with the RESOLVED harness and the caller\'s section', async () => {
+  const sent = []
+  const { wizardBeacon } = build(
+    {
+      analyticsHarnessOf,
+      onboardingTeamQ: () => '?org=o1',
+      api: (url, opts) => { sent.push({ url, opts }); return { catch: () => {} } },
+    },
+    ['function wizardBeacon'],
+  )
+  // The UI-only surface leaf goes out as its capture harness, not as itself.
+  wizardBeacon('codexDesktop', 'config')
+  assert.equal(sent.length, 1, 'the beacon is one PATCH')
+  assert.equal(sent[0].url, '/v1/onboarding/state?org=o1')
+  assert.equal(sent[0].opts.method, 'PATCH')
+  assert.equal(sent[0].opts.useSession, true)
+  assert.deepEqual(JSON.parse(sent[0].opts.body), { harness: 'codex', section: 'config' })
+  // An identity-valued leaf rides through unchanged.
+  wizardBeacon('claude-web', 'prompt')
+  assert.deepEqual(JSON.parse(sent[1].opts.body), { harness: 'claude-web', section: 'prompt' })
+})
+
+test('#2936: an unattributable leaf emits NOTHING — never a value the server would drop', async () => {
+  const sent = []
+  const { wizardBeacon } = build(
+    {
+      analyticsHarnessOf,
+      onboardingTeamQ: () => '',
+      api: (url, opts) => { sent.push({ url, opts }); return { catch: () => {} } },
+    },
+    ['function wizardBeacon'],
+  )
+  // chatgpt is key-less OAuth with no capture lane: the server keeps it OUT of
+  // the analytics vocabulary and pins a stray beacon inert
+  // (tests/test_onboarding_analytics_patch.py). Emitting it would put a
+  // rejected value in the unregistered-value sink (#3821) and make a beacon the
+  // server dropped look like one that fired.
+  wizardBeacon('chatgpt', 'config')
+  assert.deepEqual(sent, [], 'an unattributable leaf must not reach the endpoint at all')
+})
+
+test('#2936: a SUCCESSFUL wizardCopy beacons with the resolved harness', async () => {
+  // The two #2935 wizardCopy tests above drive the REFUSED clipboard, which
+  // returns before the beacon — so before this test the beacon call inside
+  // wizardCopy was executed by nothing at all.
+  const wrote = []
+  const sent = []
+  const env = build(
+    {
+      navigator: { clipboard: { writeText: async (v) => { wrote.push(v) } } },
+      setWizardCopied: () => {},
+      mountedRef: { current: true },
+      setTimeout: () => 0,
+      wizardHarness: 'codexDesktop',
+      onboardingTeamQ: () => '',
+      api: (url, opts) => { sent.push({ url, opts }); return { catch: () => {} } },
+      analyticsHarnessOf,
+      COPY_FAILED: '__copy_failed__',
+    },
+    ['async function copyText', 'function wizardBeacon', 'async function wizardCopy'],
+  )
+  await env.wizardCopy('payload', 'harness')
+  assert.deepEqual(wrote, ['payload'], 'the write landed')
+  assert.equal(sent.length, 1, 'a resolved copy beaconed exactly once')
+  assert.deepEqual(JSON.parse(sent[0].opts.body), { harness: 'codex', section: 'config' })
+})
+
 // #2935 (review P2-1): strip comments and string BODIES while preserving line
 // structure, so the scan sees code only. The first version keyed on the
 // qualified literal `navigator.clipboard?.writeText(` on one line, which a

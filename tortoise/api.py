@@ -93,8 +93,11 @@ class EventAPI:
             "content": content,
             "operator": operator,
             "provenance": prov,
-            # #432: parity with the SDK default — points enter as draft and go
-            # live when first operator edge is created (#131).
+            # #432/#1088: EventAPI DELIBERATELY writes status="draft" — the
+            # legacy journal-composer posture, NOT SDK parity (SDK default is
+            # live). An explicit draft is never auto-promoted; it stays draft
+            # until `promote_point` / `update_point(status="live")` — the #131
+            # clause now fills only a never-set status.
             "status": "draft",
             "createdAt": now_iso(),
         }

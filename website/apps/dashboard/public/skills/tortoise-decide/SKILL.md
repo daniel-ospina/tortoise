@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, graph, decision, epistemology, ep-confidence]
 summary: "The core decision workflow on the Tortoise graph — options/criteria/findings → IMPL/NAND/mitigation edges → EP confidence ranking. Tool-based (MCP) so it runs against hosted tenants; graph-scripts/decide.py is the self-host variant."
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-10-11
 allowed-tools: read write bash grep
 ---
 
@@ -40,8 +40,10 @@ audiences. The script variant is at the end.
    right before anything else — the user owns the option set.
 2. **Research options and criteria.** What are the candidate options? What
    criteria will they be judged on? What findings (evidence) are relevant?
-   (For deep research, pair with the `research` skill; new findings land on
-   the graph and connect to the decision.)
+   (For deep research, run the **`research-domain`** loop — broad research →
+   mine into the graph → UC2 gaps → re-research the gaps. It is the loop this
+   decision's evidence comes from; a shallow pass here is what leaves an
+   option ranked on one uncited claim.)
 3. **Check with the user:** list the criteria (for value) + the options (for
    completeness) — confirm before wiring edges.
 4. **Connect criteria → options.** For each criterion that supports or
@@ -97,6 +99,32 @@ Options ranked by EP confidence:
   2. opt:b  — <confidence> — top reasons: <edges>
 Mitigations applied: <n> (relevance-adjusted operators)
 ```
+
+## Researching the decision (`research-domain`)
+
+A decision is only as good as the evidence wired into it. When step 2 needs real
+research rather than the user's own knowledge, run the **`research-domain`** loop
+and let it drive the evidence set:
+
+```text
+research(broad) → mine → UC2 gaps → research(gaps) → mine → repeat
+```
+
+The control signal is `tortoise_recall(mode="gaps", query=<decision label>)` —
+the graph's UC2 query for claims that are **load-bearing but under-supported**
+(`load / (1 + support)`, where load is outgoing IMPL + NAND and support is
+incoming IMPL + `extractedFrom` Source edges). Each cycle sends the next research
+round at exactly the options and criteria the graph cannot yet justify; the loop
+stops on convergence or at the cycle budget (default 3). Two consequences for
+this workflow:
+
+- Run the loop **before** step 5 hardens the mitigations. A criterion that is
+  load-bearing and unsourced is precisely what a mitigation pass otherwise papers
+  over — the criterion stays TRUE and stops mattering, so the missing evidence
+  never gets filed.
+- The open-gaps list is the honest answer to "why is this option ranked where it
+  is?". Present it alongside the ranking, so low confidence reads as *unresolved
+  evidence* rather than as disagreement.
 
 ## Self-host variant
 

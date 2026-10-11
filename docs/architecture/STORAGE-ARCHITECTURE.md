@@ -409,6 +409,8 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 | **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** ⚠️ **No measurement of the journal's growth exists yet (§15 lists none).** |
 | **egress + IOPS** | a cold, disk-resident design **reads from disk on every cache miss.** The cost moves from *storage* to *requests* — and egress is the line that punishes a read-heavy pattern. **Not modelled.** ⚠️ **No measurement covers egress or IOPS yet (§15 lists none).** |
 
+✅ **One of the two omitted lines — egress + IOPS — is now PRICED and carried as a row of the two-store table (§17.4).** Egress and IOPS are **$0.09/GB** (250 GB included) and **$0.024/IOPS/month** (3,000 included, General Purpose). **The journal is still neither priced nor a row** — its *growth* has **no measurement** and it is the one line §17.4 cannot price.
+
 **⇒ The table answers *"what does the DATA cost?"*. It does not answer *"what does the SYSTEM cost?"* — and §6 is the section that says so. Do not quote this table as a total.**
 
 ---
@@ -428,7 +430,7 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | lever | magnitude | owner |
 |---|---|---|
-| **disk-resident storage** (this document) | **~580× on the storage line** — ⚠️ the blended *total-cost* figure is **uncomputed**; it needs the compute and IOPS lines, and **neither has a measurement yet** (M2 is *needed*, not done — §15) | `#4333` |
+| **disk-resident storage** (this document) | **584× on the RATE line · 778.7× per tenant** (the extra factor is the 75% density headroom). ⚠️ The blended *total-cost* figure is **now a closed form — §17.4.4: `1 / (f + (1 + ρ) / ratio)`** — where `f` is the hot fraction and `ρ` the record's non-storage lines relative to its disk line. **Both are unmeasured**, so §17.4 prices every line and states the condition rather than a point estimate — **and at today's `f = 1` policy the split is NET-NEGATIVE** | `#4333` · **`#7954`** |
 | **writing less** — the selection gate | **~10×** ⚠️ see §6.1 | `#4894` / extraction |
 
 **Neither alone reaches 100×, and the two multiply.** A storage migration presented as a 100× fix would still be comparing one cost line to another.
@@ -489,7 +491,7 @@ State values are personal/entity attribute values that must survive verbatim —
 
 **This bounds how far volume reduction may go.** The Epistemic layer's operators (`IMPL`, `NAND`) act on **individual claims** — and the mitigation mechanism is the **`mitigated_by` edge on an operator Point**, graded by `mitigation_strength` (`ONTOLOGY.md` §3.9, `#2315`). ⚠️ *`MITIGATES` is **not** a registered predicate* — an earlier draft of this line listed it as one, which invites a lane to implement a type that does not exist. A Point containing several fused claims cannot be argued about:
 
-- Operators connect only epistemic targets (`Point↔Point`, `Event↔Point`) — you cannot `NAND` a paragraph.
+- Operators connect only epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event`) — you cannot `NAND` a paragraph. ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only (`ONTOLOGY.md` §3.1/§5).
 - EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
 - Relevance modulation (a mitigation reducing one claim's weight) requires the claims be separable.
 
@@ -705,7 +707,7 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 - **`references` carries more than one meaning, so the gap is not uniform.** Its declared target set is `Event | Object | Source` (§3.4), and the in-repo writers do not all mean the same thing by it:
   - **identity / mention** — a connector `Object` materialized at the projection choke point (`projection/entities.py::_materialize_connector_source`; `connectors/github.py:305` mirrors it idempotently). The Source's `url` **is** the artifact. The Source still has versions, but the target is **not read from** them, so a recorded version here would be a non-answer rather than a stale mark.
-  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ⚠️ **Addressed is not the same as closed on this path:** no connector writes `contentHash` and the choke point creates its Source with `contentHash = ''` (the Source MERGE in `projection/entities.py::_materialize_connector_source`), so the anchor is **absent** for connector-derived Events — honest (no version is known), but *"are these entities about the content we currently hold?"* stays unanswerable there until a connector records a content hash (tracked in `#5214`). The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
+  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ✅ **Now CLOSED on the connector path (`#5214`, 2026-10-13): a connector Source carries a real content version, so the anchor LANDS here.** The choke point writes `contentHash` = `_connector_content_hash(inner)`, the **sha256 of the materialized connector payload** — the content we actually read, i.e. ONTOLOGY §4.6's *"the digest of the content read"*. It is a digest of the payload rather than per-`sourceKind` code on purpose: each connector emits its own payload shape (`github_map`'s single vocabulary for GitHub, the connector's own mapper for Slack/Linear), so keying the digest to the payload scopes it per kind with no registry to keep in sync, and one item state hashes EQUAL across the producers that mint different `eventId`s for it (the poll path mints `…-created` for an already-closed issue, the webhook path `…-closed` — folding the id in would advance the version on a producer switch, a false stale on every other poll). The `contentHash` + the §4.6 ordinal `version` move together, gated in the query so an unchanged re-poll writes nothing at all. **Ownership:** the version is written only on a `:Source` whose **own `sourceKind` is a registered connector kind** — i.e. one this choke point materialized. The choke point already treats an existing kind as authoritative (#398, never re-stamped), so the writer that owns the kind owns the version; without that gate a connector poll would overwrite another writer's `contentHash` on a shared url (sweep contract: *the survivor's own metadata wins*). The consequence is deliberate: a node another writer owns stays **UNVERSIONED** — reading `unknown`, never `current`. ⚠️ **Three residuals, all deliberate:** (1) a **container-level fallback key** (`slack:{channel}`, `linear:{team_key}`) names no item — every message shares that one Source — so it keeps `contentHash = ''` and stays honestly unanchored (a per-message digest there would advance the version on every poll and mark every sibling derivation stale); (2) the digest is over what the connector **holds**, so a change the payload does not carry (the GitHub **body**, which no poll path fetches) is not a version transition — tracked in `#8010`; (3) a `_link_source`/document stub that the connector did **not** create is not adopted into versioning. The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
   - **referential containment** — `Source → Source` (the session→external `MERGE (a)-[:references]->(b)` in `hosted_api.py::_execute_commit_writes`). A provenance chain, not a derivation of either target's content.
 
   ⇒ **The version question is a property of what the link means, not of the target's label.** That is why a blanket `sourceVersion` on every `references` edge is the wrong shape: it would stamp a non-answer on the identity and containment forms.
@@ -718,11 +720,19 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 ⚠️ **Post-D10 the proxy is carried by the RETIRED label's alias, so it lives at the CALL SITE.** The `:Document` node label is gone (a document is a `:Source`), so the three document-derivation writers — `_upsert_document`, the session→document link in `_execute_commit_writes`, and the doc classifier of the ingest path — pass the retained deprecated alias `"Document"` as the *relation's* spelling, and `link_source_to_entity` reads it for this decision **before** remapping the identity onto `:Source`. The two facts are independent: the stored edge is `(Source)-[:references]->(Source)` either way, so switching a call site to `"Source"` keeps the edge, creates no conflict marker, and silently drops the anchor — which is exactly what the D10 merge did. These call sites are pinned by `tests/test_source_version_references_5199.py` (`test_document_derivation_through_the_production_path_anchors`, `test_index_path_document_link_records_the_version_read`, and the structural `test_document_call_sites_express_derivation_not_containment`); a definitional `grep` for the alias among them is the cheap check before any refactor of these writers.
 
-⚠️ **This is a pipeline guarantee, NOT a graph invariant** — do not read it as "every `references` edge is anchored". Two writers bypass it by design and neither is auto-anchored: the generic escape hatch `create_edge` (public SDK, exposed as the MCP tool `tortoise_create_edge`) takes any allowlisted predicate including `references`, and `graph-scripts/backfill_references.py` is a standalone ops script. A caller minting a derivation edge through either leaves the anchor **absent** unless it supplies the property itself. Tracked in `#5213`.
+⚠️ **This is a pipeline guarantee, NOT a graph invariant** — do not read it as "every `references` edge is anchored". Two writers bypass it by design and neither is auto-anchored: the generic escape hatch `create_edge` (public SDK, exposed as the MCP tool `tortoise_create_edge`) takes any allowlisted predicate including `references`, and `graph-scripts/backfill_references.py` is a standalone ops script. Tracked in `#5213`.
+
+⚠️ **An edge minted by either writer is not merely "unanchored for now" — the anchor cannot land on it afterwards either, and a caller cannot supply it.** Measured, and both halves matter:
+
+- **No way to supply it.** `TortoiseSDK.create_edge(relation, from_id, to_id)`, the MCP tool `tortoise_create_edge(source_id, target_id, predicate)` and `projection.edges._EdgeHandlers.create_edge(source_id, target_id, predicate)` take **no property parameter at all**, and `create_source` **rejects** a caller-supplied `sourceVersion` (`"server-managed provenance field"`, `sdk.py`) — so "the caller supplies the property itself" is not an available remedy through the public surface. (Raw Cypher outside the SDK is the only way, and `graph-scripts/backfill_references.py` is the spelling of that route in-repo.)
+- **A later legitimate link cannot repair it.** Every provenance writer stamps through `_anchor_on_create(...)`, which sets `r.sourceVersion` **`ON CREATE` only** (§9.6, load-bearing so a re-link cannot erase staleness). A bare edge created first therefore **satisfies the later `MERGE`** and the `ON CREATE` clause never fires: measured `create_edge` → `link_source_to_event` on the same `(source, event)` pair leaves `exists(r.sourceVersion) = false`, while the reverse order preserves `'h1'`. The honest-absent rule is what keeps this from being a false *current* read, but no writer repairs it: the only repair the codebase offers is **deleting the edge and re-linking** through a provenance writer, and the only other route to the property is the same raw-Cypher one named above (`SET r.sourceVersion`). Neither is a remedy the public surface can express.
+- **Both derivation target shapes are reachable through the escape hatch**, so the boundary is not narrow: an `Event` (id/`eventId`-keyed) and a document-bearing `:Source` that carries an `id` both accept a `references` edge from a Source resolved by `url` (a url-only `:Source` is not a valid *target* — target resolution is id|`eventId` — which is a separate deliberate resolution property, not a mitigation of this one).
+
+⇒ **Revisit (option 1) must handle the pre-existing-edge case, not just the new-write case.** Routing `create_edge` through the anchor cannot be a matter of adding `_DERIVATION_ANCHOR_SET` to its `MERGE`: on the already-existing bare edge that clause is still `ON CREATE` and still does not fire, so the stamped-by-the-generic-writer scenario above would survive the fix. It also cannot discriminate a document derivation the way the provenance writers do — the pre-D10 `"Document"` signal is a **call-site relation-alias** (`link_source_to_entity`'s third argument), and `create_edge` passes the predicate verbatim, so its `Source → Source` derivation lands on the same `"Source"` spelling as referential containment and reads property-free under the label proxy. Both are recorded for the owner's revisit on `#5213`; this section's decision stays option 3 (document, do not re-route).
 
 ⚠️ **On the repair path the anchor comes from the TARGET, not the Source.** `backfill_sources` sets the Source to the file's **current** hash while the legacy Event keeps the `file_hash` it was captured with (W2, "file edited since capture") — so anchoring `s.contentHash` there would report a **stale Event as current**, the precise failure this anchor exists to expose. `link_source_to_legacy_event` therefore anchors `e.file_hash` (equal to `s.contentHash` whenever the file has not changed), and anchors nothing when the Event records no hash.
 
-⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll (a connector re-poll that bumps the Source with no target rebuild), and the ON CREATE/ON MATCH pair cannot distinguish the two cases on its own. Recorded for the owner on `#5199`.
+⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll — and since `#5214` that re-poll is no longer hypothetical on the connector path, the Source **does** advance there while no target is rebuilt, so `ON CREATE` is what keeps that read honest (`stale`). Removing it would make exactly that case read `current`. Recorded for the owner on `#5199`.
 
 ⚠️ **No backfill, deliberately.** An edge written before this change carries no recorded version and is **not** retro-stamped: the version it was read from is **unknown**, and writing today's hash would fabricate a `current` read. Its honest state is **absent** — which is precisely why the anchor is a derived comparison and never a stored `status`.
 
@@ -788,7 +798,7 @@ Because `based_on` carries ids that address **different tables**, a "which of th
 
 ### 11.1 Why the connections are not the cost problem — measured
 
-Our `aboutObject` links are **property-free**: a full-repo search found **zero** `aboutObject` edges carrying any property (`rg -n 'aboutObject \{'` → **0 matches / 1,842 files**). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
+Our `aboutObject` links are **property-free**: the write path emits `MERGE (s)-[:aboutObject]->(t)` and **never a `SET`** (`projection/edges.py`, `create_about_edge` — `:344` at the pinned revision), and a full-repo search for a property-bearing edge finds **none** (`rg -n 'aboutObject \{'` → **0 matches at the 2026-09-23 pin `c79ba1cf2`**; **2** at HEAD on 2026-10-10, both display strings inside a test — `tests/test_commit_endpoint.py:1214`/`:1217`). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
 
 Estimated footprint in Postgres (two 16-byte ids, one B-tree index, standard tuple + index overhead):
 
@@ -1236,6 +1246,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **Why folding the owner's middle tier in is correct:** the owner's tiers 2 and 3 (*"TLDR epistemic/events related to an entity"* vs *"fuller data around an entity"*) are **the same tier at two depths**, and depth is exactly what a **sufficiency router** already controls — see §12.4. **A third tier adds a routing decision and a failure mode, not a capability.**
 
+**⚠️ And this table assumes each tier is COMPLETE — under §2.0's hybrid the cache is not.** The sufficiency router below routes on **answer depth inside a tier that holds the node at all**; a node the cache does not hold is a **different event with a different repair** (§17.3), and the two routers must not be merged.
+
 ### 12.4 Escalate on SUFFICIENCY, not on query type — the load-bearing rule
 
 **The obvious design is to classify the query ("simple → summary, complex → raw") and route on that. It is the design that fails.**
@@ -1293,6 +1305,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 3. **Build the sufficiency router, not a complexity classifier** (§12.4) — and check it against `#2354`'s "never auto-resolve" discipline.
 4. **Build the write-back** (§12.5) — otherwise escalation is a permanent tax rather than an investment.
 
+**⚠️ Two more items §17 adds, and they are NOT part of items 3 and 4.** §17.3's **residency router** (*a cache miss → fetch from the truth store*) is a **second, distinct router** from item 3's **sufficiency router** (*short evidence → escalate a tier*), and it is decidable **only** against §17.2's **completeness marker**. **Do not extend item 3's router to cover residency** — the two route on different facts, and collapsing them is the §17.3 defect. See `#7952` (the marker) → `#7953` (the router).
+
 **⚠️ And the discipline that keeps this honest: our own numbers for the cost TIERS still do not exist.** Every tier figure above is **published third-party** and must be re-measured on our data before any lever is committed. ✅ **What IS now measured is our own retrieval latency (§12.1d) and our own memory composition (§12.1) — those are no longer borrowed.** *(⚠️ The former "our 95.6 MB measurement", cited here, has been **withdrawn as wrong** — §12.1.)*
 
 ## 13. Issue map — what this document informs
@@ -1307,7 +1321,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §3 what is already in code | **`#4240`** | **the hosted path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) → a wiring gap, not a design gap** |
 | §3 why this shape | `#3895` | the derived layer becomes **REBUILDABLE** — ⚠️ **NOT "disposable"**: §3 forbids that reading in bold, and `#3895` is a *restore*. "Disposable" is the label that would license dropping the only copy. It regenerates **from the truth layer**, and only because the journal carries the payload |
 | §4 tenancy | `#3885` | **one project, tenant-scoped rows** — not one project per team |
-| §5 cost | `#4333` · `#4614` | published rates; ~10× headroom at 1,000 users |
+| §5 cost | `#4333` · **`#7954`** | published rates; ~10× headroom at 1,000 users. ⚠️ **CORRECTED 2026-10-10: the earlier `#4614` citation was WRONG** — `#4614` is a *quota-cliff capture bug* (`402` at 9,998/10,000), not a rates issue. **This subsection's prices are now vendor-page-verified, and the two-store arithmetic is `#7954`'s (§17.4)** |
 | §6 the split does NOT fix volume | **`#4899`** · `#1026` | **storage ~580× on the STORAGE line × selection ~10× (a target, not a measurement) — neither alone reaches 100×.** This is the section that stops a storage migration being sold as the fix |
 | §7 state values | **`#2453`** (LANDED) · **`#4899`** (enforcement) · `#2820` | the carve-out, plus the DECIDED placement (owner, 2026-10-06): a state/numeric value is a **structural field on an entity**, with the embedding clause conditional on the §7 query-pattern measurement. ⚠️ **The former "`#1509` (E2, §9)" citation was WRONG** — `#1509` has no §9 and no E2; the placement recommendation there is a **comment** on `#1509` — now **SUPERSEDED by the PLACEMENT ACCEPTED decision (§7)** — and **E2 is `#1534`'s slot** (CLOSED). See §7's own corrected note |
 | §7 caveat | **`#4889`** | ⚠️ **CORRECTED (owner, 2026-10-06).** The live graph is a **DOGFOOD instance** — an edge count there was never the right test, and the earlier *"0 edges"* framing is withdrawn. **The code and its tests exist** (`tortoise/subject_binding.py` and the `aboutSubject` write paths exist; `#4889` is CLOSED), and the **end-to-end check needs a capstone issue (not yet filed)**, not a caveat asserting a production count. |
@@ -1321,7 +1335,10 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
 | §9.6 source versioning | — | **the version must be recorded on the extraction link as `sourceVersion`**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 | §12.1a index shape | `#5090` · `#5331` | **the decision is the size-earned conditional index (C)** — not per-tenant partitioning, not a shared filtered index. The partition comparison is a measured *alternative*: `PARTITION BY` flat to T=500 (96.6 ms at T=2,100, unexplained), the partial-index form degrading to 83 ms at T=500 |
-| §17 the five gaps | **`#5089`** (17.1) · `#5090` (17.5) | what the record/cache split still needs: a write-path chokepoint, cache coherence + a completeness marker, partial-cache semantics, a two-store cost model, and a field-level placement table. **None is a new decision** — each follows from §2.0 |
+| §17.2 the completeness marker | **`#7952`** | a read for a node outside the known-hot set returns explicit **`not-hot`** — **never empty** — and coherence is reconciled as a **number**, not a boolean. This is the input §17.3's router reads |
+| §17.3 the residency router | **`#7953`** | a residency miss is not an insufficiency: **fetch from the truth store**, never escalate a tier, never surface an absence. Decidable only against §17.2's marker (**hard edge**) |
+| §17.4 the two-store cost model | **`#7954`** | price **both** stores (Postgres compute + disk **and** FalkorDB RAM) plus the blended total §5–§6 omit |
+| §17 the five gaps | **`#7951`** (17.1) · **`#7952`** (17.2) · **`#7953`** (17.3) · **`#7954`** (17.4) · **`#7955`** (17.5) · **`#7967`** (the surface map) | what the record/cache split still needs: a write-path chokepoint, cache coherence + a completeness marker, partial-cache semantics, a two-store cost model, and a field-level placement table. **None is a new decision** — each follows from §2.0. ⚠️ **Corrected 2026-10-10 — this row previously read `#5089` (17.1) · `#5090` (17.5), which named the wrong owners:** **the routing half of §17.1 is `#7951`'s** (`#5089` owns the journal half — §17.1 says so itself), and **§17.5's placement ENUMERATION is `#7955`'s** (`#5090` is a *consumer* of the vector layer, not the enumeration). The five gaps are children of **`#7879`**; **`#7950`** is the capstone that verifies them; **`#7968`**/**`#7969`**/**`#7971`** carry the schema, the record projection and the cache projection, and **`#7970`** the read path. The integration-surface map every one of them cites is **`#7967`** → `docs/epics/2026-10-10-7879-postgres-record/01-test-design.md` |
 
 **Not yet filed from this document (candidates, not decisions):**
 
@@ -1329,24 +1346,31 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
   **The primary search path does NOT read it.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for this path.**
 
-  **It IS load-bearing elsewhere — four default-ON sites, two of them customer-callable:**
+  **It IS load-bearing elsewhere — ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE** (all line numbers pinned to `c79ba1cf2`; the symbols are authoritative):
 
-  | # | site | what it reads for | kind |
+  | # | site | what it reads for | reach |
   |---|---|---|---|
-  | 1 | `sdk.py:6397` — SDK **`belief_timeline`** (`mcp_server.py:3126` exposes it) | walks decision → Object named by topic | traversal |
-  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** | finds seed claims via Object | traversal |
-  | 3 | `extractor_v2.py:1934` | the classifier's "same entity?" gate | traversal |
-  | 4 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | traversal, **2-hop** |
+  | 1 | `sdk.py:6411` — SDK **`belief_timeline`** (MCP `tortoise_belief_timeline`, `tool_registry.py:391`) | walks decision → Object named by topic | **customer-callable** |
+  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (`sdk.py:7516`; hosted REST `hosted_api.py:6294`) | finds seed claims via Object | **customer-callable** (⚠️ the MCP handler `tortoise_topic_summarize` is registered nowhere and never served — `#7988`) |
+  | 3 | `ranking.py:1195`/`:1206` — SDK **`recall_subgraph`** (`ranking.SubgraphExpander._neighbors`) | its default `completeness="full"` walks **every** relationship type (`MATCH (n)-[r]->(m)`) — so it reads the edge **without naming it** and no grep can find it | **customer-callable** |
+  | 4 | `ranking.py:461` / `:714` — **`search(order_by="graph")`** (MCP `tortoise_search`) | event and point degree centrality | **customer-callable** |
+  | 5 | `extractor_v2.py:1934` (`_enrich_point_priors`) | the classifier's "same entity?" gate | default-ON, write path |
+  | 6 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | default-ON, write path, **2-hop** |
+  | 7 | `sdk.py:14744` (`_entity_key_expansion_pass`) | the entity-key alias harvest | **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`) |
+  | 8 | `assembly.py:573`/`:789`/`:809` (`alias_objects`, `collect_slices`) | the connected-assembly slices | **OFF by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
+  | 9 | `subgraph.py:312`/`:319-320` (`build_subgraph`) | the `#3011` epistemic-subgraph engine | **eval harness only** (`tools/longmem_eval/context_assembly_arms.py`) |
+  | 10 | `aggregate.py:502` (`collect_anchor_census`) | the aggregative-verdict anchor census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
+  | 11 | `coverage_loop.py:238` (`facet_census`) | the rule-based facet census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
 
-  Plus `sdk.py:14744` (`_entity_key_expansion_pass`) — **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`). And **23 test files assert the edge.**
+  And **36 test files assert the edge at the pin** (41 at HEAD, 2026-10-10).
 
-  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break two public surfaces.
+  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break **four** customer-callable surfaces. ⚠️ **An earlier version of this table named four sites and called TWO of them customer-callable — that undercounts on both axes, and the count is the whole argument: `recall_subgraph` and `search(order_by="graph")` were missing** (review finding B2.7, `REVIEW-CONSOLIDATED-2026-09-23.md`).
 
-  **But the structural door stays open:** a full-repo search found **zero** `aboutObject` edges carrying **any property** (`rg -n 'aboutObject \{'` → 0 matches / 1,842 files). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
+  **But the structural door stays open:** **no** `aboutObject` edge carries **any property** — `create_about_edge` (`projection/edges.py:344`) emits `MERGE (s)-[:aboutObject]->(t)` with no `SET`, and the search for a property-bearing edge returns **zero** at the pin (2 at HEAD, both test display strings — `tests/test_commit_endpoint.py:1214`/`:1217`). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
 
   **⚠️ `#4240` is half-right, and the true half is the sharper argument.** Capture-path edges **are** journaled (`EntityLinked`, `#3664`; replayed by `projection/entities.py:785+`). **Indexer-path edges are NOT** - `_connect_issue_objects` (`sdk.py:20154`) calls `create_about_edge` with no journal write, and `test_index_restore.py:373-403` asserts `count(*) == 0` after rebuild. **So the finding is not "this edge saves no storage" but "this edge class is internally inconsistent about durability"** - a cleanup question, arguably more urgent than stored-vs-derived.
 
-  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** We have neither today.
+  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** ⚠️ **CORRECTED 2026-10-10: this sentence used to end *"We have neither today"*, which was true at the pin but is stale — `#5010` has since CLOSED and the cap is implemented** (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, wired query-side; PR `#5057`). At 200 it **binds nothing today** (worst hub 123 — the next bullet).
 
   **What remains UNKNOWN, and would flip the recommendation:** whether `belief_timeline` / `topic_summarize` are **ever actually called** in production. If they are reachable-but-unused, Hindsight's premise is restored and deriving becomes correct.
 
@@ -1412,7 +1436,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | id | question | why it matters | status |
 |---|---|---|---|
 | **M1** | **What is OUR query latency, warm?** (`EXPLAIN (ANALYZE)` + timing on the live graph) | **Every latency figure here is someone else's.** A one-liner that retires the entire §12.1 debate. | ✅ **DONE 2026-09-24 — see §12.1d. Answer: 1.5–5 ms; latency is a non-issue.** |
-| **M2** | **What is our real bill?** — the actual FalkorDB invoice against the $9 → $19 budget, at month-6 footprint | the only cost question asked, and §5/§6 are arithmetic on published rates, not our invoice | needed |
+| **M2** | **What is our real bill?** — the actual FalkorDB invoice against the $9 → $19 budget, at month-6 footprint | the only cost question asked, and §5/§6 are arithmetic on published rates, not our invoice. ⚠️ **§17.4 (2026-10-10) now supplies the two-store arithmetic these lines feed — and it names the two magnitudes it still lacks (`f`, `ρ`); M2 remains OUR INVOICE, which no published rate substitutes for** | needed |
 | **M3** | **How much of the 140 MB is junk?** — re-measure after the extractor work lands | tells us how much of the CACHE's footprint is junk — i.e. cache-tier sizing and whether self-hosting (M4) pays. **It does not re-open the engine choice** (§2.0) | after extractor work |
 | **M4** | **Does self-hosting beat Cloud at the CACHE tier's footprint?** — price a VM holding N tenants at ≤75% RAM | a **cache-tier ops** lever — **no longer *"the named revisit lever"*** (§14.2 amended): it moves a cache, it does not move the record | when there are users |
 | **M5** | ⭐ **Where should the vector index live?** — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read | **decides V1 (§12.1c) — the first cache-tier question (§14.2)** | **M1 done (§12.1d); `GRAPH.MEMORY USAGE` read (§12.1b). V1 is now a decision, not a measurement gap.** |
@@ -1499,15 +1523,192 @@ For the record, since two members of the design rest on it:
 
 ### 17.3 Partial-cache semantics — a residency miss is not an insufficiency
 
-**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router.
+**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router. **⚠️ The rule and the router's contract below were stated 2026-10-10 (`#7953`); the gap itself was identified 2026-10-08 (`#7869`).**
 
 **The two events are different and need different responses:** *"the evidence I hold does not answer this"* (escalate a tier) versus *"this node is not in the cache"* (fetch from the truth store). **Collapsing them either escalates unnecessarily or — worse — treats a cache miss as a negative finding.**
 
+#### ⭐ THE RULE — a residency miss never surfaces as an absence
+
+> **A node the cache cannot see is a MISS ON RESIDENCY, not a finding of absence. It is never reported as *"no such node"*, never as `empty`, and never as an insufficiency that escalates a tier.**
+
+1. **Never an absence.** The cache is partial **by design** (§2.0). A node outside the known-hot set is *unknown to this store*, not missing from the record — and an absence is the one wrong answer that is **indistinguishable from a right one** (§17.2, seen from the read side).
+2. **Never an escalation.** A residency miss is repaired by **fetching from the truth store** (Postgres). Walking to a colder graph tier is the **sufficiency** router's repair, for a different fact (§12.4).
+3. **Never a silent drop.** If the truth fetch cannot be made, the read is **impaired** and must say so — the read path already classifies a leg that did not run as the recorded status vocabulary's `degraded` (`tortoise/read_status.py`), and an impaired read must never be re-read as *"nothing matched"*.
+
+#### The two routers are TWO artifacts — do not merge them
+
+| | **sufficiency router** (§12.4 · §12.8 item 3) | **residency router** (this section) |
+|---|---|---|
+| the fact it reads | *does the evidence I already hold answer this?* | *is this node in the known-hot set at all?* |
+| its input | the assembled evidence, already in hand | **the completeness marker** (§17.2) |
+| its repair | **escalate a tier** — go deeper | **fetch from the truth store** — go to the record |
+| it fires when | the node IS resident and the evidence is short | the node is NOT resident |
+| a wrong answer looks like | an unnecessary escalation — expensive, still correct | **a cache miss reported as a negative finding — wrong, and invisible** |
+
+**Both route on a measured property of the RESULT, never a predicted property of the question** — that is §12.4's discipline, and it holds for both. A residency router that classifies the *query* instead re-introduces the write-before-query barrier §12.4 rejects.
+
+#### ⛔ THE HARD EDGE: marker → router
+
+**Without §17.2's marker the router cannot exist.** `not-hot` is the *only* signal that separates the two events; an empty result set carries no signal at all — which is exactly why an empty result is *"indistinguishable from no such node"*. **The marker is the router's INPUT, not its sibling:** a router built first would have to invent the marker's contract. That is the §17.3 ordering edge — `#7952` → `#7953`.
+
+#### The marker is NOT a fifth status term
+
+⚠️ **`not-hot` must not be minted as a fifth term of the read-status vocabulary.** That vocabulary is **RECORDED** — `available | empty | degraded | unconfigured`, **ONE** home, `tortoise/status_vocabulary.py` (`:82`), consumed by the read path (`tortoise/read_status.py`) and the client boundary, and its own text forbids a fifth term (`:27`). A residency verdict is a **directive about where to look**, not a status of the read — so it must not be *named* as a term. **How it is exposed is `#7952`'s call** (its own field, the `response_fields` pattern the status field itself uses, #3863, is the available precedent); what this section fixes is the **constraint**: the four terms keep naming what they name, and `not-hot` is not one of them.
+
+**The consequence, stated against the code that could break it:** under the hybrid, **`hits == 0` alone no longer establishes `empty`**. A zero-hit read is `empty` only when **the record was consulted** and held nothing; a node that was never hot must **not** be reported as `empty` (it is `degraded` when the truth fetch could not be made). That assumption is exactly what `tortoise/read_status.py::classify_read_status` encodes today — which is why the marker needs a field, not a term.
+
+**Owner and verification.** `#7953` — interface **D**, part 2; test-design `#7967` surfaces **S4** (e2e: a non-resident read returns `not-hot`, never empty) and **S5** (unit + integration: a miss is never a negative finding, and no unnecessary tier escalation). **Depends on `#7952`** (the marker); **blocks `#7970`** (serving reads from the record). **Deferred, not absent:** with a **complete** cache the marker cannot fire and this router is unreachable — which is why §2.0 holds the limit high, and why this work is *design now, build at the partiality trigger*.
+
 ### 17.4 A two-store cost model — the existing tables price ONE store
 
-**§5's cost table and §6's multiplier both model a single store.** The hybrid pays **both**: Postgres compute + disk **and** FalkorDB RAM. §6 concedes the gap in its own words — *"the blended total-cost figure is uncomputed; it needs the compute and IOPS lines, and neither has a measurement yet."*
+**§5's cost table and §6's multiplier both model a single store.** The hybrid pays **both**: Postgres compute + disk **and** FalkorDB RAM. §6 conceded that gap in its own words — *"the blended total-cost figure is uncomputed; it needs the compute and IOPS lines, and neither has a measurement yet."* (**That is §6 as it read before this change closed the gap; §6 no longer says it.**)
 
 **This matters because the split's whole justification is arithmetic.** The claim is not *"Postgres is cheaper"* but *"bytes that are never read again stop renting RAM."* **That claim has no table yet.**
+
+**✅ 2026-10-10 (`#7954`) — the table exists, the arithmetic is closed, and it NAMES ITS CONDITION rather than confirming the conclusion.** The **rate cards are published and verified against the vendors' own pages on 2026-10-10**; the **derivation is reproducible** ("Reproduce", end of §17.4); **two magnitudes are still unmeasured** and every figure depending on them is marked `≥` or shown as a sweep. **No part of this is a new decision** — it prices the §2.0 ruling.
+
+**It answers the four things that were missing:** a rate card for **both** stores (§17.4.1), the **IOPS line** §5.1 omits (also §17.4.1), the **blended total** §6 called uncomputed (§17.4.4), and the **RAM-per-node figure with its base and denominator** (§17.4.2).
+
+#### 17.4.1 The two rate cards — one per store
+
+**Verified from the vendors' published pricing pages, 2026-10-10.** The two stores are priced on **different quantities**, and that difference is the entire mechanism: **the cache rents PROVISIONED RAM; the record rents BYTES ON DISK.**
+
+| line | store | published rate | billed on | included | note |
+|---|---|---|---|---|---|
+| **RAM — STARTUP** | **FalkorDB** (cache) | **$73 / 1 GB / month** | provisioned instance memory, **whole GB** | — | the 1 GB tier; the same rate as `$0.10/GB-hour` (§2.0, restated in §16.1) |
+| **RAM — PRO** | **FalkorDB** (cache) | **$350 / 8 GB / month = $43.75 / GB** | same | — | the rate that applies once ≥ 8 GB is provisioned |
+| **disk — General Purpose** | **Postgres** (record) | **$0.125 / GB / month** | stored bytes | 8 GB per project | §5's rate, re-verified |
+| **IOPS — General Purpose** | **Postgres** (record) | **$0.024 / IOPS / month** | provisioned IOPS | 3,000 | ⭐ **the line §5.1 names as missing — now priced** |
+| **throughput — GP** | **Postgres** (record) | **$0.095 / MB/s / month** | provisioned throughput | 125 MB/s | couples to IOPS |
+| **disk — High Performance** | **Postgres** (record) | **$0.195 / GB + $0.119 / IOPS / month** | stored bytes + IOPS | none | 99.999%; the IOPS row is **5×** General Purpose |
+| **egress** | **Postgres** (record) | **$0.09 / GB** | bytes read out | 250 GB | ⭐ §5.1's *"egress punishes a read-heavy pattern"* — now priced |
+| **object storage** | **object** (record-adjacent) | **$0.0213 / GB / month** | stored bytes | 100 GB | §2.0's artifact tier |
+| **compute ladder** | **Postgres** (record) | **Micro $10 · Small $15 · Medium $60 · Large $110 · XL $210 · 2XL $410 · 4XL $960** / month | provisioned instance | $10/mo credit | Micro = 1 GB RAM shared; 2XL = 32 GB; **the tier the read path needs is unmeasured** |
+| **plan** | account | **$25 / month** (Pro) | per project | first project | fixed, **not** per tenant |
+
+**⚠️ `#4614` is cited in this issue — and in §13's issue map, corrected there — as the "published rates" issue, and it is NOT one.** It is a *quota-cliff capture bug* (`402` at 9,998/10,000). **The rate authority is the vendor pricing pages above** (and `#4333` for the cost basis of the cache). **Recorded so the citation is not reused.**
+
+**⚠️ `#4333` remains the authority on volume and true bytes per node, and its own ledger lists `egress + IOPS` as *"❌ not modelled, not measured"*.** §17.4 **prices** those lines; it does **not** measure them, and §17.4.4 says so explicitly.
+
+#### 17.4.2 The measured inputs — every per-node figure with its base AND its denominator
+
+**This is the table §1's correction demands, and it is where this document has erred three times.** The counts below are **four different sets**, and the two "resident" readings are **two different methods that disagree by 1.76×** — both are live reads, and §17.4.3 states which one it prices on.
+
+| quantity | value | base / denominator | basis | method & date |
+|---|---|---|---|---|
+| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | — | MiB | sampling estimate (`SAMPLES` = 100) · **2026-09-25** (top block) |
+| resident nodes | **89,701** | `MATCH (n)` | — | live read · **2026-09-25** (top block) |
+| quota-counted nodes | **24,978** | the quota predicate | — | live read · **2026-09-25** (top block) |
+| `graph_size` (taxonomy sum) | **51,012** | `graph_size`; excludes `GraphEvent` | — | live read · **2026-09-24** (`#4333` §3.2) |
+| **bytes per CAPPED node** | **6,003 B** | 143 MiB ÷ 24,978 | MiB | ⚠️ denominator trap — **not** a per-user cost basis |
+| ⭐ **bytes per RESIDENT node** | **1,672 B** | 143 MiB ÷ 89,701 | MiB | ✅ **the figure §17.4.3 prices on** |
+| bytes per `graph_size` node | **2,939 B** | 143 MiB ÷ 51,012 | MiB | **a different method under the same word "resident"** |
+| ⛔ the withdrawn 5.6 KB | **5,600 B ≈ 5.6 KB** | 140 **decimal** MB ÷ **25,000 (CAPPED)** | decimal MB | **WITHDRAWN** — total RAM ÷ the capped count |
+| ⚠️ the superseded ~3 KB | **3,111 B ≈ 3 KB** | 140 **decimal** MB ÷ **~45,000** | decimal MB | **superseded** by the 2026-09-25 row above; ≈**3×** over the declared 1,024 B |
+| marginal single-node probe | **4,701 B** | properties + a 384-dim embedding, **no index** | bytes | isolated fresh instance (`#4333` §3.4) — a **floor**, not a blend |
+| graph-wide blended | **≈2.75 KB** | denominator-dependent | bytes | `#4333` §3.4 |
+
+**⇒ Three consequences the model depends on, and they are not interchangeable:**
+
+1. **`~3 KB` is not the withdrawn `5.6 KB`** — different denominators (≈45k vs the **capped** 25,000), so the `~3×` headline stands. ⚠️ **But even `~3 KB` is now superseded for pricing**, because the 2026-09-25 block measured the same 143 MiB against **89,701** resident nodes → **1,672 B**. **Quote `1,672 B per RESIDENT node` with its base, or `~3 KB per ~45k` labelled as the older denominator.**
+2. **⚠️ The two "resident" readings disagree and the discrepancy is UNRESOLVED** — `MATCH (n)` = **89,701** vs `graph_size` = **51,012**, one day apart. One includes node classes the other does not. **§17.4.3 prices on `MATCH (n)` (89,701 → 1,672 B) and records the disagreement rather than averaging it.** Feeds `#4333`.
+3. **The declared `cost_basis.bytes_per_node = 1,024` (`product/pricing.json`) matches no measured regime** — 1,672 B resident · 6,003 B capped · 4,701 B marginal. Replacing it is a **pricing** input and stays the owner's (`#4333`, owner question 1).
+
+#### 17.4.3 The model — per tenant, per month, both stores
+
+**Both sides are priced the same way, so the comparison is like-for-like.** `S` = a tenant's stock bytes (**measured: 143 MiB ≈ 0.150 decimal GB**); `f` = the **hot fraction** — the share of `S` the cache holds (§2.1: the hot set must be **chosen**); `ρ` = the record's **non-storage** lines (compute + IOPS + egress + plan) relative to its disk line.
+
+| line | single store (today: everything hot) | hybrid (record + cache) |
+|---|---|---|
+| **cache RAM** | `rate × S / 0.75` | **`f ×`** `rate × S / 0.75` |
+| **record disk** | — | `$0.125 × S` |
+| **record compute** | — | a tier from the ladder **÷ tenants per instance** |
+| **record IOPS + egress** | — | ⚠️ **magnitude unmeasured** (3,000 IOPS, 250 GB are *included*) |
+| **account plan** | — | `$25 ÷ tenants` |
+
+**Density is what turns a rate into a per-tenant figure, and it is a FLOOR DIVISION — a step function, not a proportional one.** A graph may occupy ≤ **75%** of instance memory (§2.1, §16.1), so an instance holds `floor(0.75 × instance_GB ÷ S)` of these tenants, and the per-tenant cache line is **instance price ÷ that count**:
+
+| instance | tenants held @ `S` = 0.150 GB | per-tenant cache line |
+|---|---|---|
+| **1 GB STARTUP ($73/mo)** | `floor(0.75 ÷ 0.150)` = **5** | **$14.60 / month** |
+| **8 GB PRO ($350/mo)** | `floor(6.0 ÷ 0.150)` = **40** | **$8.75 / month** |
+
+**⚠️ At N = 1 tenant the step function *is* the bill** — the dogfood instance pays **$73/mo** (or $350/mo) whether the graph is 143 MB or 700 MB. **Per-tenant figures are a density claim, and the achieved density is unmeasured.**
+
+**The sweep that decides the split** — measured footprint, 1 GB STARTUP, 5 tenants, Medium compute and the plan ÷ 1,000 tenants:
+
+| hot fraction `f` | cache RAM | record disk | record compute + plan | IOPS | hybrid total | single store | multiplier |
+|---|---|---|---|---|---|---|---|
+| **1.00** (today — *"keep the limit in falkor high"*) | $14.60 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $14.70** | $14.60 | **0.99×** ⛔ |
+| 0.50 | $7.30 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $7.40** | $14.60 | 1.97× |
+| 0.20 | $2.92 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $3.02** | $14.60 | 4.83× |
+| 0.05 | $0.73 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $0.83** | $14.60 | 17.5× |
+| 0.00 | $0.00 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $0.10** | $14.60 | 141× |
+
+**⛔ THE FINDING THAT MATTERS — AND IT IS NOT A FOREGONE CONCLUSION: at `f = 1` the hybrid is a STRICT NET COST.** The split's saving is `(1 − f) × cache`; while the cache holds everything — **which is exactly what §2.0's *"keep the limit in falkor high"* clause does today** — that term is **zero** and the record's lines are **strictly positive**. **The split pays for itself IFF the hot set is genuinely smaller than the stock.** That is the arithmetic §6 said was missing; it does not confirm the split, it **names its condition**.
+
+**The same model at scale — 1,000 tenants, `S` = 0.150 GB each (≈ 149.9 GB of stock, packed 40 tenants per 8 GB PRO):**
+
+| case | cache RAM | record disk | record compute + plan | hybrid total | per user | vs single store |
+|---|---|---|---|---|---|---|
+| **single store** — everything hot | $8,750 | — | — | $8,750 | **$8.75** | 1.00× (reference) |
+| hybrid, `f` = 0.20, Medium compute | $1,750 | $18.74 | $85 | $1,854 | **$1.85** | **4.72×** |
+| hybrid, `f` = 0.20, 2XL compute | $1,750 | $18.74 | $435 | $2,204 | **$2.20** | 3.97× |
+| hybrid, `f` = 1.00, Medium compute | $8,750 | $18.74 | $85 | $8,854 | **$8.85** | **0.99×** ⛔ |
+
+**⚠️ Do not compare that `$1.85`–`$8.85` per user against §5's `$0.53` at 1,000 users — different bases.** §5 prices **ONE** store (Postgres disk + compute) at **1 GB/user**; this table prices **BOTH** at the **measured 0.150 GB/user**. **The comparison §5 invites and cannot answer is the one this table makes: the hybrid pays the cache line *on top of* the record line**, and the cache line is the larger of the two at every `f` above the break-even. **The compute tier is carried at Medium for comparability; the tier the read path actually needs is unmeasured, and 2XL takes the `f = 1` case to 0.95×.**
+
+#### 17.4.4 The blended total — closed form, with the two unmeasured inputs visible
+
+**§6's "uncomputed blended total" now has a closed form.** Let `ratio` = the storage-line multiplier = `(rate ÷ 0.75) ÷ $0.125`:
+
+| provisioning | `ratio` — per tenant (density-adjusted) | pure rate ratio (`rate ÷ $0.125`) |
+|---|---|---|
+| 1 GB STARTUP ($73/GB) | **778.7×** | 584× |
+| 8 GB PRO ($43.75/GB) | **466.7×** | 350× |
+
+```text
+blended total-cost multiplier = 1 / ( f + (1 + ρ) / ratio )
+break-even hot fraction       = 1 − (1 + ρ) / ratio
+```
+
+**⚠️ `ratio` is 778.7× here, not the `~580×` §6 quotes — the difference is the 75% density headroom**, i.e. the cache pays for RAM it may not fill. **Both are correct on their own bases: quote `584×` as a RATE ratio and `778.7×` as a PER-TENANT one.**
+
+| `ρ` — record non-storage ÷ disk line | what it represents | break-even `f` | ceiling at `f` = 0 |
+|---|---|---|---|
+| 0 | disk only — no compute or IOPS anywhere | **99.87%** | **778.7×** |
+| 4.5 | Medium compute + plan ÷ 1,000 tenants (`$0.085 ÷ $0.0187`) | **99.29%** | 141× |
+| 10 | compute + IOPS dominating the record line | 98.59% | 70.8× |
+
+**⇒ The blended total becomes a NUMBER as soon as two magnitudes are measured, and neither exists today:**
+
+1. **`f` — the hot fraction.** **Not measured anywhere.** §2.1's *"we choose what the cache holds"* is the lever, and this is its decision variable.
+2. **`ρ` — the record's non-storage lines per tenant:** which compute tier the read path actually needs, and **how many IOPS a cache-miss storm costs** (§5.1's own warning: *"the cost moves from storage to requests"*). ⚠️ **The IOPS line is PRICED ($0.024/IOPS/month) but its MAGNITUDE is unmeasured — which is why every hybrid total above is a `≥`.**
+
+**⇒ Both magnitudes are filed as `#7983`** — *the model is complete; two of its inputs are not.* **Until they are measured, §17.4 is the table the issue asked for and NOT yet a point estimate, and no blended figure may be quoted as one.**
+
+**⚠️ And this is why §6's `~10×` and this `~580×` must not be multiplied into a headline.** The storage-line win is real and large; the **total-cost** win is `1 / (f + (1 + ρ) / ratio)`, and **every non-storage dollar the record adds shrinks it toward 1**. *"A storage-cost win is not a total-cost win"* is §6's sentence — **this is the number that says by how much.**
+
+#### 17.4.5 What §17.4 does NOT claim
+
+- **It does not re-open §2.0.** The ruling is the owner's; this prices it and names its condition.
+- **It does not claim the split is unprofitable.** It claims the split is **`f`-conditional**, and that under today's `f = 1` policy it is **net-negative on the arithmetic**.
+- **It does not substitute for `M2`** (§15). `M2` is **our own invoice**; this is arithmetic on **published rates**. Both are wanted.
+- **It does not price the journal.** §5.1's first missing line grows at or near the derived layer's rate, has **no measurement**, and in a two-store model is **paid twice** — appended in the record *and* carried in the cache projection.
+- **It does not rest on a vendor benchmark.** Every input is either a **published rate** (§17.4.1) or **our own measurement** (§17.4.2) — the discipline §16.2 and `#4333`'s X5 both require.
+
+**Reproduce** — every figure above is arithmetic on the two tables in §17.4.1 and §17.4.2. With `S = 143 MiB`, `rate = $73/GB`, `density = 0.75`:
+
+```text
+GB(S)      = 143 × 1024² / 1e9                = 0.1499 GB
+cache      = 73 × 0.1499 / 0.75               = $14.60 / tenant / month
+disk       = 0.125 × 0.1499                   = $0.0187
+compute    = 60 / 1000                       = $0.060
+plan       = 25 / 1000                       = $0.025
+rho        = (0.060 + 0.025) / 0.0187         = 4.5
+ratio      = (73 / 0.75) / 0.125              = 778.7
+multiplier = 1 / (f + (1 + rho) / 778.7)      -> 0.99x at f = 1.00, 4.83x at f = 0.20
+```
 
 ### 17.5 A field-level placement table — 9 derived/volatile property names on the sampled surface
 

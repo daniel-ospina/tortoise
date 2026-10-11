@@ -817,12 +817,25 @@ def test_wizard_env_form_blocks_carry_no_literal_key():
 def test_wizard_copy_beacon_persists_harness_section():
     """T4: the wizard copy action PATCHes /v1/onboarding/state with
     {harness, section} (the copy beacon moved from welcome.html to the
-    dashboard wizard, #1566/#1730)."""
+    dashboard wizard, #1566/#1730).
+
+    #2936: the request has ONE home (`wizardBeacon`) since the shipped connect
+    step was wired to it — the two call paths below (the live cards' `onCopied`
+    and the ARCHIVED render's `wizardCopy`) must both resolve the leaf through
+    `analyticsHarnessOf` before it reaches the body.
+    """
     dashboard = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
     src = dashboard.read_text(encoding="utf-8")
     assert "onboarding/state" in src
-    assert "harness: wizardHarness" in src
-    assert "section: 'config'" in src
+    # The emitter is the only site that builds the body, and the body carries
+    # the RESOLVED harness — never the raw wizard leaf (a UI-only leaf like
+    # 'codexDesktop' is not in the server vocabulary).
+    assert "harness: attributed" in src
+    assert "const attributed = analyticsHarnessOf(harness)" in src
+    # Both call paths go through it: the archived render's wizardCopy and the
+    # shipped cards' onCopied.
+    assert "wizardBeacon(wizardHarness, 'config')" in src
+    assert "onCopied={() => wizardBeacon(" in src
 
 
 def test_key_never_interpolated_into_env_blocks():
