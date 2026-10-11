@@ -1385,6 +1385,13 @@ def _jdoor_journal(events) -> list[dict]:
     return EventLog(str(events / "events.jsonl")).read_all()
 
 
+def _jdoor_event_state(proj, eid: str) -> tuple:
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:$id}) RETURN e.eventKind, e.endedAt",
+        params={"id": eid}).result_set
+    return (None, None) if not rows else (rows[0][0], rows[0][1])
+
+
 def _jdoor_count(records, type_: str) -> int:
     return sum(1 for e in records if e.get("type") == type_)
 
@@ -1692,6 +1699,62 @@ def test_7951_prefix_event_in_graph_is_backfilled_to_the_journal(tmp_path):
         assert _jdoor_event_count(proj, eid) == 1, (
             "the backfilled EventRecorded did not reproduce the Event on "
             "rebuild_all (#7951 R2)")
+    finally:
+        sdk.close()
+
+
+def test_7951_frozen_created_backfill_replays_the_live_state(tmp_path):
+    """P2-1: the backfilled ``-created`` record must carry the FROZEN node's
+    ``eventKind``/``endedAt``, not the freshly-computed current state.
+
+    ``_frozen_created_payload`` is load-bearing exactly here: on the backfill
+    path the node is frozen at first observation while ``created`` is rebuilt
+    from the issue state NOW, so journaling ``created`` verbatim makes replay
+    reproduce the CURRENT state and diverge from the live node. The existing
+    ``test_created_event_frozen_across_close_reopen`` never enters this path
+    (it drives the plain walk, which re-folds nothing), so before this test
+    the committed suite stayed green with the helper reduced to
+    ``return dict(created)``."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        # A pre-#7951 binary: the -created Event folded directly (graph only,
+        # no journal append) while the issue was OPEN.
+        ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
+                                       previous_state=None)
+        assert ev["eventKind"] == "github.issue.open" and ev["endedAt"] is None
+        proj.apply(ev)
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+        live_before = _jdoor_event_state(proj, _JDOOR_EID)
+
+        # Poll a CLOSED issue: `created` is rebuilt from the CLOSED state, so
+        # the naive backfill would journal the closed kind + an endedAt.
+        _run(_indexer(MockGitHubTransport(issues=[
+            gh_issue(1, state="closed", closed_at="2026-07-20T08:00:00Z",
+                     updated_at="2026-07-20T08:00:00Z")])), sdk)
+
+        # The live node stays frozen at first observation …
+        live_now = _jdoor_event_state(proj, _JDOOR_EID)
+        assert live_now == live_before == ("github.issue.open", None), (
+            f"the -created node was re-folded from the current closed state: "
+            f"{live_now} (#7951 P2-1)")
+
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "EventRecorded"
+                   and e.get("eventId") == _JDOOR_EID]
+        assert len(records) == 1, f"expected one backfilled record: {records!r}"
+        assert (records[0].get("eventKind"),
+                records[0].get("endedAt")) == live_now, (
+            "the backfilled EventRecorded carries the CURRENT (closed) state, "
+            "not the frozen live node's — a replay would reproduce a node the "
+            "live graph does not hold (#7951 P2-1)")
+
+        # … and the replay reproduces the SAME node (live == replay).
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_event_state(proj, _JDOOR_EID) == live_now, (
+            "rebuild_all did not reproduce the live -created node — the "
+            "frozen-creation invariant is broken on the backfill path "
+            "(#7951 P2-1)")
     finally:
         sdk.close()
 

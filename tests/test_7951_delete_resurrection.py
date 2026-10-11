@@ -36,7 +36,9 @@ journal-backed hosted SDK, then replays the journal with BOTH engines.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import threading
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY",
@@ -154,6 +156,24 @@ def _close_anchors() -> None:
         if anchor is not None:
             with contextlib.suppress(Exception):
                 anchor.close()
+
+
+@pytest.fixture(autouse=True)
+def _reset_replay_anchors():
+    """#7951 round 3: the replay anchors are ContextVars (context-local, not
+    per-instance), so an arm left set by one test would bleed into the next
+    test running in the same context. Reset on both sides."""
+    from tortoise import projection as _proj_mod
+
+    def _clear():
+        _proj_mod._REPLAY_MINT_SEQ.set(None)
+        _proj_mod._REPLAY_SESSION_MINT_SEQ.set(None)
+        _proj_mod._REPLAY_SESSION_DELETED_SEQ.set(None)
+        _proj_mod._REPLAY_SEQ.set(-1)
+
+    _clear()
+    yield
+    _clear()
 
 
 @pytest.fixture
@@ -364,11 +384,13 @@ class TestPostDeleteWriteReMaterialisesSource:
 
 
 class TestReplaySourceMintAnchorIsDerived:
-    """R2-P1 acceptance: the anchor observes the MINT itself (the Cypher write
-    through the projection's graph handle), not an enumerated list of event
-    types or Python functions — so a newly added mint path cannot silently
-    escape the anchor. This is the structural property the fix is FOR; the
-    EventRecorded test above is the concrete instance the round-1 list missed."""
+    """R2-P1/round-3 acceptance: BOTH anchors observe the MINT itself (the
+    Cypher write through the projection's graph handle), not an enumerated list
+    of event types or Python functions — so a newly added mint path cannot
+    silently escape the anchor. This is the structural property the fix is FOR;
+    the EventRecorded test above is the concrete instance the round-1 Source
+    list missed, and the bare-recapture test below is the instance the round-2
+    container `SessionRecorded` pre-scan missed."""
 
     def test_observer_records_any_source_minting_statement(self):
         from tortoise.projection import FalkorProjection
@@ -378,10 +400,10 @@ class TestReplaySourceMintAnchorIsDerived:
         proj._replay_seq = 7
         # Two mint spellings from paths that are in NO round-1 type list — the
         # observer keys off the write, so both are recorded anyway.
-        proj._observe_replay_source_mint(
+        proj._observe_replay_mint(
             "MERGE (s:Source {url:$url}) ON CREATE SET s.title=$url",
             {"url": "session:some-new-path"})
-        proj._observe_replay_source_mint(
+        proj._observe_replay_mint(
             "CREATE (big:Source {url: $u, sourceKind: 'x'})",
             {"u": "session:created-not-merged"})
         assert proj._replay_mint_seq == {
@@ -389,22 +411,46 @@ class TestReplaySourceMintAnchorIsDerived:
             "session:created-not-merged": 7,
         }, "the mint observer is not structurally tied to the write"
 
+    def test_observer_records_any_session_minting_statement(self):
+        """Round 3: the CONTAINER anchor is derived the same way — every
+        `:Session` mint is observed, including the snapshot-restore spelling
+        (`MERGE (s:Session {id:$id}) SET s += $props`) the round-2 pre-scan
+        type list could not see."""
+        from tortoise.projection import FalkorProjection
+
+        proj = object.__new__(FalkorProjection)
+        proj._replay_session_mint_seq = {}
+        proj._replay_seq = 3
+        proj._observe_replay_mint(
+            "MERGE (s:Session {id:$id}) SET s += $props",
+            {"id": "s-snapshot-restore", "props": {}})
+        proj._observe_replay_mint(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            {"sid": "s-link-session"})
+        assert proj._replay_session_mint_seq == {
+            "s-snapshot-restore": 3,
+            "s-link-session": 3,
+        }, "the container mint observer is not structurally tied to the write"
+
     def test_observer_is_inert_outside_a_replay_and_ignores_non_mints(self):
         from tortoise.projection import FalkorProjection
 
         proj = object.__new__(FalkorProjection)
         # `None` (not replaying) → a no-op even for a mint statement.
-        proj._observe_replay_source_mint(
+        proj._observe_replay_mint(
             "MERGE (s:Source {url:$url})", {"url": "session:x"})
         assert proj._replay_mint_seq is None
+        assert proj._replay_session_mint_seq is None
         # A read and a non-Source MERGE are not mints.
         proj._replay_mint_seq = {}
+        proj._replay_session_mint_seq = {}
         proj._replay_seq = 1
-        proj._observe_replay_source_mint(
+        proj._observe_replay_mint(
             "MATCH (s:Source {url:$url}) RETURN s", {"url": "session:x"})
-        proj._observe_replay_source_mint(
+        proj._observe_replay_mint(
             "MERGE (p:Point {id:$id})", {"id": "p1"})
         assert proj._replay_mint_seq == {}
+        assert proj._replay_session_mint_seq == {}
 
 
 class TestPostDeleteEventReMaterialisesSource:
@@ -495,6 +541,194 @@ class TestPreDeleteEdgesDoNotSurviveRebuild:
             "node Source:\n"
             + _fmt(live_sn[0] - ra_sn[0], ra_sn[0] - live_sn[0]) + "\n"
             + _fmt(live_sn[1] - ra_sn[1], ra_sn[1] - live_sn[1]) + " (#7951 R2-P2)")
+
+
+# ═════════════════════════════════════════════════════════════════
+# P2-2 (round 3): the `_link_session` half of the R2-P2 gate.
+# Pass 2 re-derives CONTAINS from EVERY `PointAdded`, including records that
+# PRECEDE a `SessionDeleted`. The live delete journals an `EntityMutated`
+# delete per CONTAINS point it removes, so the crafted journal below (a
+# pre-delete `contains_session` point with NO delete of its own) is a journal
+# the live delete cannot normally produce — which is exactly why the gate is
+# defensive. Mutation (`_replay_del = None` in `_link_session`) leaves the
+# whole committed suite green, so this crafted journal is what makes the gate
+# load-bearing-and-pinned instead of load-bearing-and-untested.
+# ═════════════════════════════════════════════════════════════════
+
+
+def _write_crafted_journal(tmp_path, records: list[dict]) -> str:
+    d = tmp_path / "crafted-journal"
+    d.mkdir(exist_ok=True)
+    with open(d / "events.jsonl", "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    return str(d)
+
+
+def _crafted_point_added(sid: str, pid: str) -> dict:
+    return {
+        "type": "PointAdded",
+        "projection_version": 2,
+        "initiated_by": "sdk",
+        "point": {
+            "id": pid,
+            "content": f"turn {pid}",
+            "pointKind": "event",
+            "speaker": "user",
+            "is_episodic": True,
+            "status": "draft",
+            "createdAt": "2026-01-01T00:00:00+00:00",
+        },
+        "contains_session": sid,
+    }
+
+
+def _contains_ids(proj, sid: str) -> set:
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
+        params={"sid": sid},
+    ).result_set
+    return {r[0] for r in rows}
+
+
+def _session_ids(proj, sid: str) -> set:
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id", params={"sid": sid}
+    ).result_set
+    return {r[0] for r in rows}
+
+
+class TestReplayAnchorsAreContextLocal:
+    """P2-4 (round 3): the replay anchors are instance-level mutable state and
+    `rebuild_all` takes no lock, so while they are armed another thread's write
+    through the same `_GuardedGraph` was recorded at whatever `_replay_seq`
+    held — a live `session:<id>` mint after a `SessionDeleted` could make the
+    deferred re-apply keep a Source it should delete. The anchors are now
+    ContextVars (the `nonfolded._COLLECTOR` / `record_graph_op` pattern), so a
+    different thread sees the defaults (disarmed) and its live write records
+    nothing."""
+
+    def test_another_thread_does_not_record_into_the_replay_anchor(self):
+        from tortoise.projection import FalkorProjection
+
+        proj = object.__new__(FalkorProjection)
+        # Arm exactly as `rebuild_all` does.
+        proj._replay_mint_seq = {}
+        proj._replay_session_mint_seq = {}
+        proj._replay_seq = 42
+        observed = {}
+
+        def _live_writer():
+            observed["mint"] = proj._replay_mint_seq
+            observed["seq"] = proj._replay_seq
+            proj._observe_replay_mint(
+                "MERGE (s:Source {url:$url})", {"url": "session:live-thread"})
+            observed["after"] = dict(proj._replay_mint_seq or {})
+
+        t = threading.Thread(target=_live_writer)
+        t.start()
+        t.join()
+
+        assert observed["mint"] is None, (
+            "the replay anchor is visible to another thread — an armed "
+            "`_replay_mint_seq` is instance/global state, not context-local "
+            "(#7951 P2-4)")
+        assert observed["after"] == {}, (
+            "a LIVE write on another thread was recorded into the replay's "
+            "Source anchor (#7951 P2-4)")
+        # The replay's own thread still holds its anchor (arming is local).
+        assert proj._replay_mint_seq == {}
+
+
+class TestContainerAnchorIsDerived:
+    def test_bare_recapture_survives_rebuild_all(self, tmp_path):
+        """Round 3: the CONTAINER anchor is derived from the replay's own
+        `:Session` mints, not a pre-scan type list.
+
+        Crafted journal: a bare re-capture with NO turn points —
+        ``[SessionRecorded(X), SessionDeleted(X), SessionRecorded(X)]``. The
+        deferred `SessionDeleted` re-apply must KEEP the container because the
+        last `SessionRecorded` re-materialised it. The round-2 pre-scan
+        enumerated the two mint TYPES, so reducing the `SessionRecorded` arm to
+        a `pass` (or missing a new mint path, e.g. the snapshot restore) deleted
+        a container the live graph holds.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        sid = "s-7951-bare-recapture"
+        rec = {"projection_version": 2, "initiated_by": "sdk"}
+        jdir = _write_crafted_journal(tmp_path, [
+            {"type": "SessionRecorded", "id": sid,
+             "capture_redactions": 0, **rec},
+            {"type": "SessionDeleted", "id": sid, **rec},
+            {"type": "SessionRecorded", "id": sid,
+             "capture_redactions": 0, **rec},
+        ])
+
+        sdk = TortoiseSDK(str(tmp_path / "bare-recapture.db"))
+        try:
+            proj = sdk._get_proj()
+            proj.rebuild_all(jdir, confirm_destructive=True)
+            assert _session_ids(proj, sid) == {sid}, (
+                "rebuild_all deleted a Session a LATER SessionRecorded "
+                "re-materialised (bare re-capture, no turn points) — the "
+                "container anchor is not derived from the replay's own "
+                "`:Session` mints (#7951 P2-3)")
+        finally:
+            sdk.close()
+
+
+class TestLinkSessionGateDropsPreDeleteEdge:
+    def test_crafted_pre_delete_contains_point_is_not_re_linked(self, tmp_path):
+        """The crafted journal's distinguishing outcome: ``{p2}`` WITH the
+        gate, ``{p1, p2}`` without.
+
+        The pre-delete ``PointAdded(p1)`` carries ``contains_session`` and NO
+        matching ``EntityMutated`` delete, so pass 2 would re-wire ``p1`` into
+        the container the delete severed — the same node-kept-but-edge-
+        resurrected shape R2-P2 fixed for the Source (``_link_source``), here
+        for the CONTAINS edge (``_link_session``).
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        sid = "s-7951-gate"
+        p1, p2 = f"{sid}_p1", f"{sid}_p2"
+        jdir = _write_crafted_journal(tmp_path, [
+            {"type": "SessionRecorded", "id": sid,
+             "projection_version": 2, "initiated_by": "sdk",
+             "capture_redactions": 0},
+            _crafted_point_added(sid, p1),
+            {"type": "SessionDeleted", "id": sid,
+             "projection_version": 2, "initiated_by": "sdk"},
+            _crafted_point_added(sid, p2),
+        ])
+
+        sdk = TortoiseSDK(str(tmp_path / "gate.db"))
+        try:
+            proj = sdk._get_proj()
+            # Engine 1: the inline, chronology-ordered fold — the delete severs
+            # p1's CONTAINS, then p2's record re-materialises the container.
+            proj.rebuild(EventLog(os.path.join(jdir, "events.jsonl")),
+                         confirm_destructive=True)
+            via_rebuild = _contains_ids(proj, sid)
+            assert via_rebuild == {p2}, (
+                f"rebuild() reached {via_rebuild}, expected {{{p2}}} — the "
+                f"crafted journal is not producing the intended shape")
+
+            # Engine 2: `rebuild_all`'s pass 2 re-derives edges from EVERY
+            # PointAdded; the R2-P2 gate is what drops p1's.
+            proj.rebuild_all(jdir, confirm_destructive=True)
+            via_rebuild_all = _contains_ids(proj, sid)
+            assert via_rebuild_all == {p2}, (
+                f"the pre-delete contains_session point was re-linked into "
+                f"the container: {via_rebuild_all}, expected {{{p2}}}; the "
+                f"`_link_session` R2-P2 gate (entities.py) is not applied "
+                f"(#7951 P2-2)")
+            assert via_rebuild_all == via_rebuild, (
+                "the two replay engines disagree on one crafted journal "
+                "(#7951 P2-2)")
+        finally:
+            sdk.close()
 
 
 
