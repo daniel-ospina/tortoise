@@ -38,6 +38,7 @@ aboutObjects: tortoise
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
 | Auth architecture — **current: server-side BFF + HttpOnly `__Host-session` on `app.premiselabs.co` (#4054)**; historical client-side head-gate design (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
+| **D1 session store — the lifecycle contract** (#3522, child of #3501): the session/flow schema and what is deliberately NOT stored, the migration path with no `wrangler.toml`, the read-replication-off **silent precondition** and its guard (`test_pages_bindings.py`), CAS predicates + `meta.changes` evidence, the 503-not-401 failure semantics, and the ~1k qps/db capacity bound with the documented hybrid-JWT scale-out path | `docs/engineering/auth/d1-session-store.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | **Fixed / shared SaaS cost allocation** — the mechanical per-line allocation rule (even / proportional), the fail-closed basis read, the `tortoise_team_cost_cents` metric it writes, and the three read paths (#4493) | `docs/ops/cost-allocation.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
