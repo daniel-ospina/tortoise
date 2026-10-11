@@ -93,6 +93,16 @@ surfaces:
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
   - test_capture_lane_3516.py
+  # #3514 (epic #1714 J4): coming-soon demand capture. Load-bearing HERE because
+  # the whole path lives in `tortoise/hosted_api.py` — an EXACT `api`
+  # SOURCE_PATTERN match that REPLACES the `core` fallback — so an `api`-only
+  # change to the record write, the ping dispatch or the two routes would run no
+  # guard without this arm. DUAL-REGISTERED with `onboarding` (the grid's own
+  # surface: a `website/apps/dashboard/src/` diff selects THAT, not `api`) and
+  # with `core` (`tortoise/demand.py` matches no named surface, so a
+  # demand.py-only change selects `core`). Triple-registered deliberately: no
+  # single arm covers both modules this feature spans.
+  - test_data_source_capture.py
   # #3516 §B: the client-timestamp floor's inputs (`client_captured_at` + its `_source`).
   # DUAL-REGISTERED with `core` for the same reason as the lane entry above: the touched
   # files span BOTH surfaces — `hosted_api.py` / `sdk.py` / `__main__.py` select `api`,
@@ -2295,6 +2305,13 @@ surfaces:
   - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
+  # #3514 (epic #1714 J4): the demand record is an ONBOARDING funnel event on the
+  # grid's own path — `_track_onboarding_event`'s store and prop allowlist. A
+  # `website/apps/dashboard/src/` change (the tile that fires the click)
+  # selects THIS surface and not `api`, so this arm is what keeps the endpoint's
+  # contract under test when only the client moves. Dual-registered with `api`
+  # and `core` (see the `api` arm).
+  - test_data_source_capture.py
   - test_onboarding_auto_complete.py
   - test_onboarding_endpoints.py
   - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
@@ -2527,6 +2544,7 @@ surfaces:
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - test_analytics_write_path_resolution.py  # #3677: tools/capture_cost_report.py is an eval-surfaced source (the eval half of the cost measurement), so a read-path change there must run the guard that pins its resolved destination — dual-registered with `api`/`core`
   - test_analytics_fallback_alert.py  # #3820: triple-registered with `api`/`core` for the same reason as the #3677 file above — the outcome counter it pins lives in `tortoise/monitoring.py`, which the eval lane's cost measurement also reads
+  - test_data_source_capture.py  # #3514: the demand path's policy half is `tortoise/demand.py`, which matches NO named surface — so a demand.py-only change selects this `core` fallback, and without this arm the file that owns the pinned literals and the marker semantics would have no guard at all. Triple-registered with `api` (hosted_api.py) and `onboarding` (the grid path).
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py
@@ -3200,6 +3218,7 @@ durations:
   test_writer_inventory.py: 44.0
   test_decide.py: 9.9
   test_onboarding_endpoints.py: 9.1
+  test_data_source_capture.py: 22.0  # #3514: locally measured on this host (40 tests, DB-free: the analytics sink is the local JSONL or a stubbed HTTP client, Telegram is a stub; 16.9s session total in one run, 22.0s including the hung-transport row's waits). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Deliberately NOT in `slow_files`: its rows put threads, not processes, on a released barrier, and the dual-registration note above (`classify_test_file` takes the FIRST match) is exactly the trap that list's header warns about. Refresh from CI junit once this file has run on main.
   test_battery_executor_v2.py: 5.7
   test_body_cap_sweep.py: 3.6
   test_agent_signup_idempotency.py: 6.8

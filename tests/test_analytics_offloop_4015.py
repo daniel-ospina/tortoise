@@ -472,6 +472,13 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
       (``control_plane_worker("telemetry").submit(_write)``), which puts it
       off the request path by another route. The pin VERIFIES that dispatch
       rather than trusting the lane's name.
+    * ``_demand_record_write`` — #3514's coming-soon demand record. It cannot
+      use the #4015 entry point because that seam is ``best_effort`` and returns
+      ``None``, while R2 requires the write's OUTCOME (a failed record must
+      answer 503 and send no ping). So it hands ``_cp_offload`` its own
+      ``pool="telemetry"`` callable and awaits the result — a third off-loop
+      route, and one whose dispatch is VERIFIED below exactly like ``_write``'s
+      (the direct call must sit inside the ``_cp_offload`` callable).
 
     The two halves are BOUND (#4015 review): asserting only that the helper
     contains SOME ``_cp_offload(..., best_effort=True)`` call left a mutation
@@ -517,7 +524,8 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
     # Declared off-loop lanes (see the docstring). A direct call whose
     # ENCLOSING function is not one of these is an undeclared emit — the
     # on-loop regression #4015 exists for.
-    declared_lanes = {"_emit_analytics_off_loop", "_write"}
+    declared_lanes = {"_emit_analytics_off_loop", "_write",
+                      "_demand_record_write"}
     sites_by_lane: dict = {}
     for _node in direct:
         sites_by_lane.setdefault(
@@ -604,6 +612,33 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
             f"the `_write` analytics lane in {lane_fn.name!r} is not dispatched "
             "to the telemetry control-plane pool — the blocking POST could be "
             "back on the event loop (#4015)"
+        )
+
+    # The third declared lane's off-loop guarantee (#3514): like the first, its
+    # direct call must sit INSIDE the callable the offload seam is handed — an
+    # inline emit plus a dummy `_cp_offload(lambda: None, ...)` would put the
+    # blocking POST back on the loop while the lane name still read as declared.
+    if "_demand_record_write" in sites_by_lane:
+        assert len(sites_by_lane["_demand_record_write"]) == 1, (
+            "the `_demand_record_write` lane must hold exactly one direct "
+            f"call: {[n.lineno for n in sites_by_lane['_demand_record_write']]}"
+        )
+        demand_site = sites_by_lane["_demand_record_write"][0]
+        demand_lane = _nearest_func(demand_site)
+        demand_offloads = [
+            n for n in ast.walk(demand_lane)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name) and n.func.id == "_cp_offload"
+        ]
+        assert len(demand_offloads) == 1, (
+            "`_demand_record_write` must offload EXACTLY one call — the "
+            f"blocking POST is otherwise back on the event loop: "
+            f"{len(demand_offloads)} found (#3514)"
+        )
+        assert any(node is demand_site
+                   for node in ast.walk(demand_offloads[0].args[0])), (
+            "the demand record's direct _track_analytics_event call is NOT "
+            "inside the _cp_offload callable (#3514)"
         )
 
 
