@@ -221,6 +221,54 @@ def test_signup_orphan_echo_is_stderr_only_never_stdout(
     )
 
 
+def test_recover_prints_the_resolution_never_the_live_key(
+    monkeypatch, tmp_path
+) -> None:
+    """#5109 P1: `recover` is neither a mint nor one-time.
+
+    It PERSISTS the recovered key to ``~/.tortoise/credentials.json`` (0600)
+    and re-POSTs /v1/agent/recover — re-printing the same key — on EVERY
+    invocation, so a resolution expression can replace the value. The
+    previous stdout echo was certified as a "shown once" exception by a
+    `#5109 NOTE`, but nothing pinned the value, and the note was false: it is
+    repeatable and persisted. Assert the sentinel never reaches stdout and
+    the instruction still does.
+    """
+    from unittest import mock
+
+    import tortoise.__main__ as main
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    sentinel = "tt_" + "12" * 16  # matches KEY_SHAPE (32 lowercase hex)
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps({
+        "key": sentinel,
+        "org_id": "team-rec",
+        "org_name": "agent-rec",
+        "signup_token": "st_" + "ef" * 32,
+    }).encode()
+    resp.__enter__.return_value = resp
+
+    out = io.StringIO()
+    with mock.patch("urllib.request.urlopen", return_value=resp), \
+         contextlib.redirect_stdout(out):
+        rc = main._cmd_recover(mock.Mock(token="st_" + "ef" * 32))
+
+    assert rc == 0, "the happy path must still succeed"
+    stdout = out.getvalue()
+    assert sentinel not in stdout, (
+        "`recover` persisted the key and echoed the LIVE value to stdout — "
+        "the verbatim-captured channel #5109 exists to close"
+    )
+    assert not KEY_SHAPE.findall(stdout), "no tt_<hex> literal on stdout"
+    assert "python3 -c" in stdout and str(
+        tmp_path / ".tortoise" / "credentials.json"
+    ) in stdout, "the resolution instruction (and its config path) must print"
+
+
 def test_json_payload_uses_the_env_form_not_the_literal() -> None:
     """The `--json` payload is the AGENT-consumed path (#304).
 

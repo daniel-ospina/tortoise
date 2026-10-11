@@ -1212,10 +1212,13 @@ def _cmd_recover(args) -> int:
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
-    # #5109 NOTE: same DELIBERATE, test-pinned "shown once" contract as
-    # _cmd_signup — see the note there; raised as an owner decision.
-    print(f"   API key: {data['key']}")
-    print(f"   Config saved to {config_path} (shown once — store it)")
+    # #5109: recover is NEITHER a mint NOR one-time — the key was just
+    # persisted to config_path (0600) above, and this command re-POSTs and
+    # re-prints on EVERY invocation, so a resolution expression CAN replace
+    # the value. Print the resolution, never the value (stdout is the
+    # verbatim-captured channel; see the module note on #5109).
+    print(f"   API key: {_key_resolution_expr(config_path)}")
+    print(f"   Config saved to {config_path} (0600 — key stays on disk)")
     print(f"   Recovery token kept: {token[:14]}…")
     return 0
 
