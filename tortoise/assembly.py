@@ -16,19 +16,32 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
   ordering/compare do NOT — measured below).
 * ``interval`` — "How many days/weeks/months/years passed between A and B"
   and the two-anchor since-until form "…had passed since X when Y".
+* ``duration-state`` — #2654: "how long had I been <state> when <event>?"
+  (the census's 7 duration-state rows MINUS the two whose morphology is not
+  the state-entry form — the combined summed span b9cfe692, which belongs
+  to #2886's aggregate lane, and the age form d01c6aa8). Single-subject:
+  the window's GRAPH end is the subject's state entry (the ObjectRegistered
+  stamp or its earliest dated row — see ``_state_entry_date``), its other
+  end the question's as-of date. The "when <event>" clause is question
+  context, never a second resolved subject.
 
-Never fires (R13 + R16 + the census negative set, ~68/133 + misfires):
+Never fires (R13 + R16 + the census negative set — the per-class list
+below; plus the R16 misfire fixtures):
 
-* the measured census negative set — 78/133 rows across the non-fireable
-  sub-classes (76/78 never fire; the 2 fires are the ADJUDICATED label-noise
+* the measured census negative set — 73/133 rows across the non-fireable
+  sub-classes (71/73 never fire; the 2 fires are the ADJUDICATED label-noise
   rows 370a8ff4 + gpt4_70e84552_abs, pinned in test_assembly_pure.py):
-  'ago'-relative, frequency/count, duration-state, relative-date-lookup,
-  nary-ordering, recency, other, pattern/recurring, offset-comparison;
+  'ago'-relative, frequency/count, relative-date-lookup,
+  nary-ordering, recency, other, pattern/recurring, offset-comparison —
+  plus the census's duration-state class, whose fireable subset #2654 moved
+  into the shape above (the 2 residual-morphology rows stay here);
   'ago' rejects EVEN with state morphology "what is the current status of X
   two weeks ago?" (reject-on-relative-offset);
-* duration-state — "how long …" ("how long had I been a member when …",
-  "how long did it take"), the census's 7 duration-state rows + the
-  duration-morphology rows mis-filed under other classes;
+* duration-state residual forms — "how long did I take … combined" (a
+  summed span: #2886's aggregate lane owns it) and "how old was I when …"
+  (an age: no state entry to resolve); plus every other duration/count
+  morphology ("how long have I been working before …", "how long did it
+  take") and the duration-morphology rows mis-filed under other classes;
 * frequency/count — "how many times", "how many days did I spend", "how
   many … have passed since <one activity>" (single-anchor since);
 * relative-date-lookup — "last Saturday", "on Valentine's day";
@@ -41,7 +54,8 @@ Never fires (R13 + R16 + the census negative set, ~68/133 + misfires):
 
 Extraction (extract_subject_terms): template splits for the two-subject
 shapes (A/B either side of the ordering "first,"-marker or the interval
-"between…and…"/"since…when…" spans), single subject for current-state.
+"between…and…"/"since…when…" spans), single subject for current-state,
+and the single PEELED state subject for duration-state (#2654).
 Subjects are returned as RAW text spans (quotes/possessives intact —
 "my cousin's wedding", "'The Hate U Give'") for the Task-3 resolver.
 """
@@ -64,6 +78,8 @@ class AssemblyShape(StrEnum):
     CURRENT_STATE = "current-state"
     ORDERING = "ordering"
     INTERVAL = "interval"
+    # #2654 — the state-entry anchor variant ("how long had I been X when Y")
+    DURATION_STATE = "duration-state"
 
 # ── guard morphology (checked first — a guard hit means None, even if a
 #    shape template would later match: R13 reject-on-relative-offset,
@@ -77,9 +93,13 @@ _RE_AGO = re.compile(
     r"this\s+(?:morning|week|month)|in\s+\d+\s+(?:days?|weeks?|months?|"
     r"years?))\b",
     re.IGNORECASE)
-# duration-state semantics (NEVER an interval): "how long" with a state
-# verb, "how many <unit> did I spend / had I been". NOT the bare "how long/
-# how much time passed between A and B" (a genuine two-anchor interval).
+# duration-state semantics that are STILL never a two-subject shape: "how
+# long" with a state verb ("how long have I been working before …"), "how
+# many <unit> did I spend / had I been", "how long did (I|the narrator)
+# take". NOT the bare "how long / how much time passed between A and B" (a
+# genuine two-anchor interval). #2654: the "… been <state> when <event>"
+# form is NO LONGER covered by this guard — it is the duration-state shape
+# (``_RE_DURATION_STATE``), matched BEFORE this guard in classify_question.
 _RE_DURATION = re.compile(
     r"\bhow\s+long\s+(?:had|have|did|was|were)\b|"
     r"\bhow\s+much\s+time\s+did\s+(?:i|the\s+narrator)\b|"
@@ -157,6 +177,23 @@ _RE_CURRENT = re.compile(
 _RE_CURRENT_STILL = re.compile(
     r"^\s*is\s+(?P<a>.+?)\s+still\s+(?:live|active|around|in\s+use|mine)"
     r"\??\s*$", re.IGNORECASE | re.DOTALL)
+# duration-state (#2654): "how long had I been <state> when <event>?" — the
+# past-elapsed-state form that needs a state's ENTRY date and the question's
+# as-of anchor (never an interval: the two anchors are the subject's state
+# entry and the as-of date, not two named events). Deliberately NARROW —
+# high precision is the point (R13/R15/R16):
+#   * "how long (had|have|has) <pronoun> been" — the past-state auxiliary
+#     frame. "how many <unit> had I been X" (the unit-prefixed twin) is NOT
+#     admitted in v1: no census row carries that form, and widening on an
+#     unmeasured surface is what the precision floor exists to prevent.
+#   * "when <event>" is REQUIRED: it is what separates this shape from the
+#     in-scope, deliberately-rejected "how long have I been working BEFORE
+#     …" family (a single-anchor duration with no reference event).
+_RE_DURATION_STATE = re.compile(
+    r"^\s*how\s+long\s+(?:had|have|has)\s+"
+    r"(?:i|you|we|they|he|she|the\s+narrator)\s+been\s+"
+    r"(?P<state>.+?)\s+when\s+(?P<event>[^?]+?)\??\s*$",
+    re.IGNORECASE | re.DOTALL)
 
 
 def classify_question(question: str) -> AssemblyShape | None:
@@ -164,17 +201,31 @@ def classify_question(question: str) -> AssemblyShape | None:
 
     Returns the AssemblyShape for questions the assembled branch may answer,
     else None (the caller falls through to the legacy lane byte-identically).
-    Guards run first — a duration/'ago'/frequency/N-ary/recency hit returns
-    None even when a later shape template would textually match (R13/R16).
+    Guards run first — an 'ago'/relative-offset, frequency/count, recency,
+    advice/preference or N-ary hit returns None even when a later shape
+    template would textually match (R13/R16). The duration-state template is
+    checked BEFORE the blanket duration guard, which keeps rejecting every
+    other duration/count morphology (#2654).
     """
     if not question or not question.strip():
         return None
     q = question.strip()
-    if (_RE_AGO.search(q) or _RE_DURATION.search(q)
-            or _RE_FREQUENCY.search(q) or _RE_RECENCY.search(q)
-            or _RE_ADVICE.search(q)):
+    # R13 absolute rejects — mutually independent "return None" clauses, so
+    # their order among themselves carries no semantics. They run FIRST:
+    # a relative offset kills a duration-state question too ("how long had I
+    # been X two weeks ago when Y").
+    if (_RE_AGO.search(q) or _RE_FREQUENCY.search(q)
+            or _RE_RECENCY.search(q) or _RE_ADVICE.search(q)):
         return None
     if _RE_OR_CHAIN.search(q):
+        return None
+    # #2654 — duration-state ("how long had I been X when Y"): the state is
+    # a single resolved subject and the span runs from its state entry to the
+    # as-of date. Checked BEFORE the duration guard so the guard keeps
+    # rejecting every OTHER duration/count morphology.
+    if _RE_DURATION_STATE.match(q):
+        return AssemblyShape.DURATION_STATE
+    if _RE_DURATION.search(q):
         return None
     if _RE_INTERVAL_SINCE.match(q):
         return AssemblyShape.INTERVAL
@@ -231,6 +282,13 @@ def extract_subject_terms(question: str,
     * ordering: A/B either side of the marker (split on the LAST " or ").
     * interval: the "between A and B" / "since A when B" spans.
     * current-state: the single subject of "the current status of X".
+    * duration-state (#2654): the SINGLE state subject of "how long had I
+      been <state> when <event>" — the state predicate peeled by
+      ``_state_term``. The "when <event>" clause is deliberately NOT
+      returned as a second term: the window's other end is the question's
+      as-of date, so demanding a second resolution would gate the shape on
+      a subject the arithmetic never reads (an event clause is "I attended
+      the meetup", not an entity name the resolver can be held to).
 
     Returns [] when the template yields no usable span (the caller's R1
     both-halves gate then keeps the fired decision false).
@@ -245,6 +303,9 @@ def extract_subject_terms(question: str,
     if shape is AssemblyShape.CURRENT_STATE:
         m = _RE_CURRENT.match(q) or _RE_CURRENT_STILL.match(q)
         return [_clean(m.group("a"))] if m else []
+    if shape is AssemblyShape.DURATION_STATE:
+        m = _RE_DURATION_STATE.match(q)
+        return [_state_term(m.group("state"))] if m else []
     if shape is AssemblyShape.INTERVAL:
         m = (_RE_INTERVAL_SINCE.match(q) or _RE_INTERVAL_BETWEEN.match(q)
              or _RE_INTERVAL_BETWEEN_LEAD.match(q))
@@ -358,6 +419,13 @@ class ResolveResult:
             # never fire with ZERO candidates — an empty resolved set is an
             # unresolved subject, not a match
             return bool(self.candidates) and not self.unresolved
+        if shape is AssemblyShape.DURATION_STATE:
+            # #2654: ONE graph anchor (the state subject). The window's
+            # other end is the as-of date the caller already supplied, so
+            # this shape takes the single-subject gate — demanding a second
+            # resolved subject would gate on a span the arithmetic never
+            # reads (see extract_subject_terms).
+            return bool(self.candidates) and not self.unresolved
         # ordering/interval: every term must resolve (a partial admit would
         # silently narrow the shape to a single subject — forbidden)
         return not self.unresolved and len(
@@ -393,6 +461,47 @@ _HEAD_CUT = re.compile(
     r"sold|delivered|received|ordered|moved|chewed|repaired|painted|fixed|"
     r"replaced|started|finished|installed|came|went|that|which|who|from|"
     r"by|with|in)\b", re.IGNORECASE)
+
+# ── #2654 duration-state: the STATE span is a PREDICATED state, not a bare
+#    entity name ────────────────────────────────────────────────────────
+# "a member of 'Book Lovers Unite'", "watching stand-up comedy specials
+# regularly", "taking guitar lessons" — the Task-3 resolver's legs must
+# probe the ENTITY the state is about, so the state predicate is peeled
+# before the term reaches them. Deliberately narrow, and only at the LEAD:
+# a determiner/possessive lead is left alone (``_candidate_names`` already
+# derives the article-stripped variants), and a gerund mid-span is part of
+# the entity's own name.
+_STATE_LEAD = re.compile(
+    r"^(?:an?\s+(?:(?:active|new|long[- ]time|founding)\s+)?"
+    r"(?:member|participant|user|owner|holder)\s+of|"
+    r"participation\s+in|attendance\s+at)\s+", re.IGNORECASE)
+#: the gerund forms of the same predicate ("watching X", "using X")
+_STATE_GERUND = re.compile(
+    r"^(?:being|watching|using|taking|learning|studying|practi[cs]ing|"
+    r"training|doing|playing|building|collecting|reading|writing|growing|"
+    r"brewing|attending|following|keeping|hosting|organi[sz]ing|visiting)\s+",
+    re.IGNORECASE)
+#: a trailing MANNER/duration adverbial ("… specials regularly") — the
+#: state's cadence, never part of the entity name
+_STATE_MANNER = re.compile(
+    r"\s+(?:regularly|consistently|frequently|daily|weekly|monthly|again|"
+    r"for\s+(?:a|some|several|many)\s+(?:time|while|years?|months?|weeks?))$",
+    re.IGNORECASE)
+
+
+def _state_term(span: str) -> str:
+    """The entity term inside a duration-state's STATE span.
+
+    "a member of 'Book Lovers Unite'" -> "'Book Lovers Unite'"; "watching
+    stand-up comedy specials regularly" -> "stand-up comedy specials".
+    Returns the ``_clean``-ed span unchanged when no predicate lead matches
+    — never an empty term.
+    """
+    t = _clean(span)
+    t = _STATE_LEAD.sub("", t, count=1).strip()
+    t = _STATE_GERUND.sub("", t, count=1).strip()
+    t = _STATE_MANNER.sub("", t, count=1).strip()
+    return _clean(t) or _clean(span)
 
 
 def _candidate_names(term: str) -> list[str]:
@@ -770,7 +879,9 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # resolved subject's OWN state row (the superseded couch's state IS the
 # answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
-# (Object status/supersededBy/supersededAt in ONE statement), dated spine
+# (Object status/supersededBy/supersededAt + createdAt — the ObjectRegistered
+# stamp #2654's duration-state entry date reads — in ONE statement), dated
+# spine
 # (aboutObject Points ∪ Event-aboutObject edges ∪ ask-lane eventId
 # join), evidence view (points with validity + EP). Per-lane date ladder
 # when → createdAt (sentinel-stripped) → eventId-joined startedAt (R2);
@@ -949,10 +1060,16 @@ def docker_walker_port(sdk) -> WalkerPort:
         # upstream, at the legs — see docker_resolver_port.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
-            "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt",
+            "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt, "
+            "o.createdAt",
             params={"ids": object_ids}).result_set
+        # #2654: ``createdAt`` is the ObjectRegistered stamp (the projection's
+        # ``coalesce($ca, $now)``) — additive, and the state-entry candidate
+        # the duration-state anchor reads (``_state_entry_date``, which takes
+        # it only as the EARLIER of {stamp, earliest dated row}).
         return [{"object_id": r[0], "name": r[1], "status": r[2],
-                 "superseded_by": r[3], "superseded_at": r[4]} for r in rows]
+                 "superseded_by": r[3], "superseded_at": r[4],
+                 "created_at": r[5]} for r in rows]
 
     def spine_rows(object_ids: list[str],
                    per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> list[dict]:
@@ -1014,7 +1131,10 @@ def docker_walker_port(sdk) -> WalkerPort:
 # UNCHANGED assemble_context/_render_block render (Task 6's byte-parity
 # invariant). CONTRACT (pinned here — Task 6 captures the byte-goldens):
 #   * state/section labels EMBED in hit content ("STATE (couch): superseded
-#     by sofa on 2026-09-01" / "STATE (bike #obj-b): live"); synthesized
+#     by sofa on 2026-09-01" / "STATE (bike #obj-b): live") and so do the
+#     #2654 duration-state anchors ("STATE ENTRY (couch): 2026-08-10" +
+#     "31 days from couch state entry (2026-08-10) to the as-of date
+#     (2026-09-10)"); synthesized
 #     rows carry NO `id` (why.enrich skips them) and lme_session_index-less
 #     -> _render_block prefixes "[session ?]".
 #   * superseded_by is DICT-shaped ({"content_snippet": name-or-snippet});
@@ -1121,6 +1241,33 @@ def _date_anchors(rows: list[dict]) -> tuple[_date | None, _date | None]:
     walker's tier sort (one date source everywhere)."""
     ds = _dated_instances(rows)
     return (min(ds), max(ds)) if ds else (None, None)
+
+
+def _state_entry_date(slices: AssemblySlices, oid: str) -> _date | None:
+    """#2654 — the subject's STATE-ENTRY date: the ObjectRegistered stamp
+    (the Object's ``createdAt``, read into the state slice by the walker) or
+    the earliest DATED row recorded about the subject (the status-start
+    fallback) — whichever is EARLIER. None when neither is usable.
+
+    Why the earlier of the two rather than the registration stamp alone: in
+    the v2 eval lane the stamp is the INGEST clock (the extractor registers
+    entities with no ``createdAt`` prop, so the projection writes ``now``),
+    while the row dates are the session dates the evidence actually carries
+    — trusting the stamp alone would date every state to the ingest RUN and
+    answer every duration question with the run's age. Both are "when this
+    state is known to have begun"; the earlier one is the one the graph can
+    defend. The as-of window is still the caller's ``question_date`` (the
+    walker already dropped rows dated after it), so this helper cannot
+    return a future-dated entry.
+    """
+    ds: list[_date] = []
+    for sr in slices.state_rows:
+        if sr.get("object_id") == oid:
+            d = _norm_date(sr.get("created_at"))
+            if d is not None:
+                ds.append(d)
+    ds.extend(_dated_instances(_oid_rows(slices, oid)))
+    return min(ds) if ds else None
 
 
 def _state_header_hit(sr: dict, label: str,
@@ -1266,6 +1413,57 @@ def synthesize_hits(
             hits.append(_state_header_hit(
                 sr, label, successors_verified,
                 question_date=question_date))
+    elif shape is AssemblyShape.DURATION_STATE:
+        # #2654 — the state-entry anchor variant. The window's GRAPH end is
+        # the subject's state entry (ObjectRegistered/status-start date, see
+        # _state_entry_date); its other end is the question's as-of date
+        # (``question_date`` — the SAME parameter the walker's as-of window
+        # and render_context's ``Current Date:`` header use), so the span is
+        # reproducible from the rendered context alone.
+        #
+        # TWO lines, each naming the dates it used: the reader (whose TR
+        # fragment computes elapsed time from the context's date
+        # annotations) gets the entry date even when the span cannot be
+        # stated, and can never mistake the as-of span for the question's own
+        # reference-event span ("when I attended the meetup") — that event is
+        # question context, and the subject's dated rows below carry its date
+        # when the graph holds it. No usable entry (undated subject, no
+        # registration stamp) emits NO line: an anchor line without a date
+        # would be a fabricated anchor.
+        #
+        # REJECTED ALTERNATIVE (recorded, never silently skipped): anchored
+        # the far end on the resolved "when <event>" date instead of the
+        # as-of date. Rejected because that clause is a first-person
+        # PREDICATE, not an entity name ("I attended the meetup", "I
+        # rearranged my living room furniture") — resolving it needs an
+        # entity-extraction pass this module does not have, and gating the
+        # shape on it fires on NOTHING (all 5 census rows phrase the event
+        # that way). The as-of end needs no resolution, and it is the same
+        # date render_context stamps on the block (``Current Date:``), so the
+        # reader reconciles both ends from the rendered context alone.
+        qd = _norm_date(question_date)
+        for oid, name in order:
+            entry = _state_entry_date(slices, oid)
+            if entry is None:
+                continue
+            if qd is not None and entry > qd:
+                # as-of BEFORE the state entry: the state had not begun as of
+                # the question's window, so there is no window to anchor —
+                # the same as-of polarity _state_header_hit applies to a
+                # post-as-of supersession (P2-4). The row dates are already
+                # as-of-windowed by the walker; only the ObjectRegistered
+                # stamp can reach here from outside the window.
+                continue
+            label = _display_label(name, oid, name in collide)
+            hits.append({"content": f"STATE ENTRY ({label}): "
+                                    f"{_fmt_date(entry)}",
+                         "kind": "duration-state"})
+            if qd is not None:
+                hits.append({"content": f"{(qd - entry).days} days from "
+                                        f"{label} state entry "
+                                        f"({_fmt_date(entry)}) to the as-of "
+                                        f"date ({_fmt_date(qd)})",
+                             "kind": "duration-state"})
 
     # per-subject sections (subject-major). Rows are re-sorted internally on
     # (date, id) so synthesize_hits output is INDEPENDENT of the input row

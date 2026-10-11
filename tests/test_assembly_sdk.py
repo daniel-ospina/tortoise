@@ -709,6 +709,57 @@ def test_positive_fts_paraphrase_fires(sdk, monkeypatch):
     assert "STATE (couch): superseded by sofa on 2026-09-01" in aa.evidence
 
 
+def test_duration_state_fires_with_the_state_entry_anchor(sdk, monkeypatch):
+    """#2654: a duration-state question fires on the resolved state subject
+    and renders the two anchors it used — the subject's state ENTRY date
+    (ObjectRegistered stamp or earliest dated row, whichever is EARLIER;
+    in the v2 lane the stamp is the ingest clock, so the row date wins) and
+    the caller's as-of date.
+
+    NOT a byte golden on purpose: this test was authored without a live
+    docker lane, so the exact evidence bytes were never CAPTURED, and the
+    R17 policy forbids inventing them. The assertions are structural
+    instead — the anchor/span lines, the additive ``created_at`` walker
+    read, and the absence of the INTERVAL line (the shape must not leak
+    into the interval render)."""
+    ag.build_base_graph(sdk)
+    # pin the ObjectRegistered stamp to the story date (the fixture's own
+    # idiom for byte-reproducible headers): an unpinned stamp is build
+    # wall-clock, and the golden below must not depend on the run date
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'couch'}) SET o.createdAt = $ts",
+        params={"ts": "2026-08-10T00:00:00Z"})
+    aa = run_ask_assembled(
+        sdk,
+        "how long had I been using the couch when I rearranged the living "
+        "room?",
+        question_date=Q_DATE)
+    assert aa.fired is True
+    assert aa.shape == "duration-state"
+    assert any(s["name"] == "couch" for s in aa.subjects), aa.subjects
+    # the additive walker read: the state slice now carries the stamp
+    assert aa.slices["state_rows"][0].get("created_at") is not None, \
+        aa.slices["state_rows"]
+    assert "STATE ENTRY (couch): 2026-08-10" in aa.evidence, aa.evidence
+    assert ("31 days from couch state entry (2026-08-10) to the as-of date "
+            "(2026-09-10)") in aa.evidence, aa.evidence
+    # the state-entry shape is NOT the interval render
+    assert "days between " not in aa.evidence, aa.evidence
+
+
+def test_duration_state_unresolved_state_subject_falls_through(
+        sdk, monkeypatch):
+    """#2654 R1: a duration-state question whose STATE subject resolves
+    nowhere fires NOTHING — the legacy lane answers it byte-identically to
+    flag OFF (never a block anchored on an unresolved subject)."""
+    ag.build_base_graph(sdk)
+    q = ("how long had I been using the hoverboard when I rearranged the "
+         "living room?")
+    off = _ask(sdk, monkeypatch, q, flag_on=False)
+    on = _ask(sdk, monkeypatch, q, flag_on=True)
+    assert on["evidence"] == off["evidence"]
+
+
 def test_out_of_subgraph_gold_a1_b0(sdk, monkeypatch):
     """R16(b) pre-registered canary: flag-OFF legacy ADMITS ≥1 of the
     out-of-subgraph gold (A≥1) while the assembled arm admits ZERO (B=0)."""
