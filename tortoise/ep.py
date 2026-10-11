@@ -964,7 +964,13 @@ class TortoiseEP:
                             affected.add(mid)
                             new_frontier.append(mid)
                     # Operator-less hops (#888 W5): direct IMPL/NAND edges
-                    # between plain Points (operator-mediated hops above).
+                    # (operator-mediated hops above). #7902/#7926: WIDENED —
+                    # the direct-edge WRITE path admits the four epistemic
+                    # labels, so this hop must too, and `_affected_factors`
+                    # Batch 3 widens in lockstep so the admitted endpoint
+                    # stays a factor participant. The hazard #7853 flagged is
+                    # the HALF-widened state (no factor → recompute from empty
+                    # natural parameters), never the both-sides widening.
                     # Draft endpoints never propagate (#780).
                     conds = ["a.id IN $ids", "b.id <> a.id",
                              epistemic_disjunction("b")]
