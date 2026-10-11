@@ -33,7 +33,7 @@ back, and this module refuses to pretend otherwise: see
 ``VALUE_CONFIRMED_REFUSAL`` and the ``value_confirmed`` stage, which is a
 refusal string rather than a number.
 
-The five stages, and exactly what each one is evidence of:
+The six stages, and exactly what each one is evidence of:
 
 ===== ================== ============= ==========================================
 stage  granularity        source        evidence
@@ -46,7 +46,9 @@ stage  granularity        source        evidence
        ``memory_produced``              ``CONTAINS`` -> extraction produced a claim
 4      org / time         Supabase      >= 1 retrieval-tool ``mcp_tool_call`` AFTER
        ``recall_attempted`` analytics    the first memory was ever produced
-5      --                 --            NOT MEASURABLE (see the refusal constant)
+5      org / time         Supabase      >= 1 of those calls RETURNED >= 1 item
+       ``recall_returned`` analytics    (``result_count``, #3675)
+6      --                 --            NOT MEASURABLE (see the refusal constant)
        ``value_confirmed``
 ===== ================== ============= ==========================================
 
@@ -57,6 +59,26 @@ recorded observation of the read side, and mislabelling it as activation is
 precisely the error this lane exists to fix — hence no ``activated`` key, no
 activation rate, anywhere in the payload.
 
+STAGE 4's GATE AND ITS COUNT HAVE DIFFERENT SCOPES — #4039. The gate is the org
+DEFAULT graph's ``first_memory_at``; the count is the org-wide analytics stream
+(``analytics_events`` carries no ``graph_id``). A multi-graph org that produced
+memory only outside the default graph therefore has no gate, and for such an org
+``no_memory_produced_in_lifetime`` would be a claim about the ORG derived from a
+GRAPH-scoped absence — false, and exactly the state inversion this module
+exists to prevent. When that org's windowed retrieval count is EXACT AND
+POSITIVE, the stage refuses instead: ``unavailable`` /
+``no_memory_in_default_graph_org_scope_unknown``. The ambiguity is surfaced, not
+asserted away; the rows where the count cannot be established (withheld) are
+disclosed in ``LIMITATIONS``.
+
+Stage 5 is where that stops being true. Since #3675 the ``mcp_tool_call``
+props carry ``result_count`` — the number of items the call returned — so a
+retrieval that returned content is distinguishable from one that returned
+nothing, and the attempt/answer split is MEASURED rather than refused. What it
+is NOT is a value judgement: a returned item is a CANDIDATE. Nothing recorded
+says the candidate was relevant, read, or used, so stage 5 is an UPPER BOUND on
+"answered from memory" and is never reported as one. ``value_confirmed`` (stage
+6) therefore stays a refusal — see its constant for exactly which gap remains.
 ZERO vs NO-SIGNAL
 -----------------
 Every stage carries ``state`` in ``{measured, unavailable, not_measurable}``
@@ -111,8 +133,16 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SURFACE = "activation_scorecard"
+
+# Stage 5's prop (#3675): the number of items a tool call returned, emitted on
+# the ``mcp_tool_call`` analytics row by the hosted MCP dispatch seam. The value
+# is an int, or ``None``/absent when the call's RESULT SHAPE made the count
+# unknowable (a write op, a refusal, a row written before #3675 shipped).
+# ``0`` and ``None`` are different facts and are never collapsed here: ``0`` is
+# "the tool ran and returned nothing", ``None`` is "we cannot say".
+RESULT_COUNT_PROP = "result_count"
 
 # ── Stage 4: the pinned retrieval-tool allowlist ───────────────────────────
 # PINNED BY NAME — deliberately NOT derived from ``readOnlyHint`` / ``_ro()``.
@@ -147,30 +177,61 @@ RETRIEVAL_TOOL_ALLOWLIST_WIDE: frozenset[str] = RETRIEVAL_TOOL_ALLOWLIST | froze
 # The analytics event the hosted MCP dispatch point emits per client tool call.
 MCP_TELEMETRY_EVENT = "mcp_tool_call"
 
+# The analytics read's PAGE SIZE, handed to ``SupabaseControlPlane.query_all``.
 # PostgREST caps an unpaginated read at the project's max-rows (1000 by
-# default). ``SupabaseControlPlane.query`` exposes no offset/Range, so a full
-# page means the count is only a LOWER BOUND — a lower bound is not a count,
-# and is reported as ``unavailable``, never as a measured value.
+# default), so this is also the hint that makes the common case one request.
+# It is a HINT, not an assumption: a deployment capped LOWER now costs more
+# pages rather than silently under-counting, because the walk ends on an EMPTY
+# page, never on a page that is merely short (#4038 — the pre-fix read took a
+# full page for a lower bound and refused; see the limitations).
 RECALL_PAGE_CAP = 1000
 
+# The MOST pages the stage-4 walk will read before it refuses to certify the
+# count (#4038). A bound is required — its length IS the read's latency and
+# memory, and the read sits on a per-org path with a 30s cohort timeout — but
+# exceeding it must stay a refusal (`analytics_page_cap_truncated`), never a
+# partial count published as measured. 100 pages is 100x the size at which the
+# pre-fix read gave up entirely: an org sustaining >100k `mcp_tool_call` rows in
+# one window still reads `unavailable`, honestly, and the fix for that tail is
+# a server-side aggregate, not a longer walk this surface holds in memory.
+RECALL_MAX_PAGES = 100
+
+# #4039: the stage-4 reason for the GRAPH-scope ambiguity. A SEPARATE reason (not
+# a reworded ``no_memory_produced_in_lifetime``) because the two are different
+# facts: that one says the org has nothing to recall FROM, this one says the org
+# cannot be reached by this gate — its memory may live outside the default graph,
+# which this read never opens. Consumers switch on ``state``, so the qualifying
+# belongs in BOTH the state (`unavailable`, not `not_measurable`) and the reason:
+# a scope-qualified reason under a `not_measurable` state would keep the
+# mis-scoped classification while fixing only the sentence beside it.
+GRAPH_SCOPE_UNKNOWN_REASON = "no_memory_in_default_graph_org_scope_unknown"
 # Default window = the beta's own <= 24h criterion (product-success-eval.md §5).
 DEFAULT_WINDOW = timedelta(hours=24)
 # A window this wide is a typo or an attempt to scan the whole history; the
 # scorecard is a beta instrument, not an archive query.
 MAX_WINDOW = timedelta(days=90)
 
-# ── Stage 5: the refusal ───────────────────────────────────────────────────
-# A string, not a number. Nothing in the recorded data distinguishes a
-# retrieval that returned remembered content from one that returned nothing.
+# ── Stage 6: the refusal ───────────────────────────────────────────────────
+# A string, not a number — and since #3675 the reason is NARROWER than it was.
+# The result-bearing telemetry now exists (``result_count`` on ``mcp_tool_call``,
+# read into stage 5), so "nothing distinguishes a retrieval that returned
+# remembered content from one that returned nothing" is no longer true and must
+# not be repeated: stage 5 measures exactly that. What no recorded signal says
+# is whether a RETURNED item was USED — relevance, dwell, dismissal and reuse
+# are unrecorded, and the two stated blockers (#3518/#3519, captured sessions
+# not being findable/retrievable) are CLOSED. So the remaining gap is a claim
+# about VALUE, which is what this stage is named for.
 VALUE_CONFIRMED_REFUSAL = (
-    "not_measurable: no recorded signal distinguishes a retrieval that returned "
-    "remembered content from one that returned nothing. mcp_tool_call.status='ok' "
-    "means only that the tool did not raise, and the question_answered event is an "
-    "onboarding question, not retrieval. Blockers: result-bearing telemetry "
-    "(result_count/abstained) on the mcp_tool_call properties — a cross-epic change "
-    "to the #888/#889-owned allowlist — and #3518/#3519, captured sessions are not "
-    "FTS-findable / not semantically retrievable, so storage does not yet imply "
-    "retrieval. 'answered-from-memory' stays UNMEASURED, not zero."
+    "not_measurable: the retrieval returned content, but nothing recorded says "
+    "that the content was USED. stage 5 (recall_returned) reports calls whose "
+    "result_count >= 1 (#3675) — a returned item is a CANDIDATE, not a consumed "
+    "answer: relevance, dwell, dismissal and reuse are not recorded by any "
+    "surface, so 'answered-from-memory' can be bounded from above and not "
+    "confirmed. Per-session attribution is also impossible (the telemetry "
+    "carries no session_id and analytics_events no graph_id), and the "
+    "result_count prop is forward-only — a window that predates its deploy is "
+    "refused by stage 5 rather than read as a zero. 'value_confirmed' stays "
+    "UNMEASURED, not zero."
 )
 
 # ── The queries ────────────────────────────────────────────────────────────
@@ -369,9 +430,10 @@ def _stage(value: Any, unit: str | None, reason: str | None = None,
     reason means unavailable" — is right for the RECOVERABLE failures (store
     unreachable, write path unconfigured, page cap, bad data): retry or repair
     fixes them, so the metric exists and merely could not be read just now.
-    An org that has never produced memory has nothing to recall FROM, and no
-    retry changes that — so that case is ``not_measurable`` and must say so
-    explicitly rather than inheriting ``unavailable``.
+    An org that has never produced memory — and has no contradicting org-wide
+    retrieval count (see :data:`GRAPH_SCOPE_UNKNOWN_REASON`) — has nothing to
+    recall FROM, and no retry changes that, so that case is ``not_measurable``
+    and must say so explicitly rather than inheriting ``unavailable``.
     """
     if value is None:
         return {"state": state or (STATE_UNAVAILABLE if reason
@@ -497,6 +559,31 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
                   truncated: bool = False,
                   memory_sessions: int | None = None,
                   window: tuple[str, str] | None = None) -> tuple[dict, dict]:
+    """Stages 4 AND 5, and the shared detail (#3675 extended this to stage 5).
+
+    Stage 4 is returned; stage 5's cell rides in ``detail["recall_returned_cell"]``
+    for ``assemble`` to lift into ``stages``. The two-cell-in-a-tuple shape is
+    deliberately NOT used: ``recall_stages`` has a long-standing 2-tuple
+    contract with ~25 call sites (tests included) and the stage-4 cell is what
+    they unpack — changing the arity would churn every one of them for a stage
+    that is derived FROM stage 4's outcome anyway. The cell is popped back out
+    of ``detail`` by ``assemble``, so it never reaches the payload's ``detail``.
+
+    Stage 5 inherits stage 4's refusals verbatim (see ``recall_returned_cell``),
+    so this wrapper adds no precedence of its own.
+    """
+    stage, detail = _recall_attempted_stage(
+        rows, first_memory_at, reason=reason, truncated=truncated,
+        memory_sessions=memory_sessions, window=window)
+    detail["recall_returned_cell"] = recall_returned_cell(stage, detail)
+    return stage, detail
+
+
+def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | None,
+                            reason: str | None = None,
+                            truncated: bool = False,
+                            memory_sessions: int | None = None,
+                            window: tuple[str, str] | None = None) -> tuple[dict, dict]:
     """Derive the stage-4 cell from analytics rows.
 
     ``rows`` may be ``None`` to signal "the store was not read" (unreachable,
@@ -532,8 +619,14 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         "recall_attempted_any": None,
         "recall_attempted_after_memory": None,
         "recall_attempted_after_memory_wide": None,
+        # #3675 stage 5 — exact-or-absent, like every other fold's output.
+        "recall_returned_after_memory": None,
+        "rows_without_result_count": None,
+        "rows_uncountable_result_count": None,
+        "result_count_prop": RESULT_COUNT_PROP,
         "recall_rows_fetched": None,
         "recall_page_cap": RECALL_PAGE_CAP,
+        "recall_page_limit": RECALL_MAX_PAGES,
         "recall_truncated": False,
         "unparseable_analytic_rows": None,
         "unclassifiable_analytic_rows": None,
@@ -561,8 +654,10 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     # `recall_attempted_any` on the no-memory path, which is otherwise an
     # UNVERIFIED whole-history count presented as a windowed one. It sits above
     # the `first_memory_at is None` and `truncated` branches so those paths
-    # carry the same doubt; the STAGE precedence is left unchanged (an org with
-    # no memory stays `not_measurable`, it does not become `unavailable`).
+    # carry the same doubt; the STAGE precedence is otherwise unchanged (an org
+    # with no memory AND a withheld/`0` org-wide count stays `not_measurable`;
+    # the one #4039 exception below — an exact, POSITIVE org-wide count — is
+    # what becomes `unavailable`).
     window_failed = False
     if window is not None:
         out_of_range = 0
@@ -620,6 +715,21 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # would report nothing-to-measure for an org that has memory.
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
+        # `recall_attempted_any` is the count over the ORG-WIDE windowed stream
+        # and it is emitted ONLY when exact (above), so a POSITIVE value here is
+        # a positive, verified observation that this org made retrieval calls in
+        # the window while the DEFAULT graph shows no memory ever produced —
+        # #4039. The absence is graph-scoped, the calls are org-wide, so the
+        # org-scope claim `no_memory_produced_in_lifetime` is not established:
+        # the org's memory may live in a graph this read does not open. Refuse
+        # the state (the metric exists and this gate cannot reach it) rather
+        # than assert it. The SAME pinned retrieval allowlist is the trigger, so
+        # the evidence and the count are one definition. `None` (withheld) or
+        # `0` (exact zero) leaves no org-wide activity to contradict the gate,
+        # so a single-graph org with no memory stays `not_measurable` as before.
+        if detail["recall_attempted_any"]:
+            return _stage(None, "calls", GRAPH_SCOPE_UNKNOWN_REASON,
+                          state=STATE_UNAVAILABLE), detail
         # No memory has ever been produced, so no retrieval can have been
         # "from memory". Report the raw count for visibility, but the stage is
         # unmeasurable rather than zero.
@@ -657,6 +767,23 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         rows, memory_at, RETRIEVAL_TOOL_ALLOWLIST)
     wide, wide_unparseable, wide_unclassifiable = _count_allowlisted(
         rows, memory_at, RETRIEVAL_TOOL_ALLOWLIST_WIDE)
+    # #3675 stage 5: the result-bearing half of the NARROW population — the
+    # same rows stage 4 counts as attempts. Folded here, beside the counts
+    # above, so the two stages cannot disagree about which rows they are looking
+    # at. `_count_returned`'s unparseable / unclassifiable outputs are DISCARDED
+    # on purpose: they are computed over the identical population with the
+    # identical helpers, so they are exactly the values stage 4 already refuses
+    # on, and stage 5 inherits that refusal (`recall_returned_cell`). Keeping a
+    # second copy would invite the two stages to disagree about the same rows.
+    #
+    # NARROW ONLY — see `recall_returned_cell`: the wide set's known-id reads
+    # return a single object with no item collection and are uncountable by
+    # shape, so folding them in would permanently refuse the stage.
+    returned, missing_count, uncountable_count, _, _ = _count_returned(
+        rows, memory_at, RETRIEVAL_TOOL_ALLOWLIST)
+    detail["recall_returned_after_memory"] = returned
+    detail["rows_without_result_count"] = missing_count
+    detail["rows_uncountable_result_count"] = uncountable_count
     detail["unparseable_analytic_rows"] = unparseable
     detail["unclassifiable_analytic_rows"] = unclassifiable
     # The wide list is the sensitivity bound (a superset). Its excluded rows are
@@ -716,22 +843,15 @@ def _count_allowlisted(rows: Iterable[dict], after: datetime | None,
     unparseable = 0
     unclassifiable = 0
     for row in rows:
-        if not isinstance(row, dict):
-            # A store/proxy can return an array of non-mapping elements; that
-            # is a row we cannot read a tool_name out of, so it makes the count
-            # a lower bound — exactly like an unreadable `properties` value.
+        props = _row_props(row)
+        if props is None:
+            # A store/proxy can return an array of non-mapping elements, or a
+            # `properties` value that will not parse; that is a row we cannot
+            # read a tool_name out of, so it makes the count a lower bound —
+            # exactly like an unreadable `properties` value.
             unclassifiable += 1
             continue
-        props = row.get("properties")
-        tool: str | None = None
-        if isinstance(props, dict):
-            tool = str(props.get("tool_name") or "") or None
-        elif isinstance(props, str):
-            try:
-                import json
-                tool = str((json.loads(props) or {}).get("tool_name") or "") or None
-            except Exception:
-                tool = None
+        tool = _row_tool_name(props)
         if tool is None:
             unclassifiable += 1
             continue
@@ -751,26 +871,217 @@ def _count_allowlisted(rows: Iterable[dict], after: datetime | None,
     return total, unparseable, unclassifiable
 
 
+def _row_props(row) -> dict | None:
+    """A row's ``properties`` as a mapping, or ``None`` when unreadable.
+
+    The writer stores a jsonb object, but a store or proxy can hand back the
+    column as a JSON STRING — both shapes are measured live here, so both are
+    read. ``None`` means "this row's properties cannot be read at all", which
+    every caller must count as an exclusion rather than skip silently: a
+    skipped row makes the count a lower bound that still looks exact.
+    """
+    if not isinstance(row, dict):
+        return None
+    props = row.get("properties")
+    if isinstance(props, dict):
+        return props
+    if isinstance(props, str):
+        try:
+            import json
+            parsed = json.loads(props)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _row_tool_name(props: dict) -> str | None:
+    """``tool_name`` from a row's properties mapping, or ``None`` when absent.
+
+    ``str(...) or None`` (not a bare ``or None``) is deliberate and is the
+    behaviour this replaced: a non-string name (an int, say) is coerced, and an
+    empty one reads as unreadable.
+    """
+    return str(props.get("tool_name") or "") or None
+
+
+def _count_returned(rows: Iterable[dict], after: datetime | None,
+                    allow: frozenset[str] | None = None) -> tuple[int, int, int, int, int]:
+    """Count allowlisted rows AT/AFTER ``after`` that RETURNED >= 1 item (#3675).
+
+    Returns ``(returned, missing_result_count, uncountable_result_count,
+    unparseable, unclassifiable)``.
+
+    ``returned`` counts rows whose ``properties.result_count`` is an int >= 1.
+    A ``0`` — the tool ran and returned nothing — is a real, measured row and is
+    deliberately NOT counted.
+
+    The two exclusion counters are DIFFERENT FACTS and are kept apart, because
+    they call for different responses:
+
+    * ``missing_result_count`` — the prop is not on the row AT ALL. The
+      ``mcp_tool_call`` emitter writes it unconditionally (#3675), so an absent
+      key means the row predates that deploy. Forward-only, unrecoverable for
+      existing rows, and invisible from inside the payload unless it is counted
+      here — the reason the stage refuses instead of publishing the resulting
+      lower bound as a count.
+    * ``uncountable_result_count`` — the key IS there and is not a count
+      (``null``, a bool, a negative). That is a retrieval whose result carried
+      no item collection: an SDK failure returned through ``_safe``, an
+      unrecognised recall mode, or a result shape that no longer matches the
+      three measured ones. Also a lower bound, also refused — and named
+      separately so a deploy-boundary window is not confused with a shape
+      regression.
+
+    ``False`` is not an int here even though Python says it is, and a NEGATIVE
+    is not a count. The row-reading discipline is shared with
+    ``_count_allowlisted`` through ``_row_props``/``_row_tool_name``; a second
+    copy is how the two folds would come to disagree about which rows they are
+    even counting.
+    """
+    allow = allow if allow is not None else RETRIEVAL_TOOL_ALLOWLIST
+    returned = 0
+    missing_result_count = 0
+    uncountable_result_count = 0
+    unparseable = 0
+    unclassifiable = 0
+    for row in rows:
+        props = _row_props(row)
+        if props is None:
+            unclassifiable += 1
+            continue
+        tool = _row_tool_name(props)
+        if tool is None:
+            unclassifiable += 1
+            continue
+        if tool not in allow:
+            continue
+        stamp = row.get("created_at")
+        if after is not None:
+            try:
+                stamp_dt = _parse_iso(stamp, "created_at")
+            except (WindowError, TypeError):
+                unparseable += 1
+                continue
+            if stamp_dt < after:
+                continue
+        if RESULT_COUNT_PROP not in props:
+            missing_result_count += 1
+            continue
+        count = props.get(RESULT_COUNT_PROP)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            uncountable_result_count += 1
+            continue
+        if count >= 1:
+            returned += 1
+    return (returned, missing_result_count, uncountable_result_count,
+            unparseable, unclassifiable)
+
+
 def value_confirmed_stage() -> dict:
-    """Stage 5 — a refusal, always. Never a number, never nullable-to-mean-zero."""
+    """Stage 6 — a refusal, always. Never a number, never nullable-to-mean-zero."""
     return {"state": STATE_NOT_MEASURABLE, "value": None, "unit": None,
             "reason": VALUE_CONFIRMED_REFUSAL}
 
 
+def recall_returned_cell(stage_4: dict, detail: dict) -> dict:
+    """Stage 5's cell, derived from stage 4's outcome and the same fold (#3675).
+
+    Stage 5 asks a strictly narrower question than stage 4 ("of those calls,
+    how many returned anything"), so it INHERITS every refusal stage 4 can
+    raise rather than re-deriving its own precedence — a truncated page, an
+    out-of-range row, an unplaceable timestamp and a never-produced-memory org
+    all make both stages unreadable, and two copies of that ladder would drift.
+
+    On the exact path it adds TWO refusals of its own, both because they make
+    the count a LOWER BOUND that would otherwise be published as if it were
+    exact:
+
+    * a call whose row has no ``result_count`` at all — the emitter writes the
+      key unconditionally, so this is a row written before #3675 shipped
+      (forward-only history);
+    * a call whose ``result_count`` is present but is not a count — a result
+      with no item collection (an SDK failure surfaced by ``_safe``, an
+      unrecognised recall mode, a shape that no longer matches the three
+      measured ones).
+
+    The two are named separately so an operator can tell a deploy-boundary
+    window from a shape regression.
+
+    The NARROW allowlist only. The wide set exists as a sensitivity bound on
+    the ATTEMPT (stage 4), and it deliberately includes known-id reads like
+    ``tortoise_get_point``, whose result is a single object with no item
+    collection — uncountable BY SHAPE, forever. Folding that into stage 5 would
+    refuse the stage for any org that ever read a point by id.
+    """
+    if stage_4.get("state") != STATE_MEASURED:
+        return {"state": stage_4.get("state"), "value": None,
+                "unit": "calls", "reason": stage_4.get("reason")}
+    if detail.get("rows_without_result_count"):
+        return _stage(None, "calls", "result_count_not_recorded")
+    if detail.get("rows_uncountable_result_count"):
+        return _stage(None, "calls", "result_count_unreadable")
+    returned = detail.get("recall_returned_after_memory")
+    if returned is None:
+        # Exact-or-absent: the fold did not run, so there is no count to report
+        # and a literal 0 here would assert one.
+        return _stage(None, "calls", "recall_returned_not_counted")
+    return _stage(returned, "calls")
+
+
 # ── Assembly ───────────────────────────────────────────────────────────────
 LIMITATIONS: tuple[str, ...] = (
-    "value_confirmed ('answered-from-memory') is NOT MEASURABLE: no recorded "
-    "signal carries a result count, so a retrieval that returned nothing is "
-    "indistinguishable from one that returned remembered content.",
+    "value_confirmed ('answered-from-memory') is NOT MEASURABLE, and since "
+    "#3675 for a NARROWER reason than before: stage 5 (recall_returned) reads "
+    "`result_count` off the mcp_tool_call props, so a retrieval that returned "
+    "nothing IS now distinguishable from one that returned remembered content. "
+    "What no recorded signal says is whether the RETURNED content was USED — "
+    "relevance, dwell, dismissal and reuse are unrecorded. Stage 5 is "
+    "therefore an UPPER BOUND on 'answered from memory', not a value measure.",
     "recall_attempted is an ATTEMPT, not an answer — it must never be read as "
     "activation, and no activation rate is derivable from it.",
+    "recall_returned is a RETURN, not an answer. It counts retrieval calls "
+    "whose `result_count` is >= 1 (#3675), so it says the retrieval surface "
+    "handed back candidates — never that a candidate was relevant, read, or "
+    "used. Reading it as 'value confirmed' is exactly the mislabelling this "
+    "module exists to remove.",
+    "recall_returned's `result_count` prop is FORWARD-ONLY: rows written "
+    "before #3675 shipped carry no count, so a retrieval row with NO "
+    "`result_count` makes the stage `unavailable` "
+    "(`result_count_not_recorded`), not a count. The prop's own deploy time "
+    "is recorded nowhere, so a window that straddles it cannot be identified "
+    "from the payload — the stage refuses, and a window wholly after the "
+    "deploy measures normally. (`detail.rows_without_result_count` names how "
+    "many rows were unreadable.)",
+    "recall_returned refuses on a PRESENT but unreadable `result_count` too "
+    "(`result_count_unreadable`, `detail.rows_uncountable_result_count`): an "
+    "SDK failure surfaced by `_safe`, an unrecognised recall mode, or a result "
+    "shape that no longer matches the three the MCP seam counts. Some of those "
+    "rows certainly returned nothing (a failed call did), so this is the "
+    "CONSERVATIVE direction — the alternative would publish a lower bound as a "
+    "count. The two counters are separate so a shape regression is not read as "
+    "a deploy-boundary window. (The underlying reason a failed call is hard to "
+    "tell apart here is that `_safe` swallows the exception, so the row reads "
+    "`status: 'ok'` — a separate defect.)",
+    "recall_returned uses the NARROW retrieval allowlist only, where stage 4 "
+    "reports both. The wide set adds known-id reads (`tortoise_get_point` et "
+    "al) whose result is a single object with no item collection: uncountable "
+    "by construction, so folding them into this stage would refuse it for any "
+    "org that ever read a point by id.",
+    "recall_returned inherits a WEAKER identity condition than it looks: "
+    "`result_count` is an integer (or null), so it is content-free by "
+    "construction — but it is also SHAPE-derived, not tool-derived. A tool "
+    "that returns a collection under `result`/`results`/`nodes` is counted "
+    "whatever its name, and a retrieval tool whose result shape changed to "
+    "none of those would stop carrying a count and drive stage 5 to "
+    "`unavailable` (`result_count_unreadable`) rather than to a wrong number.",
     "Per-session recall attribution is IMPOSSIBLE: the telemetry carries no "
-    "session_id, so stage 4 is org/time-scoped while stages 1-3 are "
+    "session_id, so stages 4 and 5 are org/time-scoped while stages 1-3 are "
     "session-scoped. This is an activation FUNNEL of mixed granularity, not a "
     "per-session claim.",
     "Stages 1-3 cover the org DEFAULT graph only (the endpoint is an org-level "
-    "surface). Stage 4 is org-wide. For a multi-graph org the two denominators "
-    "differ; the graph_scope field states this in the payload.",
+    "surface). Stages 4 and 5 are org-wide. For a multi-graph org the two "
+    "denominators differ; the graph_scope field states this in the payload.",
     "recall_attempted is org-scoped, so it counts only events carrying this "
     "org's id. A locally-hosted (stdio) MCP server emits the event but with an "
     "empty org_id (no request context), and the REST recall surface emits no "
@@ -794,7 +1105,7 @@ LIMITATIONS: tuple[str, ...] = (
     "different sources. Detectability of (2) is tracked in #3677.",
     "memory_produced counts extraction-SUCCEEDED sessions (a non-transcript "
     "Point exists). It is not a measure of memory that HELPED anyone — that is "
-    "value_confirmed, which is unmeasurable.",
+    "value_confirmed, which is unmeasurable; stage 5 bounds it from above.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
     "The analytics leg's interval is [since, until) — the same as the graph "
@@ -802,16 +1113,23 @@ LIMITATIONS: tuple[str, ...] = (
     "GUARANTEE, not a limitation: it is asserted by a test, because the two "
     "legs are separate queries and could drift.",
     "Self-hosted orgs are not covered: the analytics store is hosted-lane only.",
-    "The analytics read assumes the store's page limit is RECALL_PAGE_CAP. A "
-    "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "
-    "a short page that looks complete, so recall_attempted would read measured "
-    "while under-counting. The cap cannot be probed from here.",
-    "A BUSY org that HAS produced memory (>= RECALL_PAGE_CAP MCP tool calls "
-    "in the window) reads `unavailable` (`analytics_page_cap_truncated`), not "
-    "a count: the analytics leg is a single unpaginated read, so a full page "
-    "is a lower bound. (An org with no lifetime memory reads "
-    "`not_measurable` instead — the no-memory check deliberately precedes the "
-    "page-cap check.) Paging the leg to completion is #4038.",
+    "The analytics read is keyset-paged to COMPLETION on `id` (#4038): it walks "
+    "pages until the store returns an EMPTY one, so a page that is merely SHORT "
+    "— a deployment whose PostgREST db-max-rows (or a proxy cap) sits below "
+    "`recall_page_cap`, which used to look complete and under-count — costs "
+    "more requests instead of a smaller number. Completion is REFUSED, and the "
+    "stage reads `unavailable` (`analytics_page_cap_truncated`), when the walk "
+    "cannot certify it: it exceeds `recall_page_limit` pages, a page is not "
+    "strictly ascending on `id` (the server ignored `order`), a page carries no "
+    "usable `id` to carry the cursor, or the store will not advance past the "
+    "cursor. A lower bound is never published as a count.",
+    "A BUSY org no longer reads `unavailable` for being busy: the pre-#4038 read "
+    "stopped at `recall_page_cap` (1000) rows and called a full page a lower "
+    "bound, which landed `unavailable` on exactly the most-used orgs. The "
+    "binding bound is now `recall_page_cap * recall_page_limit` rows in ONE "
+    "window; past it the stage still refuses rather than under-reporting. (An "
+    "org with no lifetime memory reads `not_measurable` instead — the "
+    "no-memory check deliberately precedes the page-cap check.)",
     "Stage 4 is GATED on `first_memory_at` from the org DEFAULT graph while it "
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "
@@ -819,7 +1137,28 @@ LIMITATIONS: tuple[str, ...] = (
     "are counted in `detail.recall_attempted_any` when that count is exact "
     "(a windowed, untruncated, fully-placeable read; otherwise it is None and "
     "the exclusion counters name why). The state is graph-scoped, "
-    "the count is org-wide. Surfacing the ambiguity is #4039.",
+    "the count is org-wide. #4039: a windowed retrieval CALL is counted by its "
+    "`tool_name` alone — `status` and `result_count` are not read — so the "
+    "count is calls, not answers: a call that FAILED (`status` `exec_error`) or "
+    "returned nothing (`result_count` 0) is counted exactly like one that "
+    "returned items. When that exact count is POSITIVE the stage no longer "
+    "makes the org-scope claim — it reports `unavailable` "
+    f"(`{GRAPH_SCOPE_UNKNOWN_REASON}`). The refusal is therefore deliberately "
+    "CONSERVATIVE: this read cannot tell an org whose memory lives in another "
+    "graph from a single-graph org whose only windowed recall activity failed "
+    "or returned nothing, so such a single-graph org reads `unavailable` "
+    "rather than `not_measurable`. RESIDUAL, not fixed: "
+    "a multi-graph org whose count is withheld (a truncated page, an "
+    "unplaceable or unclassifiable row, an out-of-window row) or is an exact "
+    "`0` (no retrieval call in the window) still reads "
+    "`no_memory_produced_in_lifetime`, because no org-wide call count "
+    "contradicts "
+    "the graph-scoped absence — this read cannot enumerate the org's other "
+    "graphs, so that case is indistinguishable from a single-graph org with no "
+    "memory. Making the gate itself org-scoped is the fix that would remove the "
+    "residual; it is a new read (an org's graph list, then a lifetime memory "
+    "scan per graph) rather than an instrumentation-definition choice — "
+    "tracked in #8149.",
     "`detail.first_memory_at` is the earliest memory-bearing SESSION's capture "
     "time (`min(s.created_at)`), NOT the creation time of the first extracted "
     "memory Point. Extraction runs after the session is written, so this "
@@ -838,18 +1177,33 @@ def assemble(*, org_id: str, since: str, until: str, graph_stages: dict,
     asserts that recursively."""
     stages = dict(graph_stages)
     stages["recall_attempted"] = recall_cell
+    # #3675 stage 5. Its cell is produced by ``recall_stages`` — it shares stage
+    # 4's window / truncation / memory precedence — and rides in ``detail`` so
+    # that long-standing 2-tuple contract (and its ~25 call sites) does not
+    # change. Lift it into ``stages`` and keep it OUT of ``detail``: that dict is
+    # a payload field, not a place for stage cells. A caller that hand-builds
+    # ``recall_detail`` (a test, or a future second producer) gets a refusal
+    # naming the omission rather than a fabricated zero.
+    stages["recall_returned"] = (recall_detail.get("recall_returned_cell")
+                                 or _stage(None, "calls",
+                                           "recall_returned_not_computed"))
     stages["value_confirmed"] = value_confirmed_stage()
 
     detail = {
         **{k: v for k, v in graph_detail.items() if k != "integrity"},
         "first_memory_at": (lifetime or {}).get("first_memory_at"),
         "sessions_with_memory_all_time": (lifetime or {}).get("sessions_with_memory"),
-        **recall_detail,
+        **{k: v for k, v in recall_detail.items()
+           if k != "recall_returned_cell"},
         "analytics_write_path": analytics_state,
         "graph_scope": "org_default_graph",
         "stage3_predicate": STAGE3_PREDICATE,
+        "recall_returned_predicate": (
+            "calls whose properties.result_count >= 1 (an int; null or absent "
+            "is NOT zero — it refuses the stage)"),
         "stages_1_3_granularity": "session",
         "stage_4_granularity": "org_time",
+        "stage_5_granularity": "org_time",
     }
     payload = {
         "surface": SURFACE,
@@ -882,7 +1236,8 @@ COHORT_SURFACE = "activation_cohort"
 #: ``assemble``'s output) so a stage added to one surface and not the other is
 #: a visible omission in the cohort payload rather than a silent one.
 COHORT_STAGE_NAMES = ("captured", "stored", "memory_produced",
-                      "recall_attempted", "value_confirmed")
+                      "recall_attempted", "recall_returned",
+                      "value_confirmed")
 
 #: Blast-radius bound on an operator-supplied cohort (see
 #: ``hosted_api.activation_cohort``): the endpoint reads every named org, so an
@@ -905,11 +1260,24 @@ COHORT_LIMITATIONS: tuple[str, ...] = (
     "`value_confirmed` is `not_measurable` for every org by construction, so "
     "its cohort state is normally `not_measurable` — that is the healthy "
     "answer, not a reporting failure.",
+    # #3675: this stage's refusals are COMMON rather than exceptional, so the
+    # folding rule above needs saying explicitly — a `partial` here is the
+    # honest answer, not a defect.
+    "`recall_returned` refuses per org (and so usually folds to `partial`) "
+    "whenever an org's window predates the `result_count` prop's deploy or a "
+    "retrieval row carries no readable count: the per-org count would be a "
+    "LOWER BOUND. The org is named in its `orgs_unavailable`. It is also an "
+    "UPPER BOUND on 'answered from memory' — a returned candidate is not a "
+    "used one.",
     "`org_errors` explains PER-ORG read failures only (the graph funnel, the "
     "stages read once per org). A failure of the SHARED `recall_attempted` "
     "store is a server-level condition, reported once in `notes` rather than "
     "attributed to every org; that stage's per-org verdict still appears in "
-    "its `orgs_unavailable`.",
+    "its `orgs_unavailable`. EXCEPTION: "
+    f"`{GRAPH_SCOPE_UNKNOWN_REASON}` is a per-ORG condition reported instead "
+    "with org attribution, because the graph-scope ambiguity it names belongs "
+    "to each org rather than to the store (see the org-scoped surface's "
+    "`limitations`).",
     # #3676 review: a well-formed name that names NO org is not detected. The
     # endpoint does no registry lookup (the entry above), so a typo reads as an
     # empty graph and is reported as a MEASURED 0 with no `org_errors` entry —
@@ -1087,6 +1455,17 @@ def org_failure_reason(payload: dict | None) -> str | None:
     return None
 
 
+#: Stage-4 reasons that are a property of ONE ORG, not of the shared analytics
+#: store. `shared_stage_notes` hoists a shared-stage reason ONCE so it is not
+#: repeated per org, and the sentence it writes says the condition is
+#: "server-level ... rather than a per-org read failure" — a claim about the
+#: STORE. For these reasons that sentence would be FALSE, and a false claim
+#: introduced by the fix for a false claim is not a fix (#4039): the graph-scope
+#: ambiguity is per-org by definition. They get their own attributed sentence;
+#: the affected orgs stay named in `stages.recall_attempted.orgs_unavailable`.
+ORG_SCOPED_STAGE_4_REASONS = frozenset({GRAPH_SCOPE_UNKNOWN_REASON})
+
+
 def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
     """ONE cohort-level note per distinct reason the SHARED stage is unmeasured.
 
@@ -1095,6 +1474,9 @@ def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
     be dropped either — that would leave the operator with `unavailable` and no
     cause anywhere in the payload. Hoisting it here keeps it visible exactly
     once, and the count says how much of the cohort it covers.
+
+    The HOISTED SENTENCE is about the store, so it is only written for reasons
+    that actually are store-level — `ORG_SCOPED_STAGE_4_REASONS` get their own.
     """
     counts: dict[str, int] = {}
     for payload in payloads:
@@ -1104,12 +1486,21 @@ def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
         if cell.get("state") == STATE_UNAVAILABLE:
             reason = str(cell.get("reason") or "unavailable")
             counts[reason] = counts.get(reason, 0) + 1
-    return [
-        f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} — this "
-        f"stage reads ONE shared analytics store, so it is a server-level "
-        f"condition rather than a per-org read failure"
-        for reason, n in sorted(counts.items())
-    ]
+    notes: list[str] = []
+    for reason, n in sorted(counts.items()):
+        if reason in ORG_SCOPED_STAGE_4_REASONS:
+            notes.append(
+                f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} "
+                f"— this reason is a property of EACH named org (its memory may "
+                f"live outside the org default graph, which this read does not "
+                f"open), not of the shared analytics store; the orgs are named "
+                f"in stages.{COHORT_SHARED_STAGE}.orgs_unavailable")
+            continue
+        notes.append(
+            f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} — "
+            f"this stage reads ONE shared analytics store, so it is a "
+            f"server-level condition rather than a per-org read failure")
+    return notes
 
 
 def assemble_cohort(*, orgs: Sequence[str], payloads: Sequence[dict | None],

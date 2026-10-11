@@ -249,5 +249,9 @@ steps rather than gates. Applying them cost less than asking.
   post-beta; it is cheap (every harness in the field makes the customer supply their model key).
 - **The journal capability** (`checkpoint`, `diary_write`, `diary_read`). Live on the MCP today,
   from the initial commit, with a `wing`/`room` vocabulary that appears nowhere in
-  `docs/ONTOLOGY.md`. Post-beta and unlisted — tracked by **#4667** (keep / rename / retire
-  undecided; a surface decision).
+  `docs/ONTOLOGY.md`. Post-beta and unlisted, and **settled to retire**: per the owner's ruling
+  on **#4667** (2026-10-09), each name retires in the same release that lands its replacement
+  (`diary_write` into `create_entity`, `checkpoint` into `capture_knowledge`, `diary_read` into
+  `list_knowledge`) — so no retirement signpost ever names a replacement that does not exist yet.
+  Until then they stay callable and unlisted; reconciling `tools/bridge_table.py`'s `REMOVED`
+  mapping against the approved menu is tracked on **#4282**.

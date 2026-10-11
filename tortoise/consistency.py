@@ -1744,11 +1744,18 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
                     "found": "absent-from-graph",
                 })
             continue
-        # `status` is only a NODE PROPERTY for Object (Subject/Event store
-        # `subjectKind`/`eventStatus` respectively), so the status comparison
-        # is bounded to Object — the kind the #3573 shapes
-        # bury. Presence is compared for every kind.
-        if label != "Object" or ambiguous_status:
+        # `status` is a NODE PROPERTY for the Object AND Subject families:
+        # #1423 made the Subject's status projection-owned (`_upsert_subject`
+        # SEEDS it ON CREATE and `_SUBJECT_HANDLED` keeps a re-mention from
+        # clobbering it), so a superseded team/role/person is exactly the
+        # "buried behind a live status" shape this leg exists to catch.
+        # `Event` carries `eventStatus` under a different name and its
+        # lifecycle has no such fold, so the comparison stays bounded to the
+        # families that model the field. Presence is compared for every kind.
+        # (The Object-only `ambiguous_status` bound is unaffected: a Subject
+        # name-only ref is REFUSED as never-guess, so it never becomes
+        # ambiguous.)
+        if label not in ("Object", "Subject") or ambiguous_status:
             continue
         jv = rec.get("status")
         if jv is None:

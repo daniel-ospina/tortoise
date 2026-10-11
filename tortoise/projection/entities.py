@@ -747,6 +747,10 @@ class _EntityHandlers:
     # Keys explicitly handled by each _upsert_* method.
     _SUBJECT_HANDLED: frozenset = frozenset({
         "id", "name", "subject_kind", "subjectKind", "createdAt", "embedding",
+        "status",  # #1423: status is projection-owned — a SubjectAdded replay
+        # must NOT rewrite it via _persist_extra_props (the clobber guard ported
+        # from #1350's Object clause: a re-mention of a superseded team/role/
+        # person cannot reset superseded→live). Mirrors _OBJECT_HANDLED below.
     })
     _OBJECT_HANDLED: frozenset = frozenset({
         "id", "name", "object_kind", "objectKind", "createdAt", "title",
@@ -2845,6 +2849,15 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            # #1423: status ON CREATE only — the Subject twin of the #1350
+            # Object clause. Before this, `status` rode the extra-props lane
+            # (`_SUBJECT_HANDLED` lacked it, #2295), which applies on MATCH as
+            # well — so ANY SubjectAdded replayed over a superseded node reset
+            # it to 'live' (measured), and a re-mention clobbered the live node
+            # while replay kept the supersession: the #2193 live≠replay class.
+            # With status projection-owned, this clause SEEDS a fresh/
+            # re-created Subject and ON MATCH never touches it.
+            "            s.status=coalesce($st, 'live'), "
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
@@ -2863,6 +2876,7 @@ class _EntityHandlers:
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
+                    "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
         # #228: persist arbitrary caller-supplied props

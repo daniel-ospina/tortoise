@@ -66,7 +66,7 @@ def test_every_registered_tool_is_in_the_baseline():
     declared = {entry.name for entry in TOOL_REGISTRY}
     baseline = {r["name"] for r in _manifest()["rows"] if not str(r["name"]).startswith("sdk:")}
     assert declared == baseline, (
-        "the registry and the approved baseline have diverged — a new tool needs an "
+        "the registry and the frozen baseline have diverged — a new tool needs an "
         f"explicit human decision (#3863). added={sorted(declared - baseline)} "
         f"removed={sorted(baseline - declared)}"
     )
@@ -137,14 +137,61 @@ def test_an_exemption_cannot_outlive_the_fact_it_records(tmp_path):
     assert "exemption" in result.stdout
 
 
-def test_approval_cannot_be_claimed_without_recording_it(tmp_path):
+def test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it(tmp_path):
+    """A manifest may not claim `approved` while the canonical doc says pending (#4185).
+
+    The approval is READ from `docs/product/canonical-mcp-tools.md`. A manifest that
+    hand-sets `approved` against a doc that does not approve it is exactly the old
+    hand-maintained field this fix removes — it must red.
+    """
     doc = _manifest()
     doc["approval_status"] = "approved"
-    modified = tmp_path / "approved.yml"
-    modified.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
-    result = _run("tools/surface-guard.py", "--manifest", str(modified))
-    assert result.returncode == 1, "`approved` with no per-row approval must red"
-    assert "approval" in result.stdout
+    doc["approval_principal"] = "daniel-ospina"
+    doc["approval_pr"] = "4120"
+    pending_doc = tmp_path / "canonical-mcp-tools.md"
+    pending_doc.write_text(
+        "---\napproval_status: pending-owner-approval\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    result = _run(
+        "tools/surface-guard.py",
+        "--manifest", _write(doc, tmp_path),
+        "--approval-doc", str(pending_doc),
+    )
+    assert result.returncode == 1, "`approved` against a pending canonical doc must red"
+    # Assert the SPECIFIC branch, not a substring a sibling also emits (#4185 review P2):
+    # `assert "approval_status" in stdout` also passes from the `not backed by` branch, and
+    # `"in the manifest but"` is NOT safe either — the per-field comparison loop emits the SAME
+    # phrase (`\`approval_principal\` is ... in the manifest but ...`), so it still passed with
+    # the stale-copy comparison disabled by `if False:`. `"stale COPY"` is emitted by the
+    # stale-copy branch ALONE, so this assertion isolates it.
+    assert "stale COPY" in result.stdout, (
+        "the stale-copy branch did not fire — the red came from elsewhere, so this test is "
+        f"not exercising what it claims:\n{result.stdout}"
+    )
+
+
+def test_the_green_banner_reports_the_STAGED_status_and_the_documents_separately():
+    """A green run must not claim the manifest's staged status came from the doc (#4185).
+
+    The banner used to print `approval_status=<status> is READ from <doc>`. Two things were
+    wrong: the value printed is the MANIFEST's, and a staged `pending-owner-approval`
+    approves nothing. At this head the two files disagree by design (#8144 owns the flip),
+    so a green run has to say which of them claimed what — and whether anything was
+    actually compared.
+    """
+    result = _run("tools/surface-guard.py")
+    assert result.returncode == 0, result.stdout
+    assert "The manifest is STAGED on approval_status=pending-owner-approval" in result.stdout, (
+        f"the banner did not report the manifest's staged status as staged:\n{result.stdout}"
+    )
+    assert "which records 'approved'" in result.stdout, (
+        "the banner did not report the DOCUMENT's recorded status separately — the manifest "
+        f"is not the file that recorded it:\n{result.stdout}"
+    )
+    assert "makes NO claim, so nothing was compared" in result.stdout, (
+        f"the banner did not say that no comparison ran:\n{result.stdout}"
+    )
 
 
 def test_unknown_approval_status_is_a_failure(tmp_path):
@@ -263,22 +310,49 @@ def _write(doc: dict, tmp_path) -> str:
     return str(p)
 
 
-def test_approved_status_requires_approval_on_SDK_rows_too(tmp_path):
-    """P1 found by review: the approval check skipped every `sdk:` row.
+def test_approved_status_requires_principal_and_pr_in_the_canonical_doc(tmp_path):
+    """An `approved` claim needs a principal and a PR in the doc it is READ from (#4185).
 
-    Half the surface (152 of 251 rows) was exempt from the one human-approval control
-    the gate was built to enforce, so `approved` could be set with no SDK approval at all.
+    The old check demanded a per-row approval; the new one demands the canonical doc
+    actually carry the two facts approval consists of. A doc that says `approved` but
+    names no principal (or no PR) is not an approval record, and the gate must not
+    launder it into one.
     """
     doc = _manifest()
+    # Make the manifest a FAITHFUL MIRROR of the fixture doc, so the ONLY possible red is the
+    # completeness branch. If the mirror is inexact the derived-field comparison below it fires
+    # first, and this test would then pass even with the completeness check deleted — it would
+    # assert a behaviour it does not exercise (found by review, 2026-10-10).
     doc["approval_status"] = "approved"
-    for row in doc["rows"]:
-        if not str(row["name"]).startswith("sdk:"):
-            row["approval"] = "PR#1 @owner"          # tools approved …
-        else:
-            row["approval"] = None                   # … SDK rows deliberately not
+    doc["approval_principal"] = "daniel-ospina"   # matches approvedBy in the fixture
+    doc["approval_pr"] = None                      # the fact under test: absent
+    doc["approval_date"] = None                    # matches the fixture's absent `approved:`
+    incomplete = tmp_path / "canonical-mcp-tools.md"
+    incomplete.write_text(
+        "---\napproval_status: approved\napprovedBy: daniel-ospina\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    result = _run(
+        "tools/surface-guard.py",
+        "--manifest", _write(doc, tmp_path),
+        "--approval-doc", str(incomplete),
+    )
+    assert result.returncode == 1, "an `approved` doc with no PR did not red the gate"
+    # Assert the SPECIFIC branch, not a substring its siblings also emit: `assert "approval" in
+    # stdout` passes on any of the three approval reds, which is how this went unnoticed.
+    assert "not backed by" in result.stdout, (
+        "the completeness branch did not fire — the red came from elsewhere, so this test is not\n"
+        f"exercising what it claims:\n{result.stdout}"
+    )
+
+
+def test_approval_principal_cannot_disagree_with_the_canonical_doc(tmp_path):
+    """No hand-set field may disagree with the document it is DERIVED from (#4185)."""
+    doc = _manifest()
+    doc["approval_principal"] = "a-hand-typed-imposter"
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
-    assert result.returncode == 1, "an unapproved SDK row did not red `approved`"
-    assert "sdk:" in result.stdout
+    assert result.returncode == 1, "a hand-edited approval principal did not red the gate"
+    assert "approval_principal" in result.stdout
 
 
 def test_the_guard_reds_when_a_tools_SDK_binding_moves(tmp_path):
@@ -332,7 +406,7 @@ def _load_manifest_tool():
 
 
 def test_the_retired_block_matches_the_declaration():
-    """The baseline's `retired:` block is the approved retirement list."""
+    """The baseline's `retired:` block is the frozen-baseline retirement list."""
     from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
 
     doc = _manifest()
@@ -620,32 +694,181 @@ def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypa
     assert "::error::" in out and "ordering table" in out, out
 
 
-def test_the_derivation_resets_approvals_BY_DESIGN(derived_baseline):
-    """The reset is the CONTROL, not an oversight — CONTRIBUTING.md makes it so.
+def test_the_derivation_READS_the_document_approval_and_resets_ROW_approvals(derived_baseline):
+    """Two different things live in this artifact, with different rules (#4185).
 
-    "To propose an addition" steps 2-4: `cut` folds the change in and marks the baseline
-    `pending-owner-approval`, and the owner then records `approval` per row. The reset is
-    what forces re-approval of the whole baseline, so a changed `served_from` cannot ride
-    an old approval into `approved`.
+      * the per-row `approval` field is a recorded owner decision a re-cut cannot
+        reproduce, so `build_doc` blanks it — the reset drops the AUDIT REFERENCE, and
+        nothing requires re-recording it (CONTRIBUTING.md step 4); carrying it over was
+        REFUSED;
+      * the top-level `approval_status` / `approval_principal` / `approval_pr` /
+        `approval_date` are READ from `docs/product/canonical-mcp-tools.md` by
+        `read_approval`, so a re-cut carries the owner's REAL approval forward instead of
+        re-asking for it — the five-times-re-asked defect.
 
-    A carry-over of the previous approvals across a re-cut (drafted because a naive cut
-    zeroes six recorded approvals and their rationale comments, which reads like data
-    loss) was REFUSED against that documented decision rather than adopted. This test
-    exists so the behaviour is not "fixed" later by someone reading only the code.
-
-    Its SCOPE is the DERIVATION. `build_doc` cannot read the artifact, so a carry-over
-    reintroduced at the WRITE site — where it would actually live — leaves these
-    assertions green; that path is pinned separately, against the file `cut` leaves
-    behind, by `test_cut_resets_approvals_at_the_WRITE_SITE` (review finding).
+    Its SCOPE is the DERIVATION. The write-site half is pinned by
+    `test_cut_resets_approvals_at_the_WRITE_SITE` (review finding); the derivation of the
+    approval from a FIXTURE doc is pinned by
+    `test_the_manifest_approval_is_DERIVED_from_the_canonical_doc`.
     """
-    assert derived_baseline["approval_status"] == "pending-owner-approval"
-    assert derived_baseline["approval_principal"] is None
-    assert derived_baseline["approval_pr"] is None
+    assert derived_baseline["approval_status"] == "approved"
+    assert derived_baseline["approval_principal"] == "daniel-ospina"
+    assert derived_baseline["approval_pr"] == "4120"
+    assert derived_baseline["approval_date"] == "2026-09-18"
     reset = [
         r for r in [*derived_baseline["rows"], *derived_baseline["retired"]]
         if r.get("approval") is not None
     ]
-    assert reset == [], f"a re-cut carried approvals forward: {reset[:5]}"
+    assert reset == [], f"a re-cut carried ROW approvals forward: {reset[:5]}"
+
+
+def test_the_manifest_approval_is_DERIVED_from_the_canonical_doc(tmp_path):
+    """#4185: approving the canonical doc must be READ INTO the manifest by a `cut`, not typed.
+
+    Point `read_approval` at a FIXTURE doc and prove the returned approval follows it.
+    No `26`/`40` and no approval value is typed into the manifest by hand: `cut` copies the
+    four values from the doc. In THIS PR `check` still excludes them (the exclusion is removed
+    by the #4185 follow-up), and what catches a hand-set field that disagrees is the guard's
+    provenance comparison, scoped to a manifest that CLAIMS an approval. This test pins the
+    READING, not the `check`-side comparison.
+    """
+    sm = _load_manifest_tool()
+    fixture = tmp_path / "canonical-mcp-tools.md"
+    fixture.write_text(
+        "---\n"
+        "approval_status: approved\n"
+        "approved: 2030-01-02\n"
+        "approvedBy: someone-else\n"
+        "approval_pr: 9999\n"
+        "---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    assert sm.read_approval(fixture) == {
+        "status": "approved",
+        "principal": "someone-else",
+        "pr": "9999",
+        "date": "2030-01-02",
+    }
+
+
+def test_an_unapproved_canonical_doc_yields_an_unapproved_manifest(tmp_path):
+    """A re-cut cannot invent approval: with a pending doc, the derivation is pending.
+
+    This is the test for requirement 3 — the approval fields are a function of the DOC,
+    never of the code a re-cut reads, so regenerating the manifest cannot mark an
+    unapproved surface approved.
+    """
+    sm = _load_manifest_tool()
+    fixture = tmp_path / "canonical-mcp-tools.md"
+    fixture.write_text(
+        "---\napproval_status: pending-owner-approval\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    approval = sm.read_approval(fixture)
+    assert approval["status"] == "pending-owner-approval"
+    assert approval["principal"] is None
+    assert approval["pr"] is None
+    assert approval["date"] is None
+
+
+def test_build_doc_READS_the_approval_from_the_canonical_doc(monkeypatch, tmp_path):
+    """The MANIFEST derivation — not just `read_approval` — follows the fixture doc.
+
+    A `build_doc` that inlined the real doc's values would pass every other test in this
+    module (they call `read_approval` directly, or assert the real doc's literals); this
+    is the one that catches it. It also pins requirement 3: a pending doc yields a pending
+    MANIFEST, so a re-cut cannot mark an unapproved surface approved.
+    """
+    sm = _load_manifest_tool()
+    fixture = tmp_path / "canonical-mcp-tools.md"
+    fixture.write_text(
+        "---\napproval_status: pending-owner-approval\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sm, "CANONICAL_DOC", fixture)
+    derived = sm.build_doc()
+    assert derived["approval_status"] == "pending-owner-approval"
+    assert derived["approval_principal"] is None
+    assert derived["approval_pr"] is None
+    assert derived["approval_date"] is None
+
+
+def test_a_doc_without_frontmatter_is_a_refusal_not_a_pending_approval(tmp_path):
+    """Absent provenance must not degrade to `pending`.
+
+    Returning the pending default for a document with no frontmatter would let a re-cut
+    mark the baseline `pending` (which the guard PASSES) after the approval record was
+    deleted — a green gate over vanished evidence. FAIL CLOSED instead.
+    """
+    sm = _load_manifest_tool()
+    fixture = tmp_path / "canonical-mcp-tools.md"
+    fixture.write_text("# a doc with no frontmatter at all\n", encoding="utf-8")
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.read_approval(fixture)
+
+
+def test_read_approval_refuses_an_approved_doc_without_a_principal_or_pr(tmp_path):
+    """The GENERATOR applies the same completeness test as its two consumers.
+
+    `surface-guard.py` and `tools/surface-target-check.py` both refuse `approved` with no
+    principal/PR. If `read_approval` did not, `cut` could write a manifest that its own gate
+    reds while `check` (derived vs committed) stayed green — one fact, three readers, two
+    answers. The requirement is on `approved` only: `pending-owner-approval` legitimately
+    carries neither.
+    """
+    sm = _load_manifest_tool()
+    fixture = tmp_path / "canonical-mcp-tools.md"
+    fixture.write_text(
+        "---\napproval_status: approved\n---\n\n# fixture\n", encoding="utf-8"
+    )
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.read_approval(fixture)
+    # …while the pending status without a principal/PR is still readable.
+    fixture.write_text(
+        "---\napproval_status: pending-owner-approval\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    assert sm.read_approval(fixture)["status"] == "pending-owner-approval"
+    # An EMPTY-STRING `approval_pr` is falsy to both consumers, so the generator must refuse
+    # it too (testing `is None` here let `cut` write `approval_pr: ''` that the guard then reds).
+    fixture.write_text(
+        "---\napproval_status: approved\napprovedBy: someone\napproval_pr: ''\n---\n\n# fixture\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.read_approval(fixture)
+    # An OUT-OF-VOCABULARY status must refuse (the guard reds it; the generator must too).
+    fixture.write_text(
+        "---\napproval_status: maybe\n---\n\n# fixture\n", encoding="utf-8"
+    )
+    with pytest.raises(sm.SurfaceEvidenceUnreadable):
+        sm.read_approval(fixture)
+
+
+def test_approval_status_is_the_TARGET_approval_not_a_baseline_stamp(
+    monkeypatch, tmp_path, derived_baseline
+):
+    """The decision #4185 encodes, pinned: the field describes the TARGET, not this snapshot.
+
+    A re-cut over a baseline that is OVER target still writes `approved`, because the owner
+    approved the TARGET (26/40), not the frozen 82/150. This is deliberate, and what makes an
+    expansion visible is NOT this field — it is (a) the guard reding BEFORE the re-cut when a
+    tool is added, and (b) `tools/surface-target-check.py` reding on the gap. Pinned here so
+    the semantics are a decision rather than an untested consequence.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    grown = copy.deepcopy(derived_baseline)
+    grown["rows"].append({"name": "tortoise_brand_new", "approval": None})
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(grown))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["approval_status"] == "approved"  # the TARGET's approval, not the baseline's
+    new_row = next(r for r in written["rows"] if r["name"] == "tortoise_brand_new")
+    assert new_row["approval"] is None  # the per-row field stays an audit record, not the gate
 
 
 def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseline):
@@ -677,11 +900,19 @@ def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseli
 
 def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseline):
     sm = _load_manifest_tool()
+    # The top-level `approval_*` keys ARE here FOR THIS PR (#4185, first PR): CI's required
+    # `surface-guard` pins the BASE guard, whose per-row rule fires on `approved`, so the
+    # committed manifest must stay `pending-owner-approval` and `check` must not compare the
+    # copy yet. A follow-up PR removes them once the new guard is on `main`. Provenance is
+    # enforced by `tools/surface-guard.py` in the meantime, whenever a manifest CLAIMS an
+    # approval. `high_water_counts` is the hand-set growth pin (also not derived).
     assert {
         "cut_at_commit",
         "approval_status",
         "approval_principal",
         "approval_pr",
+        "approval_date",
+        "high_water_counts",
         "response_fields",
     } == sm.NON_DERIVABLE_DOC_KEYS
     for key in sorted(sm.NON_DERIVABLE_DOC_KEYS):
@@ -706,6 +937,87 @@ def test_a_nonderivable_key_is_still_seen_when_it_is_the_ONLY_difference(derived
         {"rows": [renamed], "retired": []}, {"rows": [row], "retired": []}
     )
     assert problems, "a renamed row slipped through the projection"
+
+
+# The two `check`-based provenance tests that used to live here
+# (`test_the_check_reds_when_the_manifest_approval_disagrees_with_the_doc` and
+# `test_the_check_reds_when_the_manifest_claims_an_approval_the_doc_does_not`) are moved to
+# the FOLLOW-UP PR (#4185, second PR): the approval keys are back in NON_DERIVABLE_DOC_KEYS
+# in this PR, so `check` cannot compare them yet. Provenance is pinned by the guard in the
+# meantime — `test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it` and
+# `test_approval_principal_cannot_disagree_with_the_canonical_doc` both exercise the exact
+# comparisons, so the behaviour is not unpinned; only its `check`-side home is deferred.
+
+
+def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_path):
+    """#4185 review P1: a re-cut over a GROWN surface must not be green by construction.
+
+    `counts:` is re-derived by every `cut`, so it cannot be its own growth control — a PR
+    that adds a tool AND re-cuts moves the number every drift check compares against. The
+    `high_water_counts` pin is carried forward instead, and this pins that the guard reds
+    when the live surface EXCEEDS it. On the pre-fix guard there is no such field and no
+    such check, so the run is green and this test fails — the check is non-vacuous.
+    """
+    doc = _manifest()
+    doc["high_water_counts"] = {"tools": 81, "sdk_public_methods": 150}
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "growth past the frozen pin did not red the gate"
+    assert "high-water pin" in result.stdout, result.stdout
+
+
+def test_the_guard_reds_when_the_high_water_pin_is_missing_or_malformed(tmp_path):
+    """Fail closed: a baseline whose growth pin is gone has no growth control left."""
+    doc = _manifest()
+    doc.pop("high_water_counts")
+    missing = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert missing.returncode == 1, "a missing growth pin did not red the gate"
+    assert "high_water_counts" in missing.stdout, missing.stdout
+    doc["high_water_counts"] = {"tools": "eighty-two", "sdk_public_methods": 150}
+    malformed = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert malformed.returncode == 1, "a malformed growth pin did not red the gate"
+    assert "high_water_counts" in malformed.stdout, malformed.stdout
+
+
+def test_a_re_cut_CARRIES_the_high_water_pin_forward(monkeypatch, tmp_path):
+    """The pin is NOT re-derived: `cut` copies it, so growth needs an explicit edit.
+
+    If a re-cut recomputed it from the live counts, the pin would move with the growth and
+    the guard's growth check would be defeated. The pin is set to a value DISTINCT from the
+    live counts and the REAL `cmd_cut` runs: patching `build_doc` here would satisfy the
+    assertion from a canned dict while `_carried_high_water_counts` never executed at all
+    (#4185 review).
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    prior["high_water_counts"] = {"tools": 7, "sdk_public_methods": 9}
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["high_water_counts"] == {"tools": 7, "sdk_public_methods": 9}, (
+        "a re-cut recomputed the growth pin from the live counts — the growth is now "
+        "invisible to the guard"
+    )
+
+
+def test_a_re_cut_REFUSES_a_manifest_that_lost_the_high_water_pin(monkeypatch, tmp_path, capsys):
+    """Absent-from-an-existing-manifest is NOT a first cut (#4185 review).
+
+    Returning the freshly derived counts there re-bases the ceiling silently — which is the
+    failure the pin exists to prevent. The fallback belongs to a MISSING manifest.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    prior.pop("high_water_counts")
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "high_water_counts" in out, out
+    # And the refusal wrote NOTHING: the pin-less manifest is exactly as it was.
+    assert "high_water_counts" not in yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def test_the_guard_reds_on_a_duplicate_registry_entry():
@@ -1272,10 +1584,11 @@ def test_recorded_response_field_is_rendered_in_the_list():
 
 
 def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_baseline):
-    """The reset is the CONTROL (CONTRIBUTING.md, "To propose an addition" steps 2-4).
+    """The reset is the CONTROL for the per-row AUDIT REFERENCE (CONTRIBUTING.md step 4).
 
-    `cut` folds a change in and marks the baseline `pending-owner-approval`; the owner then
-    re-records `approval` per row. A carry-over of the previous approvals — drafted because
+    `cut` folds a change in, carries the TOP-LEVEL approval forward (it is READ from the
+    canonical doc, #4185), and blanks the per-row `approval` audit reference. A carry-over of
+    the previous row references — drafted because
     a naive re-cut zeroes six recorded approvals and reads like data loss — was REFUSED
     against that documented decision, and the tool says so where it writes.
 
@@ -1303,7 +1616,12 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
     assert sm.cmd_cut(ns) == 0
 
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert written["approval_status"] == "pending-owner-approval"
+    # The TOP-LEVEL approval is READ from the canonical doc (#4185), so a re-cut
+    # carries the owner's real approval forward — that is the defect fixed; the
+    # per-row reset below is the separate #4598 control, kept.
+    assert written["approval_status"] == "approved"
+    assert written["approval_principal"] == "daniel-ospina"
+    assert written["approval_pr"] == "4120"
     carried = [
         r["name"]
         for r in [*written["rows"], *written["retired"]]
@@ -1313,6 +1631,78 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
         "the write site carried the previous approvals across the re-cut, reversing the "
         f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
     )
+
+
+def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_baseline):
+    """`yaml.safe_dump` carries no comments, so a lazy re-cut would DELETE the marker.
+
+    The tool docstrings are the durable home, but the manifest is the artifact a lane
+    actually reads. `cut` must put the marker back rather than silently dropping it —
+    otherwise the first re-cut after this PR erases the record of what was overridden.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    written = path.read_text(encoding="utf-8")
+    assert written.startswith(sm.MANIFEST_HEADER)
+    assert "OVERRIDES: the frozen-snapshot-as-approval-baseline practice" in written
+    # The approval-provenance comment must survive too: the committed manifest carries it,
+    # and a re-cut that dropped it would erase the record of WHERE the approval is read from.
+    assert "The top-level approval is STAGED from docs/product/canonical-mcp-tools.md" in written
+    # The growth pin's rationale must survive too — a re-cut that dropped it would leave the
+    # next reader with no idea why `high_water_counts` cannot be edited by hand.
+    assert "`high_water_counts` is a GROWTH PIN" in written
+    # …and the header must not carry a FORMATTED count of the target (`26 MCP tools` / `40 SDK`):
+    # the target lives in the product docs, read by `tools/surface-target-check.py`, and a
+    # restated literal here would go stale silently. The mandated `OVERRIDES:` marker above is
+    # the only place the owner's `26/40` appears, quoted verbatim as the approval record.
+    assert "26 MCP tools" not in sm.MANIFEST_HEADER
+    assert "40 SDK" not in sm.MANIFEST_HEADER
+
+
+def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
+    """`cut` re-emits MANIFEST_HEADER verbatim, so the committed header must match it.
+
+    Otherwise the next re-cut silently re-wraps the comments and the artifact a reviewer
+    diffs is not the artifact `cut` produces (found by review). `check` cannot see this:
+    YAML drops comments, so the header is outside every derived comparison.
+    """
+    import difflib
+
+    sm = _load_manifest_tool()
+    committed = MANIFEST.read_text(encoding="utf-8").split("manifest_version:")[0]
+    assert committed == sm.MANIFEST_HEADER, "\n".join(
+        difflib.unified_diff(
+            sm.MANIFEST_HEADER.splitlines(),
+            committed.splitlines(),
+            "MANIFEST_HEADER",
+            "config/surface-manifest.yml",
+            lineterm="",
+        )
+    )
+
+
+def test_the_committed_manifest_is_the_STAGED_pending_copy():
+    """#4185 lands in two PRs, so THIS head must not carry the flip (#4185 review).
+
+    The guard's provenance comparison is scoped to a manifest that CLAIMS an approval, so
+    flipping here would arm a comparison the base-pinned guard cannot survive (242 rows).
+    The staged state is the split's contract; the follow-up (#8144) owns the flip.
+    """
+    doc = _manifest()
+    assert doc["approval_status"] == "pending-owner-approval", (
+        "the committed manifest flipped to the approved copy — that is the FOLLOW-UP "
+        "(#8144) change, not this PR's (#4185 lands in two PRs)"
+    )
+    for key in ("approval_principal", "approval_pr", "approval_date"):
+        assert doc[key] is None, (
+            f"{key} is staged but non-null — the committed copy must not claim an approval "
+            "at this head (#8144 owns the flip)"
+        )
 
 
 def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
@@ -2345,3 +2735,273 @@ def test_the_render_does_not_claim_a_client_cap_binds_a_smaller_surface(tmp_path
                 f"{sm.LARGEST_COMPARABLE}), so 'pins a smaller set' is false here"
             )
             assert f"the biggest comparable, Letta, pins {sm.LARGEST_COMPARABLE}" in text
+
+
+# --- the surface TARGET compliance check (#4185) -----------------------------------
+# `tools/surface-guard.py` compares the live declaration to the FROZEN BASELINE — a
+# snapshot of the implementation. It therefore cannot see a surface 3x over the owner's
+# approved target, which is the defect this file's sibling answers:
+# `tools/surface-target-check.py` compares the LIVE surface to the TARGET (26/40) read
+# from the two product docs. Co-located here rather than in a new test module so the
+# CI-surfaces manifest does not need a second registration for the same surface.
+
+
+def _load_target_check():
+    """Import `tools/surface-target-check.py` (hyphenated filename) as a module."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "surface_target_check", ROOT / "tools" / "surface-target-check.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_canonical_fixture(path: Path, *, status: str = "approved", mcp: int = 7) -> None:
+    path.write_text(
+        "---\n"
+        f"approval_status: {status}\n"
+        "approved: 2030-01-02\n"
+        "approvedBy: someone-else\n"
+        "approval_pr: 9999\n"
+        "---\n\n"
+        f"# Canonical MCP tool list — 5 proposed tools (the beta target is {mcp})\n\n"
+        f"**MCP target count is unchanged at {mcp}**\n",
+        encoding="utf-8",
+    )
+
+
+def _write_beta_fixture(path: Path, *, mcp: int = 7, sdk: int = 9) -> None:
+    path.write_text(
+        "---\napproval_status: approved\napprovedBy: someone-else\n---\n\n"
+        "# Beta SDK surface\n\n"
+        f"**{sdk} methods** against **150** today. **MCP: {mcp} tools**\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_live_surface_is_the_baseline_the_guard_froze():
+    """The live counts are the same numbers the manifest's `counts:` records.
+
+    A compliance check that measured a DIFFERENT surface than the drift gate would be
+    two instruments disagreeing about what "the surface" is.
+    """
+    tc = _load_target_check()
+    live = tc.live_surface()
+    manifest = _manifest()
+    assert live["mcp"] == manifest["counts"]["tools"] == 82
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
+
+
+def test_the_compliance_check_is_RED_on_todays_gap(capsys):
+    """#4185's whole point: the live surface does NOT match the approved target.
+
+    Asserts the REAL numbers and the deltas, not just a non-zero exit — a check that
+    reds without naming the gap is the wall of noise this replaces.
+    """
+    tc = _load_target_check()
+    live = tc.live_surface()
+    targets = tc.read_targets()
+    # The owner's ruling is the invariant; the live numbers are MEASURED, not restated, so
+    # the migration that closes the gap only needs this test's premise updated, not its
+    # arithmetic (#4185 review finding).
+    assert (targets["mcp"], targets["sdk"]) == (26, 40)
+    assert (live["mcp"], live["sdk"]) != (26, 40), (
+        "the gap has closed — update this test's premise (it exists to pin the RED)"
+    )
+    rc = tc.main(["surface-target-check.py"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert f"{targets['mcp']} MCP tools / {targets['sdk']} SDK methods" in out, out
+    assert f"{live['mcp']} MCP tools / {live['sdk']} SDK methods" in out, out
+    assert f"Δ {live['mcp'] - targets['mcp']:+d}" in out, out
+    assert f"Δ {live['sdk'] - targets['sdk']:+d}" in out, out
+    assert "OVER TARGET" in out, out
+
+
+def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, capsys):
+    """The migration can overshoot; an UNDER-target surface must not read as OVER TARGET.
+
+    The tool is meant to be run DURING the migration, when an over-aggressive cut lands
+    exactly this state — `"OK" if delta == 0 else "OVER TARGET"` labelled it wrongly.
+    """
+    tc = _load_target_check()
+    monkeypatch.setattr(
+        tc,
+        "live_surface",
+        lambda: {"mcp": 20, "sdk": 30, "tools": [], "sdk_methods": []},
+    )
+    rc = tc.main(["surface-target-check.py"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "UNDER TARGET" in out and "OVER TARGET" not in out, out
+
+
+def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
+    monkeypatch, capsys
+):
+    """The fixture is the migrated surface: 26 tools, 40 methods → exit 0.
+
+    `live_surface` is the seam, so the test does not have to delete 56 tools to prove
+    the green path (which the task explicitly forbids anyway).
+    """
+    tc = _load_target_check()
+    monkeypatch.setattr(
+        tc,
+        "live_surface",
+        lambda: {"mcp": 26, "sdk": 40, "tools": [], "sdk_methods": []},
+    )
+    rc = tc.main(["surface-target-check.py"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK — the live surface matches the owner-approved target." in out, out
+
+
+def test_the_target_is_read_from_the_docs_not_a_constant(tmp_path):
+    """A changed doc changes the target — the property a duplicated `26`/`40` lacks."""
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=11)
+    _write_beta_fixture(beta, mcp=11, sdk=13)
+    targets = tc.read_targets(canonical, beta)
+    assert targets["mcp"] == 11
+    assert targets["sdk"] == 13
+    assert targets["approval"]["principal"] == "someone-else"
+    assert targets["approval"]["pr"] == "9999"
+
+
+def test_the_canonical_docs_beta_target_number_is_not_read_as_the_mcp_target(tmp_path):
+    """#4185 review P3: each pattern is scoped to the document that OWNS the phrase.
+
+    `beta target (is|becomes) N` names the BETA list's own count when it appears in the
+    canonical doc, not the MCP target. Running the full pattern set over both docs meant a
+    future amendment that moved only the canonical `MCP target count` looked ambiguous and
+    the tool refused a correctly-readable target. Pre-fix this fixture raises
+    `TargetUnreadable` (canonical yields {26, 40}); post-fix the canonical doc's own pattern
+    reads 26 and the `beta target` phrase is ignored.
+    """
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    canonical.write_text(
+        "---\n"
+        "approval_status: approved\n"
+        "approved: 2030-01-02\n"
+        "approvedBy: someone-else\n"
+        "approval_pr: 9999\n"
+        "---\n\n"
+        "# Canonical MCP tool list — 23 proposed tools (the beta target is 40)\n\n"
+        "**MCP target count is unchanged at 26**\n",
+        encoding="utf-8",
+    )
+    _write_beta_fixture(beta, mcp=26, sdk=40)
+    targets = tc.read_targets(canonical, beta)
+    assert targets["mcp"] == 26, "the canonical doc's `beta target` number leaked into the MCP target"
+    assert targets["sdk"] == 40
+
+
+def test_an_unapproved_canonical_doc_is_a_refusal(tmp_path):
+    """There is no owner-approved target when the doc is not approved."""
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, status="pending-owner-approval", mcp=7)
+    _write_beta_fixture(beta, mcp=7, sdk=9)
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+
+
+def test_an_unapproved_beta_doc_is_a_refusal(tmp_path):
+    """The beta doc is the SOLE source of the SDK target — it must be approved too."""
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=7)
+    beta.write_text(
+        "---\napproval_status: pending-owner-approval\napprovedBy: someone-else\n---\n\n"
+        "**9 methods** against **150** today. **MCP: 7 tools**\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+    # …and a beta with `approved` but no principal is refused the same way.
+    beta.write_text(
+        "---\napproval_status: approved\n---\n\n"
+        "**9 methods** against **150** today. **MCP: 7 tools**\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+
+
+def test_two_docs_that_disagree_on_the_mcp_target_are_a_refusal(tmp_path):
+    """No guessing: two numbers is not a target."""
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=7)
+    _write_beta_fixture(beta, mcp=8, sdk=9)
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+
+
+def test_a_doc_that_yields_no_mcp_target_is_a_refusal(tmp_path):
+    """The redundancy IS the control: a doc with no MCP number must refuse, not fall back.
+
+    A UNION across the two docs tolerated exactly this — deleting the MCP phrase from one
+    doc still produced the other doc's number, so the "cross-checked in both docs" claim
+    was decorative (review finding). Each doc must carry the number.
+    """
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=7)
+    beta.write_text(
+        "---\napproval_status: approved\napprovedBy: someone-else\n---\n\n"
+        "# Beta SDK surface\n\n**9 methods** against **150** today.\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+
+
+def test_an_approved_doc_without_a_principal_or_pr_is_a_refusal(tmp_path):
+    """`approved` with no principal and no PR is not an approval record.
+
+    surface-guard already rejects that doc when the manifest claims `approved`; the
+    compliance instrument must apply the same completeness test, or it honours an approval
+    the gate would refuse.
+    """
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    canonical.write_text(
+        "---\napproval_status: approved\n---\n\n**MCP target count is unchanged at 7**\n",
+        encoding="utf-8",
+    )
+    _write_beta_fixture(beta, mcp=7, sdk=9)
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(canonical, beta)
+
+
+def test_a_missing_target_doc_is_a_refusal(tmp_path):
+    """A check that cannot read its evidence must not report success."""
+    tc = _load_target_check()
+    with pytest.raises(tc.TargetUnreadable):
+        tc.read_targets(tmp_path / "nope.md", tmp_path / "also-nope.md")
+
+
+def test_the_target_tool_refuses_rather_than_pass_when_evidence_is_unreadable(
+    capsys, tmp_path
+):
+    """The CLI path: an unreadable target is `::error::` + exit 1, not a traceback."""
+    tc = _load_target_check()
+    rc = tc.main(
+        ["surface-target-check.py", "--canonical-doc", str(tmp_path / "missing.md")]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "::error::" in out and "REFUSED" in out, out
+    assert "Traceback" not in out

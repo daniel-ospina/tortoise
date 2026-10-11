@@ -1440,10 +1440,12 @@ jobs:
           # entered `slow_files`, and again when that suite's weight was
           # corrected from 709.0 to 45.0 (709 came from a load-contaminated
           # measurement — see its `durations` note). They are the LPT legs of
-          # `slow_files - carve_out` on the committed `durations` map — 31 and
-          # 31 files at 14.192 / 14.188 min; each row is a partition of the set,
-          # re-derivable with
-          # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
+          # `slow_files - carve_out` on the committed `durations` map — 32 and
+          # 32 files at 14.808 / 14.443 min; each row is a partition of the set.
+          # (#2125 added `test_framework_middleware` to leg a: 37.0s, taking it
+          # from 14.192 to 14.808 min. The weights below are the post-#2125
+          # reading ACTUALLY committed — recompute them from `durations` before
+          # quoting them, as they rot on every re-cut.)
           # (The first cut packed 43 files / 16.21m; eight dual-registered
           # files returned to the fast pool — a second surface's diff would
           # otherwise run them on NEITHER leg — so #6137 re-cut them to
@@ -1452,7 +1454,7 @@ jobs:
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than the 14.19 min it is now.
+          # committed weight was 2.84 min rather than the 14.81 min it is now.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1468,8 +1470,8 @@ jobs:
               test_consistency_divergence_5011 test_control_plane test_dream
               test_embedded_evidence test_ep_selector test_ep_sources
               test_epic903_fixtures test_epic903_scheduler
-              test_epic903_warmstart test_graph_diagnostics
-              test_graphcopy_boolean_index_3154
+              test_epic903_warmstart test_framework_middleware
+              test_graph_diagnostics test_graphcopy_boolean_index_3154
               test_hosted_volunteer_context test_import_endpoint test_indexes
               test_ingest test_ingest_v2_consolidation test_ingest_validation
               test_platform_seams test_projection test_sdk_group3
@@ -1501,8 +1503,9 @@ jobs:
     # the #3239 literal budget no longer cleared the work: #6137 raised the
     # watchdog to 35m (2.53x the 13.82m heavier leg) and this cap to 40m (2.90x).
     # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
-    # BOTH rows by LPT off the committed map — balanced at 14.192m / 14.188m, so
-    # the watchdog holds at 40m (2.82x the heavier leg) against a 28.38m floor.
+    # BOTH rows by LPT off the committed map; #2125 added
+    # `test_framework_middleware` to leg a. The rows now carry 14.808m / 14.443m,
+    # so the watchdog holds at 40m (2.70x the heavier leg) against a 29.62m floor.
     #
     # #798 is an ORDER constraint, not just a magnitude: the in-step watchdog is
     # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
@@ -1763,11 +1766,12 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. The heavier leg carries 14.192m
+          # shards derive their budget from. The heavier leg carries 14.808m
           # (#5285 re-cut both rows when the fail-loud suite entered
-          # `slow_files`, then again when its weight was corrected) and this
-          # literal is 40m, i.e. 2.82x the 2.0x minimum
-          # the headroom floor requires (28.38m); it was 10m
+          # `slow_files`, then again when its weight was corrected; #2125 added
+          # `test_framework_middleware` to leg a) and this
+          # literal is 40m, i.e. 2.70x the 2.0x minimum
+          # the headroom floor requires (29.62m); it was 10m
           # when the legs' committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is
@@ -2979,7 +2983,7 @@ jobs:
       # required `surface-guard` job would go green on a rewritten gate.
       #
       # PIN THE ENFORCEMENT, NOT THE GENERATOR. `tools/surface-guard.py` is the
-      # gate — it compares the declaration against the approved baseline, and it
+      # gate — it compares the declaration against the frozen baseline, and it
       # is SELF-CONTAINED (its own `_read_manifest`, deliberately independent of
       # `tools/surface_manifest.py`), so nothing in the PR's tree can influence
       # it. Pinning `tools/surface_manifest.py` as well looked symmetrical and was
@@ -3042,6 +3046,16 @@ jobs:
         run: |
           python3 tools/surface_manifest.py render
           git diff --exit-code -- docs/product/mcp-sdk-surface.md
+      # ── THE TARGET COMPLIANCE GAP, SURFACED BUT NOT GATING (#4185) ─────────
+      # The gap between the live surface (82/150) and the owner-approved target
+      # (26/40) is genuine, so a REQUIRED check would red `main` and block every
+      # unrelated merge while the migration is in flight. But a check nobody runs
+      # reports to nobody: this step prints the numbers and the deltas on EVERY
+      # run, and `continue-on-error` keeps it informational. The `::error::`
+      # annotation still shows up on the run page, so the gap stays visible.
+      - name: Surface target compliance (informational, #4185)
+        continue-on-error: true
+        run: python3 tools/surface-target-check.py
 
   # ── THE REQUIRED GATE OBSERVES EVERY SHARD IT CERTIFIES ──────────────────
   # `python-ci-gate` is a REQUIRED status check AND the only `merge_condition`

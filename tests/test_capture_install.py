@@ -2252,8 +2252,18 @@ def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
     capture hook stays live — Cursor has no read seam, so the honest answer is
     a note naming what to delete (#3819).
 
+    #2122: the note names EVERY script and event the Cursor layout installs —
+    naming only `tortoise-session-end.sh` read as "capture uninstalled" while
+    the `sessionStart` injection registration stayed live (the #3963
+    accounting rule, applied to the second Cursor script).  The names are
+    DERIVED from `_cursor_layout().scripts`, so a third script cannot be
+    forgotten here.
+
     Mutation: drop the cursor uninstall branch — the command exits 1 with the
-    read-hook refusal and this REDs."""
+    read-hook refusal and this REDs; retype the note with only session-end —
+    the `tortoise-session-start.sh` assertion REDs."""
+    from tortoise import hook_install
+
     root = tmp_path / "proj"
     home = tmp_path / "home"
     root.mkdir()
@@ -2270,8 +2280,10 @@ def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
              env, root)
 
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "capture seam is left in place" in r.stdout, r.stdout
-    assert "tortoise-session-end.sh" in r.stdout, r.stdout
+    assert "left in place" in r.stdout, r.stdout
+    for spec in hook_install.get_layout("cursor").scripts:
+        assert spec.name in r.stdout, (spec.name, r.stdout)
+        assert spec.event in r.stdout, (spec.event, r.stdout)
     # it never inspected/rewrote a cline registration as if it were cursor's
     assert not (root / ".cline").exists(), r.stdout
 
@@ -3379,11 +3391,10 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # `ARTIFACT_CONTRACTS` entry, so it is never graded and needs no marker of its
 # own; the installer registers the SHIPPED package path rather than copying the
 # file, so the slot change reaches it through the package upgrade.
-# codex/cursor are ALREADY at 3 on main (#5919, the redirection fix) and this
-# change's slot split moves no number for them — main b3c3d949c already ships
-# both seams at 3.  Their stale installed copies are caught by the file-BYTES
-# comparison (`modified-script`), which a copy carrying the old single-slot
-# writer fails.
+# codex/cursor were ALREADY at 3 on main (#5919, the redirection fix) and that
+# change's slot split moved no number for them.  Cursor later moved 3→4 under
+# #2122 (the sessionStart injection half, see the table comment below); codex
+# stays at 3.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
@@ -3393,7 +3404,16 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # instead of cutting it silently, so the bytes the seam POSTs changed and every
 # installed generation-1 copy must read as stale.  The branch predates it, so
 # this number comes from main, not from #5838.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 10, "codex": 3, "cursor": 3,
+# cursor 3→4 is #2122: the Cursor seam gained a SECOND script —
+# `session-start.sh`, Cursor's `sessionStart` cold-context injection
+# (`additional_context`), the one push seam Cursor's hook reference documents
+# (its per-turn `beforeSubmitPrompt` output is `{continue, user_message}` —
+# observe/block, no injection).  Cursor grades its seam as ONE generation, so
+# BOTH shipped scripts carry 4, and an installed generation-3 copy (session-end
+# only) must read as stale to receive the injection half.  The drift detector
+# also flags the missing script/entry on its own, so the bump is what carries
+# the change to an install whose bytes are frozen at generation 3.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
                              "pi": 2}
 
 
@@ -3421,10 +3441,20 @@ def test_shipped_install_contract_generations(harness):
     deletes), so claude moved 9→10 — and that bump is what carries the fix to
     already-installed hosts, whose hook bytes are frozen at install time and
     whose ledger entries would otherwise stay permanently un-processable.
-    The codex/cursor seams take the same slot split, but their marker was
-    already at 3 on main (#5919) and this branch agreed, so NO number moved for
-    them: their stale installed copies are caught by the installed-copy byte
-    comparison (`modified-script`), not by a generation bump.  `pi` moved 1→2 on
+    #3796 changed the claude hooks' BEHAVIOUR once more (session-start.sh now
+    DISPATCHES the install-probe beacon in the background and reaps it after the
+    digest, instead of serializing the POST behind a digest this script does not
+    bound; discovery is also resolved exactly once into three pre-initialised
+    variables), so claude moved 10→11.  The bump is again the ONLY thing that
+    carries the new dispatch order to an already-installed host: its hook bytes
+    are frozen at install time, so without it every existing install keeps
+    serializing the beacon behind the digest forever while
+    `tortoise hooks status` reports it current.
+    The codex seam took the same slot split and its marker was already at 3 on
+    main (#5919), so NO number moved for it: a stale codex install is caught by
+    the installed-copy byte comparison (`modified-script`), not by a generation
+    bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
+    sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
     a #5838 bump.  Those
     numbers are a reviewed decision, not a detail, so they are pinned once and

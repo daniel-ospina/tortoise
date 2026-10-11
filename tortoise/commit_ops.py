@@ -58,6 +58,47 @@ OBJECT_TERMINAL_STATUSES = frozenset(
 # remains.
 _RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
 
+# ═════════════════════════════════════════════════════════════════════════
+# #1423 — THE canonical SUBJECT terminal vocabulary for the SEARCH/RECALL read
+# surfaces. The Subject twin of ``OBJECT_TERMINAL_STATUSES`` above, and the
+# family arm ``search_engine._status_vocab_for`` now returns explicitly
+# (before #1423 it fell through to the Object set by ACCIDENT of the
+# dispatcher's fallback, while the four legs gated on
+# ``label in ("Point", "Object")`` so a :Subject was never filtered at all).
+#
+# ONTOLOGY §4.2 declares the Subject lifecycle vocabulary as draft / live /
+# superseded / deprecated / archived. The TERMINAL members are the read-surface
+# exclusion; ``draft`` is NOT terminal (a draft Subject is retrievable, exactly
+# as a draft Point is).
+#
+# ``retracted`` is NOT declared in §4.2, and ``SUBJECT_STATUS_VALUES`` below
+# refuses it on WRITE — yet it IS excluded here, deliberately, on the Object
+# family's own precedent (#2977): a read vocabulary answers "which STORED
+# states are dead", not "which states a writer may mint". The Object read set
+# kept ``retracted`` while no in-tree writer produced it, because a graph can
+# hold one from a legacy/pre-fix SDK, a raw Cypher producer, or a JSONL replay
+# of either. Before #1423 the leg gate skipped ``:Subject`` entirely, so such
+# a node was served as CURRENT state on all four retrieval legs. The read set
+# is the NET; ``SUBJECT_STATUS_VALUES`` is the DOOR. The set matches
+# ``OBJECT_TERMINAL_STATUSES``.
+SUBJECT_TERMINAL_STATUSES = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
+
+# #1423 (review P1) — the DECLARED, WRITABLE Subject lifecycle, ONTOLOGY §4.2.
+# ``retracted`` is deliberately ABSENT: §4.2 declares no Subject retraction
+# verb, and adopting a vocabulary that a recorded decision does not carry is
+# not a fix (the contradiction test). The generic entity write surface
+# (``create_entity("subject", ...)`` and ``update_entity``) validates a
+# Subject ``status`` against THIS set and raises for anything else, so an
+# undeclared value (``"dead"``) can no longer be STORED and leak on every
+# read leg — the general hole the ``retracted`` observation is one instance
+# of. Points carry the same guard (``sdk.POINT_STATUS_VALUES``). The OBJECT
+# family has no write-side guard yet: ``update_entity(<object>, status=...)``
+# is still unvalidated, which is a PRE-EXISTING hole outside this lane's
+# scope (#1423 is the Subject family).
+SUBJECT_STATUS_VALUES = frozenset(
+    {"draft", "live", "superseded", "deprecated", "archived"})
+
 
 def _op_attr(op, name, default=None):
     """Field access for raw payload dicts OR commit_schema Operator models."""
@@ -675,6 +716,207 @@ class _PerRecordWarnBudget:
         return max(0, self.total - self._limit)
 
 
+def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
+                                session_id, evidence, warn, _skip) -> bool:
+    """#1423: apply ONE entity supersession whose endpoints are `:Subject`.
+
+    The Subject twin of the Object lane in ``apply_supersessions`` — people
+    change roles, teams reorganise, a role is replaced — sequenced after the
+    Object path by owner decision 3a on #1350, and consuming the SAME
+    kind-agnostic supersession records the extractor already produces
+    (``extractor_v2._supersession_records``).
+
+    WHY the write is a ``supersede`` ``EntityMutated`` record and not a
+    dedicated event type: the projection-owned status the issue asks for is
+    ALREADY the generic entity surface's job. The live write applies the map
+    and journals it through the ONE record builder
+    (``_journal_entity_mutation``, op ``supersede``), and the ONE generic
+    ``SET n += $state`` fold replays it on every canonical label in all four
+    replay engines (``rebuild_all`` / ``rebuild`` / ``recover_from_log`` /
+    ``backup.restore``) plus the consistency reference fold. A
+    ``SubjectSuperseded`` event would have re-cut that machinery per label —
+    three hand-synced type lists, a fourth refusal/accept parity gate and a
+    second deferred sweep (#2977's correction 5 is the measured cost of that
+    route). MEASURED end to end before this landed:
+    ``update_entity(subject, status='superseded', supersededBy=...,
+    supersededAt=...)`` already round-tripped byte-identically through
+    ``rebuild_all``; only the PRODUCER was missing.
+
+    Gates (all mirroring the Object lane, so the two families cannot drift on
+    the never-guess / keep-first / visible-successor discipline):
+
+    * **keep-first** — a target already terminal is an idempotent no-op, never
+      a re-fold (the Object lane's ``_RECALL_OBJECT_EXCLUDED_STATUS`` check).
+    * **never-guess** — an id-form ref must match exactly one Subject; a
+      name-form ref must match exactly one carrier. Two id-claimants or two
+      name-carriers are ambiguous and are refused with a warning.
+    * **visible distinct successor** — the successor must carry an id, differ
+      from the target, and not itself be terminal; otherwise folding would
+      bury the target with no successor a recall surface can show.
+    * **reproducible-only** — an id-less target is REFUSED rather than
+      name-folded. The journaled fold is id-keyed
+      (``MATCH (n:$label {id:$rid}) SET n += $s``); a name-keyed live write
+      would therefore journal a record replay cannot re-apply, i.e. it would
+      introduce exactly the live≠replay divergence this lane exists to remove.
+      No in-tree producer mints an id-less `:Subject` (``_upsert_subject``
+      early-returns without one), so the gate is a boundary, not a hot path.
+
+    Returns True iff a supersession was applied (the caller's ``applied``
+    counter). Every refusal is warned AND reported through ``_skip`` (the
+    caller's ``skipped`` channel, #5365) — never silent.
+
+    STATED BOUND — same-payload Subject CHAINS fold in PAYLOAD order. The
+    Object lane's #2249 pre-pass (``_supersession_fold_order``) reorders a
+    same-payload chain so each fold runs while its successor is still live;
+    that pre-pass probes ``:Object`` only, so a Subject chain contributes no
+    edges and is folded in emission order. A payload carrying BOTH ``A→B`` and
+    ``B→C`` in the REVERSED order therefore terminalizes B first and the
+    visible-successor gate then skips ``A→B``, leaving A live until the next
+    capture. Not new exposure (the gate is the same one the Object lane had
+    pre-#2249) and not a replay defect — the fold is idempotent in journal
+    order — but it IS an asymmetry between the two families. Extending the
+    pre-pass means making its two carrier probes label-aware AND resolving a
+    record's family the same way the fold does (successor-probe-first) — a
+    rewrite of that heuristic, filed as its own issue (#8082) rather than
+    smuggled in here.
+    """
+    # ── ref-side resolution INSIDE the Subject family ────────────────────
+    # Resolving the ref in `:Subject` (not `:Object`) is what makes a
+    # cross-family record — a Subject successor with an Object ref, or the
+    # reverse — refuse here rather than fold half a replacement onto one node.
+    by_id = proj.g.query(
+        "MATCH (s:Subject) WHERE s.id = $ref "
+        "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
+        params={"ref": ref},
+    ).result_set
+    if len(by_id) > 1:
+        # #1423 review P2: the Object twin records this refusal durably
+        # (``record_non_folded``) as well as warning — the entry IS the
+        # record, the log line is only operator visibility
+        # (``entity_identity``'s own doctrine). Mirror it, ``label="Subject"``.
+        record_non_folded("Subject", ref, [r[1] for r in by_id],
+                          shape="duplicate-id")
+        warn(f"subject supersession {ref!r} matches {len(by_id)} Subjects "
+             f"by id — skipped (never-guess)")
+        _skip(ref, supersedes_by, "ambiguous subject id")
+        return False
+    if by_id:
+        _nid, target_id, target_name, target_status, target_sb = by_id[0]
+    else:
+        by_name = proj.g.query(
+            "MATCH (s:Subject) WHERE s.name = $ref "
+            "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
+            params={"ref": ref},
+        ).result_set
+        if len(by_name) > 1:
+            # #1423 review P2: durable record, not just a log line — the
+            # Object twin's `:1184` call mirrored with `label="Subject"`.
+            record_non_folded("Subject", ref,
+                              display_holder_ids([r[1] for r in by_name]),
+                              shape="ambiguous-name")
+            warn(f"subject supersession {ref!r} matches {len(by_name)} "
+                 f"Subjects by name — skipped (never-guess)")
+            _skip(ref, supersedes_by, "ambiguous subject name")
+            return False
+        if not by_name:
+            warn(f"subject supersession {ref!r} not found in the graph as "
+                 f"a :Subject — skipped (fail-open)")
+            _skip(ref, supersedes_by, "ref is not a Subject")
+            return False
+        _nid, target_id, target_name, target_status, target_sb = by_name[0]
+    # Keep-first: a terminal target is never re-folded. Same-successor is a
+    # silent idempotent dedup (an unchanged conversation re-ingested); a
+    # DIVERGENT successor warns — the Object lane's exact asymmetry, so a
+    # conflict stays auditable instead of vanishing.
+    if (target_status or "") in SUBJECT_TERMINAL_STATUSES:
+        if (target_sb or "") != supersedes_by:
+            warn(f"subject supersession {ref!r} already terminal "
+                 f"(status={target_status!r}, supersededBy={target_sb!r}) — "
+                 f"conflict with {supersedes_by!r} skipped "
+                 f"(keep-first, the fold never blind-overwrites)")
+        return False
+    if not target_id:
+        warn(f"subject supersession {ref!r} resolved to an id-less "
+             f"`{target_name}` — skipped: the journaled fold is id-keyed, so "
+             f"a name-keyed live write would not be replayable (#1423)")
+        _skip(ref, supersedes_by, "id-less subject target")
+        return False
+    # ── successor must be a VISIBLE, DISTINCT Subject ────────────────────
+    has_visible_distinct = any(
+        sid is not None and sid != target_id
+        and (sst or "") not in SUBJECT_TERMINAL_STATUSES
+        for sid, _sname, sst in sb_rows)
+    if not has_visible_distinct:
+        warn(f"subject supersession {ref!r} skipped — successor "
+             f"{supersedes_by!r} resolves only to id-less, target-identical, "
+             f"or terminal Subjects (no visible successor under that name)")
+        _skip(ref, supersedes_by, "no visible successor")
+        return False
+    # ── the write: ONE journaled path, live == journal == replay ─────────
+    # The stamp is minted HERE and carried in the journaled `state` map, so
+    # replay restores the ORIGINAL instant verbatim instead of a rebuild-time
+    # one — the #2164-P4 drift class, which the Object twin still exhibits
+    # (its live fold falls back to `now` while replay reads the journaled ts).
+    #
+    # The live statement is `_update_entity`'s non-Point branch VERBATIM (`SET
+    # n += $props` with the applied values read back in the SAME statement)
+    # rather than a call to it: that surface has no provenance channel, and
+    # `session_id` + `evidence` are what makes the record auditable against
+    # the conversation it came from — the Object lane's `ObjectSuperseded`
+    # carries both. The record itself still goes through the ONE builder
+    # (`_journal_entity_mutation`), so the shape cannot drift.
+    from tortoise.projection import _now_iso
+    state = {"status": "superseded", "supersededBy": supersedes_by,
+             "supersededAt": _now_iso()}
+    keys = list(state)
+    try:
+        applied = proj.g.query(
+            "MATCH (s:Subject {id:$id}) SET s += $s "
+            "RETURN [k IN $keys | properties(s)[k]] AS vals",
+            params={"id": target_id, "s": state, "keys": keys},
+        )
+    except Exception as exc:
+        warn(f"subject supersession write failed for {target_name!r}: {exc}")
+        _skip(ref, supersedes_by, f"write failed: {exc}")
+        return False
+    if not applied.result_set:
+        # The write matched no `:Subject` at that id (a concurrent delete, or
+        # an id another label owns). Nothing was written, so nothing may be
+        # journaled — a phantom record would refuse replay.
+        warn(f"subject supersession {ref!r} → {supersedes_by!r} did not "
+             f"land (the write matched no :Subject {target_id!r}; the "
+             f"record is NOT journaled)")
+        _skip(ref, supersedes_by, "write matched no subject")
+        return False
+    vals = list(applied.result_set[0][0])
+    if len(vals) != len(keys):
+        # Impossible by construction — `[k IN $keys | ...]` is
+        # length-preserving — so this is an engine contract breach. LOUD, per
+        # the same guard `_update_entity` carries: a silent truncation would
+        # journal a state that never existed.
+        warn(f"subject supersession state arity mismatch for {target_name!r}: "
+             f"{len(keys)} keys vs {len(vals)} values — journalling the "
+             f"shorter of the two")
+    provenance = {k: v for k, v in
+                  (("session_id", session_id), ("evidence", evidence))
+                  if v}
+    try:
+        sdk._journal_entity_mutation(
+            "Subject", target_id, "supersede",
+            state=dict(zip(keys, vals, strict=False)),
+            provenance=provenance or None)
+    except Exception as exc:
+        # The live write LANDED and the journal append did not. Report it as
+        # such (the divergence is real until the next write) instead of
+        # counting an applied supersession whose replay will not reproduce it.
+        warn(f"subject supersession {ref!r} → {supersedes_by!r} wrote live but "
+             f"the journal append FAILED ({exc}) — live != replay until the "
+             f"next write")
+        _skip(ref, supersedes_by, f"journal append failed: {exc}")
+        return False
+    return True
+
+
 def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                         skipped=None):
     """Apply canonical supersession records — the ONE consumer-side
@@ -734,6 +976,15 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
     producer; one terminal BEFORE the payload still skips (guard-(h)
     semantics). Returns the number of
     records applied.
+
+    #1423 — TWO entity families. The successor probe is Object-first;
+    when no Object carries the successor NAME it probes `:Subject` and
+    dispatches to ``_apply_subject_supersession`` (see that docstring for
+    why the Subject lane is a ``supersede`` ``EntityMutated`` record rather
+    than a dedicated event type, and for the gates it mirrors). Everything
+    above applies to BOTH families; only the fold differs, because the
+    Object fold (``ObjectSuperseded``) predates the generic entity surface.
+    The Object path is byte-identical when an Object carries the name.
 
     ``skipped`` (#5365) is an OPTIONAL caller-supplied list. When given, one
     ``{"ref", "successor", "reason"}`` dict is appended for every record the
@@ -863,26 +1114,31 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             params={"sb": supersedes_by},
         ).result_set
         if not sb_rows:
-            # #1370: routing a subject-kind entity to `:Subject` means an
-            # entity supersession record for it can no longer resolve to an
-            # Object. Report that case ACCURATELY (the generic "dangling
-            # successor" message would misdiagnose a correctly-typed node
-            # as a missing one) and skip — entity supersession is Object-only.
-            _subj = proj.g.query(
-                "MATCH (s:Subject {name:$sb}) RETURN count(s)",
+            # #1423: the successor may be a :Subject. #1370 routes the
+            # extractor's declared §5 Subject kinds (team / role /
+            # organization / naturalPerson / legalPerson) to `:Subject`, and
+            # the producer (`extractor_v2._supersession_records`) is
+            # kind-AGNOSTIC — so a "team Y replaced by team Z" record resolves
+            # here to two Subjects. Before #1423 this branch warned and skipped
+            # ("entity supersession is Object-only"), which left a superseded
+            # role/team/person `live` forever AND search-visible. The Subject
+            # family has its own lane below; it is tried ONLY when no Object
+            # carries the successor name, so the Object path is byte-identical.
+            subj_rows = proj.g.query(
+                "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status",
                 params={"sb": supersedes_by},
             ).result_set
-            if _subj and _subj[0][0]:
-                warn(f"entity supersession {ref!r} skipped — successor "
-                     f"{supersedes_by!r} is a :Subject (a declared §5 "
-                     f"subject kind, #1370); entity supersession is "
-                     f"Object-only")
-                _skip(ref, supersedes_by, "successor is a :Subject")
-            else:
-                warn(f"entity supersession {ref!r} skipped — successor "
-                     f"{supersedes_by!r} is not an Object in the payload "
-                     f"entities or the graph (dangling successor)")
-                _skip(ref, supersedes_by, "dangling successor")
+            if subj_rows:
+                if _apply_subject_supersession(
+                        proj, sdk, ref, supersedes_by, subj_rows,
+                        session_id=session_id, evidence=evidence,
+                        warn=warn, _skip=_skip):
+                    applied += 1
+                continue
+            warn(f"entity supersession {ref!r} skipped — successor "
+                 f"{supersedes_by!r} is not an Object or a Subject in the "
+                 f"payload entities or the graph (dangling successor)")
+            _skip(ref, supersedes_by, "dangling successor")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only
@@ -933,8 +1189,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             _seen_nodes.add(_row[0])
             rows.append(list(_row[1:]))
         if not rows:
-            warn(f"supersession ref {ref!r} not found in the graph — "
-                 f"skipped (fail-open)")
+            # #1423 review P2: the SUCCESSOR probe above is Object-FIRST, so a
+            # successor name carried by BOTH families routes this record into
+            # the Object lane even when the REF is a Subject (`Subject(A)`,
+            # `Subject(B)`, `Object(B)`). This ref probe is Object-only, so it
+            # finds nothing and the pre-fix code warned "ref not found" and
+            # `continue`d — DROPPING a fold that IS representable, and
+            # reporting it nowhere in `skipped` (against
+            # `apply_supersessions`' one-entry-per-unapplied-record contract,
+            # #5365). Hand the record to the SUBJECT lane instead: it resolves
+            # the ref inside its own family and `_skip`s with
+            # "ref is not a Subject" when the ref is not one, so a miss is
+            # reported exactly once rather than silently dropped. The ref
+            # looks the same either way — the successor probe is what chose
+            # the lane, and the successor is the family's identity.
+            subj_rows = proj.g.query(
+                "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status",
+                params={"sb": supersedes_by},
+            ).result_set
+            if _apply_subject_supersession(
+                    proj, sdk, ref, supersedes_by, subj_rows,
+                    session_id=session_id, evidence=evidence,
+                    warn=warn, _skip=_skip):
+                applied += 1
             continue
         # #2164 review (P2-2): rows[0] was backend-order-dependent — the OR
         # probe can return BOTH an id-match row (ref == an Object's id) AND a

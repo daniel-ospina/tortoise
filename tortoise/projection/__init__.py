@@ -149,6 +149,41 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
     return value
 
 
+def _bounded_server_socket_kwargs() -> dict[str, float | None]:
+    """The product's bounded socket policy, as server-client kwargs.
+
+    ONE resolution point for every raw server-lane client the package builds:
+    the projection's host branch, ``session_indexer``'s graph-entity lookup,
+    ``backup``'s BGSAVE and the ``doctor`` probe in ``__main__``. Before this
+    existed each site re-derived its own bounds or passed none at all. The
+    indexer passed none — which is NOT "redis-py's 5s default":
+    ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and hands
+    that to redis-py explicitly, so the read was UNBOUNDED (#3065). A
+    server-side stall (the #2969 active-defrag loop) then parked the caller in
+    ``recv()`` forever, and the site's best-effort handler made that
+    indistinguishable from "no results". The other two sites passed the
+    pre-#2850 literals (5s connect / 10s read), so neither knob reached them
+    either — the same defect, one step milder (bounded, but not tunable).
+
+    The returned pair is byte-identical to what the host branch has always
+    passed, so a knob set for the product is now set for every product client:
+    ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` / ``TORTOISE_DB_SOCKET_TIMEOUT``
+    (parsed by ``_resolve_socket_timeout``, which fails loud on a typo) with
+    ``_socket_timeouts()`` supplying the default.
+
+    NOT for the embedded (unix-socket) lane: redis-py does not forward
+    ``socket_connect_timeout`` for a unix socket (see that branch), so the
+    embedded client deliberately carries only the read bound.
+    """
+    connect_to, read_to = _socket_timeouts()
+    return {
+        "socket_connect_timeout": _resolve_socket_timeout(
+            _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
+        "socket_timeout": _resolve_socket_timeout(
+            _SOCKET_TIMEOUT_ENV, read_to),
+    }
+
+
 # ── #3585: the fail-closed run boundary (R8/R9) ───────────────────────────
 #
 # The non-folded-event set is collected for the duration of a REPLAY RUN, and
@@ -3788,8 +3823,8 @@ def secondary_entity_id_props(label: str) -> tuple[str, ...]:
 # tests/test_unjournaled_mutation_class.py derives the relationship so that an
 # op added without a fold arm REDs instead of shipping.
 _ENTITY_MUTATION_OPS: tuple[str, ...] = (
-    "delete", "rename", "restatus", "revise",       # fold arms exist
-    "retract", "supersede",                          # recorded on #3299 — no arm yet
+    "delete", "rename", "restatus", "revise", "supersede",  # fold arms exist
+    "retract",                                       # recorded on #3299 — no arm yet
 )
 # FOLD capability, not producer reach: the `rename` arm is implemented and must
 # stay so, but the PRODUCER deliberately does not emit `rename` yet — see
@@ -3798,30 +3833,61 @@ _ENTITY_MUTATION_OPS: tuple[str, ...] = (
 # `state["name"]`; a record carrying just a top-level `name` unfolds and is
 # reported as a fold miss. #3377 returned to
 # open; #4769 lands rename journalling WITH the structural sweep-ordering fix.
+#
+# #1423: `supersede` joined the implemented set. It is a STATE op — the record's
+# `state` map carries the applied `status`/`supersededBy`/`supersededAt`, so the
+# ONE generic `SET n += $state` arm folds it on every canonical label (Subject
+# included) in all four replay engines, with no new event type and no new
+# per-label fold. The producer is `commit_ops._apply_subject_supersession`
+# (the Subject arm of `apply_supersessions`), so a role/team/person
+# replacement is journaled and replayed instead of refused.
 _ENTITY_MUTATION_IMPLEMENTED_OPS: frozenset[str] = frozenset(
-    {"delete", "rename", "restatus", "revise"})
+    {"delete", "rename", "restatus", "revise", "supersede"})
 # The ops that carry a `state` payload (everything implemented except delete).
 _ENTITY_MUTATION_STATE_OPS: frozenset[str] = frozenset(
-    {"rename", "restatus", "revise"})
+    {"rename", "restatus", "revise", "supersede"})
 # HAND-MAINTAINED, not derived from the set difference: a derived set would
 # auto-absorb an op added to ``_ENTITY_MUTATION_OPS`` with no classification,
 # leaving the derivation test green on exactly the addition it exists to catch.
 _ENTITY_MUTATION_PENDING_OPS: frozenset[str] = frozenset(
-    {"retract", "supersede"})
+    {"retract"})
+
+
+#: #1423: keys the record envelope OWNS, so an optional ``provenance`` dict
+#: passed to ``_journal_entity_mutation`` cannot corrupt the line. ``_emit_event``
+#: takes ``point``/``payload``/``id`` as named params and its envelope carries
+#: ``type``/``event_id``/``ts``/``initiated_by``/``projection_version`` — the
+#: exact reason the EntityMutated payload is nested under ``state`` in the first
+#: place, which an unguarded provenance merge would re-open.
+_ENTITY_MUTATION_RESERVED_KEYS: frozenset[str] = frozenset({
+    "type", "id", "op", "label", "state", "name",
+    "point", "payload", "event_id", "ts", "initiated_by",
+    "projection_version", "recorded_ts",
+})
 
 
 def classify_entity_mutation_op(props: dict) -> str:
     """The write's PRIMARY INTENT → its ``EntityMutated`` ``op`` value.
 
-    Precedence ``name`` > ``status`` > other. ``state`` always carries the
-    write's full applied map, so a mixed write loses nothing by the labelling —
-    a consumer wanting EVERY status transition must read ``state["status"]``
-    and must NOT filter on ``op``.
+    Precedence ``supersededBy`` > ``name`` > ``status`` > other. ``state``
+    always carries the write's full applied map, so a mixed write loses nothing
+    by the labelling — a consumer wanting EVERY status transition must read
+    ``state["status"]`` and must NOT filter on ``op``.
+
+    ``supersededBy`` is checked FIRST (#1423): it is the successor pointer, the
+    one prop no other write sets, so a record carrying it IS a supersession
+    whatever else it carries. Labelling it ``supersede`` keeps that intent in
+    the op instead of flattening it into the generic ``restatus``. The fold is
+    the SAME generic state arm either way (``supersede`` is a member of
+    ``_ENTITY_MUTATION_STATE_OPS``), so the label decides audibility, never
+    behaviour.
 
     Lives here (not in ``sdk``) so the producer cannot invent a name; its return
     set is AST-asserted equal to ``_ENTITY_MUTATION_STATE_OPS`` by the test
     suite.
     """
+    if "supersededBy" in props:
+        return "supersede"
     if "name" in props:
         return "rename"
     if "status" in props:
@@ -6068,10 +6134,14 @@ class FalkorProjection(
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             # Resolved at CONNECTION time so an env knob covers every CONSUMER
-            # of this client (SDK sessions, ingest, hosted) — NOT every
-            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
-            # `backup.py` and the probe in `__main__.py` construct their own,
-            # and neither knob reaches them. ACTUAL
+            # of this client (SDK sessions, ingest, hosted) — and, since
+            # #3065, every OTHER raw FalkorDB client in `tortoise/` too:
+            # `session_indexer.py`, `backup.py` and the probe in `__main__.py`
+            # construct their own, and each one now takes its bounds from
+            # `_bounded_server_socket_kwargs()` — the ONE resolution point
+            # (defined beside the #2969 helpers above). Before that the indexer
+            # carried NO bound at all (the unbounded `recv()` #3065 was filed
+            # for) and the other two carried knob-blind literals. ACTUAL
             # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
             # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
             # opt-out) WINS whenever it is set; #2850's product-wide
@@ -6094,18 +6164,17 @@ class FalkorProjection(
             # none/off/false/0 (or any non-positive number) removes the bound
             # entirely — the block-forever mode #2850 exists to PREVENT, reachable
             # only through that opt-out.
-            connect_to, read_to = _socket_timeouts()
             # #3595: same guarded-construction seam on the server lane — the
             # ~142 `reg.query(...)` sites behind TortoiseSDK._get_registry and
             # the direct `proj.db.select_graph(...)` sites all reach the wire
             # through handles this client produces.
+            # #3065: the bounds come from the shared resolution point rather
+            # than being spelled out here — the same values, so the remaining
+            # raw clients can share this exact pair instead of a copy of it.
             self.db = guarded_client(FalkorDB, host=host, port=port,
                                      username=username, password=password,
-                                     socket_connect_timeout=_resolve_socket_timeout(
-                                         _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
-                                     socket_timeout=_resolve_socket_timeout(
-                                         _SOCKET_TIMEOUT_ENV, read_to),
-                                     ssl=ssl)
+                                     ssl=ssl,
+                                     **_bounded_server_socket_kwargs())
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
@@ -12509,7 +12578,8 @@ class FalkorProjection(
 
         if op != "delete":
             # Outside the recorded vocabulary, or recorded-but-unimplemented
-            # (`retract`/`supersede`). LOUD: a silently dropped mutation is
+            # (`retract` — #1423 moved `supersede` into the IMPLEMENTED set,
+            # so only `retract` remains pending). LOUD: a silently dropped mutation is
             # exactly this class's defect. The two are distinguished so a
             # future extender is not told its sanctioned op is "unknown".
             # #3585 (R8): both are non-folded and NOT exempt — the run fails,

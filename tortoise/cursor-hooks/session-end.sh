@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 3
+# tortoise-hook-version: 4
 # Tortoise session capture for Cursor — sessionEnd hook (#3819).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
 # for this hook (see tortoise/hook_install.py): column-0, one per file, bumped
 # on ANY behavioural edit. #3819 is the first generation for the Cursor seam.
+# 3→4 is #2122: the seam gained a SECOND script (`session-start.sh`, the
+# sessionStart cold-context injection), so every installed generation-3 copy
+# must read as stale to receive it. Cursor grades its seam as ONE generation,
+# so this file and `session-start.sh` carry the same number.
 #
 # Fires when a Cursor agent session ends. Cursor delivers the event as JSON on
 # stdin (verified against the installed bundle, Cursor 3.20.21:

@@ -2810,7 +2810,9 @@ def _cmd_install_hooks(args) -> int:
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
       (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
-      hooks.json`` registration), and pi (the in-repo capture extension).
+      hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
+      sessionStart cold-context injection hook, #2122) and pi (the in-repo
+      capture extension).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -2843,11 +2845,20 @@ def _cmd_install_hooks(args) -> int:
     # HOME-scoped capture hook stayed live — the opposite of what a user
     # asking to uninstall capture concluded (#3819).
     if uninstall and harness == "cursor":
+        # Derived from the layout (never retyped): a Cursor install writes
+        # EVERY script in `_cursor_layout().scripts`, and naming only
+        # session-end.sh read as "capture uninstalled" while the sessionStart
+        # injection registration stayed live (#2122, the #3963 accounting rule).
+        from tortoise import hook_install as _hook_install
+
+        layout = _hook_install.get_layout("cursor")
+        scripts = " and ".join(f"~/.cursor/hooks/{s.name}"
+                               for s in layout.scripts)
+        events = "/".join(s.event for s in layout.scripts)
         print("cursor has no shell-hook read seam — nothing for --uninstall to "
-              "remove. The capture seam is left in place: delete "
-              "~/.cursor/hooks/tortoise-session-end.sh and its "
-              "sessionEnd entry in ~/.cursor/hooks.json to "
-              "uninstall capture.")
+              f"remove. The capture/injection seam is left in place: delete "
+              f"{scripts} and their {events} entries in "
+              "~/.cursor/hooks.json to uninstall it.")
         return 0
     # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
     # injection IS the native plugin, and the capture installer owns the whole
@@ -2928,10 +2939,12 @@ def _cmd_install_hooks(args) -> int:
         return 0
     if harness == "cursor":
         # Cursor has no shell-hook read seam either: the sessionEnd capture
-        # hook is its only seam, and `_install_capture_seam` already reported
-        # the install, the no-op, and the IDE-only disclosure.  Falling
-        # through to `_install_read_hook` would inspect (and could rewrite) a
-        # CLINE registration as if it were Cursor's.
+        # hook and the sessionStart injection hook are its whole seam (the
+        # per-turn beforeSubmitPrompt event cannot inject), and
+        # `_install_capture_seam` already reported the install, the no-op, and
+        # the IDE-only disclosure.  Falling through to `_install_read_hook`
+        # would inspect (and could rewrite) a CLINE registration as if it were
+        # Cursor's.
         return 0
     return _install_read_hook(args)
 
@@ -2997,6 +3010,19 @@ def _install_capture_seam(args, install_capture) -> int:
         # docs: "Cloud agents have no editor-lifetime session boundary."
         from tortoise.capture_install import cursor_home
         cursor_root = cursor_home(_P.home())
+        # #2122: the same install registers Cursor's sessionStart injection
+        # hook. Say WHAT was registered and on which event — the contract the
+        # hook emits is `additional_context`; whether Cursor delivers it to the
+        # model is Cursor's side of the seam (community-reported reliability
+        # caveats), so this names the artifact, not a delivery promise.
+        if result.changed:
+            print(
+                f"Cursor memory is installed in {cursor_root / 'hooks.json'}: "
+                "the sessionEnd capture hook, plus the sessionStart hook that "
+                "injects the cold-context digest as Cursor's "
+                "`additional_context` (sessionStart is Cursor's only context-"
+                "injection seam — its per-turn beforeSubmitPrompt event can "
+                "observe/block a prompt but cannot inject).")
         print(
             f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
             f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
@@ -3121,6 +3147,12 @@ def _install_read_hook_impl(args) -> int:
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
+    - Every write is ATOMIC (#3918): a fresh same-dir temp + ``os.replace``
+      via ``hook_install._atomic_write_text``, so a crash, ENOSPC or a kill
+      mid-write cannot truncate the user's own ``settings.json`` (or the
+      cline marker), and a hard-linked or leaf-symlinked target is REPLACED
+      rather than written through. An existing file keeps its mode; the
+      cline marker is set 0o755 as part of the swap.
     - A ``--dir`` root that is not a real directory (a regular file, a
       symlink to a file, or a dangling symlink) is REFUSED before either
       half writes, so a bad root fails the whole install with NOTHING on
@@ -3128,8 +3160,22 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
+
+    # #3918: every WRITE below goes through the shipped atomic helper — a
+    # fresh same-dir temp + ``os.replace`` (the pattern #3866 gave
+    # ``capture_install._atomic_bytes`` / ``hook_install._atomic_write_text``),
+    # never ``Path.write_text``.  ``write_text`` truncates the destination in
+    # place, so a crash, an ENOSPC or a kill between the truncate and the last
+    # byte leaves the user's own ``settings.json`` — the file holding THEIR
+    # hook registrations and unrelated settings — truncated or invalid JSON.
+    # ``rename(2)`` also replaces the directory ENTRY, which closes the
+    # leaf-symlink and hardlink write-through cases in the same move (#2385
+    # item 2).  The residual there — an intermediate directory component
+    # swapped for a symlink between the guard above and the write — is NOT
+    # closed by this and needs a per-component ``openat`` walk.
+    from tortoise.hook_install import _atomic_write_text
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
         print("Installable harness seams (per-turn volunteering-memory hook "
@@ -3158,8 +3204,10 @@ def _install_read_hook_impl(args) -> int:
               "tortoise-capture.ts (the capture extension; Pi has no "
               "shell-hook read seam)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
-              "(the sessionEnd capture hook; Cursor has no shell-hook read "
-              "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
+              "(the sessionEnd capture hook + the sessionStart cold-context "
+              "injection hook; Cursor has no per-turn shell-hook read seam — "
+              "its beforeSubmitPrompt event cannot inject. IDE-ONLY: Cursor "
+              "cloud agent sessions are not captured)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
@@ -3369,8 +3417,10 @@ def _install_read_hook_impl(args) -> int:
             print(f"Removed {target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(marker_content)
-            _os.chmod(target, 0o755)
+            # #3918: the exec bit goes on the TEMP, with the content — a
+            # post-replace ``chmod`` would let a crash ship a 0600 hook that
+            # exists but can never run.
+            _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
@@ -3515,7 +3565,9 @@ def _install_read_hook_impl(args) -> int:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
             else:
-                target.write_text(out)
+                # #3918: atomic write-back — a failed uninstall must leave the
+                # registration intact, never a truncated document.
+                _atomic_write_text(target, out)
                 print(f"Uninstalled volunteer-turn.sh from {target}")
             return 0
         # Merge: append our registration under UserPromptSubmit only when no
@@ -3594,7 +3646,7 @@ def _install_read_hook_impl(args) -> int:
             # above does not catch — and the CLI died with a traceback.  The
             # sibling read above (``existing = target.read_text(...)``) has
             # always passed utf-8.
-            target.write_text(out)
+            _atomic_write_text(target, out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
         return 0
@@ -3604,7 +3656,8 @@ def _install_read_hook_impl(args) -> int:
         print(_json.dumps(_document(registration), indent=2))
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_json.dumps(_document(registration), indent=2) + "\n")
+        _atomic_write_text(
+            target, _json.dumps(_document(registration), indent=2) + "\n")
         print(f"Installed {target}")
         if harness == "codex":
             print("Project-local codex hooks require one-time trust: run "
@@ -8394,10 +8447,16 @@ def _cmd_doctor(args):
             from falkordb import FalkorDB
 
             from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            from tortoise.projection import _bounded_server_socket_kwargs
+            # #3065: the probe's bounds come from the product's ONE resolution
+            # point too. The 5s/10s literals it carried were the pre-#2850
+            # hardcoded values, so `doctor` ignored an operator's
+            # TORTOISE_DB_SOCKET_TIMEOUT — a diagnostic run against a wedged
+            # server parked for the literal instead of the configured bound.
             dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
                                  username=probe_user, password=probe_pass,
                                  ssl=(parsed.scheme == "rediss"),
-                                 socket_connect_timeout=5, socket_timeout=10)
+                                 **_bounded_server_socket_kwargs())
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:

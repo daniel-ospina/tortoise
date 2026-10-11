@@ -79,15 +79,20 @@ Daniel's review is what carries the approval.
 ## What the gate compares — and what it does not
 
 The freeze this document serves is on **tools and endpoints**. The gate compares the live
-declaration against the approved list below. It fails on three kinds of name-level change:
+declaration against the frozen baseline below. It fails on three kinds of name-level change:
 
-1. **A new tool** — an MCP tool that is not on the approved list.
-2. **A new endpoint** — a public SDK method that is not on the approved list.
-3. **An approved entry disappearing** — a tool or endpoint that is on the list and is no
+1. **A new tool** — an MCP tool that is not in the frozen baseline.
+2. **A new endpoint** — a public SDK method that is not in the frozen baseline.
+3. **A frozen-baseline entry disappearing** — a tool or endpoint that is on the list and is no
    longer offered.
 
-It also fails when the implementation behind an approved name is swapped for a different
+It also fails when the implementation behind a frozen-baseline name is swapped for a different
 one, because that changes the endpoint while leaving the name intact.
+
+**This frozen baseline is a snapshot of what EXISTS, not the owner-approved TARGET.** The
+target is recorded in [`canonical-mcp-tools.md`](canonical-mcp-tools.md) and
+[`beta-sdk-surface.md`](beta-sdk-surface.md); `tools/surface-target-check.py` reds while the
+live surface differs from it.
 
 Those are the name-level checks. The gate **additionally** fails on several served-surface and
 evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed
@@ -404,8 +409,8 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.reconcile_sessions` | reached by no registered MCP tool; caller categories: cli | tooling, docs | **review** | no MCP tool binds it; callers: cli |
 | `TortoiseSDK.close` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.session_index_health` | reached by no registered MCP tool; caller categories: cli, engine | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine |
+| `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine, tenant-rest |
 | `TortoiseSDK.apikey_create` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |
-| `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |
 | `TortoiseSDK.recall_gaps` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 | `TortoiseSDK.recall_subgraph` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 

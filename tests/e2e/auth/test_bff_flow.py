@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
 from bff_test_helpers import d1_sqlite_files, require_toolchain
@@ -380,6 +381,171 @@ def test_callback_with_forged_flow_cookie_is_rejected(stack):
     )
     assert status == 302, f"forged flow must be answered with the interstitial, got {status}"
     assert "interstitial=1" in headers.get("Location", ""), headers.get("Location")
+
+
+# ---------------------------------------------------------------------------
+# Contract: a DENIED / failed provider round-trip reaches the #1224 banner
+# ---------------------------------------------------------------------------
+# Under the BFF the provider's outcome comes back to `/auth/callback` — and
+# GoTrue carries a FAILURE there as `error` / `error_code` / `error_description`
+# on the QUERY (`internal/api/external.go` → `redirectErrors`; it mirrors the
+# same params into the FRAGMENT too, which a browser never sends to a server).
+# The callback read only `code`, so the error was discarded and the visitor was
+# sent into a NEW `/auth/start` hop — i.e. straight back to the provider with no
+# explanation, while the page's banner code was unreachable on the BFF path.
+#
+# These tests drive the REAL redirect chain (the mock's `/authorize` answers with
+# GoTrue's exact query+fragment shape), so the channel the server can read is the
+# channel that is exercised.
+@contextlib.contextmanager
+def _provider_denied(error_code: str):
+    """Make the mock's authorize hop answer with a provider error, then reset.
+
+    `error_code=""` reproduces GoTrue's `OAuthError` shape (a visitor denying
+    consent: `error` + `error_description`, NO `error_code`); any other value is
+    emitted as `error_code`, which is the `HTTPError` shape (`bad_oauth_state`
+    is the #1224 state-expiry case).
+    """
+    def _set(mode):
+        req = urllib.request.Request(
+            f"{MOCK_URL}/__mock/fault",
+            data=json.dumps({"providerDenied": mode}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+
+    _set(error_code)
+    try:
+        yield
+    finally:
+        # Reset even on a failing assertion, or the deny mode leaks into every
+        # later test in the module (the mock is module-scoped).
+        with contextlib.suppress(Exception):
+            _set(None)
+
+
+def _drive_to_the_denial(j: Jar) -> str:
+    """start -> authorize and return the denial URL the browser would follow."""
+    status, _, headers = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302, f"/auth/start failed: {status}"
+    assert j.cookie("__Host-authflow"), "a denial is only realistic with a live flow"
+    status, _, headers = j.get(headers["Location"], follow=False)
+    assert status == 302, f"the authorize hop failed: {status}"
+    return headers["Location"]
+
+
+@pytest.mark.parametrize("error_code", ["", "bad_oauth_state"])
+def test_denied_provider_round_trip_reaches_the_banner(stack, error_code):
+    """A denial must surface, and must NOT be answered by restarting OAuth.
+
+    Both GoTrue shapes are covered because the page's own predicate is
+    `error || error_code` — a forwarding rule keyed on `error_code` alone would
+    drop the visitor-denied case, and one keyed on `error` alone would drop
+    nothing here but is not what the page reads.
+    """
+    j = Jar()
+    with _provider_denied(error_code):
+        denial = _drive_to_the_denial(j)
+        assert "error=access_denied" in denial, denial
+        assert "access_denied" in denial.split("#", 1)[0], (
+            "the mock must put the error in the QUERY — a denial carried only in "
+            f"the fragment is invisible to every server: {denial}"
+        )
+
+        # The browser sends the query and drops the fragment; urllib does the
+        # same, so this IS the request /auth/callback actually receives.
+        status, _, headers = j.get(denial, follow=False)
+
+    assert status == 302, f"/auth/callback must redirect, got {status}"
+    loc = headers.get("Location", "")
+    target = urlparse(loc)
+    q = parse_qs(target.query)
+    assert target.path == "/auth", (
+        f"the provider's error must be forwarded to the page that RENDERS the "
+        f"#1224 banner, got {loc!r}"
+    )
+    assert q.get("error") == ["access_denied"], loc
+    assert q.get("error_description") == ["User denied the request"], loc
+    if error_code:
+        assert q.get("error_code") == [error_code], loc
+
+    # The defect: /auth/start mints a fresh flow and bounces the visitor
+    # straight back to the provider — an unexplained denial loop.
+    assert "/auth/start" not in loc, (
+        f"a denial must NOT restart OAuth, got {loc!r} — this is the loop the "
+        "banner exists to break"
+    )
+    # Single-use: the flow is spent, and its cookie must not outlive it.
+    cleared = headers.get("Set-Cookie", "")
+    assert "__Host-authflow=" in cleared and "Max-Age=0" in cleared, (
+        f"the spent flow cookie must be cleared, got {cleared!r}"
+    )
+    assert "__Host-session=" not in cleared, "a denied round-trip must not mint a session"
+
+    # And the hop actually resolves to the document that renders it — the query
+    # must survive `functions/auth/index.ts`'s `/signup` rewrite, or the banner
+    # is still unreachable with a correct-looking redirect.
+    landed, body, _ = j.get(f"{APP}{loc}")
+    assert landed == 200, f"the banner page must serve, got {landed}"
+    assert 'id="error"' in body and "oauthErrorParams" in body, (
+        "the landing document is not the `/auth` page that renders the #1224 banner"
+    )
+
+
+def test_a_callback_with_no_provider_outcome_still_restarts_the_flow(stack):
+    """PAIRED CONTROL: the bare case is not the error case.
+
+    A hit with no `code` and no error is an abandoned/aborted flow, and
+    restarting is the correct answer. If forwarding were unconditional, this
+    would land on `/auth?` with no banner and no way forward.
+    """
+    j = Jar()
+    status, _, headers = j.get(f"{APP}/auth/callback", follow=False)
+    assert status == 302, f"got {status}"
+    assert headers.get("Location", "") == "/auth/start?kind=signin", headers.get("Location")
+
+
+def test_a_denied_round_trip_forwards_a_bounded_description(stack):
+    """A hostile / oversized description must not become an unsendable header.
+
+    The forwarded values are attacker-forgeable on a crafted link, and they are
+    written into a `Location` header — so an unbounded `error_description` turns
+    a denial into a redirect the runtime cannot send. 300 is the bound the
+    consent surface already uses (#3496 `boundedText`).
+    """
+    hostile = "A" * 2000 + "\r\nX-Injected: 1\x00tail"
+    j = Jar()
+    # No flow needed: the `!code` branch decides before the class-8 binding, and
+    # an over-long description is exactly the crafted-URL case.
+    status, _, headers = j.get(
+        f"{APP}/auth/callback?error=access_denied&error_code=bad_oauth_state"
+        f"&error_description={quote(hostile, safe='')}",
+        follow=False,
+    )
+
+    assert status == 302, f"a hostile description must not 500 the callback, got {status}"
+    loc = headers.get("Location", "")
+    assert not any(ch in loc for ch in "\r\n\x00"), f"raw control chars in Location: {loc!r}"
+    forwarded = parse_qs(urlparse(loc).query).get("error_description", [""])[0]
+    assert len(forwarded) <= 300, f"unbounded forwarding: {len(forwarded)} chars"
+    assert forwarded.startswith("A" * 100), forwarded[:200]
+
+
+def test_a_denied_round_trip_forwards_error_code_without_error(stack):
+    """The page's predicate is `error || error_code` — either signal is enough.
+
+    GoTrue's HTTPError shape sets both, but the PAGE also arms its banner on
+    `error_code` alone; a forwarding rule that required `error` would drop it.
+    """
+    j = Jar()
+    status, _, headers = j.get(f"{APP}/auth/callback?error_code=bad_oauth_state", follow=False)
+
+    assert status == 302, f"got {status}"
+    loc = headers.get("Location", "")
+    assert parse_qs(urlparse(loc).query).get("error_code") == ["bad_oauth_state"], loc
+    assert "/auth/start" not in loc, loc
 
 
 def test_email_confirmation_completes_through_the_interstitial(stack):

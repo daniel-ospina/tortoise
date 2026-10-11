@@ -48,6 +48,10 @@ from .cross_lens import DEFAULT_THRESHOLD
 # filter never re-literals it (a copy is how the read surface drifts from
 # search).
 from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
+# #1423 (review P1): the DECLARED, writable Subject lifecycle (ONTOLOGY §4.2),
+# used by the Subject `status` write guards in `create_entity` and
+# `_update_entity`. Imported so neither surface re-literals the vocabulary.
+from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -14100,7 +14104,14 @@ class TortoiseSDK:
             return {**chain, "subject": None}
         sub = rows[0][0]
         chain["subject"] = {"id": sub.get("id"), "name": sub.get("name"),
-                             "kind": sub.get("subjectKind", "")}
+                             "kind": sub.get("subjectKind", ""),
+                             # #1423: the deciding subject's own lifecycle status
+                             # rides the chain, so "who decided this?" can also
+                             # report that the role/team has since been
+                             # superseded. Empty string when unset (a
+                             # pre-#1423 / raw-producer node), never absent —
+                             # additive for existing consumers.
+                             "status": sub.get("status", "") or ""}
         # ponytail: follow outgoing rels for Role → Org delegation
         rels = proj.g.query(
             "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
@@ -22867,7 +22878,8 @@ class TortoiseSDK:
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
-                                 name: str | None = None) -> None:
+                                 name: str | None = None,
+                                 provenance: dict | None = None) -> None:
         # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
         # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
         # NOT read it — the fold's `rename` arm applies `state`, so a record
@@ -22904,6 +22916,16 @@ class TortoiseSDK:
         Identity is recorded AS WRITTEN (``label`` + the key the live write
         matched + ``name``) and never re-derived from the live node at replay
         time.
+
+        ``provenance``
+            OPTIONAL audit keys merged onto the record BESIDE ``state``
+            (``session_id`` / ``evidence``), never inside it — a key in
+            ``state`` would be re-applied as a node property by the fold's
+            ``SET n += $state``. Added by #1423 so the Subject supersession
+            write carries the same provenance the Object twin's
+            ``ObjectSuperseded`` event does
+            (``commit_ops.apply_supersessions``). ``None`` (the default, and
+            every ``_update_entity`` call) leaves the record byte-identical.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
@@ -22918,6 +22940,20 @@ class TortoiseSDK:
             record["state"] = state
         if name is not None:
             record["name"] = name
+        if provenance:
+            # #1423: the envelope's own keys win — drop (loudly) any reserved
+            # key a caller tried to merge, so a provenance dict can never
+            # rewrite `type`/`id`/`state`/`event_id`/…. See
+            # `_ENTITY_MUTATION_RESERVED_KEYS`.
+            from tortoise.projection import _ENTITY_MUTATION_RESERVED_KEYS
+            _clash = sorted(k for k in provenance
+                            if k in _ENTITY_MUTATION_RESERVED_KEYS)
+            if _clash:
+                _logger.warning(
+                    "EntityMutated provenance keys %r are reserved on the "
+                    "record envelope and were DROPPED (#1423)", _clash)
+            record.update({k: v for k, v in provenance.items()
+                           if k not in _ENTITY_MUTATION_RESERVED_KEYS})
         self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
     def _update_entity(self, id_val: str, **props) -> dict:
@@ -23167,6 +23203,36 @@ class TortoiseSDK:
                         "Point", id_val, "restatus",
                         state={"status": _status})
                 props = {k: v for k, v in props.items() if k != "status"}
+
+        # #1423 (review P1): the `status` guard above is POINT-gated (its
+        # predicate is `MATCH (n:Point {id:$id})`), so a `:Subject` `status`
+        # travelled the unvalidated non-Point branch (`SET n += $p`), was
+        # STORED, and was then served on all four retrieval legs — reproduced
+        # for `status="retracted"` AND for any undeclared value (e.g.
+        # `"dead"`). The Subject read vocabulary cannot cover that: it is a
+        # denylist of KNOWN terminal states, so an unknown one reads as
+        # CURRENT. Validate against ONTOLOGY §4.2's declared Subject lifecycle
+        # and REFUSE anything outside it BEFORE any write — the Point guard's
+        # shape, applied to the Subject family (`SUBJECT_STATUS_VALUES`).
+        #
+        # A node carrying BOTH `:Point` and `:Subject` cannot reach this block
+        # with a status: the Point arm above already validated it against the
+        # Point vocabulary and dropped the key from `props` (the Point-
+        # precedence rule #3311 established).
+        if "status" in props:
+            _subj_hits = proj.g.query(
+                "MATCH (n:Subject {id:$id}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _subj_hits:
+                _status = props["status"]
+                if (not isinstance(_status, str)
+                        or _status not in _SUBJECT_STATUS_VALUES):
+                    raise ValueError(
+                        f"Invalid status {_status!r} for a :Subject. "
+                        f"Must be one of: "
+                        f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
+                    )
 
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
@@ -23513,6 +23579,19 @@ class TortoiseSDK:
                 "via props.")
         t = (type or "").strip().lower()
         if t == "subject":
+            # #1423 (review P1): `status` arrives through `**props` below and
+            # OVERRIDES the `"status": "live"` default, so this surface is a
+            # SECOND door onto an undeclared Subject status. Validate against
+            # ONTOLOGY §4.2's declared lifecycle and fail closed, exactly as
+            # `_update_entity` does.
+            _subj_status = props.get("status", "live")
+            if (not isinstance(_subj_status, str)
+                    or _subj_status not in _SUBJECT_STATUS_VALUES):
+                raise ValueError(
+                    f"Invalid status {_subj_status!r} for a :Subject. "
+                    f"Must be one of: "
+                    f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
+                )
             node = self._create_entity(
                 "Subject", _entity_name_id("Subject", name),
                 {"name": name, "subjectKind": props.pop("subjectKind", "other"),

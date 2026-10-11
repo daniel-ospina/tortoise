@@ -8,8 +8,10 @@ registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
     entry without human approval. The surface is the contract every agent and
     customer integration is built on, so changing it materially affects customer
     outcomes. GET APPROVAL FROM DANIEL FIRST — repo `AGENTS.md` → "USER QUESTIONS"
-    / "DECISION RELAY" — and record it on the row's `approval` in
-    `config/surface-manifest.yml` before the PR. The full procedure is in
+    / "DECISION RELAY" — and record it in `docs/product/canonical-mcp-tools.md`
+    before the PR; the next `tools/surface_manifest.py cut` copies it into
+    `config/surface-manifest.yml` (the manifest is a committed snapshot, never a live
+    reader). The full procedure is in
     `CONTRIBUTING.md` ("The MCP tool surface and public SDK methods cannot grow by
     accident").
 
@@ -77,18 +79,19 @@ def _idem() -> ToolAnnotations:
 #
 # ⛔ AN ENTRY HERE EXPANDS THE AGENT-FACING SURFACE, AND THAT NEEDS EXPLICIT
 #    HUMAN APPROVAL (#3863). `tools/surface-guard.py` — CI job `surface-guard`,
-#    part of `python-ci-gate` — compares this registry against the approved
+#    part of `python-ci-gate` — compares this registry against the frozen
 #    baseline in `config/surface-manifest.yml` and fails closed on ANY added
 #    tool, removed tool, changed SDK binding, or an exemption that has become
 #    reachable.
 #
 #    To propose an addition: change the registry, run
 #    `uv run python tools/surface_manifest.py cut` to fold it into the baseline,
-#    run `... render` to regenerate `docs/product/mcp-sdk-surface.md`, then get
-#    the owner's approval recorded per-row in `approval:`. A baseline that no
-#    longer matches this registry, or an approval that is absent, is a red build
-#    by design — that red IS the gate. Do not "fix" it by editing the baseline
-#    to match; see docs/product/mcp-sdk-surface.md for the curated list.
+#    run `... render` to regenerate `docs/product/mcp-sdk-surface.md`, and record
+#    the owner's approval in `docs/product/canonical-mcp-tools.md` — the next `cut`
+#    copies it into the manifest, and the per-row `approval:` is only an audit
+#    record, never the gate. A baseline that no longer matches this registry is a
+#    red build by design — that red IS the gate. Do not "fix" it by editing the
+#    baseline to match; see docs/product/mcp-sdk-surface.md for the curated list.
 
 # The FULL declaration, live and retired together. `TOOL_REGISTRY` (the live,
 # advertised surface) and `RETIRED_TOOL_REGISTRY` (the #3883 warning shims) are
@@ -1517,7 +1520,7 @@ GROUP_BY_NAME: dict[str, str] = {
 #
 # Retiring a name SHRINKS the agent-facing surface, so it is a surface change:
 # `tools/surface-guard.py` requires every name here to be recorded in the
-# approved baseline's `retired:` block, and re-cut by a human, exactly as an
+# frozen baseline's `retired:` block, and re-cut by a human, exactly as an
 # addition requires approval.
 RETIRED_USE_INSTEAD: dict[str, str] = {
     # Tier 1 — `tortoise_get_entity` is the canonical fetch-by-id tool; the

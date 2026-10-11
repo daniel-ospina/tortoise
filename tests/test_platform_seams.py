@@ -1144,6 +1144,256 @@ def test_read_half_boundary_reraises_memory_error(monkeypatch):
         tmain._install_read_hook(argparse.Namespace())
 
 
+# ── #3918 — the read-hook writes are DURABLE, not just conditional ──────
+# #3808 made the read half's write CONDITIONAL (a byte-identical document is
+# not rewritten), but the write itself was still a plain ``Path.write_text``:
+# truncate-in-place, so a crash / ENOSPC / kill between the truncate and the
+# last byte left the user's own ``settings.json`` — the file holding THEIR
+# hook registrations and unrelated settings — truncated or invalid JSON.  Each
+# test below fails on the pre-#3918 code (``write_text``) and passes on the
+# atomic one, so they pin the DURABILITY property rather than the refactor.
+
+_FOREIGN_DOC = {
+    "hooks": {
+        "PreToolUse": [
+            {"matcher": "Edit|Write",
+             "hooks": [{"type": "command", "command": "lint.sh"}]}
+        ]
+    },
+    "enableAllProjectHooks": True,
+}
+
+
+def _read_hook_args(root: Path, harness: str = "claude", **overrides):
+    """The minimal Namespace ``_install_read_hook_impl`` reads."""
+    fields = {"harness": harness, "dir": str(root), "dry_run": False,
+              "uninstall": False, "list": False}
+    fields.update(overrides)
+    return argparse.Namespace(**fields)
+
+
+def _no_space_left(_src, _dst, *_a, **_k):
+    """The last syscall of an atomic write failing — ENOSPC on the rename."""
+    raise OSError(28, "No space left on device")
+
+
+def _assert_no_temp_leftovers(directory: Path, stem: str) -> None:
+    stray = sorted(p.name for p in directory.glob(f"{stem}.*.tortoise-tmp"))
+    assert not stray, f"stray temp file(s) left behind: {stray}"
+
+
+def test_read_hook_merge_swaps_the_directory_entry(tmp_path):
+    """The merge REPLACES the document; it never rewrites the live inode.
+
+    The inode assertion is the atomicity property itself: ``write_text``
+    truncates the file it already has, so the inode it reports is the one a
+    reader saw (and, mid-crash, a half-written one).  ``os.replace`` frees the
+    old inode only after the new one is linked, so the two can never collide.
+
+    MUTATION: swap ``_atomic_write_text`` back for ``target.write_text(out)``
+    → same inode → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(_FOREIGN_DOC))
+    os.chmod(target, 0o640)  # a shared settings.json must keep its mode
+    before_inode = target.stat().st_ino
+
+    assert tmain._install_read_hook_impl(_read_hook_args(tmp_path)) == 0
+
+    assert target.stat().st_ino != before_inode, (
+        "the destination inode was reused — the document was rewritten in "
+        "place, so a crash mid-write can still truncate it")
+    assert (target.stat().st_mode & 0o777) == 0o640, "mode was narrowed"
+    cfg = json.loads(target.read_text(encoding="utf-8"))
+    assert cfg["enableAllProjectHooks"] is True, "foreign setting lost"
+    assert len(cfg["hooks"]["PreToolUse"]) == 1, "foreign hook lost"
+    commands = [h.get("command", "")
+                for e in cfg["hooks"]["UserPromptSubmit"]
+                for h in e.get("hooks", [])]
+    assert any(c.endswith("volunteer-turn.sh claude") for c in commands)
+    _assert_no_temp_leftovers(target.parent, "settings.json")
+
+
+def test_read_hook_merge_failure_leaves_the_document_intact(
+        tmp_path, monkeypatch, capsys):
+    """A failed write leaves the user's file BYTE-IDENTICAL.
+
+    The failure is injected at the rename — the one syscall every atomic
+    write ends on — so the assertion covers the whole window a truncating
+    write would have exposed.
+
+    MUTATION: ``write_text`` → the new document is already on disk when the
+    injected failure would have fired, rc is 0, and the bytes changed → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(_FOREIGN_DOC))
+    before = target.read_bytes()
+    before_inode = target.stat().st_ino
+
+    monkeypatch.setattr(os, "replace", _no_space_left)
+    rc = tmain._install_read_hook(_read_hook_args(tmp_path))
+    err = capsys.readouterr().err
+
+    assert rc == 1, "a failed write must not report success"
+    assert "Traceback" not in err, err
+    assert "Install failed: OSError" in err, err
+    assert target.read_bytes() == before, "the document was damaged"
+    assert target.stat().st_ino == before_inode
+    _assert_no_temp_leftovers(target.parent, "settings.json")
+
+
+def test_read_hook_uninstall_write_back_is_atomic(
+        tmp_path, monkeypatch, capsys):
+    """``--uninstall``'s write-back is the same write, so it is the same fix.
+
+    MUTATION: ``write_text`` → the uninstall lands (rc 0, registration gone)
+    even though the rename failed → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    target = tmp_path / ".claude" / "settings.json"
+    assert tmain._install_read_hook_impl(_read_hook_args(tmp_path)) == 0
+    registered = target.read_bytes()
+    assert b"volunteer-turn.sh" in registered
+    before_inode = target.stat().st_ino
+
+    monkeypatch.setattr(os, "replace", _no_space_left)
+    rc = tmain._install_read_hook(
+        _read_hook_args(tmp_path, uninstall=True))
+    err = capsys.readouterr().err
+
+    assert rc == 1, "an uninstall that could not be written reported success"
+    assert "Traceback" not in err, err
+    assert target.read_bytes() == registered, (
+        "the registration survived the failed write-back")
+    assert target.stat().st_ino == before_inode
+    _assert_no_temp_leftovers(target.parent, "settings.json")
+
+
+def test_read_hook_merge_does_not_write_through_a_hardlink(tmp_path):
+    """A hard-linked ``settings.json`` is REPLACED, not written through.
+
+    ``write_text`` opens the existing inode, so every other link to it (a
+    dotfile-manager copy, a second checkout, a backup hardlink) silently
+    receives our registration too.  ``rename(2)`` swaps the NAME, so the
+    sibling link keeps the bytes the user put there.
+
+    MUTATION: ``write_text`` → ``linked.json`` gains volunteer-turn.sh → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    payload = json.dumps(_FOREIGN_DOC)
+    target.write_text(payload)
+    sibling = tmp_path / "settings-linked-elsewhere.json"
+    os.link(target, sibling)
+
+    assert tmain._install_read_hook_impl(_read_hook_args(tmp_path)) == 0
+
+    assert "volunteer-turn.sh" in target.read_text(encoding="utf-8")
+    assert sibling.read_text(encoding="utf-8") == payload, (
+        "the write went THROUGH the hardlink into a file we do not own")
+    assert sibling.stat().st_ino != target.stat().st_ino, "link not broken"
+
+
+def test_cline_marker_failure_leaves_the_marker_and_its_mode(tmp_path,
+                                                            monkeypatch,
+                                                            capsys):
+    """The cline arm's write is durable too — and it carries the exec bit.
+
+    MUTATION: the pre-#3918 ``write_text`` + post-hoc ``chmod`` → the dead
+    path is already replaced when the rename fails → RED; and a post-replace
+    ``chmod`` loses the mode on the failure path.
+    """
+    import tortoise.__main__ as tmain
+
+    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook.parent.mkdir(parents=True)
+    # A DEAD two-token marker — structurally ours, so the installer proceeds
+    # to the repair write instead of refusing a foreign hook.
+    hook.write_text("#!/usr/bin/env bash\n"
+                    "exec /nonexistent/volunteer-turn.sh cline\n")
+    os.chmod(hook, 0o755)
+    before = hook.read_bytes()
+    before_inode = hook.stat().st_ino
+
+    monkeypatch.setattr(os, "replace", _no_space_left)
+    rc = tmain._install_read_hook(
+        _read_hook_args(tmp_path, harness="cline"))
+    err = capsys.readouterr().err
+
+    assert rc == 1, "a failed write must not report success"
+    assert "Traceback" not in err, err
+    assert hook.read_bytes() == before, "the marker was damaged"
+    assert hook.stat().st_ino == before_inode
+    assert (hook.stat().st_mode & 0o111) == 0o111, "exec bit lost"
+    _assert_no_temp_leftovers(hook.parent, "UserPromptSubmit")
+
+
+def test_cline_marker_is_installed_atomically_with_its_exec_bit(tmp_path):
+    """The success path: fresh inode, mode 0o755, no temp left.
+
+    MUTATION: ``write_text`` → same inode → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("#!/usr/bin/env bash\n"
+                    "exec /nonexistent/volunteer-turn.sh cline\n")
+    before_inode = hook.stat().st_ino
+
+    assert tmain._install_read_hook_impl(
+        _read_hook_args(tmp_path, harness="cline")) == 0
+
+    assert hook.stat().st_ino != before_inode
+    assert (hook.stat().st_mode & 0o777) == 0o755
+    assert "volunteer-turn.sh cline" in hook.read_text(encoding="utf-8")
+    assert "/nonexistent" not in hook.read_text(encoding="utf-8")
+    _assert_no_temp_leftovers(hook.parent, "UserPromptSubmit")
+
+
+def test_fresh_registration_is_written_atomically(tmp_path, monkeypatch,
+                                                  capsys):
+    """The fresh-file branch (no existing document) is the same write.
+
+    A failed write must leave NO registration behind: a half-written
+    ``hooks.json`` that no longer parses is worse than a non-zero exit.
+
+    MUTATION: ``write_text`` → the document exists after the failed run → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    target = tmp_path / ".codex" / "hooks.json"
+
+    monkeypatch.setattr(os, "replace", _no_space_left)
+    rc = tmain._install_read_hook(_read_hook_args(tmp_path, harness="codex"))
+    err = capsys.readouterr().err
+
+    assert rc == 1, "a failed write must not report success"
+    assert "Traceback" not in err, err
+    assert not target.exists(), "a failed install left a registration behind"
+    _assert_no_temp_leftovers(target.parent, "hooks.json")
+
+    # Success path: a fresh file lands 0o644 — the policy the capture half
+    # applies to the same settings.json — never mkstemp's 0600.
+    monkeypatch.undo()
+    assert tmain._install_read_hook_impl(
+        _read_hook_args(tmp_path, harness="codex")) == 0
+
+    assert (target.stat().st_mode & 0o777) == 0o644
+    cfg = json.loads(target.read_text(encoding="utf-8"))
+    assert "UserPromptSubmit" in cfg["hooks"]
+    _assert_no_temp_leftovers(target.parent, "hooks.json")
+
+
 # ── #2369 per-turn reflex trust boundary (co-sourced identity) ──────────
 # (trust-posture hardening: file-sourced keys never take their destination
 # from env; a repo .tortoise can never supply a transmitting identity; a

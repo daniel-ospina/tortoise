@@ -521,7 +521,13 @@ def test_fetch_state_subject_direct(sdk):
     sdk._get_proj().create_about_edge(p["id"], subj["id"], "aboutSubject")
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
-    assert state["subject"] == {"id": subj["id"], "name": "Epistemic Team", "kind": "team"}
+    # #1423: the decoration carries the Subject's own lifecycle status ADDITIVELY
+    # (id/name/kind are unchanged — the exact-dict pin below is what makes the
+    # addition visible). Before #1423 the payload stopped at three keys, so a
+    # consumer could not see that the subject had since been superseded; the pin
+    # asserts the new key, so a silent REMOVAL of it reds rather than passes.
+    assert state["subject"] == {"id": subj["id"], "name": "Epistemic Team",
+                                "kind": "team", "status": "live"}
 
 
 def test_fetch_state_subject_via_event(sdk):
@@ -542,7 +548,9 @@ def test_fetch_state_subject_via_event(sdk):
     )
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
-    assert state["subject"] == {"id": subj["id"], "name": "Daniel", "kind": "legalPerson"}
+    # #1423: same additive `status` key on the event-resolved fallback hop.
+    assert state["subject"] == {"id": subj["id"], "name": "Daniel",
+                                "kind": "legalPerson", "status": "live"}
 
 
 def test_fetch_state_subject_via_event_requires_eventid(sdk):

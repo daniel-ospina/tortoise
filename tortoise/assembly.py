@@ -13,7 +13,17 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
 * ``ordering`` — two-subject "Which X first, A or B?" / "Who ... first,
   A or B?" (the census's ordering/compare 34: the shape-typical rows fire;
   duration/count/N-ary rows that the SEMANTIC census filed under
-  ordering/compare do NOT — measured below).
+  ordering/compare do NOT — measured below) AND the N-ARY option list
+  (#2653): "the order ...: A, B, and C" / "first, A, B or C" — 3+ named
+  options decomposed over the SAME dated spine (see the N-ary section
+  below).
+* ``relative-date-lookup`` — "last Saturday", "on Valentine's day", "the
+  past weekend": a DETERMINISTIC calendar anchor (fixed-date holiday, or a
+  weekday/weekend offset from ``question_date``) feeding an as-of EQUALITY-DAY
+  lookup over the typed spine (#2655). Measured coverage of the census class is
+  3/6 — the class's other 3 rows name no calendar anchor at all (one is an
+  ``ago``-offset day, #2652's class; one is ordering-within-a-month; one is
+  frequency/count, #2886's class) and stay non-firing by design.
 * ``interval`` — "How many days/weeks/months/years passed between A and B"
   and the two-anchor since-until form "…had passed since X when Y".
 * ``duration-state`` — #2654: "how long had I been <state> when <event>?"
@@ -40,17 +50,19 @@ the state-entry duration-state rows into a shape; of the residual 39 rows
 only the 2 adjudicated label-noise rows fire, so the floor's
 non-adjudicated denominator is rejected 37/37 — see the floor test):
 
-* the residual census negatives — the measured floor denominator after
-  BOTH promotions: #2652 removed the 34 promoted rows (ago-relative 31 +
-  recency 2 + the 1 morphologically-promoted mis-file) and #2654 removed
-  the 5 state-entry duration-state rows it now fires on, leaving the 39
-  rows across frequency/count, the 2 residual duration-state rows,
-  relative-date-lookup, nary-ordering, other, pattern/recurring,
-  offset-comparison and recency/current-state. 2 fire, both pinned
-  ADJUDICATED label-noise rows (370a8ff4 + gpt4_70e84552_abs). NOTE the
-  #2165 figure (76/78) is NOT comparable: 34 of those 78 are now deliberate
-  positives of the ``ago-relative`` shape (78 − 34 − the 5 #2654
-  state-entry rows = the pinned 39-row residual);
+* the residual census negatives — the measured floor denominator after ALL
+  FOUR promotions: #2652 removed the 34 promoted ago/recency rows (31 + 2
+  + the 1 morphologically-promoted mis-file), #2653 re-measured
+  nary-ordering (2 genuine named-subject rows now fire; its other 2 rows
+  adjudicated), #2654 removed the 5 state-entry duration-state rows it now
+  fires on, and #2655 removed the calendar-anchored rows of
+  ``relative-date-lookup`` (plus the 3 rows the census misfiled OUT of the
+  class — see ``_RELATIVE_DATE_CLASS_EXPANSION`` in the test file). Of what
+  remains, the only permitted fires are the ADJUDICATED label-noise rows
+  (370a8ff4 + gpt4_70e84552_abs); the test file is the authority for every
+  count and for the floor.
+  'ago' rejects EVEN with state morphology "what is the current status of X
+  two weeks ago?" (reject-on-relative-offset);
 * duration-state residual forms — "how long did I take … combined" (a
   summed span: #2886's aggregate lane owns it) and "how old was I when …"
   (an age: no state entry to resolve); plus every other duration/count
@@ -59,10 +71,23 @@ non-adjudicated denominator is rejected 37/37 — see the floor test):
 * frequency/count — "how many times", "how many days did I spend", "how
   many … have passed since <one activity>" (single-anchor since);
 * relative-date-lookup — "last Saturday", "on Valentine's day" (sibling
-  #2655's CALENDAR-ANCHOR family — deliberately NOT promoted here);
+  #2655's CALENDAR-ANCHOR family — deliberately NOT promoted here); the
+  three census rows of the class that name NO calendar anchor ("a week
+  ago", "the first … in June", "the most in March and April") stay here
+  too;
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
   #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
-  latest");
+  latest"). The census's nary-ordering class is RE-MEASURED to 2
+  named-subject rows (#2653; the committed census stores 140-char question
+  TRUNCATIONS, which is why the class was filed as 4): the 2 genuine N-ary
+  rows (gpt4_f49edff3 / gpt4_18c2b244) now FIRE as ORDERING with 3 terms;
+  gpt4_70e84552_abs is the binary `_abs` twin of an ordering row and
+  already fired (adjudicated noise, pinned in test_assembly_pure.py);
+  gpt4_d6585ce8 ("the concerts and musical events I attended") names NO
+  subjects — it is a class-plural enumeration request, a DIFFERENT feature,
+  and correctly never fires here;
+* a 3+ option list whose members are NOT option phrases (a binary question
+  whose A-side merely CONTAINS a comma) — see ``_nary_option_list``;
 * pattern/recurring; offset-comparison ("how many months before my
   anniversary");
 * the R13 COMPOUND pin — a relative offset inside a two-subject
@@ -88,6 +113,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.calendar_anchors import (  # #2655 calendar-anchor resolution
+    find_anchor_spans, resolve_calendar_anchor)
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
@@ -100,6 +127,9 @@ class AssemblyShape(StrEnum):
     CURRENT_STATE = "current-state"
     ORDERING = "ordering"
     INTERVAL = "interval"
+    # #2655: the census class name verbatim, so measurement attribution over
+    # the fired decision reads the same string the census carries.
+    RELATIVE_DATE = "relative-date-lookup"
     # #2654 — the state-entry anchor variant ("how long had I been X when Y")
     DURATION_STATE = "duration-state"
     #: #2652 — 'ago'-relative / implicit-time: the question carries a
@@ -467,17 +497,28 @@ _RE_RECENCY = re.compile(
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
-# verbs reject BEFORE the ordering template.
+# verbs reject BEFORE the ordering arm.
+#
+# #2653: the weak verbs (pick/choose/decide) need an ADVICE FRAME. Bare
+# "pick" is an ordinary narrative verb — the census's own N-ary ordering row
+# gpt4_f49edff3 says "the day I helped my cousin PICK OUT STUFF for her baby
+# shower", which a bare-verb guard rejected as preference and so silently
+# excluded a measured row from the shape it belongs to. The frame forms below
+# are the ones the R16 family actually uses ("which one should I pick",
+# "which to choose"); the strong signals are unchanged.
 _RE_ADVICE = re.compile(
-    r"\b(?:should|ought|recommend(?:ed|ation)?|suggest(?:s|ed|ing)?|"
+    r"\b(?:should|ought|shall|recommend(?:ed|ation)?|suggest(?:s|ed|ing)?|"
     r"prefer(?:red|able|ence)?|advise|better|best\s+(?:to|for)\b|"
-    r"prioritize|pick|choose|decide)\b",
+    r"prioritize)\b|"
+    r"\b(?:which|what)\s+(?:one\s+)?(?:to|should)\b|"
+    r"\b(?:shall|would|could)\s+(?:i|we|you|they|he|she|it)\b|"
+    r"\bto\s+(?:pick|choose|decide)\b",
     re.IGNORECASE)
 # N-ary: an enumerated list of 3+ options. Two shapes of escape: repeated
-# " or " ("A or B or C") and a comma/semicolon list on the A-side
-# ("first, A, B or C") — both checked in classify_question after the
-# ordering match (bounded two-option questions carry exactly one " or " and
-# a comma-free A-side).
+# " or " ("A or B or C") and a comma list ("first, A, B or C" / "A, B, and
+# C"). #2653 DECOMPOSES both (``_nary_terms``); the guard survives only for
+# the NON-ordering shapes — an or-chain inside an interval anchor is not an
+# option list (see classify_question's arm order).
 #
 # ⛔ The whitespace runs are SINGLE `\s`, not `\s+`. With `\s+` on both
 # sides of the lazy `.+?` the quantifiers overlap — '\s+' and '.' both match
@@ -490,6 +531,50 @@ _RE_ADVICE = re.compile(
 # ago guard above was rewritten to remove. A single `\s` absorbs the same
 # whitespace (the lazy `.+?` covers any extra) and removes the ambiguity.
 _RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
+
+# N-ary list with an EXPLICIT list-introducing colon after an ordering head —
+# the measured corpus form ("Which three events happened in the order from
+# first to last: A, B, and C" / "What is the order of the three events:
+# 'A', 'B', and 'C'"). The colon is the strong signal: the two head forms
+# carry no " or " at all, so _RE_ORDERING cannot see them.
+# The "earliest to latest" head form is deliberately NOT an alternative here:
+# a question containing it always matches ``_RE_RECENCY`` ("\blatest\b") and
+# is rejected by the R13 guard before this pattern is ever tried, so the
+# alternative was dead code that contradicted that guard.
+_RE_ORDERING_LIST = re.compile(
+    r"^\s*(?:which|who|what)\b[^?:]*?"
+    r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b)"
+    r"[^?:]*:\s*[^?\s][^?]*\??\s*$",
+    re.IGNORECASE | re.DOTALL)
+
+# the ordering-marker words that introduce an option list when the question
+# carries no colon ("which did I get first, A, B or C?")
+_RE_ORDER_MARKER = re.compile(
+    r"\b(?:first|order|sequence)\b", re.IGNORECASE)
+
+# the TIME/SCOPE clause a binary question may carry between the ordering
+# marker and the option list ("first in February, the bike or the car") — the
+# comma there is a clause boundary, NOT a second option (the pre-#2653
+# classifier's own N-ary comma check; now shared with extraction so the two
+# cannot disagree).
+_RE_TIME_CLAUSE = re.compile(
+    r"^(?:in|on|at|during|for|after|since|before|around)\s+"
+    r"(?:[a-z]+\s+)*?(?:january|february|march|april|may|june|july|"
+    r"august|september|october|november|december|monday|tuesday|"
+    r"wednesday|thursday|friday|saturday|sunday|"
+    r"20\d{2}|the\s+\w+)\s*,\s*",
+    re.IGNORECASE)
+
+# a member of an option list opens with a determiner/possessive/numeral/quote.
+# Used ONLY to keep a NON-colon 3-way split honest: "the couch, which I
+# loved, or the chair" is a BINARY question with a parenthetical comma, and
+# splitting it into three would fail the R1 all-terms gate where the binary
+# path used to fire. The colon form needs no such check (an explicit list
+# introducer IS the signal).
+_RE_OPTION_LEAD = re.compile(
+    r"^(?:['\"]|(?:the|a|an|my|our|your|their|his|her|its|this|that|"
+    r"these|those|one|two|three|four|five|six|seven|eight|nine|ten)\b)",
+    re.IGNORECASE)
 
 # ── shape templates (ordered high-precision) ─────────────────────────────
 
@@ -528,6 +613,70 @@ _RE_CURRENT = re.compile(
 _RE_CURRENT_STILL = re.compile(
     r"^\s*is\s+(?P<a>.+?)\s+still\s+(?:live|active|around|in\s+use|mine)"
     r"\??\s*$", re.IGNORECASE | re.DOTALL)
+# #2655 date-lookup surface: the question asks FOR something about the anchored
+# occasion (a wh-lookup), rather than merely mentioning the day.
+_RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
+                           re.IGNORECASE)
+
+
+def _strip_anchor_spans(question: str, spans) -> str:
+    """``question`` with each matched anchor span blanked (R2655).
+
+    The residual is what the R13 relative-offset guard and the
+    duration/frequency/recency/advice guards are evaluated against, so a
+    NON-anchor relative offset co-present with an anchor ("… two months ago or
+    … last Saturday") still rejects the question — the anchor must not act as a
+    shield for another shape's morphology.
+    """
+    out = question
+    for span in sorted(spans, key=lambda s: s.start, reverse=True):
+        out = out[:span.start] + " " + out[span.end:]
+    return out
+
+
+def _date_lookup_surface(question: str, residual: str, spans) -> bool:
+    """#2655: is this calendar-anchor question a DATE LOOKUP?
+
+    High precision by construction, and deliberately NARROW: the caller falls
+    through to the unchanged classifier body for every rejection, so a
+    question whose anchors belong to another shape keeps that shape, and every
+    guard-rejected phrasing stays rejected.
+
+    * ONE distinct anchor only — two anchors ("between Christmas and New
+      Year's day …") is an interval, not a day lookup;
+    * a wh-lookup surface must be present;
+    * no competing shape template matches the question (ordering / interval /
+      current-state own it);
+    * no competing guard matches the anchor-stripped RESIDUAL (a non-anchor
+      relative offset, a duration/frequency/recency/advice surface, or an
+      N-ary list).
+    """
+    if len({(s.kind, s.label) for s in spans}) != 1:
+        return False
+    if not _RE_WH_LOOKUP.search(question):
+        return False
+    if (_RE_ORDERING.match(question) or _RE_CURRENT.match(question)
+            or _RE_CURRENT_STILL.match(question)
+            or _RE_INTERVAL_SINCE.match(question)
+            or _RE_INTERVAL_BETWEEN.match(question)
+            or _RE_INTERVAL_BETWEEN_LEAD.match(question)
+            or _RE_DURATION_STATE.match(question)):
+        return False
+    # #2652 split the pre-merge `_RE_AGO` guard into THREE parts -- the
+    # CALENDAR-anchor residue (`_RE_AGO_OTHER`), the PROMOTED relative
+    # vocabulary (`_relative_match`), and the un-promoted bare-`ago` residue
+    # (`_RE_AGO_RESIDUAL`) -- so a non-anchor relative offset in the residual
+    # is whichever of the three owns it and ALL must reject here. (The union
+    # is exactly the old guard: `_RE_AGO` ≡ `_RE_AGO_OTHER ∪ \bago\b`, and
+    # `_relative_match` is a subset of the bare-`ago` residue -- it is named
+    # explicitly because it is the vocabulary the promoted forms route on.)
+    return not (
+        _RE_AGO_OTHER.search(residual)
+        or _relative_match(residual) is not None
+        or _RE_AGO_RESIDUAL.search(residual)
+        or _RE_DURATION.search(residual)
+        or _RE_FREQUENCY.search(residual) or _RE_RECENCY.search(residual)
+        or _RE_ADVICE.search(residual) or _RE_OR_CHAIN.search(residual))
 # duration-state (#2654): "how long had I been <state> when <event>?" — the
 # past-elapsed-state form that needs a state's ENTRY date and the question's
 # as-of anchor (never an interval: the two anchors are the subject's state
@@ -631,6 +780,35 @@ def classify_question(question: str) -> AssemblyShape | None:
     if not question or not question.strip():
         return None
     q = question.strip()
+    # #2655: a calendar-anchored date lookup is decided FIRST, and — when an
+    # anchor surface is present at all — this function NEVER falls through to
+    # the other templates without the R13 re-check below. Both halves are
+    # deliberate:
+    #   * the anchor branch must precede the R13 guards, because the
+    #     CALENDAR-anchor vocabulary (`last <weekday>` / `last weekend` /
+    #     `valentine`) is exactly the set #2652 kept in `_RE_AGO_OTHER`, and
+    #     that guard would otherwise swallow the shape;
+    #   * a question that carries an anchor AND another shape's morphology must
+    #     return None ("… two months ago or … last Saturday?" is NOT a date
+    #     lookup, and the ordering template would otherwise fire on it and
+    #     REGRESS a pinned negative).
+    spans = find_anchor_spans(q)
+    if spans:
+        if _date_lookup_surface(q, _strip_anchor_spans(q, spans), spans):
+            return AssemblyShape.RELATIVE_DATE
+        # NOT a day lookup. The anchor branch may only change a decision the
+        # R13 guard made ON THE ANCHOR SURFACE itself: an anchor-bearing
+        # question containing `last <weekday>`/`last weekend`/`valentine`
+        # returned None pre-#2655 because that CALENDAR vocabulary was
+        # guarded, so a hit here MUST stay None — the anchor may never act as
+        # a shield that lets another shape (or an ordering template sitting
+        # next to a non-anchor `ago` offset) fire on a question it would have
+        # been rejected for. Anything else (a state probe with a HOLIDAY
+        # adjunct, two holidays inside a `between … and …` interval) falls
+        # through to the unchanged body below and keeps the shape it already
+        # had.
+        if _RE_AGO_OTHER.search(q):
+            return None
     # R13 rejects that are NOT promotable — mutually independent "return
     # None" clauses, so their order among themselves carries no semantics.
     # They run FIRST: the CALENDAR-anchor vocabulary (sibling #2655's
@@ -646,7 +824,14 @@ def classify_question(question: str) -> AssemblyShape | None:
     # N-ary (3+ options) is a R13 reject for EVERY shape template that
     # follows — including duration-state — so it stays ahead of all of
     # them (#2654's ordering: main ran this before `_RE_DURATION_STATE`).
-    if _RE_OR_CHAIN.search(q):
+    # #2653 lifts that reject ONLY for a genuine N-ary ORDERING list: the
+    # exemption is gated on an ordering HEAD as well as a decomposable
+    # option span, so an or-chain that is not an ordering question keeps
+    # main's hard reject here instead of falling through to the
+    # duration-state/interval arms below.
+    if _RE_OR_CHAIN.search(q) and not (
+            _nary_terms(q)
+            and (_RE_ORDERING.match(q) or _RE_ORDERING_LIST.match(q))):
         return None
     # #2654 — duration-state ("how long had I been X when Y"): the state is
     # a single resolved subject and the span runs from its state entry to
@@ -690,33 +875,182 @@ def classify_question(question: str) -> AssemblyShape | None:
         return AssemblyShape.INTERVAL
     if _RE_INTERVAL_BETWEEN.match(q) or _RE_INTERVAL_BETWEEN_LEAD.match(q):
         return AssemblyShape.INTERVAL
-    if _RE_ORDERING.match(q):
-        # N-ary comma check: any comma between the "first" marker and the
-        # final " or " means a 3+ option list ("first, A, B or C" /
-        # "first: A, B or C") — reject (R13 N-ary out of v1). Legit A-sides
-        # carry NO comma there ("first, my cousin's wedding or Michael's…").
+    m_ord = _RE_ORDERING.match(q)
+    m_list = None if m_ord else _RE_ORDERING_LIST.match(q)
+    if m_list and _RE_CURRENT.match(q):
+        # "the order I placed:" is a CURRENT_STATE subject, not an option
+        # list — the ordering-list arm must not steal it. (`_RE_CURRENT_STILL`
+        # cannot match here: it is anchored on "is …", which `_RE_ORDERING_LIST`
+        # — anchored on which/who/what — can never share.)
+        m_list = None
+    if m_ord or m_list:
+        # N-ary (#2653): 3+ named options DECOMPOSE instead of being rejected
+        # (R13's "N-ary out of v1" is lifted here). classify and extract read
+        # the SAME predicate, so a fired ORDERING shape can never come back
+        # with fewer than 3 terms for a 3+ list (R1).
+        if _nary_terms(q):
+            return AssemblyShape.ORDERING
+        if m_ord is None:
+            # the colon-list head with fewer than 3 decomposable options is
+            # not a shape this branch can answer
+            return None
+        # ── binary two-option path (UNCHANGED since #2165) ──
         parts = re.split(r"\s+or\s+", q, flags=re.IGNORECASE)
         a_side = parts[-2] if len(parts) >= 2 else ""
         m_first = re.search(r"\bfirst\b", a_side, re.IGNORECASE)
         a_seg = (a_side[m_first.end():] if m_first else a_side)
         # skip the marker DELIMITER itself (", my cousin's wedding" /
-        # ": my graduation" / "- the couch") before the N-ary comma check
+        # ": my graduation" / "- the couch") before the comma check
         a_seg = re.sub(r"^[\s,:;–—-]+", "", a_seg)
-        # strip a leading TIME/scope clause ("first in February, the bike" —
-        # the comma is a clause boundary, NOT a second option)
-        a_seg = re.sub(
-            r"^(?:in|on|at|during|for|after|since|before|around)\s+"
-            r"(?:[a-z]+\s+)*?(?:january|february|march|april|may|june|july|"
-            r"august|september|october|november|december|monday|tuesday|"
-            r"wednesday|thursday|friday|saturday|sunday|"
-            r"20\d{2}|the\s+\w+)\s*,\s*",
-            "", a_seg, flags=re.IGNORECASE)
+        a_seg = _strip_time_clause(a_seg)
         if "," in a_seg or ";" in a_seg:
             return None
         return AssemblyShape.ORDERING
+    if _RE_OR_CHAIN.search(q):
+        # an or-chain outside an ordering head is never a shape (an interval
+        # anchor is "between A and B", not a 3-way option list)
+        return None
     if _RE_CURRENT.match(q) or _RE_CURRENT_STILL.match(q):
         return AssemblyShape.CURRENT_STATE
     return None
+
+
+def _strip_time_clause(seg: str) -> str:
+    """Drop a leading time/scope clause ("first in February, the bike" —
+    the comma is a clause boundary, NOT a second option)."""
+    return _RE_TIME_CLAUSE.sub("", seg, count=1)
+
+
+def _reads_as_list(opts: list[str], prefix: str) -> bool:
+    """Does this split actually read as an OPTION LIST?
+
+    A colon inside a quoted option ("'Star Wars: A New Hope', 'Empire', …")
+    leaves a FRAGMENT first — a term that closes a quote it never opened —
+    followed by an option that opens the SAME quote. A whole first option
+    that merely ends in a quote (an inch mark `5"`, a possessive "the
+    girls'") is told apart by the PREFIX: the fragment's opening quote is
+    real, so `prefix` holds an unmatched delimiter of that kind, whereas an
+    inch mark's or a possessive's quote has none before the colon (and a
+    possessive apostrophe is not an opening one — it follows a word
+    character).
+    """
+    if len(opts) < 2:
+        return False
+    first = opts[0]
+    if first[:1] in ("'", '"') or first[-1:] not in ("'", '"'):
+        return True
+    closer = first[-1:]
+    if opts[1][:1] != closer:
+        return True
+    at = prefix.rfind(closer)
+    if at < 0:
+        return True
+    return at != 0 and prefix[at - 1].isalnum()      # an apostrophe, not a quote
+
+
+def _list_colon_index(q: str) -> int:
+    """Index of the option-list colon, or -1 when the question has none.
+
+    The introducer is the last colon whose TAIL actually reads as an option
+    list: at least two options, each with balanced quotes. Walking right to
+    left is what stops a colon inside a quoted option ("'Star Wars: A New
+    Hope'") from cutting the list in two, WITHOUT having to decide whether
+    any particular `'` is a quote or an apostrophe — the tail after such a
+    colon is not a list ("A New Hope', 'Empire', …" starts a term on a stray
+    quote), so the scan steps over it. The same test disposes of a
+    time-of-day head colon and a trailing time clause ("… and the meeting at
+    3:00?"): their tails hold a single option.
+    """
+    for i in range(len(q) - 1, -1, -1):
+        if q[i] != ":":
+            continue
+        if q[i - 1:i].isdigit() and q[i + 1:i + 2].isdigit():
+            continue        # a time-of-day colon ("at 3:00"), not an introducer
+        if _reads_as_list(_split_option_list(q[i + 1:]), q[:i]):
+            return i
+    return -1
+
+
+def _option_list_segment(question: str) -> str:
+    """The option-list span of an ordering question.
+
+    The list-introducing colon WINS when the question carries one — the span
+    is cut there, never at a colon inside a quoted option ("'Star Wars: A
+    New Hope'"). The ordering-list template alone cannot decide this: its
+    tail after the first colon admits further colons, so it matches a
+    question whose HEAD carries a time ("the events at 3:00: the couch, …")
+    with the TIME colon as the introducer. With no such colon, everything
+    after the FIRST ordering marker word ("which did I get first, A, B or
+    C") — first-occurrence on purpose, so "my first child" is not read as
+    the marker.
+    """
+    q = question.strip()
+    ci = _list_colon_index(q)
+    if ci >= 0:
+        seg = q[ci + 1:]
+    else:
+        m = _RE_ORDER_MARKER.search(q)
+        seg = q[m.end():] if m is not None else ""
+    return _strip_time_clause(re.sub(r"^[\s,:;–—-]+", "", seg))
+
+
+def _split_option_list(seg: str) -> list[str]:
+    """Deterministic option split over a clause span.
+
+    Top-level commas plus the conjunctions that INTRODUCE an option
+    ("A, B, and C" / "A, B or C" / "A or B or C"). An internal conjunction
+    is kept — "the concerts and musical events" stays ONE option (a plain
+    " and " split would fragment it). Over-splitting is fail-CLOSED: the
+    extra term does not resolve, the R1 all-terms gate keeps the fired
+    decision false.
+    """
+    pieces = [p.strip() for p in re.split(r",\s*", seg.strip().rstrip(" ?"))
+              if p.strip()]
+    opts: list[str] = []
+    for piece in pieces:
+        piece = re.sub(r"^(?:and|or)\s+", "", piece, flags=re.IGNORECASE)
+        for part in re.split(r"\s+or\s+", piece.strip(),
+                             flags=re.IGNORECASE):
+            if part.strip():
+                opts.append(part.strip())
+    return opts
+
+
+def _nary_option_list(opts: list[str], *, explicit: bool) -> bool:
+    """True when the split options are a genuine 3+ option list.
+
+    ``explicit`` (a list-introducing colon) is the strong signal and needs no
+    shape check. Without it every NON-FINAL option must look like an option
+    phrase, so a binary question whose A-side merely contains a comma
+    ("the couch, which I loved, or the chair") is not split into three.
+    """
+    if len(opts) < 3:
+        return False
+    if explicit:
+        return True
+    return all(_RE_OPTION_LEAD.match(o) for o in opts[:-1])
+
+
+def _nary_terms(question: str) -> list[str]:
+    """The N-ary option terms of an ordering question ([] when the option
+    list is not a genuine 3+ list).
+
+    classify_question and extract_subject_terms both read THIS — one
+    predicate, so the fired shape and the extracted term count cannot
+    disagree (an N-ary fire with 2 terms would silently narrow the shape).
+    """
+    q = question.strip()
+    # The list is EXPLICIT when a real introducer colon was found — not merely
+    # when the template matched. On a question whose only colon sits inside an
+    # OPTION ("the meeting at 3:00"), the template matches yet there is no
+    # introducer, the marker fallback leaves the ordering head in the segment,
+    # and `explicit` would wave the `_RE_OPTION_LEAD` shape check through on a
+    # leaked first term.
+    explicit = _list_colon_index(q) >= 0
+    opts = _split_option_list(_option_list_segment(q))
+    if not _nary_option_list(opts, explicit=explicit):
+        return []
+    return [_clean(o) for o in opts]
 
 
 def _clean(term: str) -> str:
@@ -759,6 +1093,12 @@ def extract_subject_terms(question: str,
     if shape is None:
         return []
     q = question.strip()
+    if shape is AssemblyShape.RELATIVE_DATE:
+        # #2655: the DAY is the scope, not a subject — there is no entity span
+        # to resolve, and the caller's fired path branches before extraction.
+        # Returning a span here would feed the resolver a fragment of the
+        # question (e.g. "the past weekend") and fabricate a subject.
+        return []
     if shape is AssemblyShape.AGO_RELATIVE:
         # #2652: the SELECTOR is the time window resolved by
         # ``resolve_relative_anchor`` against question_date — not an
@@ -779,8 +1119,13 @@ def extract_subject_terms(question: str,
         if not m:
             return []
         return [_clean(m.group("a")), _clean(m.group("b"))]
-    # ordering — split on the LAST " or " (two named options guaranteed by
-    # the shape template + the N-ary guard)
+    # ordering — N-ary list first (#2653): 3+ named options decompose into
+    # pairwise/chain comparisons over the SAME dated spine.
+    nary = _nary_terms(q)
+    if nary:
+        return nary
+    # binary — split on the LAST " or " (two named options guaranteed by the
+    # shape template + the N-ary predicate)
     parts = re.split(r"\s+or\s+", q, maxsplit=0, flags=re.IGNORECASE)
     if len(parts) < 2:
         return []
@@ -876,10 +1221,18 @@ class ResolveResult:
     def candidates_for(self, subject_index: int) -> list[SubjectCandidate]:
         return [c for c in self.candidates if c.subject_index == subject_index]
 
-    def both_halves_ok(self, shape: AssemblyShape | None) -> bool:
+    def both_halves_ok(self, shape: AssemblyShape | None,
+                       n_terms: int | None = None) -> bool:
         """R1: two-subject shapes admit BOTH halves or fire nothing. A
         single-subject shape (current-state) fires when its one term
-        resolved. None shape never fires here (classify first)."""
+        resolved. None shape never fires here (classify first).
+
+        ``n_terms`` (#2653): the number of subject terms the shape extracted.
+        Omitted (the legacy binary callers) means the two-half contract; the
+        N-ary ordering path passes the extracted count so an N-way question
+        admits ALL N or nothing — a partial admit would silently narrow the
+        shape exactly as a missing half does for the two-option form.
+        """
         if shape is None:
             return False
         if shape is AssemblyShape.CURRENT_STATE:
@@ -895,8 +1248,9 @@ class ResolveResult:
             return bool(self.candidates) and not self.unresolved
         # ordering/interval: every term must resolve (a partial admit would
         # silently narrow the shape to a single subject — forbidden)
+        expected = 2 if n_terms is None else n_terms
         return not self.unresolved and len(
-            {c.subject_index for c in self.candidates}) == 2
+            {c.subject_index for c in self.candidates}) == expected
 
 
 class ResolverPort(Protocol):
@@ -1383,6 +1737,11 @@ class WalkerPort(Protocol):
     def spine_rows(self, object_ids: list[str],
                    per_subject_cap: int) -> list[dict]: ...
 
+    # #2655: the equality-day probe (no subject anchor — the day IS the
+    # scope). Returns a SUPERSET: the day filter is decided on the R2 ladder
+    # date in ``collect_day_slices``, never by the port's predicate alone.
+    def day_rows(self, days: tuple, per_day_cap: int) -> list[dict]: ...
+
 
 def _norm_date(value) -> _date | None:
     """Shared date normalization — the SINGLE source for the as-of equality
@@ -1507,6 +1866,72 @@ def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
                    "truncated": truncated})
 
 
+def collect_day_slices(port: WalkerPort, days,
+                       *, per_day_cap: int = PER_ENTITY_FANOUT_CAP,
+                       ) -> AssemblySlices:
+    """#2655 — the as-of EQUALITY-DAY lookup over the typed spine.
+
+    Same contract as ``collect_slices`` (ONE batched read, the R2 date ladder
+    as the SINGLE date source, ``bounded_fanout`` clamp, an admission census),
+    with the subject anchor replaced by the resolved DAY:
+
+    * the port's ``day_rows`` read is a bounded SUPERSET probe (a date prefix
+      is the only index-friendly predicate available); membership is decided
+      HERE, on the ladder date, so a row whose truthy ``when`` shadows a
+      matching ``createdAt`` is admitted on its OWN date or not at all — never
+      by an or-chain that would re-derive a date the walker already resolved;
+    * **undated rows are excluded outright** (unlike ``collect_slices``, which
+      keeps them undated-last): an undated row can never satisfy a day
+      equality, and keeping it would render an unrelated row under a
+      ``DATE (…)`` header — a fabricated date claim;
+    * the per-day cap is applied AFTER the membership filter, so a row dated
+      elsewhere (a port over-fetch) cannot consume the day's budget.
+
+    Deterministic order: ``(date, kind, id)`` — input-order independent.
+    """
+    day_set = {d for d in days if isinstance(d, _date)}
+    if not day_set:
+        return AssemblySlices()
+    cap = bounded_fanout(per_day_cap)
+    ordered_days = tuple(sorted(day_set))
+    raw = list(port.day_rows(ordered_days, cap) or [])
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    per_day_counts: dict[_date, int] = {}
+    for row in raw:
+        row = dict(row)
+        rid = row.get("id")
+        if rid is not None:
+            key = str(rid)
+            if key in seen:
+                continue
+            seen.add(key)
+        tier, d = _tier_and_date(row)
+        if d is None or d not in day_set:
+            continue
+        per_day_counts[d] = per_day_counts.get(d, 0) + 1
+        if per_day_counts[d] > cap:
+            continue
+        row["tier"] = tier
+        row["date"] = d
+        rows.append(row)
+
+    # (date, kind, id) — date-major, then the row kind, then the id: the same
+    # TOTAL key the subject sections use, extended with the kind so a Point
+    # and an Event sharing an id can never swap places between runs.
+    rows.sort(key=lambda r: (r["date"], _as_str(r.get("kind")),
+                             _as_str(r.get("id"))))
+    return AssemblySlices(
+        state_rows=(),
+        timeline_rows=tuple(rows),
+        evidence_rows=tuple(r for r in rows if r.get("kind") == "point"),
+        admission={"rows_requested": cap * len(ordered_days),
+                   "rows_admitted": len(rows),
+                   "truncated": any(v >= cap
+                                    for v in per_day_counts.values())})
+
+
 def docker_walker_port(sdk) -> WalkerPort:
     """Adapter over a live TortoiseSDK: the state read is ONE batched
     Cypher statement (status/supersededBy/supersededAt together — no torn
@@ -1585,6 +2010,64 @@ def docker_walker_port(sdk) -> WalkerPort:
                             "content": r[2], "started_at": r[3],
                             "status": r[4], "lme_event_id": r[5],
                             "lme_session_index": r[6]})
+        return out
+
+    def day_rows(days: tuple, per_day_cap: int = PER_ENTITY_FANOUT_CAP,
+                 ) -> list[dict]:
+        # #2655: the equality-day probe. ONE prefix-range statement per day
+        # per kind (bounded: 2 kinds x len(days) — never row-level N+1).
+        #
+        # The predicate is a SUPERSET: `when` and `createdAt` are both probed
+        # with `STARTS WITH <day>` because the R2 ladder makes `when`
+        # authoritative when it parses — so a row whose `when` says another day
+        # IS returned here and is then dropped by `collect_day_slices` on its
+        # ladder date. Pushing a single conjunct down instead would silently
+        # DROP a genuine day row whose `when` is unparseable but whose
+        # `createdAt` is the day (a false negative the ladder exists to
+        # prevent). `STARTS WITH` on a null property yields null (falsy) —
+        # undated rows are never matched.
+        #
+        # ORDER BY id mirrors `spine_rows` (deterministic, per-kind) — the
+        # collector re-sorts on (date, kind, id), so the returned order is an
+        # implementation detail, not the contract.
+        if not days:
+            return []
+        cap = bounded_fanout(per_day_cap)
+        out: list[dict] = []
+        for d in days:
+            day = d.isoformat()
+            prow = proj.g.query(
+                "MATCH (p:Point) "
+                "WHERE p.when STARTS WITH $day "
+                "OR p.createdAt STARTS WITH $day "
+                "RETURN 'point' AS kind, p.id, p.content, p.when, "
+                "p.createdAt, p.status, p.validFrom, p.validTo, "
+                "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
+                "p.search_keys, p.eventId, p.lme_session_index "
+                "ORDER BY p.id LIMIT $cap",
+                params={"day": day, "cap": cap}).result_set
+            for r in prow:
+                out.append({"kind": r[0], "id": r[1], "content": r[2],
+                            "when": r[3], "created_at": r[4],
+                            "status": r[5], "valid_from": r[6],
+                            "valid_to": r[7], "expired_at": r[8],
+                            "ep_alpha": r[9], "ep_beta": r[10],
+                            "quote": r[11], "search_keys": r[12],
+                            "event_id": r[13], "lme_session_index": r[14]})
+            erow = proj.g.query(
+                "MATCH (e:Event) "
+                "WHERE e.startedAt STARTS WITH $day "
+                "OR e.when STARTS WITH $day "
+                "RETURN 'event' AS kind, e.eventId, e.name, e.startedAt, "
+                "e.status, e.lme_event_id, e.lme_session_index "
+                "ORDER BY e.eventId LIMIT $cap",
+                params={"day": day, "cap": cap}).result_set
+            for r in erow:
+                # the Event node stores its human text under `name` (mirrors
+                # ``spine_rows`` — never `content`)
+                out.append({"kind": r[0], "id": r[1], "content": r[2],
+                            "started_at": r[3], "status": r[4],
+                            "lme_event_id": r[5], "lme_session_index": r[6]})
         return out
 
     def window_rows(lo, hi, cap=PER_ENTITY_FANOUT_CAP) -> list[dict]:
@@ -1671,6 +2154,7 @@ def docker_walker_port(sdk) -> WalkerPort:
     import types
     return types.SimpleNamespace(state_rows=state_rows,
                                  spine_rows=spine_rows,
+                                 day_rows=day_rows,
                                  window_rows=window_rows)
 
 
@@ -1864,6 +2348,40 @@ def _state_header_hit(sr: dict, label: str,
             "superseded_by": sb}
 
 
+def _date_section_hits(slices: AssemblySlices,
+                       anchor) -> list[dict]:
+    """#2655 — the date-scoped block: ONE synthesized header naming the
+    RESOLVED day(s), then every admitted row of that day in the walker's own
+    date order.
+
+    There is no resolved subject to head a section (the day IS the scope), so
+    the subject-section loop does not run here. Rows are cleaned of the
+    pure-walker derivation keys ({date, tier}) exactly as the subject sections
+    do; the header is the ONLY line this renderer invents. Empty slices render
+    NOTHING (the caller's P1-1 gate then keeps the fired decision false — a
+    bare header would replace a working legacy pool with a dateline).
+    """
+    if anchor is None or not slices.timeline_rows:
+        return []
+    days = ", ".join(d.isoformat() for d in anchor.days)
+    rows = sorted(slices.timeline_rows,
+                  key=lambda r: (r.get("date") or _date.max,
+                                 _as_str(r.get("kind")),
+                                 _as_str(r.get("id"))))
+    hits: list[dict] = [{"content": f"DATE ({anchor.label}): {days}",
+                         "kind": "date"}]
+    seen: set[str] = set()
+    for r in rows:
+        rid = r.get("id")
+        if rid is not None:
+            key = str(rid)
+            if key in seen:
+                continue
+            seen.add(key)
+        hits.append({k: v for k, v in r.items() if k not in ("date", "tier")})
+    return hits
+
+
 def _ago_offset_line(d: _date, qd: _date, unit: str | None) -> str:
     """#2652 deterministic elapsed arithmetic: ``<date> — N <unit> before
     <question_date>``. PURE INTEGER DATE MATH via ``_norm_date`` (the same
@@ -1927,6 +2445,7 @@ def synthesize_hits(
     candidates: tuple | list = (), halves: tuple | list = (),
     successors_verified: frozenset[str] = frozenset(),
     question_date: str | None = None,
+    date_anchor=None,
     anchor=None,
 ) -> list[dict]:
     """Render slices -> annotated hit dicts (the assemble_context input).
@@ -1934,12 +2453,16 @@ def synthesize_hits(
     Deterministic: subject-major sections in candidate order, rows
     chronological within a section; state/ordering/interval lines computed
     through the SHARED _norm_date helper (never an independent date lib).
+    For ``RELATIVE_DATE`` the day's own block is rendered (#2655) — see
+    ``_date_section_hits``.
 
     #2652: ``AGO_RELATIVE`` has NO subject sections (the selector is the
     time window) — it renders through ``_synthesize_ago_hits`` and needs
     ``anchor``; without it the shape renders nothing (the caller's
     empty-block guard then falls back to legacy).
     """
+    if shape is AssemblyShape.RELATIVE_DATE:
+        return _date_section_hits(slices, date_anchor)
     if shape is AssemblyShape.AGO_RELATIVE:
         if anchor is None:
             return []
@@ -1997,7 +2520,40 @@ def synthesize_hits(
             if lo is not None:
                 dated.append((oid, name, lo, i))
         dated.sort(key=lambda t: (t[2], t[3]))
-        if len(dated) >= 2:
+        # N-ary (#2653): the questions' OWN term count decides the arm, so the
+        # two-option path below stays byte-identical (its goldens are pinned).
+        n_terms = len(halves) if halves else len(order)
+        if n_terms >= 3 and len(order) >= 3:
+            # Chain over the SAME dated spine (earliest dated row per
+            # subject — the binary path's own anchor). The FULL order is
+            # claimed ONLY when EVERY subject is dated: a chain missing a
+            # member would state a confidently wrong order, so it emits
+            # nothing and the per-subject sections below carry the evidence
+            # (same fail-closed polarity as the interval anchors).
+            chron = [(oid, name, lo) for oid, name, lo, _i in dated]
+            if len(chron) == len(order) and len(chron) >= 2:
+                by_day: dict[_date, list[tuple[str, str]]] = {}
+                for oid, name, d in chron:
+                    by_day.setdefault(d, []).append((oid, name))
+                pieces: list[str] = []
+                for gi, d in enumerate(sorted(by_day)):
+                    # within-day ties are ordered by OBJECT ID — the same
+                    # phrasing-independent canon as the binary tie phrase
+                    group = sorted(by_day[d], key=lambda t: t[0])
+                    labels = [_display_label(nm, oid, nm in collide)
+                              for oid, nm in group]
+                    joined = " and ".join(labels)
+                    if gi == 0:
+                        pieces.append(
+                            f"{joined} came first on {_fmt_date(d)}"
+                            if len(labels) == 1 else
+                            f"{joined} both appeared on {_fmt_date(d)}")
+                    else:
+                        pieces.append(f"then {joined} on {_fmt_date(d)}")
+                if pieces:
+                    hits.append({"content": ", ".join(pieces),
+                                 "kind": "ordering"})
+        elif len(dated) >= 2:
             da = dated[0][2]
             if dated[1][2] == da:
                 # same-day tie: claiming a word-order-dependent winner would
@@ -2558,6 +3114,55 @@ def _assemble_under_caps(hits: list[dict], *, caps: dict,
     return selected, cap_stats
 
 
+def _empty_block() -> _AssembledBlock:
+    """The R1/P1-1 fall-through: fire NOTHING and let the legacy lane run."""
+    return _AssembledBlock(fired=False, shape=None, subjects=(),
+                           slices={}, admission={}, post_cap_lines=[])
+
+
+def _assemble_relative_date(sdk, question: str, *, question_date: str | None,
+                            caps: dict) -> _AssembledBlock:
+    """#2655 — the calendar-anchored day lookup (the RELATIVE_DATE branch).
+
+    anchor (resolved against the caller's ``question_date`` through the SHARED
+    ``_norm_date`` — one date source, never a clock read here) -> one batched
+    equality-day walk -> the day's own block. An unresolvable anchor, an
+    ambiguous anchor set, or a day with NO rows all fall through to legacy
+    byte-identically (P1-1: firing a bare dateline would REPLACE a working
+    legacy pool and burn the one reader call).
+
+    The tail is the SHARED one (`_decorate_real_rows` + `_assemble_under_caps`,
+    the same helpers the #2652 window path uses), so the decorate/D8/W4/
+    assemble stages have exactly one implementation.
+    """
+    from tortoise.retrieval import resolve_limit_from_caps
+    limit = resolve_limit_from_caps(caps)
+    anchor = resolve_calendar_anchor(question, _norm_date(question_date))
+    if anchor is None:
+        return _empty_block()
+    slices = collect_day_slices(docker_walker_port(sdk), anchor.days,
+                                per_day_cap=limit)
+    if not slices.timeline_rows:
+        return _empty_block()
+    hits = synthesize_hits(slices, shape=AssemblyShape.RELATIVE_DATE,
+                           date_anchor=anchor)
+    hits = _decorate_real_rows(sdk, hits)
+    selected, cap_stats = _assemble_under_caps(
+        hits, caps=caps, question_date=question_date)
+    if not selected:
+        # P1-1: a day whose rows all fall outside the caps would replace a
+        # working legacy pool with a dateline — fall through to legacy.
+        return _empty_block()
+    # the day IS the scope: no resolved subject rides on the block.
+    return _AssembledBlock(
+        fired=True, shape=AssemblyShape.RELATIVE_DATE.value, subjects=(),
+        slices={"state_rows": [],
+                "timeline_rows": list(slices.timeline_rows),
+                "evidence_rows": list(slices.evidence_rows)},
+        admission=dict(slices.admission), post_cap_lines=selected,
+        cap_stats=cap_stats)
+
+
 def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
                         caps: dict | None = None) -> _AssembledBlock:
     """The fired content pipeline (env-gated at the CALLER —
@@ -2583,6 +3188,12 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     if shape is None:
         return _AssembledBlock(fired=False, shape=None, subjects=(),
                                slices={}, admission={}, post_cap_lines=[])
+    if shape is AssemblyShape.RELATIVE_DATE:
+        # #2655: the DAY is the scope — there is no subject to resolve, so the
+        # resolver/both-halves gate does not apply and the subject pipeline
+        # below is entered UNCHANGED for every other shape.
+        return _assemble_relative_date(sdk, question,
+                                       question_date=question_date, caps=caps)
     if shape is AssemblyShape.AGO_RELATIVE:
         # #2652: the selector is the TIME WINDOW (question_date minus the
         # parsed offset), not an Object — so the R1 both-halves gate is
@@ -2618,7 +3229,10 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         return _AssembledBlock(fired=False, shape=None, subjects=(),
                                slices={}, admission={}, post_cap_lines=[])
     resolved = resolve_subjects(docker_resolver_port(sdk), terms, shape=shape)
-    if not resolved.both_halves_ok(shape):
+    # #2653: the extracted term count IS the R1 width (an N-way list fires
+    # only when all N subjects resolve). For the two-option and interval
+    # shapes len(terms) == 2, so the legacy two-half contract is unchanged.
+    if not resolved.both_halves_ok(shape, n_terms=len(terms)):
         # one half failed to resolve (or a both-subject shape lacks one) ->
         # the R1 gate: fire NOTHING, let legacy fall through
         return _AssembledBlock(fired=False, shape=None, subjects=(),
@@ -2655,13 +3269,12 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     selected, cap_stats = _assemble_under_caps(
         hits, caps=caps, question_date=question_date)
     if not selected:
-        # P1-1: both halves resolved but the assembly has NOTHING to say
-        # (content-less subjects) — firing would replace legacy evidence
-        # with an empty block and burn the ONE reader call on nothing.
-        # Fall through to legacy (the R1 spirit: fire only when the fired
-        # block is a REAL replacement).
-        return _AssembledBlock(fired=False, shape=None, subjects=(),
-                               slices={}, admission={}, post_cap_lines=[])
+        # P1-1: the assembly has NOTHING to say (content-less subjects, or an
+        # empty day) — firing would replace legacy evidence with an empty
+        # block and burn the ONE reader call on nothing. Fall through to
+        # legacy (the R1 spirit: fire only when the fired block is a REAL
+        # replacement).
+        return _empty_block()
     subs = [{"object_id": c.object_id, "name": c.name,
              "confidence": c.confidence}
             for c in candidates]

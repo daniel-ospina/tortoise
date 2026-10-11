@@ -802,6 +802,15 @@ _ALLOWED_OPERATOR = {
         'cand_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN o.name, o.id", params={"names": sb_names}).result_set': 1,
         '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name", params={"names": refs_sorted}).result_set': 1,
         '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name = $ref " "RETURN ID(o), o.id, o.name, o.status, o.supersededBy", params={"ref": ref}, ).result_set': 1,
+        # #1423: the Subject TWIN of the `_name_rows` read above. Same
+        # disposition, same owner (the supersession ref-side probe, S3): the
+        # name form is reached ONLY when the id form matched nothing, it
+        # returns every carrier, and the caller refuses outright on >1
+        # (`len(by_name) > 1` -> warn + _skip, "never-guess") — so it cannot
+        # fold two same-name Subjects into one. Not a route candidate: routing
+        # it through the #3633 resolver would convert "two carriers" into a
+        # resolver refusal, a semantics change enumerated by #5509.
+        'by_name = proj.g.query( "MATCH (s:Subject) WHERE s.name = $ref " "RETURN ID(s), s.id, s.name, s.status, s.supersededBy", params={"ref": ref}, ).result_set': 1,
     },
     'tortoise/entity_identity.py': {
         # THE sanctioned name->id reads (this PR's resolver module). The
@@ -825,15 +834,28 @@ _ALLOWED_OPERATOR = {
 _ALLOWED_KEYED = {
     'tortoise/commit_ops.py': {
         'sb_rows = proj.g.query( "MATCH (o:Object {name:$sb}) RETURN o.id, o.name, o.status", params={"sb": supersedes_by}, ).result_set': 1,
-        # #1370 (PR #5230, on `main` after this branch forked): NOT a fold and
-        # not a name-KEYED identity read — it RETURNS count(s), a cardinality
-        # test reached only when no Object holds the name (the `if not
-        # sb_rows:` branch above). It selects no identity, and a count is
-        # invariant to how many carriers hold the name, so it cannot fold two
-        # into one. Routed here it would be a semantics change (a refusal for
-        # >1 carrier would report "dangling successor" instead of "is a
-        # :Subject"), which is another lane's call — enumerated by #5509.
-        '_subj = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN count(s)", params={"sb": supersedes_by}, ).result_set': 1,
+        # #1423: the Subject TWIN of the `sb_rows` successor probe — the name
+        # the successor-name probe falls back to when no Object carries it
+        # (the #1370 routing makes team/role/person successors `:Subject`).
+        # It RETURNS identity now (it cannot be a bare count): the lane needs
+        # them because the old count-only read could only report "is a
+        # :Subject". It is not a fold — the rows drive
+        # `_apply_subject_supersession`, which refuses on >1 ref carrier, and
+        # requires a VISIBLE DISTINCT non-terminal successor before any write;
+        # the journaled fold itself is id-keyed (`MATCH (s:Subject {id:$id})`).
+        # The retired count-only read (`_subj = ... RETURN count(s)`) is REMOVED
+        # with it, not left stale below.
+        #
+        # TWO occurrences (#1423 review P2): the Subject lane's own successor
+        # probe AND the Object lane's ref-miss fallback. The successor probe is
+        # Object-FIRST, so a successor name carried by BOTH families routes the
+        # record into the Object lane; when the ref then does not resolve as an
+        # Object, this same probe supplies the Subject lane's successor rows
+        # rather than dropping the record with no `skipped` entry (#5365).
+        # Both sites feed `_apply_subject_supersession`, which refuses on an
+        # ambiguous ref and requires a VISIBLE DISTINCT non-terminal successor
+        # before any journaled write.
+        'subj_rows = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status", params={"sb": supersedes_by}, ).result_set': 2,
     },
     'tortoise/hosted_api.py': {
         # §A hosted session-capture about-edge anchor (S1).

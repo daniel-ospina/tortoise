@@ -132,6 +132,9 @@ surfaces:
   - test_battery_parity_mabench_run.py
   - test_battery_parity_mabench_tortoise.py
   - test_battery_parity_migration.py
+  # #3065: bounded-socket guard for the raw FalkorDB clients in the product
+  # package (dual-registered with `core`, its fallback surface — see there).
+  - test_bounded_raw_clients_3065.py
   # #2922/#2923: DB-free static guards for boot-path regressions (credential
   # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
   # Registered under `api` as well as `core` deliberately: the file it guards most
@@ -538,6 +541,13 @@ surfaces:
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
+  # #3675: the result-bearing `mcp_tool_call` prop. Dual-registered like the
+  # rest of the mcp_server family (`tortoise/mcp_server.py` is a SHARED_MODULE,
+  # so its own changes already take the full matrix) AND under `core`, because
+  # the consumer half — `tortoise/activation_scorecard.py`'s stage 5 — matches
+  # no named pattern and falls to the `core` fallback. One-surface registration
+  # would skip the suite on the other half of the diff.
+  - test_mcp_result_count_telemetry.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
@@ -887,6 +897,11 @@ surfaces:
   # follows) — see the `api` entry.
   - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
+  # #2655: guards `tortoise/calendar_anchors.py` (the deterministic
+  # calendar-anchor resolver). That module matches no SOURCE_PATTERNS rule, so
+  # a resolver-only change falls through to `core` — this entry is what makes
+  # the guard run on the diff that can break it.
+  - test_calendar_anchors.py
   - test_ci_stall_identify.py
   - test_docs_miner.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
@@ -1038,6 +1053,9 @@ surfaces:
   # runs this drift gate. Do not read this entry as covering a hand-edited
   # document.
   - test_mcp_rename_table.py
+  # #3675: the result-bearing `mcp_tool_call` prop (with the `api` half — see
+  # there). `core` owns the consumer, `tortoise/activation_scorecard.py`.
+  - test_mcp_result_count_telemetry.py
   # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
   # read is injected through a fixture), so `core` can run it on engine-wide
   # changes; it pins tools/queue_conflict_census.py, the instrument that makes
@@ -1180,6 +1198,16 @@ surfaces:
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
+  # #3065: every raw FalkorDB client in `tortoise/` must carry a bounded
+  # socket READ (`session_indexer`'s graph-entity lookup carried none — an
+  # unbounded `recv()` — and `backup`/`__main__` carried knob-blind literals).
+  # DUAL-REGISTERED with `api` for the reason every dual entry above exists:
+  # `tortoise/__main__.py` is an exact `api` SOURCE_PATTERN match, and the
+  # file guards a construction site in that module — an `__main__.py`-only
+  # change must run it. `tortoise/session_indexer.py` and `tortoise/backup.py`
+  # match no named pattern, so they fall through to `core`: without THIS entry
+  # the guard would not run on a change to the site it was written for.
+  - test_bounded_raw_clients_3065.py
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
@@ -1487,6 +1515,14 @@ surfaces:
   # full matrix). THIS ENTRY IS LOAD-BEARING: without it classify_test_file()
   # returns None for the test and a hook-only PR would never run the guard.
   - test_claude_hook_install_probe.py
+  # #3796: the SAME seam, one step further — the install-probe beacon must be
+  # DISPATCHED before the digest, not serialized behind it, and the reaped
+  # status must still reach the #3797 observation. Its source is
+  # `tortoise/claude-hooks/session-start.sh`, an ENGINE path that matches no
+  # SOURCE_PATTERNS entry and so classifies `core` via the `tortoise/` fallback
+  # — exactly like the #3755 entry above, and (per that entry) an unregistered
+  # file is one a hook-only PR would never run.
+  - test_3796_probe_not_serialized.py
   # #3808: `tortoise install claude|pi` installs the CAPTURE seam (the hook
   # scripts + the merged settings.json timeout; the Pi extension) instead of
   # leaving it as dashboard copy-paste. Its sources are
@@ -1862,6 +1898,17 @@ surfaces:
   # #3301: the four search legs must apply the canonical OBJECT vocabulary —
   # per-leg returned-set tests (docker lane).
   - test_object_search_visibility_3301.py
+  # #1423: Subject supersession — the write path (a Subject-addressed
+  # supersession applies instead of the #1370 warn-and-skip), the journaled
+  # `EntityMutated op=supersede` record, rebuild_all byte-parity including the
+  # ORIGINAL supersededAt, the #1350/#2194 clobber guard ported to Subject
+  # (a re-mention cannot resurrect a superseded team/role/person), and the
+  # read-side family vocabulary + per-leg returned sets. Same surface as its
+  # siblings test_object_registered_journal.py / test_object_search_
+  # visibility_3301.py / test_unjournaled_mutation_class.py (the projection +
+  # journal + search-leg seam; `tortoise/sdk.py` is a SHARED_MODULE -> full
+  # matrix, so `core` is the default home).
+  - test_subject_supersession_1423.py
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
   - test_operator_source_search.py
@@ -2136,6 +2183,15 @@ surfaces:
   - test_volunteer_contract.py          # volunteer contract (hermetic, no DB)
   - test_capture_phase_d_dedup.py       # capture Phase-D content-hash/rephrase dedup
   - test_volunteer_pipeline.py          # volunteer canonical pipeline (docker-lane; skipif no URI)
+  # #2125 (epic #2080 end-state frameworks): the injection middleware
+  # (`tortoise/framework.py` — ADK before_model_callback / LangGraph pre-model
+  # node / Semantic Kernel Prompt Render Filter). `tortoise/framework.py`
+  # matches no named SOURCE_PATTERNS entry, so a change to the module selects
+  # `core` via the `tortoise/` fallback — this entry is what makes the seam
+  # grade run for the very change it guards (#2938/#3154 class). It builds its
+  # seeded graph in-process on the embedded lane (an explicit db_path beats an
+  # env URI), so it belongs here and not in `uri_requiring`.
+  - test_framework_middleware.py
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
@@ -2146,6 +2202,16 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
+  # #3512: this pins the RECORD of the Pi seam's home (the epic #1714 plan and
+  # `tortoise/pi-hooks/README.md`) against the tree — the plan named
+  # `tortoise/pi-extension/` for months while the artifact that ships lives at
+  # `tortoise/pi-hooks/`. Same selection reasoning as the sibling directly above
+  # and the same fallback: `tortoise/pi-hooks/README.md` matches no
+  # SOURCE_PATTERNS entry, so a README-only edit selects `core` through the
+  # `tortoise/` prefix — which is the only arm that runs the guard on the change
+  # it guards. (A `docs/` edit is deliberately skipped by NON_PYTHON_PREFIXES,
+  # so the plan's own copy is covered by review of the `.md`, not by this arm.)
+  - test_pi_capture_disposition.py
   # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
   # `tortoise/session_import/` maps to no named surface, so a parsers.py change
   # selects `core` via the fallback — registered only under `api` (its
@@ -2532,6 +2598,13 @@ surfaces:
   - test_ci_timing.py
   - test_ci_manifest.py  # #5050: the measured durations map validator (READ-ONLY; `ci_timing.py --refresh-durations` is the sole writer)
   - test_ids.py
+  # #7955: the Interface E canonical-id contract test pins `tortoise/ids.py`
+  # (`ulid`), `tortoise/sdk.py`'s id regexes and `_is_ulid`, and
+  # `tortoise/projection/edges.py` (`DERIVABLE_STRUCTURAL_RELS`,
+  # `STRUCTURAL_REL_LABELS`, `stub_key`) —
+  # the same `sdk` SOURCE_PATTERNS that own `test_ids.py`, so the pin runs on
+  # the PRs that can break it instead of reading as unregistered manifest drift.
+  - test_identity_contract.py
   - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
   - test_validity_window_contract_5374.py   # #5374: the shared `commit_schema.validate_validity_window` contract + read-path (`_covers`) agreement (docker-lane)
   - test_log.py
@@ -2892,6 +2965,7 @@ slow_files:
 - test_epic903_scheduler.py
 - test_epic903_warmstart.py
 - test_extractor_v2.py
+- test_framework_middleware.py
 - test_graph_diagnostics.py
 - test_hosted_volunteer_context.py
 - test_import_endpoint.py
@@ -3215,6 +3289,13 @@ durations:
   eval/retrieval/test_run.py: 179.8
   test_4314_inert_hooks.py: 23.9
   test_platform_seams.py: 74.5
+  # #2125: NEW file — no CI junit measurement exists yet, so it carries the local
+  # embedded-lane reading for this turn under the `# unmeasured` convention above
+  # (37.0s for the whole module, the real-reflex leg dominating; the CI reading is
+  # usually larger). Refresh from the first post-merge run that includes it. Do NOT
+  # drop the row: an unregistered new test file reds `integrity_problems`, which is
+  # how this row was found (#4348 trap).
+  test_framework_middleware.py: 37.0  # unmeasured
   test_2952_degraded_read.py: 0.4
   test_quota.py: 17.0
   test_no_legacy_token_path.py: 0.5
@@ -3568,6 +3649,7 @@ durations:
   test_mcp_server_auth_modes.py: 0.7
   test_object_registered_journal.py: 1.7
   test_object_search_visibility_3301.py: 2.0
+  test_subject_supersession_1423.py: 210.8  # unmeasured — locally measured (24 tests, 210.79s session total, this worktree, 2026-10-11). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time (the >=90% coverage floor, #2876). The cost is the per-test SDK/embedder setup plus the four `rebuild_all` replays; refresh from CI junit once this file has run on main.
   test_session_extraction_modes.py: 5.3
   test_claim_lifecycle.py: 1.4
   test_e2e_journey.py: 0.9

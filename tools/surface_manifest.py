@@ -28,6 +28,23 @@ WHAT `check` DOES NOT PROVE — APPROVAL IS NOT MACHINE-CARRIED
     review. A green run is not consent. (The repository ruleset the #3863 scope doc
     proposed as the carrier was REJECTED on #4282 as over-engineering.)
 
+    PROVENANCE IS STAGED, NOT YET COMPARED HERE (#4185, first PR). `read_approval` reads
+    the owner's approval from `docs/product/canonical-mcp-tools.md`; it is landed and
+    tested, but the manifest's top-level `approval_status` / `approval_principal` /
+    `approval_pr` / `approval_date` remain in `NON_DERIVABLE_DOC_KEYS`, so `check` does
+    NOT compare them yet. That is deliberate: CI's required `surface-guard` job pins the
+    BASE copy of `tools/surface-guard.py`, whose per-row `approval` rule fires on
+    `approval_status: approved`, so flipping the committed manifest in this PR cannot be
+    green. A follow-up PR — once the new guard is on `main` — removes these keys from the
+    deny-list, flips the manifest to the derived `approved`, and arms the comparison.
+    Until then `tools/surface-guard.py` still enforces provenance whenever a manifest
+    CLAIMS an approval. Compliance with the owner-approved TARGET recorded in
+    `docs/product/canonical-mcp-tools.md` and `docs/product/beta-sdk-surface.md` is a
+    separate question, answered against the live surface by
+    `tools/surface-target-check.py`.
+
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+
 THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
     `check` re-derives the whole baseline with the SAME function `cut` writes
     (`build_doc`) and fails on any difference outside the keys whose value is not a
@@ -175,6 +192,36 @@ ORDER_FILE = ROOT / "config" / "surface-order.yml"
 MANIFEST_FILE = ROOT / "config" / "surface-manifest.yml"
 RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 
+# The header `cut` RE-EMITS above the dumped document. `yaml.safe_dump` carries no
+# comments, so without this a re-cut would silently delete the OVERRIDES marker (and every
+# other explanatory line above the first key). The marker's durable homes are the tool
+# docstrings; this is the copy a reader of the ARTIFACT sees, kept across re-cuts.
+MANIFEST_HEADER = (
+    "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).\n"
+    "#\n"
+    "# The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by\n"
+    "# `tools/surface_manifest.py::read_approval`; the committed copy is still\n"
+    "# `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,\n"
+    "# whose per-row `approval` rule fires on `approved`. A follow-up PR (#8144) flips it\n"
+    "# once the new guard is on main; do not hand-edit the four values — re-cut (the cut\n"
+    "# copies the doc).\n"
+    "#\n"
+    "# `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and\n"
+    "# `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a\n"
+    "# deliberate, reviewable act in the approving PR — so a re-cut over a grown surface\n"
+    "# cannot be green by construction.\n"
+    "#\n"
+    "# ⚠️ A re-cut emits ONLY this header, then the `yaml.safe_dump` of the derived document.\n"
+    "# YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep\n"
+    "# rationale here or in the docs, never in an ad-hoc comment in the body.\n"
+    "#\n"
+    "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
+    "# drift is visible (tools/surface-guard.py). The approved TARGET is recorded in\n"
+    "# docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance\n"
+    "# with it is checked by tools/surface-target-check.py, which reads those docs rather than\n"
+    "# a constant here.\n"
+)
+
 
 class SurfaceEvidenceUnreadable(Exception):
     """The evidence a check needs could not be read — a failure, never a skip.
@@ -204,7 +251,7 @@ def _read_manifest(path: Path | None = None) -> dict:
         path = MANIFEST_FILE
     if not path.exists():
         raise SurfaceEvidenceUnreadable(
-            f"the approved surface baseline is missing at {path}. The tool cannot verify "
+            f"the frozen surface baseline is missing at {path}. The tool cannot verify "
             "(or re-cut) the surface without it; a check that cannot read its evidence "
             "must not report success."
         )
@@ -251,6 +298,113 @@ def _read_manifest(path: Path | None = None) -> dict:
     return doc
 
 
+CANONICAL_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+
+
+def _frontmatter(path: Path) -> dict:
+    """The YAML frontmatter of a product doc, or raises when it carries none
+    (missing / unclosed / non-mapping / unparseable).
+
+    Deliberately NOT a `{}` fallback: a gate that cannot read its evidence must
+    not report success, and an empty mapping reads as "nothing to check".
+    """
+    if not path.exists():
+        raise SurfaceEvidenceUnreadable(
+            f"{path} is missing — the owner's approval lives there, and a check that "
+            "cannot read its evidence must not report success."
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SurfaceEvidenceUnreadable(f"could not read {path}: {exc}") from exc
+    if not text.startswith("---"):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} carries no YAML frontmatter — the owner's approval is recorded there, "
+            "and a document whose approval cannot be read is not an approval record. "
+            "Restore the frontmatter rather than letting the approval silently degrade."
+        )
+    end = text.find("\n---", 3)
+    if end < 0:
+        raise SurfaceEvidenceUnreadable(
+            f"{path} opens a frontmatter block that is never closed — its approval cannot "
+            "be read."
+        )
+    try:
+        data = yaml.safe_load(text[3:end])
+    except yaml.YAMLError as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not parse the frontmatter of {path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SurfaceEvidenceUnreadable(
+            f"{path}'s frontmatter is not a mapping — its approval cannot be read."
+        )
+    return data
+
+
+def read_approval(path: Path | None = None) -> dict:
+    """The owner's approval — READ from `docs/product/canonical-mcp-tools.md`.
+
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+
+    The manifest used to carry `approval_status: pending-owner-approval` while the
+    canonical list already recorded `approval_status: approved`, `approvedBy:
+    daniel-ospina` and `approval_pr: 4120`. Two files disagreed about one fact, and the
+    gate read the wrong one — so the owner was re-asked for the same approval. Reading
+    it here is the fix: the canonical list is the single place the approval is recorded,
+    and `cut` copies it into the manifest.
+
+    `path` is resolved at CALL time so a test can point it at a fixture doc.
+    """
+    if path is None:
+        path = CANONICAL_DOC
+    fm = _frontmatter(path)
+    # FAIL CLOSED ON A MISSING `approval_status`: synthesising the pending default here
+    # would let a doc whose approval provenance was deleted re-cut the manifest to
+    # `pending`, which the guard then PASSES — a green gate over vanished evidence. The
+    # document must say what its approval is; absence is a refusal.
+    if not fm.get("approval_status"):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} records no `approval_status`, so it is not an approval record. "
+            "The manifest's approval is READ from this document; absence must not be "
+            "silently treated as `pending-owner-approval`."
+        )
+    pr = fm.get("approval_pr")
+    approved = fm.get("approved")
+    status = str(fm["approval_status"])
+    # THE SAME VOCABULARY THE CONSUMERS ENFORCE. `surface-guard.py` reds an unknown status;
+    # if the generator merely carried it through, `cut` would write a manifest its own gate
+    # reds while `check` stayed green.
+    if status not in ("pending-owner-approval", "approved"):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} records `approval_status: {status}` — not one of "
+            "'pending-owner-approval' or 'approved'. The manifest's approval is READ from "
+            "this document, so an unrecognised status must not be carried into it."
+        )
+    # FAIL CLOSED ON AN INCOMPLETE `approved`. `surface-guard.py` and
+    # `tools/surface-target-check.py` both refuse an `approved` with no principal and no PR;
+    # if `read_approval` did not, `cut` could write a manifest that its own gate reds while
+    # `check` (which compares derived vs committed) stayed green — the generator disagreeing
+    # with its consumers about what "approved" means. `pending-owner-approval` legitimately
+    # carries neither, so the requirement is on `approved` only. TRUTHINESS, not `is None`:
+    # an empty-string `approval_pr` is falsy to both consumers, so it must be here too.
+    # THIS reader raises where `surface-guard.py` reports the missing fields and
+    # `surface-target-check.py` also refuses — all three fail closed; only the reporting
+    # differs (this one must refuse to write, the gate must name the field).
+    if status == "approved" and (not fm.get("approvedBy") or not pr):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} records `approval_status: approved` but "
+            f"approvedBy={fm.get('approvedBy')!r} / approval_pr={pr!r} — an approval "
+            "record must carry a principal and a PR."
+        )
+    return {
+        "status": status,
+        "principal": str(fm["approvedBy"]) if fm.get("approvedBy") else None,
+        "pr": str(pr) if pr else None,
+        "date": str(approved) if approved is not None else None,
+    }
+
+
 # --- what a re-derivation CANNOT reproduce -----------------------------------
 # `check` re-derives the baseline from code and reds on any difference, which is what
 # makes a hand-edited manifest a failure rather than a fact. These keys are excluded
@@ -265,8 +419,9 @@ def _read_manifest(path: Path | None = None) -> dict:
 #     rows happen to agree. NOTE: a PR author can therefore rewrite the evidence the owner
 #     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
 #     is a documented residual — the columns are not a function of the code — FILED, not hidden.
-#   * `approval` is the owner's reference: a PR number and a principal. The gate checks its
-#     SHAPE only — it cannot verify that the review it names exists. The consent carrier is
+#   * `approval` is an unvalidated AUDIT reference: a PR number and a principal. NO check
+#     validates its shape, and none verifies that the review it names exists — the approval
+#     itself is READ from `docs/product/canonical-mcp-tools.md` (#4185). The consent carrier is
 #     the #4282 mandate (approval from Daniel FIRST; see tortoise/tool_registry.py,
 #     tortoise/sdk.py and CONTRIBUTING.md) and Daniel's review, NOT a machine control. The
 #     repository ruleset proposed by the #3863 scope doc was REJECTED by the owner on #4282
@@ -278,6 +433,17 @@ def _read_manifest(path: Path | None = None) -> dict:
 #     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
 #     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
 #   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
+#   * the top-level `approval_status` / `approval_principal` / `approval_pr` /
+#     `approval_date` keys are excluded for THIS PR (#4185, first PR): `read_approval`
+#     is landed, but flipping the committed manifest to the derived `approved` reds CI's
+#     required `surface-guard`, which pins the BASE guard's per-row `approval` rule. A
+#     follow-up PR (new guard on `main`) removes them from this set and arms the
+#     comparison. `tools/surface-guard.py` still enforces provenance whenever a manifest
+#     CLAIMS an approval.
+#   * `high_water_counts` is a hand-set GROWTH PIN, not a derivation: `cut` carries it
+#     forward and `tools/surface-guard.py` reds when the live surface EXCEEDS it. It is
+#     excluded here because it is not a function of the code — it is the ceiling the
+#     owner froze, raised only by a deliberate edit in an approving PR.
 #
 # The exclusion is a DENY-list applied to BOTH sides, so a key the generator grows later is
 # compared by default (present on one side only, and ABSENCE is compared as absence — a
@@ -289,9 +455,14 @@ NON_DERIVABLE_ROW_KEYS = frozenset(
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {
         "cut_at_commit",
+        # Staged provenance (#4185, first PR): see the block above. A follow-up PR removes
+        # these four keys once the new guard is on `main`.
         "approval_status",
         "approval_principal",
         "approval_pr",
+        "approval_date",
+        # The growth pin (#4185 review P1): carried by `cut`, enforced by the guard.
+        "high_water_counts",
         # `response_fields` records hand-authored response FIELDS, outside the gated
         # surface. `build_doc` carries the committed block forward (see
         # `_carried_response_fields`), so a derivation of it is the artifact compared
@@ -712,10 +883,10 @@ def _component_fingerprint(fn) -> str | None:
     Deliberately built from the CODE OBJECT (`co_filename` and a digest of the
     bytecode, names and constants — see `_code_digest`), not from `__module__` /
     `__qualname__`. Those two attributes are plain
-    writable strings, so a shadow function can copy an approved tool's identity exactly and
-    pass a name-based comparison while serving different code (verified: a shadow that set
-    `__module__ = "tortoise.mcp_server"` and `__qualname__ = "tortoise_search"` replaced an
-    approved tool with the gate green). A code object cannot be forged so cheaply — a
+    writable strings, so a shadow function can copy a frozen-baseline tool's identity exactly
+    and pass a name-based comparison while serving different code (verified: a shadow that set
+    `__module__ = "tortoise.mcp_server"` and `__qualname__ = "tortoise_search"` replaced a
+    frozen-baseline tool with the gate green). A code object cannot be forged so cheaply — a
     different implementation means a different file/digest.  `co_firstlineno` is
     deliberately NOT part of the identity: a pure code move is not a served change.
 
@@ -760,6 +931,57 @@ def _carried_response_fields() -> list:
     return fields if isinstance(fields, list) else []
 
 
+def _carried_high_water_counts(fallback: dict) -> dict:
+    """The frozen GROWTH PIN, carried forward verbatim across a re-cut (#4185).
+
+    `counts:` is re-derived on every `cut`, so a re-cut over a surface that GREW moves
+    the very number a drift check would compare against and the growth disappears. This
+    pin is NOT re-derived: `cut` copies the committed value forward, and
+    `tools/surface-guard.py` reds when the live counts EXCEED it. Raising it is therefore
+    a deliberate, reviewable edit in the approving PR — the machine half of "a re-cut
+    over a grown surface cannot be green by construction" (review P1).
+
+    No manifest at all (the first cut): fall back to the fresh counts so the field is
+    always emitted. The manifest EXISTS but has no pin, or holds a malformed one: refuse
+    rather than silently reset the ceiling — a silent reset is exactly the failure this pin
+    exists to prevent.
+    """
+    try:
+        with MANIFEST_FILE.open() as fh:
+            doc = yaml.safe_load(fh)
+    except FileNotFoundError:
+        return dict(fallback)
+    except (OSError, yaml.YAMLError) as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not read {MANIFEST_FILE} to carry the `high_water_counts` pin: {exc}. "
+            "Refusing to reset the growth ceiling silently."
+        ) from exc
+    if not isinstance(doc, dict) or "high_water_counts" not in doc:
+        raise SurfaceEvidenceUnreadable(
+            f"{MANIFEST_FILE} exists but carries no `high_water_counts` pin — refusing to "
+            "re-base the growth ceiling silently. The fallback above is for a MISSING manifest "
+            "(the first cut); one that exists and lost the pin must not quietly adopt the "
+            "freshly derived counts as its ceiling — that is the failure the pin exists to "
+            "prevent. Restore the pin (or delete the manifest for a first cut)."
+        )
+    pin = doc.get("high_water_counts")
+    if not isinstance(pin, dict):
+        raise SurfaceEvidenceUnreadable(
+            f"{MANIFEST_FILE}'s `high_water_counts` is {pin!r}, not a mapping — refusing "
+            "to reset the growth ceiling silently."
+        )
+    out: dict[str, int] = {}
+    for key in ("tools", "sdk_public_methods"):
+        value = pin.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SurfaceEvidenceUnreadable(
+                f"{MANIFEST_FILE}'s `high_water_counts.{key}` is {value!r}, not an "
+                "integer — refusing to reset the growth ceiling silently."
+            )
+        out[key] = value
+    return out
+
+
 def build_doc(commit: str | None = None) -> dict:
     """Derive the baseline from the declaration. THE single derivation.
 
@@ -778,6 +1000,7 @@ def build_doc(commit: str | None = None) -> dict:
         ) from exc
 
     order = load_order()
+    approval = read_approval()
     keywords = order["keywords"]
     tokens_to_keyword = {t: kw for kw, toks in order["tokens"].items() for t in toks}
     family_rank = order["family_rank"]
@@ -811,8 +1034,9 @@ def build_doc(commit: str | None = None) -> dict:
 
     # The REGISTRATION SURFACE, not just the listing. A server-level transform can route
     # `get_tool` WITHOUT appending to `list_tools`, making a tool callable over the
-    # protocol while it appears in no enumeration at all; and `mcp.add_tool(fn, name=<an
-    # approved name>)` silently REPLACES an approved tool's implementation while leaving
+    # protocol while it appears in no enumeration at all; and `mcp.add_tool(fn, name=<a
+    # frozen-baseline name>)` silently REPLACES a frozen-baseline tool's implementation while
+    # leaving
     # both the name set and the count unchanged. Neither is visible to a listing-only
     # comparison, so the baseline also records what actually does the registering: the
     # transform set, and the implementation identity behind each tool component.
@@ -1068,9 +1292,9 @@ def build_doc(commit: str | None = None) -> dict:
             "use_instead": e.retired_use_instead,
             "sdk_method": getattr(e, "sdk_method", None) or None,
             "http_policy": bool(getattr(e, "http_policy", False)),
-            # Carried so `approval_status: approved` has a place to record the
-            # decision for a retirement, exactly as it does for a live row: a
-            # retirement shrinks the surface and needs the same human approval.
+            # An unvalidated AUDIT reference, exactly as on a live row: the approval itself
+            # is READ from docs/product/canonical-mcp-tools.md (#4185). Retiring a name
+            # shrinks the surface and is a decision, but this field records, it does not gate.
             "approval": None,
         }
         for e in RETIRED_TOOL_REGISTRY
@@ -1086,15 +1310,30 @@ def build_doc(commit: str | None = None) -> dict:
         "allowed_transforms": transform_names,
         # Hand-authored, and deliberately NOT gated — carried forward, never re-derived.
         "response_fields": _carried_response_fields(),
-        "approval_status": "pending-owner-approval",
-        "approval_principal": None,
-        "approval_pr": None,
+        # READ from `docs/product/canonical-mcp-tools.md`, never typed here (#4185).
+        # This is the one field pair the manifest no longer maintains itself: the `cut`
+        # COPIES it from the canonical doc at cut time, so an approval recorded after the
+        # cut needs a re-cut to land. `check` does NOT compare them yet — the four keys are
+        # still in `NON_DERIVABLE_DOC_KEYS` (see the header block). What catches a hand-edit
+        # that disagrees with the doc is `tools/surface-guard.py`, whose provenance
+        # comparison runs whenever the manifest CLAIMS an approval.
+        "approval_status": approval["status"],
+        "approval_principal": approval["principal"],
+        "approval_pr": approval["pr"],
+        "approval_date": approval["date"],
         "counts": {
             "tools": len(tools_out),
             "sdk_public_methods": len(sdk_out),
             "retired": len(retired_out),
             "keyword_distribution": keyword_counts,
         },
+        # A GROWTH PIN, not a derivation (see `NON_DERIVABLE_DOC_KEYS` and
+        # `_carried_high_water_counts`): carried forward by `cut` so a re-cut over a
+        # grown surface cannot raise it silently; the guard reds when the live surface
+        # exceeds it.
+        "high_water_counts": _carried_high_water_counts(
+            {"tools": len(tools_out), "sdk_public_methods": len(sdk_out)}
+        ),
         "retired": retired_out,
         "rows": tools_out + sdk_rows,
     }
@@ -1142,9 +1381,11 @@ def cmd_cut(args: argparse.Namespace) -> int:
         return _refuse(exc)
 
     # FAIL CLOSED ON A SILENT APPROVAL WIPE (#4598). `build_doc` writes `approval: null` on
-    # every row, and CONTRIBUTING.md makes that reset the CONTROL: a re-cut forces the owner to
-    # re-approve the baseline, so a changed `served_from` cannot ride an old approval into
-    # `approved`. That control is KEPT — what is removed here is only its SILENCE. On
+    # every row, and CONTRIBUTING.md makes that reset the CONTROL for the per-row AUDIT
+    # REFERENCE: a re-cut cannot carry an old reference onto a changed row. The TOP-LEVEL
+    # approval is separate — it is READ from `docs/product/canonical-mcp-tools.md` and carried
+    # forward (#4185), so a re-cut no longer re-asks for it. That control is KEPT — what is
+    # removed here is only its SILENCE. On
     # 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
     # approvals to zero, and nothing went red: `approval` is NON_DERIVABLE, so no derived
     # property compares it and no check can see the loss. Refusing here costs one flag; not
@@ -1166,23 +1407,30 @@ def cmd_cut(args: argparse.Namespace) -> int:
               f"that a re-cut would destroy:")
         for name, approval in doomed:
             print(f"  {name}: {approval}")
-        print("  Re-record them after the cut (CONTRIBUTING.md, step 4), or pass "
-              "--allow-approval-reset to drop them deliberately.")
+        print("  These per-row `approval` audit references are dropped; the approval itself is "
+              "READ from docs/product/canonical-mcp-tools.md (#4185), so no per-row "
+              "re-recording is required. Pass --allow-approval-reset to drop them deliberately.")
         return 1
 
     MANIFEST_FILE.write_text(
-        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
+        MANIFEST_HEADER
+        + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
         encoding="utf-8",
     )
 
-    # NOT CARRIED FORWARD, DELIBERATELY: this writes `approval_status: pending-owner-approval`
-    # and `approval: null` on every row, exactly as `build_doc` produces them. Carrying the
-    # previous approvals over a re-cut looks like protecting the audit record, and it was
-    # drafted and then REFUSED: CONTRIBUTING.md ("To propose an addition", steps 2-4) makes
-    # the reset the control — a re-cut forces the owner to re-approve the baseline, so a
-    # changed `served_from` cannot ride an old approval into `approved`. Preserving them
-    # would silently reverse that decision, so the reset stays and the tool SAYS so, because
-    # otherwise the next reader sees the wipe as a bug and "fixes" it back.
+    # NOT CARRIED FORWARD, DELIBERATELY: the per-row `approval` field is written `null`
+    # exactly as `build_doc` produces it. Carrying the previous AUDIT REFERENCES over a re-cut
+    # looks like protecting the audit record, and it was drafted and then REFUSED:
+    # CONTRIBUTING.md step 4 makes the reset the control for the reference — a re-cut cannot
+    # carry an old reference onto a changed row. Preserving them would silently reverse that
+    # decision, so the reset stays
+    # and the tool SAYS so, because otherwise the next reader sees the wipe as a bug and "fixes"
+    # it back.
+    #
+    # THE TOP-LEVEL APPROVAL IS DIFFERENT (#4185): `approval_status` / `approval_principal` /
+    # `approval_pr` / `approval_date` are READ from `docs/product/canonical-mcp-tools.md` by
+    # `read_approval`, so a re-cut copies the owner's real approval forward without a second
+    # human step. They are NOT a hand-maintained field a re-cut can blank.
     print(f"wrote {_display(MANIFEST_FILE)}")
     print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
           f"retired={doc['counts']['retired']}")
@@ -1195,7 +1443,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
         for name, approval in doomed:
             print(f"    {name}: {approval}")
     else:
-        print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
+        print(
+            "  per-row `approval` audit references reset to null; the approval itself is READ "
+            "from docs/product/canonical-mcp-tools.md (#4185)"
+        )
     return 0
 
 
@@ -1349,15 +1600,20 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("## What the gate compares — and what it does not")
     add("")
     add("The freeze this document serves is on **tools and endpoints**. The gate compares the live")
-    add("declaration against the approved list below. It fails on three kinds of name-level change:")
+    add("declaration against the frozen baseline below. It fails on three kinds of name-level change:")
     add("")
-    add("1. **A new tool** — an MCP tool that is not on the approved list.")
-    add("2. **A new endpoint** — a public SDK method that is not on the approved list.")
-    add("3. **An approved entry disappearing** — a tool or endpoint that is on the list and is no")
+    add("1. **A new tool** — an MCP tool that is not in the frozen baseline.")
+    add("2. **A new endpoint** — a public SDK method that is not in the frozen baseline.")
+    add("3. **A frozen-baseline entry disappearing** — a tool or endpoint that is on the list and is no")
     add("   longer offered.")
     add("")
-    add("It also fails when the implementation behind an approved name is swapped for a different")
+    add("It also fails when the implementation behind a frozen-baseline name is swapped for a different")
     add("one, because that changes the endpoint while leaving the name intact.")
+    add("")
+    add("**This frozen baseline is a snapshot of what EXISTS, not the owner-approved TARGET.** The")
+    add("target is recorded in [`canonical-mcp-tools.md`](canonical-mcp-tools.md) and")
+    add("[`beta-sdk-surface.md`](beta-sdk-surface.md); `tools/surface-target-check.py` reds while the")
+    add("live surface differs from it.")
     add("")
     add("Those are the name-level checks. The gate **additionally** fails on several served-surface and")
     add("evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed")
