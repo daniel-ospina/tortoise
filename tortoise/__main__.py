@@ -5670,10 +5670,22 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
         # able to clear it.
         if _import_receipt_for(session_id).exists():
             _stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            capture_backlog.mark_processed(session_id, processed_at=_stamp)
-            processed += 1
-            print(f"  [{index}/{total}] {session_id}: extracted ✓ "
-                  "(reconciled from its import receipt)")
+            # Check the write, do not assume it: `mark_processed` returns
+            # False when the record cannot be read or the write does not land
+            # (the module documents every write as best-effort). Counting that
+            # as processed is the exact lie this function's docstring forbids —
+            # the ledger would still say `not-processed` while the run reports
+            # "N processed, 0 still not-processed" and exits 0. The sibling
+            # re-capture path below reads the verdict BACK from the ledger for
+            # the same reason, so the two halves of one loop must agree.
+            if capture_backlog.mark_processed(session_id, processed_at=_stamp):
+                processed += 1
+                print(f"  [{index}/{total}] {session_id}: extracted ✓ "
+                      "(reconciled from its import receipt)")
+            else:
+                failed += 1
+                print(f"  [{index}/{total}] {session_id}: still not extracted "
+                      "(could not retire the record from its import receipt)")
             continue
         rc = _cmd_sessions_import(_argparse.Namespace(
             file=record.get("file"),
@@ -5725,7 +5737,7 @@ def _cmd_sessions_import(args) -> int:
     extraction-disabled setting #4258), a DEGRADED one (extraction
     error/empty, or a non-empty `errors` list — see
     :func:`_degraded_extraction`), and a `replayed` receipt carrying an
-    upgrade-refused warning (`_upgrade_refused`, whose mode is neither
+    upgrade-refused warning (`_deferral_reason`, whose mode is neither
     store-only nor degraded). Each also records the session in the
     saved-backlog ledger. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported). A re-POST of
@@ -6144,19 +6156,6 @@ def _cmd_sessions_import(args) -> int:
     # either would make every later re-import skip the POST on a stale receipt,
     # so the session could never gain memory points, and would leave the
     # warning's own remedy an instruction the CLI itself makes unreachable.
-    _upgrade_refused = (
-        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
-        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
-    # #4197 review: a DEGRADED 2xx — `extraction_mode` error/empty, or a
-    # non-empty `errors` list — STORED the turns and FAILED to extract (the
-    # rule stated at the top of this function: "empty and error never claim
-    # success"). It DEFERS like the store-only shapes rather than taking a
-    # receipt: a receipt makes every later re-import short-circuit BEFORE the
-    # POST ("Already imported … receipt present — skipping"), so the session
-    # could never gain its memory points AND a ledger entry recorded for it
-    # could never be retired — a permanent, un-fixable entry on every read
-    # surface. Same rule, and the same no-receipt reason, as the two store-only
-    # shapes below.
     # #4197 review: a DEGRADED 2xx — `extraction_mode` error/empty, or a
     # non-empty `errors` list — STORED the turns and FAILED to extract. It
     # DEFERS like the store-only shapes rather than taking a receipt: a receipt
@@ -6176,7 +6175,13 @@ def _cmd_sessions_import(args) -> int:
             session_id=session_id, harness=harness, file_path=file_path,
             turns=turns, reason=_degraded)
         return 0
-    if _deferral_reason(result):
+    # THE single predicate, and the SINGLE recorded reason: the `_why` below is
+    # the human-readable remedy, but the message the offer/report renders is the
+    # ledger's `reason` field, so that field must be the value `capture` and
+    # `drain` record for the same body (`_deferral_reason`) — not a second
+    # spelling computed here.
+    _reason = _deferral_reason(result)
+    if _reason:
         # #4258: the missing key and the turned-off setting are INDEPENDENT
         # reasons. When BOTH hold, the mode is "no-provider" but the receipt
         # also carries the disabled warning — the remedy must then name both
@@ -6212,7 +6217,7 @@ def _cmd_sessions_import(args) -> int:
         # Best-effort: losing the offer must never cost the capture.
         _record_backlog_deferral(
             session_id=session_id, harness=harness, file_path=file_path,
-            turns=turns, reason=_why)
+            turns=turns, reason=_reason)
         return 0
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({

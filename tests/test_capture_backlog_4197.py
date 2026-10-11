@@ -185,7 +185,9 @@ def test_store_only_import_records_the_backlog_and_writes_no_receipt(places,
     assert record["harness"] == "pi"
     assert record["turns"] == 4
     assert record["estimate"] > 0, "the offer must be priceable from the record"
-    assert "no LLM provider key" in record["reason"]
+    assert record["reason"] == "no-provider", \
+        "the recorded reason is `_deferral_reason`, the same value capture/drain " \
+        "write for this body — not a second spelling minted here"
 
 
 def test_summary_reports_all_three_states_with_cost(places):
@@ -1472,6 +1474,33 @@ def test_a_refused_upgrade_on_the_capture_path_is_recorded(places, tmp_path,
     assert record["file"] == str(durable)
 
 
+def test_the_recorded_reason_is_single_sourced_across_the_writers(
+        places, tmp_path):
+    """`_deferral_reason` is the SINGLE definition of "this 2xx still needs a
+    re-attempt" — so the ledger `reason` every writer records for one body must
+    be identical, because that field is the only diagnosis the offer and the
+    report render. `sessions import` recorded its own `_why` spelling ("no LLM
+    provider key") while `session capture` and `session drain` recorded
+    `_deferral_reason(body)` ("upgrade refused: no provider key"), so one body
+    produced two different diagnoses.
+
+    MUTATION THAT REDS THIS: record `_why` instead of `_deferral_reason(result)`
+    on the import deferral path (the pre-fix shape).
+    """
+    transcript = _transcript(tmp_path, "import.jsonl")
+    body = _refused_replay_body("s_imp_ref")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: body)[0]):
+        rc = main._cmd_sessions_import(main.argparse.Namespace(
+            file=str(transcript), harness="pi", session_id="s_imp_ref"))
+
+    assert rc == 0, "a refused upgrade is a deferral, not a failure"
+    record = backlog.sessions()[0]
+    assert record["reason"] == "upgrade refused: no provider key", \
+        "the import writer must record `_deferral_reason`, exactly as " \
+        "`session capture` and `session drain` do for the same body"
+
+
 def test_a_refused_upgrade_on_the_drain_is_recorded(places, capsys, tmp_path,
                                                     monkeypatch):
     """The same body through the drain used to be recorded NOWHERE: the mode
@@ -1546,6 +1575,43 @@ def test_the_run_reconciles_an_entry_whose_receipt_already_landed(places,
     assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
 
 
+def test_a_failed_reconciliation_is_reported_as_failed_not_processed(
+        places, capsys, tmp_path, monkeypatch):
+    """A receipt proves extraction ran, but retiring the ledger entry is a
+    SEPARATE write and the module documents it as best-effort. When it does not
+    land, counting the entry processed is the exact lie this feature exists to
+    prevent: the run printed "N processed, 0 still not-processed" and exited 0
+    while the ledger still said `not-processed` and `doctor` kept warning.
+
+    MUTATION THAT REDS THIS: ignore `mark_processed`'s return value (the
+    pre-fix reconciliation branch).
+    """
+    home, receipts = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_recon_fail", harness="pi",
+                                 file=str(transcript), turns=4, estimate=12)
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "s_recon_fail.json").write_text(
+        json.dumps({"session_id": "s_recon_fail", "turns": 4}),
+        encoding="utf-8")
+    monkeypatch.setattr(backlog, "mark_processed", lambda *a, **k: False)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+    with mock.patch("urllib.request.urlopen", side_effect=AssertionError(
+            "the receipt proves the POST already happened — no re-POST")):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "0 processed, 1 still not-processed" in out
+    assert "could not retire the record from its import receipt" in out
+    assert "reconciled from its import receipt" not in out, \
+        "a failed retirement must not claim the entry was reconciled"
+    counts = backlog.summary()["counts"]
+    assert counts[backlog.STATUS_PROCESSED] == 0
+    assert counts[backlog.STATUS_NOT_PROCESSED] == 1
+
+
 def test_a_record_nothing_can_act_on_can_be_dropped(places, capsys):
     """A `session drain` record carries no transcript path (the spool keeps the
     turns, not the path), so `--process` can only skip it. Without a way out,
@@ -1604,6 +1670,37 @@ def test_forget_also_reaches_a_legacy_named_record(places):
 
     # …and a record nothing can act on is droppable by identity too.
     assert backlog.forget("s_legacy") is True
+    assert backlog.sessions() == []
+
+
+def test_forget_drops_every_record_for_an_id_not_just_the_first(places):
+    """An earlier layout left `<sanitised>.json` orphans beside the canonical
+    `<sanitised>-<digest>.json`. Resolving ONE path let `forget` unlink the
+    canonical file, report "Dropped …", and leave the legacy orphan still
+    listed by `sessions()` — the dead end the flag exists to clear, still there,
+    with the command asserting the opposite.
+
+    MUTATION THAT REDS THIS: resolve a single path in `forget` (the pre-fix
+    `_existing_path` shape).
+    """
+    canonical = backlog._session_path("s_dup")
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "session_id": "s_dup", "harness": "pi", "file": None, "turns": 3,
+        "estimate": 9, "reason": "no LLM provider key",
+        "recorded_at": "2026-01-02T00:00:00Z", "status": "not-processed",
+    }
+    canonical.write_text(json.dumps(record), encoding="utf-8")
+    legacy = backlog.backlog_dir() / "s_dup.json"
+    legacy.write_text(json.dumps(dict(
+        record, recorded_at="2026-01-01T00:00:00Z")), encoding="utf-8")
+    assert {p.name for p in backlog.backlog_dir().glob("*.json")} == \
+        {canonical.name, legacy.name}
+    assert [r["session_id"] for r in backlog.sessions()] == ["s_dup"]
+
+    assert backlog.forget("s_dup") is True
+    assert list(backlog.backlog_dir().glob("*.json")) == [], \
+        "forget must drop EVERY record for the id, not just the first path"
     assert backlog.sessions() == []
 
 

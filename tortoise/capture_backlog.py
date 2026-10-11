@@ -173,6 +173,39 @@ def _existing_path(session_id: str) -> Path:
     return canonical
 
 
+def _matching_paths(session_id: str) -> list[Path]:
+    """EVERY record whose ``session_id`` FIELD is ``session_id``.
+
+    A session can have more than one file only through an orphan left by an
+    earlier layout (`<sanitised>.json` beside `<sanitised>-<digest>.json`), and
+    the record's identity is its ``session_id`` FIELD, never its filename. A
+    caller that resolves only ONE path (via :func:`_existing_path`) can drop
+    the canonical file, report success, and leave the legacy orphan still listed
+    by :func:`sessions` — so the state transition must collect them all.
+    """
+    found: list[Path] = []
+    try:
+        for path in backlog_dir().glob("*.json"):
+            if path.name.endswith(".tmp"):
+                continue
+            rec = _read_json(path)
+            if rec and str(rec.get("session_id") or "") == str(session_id):
+                found.append(path)
+    except Exception:
+        return []
+    # The canonical path is also the fallback for a malformed record whose
+    # FIELD is missing (the pre-`_matching_paths` shape deleted it): keep that
+    # reachable rather than silently refusing to drop it.
+    canonical = _session_path(session_id)
+    if canonical not in found:
+        try:
+            if canonical.exists():
+                found.append(canonical)
+        except Exception:
+            pass
+    return found
+
+
 def _policy_path() -> Path:
     """The policy record's path — derived once, like every other path here."""
     return backlog_dir() / _POLICY_DIR / _POLICY_FILE
@@ -386,13 +419,21 @@ def forget(session_id: str) -> bool:
     record is the only evidence that the session was stored without extraction.
 
     Never raises; a missing record is a no-op (``False``).
+
+    Removes EVERY record for the id, not just the first path
+    :func:`_existing_path` resolves: when a legacy orphan and a canonical
+    record coexist, unlinking one left the other still listed, so the command
+    printed "Dropped …" while the dead end survived — the exact failure this
+    flag exists to close.
     """
     try:
-        path = _existing_path(session_id)
-        if not path.exists():
-            return False
-        path.unlink()
-        return True
+        removed = False
+        for path in _matching_paths(session_id):
+            if not path.exists():
+                continue
+            path.unlink()
+            removed = True
+        return removed
     except Exception:
         return False
 
