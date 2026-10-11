@@ -110,7 +110,7 @@ are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEY
 `NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
 `basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
 flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
-`approval_date` / `response_fields`. The top-level `approval_*` keys are **read from**
+`approval_date` / `high_water_counts` / `response_fields`. The top-level `approval_*` keys are **read from**
 `docs/product/canonical-mcp-tools.md` by `tools/surface_manifest.py::read_approval`, but in this PR they
 are still **excluded** from that comparison (#4185 lands in two PRs — see "CI's `surface-guard` pins
 the BASE copy" below). What catches a hand-edit that disagrees with the document is

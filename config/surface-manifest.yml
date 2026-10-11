@@ -30,6 +30,7 @@ allowed_transforms:
 approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
+approval_date: null
 # Response FIELDS are outside the frozen surface — the freeze is on tools and
 # endpoints — but each one is recorded here so this manifest stays the single
 # source of truth for what we tell agents we return. A field that is off by

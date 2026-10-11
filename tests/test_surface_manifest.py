@@ -955,26 +955,25 @@ def test_the_guard_reds_when_the_high_water_pin_is_missing_or_malformed(tmp_path
     assert "high_water_counts" in malformed.stdout, malformed.stdout
 
 
-def test_a_re_cut_CARRIES_the_high_water_pin_forward(monkeypatch, tmp_path, derived_baseline):
+def test_a_re_cut_CARRIES_the_high_water_pin_forward(monkeypatch, tmp_path):
     """The pin is NOT re-derived: `cut` copies it, so growth needs an explicit edit.
 
-    If a re-cut recomputed it from the (grown) counts, the pin would move with the growth
-    and the guard's growth check would be defeated. Pinned here at the write site.
+    If a re-cut recomputed it from the live counts, the pin would move with the growth and
+    the guard's growth check would be defeated. The pin is set to a value DISTINCT from the
+    live counts and the REAL `cmd_cut` runs: patching `build_doc` here would satisfy the
+    assertion from a canned dict while `_carried_high_water_counts` never executed at all
+    (#4185 review).
     """
     sm = _load_manifest_tool()
     path = tmp_path / "surface-manifest.yml"
     prior = copy.deepcopy(_manifest())
-    prior["high_water_counts"] = {"tools": 82, "sdk_public_methods": 150}
+    prior["high_water_counts"] = {"tools": 7, "sdk_public_methods": 9}
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
-    grown = copy.deepcopy(derived_baseline)
-    grown["counts"] = {**grown["counts"], "tools": 83}
-    grown["rows"].append({"name": "tortoise_brand_new", "approval": None})
-    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(grown))
     assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert written["high_water_counts"] == {"tools": 82, "sdk_public_methods": 150}, (
-        "a re-cut recomputed the growth pin from the grown counts — the growth is now "
+    assert written["high_water_counts"] == {"tools": 7, "sdk_public_methods": 9}, (
+        "a re-cut recomputed the growth pin from the live counts — the growth is now "
         "invisible to the guard"
     )
 
