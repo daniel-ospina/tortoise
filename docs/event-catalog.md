@@ -67,16 +67,26 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
-- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+- **`SourceVersioned`** (#5024, T6; the WINDOW half in #3644) — the `:Source` **version transition**. A
   re-fetched source whose `contentHash` differs is a *new version of the same
   identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
   `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
   `contentHash` (the NEW version), **`previousContentHash`** (the superseded
   one — this is what makes the prior version addressable after the single
-  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
-  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  `:Source` node has moved on), **`validFrom`** (the new version's valid-time
+  start, and the node's new window start) and **`previousValidTo`** (the prior
+  version's window close — equal to `validFrom` by construction: the same
+  instant mints both, which is §4.6's *"the journal record that opens a new
+  version closes the old one in the same act"*), plus the usual
+  `sourceKind`/`title`/`ingestedAt`/`updatedAt`/extras. There is ONE node per
+  `url`, so the prior version's window is **a journal fact**, never a second
+  node: `previousValidTo` is therefore a record-only key (`_SOURCE_HANDLED`
+  keeps it off the node).
+  The transition instant is **not** a separate key: the
   payload's own `updatedAt` (minted once by `create_source`, so the live node
-  and the record cannot disagree) is it, and the fold reads exactly that. The
+  and the record cannot disagree) is it, and the fold reads exactly that —
+  `validFrom` is the SAME minted instant, i.e. one clock read under two names,
+  not a second derivation. The
   record carries **no** recomputed ordinal — `version` is reproduced on replay
   through the same hash-diff gate the live write used, so recording it too
   would be a second derivation that can disagree. Folded by

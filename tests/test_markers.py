@@ -147,6 +147,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # lane end to end — a `test_*` rename would exercise a namespace prod
     # never resolves.
     "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #3517 parity: `_provision_org` seeds the registry Team node directly
+    # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
+    # onboarding state the surfaces under test write lives ON that node — a
+    # `MATCH ... SET`, so the seed and the resolution must be the SAME graph.
+    # A test_* rename would seed a different graph than `hosted_api` resolves.
+    "test_onboarding_session_recording_parity.py": {"registry": "prod-coupled"},
     # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
     # namespace_not_display_name seeds a `Graph` row into the registry graph and
     # then calls `_has_scoped_graphs`, whose OWN body constructs
@@ -594,6 +600,12 @@ def test_no_redirect_stems_registry_exact():
         "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
+        # #3644: the version-window pins construct embedded stores and assert
+        # the writer's window semantics; registered in all three homes
+        # (ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here) — PR
+        # #8016 code-review ISSUE 2: the file was carve-out-labelled but
+        # absent from the two registries.
+        "test_source_version_window_3644",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
         # TEST_NO_REDIRECT_STEMS (eval/graph-integrity carve-outs) — the pin
         # test drifted; aligned here so the repo-wide markers gate passes.

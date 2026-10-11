@@ -143,7 +143,9 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -187,6 +189,11 @@ STALLED_TURN_SECONDS = 600.0
 #: run; the value is still PUBLISHED past the window (``--allow-stale``) — marked
 #: stale, never presented as current.
 STATE_FRESH_S = 900.0
+
+#: A stamp this far AHEAD of now is not clock skew between the writer and this reader
+#: — same box, same clock — it is a corrupt or future-dated cache, and its age is
+#: UNKNOWN rather than zero (#7957 H1: "an unknown age is never current").
+STATE_CLOCK_SKEW_S = 60.0
 
 # --- paths ------------------------------------------------------------------
 
@@ -1669,7 +1676,15 @@ def state_age_seconds(state: Mapping[str, Any]) -> float | None:
     if ts.tzinfo is None:
         # `build_state` always writes an offset (`%z`); a naive stamp is LOCAL.
         ts = ts.astimezone()
-    return max(0.0, time.time() - ts.timestamp())
+    age = time.time() - ts.timestamp()
+    if age < -STATE_CLOCK_SKEW_S:
+        # A stamp from the FUTURE is not an age. `max(0.0, ...)` reported it as the
+        # FRESHEST possible state, so a future-dated or corrupt cache answered forever
+        # and was never rebuilt — the exact failure this window exists to remove
+        # (#7957 H1). Treated as unreadable, which `state_freshness` maps to "never
+        # current", per this module's fail-closed polarity.
+        return None
+    return max(0.0, age)
 
 
 def state_freshness(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -1680,8 +1695,9 @@ def state_freshness(state: Mapping[str, Any]) -> dict[str, Any]:
             "age_seconds": None,
             "stale": True,
             "reason": (
-                "the state carries no readable `generated_at` stamp, so its age is "
-                "UNKNOWN — an unknown age is never current (#7957 H1)"
+                "the state carries no usable `generated_at` stamp (absent, "
+                "unparseable, or dated in the future), so its age is UNKNOWN — "
+                "an unknown age is never current (#7957 H1)"
             ),
         }
     if age > STATE_FRESH_S:
@@ -1730,13 +1746,53 @@ def _report_state_age(fr: Mapping[str, Any], *, source: str) -> None:
     print(f"fleet-state: {render_state_age(fr)} (source={source})", file=sys.stderr)
 
 
+#: Attempts to create a collision-free temp beside the cache. `O_EXCL` refuses an
+#: existing path, so even a collision fails SAFE instead of clobbering another writer.
+_TMP_ATTEMPTS = 8
+_TMP_SEQ = itertools.count()
+
+
 def _write_state_json(path: Path, state: Mapping[str, Any]) -> bool:
-    """Best-effort atomic cache write. A torn cache is worse than none."""
+    """Best-effort atomic cache write. A torn cache is worse than none.
+
+    The temp is created with mode ``0o666`` so the KERNEL applies the process umask —
+    exactly what ``Path.write_text`` produced. ``tempfile.mkstemp`` was tried first here
+    and creates ``0o600``, which ``os.replace`` then made the cache's FINAL mode: the
+    cache silently narrowed to owner-only, locking out a non-owner reader (a container, a
+    group process) with no error at write time, only a failure to read later (#7957 H2).
+    """
+    tmp_name = ""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(state, indent=2, default=str))
-        os.replace(tmp, path)
+        # A UNIQUE temp per writer: every reader that finds a stale cache tries to repair
+        # it, so a fixed `<name>.tmp` is shared and the writers that lose the race have
+        # their repair silently dropped, re-paying the full rebuild on the next read
+        # (#7957 H2). pid + a per-process counter is unique without a random name, and
+        # `O_EXCL` turns even a collision into a retry rather than a clobber.
+        fd = -1
+        for _ in range(_TMP_ATTEMPTS):
+            candidate = f"{path.name}.{os.getpid()}.{next(_TMP_SEQ)}.tmp"
+            tmp_name = str(path.parent / candidate)
+            try:
+                fd = os.open(tmp_name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                break
+            except FileExistsError:
+                continue
+        if fd < 0:
+            return False
+        try:
+            # `with` owns the descriptor: it is closed on EVERY path through this block,
+            # including a `json.dumps` failure. Nothing here closes `fd` by hand, and it
+            # must not — `os.fdopen` finalises and closes the FileIO when a later stage of
+            # the call fails, so a second close would hit whatever the number had been
+            # reused for (#7957 H2: readers repair the same cache concurrently).
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(state, indent=2, default=str))
+            os.replace(tmp_name, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
         return True
     except OSError:
         return False
@@ -2070,7 +2126,11 @@ def cmd_lane(args: argparse.Namespace) -> int:
             "sections of this lane are incomplete (#7957 H5)",
             file=sys.stderr,
         )
-    print(json.dumps(lane, indent=2, default=str) if args.json else _render_lane(lane))
+    # Additive: `lane --json` was already an object, so the age of the answer rides
+    # along without changing its shape (#7957 H1 for the machine channel).
+    payload = dict(lane)
+    payload["freshness"] = payload_freshness(state)
+    print(json.dumps(payload, indent=2, default=str) if args.json else _render_lane(lane))
     return 0
 
 
@@ -2115,21 +2175,33 @@ def cmd_free(args: argparse.Namespace) -> int:
     # than crashing the one command whose answer is "send work here".
     lanes = state.get("lanes")
     lanes = lanes if isinstance(lanes, (list, tuple)) else []
-    free = [
-        lane_ for lane_ in lanes
-        if isinstance(lane_, Mapping) and lane_.get("free") is True
-    ]
+    # The guard must cover EVERY field this command dereferences, not just the flag
+    # (#7957 H4): a `{"free": true}` stub used to pass the filter and then raise
+    # KeyError below, handing the caller a traceback where it needed "no genuinely
+    # free lane". A lane record we cannot fully read is not an offerable lane.
+    def _offerable(lane_: Any) -> bool:
+        if not isinstance(lane_, Mapping) or lane_.get("free") is not True:
+            return False
+        ident = lane_.get("identity")
+        sess = lane_.get("session")
+        return (
+            isinstance(ident, Mapping)
+            and isinstance(ident.get("lane"), str)
+            and isinstance(sess, Mapping)
+        )
+
+    free = [lane_ for lane_ in lanes if _offerable(lane_)]
     if args.json:
         print(json.dumps({"free": [lane_["identity"]["lane"] for lane_ in free],
                           "freshness": payload_freshness(state),
                           "detail": [{"lane": lane_["identity"]["lane"],
-                                      "session_source": lane_["session"]["source"],
-                                      "liveness": lane_["liveness"]} for lane_ in free]}, indent=2))
+                                      "session_source": lane_["session"].get("source"),
+                                      "liveness": lane_.get("liveness")} for lane_ in free]}, indent=2))
     else:
         if not free:
             print("no genuinely free lane (every lane holds work or is demonstrably active)")
         for lane_ in free:
-            print(f"  {lane_['identity']['lane']}  session={lane_['session']['sid'] or 'UNKNOWN'}")
+            print(f"  {lane_['identity']['lane']}  session={lane_['session'].get('sid') or 'UNKNOWN'}")
     return 0
 
 

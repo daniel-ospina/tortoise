@@ -289,6 +289,33 @@ SOURCE_PATTERNS = {
                    # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
                    "website/apps/dashboard/public/skills/",
                    "website/apps/dashboard/public/install-tortoise-skills.sh",
+                   # #3517: the capture disclosure's single source of truth and
+                   # the non-LLM renderer. Both own guards registered below
+                   # (`test_capture_disclosure_template.py`,
+                   # `test_onboarding_session_recording_parity.py`) — the
+                   # cross-surface "one home" scan reads the JSON, and the
+                   # parity test reads the CLI the SKILL names. Without these
+                   # entries an edit to either file matched no pattern and fell
+                   # back to `core`, where neither guard is registered: the
+                   # guard would not run on the PR that can break it (the same
+                   # #3673 silent-drop class as the served-skill entries above).
+                   "tortoise/capture_disclosure.py",
+                   "tortoise/config/capture_disclosure.json",
+                   # #3517: the false-promise grep's file set INCLUDES the 1714
+                   # research briefs (the plan's own requirement — the withdrawn
+                   # 403 consent contract still reads as live in this one).
+                   # `docs/` is in NON_PYTHON_PREFIXES, so without this entry a
+                   # docs-only PR that re-adds the dead contract selects NO
+                   # surface and the gate never runs on the only change that can
+                   # break it. Named as the CONCRETE file, not a glob: `select()`
+                   # matches with `startswith` and has no glob support, so a
+                   # `docs/research/1714-` prefix would satisfy nothing while
+                   # reading as coverage (`test_source_patterns_all_name_
+                   # something_real` reds on it — that is how dead entries are
+                   # caught). `test_capture_disclosure_template.py::test_every_
+                   # hit_carrying_brief_is_selected_by_ci` keeps this list honest
+                   # as new briefs land.
+                   "docs/research/1714-solution-converge.md",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and
@@ -815,7 +842,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
              # `api` match must not drop the core half.
-             "tortoise/oauth.py")
+             "tortoise/oauth.py",
+             # #5581: the source-currency derivation helper owns
+             # tests/test_source_currency_5581.py, registered `core` — but
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a HELPER-ONLY change
+             # selected NO surface, took the docs-only early return and fell
+             # back to tier-1 smoke: the cases pinning §4.6's aggregate rule
+             # (notably that an EMPTY link set reads `unknown`, never the
+             # vacuously-`current` false-fresh) would not have run on the PR
+             # that edits the aggregation. Same #1349/#3332/#3616 silent-drop
+             # class as tools/test_lane.py above. Pinned by
+             # tests/test_ci_selection.py::test_source_currency_tool_change_selects_core_not_tier1.
+             "tools/source_currency.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

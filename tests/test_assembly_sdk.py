@@ -168,6 +168,7 @@ def _ask_env_clean(monkeypatch):
 
 
 from tests.test_ask_sdk import FakeReader, _install_fake  # noqa: E402
+from tortoise.retrieval import estimate_tokens_ask  # noqa: E402
 
 Q_DATE = "2026-09-10"
 
@@ -709,6 +710,57 @@ def test_positive_fts_paraphrase_fires(sdk, monkeypatch):
     assert "STATE (couch): superseded by sofa on 2026-09-01" in aa.evidence
 
 
+def test_duration_state_fires_with_the_state_entry_anchor(sdk, monkeypatch):
+    """#2654: a duration-state question fires on the resolved state subject
+    and renders the two anchors it used — the subject's state ENTRY date
+    (ObjectRegistered stamp or earliest dated row, whichever is EARLIER;
+    in the v2 lane the stamp is the ingest clock, so the row date wins) and
+    the caller's as-of date.
+
+    NOT a byte golden on purpose: this test was authored without a live
+    docker lane, so the exact evidence bytes were never CAPTURED, and the
+    R17 policy forbids inventing them. The assertions are structural
+    instead — the anchor/span lines, the additive ``created_at`` walker
+    read, and the absence of the INTERVAL line (the shape must not leak
+    into the interval render)."""
+    ag.build_base_graph(sdk)
+    # pin the ObjectRegistered stamp to the story date (the fixture's own
+    # idiom for byte-reproducible headers): an unpinned stamp is build
+    # wall-clock, and the golden below must not depend on the run date
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {name:'couch'}) SET o.createdAt = $ts",
+        params={"ts": "2026-08-10T00:00:00Z"})
+    aa = run_ask_assembled(
+        sdk,
+        "how long had I been using the couch when I rearranged the living "
+        "room?",
+        question_date=Q_DATE)
+    assert aa.fired is True
+    assert aa.shape == "duration-state"
+    assert any(s["name"] == "couch" for s in aa.subjects), aa.subjects
+    # the additive walker read: the state slice now carries the stamp
+    assert aa.slices["state_rows"][0].get("created_at") is not None, \
+        aa.slices["state_rows"]
+    assert "STATE ENTRY (couch): 2026-08-10" in aa.evidence, aa.evidence
+    assert ("31 days from couch state entry (2026-08-10) to the as-of date "
+            "(2026-09-10)") in aa.evidence, aa.evidence
+    # the state-entry shape is NOT the interval render
+    assert "days between " not in aa.evidence, aa.evidence
+
+
+def test_duration_state_unresolved_state_subject_falls_through(
+        sdk, monkeypatch):
+    """#2654 R1: a duration-state question whose STATE subject resolves
+    nowhere fires NOTHING — the legacy lane answers it byte-identically to
+    flag OFF (never a block anchored on an unresolved subject)."""
+    ag.build_base_graph(sdk)
+    q = ("how long had I been using the hoverboard when I rearranged the "
+         "living room?")
+    off = _ask(sdk, monkeypatch, q, flag_on=False)
+    on = _ask(sdk, monkeypatch, q, flag_on=True)
+    assert on["evidence"] == off["evidence"]
+
+
 def test_out_of_subgraph_gold_a1_b0(sdk, monkeypatch):
     """R16(b) pre-registered canary: flag-OFF legacy ADMITS ≥1 of the
     out-of-subgraph gold (A≥1) while the assembled arm admits ZERO (B=0)."""
@@ -1192,3 +1244,122 @@ def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
     assert got == long_name, (
         f"the SDK object read returned {len(got)} chars, expected the full "
         f"{len(long_name)}-char successor name")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2652 — 'ago'-relative / implicit-time resolution: the fired WINDOW block.
+# The classifier routes the promoted relative-time vocabulary to
+# AGO_RELATIVE; ``_assemble_connected`` resolves question_date MINUS offset
+# into an as-of window and walks it (no Object subject — the selector is the
+# TIME). Fixture geometry with Q_DATE=2026-09-10: session A (2026-08-10) is
+# EXACTLY "a month ago"; session B (2026-09-01) is "9 days ago"; the
+# distractors are createdAt 2026-06-01.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_ago_relative_fires_a_window_block(sdk, monkeypatch):
+    """#2652 anchor+offset: 'a month ago' from 2026-09-10 → the window
+    2026-07-26..2026-08-25, i.e. session A. The window REPLACES the pool, so
+    the session-B rows (2026-09-01) are ABSENT — and the deterministic
+    elapsed line precedes every dated row."""
+    from tortoise.retrieval import estimate_tokens_ask
+    ag.build_base_graph(sdk)
+    res = _ask(sdk, monkeypatch, "what did I do a month ago?", flag_on=True)
+    ev = res["evidence"]
+    print("\n===AGO_MONTH===\n" + repr(ev) + "\n===END===")
+    assert "WINDOW (2026-07-26 -> 2026-08-25): 1 month before 2026-09-10" in ev
+    assert "bought the grey couch from ikea for 800 dollars" in ev
+    assert "the dog chewed the corner of the dog bed cushion" in ev
+    # the window is a HARD selector: session B is outside it
+    assert "sold the old couch and ordered a new sofa" not in ev
+    assert res["retrieval_degraded"] is False
+    assert res["context_tokens"] == estimate_tokens_ask(ev)
+
+
+def test_ago_relative_day_offset_window(sdk, monkeypatch):
+    """'9 days ago' → 2026-09-01 exactly: session B only (a ONE-DAY window)."""
+    ag.build_base_graph(sdk)
+    res = _ask(sdk, monkeypatch, "what did I do 9 days ago?", flag_on=True)
+    ev = res["evidence"]
+    print("\n===AGO_DAY===\n" + repr(ev) + "\n===END===")
+    assert "WINDOW (2026-09-01 -> 2026-09-01): 9 days before 2026-09-10" in ev
+    assert "sold the old couch and ordered a new sofa" in ev
+    assert "bought the grey couch from ikea" not in ev
+    assert res["retrieval_degraded"] is False
+
+
+def test_ago_relative_empty_window_falls_back_to_legacy(sdk, monkeypatch):
+    """#2165 P1-1 applied to #2652: a window with NO dated row (2 weeks ago
+    → 2026-08-24..2026-08-30, which the fixture leaves empty) must NOT
+    replace the pool with a content-less window header — the lane falls back
+    to legacy BYTE-IDENTICALLY (the committed flag-OFF golden)."""
+    ag.build_base_graph(sdk)
+    q = "what was the couch status two weeks ago?"
+    res = _ask(sdk, monkeypatch, q, flag_on=True)
+    _assert_golden(res["evidence"], q, GOLD_LEGACY_AGO)
+    # ...and the unrouted/empty case is the SAME on both flag postures
+    off = _ask(sdk, monkeypatch, q, flag_on=False)
+    _assert_golden(off["evidence"], q, GOLD_LEGACY_AGO)
+
+
+def test_ago_count_and_recency_fire(sdk, monkeypatch):
+    """The two offset-LESS promoted forms fire too: the count form ('how
+    many weeks ago', its offset IS the answer) and 'most recently' both use
+    the bounded recent window. Recency renders NEWEST-FIRST."""
+    ag.build_base_graph(sdk)
+    cnt = _ask(sdk, monkeypatch, "How many weeks ago did I meet up with my "
+               "aunt and receive the crystal chandelier?", flag_on=True)
+    print("\n===AGO_COUNT===\n" + repr(cnt["evidence"]) + "\n===END===")
+    assert "WINDOW (2025-08-06 -> 2026-09-10): elapsed time before " \
+        "2026-09-10" in cnt["evidence"]
+    assert cnt["retrieval_degraded"] is False
+    rec = _ask(sdk, monkeypatch, "Which streaming service did I start using "
+               "most recently?", flag_on=True)
+    print("\n===RECENCY===\n" + repr(rec["evidence"]) + "\n===END===")
+    assert "most recent activity before 2026-09-10" in rec["evidence"]
+    # newest-first: the first dated line is 2026-09-01 (session B)
+    lines = [ln for ln in rec["evidence"].splitlines()
+             if "before 2026-09-10" in ln and ln.startswith("[session ?] 2")]
+    assert lines and lines[0].startswith("[session ?] 2026-09-01"), lines[:3]
+    assert rec["retrieval_degraded"] is False
+
+
+def test_ago_relative_flag_off_emits_no_window_block(sdk, monkeypatch):
+    """The promoted routing never touches the OFF lane: with the flag off,
+    none of the promoted questions produces a WINDOW/STATE block, so the
+    OFF lane's pool is the legacy one unchanged. (The byte-identity GOLDEN
+    for the unrouted fixture is asserted by the neighbouring tests that
+    call ``_assert_golden(..., GOLD_LEGACY_AGO)``; this one is the
+    flag-off absence check.)"""
+    ag.build_base_graph(sdk)
+    for q in ["what did I do a month ago?", "what did I do 9 days ago?",
+              "Which streaming service did I start using most recently?"]:
+        res = _ask(sdk, monkeypatch, q, flag_on=False)
+        assert "WINDOW (" not in res["evidence"], q
+        assert "STATE (" not in res["evidence"], q
+
+
+def test_ago_relative_ask_assembled_contract(sdk, monkeypatch):
+    """#2652 × the AssemblyAnswer contract: the eval arm reads `post_cap_lines`
+    for gold-id admission and `answer` for conversion, so the window shape
+    must report the SAME field set as every other shape — fired, shape named,
+    evidence = render_context(post_cap_lines), answer=None in pure-assembly
+    mode (no reader supplied), and retrieval_degraded=False on the fired
+    path."""
+    ag.build_base_graph(sdk)
+    aa = run_ask_assembled(sdk, "what did I do a month ago?",
+                           question_date=Q_DATE)
+    assert aa.fired is True and aa.shape == "ago-relative"
+    assert aa.answer is None                      # pure-assembly mode
+    assert aa.retrieval_degraded is False
+    assert aa.subjects == []
+    assert "WINDOW (2026-07-26 -> 2026-08-25): 1 month before 2026-09-10" \
+        in aa.evidence
+    assert aa.context_tokens == estimate_tokens_ask(aa.evidence)
+    # post_cap_lines IS the reader-visible evidence (the arm's admission list)
+    assert aa.post_cap_lines
+    assert aa.admission["rows_admitted"] >= 1
+    # a shape the classifier routes but whose window is empty reports
+    # fired=False with an EMPTY evidence (the legacy-fallback contract)
+    empty = run_ask_assembled(sdk, "what did I do 2 weeks ago?",
+                              question_date=Q_DATE)
+    assert empty.fired is False and empty.evidence == ""

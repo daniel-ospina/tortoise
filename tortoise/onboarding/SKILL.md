@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-12
+updated: 2026-10-11
 allowed-tools: read write bash
 ---
 
@@ -546,7 +546,105 @@ silent skip); self-hosted daemon unreachable → the compose stack is not up
 embedded; state read unavailable (self-hosted) → skip checkpoint (W12 owns
 the self-hosted node).
 
-## 5. Next steps (do NOT do them in this session unless asked)
+## 5. Capture setup — ask, then install in the prompt (#3517)
+
+Run this ONCE per organization, after §4 verifies the connection and BEFORE any
+capture happens. **Recording is a SETTING, not a consent ritual** (epic #1714
+B2): recording is default-ON, the legal basis is contract + notice (T&C /
+privacy policy), the off-switch is a product setting, and **no consent record,
+no consent gate and no approval bound to the install exist or should be built**.
+The ask stays because installing software into someone's harness is a change to
+their machine — and the facts you print come from the ONE renderer, never from
+your own prose (epic #1714 decision 1: the disclosure is generated from runtime
+structured data via a **non-LLM template**, because a wrong disclosure is a UX
+bug).
+
+### Ask one explicit yes/no — never assume the answer
+
+> "Tortoise can record your agent sessions so you can recall them later.
+> Install the recorder for <harness> now? (yes / no)"
+
+Never skip the ASK when `capture_revised` is already set — and, in the yes
+branch, **never skip the WRITE**: a user-initiated enable always re-sets the
+setting, even after an earlier decline (see the re-enable pin below).
+
+### On YES — in this order
+
+1. **Install the capture seam for this harness.** `tortoise install <harness>`
+   (idempotent — a re-run is also the upgrade path; `--dry-run` prints the plan
+   and changes nothing). The installer is the only writer: **do not hand-copy
+   the artifact**, and do not invent a second install path.
+   Then **assert the target resolved**: `tortoise install --list` states the
+   artifact each harness installs to (for Pi:
+   `~/.pi/agent/extensions/tortoise-capture.ts`). Resolve what is actually
+   there (`readlink -f <artifact>`) and confirm it resolves to that declared
+   path inside the harness's own root. Never report an install you did not
+   resolve — a mistyped or foreign artifact installs silently and captures
+   nothing.
+   The **symlinked target** and the two-part store-proven verification behind
+   this step are #3515's mechanism (and #3512's home for it); this section wires
+   what it finds and **never re-implements the installer**. If the resolved path
+   is outside the harness's own root, stop and report it rather than writing
+   through the link.
+2. **Verify behaviourally, not by exit code:**
+   `tortoise session verify --harness <harness>` — installed → captured → in
+   memory. A red verify is an honest failure: report it and do NOT claim the
+   install succeeded.
+3. **Write the setting through the EXISTING tool.** The answer is wired to the
+   tool the dashboard's own toggle writes through — there is exactly ONE state
+   path, and a parallel setter is a defect:
+   - MCP-connected agent: `tortoise_onboarding_session_recording(enabled=true)`
+   - CLI agent (no MCP tool listed yet): `PATCH /v1/onboarding/state` with
+     `{"session_recording": true}`
+   Both write `session_recording` + `capture_revised`, and nothing else.
+4. **Fire the install probe BEFORE you report success.**
+   `tortoise session probe --harness <harness>` (the existing
+   `POST /v1/sessions/install-probe` route — no new endpoint). Without this the
+   dashboard reads **install-pending** ("not installed yet") about a harness
+   you installed a moment ago. The probe is harness + timestamp, no content, and
+   it is not gated on the recording setting.
+5. **Print the disclosure, verbatim, from the renderer.**
+   `tortoise session disclosure --harness <harness>` prints what is recorded,
+   where it goes, and where the off-switch is, from this organization's live
+   state. Print that output as-is — never paraphrase it, never write it yourself,
+   and never state a fact you did not read. Then confirm in one line with
+   `tortoise session disclosure --harness <harness> --kind confirmation`, which
+   names the off-switch the install just made reachable.
+
+### On NO
+
+1. **Install nothing.** No seam, no extension, no config write.
+2. **Write the same keys the dashboard's decline writes** — the no-branch
+   mirrors the wizard/panel toggle so the two surfaces cannot diverge:
+   `tortoise_onboarding_session_recording(enabled=false)` (CLI:
+   `PATCH /v1/onboarding/state` with `{"session_recording": false}`). That is
+   `session_recording=false` + `capture_revised=true`, exactly the yes-branch
+   key set with the opposite value — never a different set of keys.
+3. **Confirm honestly** with
+   `tortoise session disclosure --harness <harness> --kind declined`: nothing was
+   installed, nothing will be recorded, and the setting stays visible where the
+   user can turn it back on.
+
+### The re-enable path is pinned
+
+`tortoise_onboarding_session_recording(enabled=true)` **re-sets the setting
+regardless of `capture_revised`** — a user who declined can re-enable at any
+time through the tool, through the dashboard toggle, or by answering this ask
+yes. An implementation that short-circuits on `capture_revised` would strand
+them, so the parity test asserts the re-enable write lands.
+
+### The off-switch is ONE shared fact, never re-typed
+
+Recorded at `Settings → Memory sources → Agent sessions` (the
+`id="settings-memory-heading"` home of the four source toggles) — NOT
+`Settings → Captured sessions`, which is the view/delete home and holds no
+toggle. The label is declared once, in the disclosure's single source of truth
+(`tortoise/config/capture_disclosure.json`, `destinations.off_switch`), and is
+rendered from there by both this prompt and the dashboard; the same file names
+the `settings-memory-heading` anchor so a UI rename cannot silently drift the
+sentence a user reads. **Do not re-type the path anywhere** — print the render.
+
+## 6. Next steps (do NOT do them in this session unless asked)
 
 - **Seed** (files your Organization + User as Subjects, linked `memberOf`) —
   owned by the W3 seed skill; the Setup guide card asks when it is that
@@ -555,7 +653,7 @@ the self-hosted node).
   MCP-tool decide protocol below. It requires NO local skill file (works on
   all 6 harnesses); the local `tortoise-decide` skill is a convenience, not
   a prerequisite.
-- **Capture disclosure** — see the copy contract in section 6 (fired at the
+- **Capture disclosure** — see the copy contract in section 7 (fired at the
   user's first capture, not during install).
 
 ### Enabling a data source (thin UI, capable backend, agent-addressable — #3540)
@@ -650,13 +748,52 @@ cannot reach the graph (never decide against a dead connection):
    *why*: the top edges that moved each option. Run `tortoise_check_structure`
    to confirm no orphaned operators.
 
-## 6. Capture-announcement COPY CONTRACT (W6 implements the trigger)
+## 7. Capture-announcement COPY CONTRACT (W6 implements the trigger)
 
 Owned here (epic #1976 §3 + §8 timing pin). At the user's FIRST capture —
 the first time a session/conversation is filed to the graph — the agent says
 ONE line, non-blocking:
 
 > "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Captured sessions."
+
+**That line is the W2-pinned copy, and it is now RENDERED from the disclosure's
+single source of truth** (`tortoise/config/capture_disclosure.json`,
+`templates.first_capture_line`) rather than authored here. It stays quoted
+because `tests/test_onboarding_variants.py`
+(`test_skill_capture_announcement_copy_contract_present`) pins this literal as
+the W2 copy contract — and `tests/test_capture_disclosure_template.py` asserts
+the quoted line is **byte-equal** to the template's render, so the two cannot
+drift. Edit the template, not this quote:
+
+```bash
+tortoise session disclosure --harness <harness> --json   # → .first_capture_line
+```
+
+Never author this copy yourself: the facts must match what is recorded and
+where it goes (epic #1714 decision 1 — a wrong disclosure is a UX bug).
+
+### Step/state accounting — the render NEVER touches `capture-disclosed`
+
+Pushed down from the epic plan §8 (the recurring plan-review finding: a new
+capture-disclosure render can **silently consume the `capture-disclosed` FLOW
+step**, a step that exists in the onboarding vocabulary, so a render that writes
+or skips it changes the flow with nobody deciding that it should).
+
+**Resolution — the render CONSUMES nothing and WRITES nothing.** `capture-disclosed`
+has exactly ONE writer, the capture path
+(`tortoise/hosted_api.py::_capture_session_impl` →
+`write_completed_step(proj, org_id, "capture-disclosed", ...)`, first-write-wins,
+on the org's first 2xx capture; a 409 off-switch capture never writes it). The
+disclosure reads onboarding state and is otherwise pure, so:
+
+- rendering it twice renders the same text and leaves state identical;
+- it creates no COMPLETED_STEP edge, before or after the first capture;
+- it neither suppresses nor advances the once-per-org announcement — the
+  `first_capture` flag on the capture response remains the only trigger.
+
+The accounting is declared once, in code
+(`tortoise/capture_disclosure.py::step_accounting`) and asserted by
+`tests/test_onboarding_session_recording_parity.py`.
 
 Contract notes:
 

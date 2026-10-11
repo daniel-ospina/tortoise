@@ -170,7 +170,9 @@ def test_the_repair_is_armed_by_the_real_boot_runner(monkeypatch):
     # the guard properties of the others are covered by
     # test_cost_allocation.py::_BOOT_SWEEPS.
     for attr in ("_sweep_events", "_purge_deleted_orgs",
-                 "_purge_deleted_accounts", "_sweep_oauth_retention"):
+                 "_purge_deleted_accounts", "_sweep_oauth_retention",
+                 # #1890: the invite-ghost sweep reads the registry graph.
+                 "_sweep_invite_ghosts"):
         monkeypatch.setattr(ha, attr, lambda *a, **k: None)
 
     asyncio.run(ha._run_boot_sweeps())
@@ -196,6 +198,8 @@ def test_the_periodic_loop_also_arms_the_repair(monkeypatch):
     monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
     for attr in ("_sweep_events", "_purge_deleted_orgs",
                  "_purge_deleted_accounts", "_sweep_oauth_retention",
+                 # #1890: registry-graph work — this test owns the metering leg.
+                 "_sweep_invite_ghosts",
                  "_refresh_cost_allocation"):
         monkeypatch.setattr(ha, attr, lambda *a, **k: None)
 

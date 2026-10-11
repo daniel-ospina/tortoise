@@ -811,10 +811,18 @@ def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
     hits returned WITHOUT supersession keys when ``include_terminal=True``
     — the decoration silently failed to attach the markers, so the
     evidence would render superseded content as current — surfaced as
-    ``retrieval_degraded=True`` (never a silent success)."""
-    from tortoise.search_engine import TERMINAL_EXCLUDED_STATUSES
+    ``retrieval_degraded=True`` (never a silent success).
+
+    Terminality is decided by the SHARED ``live.is_terminal_status`` on
+    ``(status, outdated)`` — the one vocabulary every read surface uses
+    (#2901), never a hand-written status subset. The legacy ``outdated``
+    flag matters here because ``invalidate_point`` writes the flag and
+    leaves ``status`` untouched: a status-only test read an invalidated
+    claim as CURRENT and returned ``False`` (no degradation) on exactly the
+    shape this gate exists to catch (#2294)."""
+    from tortoise.live import is_terminal_status
     for h in hits:
-        if ((h.get("status") or "") in TERMINAL_EXCLUDED_STATUSES
+        if (is_terminal_status(h.get("status"), bool(h.get("outdated")))
                 and not (h.get("superseded_by") or h.get("supersedes")
                          or h.get("valid_from") or h.get("valid_to")
                          or h.get("expired_at"))):

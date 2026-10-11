@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -961,6 +964,160 @@ def test_state_freshness_boundary_is_the_window_not_a_hunch() -> None:
     assert "STALE" not in fs.render_state_age(fresh)
     assert "STALE(>900s)" in fs.render_state_age(stale)
     assert fs.render_state_age(unknown) == "state_age=? (unreadable stamp)"
+
+
+def test_a_stamp_in_the_future_is_unreadable_not_the_freshest_possible_state() -> None:
+    """`max(0.0, …)` reported a future stamp as age ZERO — the freshest state there
+    is — so a future-dated or corrupt cache answered forever and was never rebuilt,
+    which is the exact failure the age window exists to remove (#7957 H1)."""
+    future = fs.state_freshness({"generated_at": _stamp(-3600)})
+    assert future["age_seconds"] is None, "a future stamp is not an age of zero"
+    assert future["stale"] is True, "an unknown age is never current"
+    assert "UNKNOWN" in future["reason"]
+    assert fs.state_age_seconds({"generated_at": _stamp(-86400)}) is None
+
+    # ...but ordinary clock skew between the writer and this reader is NOT a future
+    # stamp, and must still read as fresh — the guard is a sanity bound, not a trap.
+    skewed = fs.state_freshness({"generated_at": _stamp(-5)})
+    assert skewed["stale"] is False and skewed["age_seconds"] == 0.0
+
+    assert fs.STATE_CLOCK_SKEW_S < fs.STATE_FRESH_S, "skew must not exceed the window"
+
+
+def test_cmd_free_a_malformed_free_record_is_not_an_offerable_lane(tmp_path, capsys) -> None:
+    """`free` is an INVITATION TO DISPATCH, so a record that merely SAYS it is free
+    but cannot be read must not be offered. The guard used to cover only the flag, so
+    a `{"free": true}` stub passed the filter and then raised KeyError on the fields
+    below — a traceback where the caller needed "no genuinely free lane" (#7957 H4)."""
+    state = _state_file(tmp_path, {"free": True})
+    assert fs.main(["--state", state, "free"]) == 0
+    assert fs.main(["--state", state, "free", "--json"]) == 0
+    assert "no genuinely free lane" in capsys.readouterr().out
+
+
+def test_write_state_json_survives_concurrent_repairs_of_one_cache(tmp_path) -> None:
+    """Every reader that finds a stale cache tries to repair it, so a FIXED temp name
+    is shared by concurrent writers: all but one lose `os.replace` to
+    FileNotFoundError and their repair is dropped, re-paying the full rebuild on the
+    next read (#7957 H2). The write must be atomic AND collision-free."""
+    path = tmp_path / "state.json"
+    payload = {"generated_at": "2020-01-01T00:00:00+0000", "pad": "x"}
+    results: list[bool] = []
+
+    def write() -> None:
+        results.append(fs._write_state_json(path, payload))
+
+    threads = [threading.Thread(target=write) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results), f"a concurrent repair was silently dropped: {results}"
+    assert json.loads(path.read_text()) == payload, "the cache was left torn"
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was leaked"
+
+
+def test_write_state_json_does_not_narrow_the_cache_mode(tmp_path) -> None:
+    """`tempfile.mkstemp` creates 0600 and `os.replace` made THAT the cache's final mode,
+    silently narrowing a file that was 0644 and locking out a non-owner reader (a
+    container, a group process) with no error at write time, only a failure to read later.
+    The mode must be what `Path.write_text` produces — compared against a real file rather
+    than a constant, so the assertion holds under any umask (#7957 H2)."""
+    reference = tmp_path / "reference"
+    reference.write_text("x")
+
+    path = tmp_path / "state.json"
+    assert fs._write_state_json(path, {"generated_at": _stamp(0)}) is True
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+
+def test_write_state_json_does_not_leave_a_cache_unreadable(tmp_path) -> None:
+    """Copying an existing cache's mode verbatim perpetuates the very failure the mode
+    handling exists to prevent: a 0o000 cache would be rewritten 0o000, unreadable by
+    everyone including its writer, so every read rebuilds and rewrites the same unusable
+    file (#7957 H2)."""
+    path = tmp_path / "state.json"
+    path.write_text("{}")
+    os.chmod(path, 0o000)
+
+    assert fs._write_state_json(path, {"generated_at": _stamp(0)}) is True
+    assert stat.S_IMODE(path.stat().st_mode) != 0o000, "the cache must not stay unreadable"
+    assert json.loads(path.read_text())["generated_at"]
+
+
+def test_write_state_json_does_not_leak_the_descriptor_it_opened(tmp_path, monkeypatch) -> None:
+    """`with os.fdopen(...)` must own the descriptor on EVERY path, including a
+    `json.dumps` failure inside the block. A spy on `os.close` cannot see this — the
+    `with` closes at the C level — so prove it with `fstat`, which fails with EBADF only
+    if the descriptor was really closed."""
+    opened: list[int] = []
+    real_open = os.open
+
+    def spy_open(path_: object, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path_, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(fs.os, "open", spy_open)
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(tmp_path / "state.json", circular)
+
+    assert opened, "the temp was never created"
+    with pytest.raises(OSError):
+        os.fstat(opened[0])  # EBADF: the descriptor was really closed
+
+
+def test_write_state_json_closes_no_descriptor_it_does_not_own(tmp_path, monkeypatch) -> None:
+    """This function must not close a descriptor by hand at all: `os.fdopen` finalises and
+    closes the FileIO when a later stage of the call fails, so a second close hits
+    whatever the freed number was reused for (#7957 H2: readers repair concurrently)."""
+    closed: list[int] = []
+    real_close = os.close
+
+    def spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(fs.os, "close", spy_close)
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(tmp_path / "state.json", circular)
+
+    assert closed == [], f"the `with` owns the descriptor; it must not be closed here: {closed}"
+
+
+def test_write_state_json_cleans_up_when_the_payload_is_unserialisable(tmp_path) -> None:
+    """A payload `json.dumps` cannot render (a circular reference) is a CALLER bug, not an
+    I/O failure, so it propagates rather than being reported as a failed cache write — but
+    it must still leave neither a temp file nor a half-written cache behind, because every
+    reader that finds a stale cache takes this path."""
+    path = tmp_path / "state.json"
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(path, circular)
+
+    assert not path.exists(), "a failed write must not fabricate a cache"
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was leaked"
+
+
+def test_lane_json_carries_the_age_of_the_answer(tmp_path, capsys) -> None:
+    """The human channel reads the stderr line; a machine consumer reading `lane
+    --json` must be able to learn the age of what it was handed (#7957 H1)."""
+    state = _state_file(tmp_path, {
+        "identity": {"lane": "L"}, "session": {}, "liveness": {}, "claim": {},
+    })
+    assert fs.main(["--state", state, "lane", "L", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "freshness" in payload
+    assert payload["freshness"]["stale"] is False
 
 
 def _load(args_list: list[str]):

@@ -53,6 +53,8 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
+from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
@@ -3456,13 +3458,28 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # FOLDED claim must go live or that claim's first calibration cannot
         # propagate through it — and a folded-only capture mints no claim,
         # so promotion_ids is empty and the claim join alone reaches nothing.
-        op_rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+        op_rows: list = []
+        _seen_op_ids: set = set()
+        # #7853: c is id-anchored — sweep the epistemic labels so an operator
+        # whose live endpoint is an Event/Subject/Object is promoted too. A
+        # multi-labelled endpoint (``:Point:Object``) matches MORE than one
+        # sweep, so collapse on ``o.id`` before the emit loop: the promoted
+        # set must equal the journalled set (#395), and the loop below emits
+        # one ``OperatorPromoted`` per row. The ``o.id IN $op_ids`` arm keeps
+        # #1088's created-operator promotion inside this same sweep, so a
+        # capture-minted operator over a FOLDED claim still goes live.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:{label}) "
             "WHERE (c.id IN $ids OR o.id IN $op_ids) "
             "AND (o.status IS NULL OR o.status = 'draft') "
-            "RETURN DISTINCT o.id",
-            params={"ids": promote_ids, "op_ids": operator_ids},
-        ).result_set
+            "RETURN DISTINCT o.id"
+        ):
+            for row in proj.g.query(
+                    _q, params={"ids": promote_ids,
+                                "op_ids": operator_ids}).result_set:
+                if row[0] not in _seen_op_ids:
+                    _seen_op_ids.add(row[0])
+                    op_rows.append(row)
         promoted_ops = []
         for (oid,) in op_rows:
             proj.g.query(
@@ -3851,6 +3868,10 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
             r["superseded_by"] = st["superseded_by"]
         if st.get("supersedes"):
             r["supersedes"] = st["supersedes"]
+        # #2294: the legacy flag half of the terminal vocabulary — the embedded
+        # fallback owes the same terminality signal as the primary path.
+        if st.get("outdated"):
+            r["outdated"] = True
         # E6 (#1538) D7: promoted window fields — additive, only when present.
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
@@ -5254,12 +5275,16 @@ class TortoiseSDK:
             if stamp_journal_embedding is not None:
                 clean = stamp_journal_embedding(
                     clean, creating=type_ in ("PointAdded", "OperatorAdded"))
-            # Operators may not store 'content' as a node property (#548);
-            # _upsert_point_props requires it — synthesize a fallback.
-            if "content" not in clean:
-                op_type = clean.get("op_type", "IMPL")
-                op_inputs = (point.get("operator") or {}).get("inputs", [])
-                clean["content"] = f"{op_type}({', '.join(op_inputs)})"
+            # #5089: NO content synthesis here. Operators store no 'content' as
+            # a node property, so synthesizing the `IMPL(inputs)` label put a
+            # value in the record that NO writer ever stored — and the replay
+            # persisted it, so a rebuilt operator carried a label live never had.
+            # What the live SDK door actually produces is an omitted key; the
+            # replay writer's `_WRITER_DEFAULTS` empty string is the journal-side
+            # asymmetry `consistency` already models for operators, and this no
+            # longer fabricates a label on top of it. (The display label is
+            # derived at the point of display, `api._point`; nothing reads an
+            # operator's content back off the node.)
             # Similarly, operators may lack 'pointKind' — default to empty.
             if "pointKind" not in clean:
                 clean["pointKind"] = ""
@@ -6761,19 +6786,23 @@ class TortoiseSDK:
                     # journal record; OperatorPromoted is its only durable
                     # record).
                     if minted_ids:
-                        proj.g.query(
+                        # #7853: c is id-anchored — sweep the epistemic labels.
+                        # The SET is idempotent, so a multi-labelled endpoint is
+                        # stamped under each matching label harmlessly.
+                        for _q in epistemic_label_queries(
                             "MATCH (o:Point {is_operator:true})-"
-                            "[:IMPL|NAND]->(c:Point) "
+                            "[:IMPL|NAND]->(c:{label}) "
                             "WHERE c.id IN $ids "
                             "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
                             "SET o.eventId=$eid, o.source_session=$sid, "
                             "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing",
-                            params={"ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
-                        )
+                            "    o.ingested_at=$ing"
+                        ):
+                            proj.g.query(_q, params={
+                                "ids": minted_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now})
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
                     # graph node (#4716 Part 1): the payload point resolved
@@ -9888,21 +9917,30 @@ class TortoiseSDK:
 
         An operator is promoted only when it carries EXPLICIT status 'draft'
         (the post-#780 `create_operator(promote_source=False)` shape) AND
-        every endpoint Point is live — otherwise the draft endpoints would
-        inherit a live edge (the exact pollution the draft lifecycle
-        prevents). Unset-status operators are LIVE under the canonical read
-        model (projection coalesce default; #944 review) and are skipped —
-        never re-promoted into the event stream.
+        every endpoint is live — otherwise a draft endpoint would inherit a
+        live edge (the exact pollution the draft lifecycle prevents). The
+        endpoint read is NOT Point-only: #7853 widened it to
+        `epistemic_disjunction('s')`, so it covers all four epistemic labels
+        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
+        blocks promotion just as a draft `:Point` does. Unset-status operators
+        are LIVE under the canonical read model (projection coalesce default;
+        #944 review) and are skipped — never re-promoted into the event
+        stream.
         """
-        rows = proj.g.query(
-            "MATCH (o:Point {is_operator:true})-[r]->(n:Point {id:$id}) "
-            "WHERE o.status = 'draft' RETURN DISTINCT o.id",
-            params={"id": point_id},
-        ).result_set
+        rows: list = []
+        # #7853: n is id-anchored — sweep the epistemic labels so a draft
+        # operator incident to an Event/Subject/Object endpoint is promoted.
+        for _q in epistemic_label_queries(
+            "MATCH (o:Point {is_operator:true})-[r]->(n:{label} {id:$id}) "
+            "WHERE o.status = 'draft' RETURN DISTINCT o.id"
+        ):
+            rows.extend(proj.g.query(
+                _q, params={"id": point_id}).result_set)
         promoted = []
         for (oid,) in rows:
             eps = proj.g.query(
-                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "MATCH (o:Point {id:$oid})-[r]->(s) "
+                f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status",
                 params={"oid": oid},
             ).result_set
@@ -15637,7 +15675,12 @@ class TortoiseSDK:
 
         Mirrors ``TortoiseEP._affected_claims``'s reach so that
         ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
-        (#6597). The window members themselves are reachable at 0 claim-hops
+        (#6597). #7853: the reach is widened with ``_affected_claims`` — the
+        id-anchored seeds sweep every epistemic label and the operator hop's
+        far endpoint is a label-disjunction, so a non-`:Point` operator input
+        is in the denominator too. The operator-less DIRECT-edge hop stays
+        ``:Point``→``:Point``, exactly as ``_affected_claims`` keeps it. The
+        window members themselves are reachable at 0 claim-hops
         (an operator-less isolated claim is its own window); then, exactly as
         ``_affected_claims`` seeds its own expansion, the plain window
         members are expanded by ONE claim-hop (direct edges + operator
@@ -15666,12 +15709,18 @@ class TortoiseSDK:
         # terminal window claims must remain seeds so the operator siblings
         # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        # #7853: the seed is ID-ANCHORED — sweep the epistemic labels so a
+        # non-`:Point` window member is a closure seed too. The widened
+        # `_affected_claims` admits one, so the denominator must, or
+        # `coverage = affected / closure` exceeds the 1.0 bound.
+        rows: list = []
+        for _qn in epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
-            f"AND {live} RETURN n.id",
-            params={"ids": list(window)},
-        ).result_set
+            f"AND {live} RETURN n.id"
+        ):
+            rows.extend(proj.g.query(
+                _qn, params={"ids": list(window)}).result_set)
         closure: set[str] = {r[0] for r in rows}
 
         live_op = _live_only("op.status")
@@ -15694,15 +15743,22 @@ class TortoiseSDK:
             new_frontier: list[str] = []
             if not frontier:
                 return new_frontier
-            nbr_rows = proj.g.query(
-                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                "-[r2:IMPL|NAND]->(m:Point) "
+            # #7853: n is the id-anchored frontier — sweep its labels; the
+            # far endpoint m is widened by traversal. Mirrors
+            # `_affected_claims`'s widened operator hop, so the closure can
+            # hold every claim the pass admits.
+            nbr_rows: list = []
+            for _qn in epistemic_label_queries(
+                "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m) "
                 "WHERE n.id IN $ids AND m.id <> n.id "
+                f"AND {epistemic_disjunction('m')} "
                 "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 f"AND {live_op} AND {live_m} "
-                "RETURN DISTINCT n.id, m.id",
-                params={"ids": frontier},
-            ).result_set
+                "RETURN DISTINCT n.id, m.id"
+            ):
+                nbr_rows.extend(proj.g.query(
+                    _qn, params={"ids": frontier}).result_set)
             for _nid, mid in nbr_rows:
                 if mid not in closure:
                     closure.add(mid)
@@ -15740,9 +15796,13 @@ class TortoiseSDK:
         # denominator bug reached through the SEED rather than the hop. Mirrors
         # `_affected_claims`'s operator-seed branch, which admits an operator
         # seed's outgoing `IMPL|NAND` targets.
+        # #7853: an operator's INPUT may be any epistemic label (mirrors
+        # `_affected_claims`'s operator-seed branch, which admits a non-Point
+        # operator target).
         op_input_rows = proj.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
+            f"AND {epistemic_disjunction('c')} "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
             f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
@@ -15790,9 +15850,14 @@ class TortoiseSDK:
         converged pass reports coverage < 1.0 forever).
         """
         proj = self._get_proj()
+        # #7853: the EP-run universe widened to every epistemic label, so
+        # this denominator must too — else `coverage = total_affected /
+        # reachable` exceeds 1.0 for a non-`:Point` operator input.
         rows = proj.g.query(
-            "MATCH (n:Point)-[r:IMPL|NAND]-(m:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "MATCH (n)-[r:IMPL|NAND]-(m) "
+            f"WHERE {epistemic_disjunction('n')} "
+            f"AND {epistemic_disjunction('m')} "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status <> 'draft') "
             "AND (m.status IS NULL OR m.status <> 'draft') "
             "RETURN count(DISTINCT n)"
@@ -15994,12 +16059,23 @@ class TortoiseSDK:
         if confidences:
             params_list = [{"id": cid, "c": conf["mean"]}
                            for cid, conf in confidences.items()]
-            written = proj.g.query(
-                "UNWIND $params AS p "
-                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c "
-                "RETURN n.id",
-                params={"params": params_list},
-            ).result_set
+            # #7853: the run set spans all four epistemic labels, so sweep ONE
+            # query per label to keep the id index-anchored (a label predicate
+            # over the UNWIND drops the per-(label, property) anchor —
+            # ``tortoise/live.py``). A multi-labelled node (``:Point:Object``)
+            # is returned by more than one sweep, so collapse on id: the
+            # journal set must equal the committed set (#395).
+            written: list = []
+            seen_ids: set = set()
+            for _q in epistemic_label_queries(
+                    "UNWIND $params AS p "
+                    "MATCH (n:{label} {id: p.id}) SET n.confidence = p.c "
+                    "RETURN n.id"):
+                for row in proj.g.query(
+                        _q, params={"params": params_list}).result_set:
+                    if row[0] not in seen_ids:
+                        seen_ids.add(row[0])
+                        written.append(row)
             # #2884 D3: this full-precision mean is the last confidence
             # writer on the fast path (the EP flush already journaled its
             # 4-dp rounded mirror) — journal it too, or a rebuild loses the
@@ -19005,6 +19081,37 @@ class TortoiseSDK:
                     edge_sid = (row[6] or "") if len(row) > 6 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
+                if _prov and entity_data:
+                    # #5581 (the #5038 read-path half): the POINT-LEVEL currency
+                    # verdict, and the sourced disclosure that rides with it.
+                    # ONE batch query for the hits' ``extractedFrom`` links —
+                    # read ONLY under the flag, exactly like the two columns
+                    # above, so an unflagged call pays nothing and returns the
+                    # byte-identical row it always did.
+                    #
+                    # ⛔ The verdict is the §4.6 AGGREGATE, never one link's
+                    # pair: a hit is a Point, and ``extractedFrom`` is
+                    # many→many, so reporting a single link's verdict as the
+                    # Point's says ``current`` for a Point another link makes
+                    # stale — the false-current the note exists to prevent
+                    # (see ``currency_status``'s ⚠ and
+                    # ``tests/test_source_version_read_wiring_5199.py``'s
+                    # ``test_search_hit_makes_no_version_claim``).
+                    #
+                    # ``outdated_sources`` carries the behind links' sources so
+                    # the row DISCLOSES what moved rather than flagging a
+                    # binary state — the owner's ruling (2026-09-26) is that the
+                    # out-of-date fact is withheld as an answer and disclosed as
+                    # an FYI **carrying its source**; a flag alone is the shape
+                    # the plan's `OVERRIDES:` line rejects.
+                    from .search_engine import aggregate_currency, read_currency_links
+                    _currency_links = read_currency_links(graph, list(entity_data))
+                    for pid, entry in entity_data.items():
+                        links = _currency_links.get(pid, [])
+                        entry["currency"] = aggregate_currency(
+                            (lk["recorded"], lk["current"]) for lk in links)
+                        entry["outdated_sources"] = [
+                            lk for lk in links if lk["currency"] == "stale"]
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
                     # Point's own ``sessionId`` (camel) prop, else its own
@@ -19180,6 +19287,13 @@ class TortoiseSDK:
                 superseded_by=point_state.get(pid, {}).get("superseded_by")
                 or pt.get("superseded_by") or None,
                 supersedes=point_state.get(pid, {}).get("supersedes") or [],
+                # #2294: the legacy ``outdated=true`` half of the terminal
+                # vocabulary. ``invalidate_point`` writes this flag WITHOUT
+                # touching ``status``, so a status-only reader cannot see the
+                # point is dead — carried here so every reader (the ask lane's
+                # decoration gate included) can apply the shared
+                # ``live.is_terminal_status``. Additive in ``to_dict``.
+                outdated=bool(point_state.get(pid, {}).get("outdated")),
                 # E6 (#1538) D7: promoted window fields (additive — empty
                 # string when undated ⇒ no marker, byte-identical output).
                 valid_from=point_state.get(pid, {}).get("valid_from")
@@ -19200,6 +19314,11 @@ class TortoiseSDK:
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),
                 captured_at=pt.get("captured_at", ""),
+                # #5581: the §4.6 Point-level verdict and the disclosure's
+                # material — present only when the flag fetched them, so
+                # ``to_dict``'s provenance block stays absent by default.
+                currency=pt.get("currency", ""),
+                outdated_sources=pt.get("outdated_sources") or [],
             )
             results.append(result)
 
@@ -19791,6 +19910,17 @@ class TortoiseSDK:
         - Uncalibrated points fall back to documented neutral confidence 0.5
           (absence of measurement is NOT low support).
 
+        #2598 — drafts render honestly. A DRAFT is EP-inert (``live._live_only``
+        excludes it at every factor-extraction call site), so when EP has not
+        measured the claim its ``recall_ranking`` carries ``confidence: None``
+        and ``confidence_source: "uncomputed"`` plus ``draft: True`` — "no
+        belief computed", never the fabricated 0.5 that used to outrank
+        measured live claims below 0.5. Drafts are still RECALLED (never
+        hidden), and the ranker places them after every live row via an explicit
+        status tiebreaker. The ``min_confidence`` floor therefore refuses an
+        uncomputed draft for any positive floor (no measured belief to meet it)
+        while the default 0.0 keeps it. Live rows are unchanged.
+
         Returns the same SearchResult shape as ``tortoise_fts_query`` (list
         of dicts), each annotated with ``entity_type``, ``recall_ranking``
         (score breakdown), and state-context keys (``contested``,
@@ -19927,10 +20057,21 @@ class TortoiseSDK:
         ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
-        ranked = [
-            r for r in ranked
-            if r["recall_ranking"]["confidence"] >= min_confidence
-        ][:limit]
+        # #2598: a DRAFT whose belief EP has not measured carries
+        # ``confidence: None`` ("no belief computed" — never the fabricated
+        # neutral 0.5). It cannot satisfy a POSITIVE belief floor, because there
+        # is no measured belief to meet it; the default 0.0 floor means "no
+        # floor" and therefore keeps drafts (they stay recallable, ranked after
+        # every live row by the ranker's status tiebreaker). A bare
+        # ``None >= min_confidence`` would raise TypeError, so the two cases are
+        # decided explicitly rather than left to comparison semantics.
+        def _passes_floor(row: dict) -> bool:
+            conf = row["recall_ranking"]["confidence"]
+            if conf is None:
+                return min_confidence <= 0.0
+            return conf >= min_confidence
+
+        ranked = [r for r in ranked if _passes_floor(r)][:limit]
 
         # 5. State context surfacing (batched, not N+1).
         point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]
@@ -21511,9 +21652,10 @@ class TortoiseSDK:
         """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
-        oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
-        is token-attributable ('st_' + left(token_hash, 12)) — never a
-        caller-supplied identity. Returns {api_key, org_id, org_name,
+        of the least-recently-used non-bootstrap key (#750.10 semantics,
+        #1854/#1872 LRU ordering — never-used first) mirror the SQL;
+        created_by is token-attributable ('st_' + left(token_hash, 12)) —
+        never a caller-supplied identity. Returns {api_key, org_id, org_name,
         tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
         token is unknown/revoked or the org is soft-deleted.
         """
@@ -21569,18 +21711,38 @@ class TortoiseSDK:
             # target scan (expired keys don't count — never wedge, and never
             # let the oldest-LIVE key be the revoke collateral for expired
             # rows above the cap; matches the session-key recovery lanes).
+            #
+            # #1872: victim selection is #1854-LRU — never-used (NULL
+            # last_used_at) first, then least-recently-used, created_at as the
+            # final tiebreak — NOT oldest-created. Pre-#1872 the oldest-created
+            # scan rotated a LIVE credential while a never-used key sat beside
+            # it (the #1854 bug class, on the keyless-token lane).
+            #
+            # The just-minted key is EXCLUDED from the victim scan, and that
+            # exclusion is load-bearing rather than tidiness: this lane INSERTs
+            # BEFORE it counts (the self-healing ordering above), so the new row
+            # is inside the candidate set with last_used_at NULL by
+            # construction. Under a NULL-first order it would be the FIRST
+            # candidate and revoke ITSELF whenever every pre-existing key had
+            # already been used — returning a dead key to the caller. The COUNT
+            # still includes the new row; that is what keeps the over-cap check
+            # self-healing.
             rows = reg.query(
                 "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
-                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
+                "RETURN k.id, k.last_used_at, k.created_at",
                 params={"tid": org_id, "now": now_iso},
             ).result_set
-            if len(rows) > max_keys and rows:
-                reg.query(
-                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
-                    params={"id": rows[0][0], "now": now_iso},
-                )
+            if len(rows) > max_keys:
+                victims = [r for r in rows if r[0] != kid]
+                victims.sort(key=lambda r: (r[1] is not None, r[1] or "",
+                                            r[2] or ""))
+                if victims:
+                    reg.query(
+                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                        params={"id": victims[0][0], "now": now_iso},
+                    )
         self._audit(org_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"api_key": api_key, "org_id": org_id,
@@ -21673,13 +21835,25 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+org
+        # Reject duplicate pending invitations for same email+org.
+        #
+        # #1890: expiry is a DERIVED terminal state — an invite whose
+        # ``expires_at`` has passed is dead even though nothing ever writes
+        # ``status`` (this method does not even set it). Without the
+        # ``expires_at`` arm an expired invite blocks the re-invite FOREVER,
+        # exactly as the hosted registry mint did (hosted_api.py). The
+        # predicate matches the hosted dup-check and
+        # ``cleanup_expired_invitations``, so the three cannot disagree about
+        # whether an invite is live.
         reg = self._get_registry()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i) > 0",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -21689,7 +21863,6 @@ class TortoiseSDK:
         token = str(uuid.uuid4())
         token_hash = hash_api_key(token)
         iid = ulid()
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(
@@ -25706,6 +25879,29 @@ class TortoiseSDK:
                     f"{_svk!r} is a server-managed provenance field and cannot "
                     f"be set via props."
                 )
+        # #3644 review (P2b) + PR #8016 code-review ISSUE 1: the version
+        # window and the version-TRANSITION keys are server-minted/journalled,
+        # never caller-asserted. Before this guard the passthrough silently
+        # DISCARDED a caller `validFrom` (the node got the minted instant while
+        # the journal `SourceCreated` carried the caller's value — a wrong
+        # window start reported OK), and `previousValidTo`/`previousContentHash`
+        # collided with the explicit `previousValidTo=`/`previousContentHash=`
+        # keywords on the `SourceVersioned` emit -> a swallowed `TypeError`
+        # DROPPED the transition record while the live node had already moved
+        # (fail-open, live != replay). Rejected loudly here, mirroring
+        # `rawState`/`sourceVersion`: the sanctioned route is the server mint
+        # (`create_source` mints `validFrom` once, on the `updatedAt` clock) and
+        # the `SourceVersioned` record (`previousValidTo`/`previousContentHash`
+        # are transition facts, `_SOURCE_HANDLED`).
+        for _wk in ("validFrom", "validTo", "valid_to", "previousValidTo",
+                    "previousContentHash"):
+            if _wk in props:
+                raise ValueError(
+                    f"{_wk!r} is a server-managed version-window/transition "
+                    f"field and cannot be set via props — `validFrom` is "
+                    f"minted by the server on the `updatedAt` clock and the "
+                    f"transition facts are journal-only (#3644)."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -25759,7 +25955,46 @@ class TortoiseSDK:
         # before this change. So the instant is minted ONCE, rides the payload
         # as `updatedAt`, the fold's `coalesce` picks it up, and the record
         # carries the SAME string — live and replay cannot disagree.
-        ev["updatedAt"] = _now_iso()
+        #
+        # ── #3644 (§4.6 window half): the version's valid-time START ────
+        # The SAME minted instant is the version's `validFrom`, and the two
+        # fields are one clock read, not two (a second `_now_iso()` here is
+        # exactly the live-vs-replay divergence the block above removes).
+        #
+        # WHY THE OBSERVATION INSTANT IS A LEGITIMATE `validFrom`.
+        # §4.7 forbids borrowing the WRITE clock as a valid-time start for a
+        # POINT (#3654): a session's occurrence date is a fact about the
+        # content, so synthesizing one from the ingest clock asserts something
+        # we do not know. A `:Source` VERSION has no such content-side date:
+        # a version IS "the content as read at an instant", so the instant it
+        # was read is definitional, not borrowed — and §4.6 requires the
+        # transition to CLOSE the prior version's window, which can only be
+        # closed at a boundary we observed (`validTo` of the old =
+        # `validFrom` of the new, contiguity by construction).
+        #
+        # The instant is minted for EVERY call and lands on the node ONLY
+        # through `_upsert_source`'s hash-diff gate (create, stub completion,
+        # hash change) — so a no-op re-check moves nothing, live or replayed,
+        # and `validFrom` is added to `_SOURCE_NOOP_IGNORED_KEYS` for the same
+        # reason `updatedAt` is (minted per call ⇒ it can never be the fact
+        # that makes an otherwise-identical re-check "different"). A producer
+        # that KNOWS an earlier instant (a publication date) is a separate
+        # additive input — deliberately not accepted here, because a
+        # caller-asserted start needs the inversion guards the Point window
+        # needed (#3980, #4021, #5358, #5360) and this lane has no such input.
+        #
+        # A SAME-HASH write that changes an extra still emits a `SourceCreated`
+        # carrying this minted instant, exactly as it already carries the
+        # minted `updatedAt` — the gate ignores both on that arm, so the record
+        # over-states neither: reading the version timeline means reading the
+        # FIRST `SourceCreated` plus the `SourceVersioned` records (there is one
+        # node per `url` and only a create or a hash transition opens a
+        # window). Stripping the key on that one arm would buy journal tidiness
+        # the `updatedAt` precedent does not have, at the cost of two emission
+        # variants that can drift.
+        _version_instant = _mint_source_window_instant()
+        ev["updatedAt"] = _version_instant
+        ev["validFrom"] = _version_instant
         # #5024 P2-2: the pre-state rides THIS CALL's own return value, not a
         # projection-level slot. A slot is shared by every call on the SDK, so
         # two threads sharing one SDK on DIFFERENT urls (different per-url
@@ -25838,7 +26073,17 @@ class TortoiseSDK:
                 # as well would be a second derivation that can disagree.
                 self._emit_event(
                     "SourceVersioned", id=url,
-                    previousContentHash=_old_hash, **payload,
+                    previousContentHash=_old_hash,
+                    # #3644: the PRIOR window's close, named as a recorded act.
+                    # Equal to the payload's `validFrom` BY CONSTRUCTION (the
+                    # same minted instant, above) — contiguity is the whole
+                    # point of §4.6's "the journal record that opens a new
+                    # version closes the old one in the same act". It is a
+                    # JOURNAL-ONLY fact: the node holds the CURRENT version, so
+                    # the fold must not write it (`_SOURCE_HANDLED` skips it,
+                    # like `previousContentHash`).
+                    previousValidTo=payload["validFrom"],
+                    **payload,
                 )
             elif self._source_payload_is_noop(payload, _stored_before):
                 # Genuine re-check: the caller re-sent what we already hold.
@@ -25868,6 +26113,15 @@ class TortoiseSDK:
     # disqualify a no-op.
     _SOURCE_NOOP_IGNORED_KEYS: frozenset = frozenset({
         "ingestedAt", "_merge_run_id", "id",
+        # #3644: the window start, for exactly the reason `updatedAt` below is
+        # here — it is minted by the producer on EVERY call (one clock, shared
+        # with `updatedAt`), so it is not a fact the caller asserted and can
+        # never make an otherwise-identical re-check "different". Leaving it
+        # in the comparison would have re-introduced the unbounded journal
+        # growth #5024 removed (measured there: 12 -> 13 lines on a no-op
+        # re-check). The node is protected independently: `_upsert_source`
+        # writes `validFrom` only through its hash-diff gate.
+        "validFrom",
         # #5024: minted by the producer on EVERY call (the one clock the write
         # and the record share). It is not a fact the caller asserted, so it
         # can never make an otherwise-identical re-check "different" — and
@@ -26461,8 +26715,13 @@ class TortoiseSDK:
                     "outcomes": []}
         match_clause = "s.id = $sid"
 
-        # Direct: Event connects directly to claim Points via IMPL/NAND
-        # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
+        # Direct: Event connects directly to claim Points via IMPL/NAND.
+        # ONTOLOGY.md §8: operators connect only epistemic targets
+        # (:Point/:Subject/:Object/:Event). ⚠️ this reader is still
+        # `:Point`-only — the #7853 read widening covers the EP/confidence
+        # path, not reputation; widening it to the other three labels is
+        # tracked by #7902 (the write path admits :Point/:Event only until
+        # then, so a :Subject/:Object endpoint is spec-only here too).
         impl_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
             "MATCH (e)-[:IMPL]->(p:Point) "
@@ -27252,6 +27511,50 @@ def _now_iso() -> str:
     """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+# #3644 review P1: the `:Source` version-window instant must be STRICTLY
+# increasing. `create_source` mints it from the WALL CLOCK and `_upsert_source`
+# writes `s.validFrom = $vf` on the hash-diff gate with NO comparison against
+# the stored value, so a fixed clock made consecutive windows zero-width
+# (`prev == cur`) and a backward-stepped clock made them INVERTED (`prev > cur`)
+# — the class `audit.inverted_validity_window` rates HIGH for a Point. The floor
+# below makes the mint monotone against every prior mint in this process, so a
+# transition can never open a window at or before the version it superseded.
+# (`updatedAt` uses the same returned value, so the two never disagree — one
+# clock. This closes the reachable in-process case: every `validFrom` the node
+# holds in this process was minted here, so the next mint is strictly above it.)
+_source_window_instant_guard = threading.Lock()
+_source_window_instant_floor: str | None = None
+
+
+def _mint_source_window_instant() -> str:
+    """`_now_iso()`, clamped strictly ABOVE the last instant this module minted.
+
+    A version window must be strictly increasing; a wall clock can stall or
+    step backward. When the fresh read is not strictly greater than the last
+    minted instant, return one microsecond past it instead.
+    """
+    global _source_window_instant_floor
+    with _source_window_instant_guard:
+        now = _now_iso()
+        floor = _source_window_instant_floor
+        if floor is not None and now <= floor:
+            now = _bump_instant(floor)
+        _source_window_instant_floor = now
+        return now
+
+
+def _bump_instant(value: str) -> str:
+    """One microsecond past ``value``, else the clock when it is unparseable."""
+    from datetime import UTC, datetime, timedelta
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return (dt + timedelta(microseconds=1)).isoformat()
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return _now_iso()
 
 
 def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:

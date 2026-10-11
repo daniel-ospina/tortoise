@@ -31,6 +31,24 @@ dashboard** (no dead ends, no external-docs links for the core path):
 5. **You're set** — completion patches `onboarding_complete` on
    `/v1/onboarding/state`.
 
+**Optional next set (not installed, #1652).** Beyond the three capabilities the
+installer ships (`how-to-use-tortoise`, `tortoise-decide`,
+`tortoise-file-finding`), two further first-party skills are served but
+**deliberately not part of the wizard's shipped set** — the shipped set is
+pinned at three (#4365). They are the optional next set, and are installed the
+same way the wizard's installer installs the core three: fetch
+`https://app.premiselabs.co/skills/<name>/SKILL.md` into the same skills
+directory (`research-domain`, `analyse-for-contradictions`).
+
+- **`research-domain`** — the graph-guided research **loop** (part of
+  `tortoise-decide`): research broad → mine into the graph → ask UC2
+  (`tortoise_recall mode="gaps"`) where the reasoning is load-bearing but
+  under-supported → research exactly those gaps → repeat (default 3 cycles).
+- **`analyse-for-contradictions`** — analyse a plan / issue / design / strategy
+  against the graph to spot conflicts with previous decisions and with
+  high-confidence claims, reporting each conflict with its evidence and
+  confidence. Read-only: it never writes to the graph.
+
 **Re-entry:** returning users with an empty graph get a "Continue setup"
 card opening the wizard (no raw-curl dead end). Completed users never see
 it.

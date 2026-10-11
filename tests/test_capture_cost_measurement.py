@@ -3446,3 +3446,340 @@ def test_report_does_not_read_a_pre_3843_row_as_a_named_harness(
     # the unrecorded row is still in the team's row count — the missing
     # dimension must not silently drop the capture from the usage record
     assert payload["by_team"][0]["rows"] == 2
+
+
+# ── #3840: the extraction-cost METRIC SET's derived figures ───────────────
+# The issue's metric list asks for input tokens, output tokens and TOTAL
+# tokens per extraction call, plus two DERIVED figures: tokens per capture
+# (median and 95th percentile — a mean is dominated by outliers) and tokens
+# per team per month. The input/output halves and the model/stage/call
+# dimensions already rode the emitted row (#3359/#3843); these tests pin the
+# two derived figures and the total, and — the part that matters — that a
+# token count we could NOT see is disclosed rather than entering the
+# distribution as a 0 (the #3824 failure mode, applied to tokens).
+
+
+def _token_row(session_id, prompt, completion, *, cost=0.001, extra=None,
+               calls=1, measured_calls=None, usage_present=True):
+    """A ``capture_cost`` row carrying explicit token counts.
+
+    ``measured_calls`` lets a test express "the row claims N calls but only
+    M were metered". It is written the way the accumulator writes it after a
+    bucket merge (``_merge_cost_bucket``): ``usage_present`` false on the
+    lane, and the un-metered remainder in ``calls_without_cost``, which is
+    what ``_measured_calls`` reads. NOTE this is the MERGED-lane shape (one
+    no-usage call beside a charged one), not what a deadline-kill leaves — a
+    deadline-kill never reaches ``_accumulate_call_cost``, so it raises the
+    top-level ``calls``/``deadline_aborts`` and leaves the lane at its
+    metered count. ``test_a_deadline_kill_row_is_a_token_floor`` pins that
+    other shape directly.
+    """
+    metered = calls if measured_calls is None else measured_calls
+    unmetered = max(0, calls - metered)
+    lane = {"calls": calls, "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cost_usd": cost,
+            "usage_present": bool(usage_present) and unmetered == 0,
+            "calls_without_usage": unmetered,
+            "calls_without_cost": unmetered}
+    props = {"session_id": session_id, "calls": calls, "retries": 0,
+             "prompt_tokens": prompt, "completion_tokens": completion,
+             "cost_usd": cost, "calls_without_cost": unmetered,
+             "deadline_aborts": 0,
+             "by_stage": {"s1": {_PROVIDER: {_MODEL: lane}}}}
+    props.update(extra or {})
+    return {"org_id": "team-1", "event_name": "capture_cost",
+            "created_at": "2026-09-16T12:00:00+00:00", "properties": props}
+
+
+def test_tokens_per_capture_is_the_median_and_p95_not_a_mean():
+    """The derived figure the issue names: tokens per capture, median and
+    95th percentile. 1100 / 4400 / 9900 -> p50 4400 (the mean, 5133, is what
+    an outlier-dominated read would have reported), p95 9350 by linear
+    interpolation. The TOTAL is the comparable-across-providers figure."""
+    dist = costing.cost_per_session_distribution([
+        _token_row("s1", 1000, 100),
+        _token_row("s2", 4000, 400),
+        _token_row("s3", 9000, 900),
+    ])
+    tokens = dist["tokens"]
+    assert tokens["sessions"] == 3
+    assert tokens["prompt"] == 14000
+    assert tokens["completion"] == 1400
+    assert tokens["total"] == 15400
+    assert tokens["p50"] == pytest.approx(4400.0)
+    assert tokens["p95"] == pytest.approx(9350.0)
+    assert tokens["max"] == 9900
+    assert tokens["lower_bound"] is False
+
+
+def test_token_figures_describe_the_same_captures_as_the_cost_figures():
+    """ONE population. A capture with no calls is excluded from the cost
+    percentiles; it must not reappear inside the token totals — two figures
+    over two different sets of captures is exactly the drift #3843's
+    one-record rule exists to prevent."""
+    rows = [_token_row("s1", 1000, 100), _token_row("s2", 4000, 400),
+            # a phantom row: tokens present, but nothing was ever attempted
+            _token_row("empty", 900000, 90000, calls=0)]
+    dist = costing.cost_per_session_distribution(rows)
+    assert dist["excluded_no_calls"] == 1
+    assert dist["tokens"]["sessions"] == dist["n"] == 2
+    # the excluded row's 990000 tokens are NOT in the totals
+    assert dist["tokens"]["total"] == 5500
+
+
+def test_a_capture_whose_tokens_cannot_be_seen_is_disclosed_not_zeroed():
+    """A call that reported a CHARGE but no token field is in the cost
+    population (the spend is real) and contributes 0 tokens. Counting it
+    silently would drag p50 down for exactly the reason the launch gate
+    exists — so it is counted, and the count is a LOWER BOUND."""
+    dist = costing.cost_per_session_distribution([
+        _token_row("visible", 3000, 300),
+        _token_row("charged-no-tokens", 0, 0, cost=0.002),
+    ])
+    tokens = dist["tokens"]
+    assert tokens["sessions"] == 2
+    assert tokens["tokenless_captures"] == 1
+    # the tokenless capture is ALSO partial — the two counters answer
+    # different questions ("is any call's tokens unseen?" / "were ALL of them"),
+    # and a capture can be both
+    assert tokens["partial_captures"] == 1
+    assert tokens["lower_bound"] is True
+
+
+def test_a_partially_metered_capture_flags_a_lower_bound():
+    """The row claims 2 calls but only 1 was metered (a deadline-kill, a
+    provider-side timeout, or an #3824 unrolled call). The tokens that
+    survived are a floor, and the reader is told so."""
+    dist = costing.cost_per_session_distribution([
+        _token_row("partial", 1000, 100, calls=2, measured_calls=1),
+    ])
+    tokens = dist["tokens"]
+    assert dist["unmetered_attempts"] == 1
+    assert tokens["partial_captures"] == 1
+    assert tokens["lower_bound"] is True
+
+
+def test_poisoned_token_fields_degrade_instead_of_crashing():
+    """A tampered/foreign export is read with ``_as_token_count``, not
+    ``_as_int``: a bool, a junk string and an absurd magnitude are REJECTED
+    (not shaped), so they contribute no number AND are disclosed — the
+    #5854 reject-and-disclose rule, which ``_as_int``'s silent 0 would hide.
+    """
+    dist = costing.cost_per_session_distribution([
+        _token_row("s1", True, "junk", extra={"prompt_tokens": True,
+                                              "completion_tokens": "junk"}),
+        _token_row("s2", 10 ** 400, 10 ** 400,
+                   extra={"prompt_tokens": 10 ** 400,
+                          "completion_tokens": 10 ** 400}),
+    ])
+    tokens = dist["tokens"]
+    assert tokens["total"] == 0
+    assert tokens["sessions"] == 2
+    # rejected, not silently zeroed: both captures carry the disclosure
+    assert tokens["invalid_token_captures"] == 2
+    assert tokens["lower_bound"] is True
+
+
+def test_heaviest_captures_carry_their_token_counts():
+    """The capture-level drill-down reads in tokens too — \"this capture was
+    unusually expensive\" is the same read as \"this capture burned the
+    tokens\", in the unit that survives a model change."""
+    dist = costing.cost_per_session_distribution([
+        _token_row("s1", 1000, 100, cost=0.001),
+        _token_row("s2", 4000, 400, cost=0.009),
+    ])
+    heaviest = dist["heaviest"]
+    assert heaviest[0]["session_id"] == "s2"
+    assert heaviest[0]["prompt_tokens"] == 4000
+    assert heaviest[0]["completion_tokens"] == 400
+    assert heaviest[0]["total_tokens"] == 4400
+
+
+def test_report_cli_prints_the_extraction_token_metric_set(tmp_path, capsys):
+    """The readable surface: the token section (total, p50/p95 per capture),
+    the per-stage and per-team totals, and the machine-readable payload."""
+    from tools import capture_cost_report as report
+
+    rows = [_team_row("team-alpha", "a1", 0.001, "pi", tokens=1000),
+            _team_row("team-alpha", "a2", 0.002, "pi", tokens=4000),
+            _team_row("team-beta", "b1", 0.004, "cursor", tokens=9000)]
+    fixture = tmp_path / "capture_cost.jsonl"
+    fixture.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                       encoding="utf-8")
+    out_json = tmp_path / "report.json"
+
+    assert report.main(["--jsonl", str(fixture), "--out", str(out_json)]) == 0
+    text = capsys.readouterr().out
+    assert "#3840: internal calibration, no ceiling" in text
+    assert "input tokens     : 14000" in text
+    assert "output tokens    : 30" in text
+    assert "total tokens     : 14030" in text
+    assert "p50 tokens/capture" in text
+    assert "p95 tokens/capture" in text
+    # this window is fully metered, so no lower-bound warning is printed
+    assert "LOWER BOUND" not in text
+    # per-stage and per-team totals are rendered, and the per-team line uses
+    # ``tokens=`` so it cannot be misread as the team's dollar total
+    assert "total=14030" in text
+    assert "tokens=5020" in text
+
+    payload = json.loads(out_json.read_text())
+    tokens = payload["distribution"]["tokens"]
+    assert tokens["total"] == 14030
+    assert tokens["sessions"] == 3
+    assert tokens["p50"] == pytest.approx(4010.0)   # 1010, 4010, 9010
+    per_team = {t["team"]: t for t in payload["by_team"]}
+    assert per_team["team-alpha"]["total_tokens"] == 5020
+    assert per_team["team-beta"]["total_tokens"] == 9010
+
+
+def test_a_deadline_kill_row_is_a_token_floor():
+    """The OTHER partial shape, pinned directly: a deadline-kill never reaches
+    ``_accumulate_call_cost``, so it raises the top-level ``calls`` (and
+    ``deadline_aborts``) and leaves the lane at its METERED count. The
+    capture's tokens are therefore short by the killed call. Misstating this
+    shape as the merged-lane one is how a disclosure test silently stops
+    covering the deadline path."""
+    stage = {"s1": {_PROVIDER: {_MODEL: {
+        "calls": 1, "prompt_tokens": 1000, "completion_tokens": 100,
+        "cost_usd": 0.001, "usage_present": True,
+        "calls_without_usage": 0, "calls_without_cost": 0}}}}
+    row = {"org_id": "team-1", "event_name": "capture_cost",
+           "created_at": "2026-09-16T12:00:00+00:00",
+           "properties": {"session_id": "killed", "calls": 2, "retries": 0,
+                          "prompt_tokens": 1000, "completion_tokens": 100,
+                          "cost_usd": 0.001, "calls_without_cost": 0,
+                          "deadline_aborts": 1, "by_stage": stage}}
+    dist = costing.cost_per_session_distribution([row])
+    assert dist["unmetered_attempts"] == 1
+    assert dist["tokens"]["partial_captures"] == 1
+    assert dist["tokens"]["lower_bound"] is True
+    # the metered call's tokens are still counted — a floor, not a zero
+    assert dist["tokens"]["total"] == 1100
+
+
+def test_a_negative_stored_token_is_rejected_and_disclosed():
+    """#5854's rule, READER half. A row written before the accumulator's token
+    normaliser landed is still in ``analytics_events``. ``_as_int`` would
+    accept the negative and the new token block would report a NEGATIVE
+    calibration total and percentiles with nothing disclosed — the very
+    sign-flip #5854 closed on the dollar path, and its sibling reader
+    (``_price_lane._tok``) already refuses. The value must contribute no
+    number AND mark the capture as a floor."""
+    dist = costing.cost_per_session_distribution([
+        _token_row("negative", -1000, -100,
+                   extra={"prompt_tokens": -1000,
+                          "completion_tokens": -100,
+                          "by_stage": {"s1": {_PROVIDER: {_MODEL: {
+                              "calls": 1, "prompt_tokens": -1000,
+                              "completion_tokens": -100, "cost_usd": 0.001,
+                              "usage_present": True,
+                              "calls_without_usage": 0,
+                              "calls_without_cost": 0}}}}}),
+        _token_row("fractional", 4000, 400,
+                   extra={"prompt_tokens": 4000.5,
+                          "completion_tokens": 400}),
+    ])
+    tokens = dist["tokens"]
+    assert tokens["total"] >= 0
+    assert tokens["p50"] >= 0
+    assert tokens["p95"] >= 0
+    assert tokens["invalid_token_captures"] == 2
+    assert tokens["lower_bound"] is True
+    # the valid halves still count; the rejected halves are simply absent
+    assert tokens["total"] == 400
+    # A rejected value CAN be counted in BOTH disclosure counters (a capture
+    # with no other usable count is tokenless AND invalid) — so the rendered
+    # causes must not contradict each other about the same capture. The report
+    # says "no usable token count" rather than "no token field" for exactly
+    # this reason. A rejected value beside a usable one is only invalid.
+    assert tokens["tokenless_captures"] >= 1
+    assert tokens["partial_captures"] >= 1
+
+
+def test_a_metered_call_with_a_charge_but_no_tokens_is_a_floor():
+    """The mixed case no attempt-based counter can see: one call reported a
+    CHARGE but no token field (``has_usage`` is true at the accumulator, so
+    it counts as METERED and ``unmetered`` stays 0), beside a call that DID
+    report tokens. The row total is therefore non-zero, so the session-level
+    tokenless test misses it too — but the measured tokens are silently
+    short, and the reader must be told."""
+    row = _token_row("mixed", 1000, 100)
+    other = dict(row["properties"]["by_stage"]["s1"][_PROVIDER][_MODEL])
+    other.update(calls=1, prompt_tokens=0, completion_tokens=0,
+                 cost_usd=0.002, usage_present=True, calls_without_cost=0)
+    # the lanes must sum to the row's own ``calls``, as the accumulator
+    # leaves them: one token-bearing call in S1, one charged-but-tokenless
+    # call in S2
+    stage = {"s1": {_PROVIDER: {_MODEL: {
+        "calls": 1, "prompt_tokens": 1000, "completion_tokens": 100,
+        "cost_usd": 0.001, "usage_present": True,
+        "calls_without_usage": 0, "calls_without_cost": 0}}},
+        "s2": {_PROVIDER: {_MODEL: other}}}
+    row["properties"]["by_stage"] = stage
+    row["properties"]["calls"] = 2
+    row["properties"]["cost_usd"] = 0.003
+    dist = costing.cost_per_session_distribution([row])
+    assert dist["unmetered_attempts"] == 0      # both calls count as metered
+    assert dist["tokens"]["total"] == 1100
+    assert dist["tokens"]["partial_captures"] == 1
+    assert dist["tokens"]["lower_bound"] is True
+
+
+def test_the_per_team_token_totals_reconcile_with_the_window_total(
+        tmp_path, capsys):
+    """ONE population, machine-checkable. A window containing a capture the
+    percentiles EXCLUDE (no calls at all) must not have that capture's tokens
+    inflate a team total: the sum of the per-team totals has to equal
+    ``distribution.tokens.total``, or two token totals for the same window
+    disagree — the #5868 defect in a new place."""
+    from tools import capture_cost_report as report
+
+    rows = [_team_row("team-alpha", "a1", 0.001, "pi", tokens=1000),
+            _team_row("team-beta", "b1", 0.004, "cursor", tokens=9000)]
+    phantom = _team_row("team-alpha", "phantom", 0.0, "pi", tokens=500000)
+    phantom["properties"]["calls"] = 0
+    phantom["properties"]["by_stage"] = {}
+    rows.append(phantom)
+    fixture = tmp_path / "capture_cost.jsonl"
+    fixture.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                       encoding="utf-8")
+    out_json = tmp_path / "report.json"
+
+    assert report.main(["--jsonl", str(fixture), "--out", str(out_json)]) == 0
+    capsys.readouterr()
+    payload = json.loads(out_json.read_text())
+    assert payload["distribution"]["excluded_no_calls"] == 1
+    assert payload["distribution"]["tokens"]["total"] == 10020
+    assert sum(t["total_tokens"] for t in payload["by_team"]) == \
+        payload["distribution"]["tokens"]["total"]
+    for entry in payload["by_team"]:
+        assert entry["total_tokens"] == \
+            entry["prompt_tokens"] + entry["completion_tokens"]
+
+
+def test_report_cli_prints_the_token_section_when_nothing_could_be_priced(
+        tmp_path, capsys):
+    """A window whose tokens are measured but whose model has no pricing-map
+    row still HAS a calibration figure. Suppressing the token section on the
+    unpriced branch would hide it exactly when the map is what is missing."""
+    from tools import capture_cost_report as report
+
+    rows = [_team_row("team-alpha", "a1", 0.0, "pi", tokens=5000)]
+    # strip the pricing map's ability to price the lane: an unmapped model
+    rows[0]["properties"]["by_stage"] = {"s1": {"unmapped-provider": {
+        "some-unmapped-model": {
+            "calls": 1, "prompt_tokens": 5000, "completion_tokens": 10,
+            "cost_usd": 0.0, "usage_present": True,
+            "calls_without_usage": 0, "calls_without_cost": 1}}}}
+    rows[0]["properties"]["calls_without_cost"] = 1
+    fixture = tmp_path / "capture_cost.jsonl"
+    fixture.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                       encoding="utf-8")
+
+    assert report.main(["--jsonl", str(fixture)]) == 0
+    text = capsys.readouterr().out
+    assert "NO PRICED capture_cost SESSIONS" in text
+    assert "#3840: internal calibration, no ceiling" in text
+    assert "p50 tokens/capture" in text
