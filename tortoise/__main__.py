@@ -6021,7 +6021,10 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
 
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
-    transcript from a harness store (codex / claude-desktop / pi).
+    transcript from a harness store (any harness in the parser registry — see
+    `tortoise.session_import.PARSERS`; no harness is listed here on purpose,
+    because a hand-maintained copy is what made #2120's `openclaw` parseable
+    but unreachable from the CLI).
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
@@ -10330,9 +10333,17 @@ def main(argv: list[str] | None = None) -> int:
              "is not consent)")
     sess_import.add_argument("--file", required=True,
                              help="Path to the session transcript (JSONL or text)")
+    # #2120 review P1: the accepted harnesses are DERIVED from the parser
+    # registry, never re-listed. The hand-maintained list that stood here had
+    # already fallen behind it: `openclaw` parsed correctly, but
+    # `sessions import --harness openclaw` — the exact command `install
+    # openclaw` prints, and the one the seam's docs instruct — was rejected by
+    # argparse before any parser was reached. 'desktop' is a CLI alias for
+    # claude-desktop rather than a registry key, so it is added explicitly.
+    from tortoise.session_import import PARSERS as _SESSION_IMPORT_PARSERS
     sess_import.add_argument(
         "--harness", required=True,
-        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
+        choices=[*_SESSION_IMPORT_PARSERS, "desktop"],
         help="Harness format to parse (each harness has its own record "
              "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(

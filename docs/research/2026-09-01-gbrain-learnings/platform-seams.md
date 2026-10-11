@@ -13,7 +13,7 @@ UserPromptSubmit hook  →  volunteer-turn.sh <harness>  →  `tortoise voluntee
 
 **That model does NOT cover every harness.** Pi (#2119) and OpenClaw (#2120)
 have no shell-hook surface: their seam is an in-process plugin/extension, so
-`tortoise install <harness>` writes a package and the ";thin registration"
+`tortoise install <harness>` writes a package and the "thin registration"
 framing does not apply to them. Each row below states its own mechanism; do
 not infer one from this diagram.
 

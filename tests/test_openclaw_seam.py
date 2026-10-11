@@ -469,6 +469,20 @@ def test_install_guidance_names_the_per_session_spool(tmp_path):
     assert "tortoise/turns/" in proc.stdout
     assert "sessions import --harness openclaw" in proc.stdout
 
+    # #2120 review P2: asserting the message MENTIONS the command is a test of
+    # copy, not of capability — it stayed green while `sessions import
+    # --harness openclaw` exited 2 ("invalid choice"), because `sessions
+    # import` kept its own hand-maintained harness list. Execute the printed
+    # command so a second such list cannot silently re-appear: the probe is
+    # expected to fail later (no such transcript, no server) but never on
+    # harness admission.
+    probe = subprocess.run(
+        [sys.executable, "-m", "tortoise", "sessions", "import",
+         "--harness", "openclaw", "--file", str(tmp_path / "absent.jsonl")],
+        capture_output=True, text=True, timeout=300, env=env, cwd=str(REPO_ROOT))
+    assert "invalid choice" not in (probe.stderr + probe.stdout), \
+        f"sessions import refuses the harness the install guidance prints:\n{probe.stderr}"
+
 
 def test_session_verify_reaches_openclaw_and_is_honestly_unverifiable():
     """`session verify --harness openclaw` must RESOLVE (the harness is in the
