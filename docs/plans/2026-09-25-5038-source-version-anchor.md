@@ -107,7 +107,7 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 per-link anchor) and PR #5207 are MERGED, and O3 is fully resolved, so no `#4282` approval is
 engaged — this ships **no new MCP tool and no new SDK method**. Delivered:
 
-* `tortoise/search_engine.py` — `aggregate_currency` (the §4.6 aggregate; **zero links ⇒
+- `tortoise/search_engine.py` — `aggregate_currency` (the §4.6 aggregate; **zero links ⇒
   `unknown`, never the vacuously-`current` an empty link set would produce**) and
   `read_currency_links` (the one-query batch read of the Points' `extractedFrom` links, edge
   `sourceVersion` vs Source `contentHash`). ⚠ The pure semantics sit HERE, not in `tools/`:
@@ -115,14 +115,14 @@ engaged — this ships **no new MCP tool and no new SDK method**. Delivered:
   note states for `subgraph_render`), so `tools/source_currency.py` holds the graph read's
   single-Point wrapper, the sourced disclosure, the eligibility term and a CLI, and imports
   the vocabulary from its ONE home above.
-* **The read-surface REPORTING** — `SearchResult.provenance.currency` (the §4.6 verdict) and
+- **The read-surface REPORTING** — `SearchResult.provenance.currency` (the §4.6 verdict) and
   `provenance.fyi` (the sourced disclosure), both INSIDE the existing, off-by-default
   `TORTOISE_SEARCH_PROVENANCE` block, recorded in `config/surface-manifest.yml` and
   re-rendered into `docs/product/mcp-sdk-surface.md`. This is the “reporting stays on the
   existing result row” clause, and it answers the handoff `tests/
   test_source_version_read_wiring_5199.py` wrote (“It goes to the read-path item on #5038
   with #5256's arrival”); that file's `test_search_hit_makes_no_version_claim` is untouched.
-* ⚠ **The ENFORCEMENT half is derived, not yet composed.** Nothing is *withheld* from a result
+- ⚠ **The ENFORCEMENT half is derived, not yet composed.** Nothing is *withheld* from a result
   set by this change: `tools/source_currency.answer_eligible` states O9's term —
   `NOT (stale ∧ a-newer-fact-exists)` — and is tested, but it is not composed into the read
   path's participation gate (`search_engine.py`'s `has_ep`). That composition needs *“a newer
