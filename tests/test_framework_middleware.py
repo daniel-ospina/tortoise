@@ -360,15 +360,56 @@ def test_overlong_turn_is_truncated_keeping_the_tail():
     assert content[-1_000:].count("A") == 0  # only the tail is kept
 
 
-def test_overlong_multibyte_turn_is_truncated_without_splitting_a_character():
-    """A byte budget must slice BYTES: a naive character slice overruns it, and
-    a naive byte slice can leave a broken leading codepoint."""
+@pytest.mark.parametrize("filler", ["á", "中", "😀"])  # 2, 3 and 4 bytes
+def test_overlong_multibyte_turn_is_truncated_on_bytes_not_characters(filler):
+    """A byte budget must slice BYTES (a character slice overruns it) AND must
+    not keep a split codepoint (a naive byte slice does).
+
+    The 3-byte filler is the load-bearing one: the content budget is not a
+    multiple of 3 (15296 % 3 == 2), so a byte slice leaves a partial codepoint
+    that only the ``errors="ignore"`` decode drops. A 2-byte filler cannot show
+    this — ``15296 % 2 == 0`` — which is why this is parametrized.
+    """
     reflex, seen = _spy()
-    _lg(reflex)({"messages": [_Msg("human", "á" * 20_000)]})
+    _lg(reflex)({"messages": [_Msg("human", filler * 20_000)]})
     content = seen["window"][0]["content"]
-    assert len(content.encode("utf-8")) <= MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES
-    assert content == "á" * len(content)  # no replacement/orphan codepoint
-    assert content.endswith("á")
+    room = MAX_WINDOW_BYTES - PER_TURN_OVERHEAD_BYTES
+    assert content  # never emptied
+    # Whole codepoints only: a kept partial would break this equality (or raise).
+    assert content == filler * len(content)
+    assert content.endswith(filler)
+    # EXACTLY the whole codepoints that fit — proof the partial was dropped.
+    assert len(content) == room // len(filler.encode("utf-8"))
+
+
+def test_whitespace_tail_does_not_discard_the_turn_or_the_window():
+    """A tail that is only whitespace must not empty the window.
+
+    The byte fit keeps the TAIL, so a turn ending in a long whitespace run was
+    truncated to whitespace alone; the guard that rejected it used ``break``,
+    which abandoned the OLDER turns too. On the newest turn the window went
+    empty and the adapter injected NOTHING, though real content existed.
+    """
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [
+        _Msg("human", "REAL QUESTION: how is CI deploy triggered?"),
+        _Msg("human", "Z" + " " * 20_000),
+    ]})
+    window = seen["window"]
+    assert any("REAL QUESTION" in turn["content"] for turn in window)
+    # trailing whitespace is stripped before the fit, never kept in its place
+    assert all(turn["content"] == turn["content"].rstrip() for turn in window)
+    assert all(turn["content"] for turn in window)
+
+
+def test_single_turn_with_a_long_whitespace_tail_still_injects():
+    """The degenerate case: ONE turn whose byte tail is all whitespace."""
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [
+        _Msg("human", "REAL QUESTION: CI deploy?" + " " * 20_000)]})
+    assert seen["window"], "the window emptied although the turn had content"
+    assert "REAL QUESTION" in seen["window"][0]["content"]
+    assert seen["window"][0]["content"].endswith("?")
 
 
 @pytest.mark.parametrize("filler", ["A", "á", "中", "😀"])

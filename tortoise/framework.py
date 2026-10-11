@@ -176,6 +176,12 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
             continue
         if not isinstance(content, str) or not content.strip():
             continue
+        # Strip BEFORE the fit. The fit keeps the TAIL, so a long trailing
+        # whitespace run would be kept in place of the meaningful end of the
+        # turn — and when the tail was ALL whitespace the turn was discarded
+        # and the whole window could empty out (nothing injected). The earlier
+        # guard already rejects a turn that is only whitespace.
+        content = content.rstrip()
         if len(kept) >= MAX_WINDOW_TURNS:
             break
         # Room left for CONTENT once this turn's own overhead is reserved.
@@ -190,7 +196,11 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
             content = encoded[-room:].decode("utf-8", errors="ignore")
             encoded = content.encode("utf-8")
         if not content.strip():
-            break
+            # `continue`, NOT `break`: a byte slice can leave only a dropped
+            # partial codepoint, and an unusable NEWEST turn must not abandon
+            # the older turns that still fit — dropping the whole window is the
+            # silent no-op this bound exists to prevent.
+            continue
         kept.append({"role": role, "content": content})
         total += len(encoded) + PER_TURN_OVERHEAD_BYTES
     kept.reverse()
