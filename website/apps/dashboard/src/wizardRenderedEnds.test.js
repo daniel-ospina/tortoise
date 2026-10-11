@@ -452,6 +452,12 @@ test('#5820: the extractors fail LOUD rather than passing vacuously', async () =
 // step 0 moves focus to the wizard container. This EXECUTES the extracted effect
 // body with mocked refs and reads whether `focus()` was called, so the guarantee
 // is pinned by the value it produces rather than by the presence of a line.
+//
+// RESIDUAL: this pins only the effect's own decision (it does not call
+// `focus()` on a flag-only re-run). It does not model the DOM — when a membership
+// flip replaces the org-create form, that form's auto-focused input unmounts and
+// real focus may fall to <body>. That is pre-existing, unchanged by this guard,
+// and not what this pin claims.
 async function focusCallsOverRuns(source) {
   const { open, close } = announcementEffectBlock(source)
   const body = source.slice(open + 1, close)

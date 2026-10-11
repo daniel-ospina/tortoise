@@ -1858,9 +1858,9 @@ function claimIntentInFlight() {
   const welcomeHasOrg = welcomeTeamReady || (Array.isArray(teams) && teams.length > 0)
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
-  // Step 1 (org input) and step 3 (paste field / copy button) carry their own
-  // autofocus targets — the container must not steal from them, so those two
-  // steps only announce.
+  // Step 1 (org input) is the one step whose child control autofocuses, so the
+  // container skips focus only while no org exists yet; later steps carry no
+  // autofocus target and the container takes focus.
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
