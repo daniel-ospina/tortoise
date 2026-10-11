@@ -131,6 +131,96 @@ def test_resolution_expr_points_at_the_path_it_was_given(tmp_path) -> None:
     assert _key_resolution_expr(a) != _key_resolution_expr(b)
 
 
+#: Interpolations that put a CREDENTIAL VALUE on a print line. The #5109 rule
+#: is "never interpolate the value" — the resolution EXPRESSION is fine — so
+#: this deliberately does not match `_key_resolution_expr(...)`.
+_LIVE_VALUE_PATTERNS = (
+    "data['key']",
+    "data.get('key')",
+    "key['api_key']",
+    "{new_token}",
+    "{orphan_token}",
+)
+
+
+def _live_key_print_sites(src: str) -> list[tuple[int, str]]:
+    """1-based line numbers of `print(...)` lines carrying a credential value."""
+    sites: list[tuple[int, str]] = []
+    for lineno, line in enumerate(src.splitlines(), start=1):
+        if "print(" not in line:
+            continue
+        if any(pat in line for pat in _LIVE_VALUE_PATTERNS):
+            sites.append((lineno, line.strip()))
+    return sites
+
+
+def test_every_live_key_print_carries_a_5109_note() -> None:
+    """The invariant is not "no key is ever printed" — it is "every remaining
+    value echo is a DELIBERATE, documented, owner-routed exception".
+
+    The success paths carry the note; the ORPHAN echoes (mint/recover OK, save
+    failed — the key exists nowhere else) were missing it, so the PR's
+    deliberate/owner-routed coverage claim was false. Pin it: every live-key
+    print must have a `#5109 NOTE` within the 5 lines above it. A new
+    `print(f"... {data['key']}")` with no note reds this gate.
+    """
+    src = (
+        Path(__file__).resolve().parent.parent / "tortoise" / "__main__.py"
+    ).read_text(encoding="utf-8")
+    lines = src.splitlines()
+    missing = []
+    for lineno, text in _live_key_print_sites(src):
+        window = "\n".join(lines[max(0, lineno - 6):lineno - 1])
+        if "#5109 NOTE" not in window:
+            missing.append((lineno, text))
+    assert not missing, (
+        "every remaining live-key print must carry a `#5109 NOTE` (deliberate, "
+        f"owner-routed) — these do not: {missing}"
+    )
+
+
+def test_signup_orphan_echo_is_stderr_only_never_stdout(
+    monkeypatch, tmp_path
+) -> None:
+    """#5109 P2: on `_cmd_signup`'s orphan path (key minted, save failed) the
+    key genuinely exists nowhere else, so the echo is DELIBERATE — but it must
+    stay on STDERR. stdout is the verbatim-captured channel; a regression that
+    moves (or duplicates) this echo onto stdout reds this gate."""
+    import contextlib
+    import io
+    from unittest import mock
+
+    import tortoise.__main__ as main
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    orphan_key = "tt_" + "ab" * 16  # matches KEY_SHAPE (32 lowercase hex)
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps({
+        "key": orphan_key,
+        "org_id": "team-orphan",
+        "org_name": "agent-orphan",
+        "signup_token": "st_" + "cd" * 32,
+    }).encode()
+    resp.__enter__.return_value = resp
+
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch("urllib.request.urlopen", return_value=resp), \
+         mock.patch("os.replace", side_effect=OSError("read-only fs")), \
+         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = main._cmd_signup(mock.Mock())
+
+    assert rc == 1, "the orphan path must fail closed (never exit 0)"
+    assert orphan_key in err.getvalue(), (
+        "the orphan path must still echo the key — it exists nowhere else"
+    )
+    assert orphan_key not in out.getvalue(), (
+        "the orphan key echo must never reach stdout (verbatim-captured, #5109)"
+    )
+
+
 def test_json_payload_uses_the_env_form_not_the_literal() -> None:
     """The `--json` payload is the AGENT-consumed path (#304).
 

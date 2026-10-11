@@ -1205,6 +1205,10 @@ def _cmd_recover(args) -> int:
         os.replace(tmp_path, config_path)
     except OSError as e:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was recovered but could
+        # not be persisted, so it exists nowhere else; no resolution expression
+        # can replace the value. Echoed to STDERR only, never stdout (the
+        # verbatim-captured channel). Owner-routed on #5109.
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
@@ -1705,9 +1709,15 @@ def _cmd_signup(args) -> int:
         # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was minted but could NOT
+        # be persisted, so it exists nowhere else; no resolution expression can
+        # replace the value. Echoed to STDERR only, never stdout (the
+        # verbatim-captured channel). Owner-routed on #5109.
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
         orphan_token = config.get("signup_token")
         if orphan_token:
+            # #5109 NOTE: DELIBERATE show-once — same orphan contract as the
+            # key above; STDERR only.
             print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)

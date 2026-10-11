@@ -502,6 +502,12 @@ surfaces:
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
+  # #5109: the CLI's no-literal-key gate pins `tortoise/__main__.py`, an EXACT
+  # `api` SOURCE_PATTERNS match — so like test_init_apikey_validation.py above
+  # it must be registered under `api`, not only `core` (the #2938 silent-drop
+  # class: a `__main__.py`-only change that selected `api` alone would skip a
+  # core-only registration). Dual-registered with `core`.
+  - test_secret_not_printed_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -852,6 +858,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_secret_not_printed_5109.py
   # #2886: the wiring seam's hermetic adapter guard
   # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
   # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,
