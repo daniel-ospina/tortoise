@@ -571,10 +571,31 @@ def test_lone_surrogate_costs_one_codepoint_not_the_whole_window():
     reflex, seen = _spy()
     _lg(reflex)({"messages": [_Msg("human", "ok \ud800"), _Msg("human", "latest")]})
     window = seen["window"]
-    assert [turn["content"] for turn in window] == ["ok ", "latest"]
+    assert [turn["content"] for turn in window] == ["ok", "latest"]
     # and the window the real validator gets is encode-safe
     from tortoise.volunteer import validate_request
     validate_request(window)
+
+
+def test_trailing_surrogate_does_not_re_expose_a_whitespace_tail():
+    """The surrogate drop runs BEFORE the strip, and the order is load-bearing.
+
+    Dropping a trailing lone surrogate re-exposes the whitespace run that
+    ``rstrip`` had already removed, and the byte fit keeps the TAIL — so with
+    the two swapped, an over-long turn whose tail is whitespace was dropped
+    wholesale (`continue`), emptying a single-turn window and discarding the
+    newest turn in a multi-turn one.
+    """
+    import tortoise.framework as fw
+
+    content = "X" + " " * (fw.MAX_WINDOW_BYTES - fw.PER_TURN_OVERHEAD_BYTES + 1) + "\ud800"
+    assert fw._bounded_window([{"role": "user", "content": content}]) == [
+        {"role": "user", "content": "X"}]
+    assert fw._bounded_window([
+        {"role": "user", "content": "OLDER REAL TURN"},
+        {"role": "user", "content": content},
+    ]) == [{"role": "user", "content": "OLDER REAL TURN"},
+           {"role": "user", "content": "X"}]  # the newest turn survives too
 
 
 def test_adk_model_turns_are_normalized_not_dropped():

@@ -200,12 +200,6 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
             continue
         if not isinstance(content, str) or not content.strip():
             continue
-        # Strip BEFORE the fit. The fit keeps the TAIL, so a long trailing
-        # whitespace run would be kept in place of the meaningful end of the
-        # turn — and when the tail was ALL whitespace the turn was discarded
-        # and the whole window could empty out (nothing injected). The earlier
-        # guard already rejects a turn that is only whitespace.
-        content = content.rstrip()
         # Drop codepoints that cannot be UTF-8 encoded — a LONE SURROGATE, which a
         # truncated surrogate pair off a cut stream (``json.loads('"\\ud83d"')``)
         # or an ``errors="surrogateescape"`` decode produces. The encode below is
@@ -214,6 +208,13 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
         # bad codepoint. Sanitizing here costs only the codepoint. Plain ``str``
         # is the declared content type, so this is not a hostile-input guard.
         content = content.encode("utf-8", "ignore").decode("utf-8")
+        # Strip AFTER the drop, never before: the fit keeps the TAIL, so a long
+        # trailing whitespace run would be kept in place of the meaningful end of
+        # the turn. The ordering matters — dropping a trailing surrogate
+        # re-exposes whitespace an earlier rstrip had removed, and the `continue`
+        # below relies on the last codepoint being non-whitespace. The guard
+        # above already rejects a turn that is only whitespace.
+        content = content.rstrip()
         if len(kept) >= MAX_WINDOW_TURNS:
             break
         # Room left for CONTENT once this turn's own overhead is reserved.
