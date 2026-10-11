@@ -39,6 +39,42 @@ interface FlowRow {
 }
 
 /**
+ * The provider round-trip's own FAILURE, as the banner's query string.
+ *
+ * GoTrue carries a denied/failed provider round-trip to `redirect_to` as
+ * `error` / `error_code` / `error_description` (`internal/api/external.go` →
+ * `redirectErrors`), which writes them to the QUERY and MIRRORS them into the
+ * FRAGMENT. A browser never sends a fragment to a server, so the query is the
+ * only channel this route can read — and the pre-BFF links that still arrive as
+ * fragments are the PAGE's job (`oauthErrorParams()` reads both surfaces).
+ *
+ * An ALLOWLIST, never a passthrough: these three are the banner's whole
+ * vocabulary, and the values arrive on a URL a visitor (or an attacker) can
+ * compose. Each is bounded because it is written into a `Location` header — an
+ * unbounded `error_description` turns a denial into a redirect the runtime
+ * cannot send instead of a banner. 300 is the bound the consent surface already
+ * uses (#3496 `boundedText`).
+ *
+ * Returns null when no error signal is present at all — a bare hit is not a
+ * failure to explain, and must keep restarting the flow.
+ */
+const BANNER_PARAM_MAX = 300;
+
+function providerErrorTarget(url: URL): string | null {
+  const params = new URLSearchParams();
+  for (const key of ["error", "error_code", "error_description"]) {
+    const raw = url.searchParams.get(key);
+    if (raw) params.set(key, raw.slice(0, BANNER_PARAM_MAX));
+  }
+  // The page's own predicate is `error || error_code`: GoTrue's `OAuthError`
+  // shape sets `error` with no `error_code` (a visitor denying consent) and its
+  // `HTTPError` shape sets both (`bad_oauth_state` is the #1224 case). Keying
+  // this on either alone drops one of the two real denials.
+  if (!params.has("error") && !params.has("error_code")) return null;
+  return `/auth?${params.toString()}`;
+}
+
+/**
  * Re-validate the stored destination before using it as a redirect target.
  *
  * Validated on write in /auth/start, and again here — a row could predate that
@@ -63,6 +99,19 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   if (!code) {
+    // TWO different causes reach here, and they must NOT be answered the same
+    // way:
+    //   * a provider OUTCOME that is an error — the visitor denied consent, the
+    //     provider refused, the OAuth state expired. The visitor must be TOLD,
+    //     and `/auth` already renders that banner (#1224/#1909);
+    //   * a bare hit with no outcome at all — an abandoned or aborted flow, for
+    //     which restarting is the right answer.
+    // Merging them discarded the provider's error and answered a DENIAL by
+    // minting a fresh flow and sending the visitor straight back to the
+    // provider: an unexplained loop, with the banner unreachable on the whole
+    // BFF path.
+    const banner = providerErrorTarget(url);
+    if (banner) return redirect(banner, [clearCookie(FLOW_COOKIE)]);
     return redirect("/auth/start?kind=signin", [clearCookie(FLOW_COOKIE)]);
   }
 
