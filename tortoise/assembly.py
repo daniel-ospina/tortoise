@@ -13,7 +13,10 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
 * ``ordering`` — two-subject "Which X first, A or B?" / "Who ... first,
   A or B?" (the census's ordering/compare 34: the shape-typical rows fire;
   duration/count/N-ary rows that the SEMANTIC census filed under
-  ordering/compare do NOT — measured below).
+  ordering/compare do NOT — measured below) AND the N-ARY option list
+  (#2653): "the order ...: A, B, and C" / "first, A, B or C" — 3+ named
+  options decomposed over the SAME dated spine (see the N-ary section
+  below).
 * ``interval`` — "How many days/weeks/months/years passed between A and B"
   and the two-anchor since-until form "…had passed since X when Y".
 
@@ -32,7 +35,17 @@ Never fires (R13 + R16 + the census negative set, ~68/133 + misfires):
 * frequency/count — "how many times", "how many days did I spend", "how
   many … have passed since <one activity>" (single-anchor since);
 * relative-date-lookup — "last Saturday", "on Valentine's day";
-* nary-ordering — 3+ named options ("Mark and Sarah or Tom");
+* the census's nary-ordering class is RE-MEASURED to 2 named-subject rows
+  (#2653; the committed census stores 140-char question TRUNCATIONS, which
+  is why the class was filed as 4): the 2 genuine N-ary rows
+  (gpt4_f49edff3 / gpt4_18c2b244) now FIRE as ORDERING with 3 terms;
+  gpt4_70e84552_abs is the binary `_abs` twin of an ordering row and
+  already fired (adjudicated noise, pinned in test_assembly_pure.py);
+  gpt4_d6585ce8 ("the concerts and musical events I attended") names NO
+  subjects — it is a class-plural enumeration request, a DIFFERENT feature,
+  and correctly never fires here;
+* a 3+ option list whose members are NOT option phrases (a binary question
+  whose A-side merely CONTAINS a comma) — see ``_nary_option_list``;
 * recency — "most recently"; pattern/recurring; offset-comparison ("how
   many months before my anniversary");
 * misfire (R16) — preference/advice with two named options + compare
@@ -107,18 +120,70 @@ _RE_RECENCY = re.compile(
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
-# verbs reject BEFORE the ordering template.
+# verbs reject BEFORE the ordering arm.
+#
+# #2653: the weak verbs (pick/choose/decide) need an ADVICE FRAME. Bare
+# "pick" is an ordinary narrative verb — the census's own N-ary ordering row
+# gpt4_f49edff3 says "the day I helped my cousin PICK OUT STUFF for her baby
+# shower", which a bare-verb guard rejected as preference and so silently
+# excluded a measured row from the shape it belongs to. The frame forms below
+# are the ones the R16 family actually uses ("which one should I pick",
+# "which to choose"); the strong signals are unchanged.
 _RE_ADVICE = re.compile(
-    r"\b(?:should|ought|recommend(?:ed|ation)?|suggest(?:s|ed|ing)?|"
+    r"\b(?:should|ought|shall|recommend(?:ed|ation)?|suggest(?:s|ed|ing)?|"
     r"prefer(?:red|able|ence)?|advise|better|best\s+(?:to|for)\b|"
-    r"prioritize|pick|choose|decide)\b",
+    r"prioritize)\b|"
+    r"\b(?:which|what)\s+(?:one\s+)?(?:to|should)\b|"
+    r"\b(?:shall|would|could)\s+(?:i|we|you|they|he|she|it)\b|"
+    r"\bto\s+(?:pick|choose|decide)\b",
     re.IGNORECASE)
 # N-ary: an enumerated list of 3+ options. Two shapes of escape: repeated
-# " or " ("A or B or C") and a comma/semicolon list on the A-side
-# ("first, A, B or C") — both checked in classify_question after the
-# ordering match (bounded two-option questions carry exactly one " or " and
-# a comma-free A-side).
+# " or " ("A or B or C") and a comma list ("first, A, B or C" / "A, B, and
+# C"). #2653 DECOMPOSES both (``_nary_terms``); the guard survives only for
+# the NON-ordering shapes — an or-chain inside an interval anchor is not an
+# option list (see classify_question's arm order).
 _RE_OR_CHAIN = re.compile(r"\s+or\s+.+?\s+or\s+", re.IGNORECASE | re.DOTALL)
+
+# N-ary list with an EXPLICIT list-introducing colon after an ordering head —
+# the measured corpus form ("Which three events happened in the order from
+# first to last: A, B, and C" / "What is the order of the three events:
+# 'A', 'B', and 'C'"). The colon is the strong signal: the two head forms
+# carry no " or " at all, so _RE_ORDERING cannot see them.
+_RE_ORDERING_LIST = re.compile(
+    r"^\s*(?:which|who|what)\b[^?:]*?"
+    r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b|"
+    r"\bearliest\s+to\s+latest\b)"
+    r"[^?:]*:\s*[^?]+?\??\s*$",
+    re.IGNORECASE | re.DOTALL)
+
+# the ordering-marker words that introduce an option list when the question
+# carries no colon ("which did I get first, A, B or C?")
+_RE_ORDER_MARKER = re.compile(
+    r"\b(?:first|order|sequence)\b", re.IGNORECASE)
+
+# the TIME/SCOPE clause a binary question may carry between the ordering
+# marker and the option list ("first in February, the bike or the car") — the
+# comma there is a clause boundary, NOT a second option (the pre-#2653
+# classifier's own N-ary comma check; now shared with extraction so the two
+# cannot disagree).
+_RE_TIME_CLAUSE = re.compile(
+    r"^(?:in|on|at|during|for|after|since|before|around)\s+"
+    r"(?:[a-z]+\s+)*?(?:january|february|march|april|may|june|july|"
+    r"august|september|october|november|december|monday|tuesday|"
+    r"wednesday|thursday|friday|saturday|sunday|"
+    r"20\d{2}|the\s+\w+)\s*,\s*",
+    re.IGNORECASE)
+
+# a member of an option list opens with a determiner/possessive/numeral/quote.
+# Used ONLY to keep a NON-colon 3-way split honest: "the couch, which I
+# loved, or the chair" is a BINARY question with a parenthetical comma, and
+# splitting it into three would fail the R1 all-terms gate where the binary
+# path used to fire. The colon form needs no such check (an explicit list
+# introducer IS the signal).
+_RE_OPTION_LEAD = re.compile(
+    r"^(?:['\"]|(?:the|a|an|my|our|your|their|his|her|its|this|that|"
+    r"these|those|one|two|three|four|five|six|seven|eight|nine|ten)\b)",
+    re.IGNORECASE)
 
 # ── shape templates (ordered high-precision) ─────────────────────────────
 
@@ -174,39 +239,119 @@ def classify_question(question: str) -> AssemblyShape | None:
             or _RE_FREQUENCY.search(q) or _RE_RECENCY.search(q)
             or _RE_ADVICE.search(q)):
         return None
-    if _RE_OR_CHAIN.search(q):
-        return None
     if _RE_INTERVAL_SINCE.match(q):
         return AssemblyShape.INTERVAL
     if _RE_INTERVAL_BETWEEN.match(q) or _RE_INTERVAL_BETWEEN_LEAD.match(q):
         return AssemblyShape.INTERVAL
-    if _RE_ORDERING.match(q):
-        # N-ary comma check: any comma between the "first" marker and the
-        # final " or " means a 3+ option list ("first, A, B or C" /
-        # "first: A, B or C") — reject (R13 N-ary out of v1). Legit A-sides
-        # carry NO comma there ("first, my cousin's wedding or Michael's…").
+    m_ord = _RE_ORDERING.match(q)
+    m_list = None if m_ord else _RE_ORDERING_LIST.match(q)
+    if m_ord or m_list:
+        # N-ary (#2653): 3+ named options DECOMPOSE instead of being rejected
+        # (R13's "N-ary out of v1" is lifted here). classify and extract read
+        # the SAME predicate, so a fired ORDERING shape can never come back
+        # with fewer than 3 terms for a 3+ list (R1).
+        if _nary_terms(q):
+            return AssemblyShape.ORDERING
+        if m_ord is None:
+            # the colon-list head with fewer than 3 decomposable options is
+            # not a shape this branch can answer
+            return None
+        # ── binary two-option path (UNCHANGED since #2165) ──
         parts = re.split(r"\s+or\s+", q, flags=re.IGNORECASE)
         a_side = parts[-2] if len(parts) >= 2 else ""
         m_first = re.search(r"\bfirst\b", a_side, re.IGNORECASE)
         a_seg = (a_side[m_first.end():] if m_first else a_side)
         # skip the marker DELIMITER itself (", my cousin's wedding" /
-        # ": my graduation" / "- the couch") before the N-ary comma check
+        # ": my graduation" / "- the couch") before the comma check
         a_seg = re.sub(r"^[\s,:;–—-]+", "", a_seg)
-        # strip a leading TIME/scope clause ("first in February, the bike" —
-        # the comma is a clause boundary, NOT a second option)
-        a_seg = re.sub(
-            r"^(?:in|on|at|during|for|after|since|before|around)\s+"
-            r"(?:[a-z]+\s+)*?(?:january|february|march|april|may|june|july|"
-            r"august|september|october|november|december|monday|tuesday|"
-            r"wednesday|thursday|friday|saturday|sunday|"
-            r"20\d{2}|the\s+\w+)\s*,\s*",
-            "", a_seg, flags=re.IGNORECASE)
+        a_seg = _strip_time_clause(a_seg)
         if "," in a_seg or ";" in a_seg:
             return None
         return AssemblyShape.ORDERING
+    if _RE_OR_CHAIN.search(q):
+        # an or-chain outside an ordering head is never a shape (an interval
+        # anchor is "between A and B", not a 3-way option list)
+        return None
     if _RE_CURRENT.match(q) or _RE_CURRENT_STILL.match(q):
         return AssemblyShape.CURRENT_STATE
     return None
+
+
+def _strip_time_clause(seg: str) -> str:
+    """Drop a leading time/scope clause ("first in February, the bike" —
+    the comma is a clause boundary, NOT a second option)."""
+    return _RE_TIME_CLAUSE.sub("", seg, count=1)
+
+
+def _option_list_segment(question: str) -> str:
+    """The option-list span of an ordering question.
+
+    A list-introducing colon WINS when present ("…the order of the three
+    events: A, B, and C"); otherwise everything after the FIRST ordering
+    marker word ("which did I get first, A, B or C"). The marker search is
+    first-occurrence on purpose: "my first child" must not be read as the
+    marker.
+    """
+    q = question.strip()
+    if ":" in q:
+        seg = q.rsplit(":", 1)[-1]
+    else:
+        m = _RE_ORDER_MARKER.search(q)
+        seg = q[m.end():] if m else ""
+    return _strip_time_clause(re.sub(r"^[\s,:;–—-]+", "", seg))
+
+
+def _split_option_list(seg: str) -> list[str]:
+    """Deterministic option split over a clause span.
+
+    Top-level commas plus the conjunctions that INTRODUCE an option
+    ("A, B, and C" / "A, B or C" / "A or B or C"). An internal conjunction
+    is kept — "the concerts and musical events" stays ONE option (a plain
+    " and " split would fragment it). Over-splitting is fail-CLOSED: the
+    extra term does not resolve, the R1 all-terms gate keeps the fired
+    decision false.
+    """
+    pieces = [p.strip() for p in re.split(r",\s*", seg.strip().rstrip(" ?"))
+              if p.strip()]
+    opts: list[str] = []
+    for piece in pieces:
+        piece = re.sub(r"^(?:and|or)\s+", "", piece, flags=re.IGNORECASE)
+        for part in re.split(r"\s+or\s+", piece.strip(),
+                             flags=re.IGNORECASE):
+            if part.strip():
+                opts.append(part.strip())
+    return opts
+
+
+def _nary_option_list(opts: list[str], *, explicit: bool) -> bool:
+    """True when the split options are a genuine 3+ option list.
+
+    ``explicit`` (a list-introducing colon) is the strong signal and needs no
+    shape check. Without it every NON-FINAL option must look like an option
+    phrase, so a binary question whose A-side merely contains a comma
+    ("the couch, which I loved, or the chair") is not split into three.
+    """
+    if len(opts) < 3:
+        return False
+    if explicit:
+        return True
+    return all(_RE_OPTION_LEAD.match(o) for o in opts[:-1])
+
+
+def _nary_terms(question: str) -> list[str]:
+    """The N-ary option terms of an ordering question ([] when the option
+    list is not a genuine 3+ list).
+
+    classify_question and extract_subject_terms both read THIS — one
+    predicate, so the fired shape and the extracted term count cannot
+    disagree (an N-ary fire with 2 terms would silently narrow the shape).
+    """
+    q = question.strip()
+    explicit = _RE_ORDERING_LIST.match(q) is not None
+    opts = _split_option_list(_option_list_segment(q))
+    if not _nary_option_list(opts, explicit=explicit):
+        return []
+    return [_clean(o) for o in opts]
 
 
 def _clean(term: str) -> str:
@@ -251,8 +396,13 @@ def extract_subject_terms(question: str,
         if not m:
             return []
         return [_clean(m.group("a")), _clean(m.group("b"))]
-    # ordering — split on the LAST " or " (two named options guaranteed by
-    # the shape template + the N-ary guard)
+    # ordering — N-ary list first (#2653): 3+ named options decompose into
+    # pairwise/chain comparisons over the SAME dated spine.
+    nary = _nary_terms(q)
+    if nary:
+        return nary
+    # binary — split on the LAST " or " (two named options guaranteed by the
+    # shape template + the N-ary predicate)
     parts = re.split(r"\s+or\s+", q, maxsplit=0, flags=re.IGNORECASE)
     if len(parts) < 2:
         return []
@@ -348,10 +498,18 @@ class ResolveResult:
     def candidates_for(self, subject_index: int) -> list[SubjectCandidate]:
         return [c for c in self.candidates if c.subject_index == subject_index]
 
-    def both_halves_ok(self, shape: AssemblyShape | None) -> bool:
+    def both_halves_ok(self, shape: AssemblyShape | None,
+                       n_terms: int | None = None) -> bool:
         """R1: two-subject shapes admit BOTH halves or fire nothing. A
         single-subject shape (current-state) fires when its one term
-        resolved. None shape never fires here (classify first)."""
+        resolved. None shape never fires here (classify first).
+
+        ``n_terms`` (#2653): the number of subject terms the shape extracted.
+        Omitted (the legacy binary callers) means the two-half contract; the
+        N-ary ordering path passes the extracted count so an N-way question
+        admits ALL N or nothing — a partial admit would silently narrow the
+        shape exactly as a missing half does for the two-option form.
+        """
         if shape is None:
             return False
         if shape is AssemblyShape.CURRENT_STATE:
@@ -360,8 +518,9 @@ class ResolveResult:
             return bool(self.candidates) and not self.unresolved
         # ordering/interval: every term must resolve (a partial admit would
         # silently narrow the shape to a single subject — forbidden)
+        expected = 2 if n_terms is None else n_terms
         return not self.unresolved and len(
-            {c.subject_index for c in self.candidates}) == 2
+            {c.subject_index for c in self.candidates}) == expected
 
 
 class ResolverPort(Protocol):
@@ -1233,7 +1392,40 @@ def synthesize_hits(
             if lo is not None:
                 dated.append((oid, name, lo, i))
         dated.sort(key=lambda t: (t[2], t[3]))
-        if len(dated) >= 2:
+        # N-ary (#2653): the questions' OWN term count decides the arm, so the
+        # two-option path below stays byte-identical (its goldens are pinned).
+        n_terms = len(halves) if halves else len(order)
+        if n_terms >= 3 and len(order) >= 3:
+            # Chain over the SAME dated spine (earliest dated row per
+            # subject — the binary path's own anchor). The FULL order is
+            # claimed ONLY when EVERY subject is dated: a chain missing a
+            # member would state a confidently wrong order, so it emits
+            # nothing and the per-subject sections below carry the evidence
+            # (same fail-closed polarity as the interval anchors).
+            chron = [(oid, name, lo) for oid, name, lo, _i in dated]
+            if len(chron) == len(order) and len(chron) >= 2:
+                by_day: dict[_date, list[tuple[str, str]]] = {}
+                for oid, name, d in chron:
+                    by_day.setdefault(d, []).append((oid, name))
+                pieces: list[str] = []
+                for gi, d in enumerate(sorted(by_day)):
+                    # within-day ties are ordered by OBJECT ID — the same
+                    # phrasing-independent canon as the binary tie phrase
+                    group = sorted(by_day[d], key=lambda t: t[0])
+                    labels = [_display_label(nm, oid, nm in collide)
+                              for oid, nm in group]
+                    joined = " and ".join(labels)
+                    if gi == 0:
+                        pieces.append(
+                            f"{joined} came first on {_fmt_date(d)}"
+                            if len(labels) == 1 else
+                            f"{joined} both appeared on {_fmt_date(d)}")
+                    else:
+                        pieces.append(f"then {joined} on {_fmt_date(d)}")
+                if pieces:
+                    hits.append({"content": ", ".join(pieces),
+                                 "kind": "ordering"})
+        elif len(dated) >= 2:
             da = dated[0][2]
             if dated[1][2] == da:
                 # same-day tie: claiming a word-order-dependent winner would
@@ -1438,7 +1630,10 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         return _AssembledBlock(fired=False, shape=None, subjects=(),
                                slices={}, admission={}, post_cap_lines=[])
     resolved = resolve_subjects(docker_resolver_port(sdk), terms, shape=shape)
-    if not resolved.both_halves_ok(shape):
+    # #2653: the extracted term count IS the R1 width (an N-way list fires
+    # only when all N subjects resolve). For the two-option and interval
+    # shapes len(terms) == 2, so the legacy two-half contract is unchanged.
+    if not resolved.both_halves_ok(shape, n_terms=len(terms)):
         # one half failed to resolve (or a both-subject shape lacks one) ->
         # the R1 gate: fire NOTHING, let legacy fall through
         return _AssembledBlock(fired=False, shape=None, subjects=(),

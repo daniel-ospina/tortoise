@@ -14,16 +14,22 @@ tests/_assembly_census.json, the committed 133-Q temporal taxonomy):
   classes ("how long did it take", "how many charity events … before",
   "how long have I been working before") — no shape template must fire on
   them; the classifier's shape-based rejection is the point.
-* Measured-negative rows that fire: 2/78 = precision 0.9744 (floor ≥ 0.95,
-  R16). Both false fires are CENSUS-LABEL NOISE with an in-shape twin filed
-  under a positive class (pin adjudicated below): (a) 370a8ff4
-  "How many weeks had passed since I recovered from the flu when I went on
-  my 10th jog" — two-anchor interval-since morphology, twin interval rows
-  fire; (b) gpt4_70e84552_abs "Which task did I complete first, fixing the
-  fence or purchasing three cows from Peter?" — the _abs twin of a row
-  filed ordering/compare whose identical morphology fires.
+* Measured-negative rows that fire: 1/74 = precision 0.9865 (floor ≥ 0.95,
+  R16). The remaining false fire is CENSUS-LABEL NOISE with an in-shape
+  twin filed under a positive class: 370a8ff4 "How many weeks had passed
+  since I recovered from the flu when I went on my 10th jog" — two-anchor
+  interval-since morphology, twin interval rows fire.
+* #2653 moved the nary-ordering class OUT of the measured-negative set by
+  re-measuring it (see test_census_nary_ordering_remeasured). It was filed
+  as 4 rows; the census stores 140-char question TRUNCATIONS, and only 2 are
+  genuine named-subject N-ary ordering questions — both of which now FIRE as
+  ORDERING with 3 terms. The other two are (a) gpt4_70e84552_abs, the binary
+  `_abs` twin of an ordering/compare row, which already fired as an
+  adjudicated label-noise case, and (b) gpt4_d6585ce8 ("the concerts and
+  musical events I attended"), a CLASS-PLURAL enumeration request that names
+  no subjects — a different feature, correctly never fired here.
 
-Both adjudications keep the shape router (NOT the census labels) as the
+The adjudications keep the shape router (NOT the census labels) as the
 arbiter — mirrored in the module docstring.
 """
 from __future__ import annotations
@@ -47,10 +53,16 @@ from tortoise.assembly import (
 _CENSUS = json.loads(
     (Path(__file__).resolve().parent / "_assembly_census.json").read_text())
 
-# the measured-negative classes (the census's non-fireable sub-classes)
+# the three classes the shape router FIRES (the census's in-scope set)
+_IN_SCOPE_CLASSES = {"interval", "ordering/compare", "current-state"}
+# the measured-negative classes (the census's non-fireable sub-classes).
+# #2653: "nary-ordering" is NOT here any more — the class was re-measured
+# and its 2 genuine named-subject rows now FIRE by design (see
+# test_census_nary_ordering_remeasured); the other two are a binary twin
+# that already fired and a class-plural request that is a different feature.
 _NEG_CLASSES = {
     "ago-relative", "frequency/count", "duration-state",
-    "relative-date-lookup", "nary-ordering", "other",
+    "relative-date-lookup", "other",
     "pattern/recurring", "offset-comparison", "recency",
     "recency/current-state",
 }
@@ -59,6 +71,24 @@ _NEG_CLASSES = {
 _ADJUDICATED_FIRE = {
     "370a8ff4",               # interval-since twin (filed frequency/count)
     "gpt4_70e84552_abs",      # ordering twin (filed nary-ordering)
+}
+# the FULL (untruncated) question texts of the census nary-ordering class.
+# tests/_assembly_census.json stores 140-char truncations, which is why this
+# class was measured as 4 rows that fire nothing: the truncation cuts
+# gpt4_f49edff3's third option away, leaving a 2-option tail no shape fires
+# on. Re-measured against the dataset, only these 2 are genuine 3+
+# named-subject ordering questions.
+_NARY_FULL_QUESTIONS = {
+    "gpt4_f49edff3": (
+        "Which three events happened in the order from first to last: the "
+        "day I helped my friend prepare the nursery, the day I helped my "
+        "cousin pick out stuff for her baby shower, and the day I ordered "
+        "a customized phone case for my friend's birthday?"),
+    "gpt4_18c2b244": (
+        "What is the order of the three events: 'I signed up for the "
+        "rewards program at ShopRite', 'I used a Buy One Get One Free "
+        "coupon on Luvs diapers at Walmart', and 'I redeemed $12 cashback "
+        "for a $10 Amazon gift card from Ibotta'?"),
 }
 # in-scope rows whose DURATION/COUNT morphology must NOT fire (pinned)
 _IN_SCOPE_NO_FIRE = {
@@ -158,27 +188,64 @@ def test_current_state_fires(question, expected):
 # ── measured precision floor on the census negative set (R15/R16) ─────────
 
 def test_census_negative_set_precision_floor():
-    """Precision on the measured negative set ≥ 0.95: at most 2 of the 78
-    non-fireable rows may fire, and those 2 are pinned to the adjudicated
-    label-noise rows (a NEW false fire fails — the floor is monotonic)."""
+    """Precision on the measured negative set ≥ 0.95: at most 1 of the 74
+    non-fireable rows may fire, and that 1 is pinned to the adjudicated
+    label-noise row (a NEW false fire fails — the floor is monotonic)."""
     rows = [r for r in _CENSUS["rows"] if r["cls"] in _NEG_CLASSES]
-    assert len(rows) == 78
+    assert len(rows) == 74
     false_fires = [
         r for r in rows
         if classify_question(r["question"]) is not None]
     assert {r["qid"] for r in false_fires} <= _ADJUDICATED_FIRE, \
         f"unexpected false fires: {[(r['qid'], r['question'][:70]) for r in false_fires]}"
-    assert len(false_fires) <= 2, \
-        f"precision floor breached: {len(false_fires)}/78 fired"
-    # the two adjudicated rows fire as their shapes (they are in-shape)
+    assert len(false_fires) <= 1, \
+        f"precision floor breached: {len(false_fires)}/74 fired"
+    # the adjudicated row fires as its shape (it is in-shape)
     for r in false_fires:
         assert classify_question(r["question"]) is not None
 
 
+def test_census_nary_ordering_remeasured():
+    """#2653: the census's nary-ordering class, RE-MEASURED from the
+    UNTRUNCATED dataset question text (the committed census stores 140-char
+    truncations — see ``_NARY_FULL_QUESTIONS``).
+
+    Measured: 2 of the 4 rows are genuine 3+ named-subject ordering
+    questions and now FIRE as ORDERING with exactly 3 extracted terms; one
+    is the binary `_abs` twin that already fired; one is a class-plural
+    enumeration request that names no subjects and must never fire here.
+    """
+    by_qid = {r["qid"]: r for r in _CENSUS["rows"]}
+    nary_rows = [r for r in _CENSUS["rows"] if r["cls"] == "nary-ordering"]
+    assert {r["qid"] for r in nary_rows} == {
+        "gpt4_f49edff3", "gpt4_18c2b244", "gpt4_d6585ce8",
+        "gpt4_70e84552_abs"}, "census nary-ordering membership drifted"
+
+    # the 2 genuine N-ary rows: fired shape + 3 terms, on the FULL text
+    for qid, full in _NARY_FULL_QUESTIONS.items():
+        assert classify_question(full) is AssemblyShape.ORDERING, qid
+        terms = extract_subject_terms(full, AssemblyShape.ORDERING)
+        assert len(terms) == 3, (qid, terms)
+        assert all(t.strip() for t in terms), (qid, terms)
+
+    # the class-plural row names NO subjects -> never a shape (a different
+    # feature: enumerating every event of a class over a window)
+    assert classify_question(by_qid["gpt4_d6585ce8"]["question"]) is None
+
+    # the binary `_abs` twin still fires as the TWO-option form
+    twin = by_qid["gpt4_70e84552_abs"]["question"]
+    assert classify_question(twin) is AssemblyShape.ORDERING
+    assert len(extract_subject_terms(twin, AssemblyShape.ORDERING)) == 2
+
+
 def test_census_in_scope_recall_and_shape_rejections():
     """In-scope census rows: the 50 shape-typical rows fire; the 5 pinned
-    duration/count mis-files do NOT (shape-based rejection is the point)."""
-    rows = [r for r in _CENSUS["rows"] if r["cls"] not in _NEG_CLASSES]
+    duration/count mis-files do NOT (shape-based rejection is the point).
+
+    The in-scope set is the census's three fired classes (interval /
+    ordering-compare / current-state, 55 rows — #2653's nary-ordering class
+    is measured separately by test_census_nary_ordering_remeasured)."""
+    rows = [r for r in _CENSUS["rows"] if r["cls"] in _IN_SCOPE_CLASSES]
     assert len(rows) == 55
     fired = [r for r in rows if classify_question(r["question"]) is not None]
     no_fire = [r for r in rows if classify_question(r["question"]) is None]
@@ -263,27 +330,110 @@ def test_duration_frequency_never_fire():
         assert extract_subject_terms(q) == [], q
 
 
-def test_nary_and_recency_never_fire():
-    """N-ary lists (3+ options), recency ('most recently'), and the
-    'how many days passed between the two Xs' compound single-subject form
-    never fire."""
+def test_nary_ordering_fires_with_n_terms():
+    """#2653: 3+ named options DECOMPOSE (R13's 'N-ary out of v1' is lifted)
+    — every delimiter family the pre-#2653 guard enumerated, plus the
+    corpus's colon-introduced list form."""
+    for q, expected in [
+        # colon + comma/and list (the corpus form; gpt4_f49edff3)
+        ("Which three events happened in order: the day I helped my friend, "
+         "the trip, and the party?",
+         ["I helped my friend", "the trip", "the party"]),
+        # colon + quoted list (gpt4_18c2b244 shape)
+        ("What is the order of the three events: 'A', 'B', and 'C'?",
+         ["'A'", "'B'", "'C'"]),
+        # repeated ' or '
+        ("Which did I get first, the couch or the chair or the table?",
+         ["the couch", "the chair", "the table"]),
+        # comma list + final ' or '
+        ("Which did I get first, the couch, the chair or the table?",
+         ["the couch", "the chair", "the table"]),
+        # colon + comma list + final ' or '
+        ("Which came first: my graduation, my wedding or my first child?",
+         ["my graduation", "my wedding", "my first child"]),
+        # 4 options
+        ("Which did I get first, the couch, the chair, the lamp or the "
+         "table?",
+         ["the couch", "the chair", "the lamp", "the table"]),
+    ]:
+        assert classify_question(q) is AssemblyShape.ORDERING, q
+        assert extract_subject_terms(q) == expected, q
+
+
+def test_binary_ordering_unaffected_by_the_nary_arm():
+    """The two-option path is BYTE-IDENTICAL (#2653 acceptance): every
+    binary delimiter family still yields exactly 2 terms, and a binary
+    question whose A-side merely CONTAINS a comma is not split into three
+    (the `_RE_OPTION_LEAD` guard — otherwise the R1 all-terms gate would fail
+    closed where the binary path used to fire)."""
+    for q, expected in [
+        ("Which vehicle did I take care of first in February, the bike or "
+         "the car?", ["the bike", "the car"]),
+        ("Which book did I finish reading first, 'The Hate U Give' or 'The "
+         "Nightingale'?", ["'The Hate U Give'", "'The Nightingale'"]),
+        ("Which event happened first, my cousin's wedding or Michael's "
+         "engagement party?",
+         ["my cousin's wedding", "Michael's engagement party"]),
+        ("which came first - the couch or the dog bed?",
+         ["the couch", "the dog bed"]),
+        ("Which did I get first: the couch or the dog bed?",
+         ["the couch", "the dog bed"]),
+        ("Which seeds were started first, the tomatoes or the marigolds?",
+         ["the tomatoes", "the marigolds"]),
+    ]:
+        assert classify_question(q) is AssemblyShape.ORDERING, q
+        terms = extract_subject_terms(q, AssemblyShape.ORDERING)
+        assert terms == expected, (q, terms)
+    # a comma INSIDE the A-side of a binary question (parenthetical clause)
+    # must not be read as a third option — the shape does not fire at all
+    assert classify_question(
+        "Which did I get first, 'The Hate U Give', which I loved, or 'The "
+        "Nightingale'?") is None
+
+
+def test_narrative_verbs_do_not_trip_the_advice_guard():
+    """#2653: bare 'pick/choose/decide' are ordinary narrative verbs. The
+    census's own N-ary row says 'the day I helped my cousin PICK OUT STUFF
+    for her baby shower' — a bare-verb advice guard rejected the shape for it,
+    silently excluding a measured row. Preference forms stay rejected."""
+    # narrative use -> the shape fires
+    assert classify_question(
+        "Which three events happened in the order from first to last: the "
+        "day I helped my friend prepare the nursery, the day I helped my "
+        "cousin pick out stuff for her baby shower, and the day I ordered a "
+        "customized phone case for my friend's birthday?"
+    ) is AssemblyShape.ORDERING
+    # preference use -> still rejected (R16)
     for q in [
-        "Which three events happened in order: the day I helped my friend, "
-        "the trip, and the party?",
+        "Which one shall I pick first, the couch or the dog bed?",
+        "Which to choose first, the couch or the dog bed?",
+        "Which would you pick first, the couch or the dog bed?",
+        "Which should I decide first, the couch or the dog bed?",
+        "Which one to pick first, the couch or the dog bed?",
+    ]:
+        assert classify_question(q) is None, q
+
+
+def test_nary_recency_and_class_plural_never_fire():
+    """Recency ('most recently'), the compound single-subject 'between the
+    two Xs' form, and the CLASS-PLURAL enumeration request (no NAMED
+    subjects) never fire — the N-ary arms need a decomposable option list,
+    and 'the concerts and musical events I attended' is not one."""
+    for q in [
         "What is the order of the six museums I visited from earliest to "
         "latest?",
+        "What is the order of the concerts and musical events I attended "
+        "in the past two months, starting from the earliest?",
         "Which mode of transport did I use most recently, a bus or a "
         "train?",
         "Which streaming service did I start using most recently?",
         "How many days passed between the two deep-subject milestones?",
         "When did I buy the couch?",  # date-lookup w/o shape support (v1)
-        # 3+ option lists (review r2 P1 — every delimiter family)
-        "Which did I get first, the couch or the chair or the table?",
-        "Which did I get first, the couch, the dog bed or the sofa?",
-        "Which came first: my graduation, my wedding or my first child?",
+        # semicolon-delimited lists are NOT the measured form
         "Which came first; my graduation; my wedding or my first child?",
     ]:
         assert classify_question(q) is None, q
+        assert extract_subject_terms(q) == [], q
 
 
 def test_empty_and_garbage_input():
@@ -1779,6 +1929,123 @@ def test_render_ordering_line_and_sections():
     assert by_oid["obj-couch"] and by_oid["obj-dogbed"]
     couch_ids = [h["id"] for h in by_oid["obj-couch"]]
     assert couch_ids[-1] == "pX-undated"
+
+
+# ── #2653: N-ary ordering — the N-way chain over the SAME dated spine ─────
+
+_D = __import__("datetime").date  # the #2653 fixtures' date constructor
+
+
+def _nary_slices(dated):
+    """AssemblySlices for an N-subject ordering render. ``dated`` is a list
+    of (object_id, name, date|None) in candidate order."""
+    return AssemblySlices(
+        state_rows=tuple(
+            {"object_id": o, "name": n, "status": "live",
+             "superseded_by": None, "superseded_at": None}
+            for o, n, _dt in dated),
+        timeline_rows=tuple(
+            {"object_id": o, "kind": "point", "id": f"p-{o}",
+             "content": f"event for {n}", "date": dt,
+             "tier": "dated" if dt is not None else "undated"}
+            for o, n, dt in dated),
+        evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+
+
+_THREE = [("obj-a", "couch", _D(2026, 8, 10)),
+          ("obj-b", "dog bed", _D(2026, 8, 14)),
+          ("obj-c", "bookshelf", _D(2026, 9, 1))]
+_THREE_TERMS = ["the couch", "the dog bed", "the bookshelf"]
+
+
+def test_render_nary_ordering_chain():
+    """#2653: 3 named options render ONE deterministic chain over each
+    subject's earliest dated row (the binary path's own anchor) — the whole
+    answer to "which came first, A, B or C"."""
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)]
+    hits = synthesize_hits(_nary_slices(_THREE),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["kind"] == "ordering"
+    assert hits[0]["content"] == (
+        "couch came first on 2026-08-10, then dog bed on 2026-08-14, "
+        "then bookshelf on 2026-09-01"), f"chain drifted: {hits[0]['content']!r}"
+
+
+def test_render_nary_ordering_chain_is_question_order_independent():
+    """Determinism: the chain is a property of the DATED SPINE, not of the
+    candidate order the resolver happened to return (a subject shuffle yields
+    zero delta — the binary path's matched-control contract)."""
+    base = [_cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)]
+    shuffled = [_cand("obj-c", "bookshelf", 0), _cand("obj-a", "couch", 1),
+                _cand("obj-b", "dog bed", 2)]
+    first = synthesize_hits(_nary_slices(_THREE),
+                            shape=AssemblyShape.ORDERING, candidates=base,
+                            halves=_THREE_TERMS)[0]["content"]
+    second = synthesize_hits(_nary_slices(_THREE),
+                             shape=AssemblyShape.ORDERING,
+                             candidates=shuffled,
+                             halves=_THREE_TERMS)[0]["content"]
+    assert first == second
+
+
+def test_render_nary_ordering_tie_group_then_rest():
+    """Same-day tie inside an N-ary chain: the tie group is named in OBJECT
+    ID order (phrasing-independent canon, as in the binary tie phrase), then
+    the later members follow."""
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 10)),
+             ("obj-c", "bookshelf", _D(2026, 9, 1))]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(dated)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["content"] == (
+        "couch and dog bed both appeared on 2026-08-10, then bookshelf on "
+        "2026-09-01"), f"tie chain drifted: {hits[0]['content']!r}"
+
+
+def test_render_nary_undated_subject_suppresses_the_chain():
+    """Fail-closed: the FULL order is claimed ONLY when every subject is
+    dated — a chain silently missing a member would state a confidently wrong
+    order. The per-subject sections still render (the evidence is not lost)."""
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 14)),
+             ("obj-c", "bookshelf", None)]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(dated)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert all(h.get("kind") != "ordering" for h in hits), hits
+    # the sections still carry every subject's rows
+    assert {h.get("object_id") for h in hits if h.get("object_id")} == {
+        "obj-a", "obj-b", "obj-c"}
+
+
+def test_both_halves_ok_is_all_terms_for_the_nary_width():
+    """R1 (#2653): the N-ary width comes from the EXTRACTED term count —
+    all N subjects must resolve or the shape fires nothing. Omitted
+    ``n_terms`` keeps the legacy two-half contract (existing callers)."""
+    from tortoise.assembly import ResolveResult
+    three = ResolveResult(candidates=tuple(
+        _cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)))
+    assert three.both_halves_ok(AssemblyShape.ORDERING, n_terms=3) is True
+    # a 4th term with no candidate -> all-N fails (no partial admit)
+    assert three.both_halves_ok(AssemblyShape.ORDERING, n_terms=4) is False
+    # one unresolved term -> fails whatever the width
+    partial = ResolveResult(
+        candidates=tuple(_cand(o, n, i)
+                         for i, (o, n, _d) in enumerate(_THREE[:2])),
+        unresolved=("the bookshelf",))
+    assert partial.both_halves_ok(AssemblyShape.ORDERING, n_terms=3) is False
+    # the legacy two-half contract is unchanged when n_terms is omitted
+    assert three.both_halves_ok(AssemblyShape.ORDERING) is False
+    assert ResolveResult(candidates=tuple(
+        _cand(o, n, i)
+        for i, (o, n, _d) in enumerate(_THREE[:2]))
+    ).both_halves_ok(AssemblyShape.ORDERING) is True
 
 
 def test_render_interval_diff_via_shared_helper():
