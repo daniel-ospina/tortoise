@@ -100,7 +100,8 @@ def _assert_no_activation_claim(payload: object) -> None:
                     raise SystemExit(
                         f"cohort payload carries an activation claim "
                         f"({key!r}) — refusing to report it; recall_attempted "
-                        f"is an attempt, not value")
+                        f"is an attempt and recall_returned a bare return "
+                        f"(#3675), neither one value")
                 stack.append(value)
         elif isinstance(node, list):
             stack.extend(node)

@@ -528,6 +528,13 @@ surfaces:
   - test_mcp_server.py
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
+  # #3675: the result-bearing `mcp_tool_call` prop. Dual-registered like the
+  # rest of the mcp_server family (`tortoise/mcp_server.py` is a SHARED_MODULE,
+  # so its own changes already take the full matrix) AND under `core`, because
+  # the consumer half — `tortoise/activation_scorecard.py`'s stage 5 — matches
+  # no named pattern and falls to the `core` fallback. One-surface registration
+  # would skip the suite on the other half of the diff.
+  - test_mcp_result_count_telemetry.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
@@ -1007,6 +1014,9 @@ surfaces:
   # runs this drift gate. Do not read this entry as covering a hand-edited
   # document.
   - test_mcp_rename_table.py
+  # #3675: the result-bearing `mcp_tool_call` prop (with the `api` half — see
+  # there). `core` owns the consumer, `tortoise/activation_scorecard.py`.
+  - test_mcp_result_count_telemetry.py
   # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
   # read is injected through a fixture), so `core` can run it on engine-wide
   # changes; it pins tools/queue_conflict_census.py, the instrument that makes

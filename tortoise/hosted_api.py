@@ -15699,9 +15699,14 @@ async def activation_scorecard(
     """Activation funnel for the calling org over [since, until).
 
     Stages: captured -> stored -> memory_produced (session-scoped, graph),
-    recall_attempted (org/time-scoped, analytics), value_confirmed (a
-    REFUSAL — see the module). Every stage carries state + reason; a 0 is only
-    ever emitted with state == "measured".
+    recall_attempted, recall_returned (org/time-scoped, analytics), then
+    value_confirmed (a REFUSAL — see the module). Every stage carries state +
+    reason; a 0 is only ever emitted with state == "measured".
+
+    `recall_returned` (#3675) is the answer-bearing half of `recall_attempted`:
+    it counts retrieval calls whose `result_count` >= 1. It is a RETURN, not a
+    confirmation that anything was useful — `value_confirmed` remains the
+    refusal for that, and the module states the remaining gap.
 
     Defaults to the beta's own <= 24h criterion window. 422 on a malformed,
     naive, non-positive, or over-90-day window (a client error, never a silent
@@ -15857,7 +15862,12 @@ async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
 def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                  graph_error: str | None, analytics_state: str, log,
                  event: str, cap: int):
-    """Read the analytics rows for the window and fold them into stage 4.
+    """Read the analytics rows for the window and fold them into stages 4-5.
+
+    Returns `(stage_cell, detail)` where `detail` also carries stage 5's cell
+    (`recall_returned_cell`, lifted by `assemble`) — both stages are derived by
+    `recall_stages` from one read, one window and one precedence ladder, so they
+    cannot disagree about which rows they are counting.
 
     Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
     — NEVER a zero — for every case where the store cannot be trusted to be
@@ -27423,6 +27433,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3675: the result-bearing half of the SAME row. Without it the
+    # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
+    # 8 points from one that returned nothing — both are ``status: "ok"`` —
+    # which is why the activation scorecard (#3674) could only ever ship
+    # ``recall_attempted``. An int (items returned) or ``None`` when the result
+    # shape makes the count unknowable; ``0`` and ``None`` are DIFFERENT FACTS
+    # and are never collapsed (see ``mcp_server._mcp_result_count``). Counts
+    # only — no retrieved text or point id can reach this key, so the #501 PII
+    # guarantee is unchanged.
+    "result_count",
     # #3359: capture_cost — the per-session cost driver (calibration data
     # only; never on the billing path). All measured fields must survive
     # the PII filter or the measurement is silently lost.

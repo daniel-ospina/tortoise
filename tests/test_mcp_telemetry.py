@@ -85,14 +85,24 @@ def test_tools():
 
 @pytest.fixture
 def captured_events(monkeypatch):
-    """Swap the emitter for a synchronous recorder (deterministic, no I/O)."""
+    """Swap the emitter for a synchronous recorder (deterministic, no I/O).
+
+    The recorder mirrors the emitter's ARITY: an exact-5-arg stub used to sit
+    here, and when #3675 added ``result_count`` the wrapper's call raised
+    TypeError INSIDE the wrapper's own `except Exception` guard — so every event
+    silently vanished and seven tests failed with an empty list rather than a
+    signature error. Recording the param (and asserting it is present) is what
+    turns that into a legible failure next time.
+    """
     from tortoise import mcp_server
     events = []
 
-    def _capture(org_id, tool_name, status, latency_ms, error_kind):
+    def _capture(org_id, tool_name, status, latency_ms, error_kind,
+                 result_count=None):
         events.append({"org_id": org_id, "tool_name": tool_name,
                        "status": status, "latency_ms": latency_ms,
-                       "error_kind": error_kind})
+                       "error_kind": error_kind,
+                       "result_count": result_count})
 
     monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry", _capture)
     return events
@@ -114,6 +124,14 @@ class TestEventPerCall:
         assert ev["tool_name"] == "_telemetry_echo"
         assert ev["status"] == "ok"
         assert ev["error_kind"] is None
+        # #3675: the result-bearing prop rides the same call. ``_telemetry_echo``
+        # returns ``{"echo": ...}`` — no item collection — so the count is
+        # UNKNOWABLE and must be None, never 0 ("the tool returned nothing").
+        # Asserting the KEY is present at all is the plumbing pin: a wrapper
+        # that stopped passing it would show up here rather than as a silently
+        # missing measurement in production.
+        assert "result_count" in ev, ev
+        assert ev["result_count"] is None, ev
         assert isinstance(ev["latency_ms"], int) and ev["latency_ms"] >= 0
         # Unauthenticated path (stdio, no team context) → empty org_id.
         assert ev["org_id"] == ""
@@ -249,7 +267,8 @@ class TestFailSafe:
     async def test_emitter_exception_does_not_break_call(self, test_tools,
                                                          monkeypatch):
         from tortoise import mcp_server
-        def _boom(org_id, tool_name, status, latency_ms, error_kind):
+        def _boom(org_id, tool_name, status, latency_ms, error_kind,
+                  result_count=None):
             raise RuntimeError("telemetry exploded")
         monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry", _boom)
         result = await mcp_server.mcp.call_tool("_telemetry_echo", {"message": "hi"})
@@ -258,7 +277,8 @@ class TestFailSafe:
     async def test_emitter_exception_does_not_mask_tool_error(self, test_tools,
                                                               monkeypatch):
         from tortoise import mcp_server
-        def _boom(org_id, tool_name, status, latency_ms, error_kind):
+        def _boom(org_id, tool_name, status, latency_ms, error_kind,
+                  result_count=None):
             raise RuntimeError("telemetry exploded")
         monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry", _boom)
         with pytest.raises(Exception) as ei:
@@ -283,7 +303,7 @@ class TestRealWritePath:
 
     Proves the event lands with the exact #889 schema through the REAL writer,
     including the analytics props whitelist in hosted_api (tool_name/status/
-    latency_ms/error_kind must survive the filter).
+    latency_ms/error_kind, and #3675's result_count, must survive the filter).
     """
 
     pytestmark = pytest.mark.asyncio
@@ -304,7 +324,7 @@ class TestRealWritePath:
 
         mcp_server._emit_mcp_tool_call_telemetry(
             "team_x", "tortoise_create_point", "validation_error", 7,
-            "missing:content")
+            "missing:content", 0)
         await mcp_server._flush_mcp_telemetry()
 
         assert fallback.exists()
@@ -316,6 +336,11 @@ class TestRealWritePath:
         assert props["status"] == "validation_error"
         assert props["latency_ms"] == 7
         assert props["error_kind"] == "missing:content"
+        # #3675: a ZERO survives the writer's PII filter AS 0. This is the
+        # value the whole prop exists for — "the retrieval ran and answered
+        # nothing" — so the filter must not drop it as falsy, and an
+        # unregistered key (which is stripped with no error) would fail here.
+        assert props["result_count"] == 0, props
 
 
 class TestOverhead:
