@@ -16,6 +16,7 @@ is a real re-run over the SAME corpus and the SAME graph, not a mock.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -200,16 +201,24 @@ def test_derive_repo_from_corpus_reads_the_staged_layout(tmp_path: Path):
 # ── integration: the write path ───────────────────────────────────
 
 @pytest.fixture
-def corpus(tmp_path: Path, monkeypatch, force_sparse_tfidf):
-    """A staged corpus (``<base>/<org>/<repo>``) + an embedded SDK on a fresh DB.
+def corpus(tmp_path: Path, monkeypatch, force_sparse_tfidf, request):
+    """A staged corpus (``<base>/<org>/<repo>``) + an SDK on a fresh DB.
 
     ``TORTOISE_INDEX_NO_NETWORK=1`` keeps the corpus pass off the embedding
     network path and ``force_sparse_tfidf`` pins the embedder OFF entirely —
     this suite measures the MINER, and a cold model load would add minutes of
     wall clock without touching anything under test.
+
+    The NAMESPACE is per test, and that is load-bearing: on the URI lane a
+    namespace maps to a VERBATIM server graph (no path hash), so a shared
+    ``test_docs`` is ONE graph for the whole session — every test in this file
+    would then see the Objects and Points the others mined, which is how a
+    "the first run mined something" or "an Object already exists" failure can
+    land on a graph no test of its own touched.
     """
     from tortoise.sdk import TortoiseSDK
 
+    slug = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
     monkeypatch.setenv("TORTOISE_INDEX_NO_NETWORK", "1")
     base = tmp_path / "ingest"
     root = base / "org-1" / "repo-2"
@@ -219,7 +228,7 @@ def corpus(tmp_path: Path, monkeypatch, force_sparse_tfidf):
     (root / "docs" / "session.md").write_text(SESSION_FILE, encoding="utf-8")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
 
-    sdk = TortoiseSDK(str(tmp_path / "docs.db"), namespace="test_docs")
+    sdk = TortoiseSDK(str(tmp_path / "docs.db"), namespace=f"test_docs_{slug}")
     yield sdk, root, base
     sdk.close()
 
@@ -355,12 +364,12 @@ def test_no_repo_and_no_about_entities_never_fabricates_an_object(corpus):
 def ent_graph(tmp_path):
     """A graph of its OWN, per test, for the entity-resolution tests.
 
-    They create Objects directly, so they must NOT ride the shared corpus
-    graph: the CI lane runs several pytest workers against one
-    namespace-keyed embedded store, and a stray Object (or a shared name) is
-    visible to every other test using that store — which is how this file came
-    back green locally and red in the shard. A private NAMESPACE is the
-    isolation, and every SDK opened here is closed on teardown.
+    They create Objects directly, so they must NOT ride a shared graph: on the
+    URI lane a namespace maps to a VERBATIM server graph (no path hash), so a
+    shared namespace is ONE graph for the whole session and a stray Object (or
+    a shared name) is visible to every other test using it. A private
+    NAMESPACE per test is the isolation, and every SDK opened here is closed on
+    teardown.
     """
     from tortoise.sdk import TortoiseSDK
 
