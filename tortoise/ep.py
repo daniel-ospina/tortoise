@@ -795,88 +795,96 @@ class TortoiseEP:
         live_a = _live_only("a.status", include_draft)
         live_b = _live_only("b.status", include_draft)
         affected: set[str] = set()
-        for seed_id in operator_ids:
-            # #7902 perf: a seed already reached by an earlier seed (or by its
-            # 1-hop expansion) needs no re-expansion — the BFS frontier starts
-            # from the WHOLE initial set, so a skipped seed keeps the same
-            # depth and the same neighbors. Without this, seeding every dirty
-            # root of an N-claim zone issues N label sweeps per phase (the
-            # interactive-latency regression the #7853 widening introduced on
-            # the #395 ≤1s budget).
-            if seed_id in affected:
+        # #7902: resolve the seeds' labels in ONE batched sweep per epistemic
+        # label, then BATCH both expansion queries per label — a per-seed loop
+        # costs ~3 queries per dirty root, which the #395 interactive-latency
+        # budget cannot afford on a 40-claim zone.
+        #
+        # Every DISTINCT seed must expand. Its pre-BFS 1-hop neighbourhood
+        # (operator-less direct edges + `_live_neighbors`) is reach that
+        # consumes no BFS hop, so skipping a seed that an earlier seed merely
+        # REACHED drops a level the `max_hops`-capped BFS cannot make up —
+        # `affected` would become a strict subset of `_window_closure`
+        # (#6597: coverage 0.75-0.875 on a direct chain). Batching, not
+        # skipping, is what buys the budget back.
+        seed_ids = list(dict.fromkeys(operator_ids))
+        seed_meta: dict[str, tuple[str, bool, str | None]] = {}
+        unresolved = list(seed_ids)
+        for _label in EPISTEMIC_LABELS:
+            if not unresolved:
+                break
+            # A node carries exactly one epistemic label, so the first label
+            # in EPISTEMIC_LABELS order that resolves wins — the same
+            # stop-at-first result as the per-seed sweep.
+            rows = self.g.query(
+                f"MATCH (n:{_label}) WHERE n.id IN $ids "
+                "RETURN n.id, (n.is_operator = true), n.status",
+                params={"ids": unresolved},
+            ).result_set
+            for sid, is_op, status in rows:
+                seed_meta[sid] = (_label, bool(is_op), status)
+            unresolved = [s for s in unresolved if s not in seed_meta]
+        # A seed that resolved to no epistemic label contributes nothing,
+        # matching the pre-widening Point probe.
+
+        op_seeds = [s for s in seed_ids if seed_meta.get(s, ("", False, None))[1]]
+        plain_by_label: dict[str, list[str]] = {}
+        for s in seed_ids:
+            meta = seed_meta.get(s)
+            if meta is None or meta[1]:
                 continue
-            is_op: list = []
-            seed_label: str | None = None
-            # #7853/#7902: the seed may be any epistemic label. Sweep the
-            # labels but STOP at the first that resolves — a node carries one
-            # epistemic label, so a Point seed costs ONE query, not four (the
-            # #395 interactive-latency budget depends on this). The resolved
-            # label is reused for the seed's direct-edge probe and the
-            # operator-mediated hop below, so those do not re-sweep.
-            for _label in EPISTEMIC_LABELS:
-                is_op = self.g.query(
-                    f"MATCH (n:{_label} {{id:$id}}) "
-                    "RETURN (n.is_operator = true), n.status",
-                    params={"id": seed_id},
-                ).result_set
-                if is_op:
-                    seed_label = _label
-                    break
-            if seed_label is None:
-                # The seed does not exist (or is not an epistemic node) — it
-                # contributes nothing, matching the pre-widening Point probe.
-                continue
-            seed_is_draft = bool(
-                is_op and is_op[0][1] == "draft" and not include_draft
-            )
-            if is_op and is_op[0][0]:
-                # Operator seed — legacy behavior: follow outgoing edges to
-                # the operator's inputs (the operator's factor). Draft
-                # operators and draft target claims are excluded (#780).
-                # #7853: the input may be any epistemic label.
-                conds = [epistemic_disjunction("c")]
-                if live_c:
-                    conds.append(live_c)
-                if live_o:
-                    conds.append(live_o)
-                where = " WHERE " + " AND ".join(conds)
-                rows = self.g.query(
-                    "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->(c) "
-                    f"{where} "
-                    "RETURN DISTINCT c.id",
-                    params={"oid": seed_id},
-                ).result_set
-            else:
-                # Plain seed (#888 W5): direct edges in BOTH directions
-                # (an operator-less edge is a factor shared by its endpoints),
-                # plus the seed's operator-mediated neighborhood via
-                # _neighbors so a seed whose only connections are
-                # operator-mediated still runs its incident factors. Draft
-                # endpoints are excluded (#780) — a draft seed runs nothing.
-                # #7902: the seed may be any epistemic label (the write path
-                # admits non-Point direct edges) — anchor on the resolved
-                # label (one query) and widen the far endpoint by traversal.
-                conds = ["b.id <> $id", epistemic_disjunction("b")]
-                if live_b:
-                    conds.append(live_b)
-                if live_a:
-                    conds.append(live_a)
-                where = " WHERE " + " AND ".join(conds)
-                rows = self.g.query(
-                    f"MATCH (a:{seed_label} {{id:$id}})-[r:IMPL|NAND]-(b) "
-                    f"{where} "
-                    # #3139/#3154: index-independent non-operator predicate
-                    # (a bare `= false` is emptied by a GRAPH.COPY'd index).
-                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
-                    "AND b.op_type IS NULL "
-                    "RETURN DISTINCT b.id",
-                    params={"id": seed_id},
-                ).result_set
-                if not seed_is_draft:
-                    for nid in self._live_neighbors(
-                            seed_id, include_draft, label=seed_label):
-                        affected.add(nid)
+            plain_by_label.setdefault(meta[0], []).append(s)
+
+        if op_seeds:
+            # Operator seeds — legacy behavior: follow outgoing edges to the
+            # operator's inputs (the operator's factor). Draft operators and
+            # draft target claims are excluded (#780). #7853: the input may
+            # be any epistemic label.
+            conds = [epistemic_disjunction("c")]
+            if live_c:
+                conds.append(live_c)
+            if live_o:
+                conds.append(live_o)
+            rows = self.g.query(
+                "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
+                "WHERE o.id IN $oids AND " + " AND ".join(conds) + " "
+                "RETURN DISTINCT c.id",
+                params={"oids": op_seeds},
+            ).result_set
             affected.update(r[0] for r in rows)
+
+        for _label, group in plain_by_label.items():
+            # Plain seeds (#888 W5): direct edges in BOTH directions (an
+            # operator-less edge is a factor shared by its endpoints), plus
+            # each seed's operator-mediated neighborhood so a seed whose only
+            # connections are operator-mediated still runs its incident
+            # factors. Draft endpoints are excluded (#780) — a draft seed runs
+            # nothing. #7902: the seed may be any epistemic label, so the
+            # resolved label anchors the id index here and narrows the
+            # traversal position below.
+            conds = ["b.id <> a.id", epistemic_disjunction("b")]
+            if live_b:
+                conds.append(live_b)
+            if live_a:
+                conds.append(live_a)
+            rows = self.g.query(
+                f"MATCH (a:{_label})-[r:IMPL|NAND]-(b) "
+                "WHERE a.id IN $ids AND " + " AND ".join(conds) + " "
+                # #3139/#3154: index-independent non-operator predicate
+                # (a bare `= false` is emptied by a GRAPH.COPY'd index).
+                "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                "AND b.op_type IS NULL "
+                "RETURN DISTINCT b.id",
+                params={"ids": group},
+            ).result_set
+            affected.update(r[0] for r in rows)
+            live_group = [
+                s for s in group
+                if not (seed_meta[s][2] == "draft" and not include_draft)
+            ]
+            if live_group:
+                affected.update(self._live_neighbors_many(
+                    live_group, include_draft, label=_label))
 
         if affected and (max_hops is None or max_hops > 0):
             frontier = list(affected)
@@ -1067,6 +1075,11 @@ class TortoiseEP:
 
     def _live_neighbors(self, node_id: str, include_draft: bool,
                         label: str | None = None) -> list[str]:
+        """Single-id wrapper over `_live_neighbors_many` (#7902)."""
+        return self._live_neighbors_many([node_id], include_draft, label=label)
+
+    def _live_neighbors_many(self, node_ids: list[str], include_draft: bool,
+                             label: str | None = None) -> list[str]:
         """Operator-mediated neighborhood hop that never crosses drafts (#780).
 
         Operator-mediated neighborhood hop for the affected-set expansion —
@@ -1083,18 +1096,26 @@ class TortoiseEP:
         neither forms a factor, so neither may admit its far endpoint into the
         affected set.
 
-        ``label`` (#7902 perf): the node's already-resolved epistemic label.
+        ``node_ids`` (#7902 perf): the BATCHED form. The whole seed group is
+        expanded in ONE query per label instead of one query per seed — a
+        per-seed loop costs the #395 interactive-latency budget N queries on
+        an N-dirty-root zone, and it is also why the expansions are batched
+        rather than SKIPPED: skipping a seed an earlier seed merely REACHED
+        would drop its neighbours from the pre-BFS set (#6597).
+
+        ``label`` (#7902 perf): the nodes' already-resolved epistemic label.
         When supplied, the id-anchored hop runs ONCE on that label instead of
-        sweeping all four — the #395 interactive-latency budget. Omit it for
-        the standalone sweep.
+        sweeping all four. Omit it for the standalone sweep.
         """
+        if not node_ids:
+            return []
         # #7853/#7902: m (the far endpoint) may be any epistemic label —
         # widened by traversal. The id-anchored n uses the resolved label when
         # known, else sweeps the four labels.
         template = (
-            "MATCH (n:{label} {id:$id})<-[r:IMPL|NAND]-(op:Point)"
+            "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
             "-[r2:IMPL|NAND]->(m) "
-            "WHERE m.id <> $id "
+            "WHERE n.id IN $ids AND m.id <> n.id "
             f"AND {epistemic_disjunction('m')} "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "
@@ -1109,7 +1130,8 @@ class TortoiseEP:
             queries = epistemic_label_queries(template)
         rows: list = []
         for _q in queries:
-            rows.extend(self.g.query(_q, params={"id": node_id}).result_set)
+            rows.extend(self.g.query(
+                _q, params={"ids": list(node_ids)}).result_set)
         return [r[0] for r in rows]
 
     def _affected_factors(self, affected_claims: set[str],
