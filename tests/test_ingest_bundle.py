@@ -279,7 +279,8 @@ class TestPromotionPolicy:
         # E2E-8 assertion 1 (SDK surface): auto → source promotes live on
         # first IMPL edge; target stays draft; operator is NOT draft (the
         # live-side of the #780 promote_source asymmetry — gated writes an
-        # explicit draft, auto writes no status → projection coalesces live).
+        # explicit draft, auto writes 'live' since #5089; before that it wrote
+        # no status, which a rebuild turned into 'live').
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},

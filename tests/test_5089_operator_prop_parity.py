@@ -33,18 +33,25 @@ correctly-replayed graph
 (``test_consistency_divergence_5011.py::test_a_promotion_snapshot_without_the_operator_key_resets_operator_ness``,
 measured). The two intents need a per-record distinction, not one clause.
 
-**``status`` — A DOOR QUESTION, not fixed here.** Its
+**``status`` — SETTLED AND FIXED (#5089).** Its
 ``coalesce($st, n.status, 'live')`` default is LOAD-BEARING, not cosmetic:
 reads select on it (``projection/grounding.py`` matches ``{status: 'live'}``),
 so it decides whether a point participates in belief propagation. Dropping it
 for operator records removed the point from the grounding result
 (``test_projection.py::test_compute_grounding_basic`` reds — measured, and the
-reason that half was reverted). The divergence is real in the other direction
-too: NEITHER live door writes ``'live'`` (the SDK's ``create_operator`` writes no
-status at all; ``api._point`` writes ``'draft'``), so no LIVE door's operator is
-a grounding participant while every REBUILT one is. Which side is canonical is a
-decision reported on #5089/#5091; the last test pins the measured state so the
-ruling has a red-to-green target.
+reason that half was reverted). The divergence ran in the other direction too:
+the SDK door's ``create_operator`` wrote NO status at all, so the live operator
+was not a grounding participant while every rebuilt one was.
+
+**That is now fixed at the door, not pinned.** ``create_operator`` writes
+``'live'`` on the promoting posture and ``'draft'`` on the extraction posture, so
+live == replay and the operator's grounding participation no longer changes
+across a rebuild. The evidence that settled it, and why a status-less operator
+was the defect rather than a design, is on #5089; the sources were
+``consistency._WRITER_DEFAULTS['status'] = 'live'``, graph PARENT CAUSE 28
+(``1a0e9120c82``), TORTOISE-GRAPH-BRIEF's ``status=None`` leak class, and
+ONTOLOGY §5. The test below was the pin, and it is updated to the resolved state
+rather than deleted.
 
 MUTATIONS THAT MUST RED:
 - restore the ``sdk._emit_event`` content synthesis → the record carries the
@@ -117,7 +124,7 @@ def sdk_and_events(tmp_path):
 
 
 def _sdk_operator(sdk):
-    """An operator created by the SDK door: no content, no status, live."""
+    """An operator created by the SDK door: no content, status 'live' (#5089)."""
     src = sdk.create_point("statement", "T0 source", status="live",
                            dedup=False)["id"]
     claim = sdk.create_point("statement", "downstream claim", status="live",

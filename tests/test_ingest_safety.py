@@ -299,10 +299,9 @@ def test_track_b_e2e7_1_draft_invisible_to_ep(sdk):
     bit-identical. REQUIRES #780's _live_only covering Batch-3 direct-edge
     factors AND A9's selector traversal (both shipped — this is the proof
     obligation for both interface notes)."""
-    # live X, Y + LIVE IMPL operator X→Y (promote_source=True default writes
-    # the operator node WITHOUT a status property — live by projection, the
-    # #780 asymmetry — so dream computes a REAL conf(Y) baseline; the draft
-    # operator variant would make conf(Y) None and the bit-identical claim
+    # live X, Y + LIVE IMPL operator X→Y (promote_source=True writes the operator
+    # node 'live' since #5089 — so dream computes a REAL conf(Y) baseline; the
+    # draft operator variant would make conf(Y) None and the bit-identical claim
     # a None==None tautology)
     x = sdk.create_point("statement", "X.", status="live")["id"]
     y = sdk.create_point("statement", "Y.", status="live")["id"]

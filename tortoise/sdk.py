@@ -12618,9 +12618,10 @@ class TortoiseSDK:
           sources (retracted/deprecated terminal sources are never
           resurrected; an explicit or prior draft is never retro-promoted,
           #1088).
-          Under auto the operator node is written WITHOUT a status property
-          (live by projection — the #780 asymmetry: gated writes explicit
-          draft on the operator, auto writes none).
+          Under auto the operator node is written 'live' (#5089 — it used to be
+          written WITHOUT a status property, which made the live operator
+          EP-inert while a rebuild produced 'live'; gated still writes an
+          explicit draft on the operator).
 
         Returns {granularity, batch_id, created: {points, entities, sources,
         connections}, deduped: {...}, ids: {points, entities, sources,
@@ -13721,11 +13722,22 @@ class TortoiseSDK:
         # NULL-status partial whose written set is a PROPER SUBSET of the
         # requested set with STRICT label/direction matching (the declared
         # values — absent↔default canonicalized the same way).
+        #
+        # #5089: the status clause admits 'live' as well as 'draft'/'NULL'. It
+        # used to read `(o.status IS NULL OR o.status = 'draft')`, which was
+        # correct only while the DEFAULT door left the operator status-less:
+        # create_operator now writes 'live' on the promoting posture (so live ==
+        # replay), and a crash between the node CREATE and the edge loop under
+        # that posture would otherwise be INVISIBLE here — the retry would miss
+        # the partial and mint a DUPLICATE operator, double-counting it in EP.
+        # The subset conditions are what identify the crash window; the status
+        # clause exists only to refuse a TERMINAL operator (retracted/
+        # superseded/outdated/archived), which stays refused.
         pcond = [
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
-            "(o.status IS NULL OR o.status = 'draft')",
+            "(o.status IS NULL OR o.status IN ['draft', 'live'])",
         ]
         if label is not None:
             pcond.append("o.label = $label")
