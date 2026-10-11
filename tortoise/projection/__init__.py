@@ -3700,9 +3700,13 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
 #: ``tests/test_rebuild_parity_fail_loud_3585.py::
 #: TestReferenceFoldEntityLabelSetHasOneHome::test_the_name_merge_label_sets_have_one_home``.
 _NAME_KEYED_ENTITY_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
-#: The labels the belief fold can target — ``tortoise.live.EPISTEMIC_LABELS``
-#: (imported at the module tail, so the literal here is a comma-identical copy
-#: pinned equal by ``tests/test_7853_confidence_label_propagation.py``). The
+#: The labels the belief fold can target — ``tortoise.live.EPISTEMIC_LABELS``.
+#: That name is imported ABOVE this literal in this module, and the pin is a
+#: ``frozenset`` EQUALITY, not a text comparison: the literal's order and
+#: spelling are free, and only the SET is held equal by
+#: ``tests/test_7853_confidence_label_propagation.py::
+#: test_epistemic_boundary_labels_are_the_belief_targets``
+#: (``frozenset(EPISTEMIC_LABELS) == _EPISTEMIC_BOUNDARY_LABELS``). The
 #: boundary :func:`journal_epistemic_existence` builds is keyed on the node's
 #: ``id`` property for EVERY one of them, because ``_fold_confidence_changed``
 #: matches ``MATCH (n:{label} {id:$rid})`` for all four (#7903 P1a/P1b).
@@ -4484,16 +4488,24 @@ def journal_epistemic_existence(events) -> dict:
                 if lbl in _EPISTEMIC_BOUNDARY_LABELS:
                     # The graph resolves a delete by the label's MATCH key
                     # (``eventId`` for Event, ``id`` elsewhere) — so untrack
-                    # every node carrying it and record the boundary delete on
-                    # the node's ``id`` property, NOT on the record's ``rid``
+                    # every node carrying it and record the boundary transition
+                    # on the node's ``id`` property, NOT on the record's ``rid``
                     # (which is the match key). A delete that resolves NO node
                     # removes nothing and records nothing: an id with no live
                     # incarnation needs no burial, and recording one for a
                     # node whose ``eventId`` had moved would be a false burial.
+                    #
+                    # Two DIFFERENT nodes can carry the same boundary ``id``
+                    # (Event's match key and boundary key differ), so a burial
+                    # is recorded only when the node's ``id`` is genuinely no
+                    # longer live after the untrack — via ``_note_presence``,
+                    # the same transition rule every other boundary arm uses.
+                    # An unconditional ``deletes`` append here buried an id
+                    # another live ``:Event`` still carried, so the reference
+                    # fold refused a journal all graph engines accept.
                     for node in list(by_eid.get((lbl, rid), ())):
                         _untrack(lbl, node)
-                        if isinstance(node.id, str):
-                            deletes.setdefault((lbl, node.id), []).append(seq)
+                        _note_presence(lbl, node.id, seq, True)
                 else:
                     # A label outside the belief table (:Source): keep the
                     # unconditional record, its existence has no belief

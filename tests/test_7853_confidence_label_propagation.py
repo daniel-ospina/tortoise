@@ -500,9 +500,9 @@ def test_reference_fold_exempts_a_materialized_non_point_belief(caplog):
     from tortoise.projection import fold
     from tortoise.projection.nonfolded import collect_non_folded, refused_events
 
-    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
-        with collect_non_folded() as entries:
-            keys = fold(list(_NON_POINT_BELIEF_JOURNAL))
+    with (caplog.at_level(logging.WARNING, logger="tortoise.projection"),
+          collect_non_folded() as entries):
+        keys = fold(list(_NON_POINT_BELIEF_JOURNAL))
 
     assert list(refused_events(entries)) == [], [str(e) for e in entries]
     assert "evt-7936" not in keys, keys
@@ -607,8 +607,14 @@ def test_reference_fold_refuses_a_belief_an_id_wide_delete_buried():
     """The unknown/missing-label delete is id-wide: ``_delete_entity_by_id``
     removes the node whatever its label, so it can bury a non-Point too.
 
-    The exemption must consult the ``(None, id)`` fallback key the way
-    ``_hard_deleted_any`` does — a per-label lookup alone would fail OPEN on
+    The boundary does NOT keep a ``(None, id)`` fallback key: a missing or
+    unknown label expands to ``_HARD_DELETE_LABELS``
+    (``projection/__init__.py``'s delete arm), so the delete is recorded on
+    the resolved node's own per-label boundary — here a real ``Subject``
+    burial. ``_hard_deleted_any``'s ``(None, rid)`` lookup belongs to the
+    separate ``hard_deleted_seq`` structure the supersede sweeps use, not to
+    this ordered boundary. The exemption must therefore READ that boundary at
+    the belief record (``create``, then ``delete``) or it would fail OPEN on
     this shape.
     """
     from tortoise.projection import fold
@@ -747,7 +753,6 @@ def test_compute_confidence_writeback_persists_full_precision_for_non_point(sdk)
     UNWIND leaves a non-Point target holding the 4-dp mirror — the API result
     is not what the graph holds.
     """
-    proj = sdk._get_proj()
     src = make_point(sdk, "strong source")
     event = make_labeled_node(sdk, "Event", "evt-7853-wb", "an event")
     set_evidence(sdk, src, 12.0, 1.0)
@@ -1002,6 +1007,22 @@ _BOUNDARY_MATRIX = [
     ("event-state-op-eventid-change-keeps-the-id",
      [_m_event(),
       _m_rename(state={"eventId": "matrix-moved"}, label="Event"),
+      _m_belief()], False),
+    # #7903 round-4 FIX 1: an `op="delete"` resolves nodes by Event's GRAPH
+    # match key (`eventId`), but the boundary burial is recorded on each
+    # resolved node's `id` — and TWO nodes can share one boundary `id`. Here
+    # the `eventId`-moving rename leaves the first `:Event` carrying
+    # `id == _MATRIX_ID` while a SECOND `:Event` is registered under the same
+    # `id`; the delete by the moved `eventId` removes only the first node, so
+    # `_MATRIX_ID` stays live and the belief folds. An unconditional burial in
+    # the delete arm buried an id a live node still carried, so the reference
+    # fold refused a journal `rebuild_all` (and every other engine) accepts —
+    # the reported FALSE RED.
+    ("event-eventid-delete-keeps-an-id-another-node-carries",
+     [_m_event(),
+      _m_rename(state={"eventId": "matrix-moved"}, label="Event"),
+      _m_event(),
+      _m_delete("Event", "matrix-moved"),
       _m_belief()], False),
     # The `:Point` twin — its graph key and belief key are BOTH `id`, so the
     # reference index must re-key as well as the boundary recording the move.

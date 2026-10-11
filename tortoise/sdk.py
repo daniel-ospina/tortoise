@@ -9909,11 +9909,15 @@ class TortoiseSDK:
 
         An operator is promoted only when it carries EXPLICIT status 'draft'
         (the post-#780 `create_operator(promote_source=False)` shape) AND
-        every endpoint Point is live — otherwise the draft endpoints would
-        inherit a live edge (the exact pollution the draft lifecycle
-        prevents). Unset-status operators are LIVE under the canonical read
-        model (projection coalesce default; #944 review) and are skipped —
-        never re-promoted into the event stream.
+        every endpoint is live — otherwise a draft endpoint would inherit a
+        live edge (the exact pollution the draft lifecycle prevents). The
+        endpoint read is NOT Point-only: #7853 widened it to
+        `epistemic_disjunction('s')`, so it covers all four epistemic labels
+        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
+        blocks promotion just as a draft `:Point` does. Unset-status operators
+        are LIVE under the canonical read model (projection coalesce default;
+        #944 review) and are skipped — never re-promoted into the event
+        stream.
         """
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft

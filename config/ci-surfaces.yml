@@ -834,9 +834,15 @@ surfaces:
   # epistemic_label_queries), and a `tortoise/live.py`-only change matches no
   # SOURCE_PATTERNS rule and falls through to `core` — so without this entry
   # the declaration's guard never runs on the change that can delete it.
-  # Dual-registered under `ep` (below) because the rest of its subject is
-  # `tortoise/ep.py` (#2938 convention, as test_lifecycle_guards.py and
-  # test_2500_terminal_ep_backfill.py above).
+  # Dual-registered under `ep` (below) because
+  # `test_dream_writeback_persists_full_precision_for_non_point` reaches the
+  # dreamer dynamically (`sdk._get_dreamer()` / `_ep_run_batch`). A
+  # `tortoise/dream.py`-only change is a named `ep` SOURCE_PATTERNS match, so
+  # it selects `ep` and the `core` fallback does NOT also run — without this
+  # entry that dreamer guard would never execute (#2938 convention). The
+  # reason is NOT `tortoise/ep.py`: that module is a `SHARED_MODULES` entry
+  # (`tools/ci_selection.py`), so a change to it already forces the full
+  # matrix and needs no per-test registration.
   - test_7853_confidence_label_propagation.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
