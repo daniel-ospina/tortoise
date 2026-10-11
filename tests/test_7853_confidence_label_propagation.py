@@ -1135,7 +1135,8 @@ def test_boundary_matrix_reference_and_graph_agree(
         the P2 (#7936 round-5) hole: the fourth engine's threading had no test
         (mutating `if "journal_existence" in _apply_params:` to `if False:` left
         115 passing). #7903 P3 adds `rebuild(log)` — the apply()-based engine
-        with its OWN `journal_existence=` kwarg (~projection/__init__.py:6934),
+        with its OWN `journal_existence=` kwarg (`projection/__init__.py:6439`;
+        `rebuild` threads it at `:7100`),
         whose loss falsely refuses a forward-referenced belief write.
         """
         tag = engine.replace(".", "_")
