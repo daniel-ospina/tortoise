@@ -293,12 +293,16 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"   # source promoted
         assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
-        # #780 asymmetry: gated writes explicit draft on the operator; auto
-        # writes NO status prop (EP treats null-status as live). Assert the
-        # honest discriminator — key absence, not == "live" (which would
-        # fail on the raw-properties read surface) and not != "draft"
-        # (which false-passes on garbage statuses like "retracted").
-        assert "status" not in sdk.get_point(op_id)
+        # #5089: this connection carries no `reify`, so `_connection_route`
+        # returns 'direct' and NO operator node is minted — `ids["connections"]
+        # [0]` is the direct-edge descriptor, and `get_point` on it is `{}`.
+        # Assert THAT, because `assert "status" not in {}` was unfalsifiable (it
+        # held whatever the operator door did). The operator NODE's status
+        # contract — 'live' under auto since #5089 — is asserted where a node
+        # actually exists: test_mcp_server.py's reify=True case.
+        assert sdk.get_point(op_id) == {}, (
+            "a direct-route connection must not mint an operator node"
+        )
 
     def test_auto_nand_promotes_source_live(self, sdk):
         # Promotion is op-type-agnostic: NAND wires the same #131 path
@@ -438,7 +442,10 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"
         assert sdk.get_point(pB)["status"] == "draft"
-        assert "status" not in sdk.get_point(op_id)  # #780 live-side
+        # #5089: no `reify` → 'direct' route → no operator node (see the note in
+        # test_auto_promotes_source_live; the old key-absence assertion was
+        # unfalsifiable).
+        assert sdk.get_point(op_id) == {}
 
     def test_keyword_only_enforced(self, sdk):
         # Q2-lock: positional auto-promotion must NOT silently opt in — a

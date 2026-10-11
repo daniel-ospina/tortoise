@@ -1051,10 +1051,11 @@ class TestIngestPromotionPolicy:
 
     def test_mcp_auto_reify_operator_is_live(self, request, monkeypatch, tmp_path):
         # #780 live-side on a REAL operator node. #5089 changed what 'auto'
-        # writes: the operator used to be born with NO status property (a
-        # status-less Point is EP-inert while the replay's coalesce produces
-        # 'live', so live != replay). The auto door now writes the 'live' the
-        # replay reproduces — this asserts the CURRENT contract, and it is what
+        # writes: the operator used to be born with NO status property (which
+        # excluded it from the strict grounding selector while the replay's
+        # coalesce produced 'live', so the rebuild alone changed its grounding
+        # participation). The auto door now writes the 'live' the replay
+        # reproduces — this asserts the CURRENT contract, and it is what
         # replaced the old `assert "status" not in op`.
         res = self._sdk_backed_ingest(
             request, monkeypatch, tmp_path, reify=True, promotion_policy="auto")

@@ -294,9 +294,11 @@ def test_create_operator_default_promotes_source(sdk):
         "MATCH (n:Point {id:$id}) SET n.status = NULL", params={"id": a["id"]})
     op = sdk.create_operator("IMPL", a["id"], [b["id"]])
     # #5089: the operator node is born 'live' on the default posture. It used to be
-    # born with NO status, which made it EP-inert while a rebuild produced 'live'
-    # (projection/entities.py coalesce) — so live != replay, and the operator
-    # silently changed EP posture across a rebuild. A status-less Point is the
+    # born with NO status, which excluded it from the STRICT grounding selector
+    # while a rebuild produced 'live' (projection/entities.py coalesce) — so the
+    # rebuild alone changed its grounding participation. (EP factor extraction
+    # admits a NULL status either way: live.py's _live_only spares NULL and only
+    # excludes 'draft'.) A status-less Point is the
     # class TORTOISE-GRAPH-BRIEF records as a leak and graph PARENT CAUSE 28
     # (1a0e9120c82) names: "Work that is recorded and does NOT vote is worse than
     # work that is not recorded, because it reads as done."

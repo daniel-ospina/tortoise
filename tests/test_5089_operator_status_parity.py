@@ -64,8 +64,18 @@ def test_create_operator_writes_a_status_the_replay_reproduces():
         # The graph's standing rule after any write: a born point is draft or live.
         assert live in ("draft", "live"), (
             f"#5089: create_operator born status={live!r} — neither 'draft' nor "
-            f"'live'. A status-less Point is EP-inert while a rebuilt one is "
-            f"'live' (projection/entities.py coalesce), so live != replay."
+            f"'live'. A status-less Point is excluded by the strict grounding "
+            f"selector while a rebuilt one is 'live' (projection/entities.py "
+            f"coalesce), so the rebuild would change its grounding participation."
+        )
+        # Pin the VALUE on the default posture, not merely its membership in the
+        # allowed set: `in ("draft", "live")` above would pass if the door
+        # regressed to birthing 'draft', which would break the parity this file
+        # exists for. (Review P2: the membership check alone was too weak.)
+        assert live == "live", (
+            f"#5089: the promoting posture must write 'live' (got {live!r}); "
+            f"'draft' is the extraction posture's value, and the #780 EP draft "
+            f"filter would then exclude this operator from EP computation."
         )
 
         sdk._get_proj().rebuild_all(os.path.dirname(os.path.join(d, "e")),
@@ -124,6 +134,13 @@ def test_partial_absorb_still_finds_a_live_partial_operator():
     matching the crash-partial: the retry would miss it and MINT A DUPLICATE
     operator, double-counting it in EP. This test drives the crash window and
     asserts the partial is still found.
+
+    **Scope of the window (review P2-3).** The predicate requires
+    `size(targets) > 0`, so what is recovered is a crash AFTER AT LEAST ONE edge
+    is written (`n >= 1`). A crash immediately after CREATE, before any edge,
+    is NOT absorbed by this arm and still mints a duplicate — pre-existing, and
+    stated here rather than left implied by "a crash between CREATE and the edge
+    loop". This test therefore drops ONE of TWO edges, not both.
 
     Mutation proof: restore the clause to
     `(o.status IS NULL OR o.status = 'draft')` and this test fails — the operator

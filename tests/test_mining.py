@@ -590,8 +590,9 @@ class TestEpSafeCommitReviewFixes:
         #5089: the leak shape is now built EXPLICITLY (`REMOVE o.status`) rather
         than relying on `create_operator` to produce it. The default door used
         to leave the operator status-less; it now writes 'live' on the promoting
-        posture so that live == replay (a status-less operator was EP-inert while
-        a rebuilt one was live — the divergence #5089 closes). The GATE's duty is
+        posture so that live == replay (a status-less operator was excluded from
+        the strict grounding selector while a rebuilt one satisfied it — the
+        divergence #5089 closes). The GATE's duty is
         unchanged, and so is this test's purpose: a legacy status-less operator
         must still be caught. Only the way the legacy shape is constructed moved.
         """

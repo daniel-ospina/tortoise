@@ -10763,8 +10763,10 @@ class TortoiseSDK:
         # (`promote_source=True`) operator was born status-less — and the replay
         # writer's coalesce default ('live') then did NOT reproduce the live graph.
         # The graph's standing rule after any write is `status in ('draft','live')`
-        # (a status-less Point is EP-inert while a rebuilt one is live, so the
-        # operator silently changed EP posture); and `consistency._WRITER_DEFAULTS`
+        # (a status-less Point is admitted by EP factor extraction but excluded by
+        # the STRICT grounding selector, while a rebuilt one satisfies it — so the
+        # rebuild alone changed the operator's grounding participation); and
+        # `consistency._WRITER_DEFAULTS`
         # states the rule this restores — "When the journal omits one, the graph's
         # value must EQUAL the default". 'live' IS that default, per this writer's
         # own docstring: "the event path default ('live', projection/entities.py
@@ -12619,9 +12621,10 @@ class TortoiseSDK:
           resurrected; an explicit or prior draft is never retro-promoted,
           #1088).
           Under auto the operator node is written 'live' (#5089 — it used to be
-          written WITHOUT a status property, which made the live operator
-          EP-inert while a rebuild produced 'live'; gated still writes an
-          explicit draft on the operator).
+          written WITHOUT a status property, which excluded the live operator
+          from the strict grounding selector while a rebuild produced 'live'; the
+          EP factor-extraction path admits a NULL status either way. Gated still
+          writes an explicit draft on the operator).
 
         Returns {granularity, batch_id, created: {points, entities, sources,
         connections}, deduped: {...}, ids: {points, entities, sources,
@@ -13669,8 +13672,10 @@ class TortoiseSDK:
         label-absent appends `o.label IS NULL` (no-label requests match only
         unlabeled operators).
 
-        Partial-absorb: on an exact miss, a NULL-status (unpromoted) operator
-        whose input set is a PROPER SUBSET of the requested set AND whose
+        Partial-absorb: on an exact miss, a NOT-YET-LIVE operator
+        (`status IS NULL`, `'draft'`, or `'live'` — the promoting posture writes
+        'live', so admitting only NULL/draft went blind on it, #5089) whose input
+        set is a PROPER SUBSET of the requested set AND whose
         label/direction STRICT-MATCH the declared values (a label-absent
         request must NOT absorb a labeled operator — the cross-absorption
         semantic-theft class) AND whose written input set is NON-EMPTY —
@@ -13730,9 +13735,14 @@ class TortoiseSDK:
         # replay), and a crash between the node CREATE and the edge loop under
         # that posture would otherwise be INVISIBLE here — the retry would miss
         # the partial and mint a DUPLICATE operator, double-counting it in EP.
-        # The subset conditions are what identify the crash window; the status
-        # clause exists only to refuse a TERMINAL operator (retracted/
-        # superseded/outdated/archived), which stays refused.
+        # The subset conditions are what identify the crash window. The status
+        # clause is a legacy guard: it admitted the two shapes the door used to
+        # write, and it is retained so a `'draft'` partial from the extraction
+        # posture is still absorbed. NOTE it is a weaker guard than it looks —
+        # the exact-hit query above carries no status clause at all, so a
+        # TERMINAL operator is reused on an exact match regardless. And the
+        # window covered is n >= 1 written edges: `size(targets) > 0` below means
+        # a crash immediately after CREATE (zero edges) is NOT absorbed.
         pcond = [
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
