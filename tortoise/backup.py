@@ -454,6 +454,7 @@ def restore(backup_dir: str, db_path: str,
                 FalkorProjection,
                 _object_hard_deleted_ids,
                 hard_deleted_pairs,
+                journal_epistemic_existence,
                 journal_first_materialization,
                 journal_hard_delete_seqs,
                 journal_object_surviving_keys,
@@ -530,6 +531,9 @@ def restore(backup_dir: str, db_path: str,
                 # retract/state-op that precedes its own creation (folded by
                 # `rebuild_all`'s hoist) is not refused on this chronological path.
                 first_materialized = journal_first_materialization(records)
+                # #7936 review: the ORDERED creation/hard-delete boundary for
+                # the belief gate — label-agnostic and delete-aware.
+                epistemic_existence = journal_epistemic_existence(records)
                 apply_kwargs: dict = {}
                 _pass_seq = False
                 try:
@@ -542,6 +546,8 @@ def restore(backup_dir: str, db_path: str,
                 if "journal_first_materialized" in _apply_params:
                     apply_kwargs["journal_first_materialized"] = first_materialized
                     _pass_seq = "journal_seq" in _apply_params
+                if "journal_existence" in _apply_params:
+                    apply_kwargs["journal_existence"] = epistemic_existence
                 # The refusal is a RUN BOUNDARY, exactly as on the other three
                 # engines: without the collector `record_non_folded` is a no-op
                 # and the context would change nothing. `assert_no_non_folded`
@@ -646,10 +652,19 @@ def _bgsave(uri: str | None = None) -> str:
         from falkordb import FalkorDB
 
         from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+        from tortoise.projection import _bounded_server_socket_kwargs
+        # #3065: the socket bounds come from the product's ONE resolution
+        # point, not from a pair of literals. The literals this replaces (5s
+        # connect / 10s read) were the pre-#2850 hardcoded values, so an
+        # operator's TORTOISE_DB_SOCKET_TIMEOUT / TORTOISE_DB_SOCKET_CONNECT_
+        # TIMEOUT never reached the snapshot path — the same knob-blindness
+        # #3065 was filed for, one symptom less severe (bounded, but not
+        # tunable). The connect default is now the product's 2s, which is the
+        # deliberate bound #2850 chose to beat a 5s health-check budget.
         db = guarded_client(FalkorDB, host=endpoint.host, port=endpoint.port,
                             username=endpoint.username, password=endpoint.password,
                             ssl=endpoint.ssl,
-                            socket_connect_timeout=5, socket_timeout=10)
+                            **_bounded_server_socket_kwargs())
         db.connection.execute_command("BGSAVE")
     except Exception as e:
         reason = f"BGSAVE against {endpoint.host}:{endpoint.port} failed: {e}"

@@ -34,58 +34,60 @@ from datetime import datetime, timezone
 
 import pytest
 
-# #1389 / #3505: these deep import-path tests (restore → temp graph → verify →
-# swap) are the #1389 skips. Their recorded reason — the app's keepalive anchor
-# and the handler booting two embedded daemons on the same single-writer path —
-# no longer holds: the session-wide construction serialization
-# (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by conftest's
-# `_serialize_embedded_construction`) closes the double-start race, so the
-# second daemon of that pair is never started and every later opener reuses the
-# first starter's server. What remains outside the lock (the residual exposure
-# listed in the lock's own note) is (a) a construction that raises inside
-# `_start_redis()` after its daemon spawned but before `_save_setting_registry()`,
-# and (b) redislite's `_cleanup()` last-client branch removing `<db>.settings`
-# from `__del__`/atexit. Neither is the keepalive-anchor-vs-handler collision
-# this reason described, and neither is dodged by a different harness — the
-# `SeedVisibilityError` guard at `_seed_live_graph` is what makes them loud
-# instead of silent.
+# #1389 / #3505 / #3547: these deep import-path tests (restore → temp graph →
+# verify → swap) were the #1389 skips. Their recorded reason — the app's
+# keepalive anchor and the handler booting two embedded daemons on the same
+# single-writer path — no longer holds: the session-wide construction
+# serialization (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by
+# conftest's `_serialize_embedded_construction`) closes the double-start race,
+# so the second daemon of that pair is never started and every later opener
+# reuses the first starter's server. What remains outside the lock (the
+# residual exposure listed in the lock's own note) is (a) a construction that
+# raises inside `_start_redis()` after its daemon spawned but before
+# `_save_setting_registry()`, and (b) redislite's `_cleanup()` last-client
+# branch removing `<db>.settings` from `__del__`/atexit. Neither is the
+# keepalive-anchor-vs-handler collision this reason described, and neither is
+# dodged by a different harness — the `SeedVisibilityError` guard at
+# `_seed_live_graph` is what makes them loud instead of silent.
 #
-# #3545 / #3547 corrected the skip's coverage claim. #1390's subprocess parity
-# E2E (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import)
+# #3545 corrected the skip's COVERAGE claim; #3547 LIFTED the skip. #1390's
+# subprocess parity E2E
+# (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import)
 # covers the HAPPY PATH ONLY — it never exercises the fail-closed chain — so
 # "redundant in-process copies, covered by the parity E2E" was true of
-# `test_import_happy_path` alone. #3545 un-skipped `test_import_tampered_blob_422`
-# (its stale "blob integrity" expectation is fixed and its sibling
-# `test_import_rehashed_blob_header_decrypt_failure_422` now pins the other
-# branch of that taxonomy). The remaining fail-closed deep cases
+# `test_import_happy_path` alone; the fail-closed cases
 # (`test_import_empty_backup_over_live_422`,
 # `test_import_dangling_edge_quarantined_422`,
-# `test_import_swap_failure_503_quarantined_live_untouched`) are DEFERRED with a
-# tracked reason in #3547 — this marker keeps them out of the default lane,
-# it does not hide them.
-_import_deep = pytest.mark.skip(
-    reason="#3505/#3547: in-process deep-path (restore→swap) copies — the parity "
-           "E2E (#1390) covers the happy path only; the deferred fail-closed "
-           "cases are tracked in #3547"
+# `test_import_swap_failure_503_quarantined_live_untouched`) had NO executable
+# coverage anywhere. There is no `_import_deep` marker any more: all five deep
+# cases run in the default lane.
+#
+# Measured 2026-10-11, embedded lane (TORTOISE_TEST_CARVE_OUT=1): 4 consecutive
+# full-file runs, 53 passed / 0 skipped each (~26–36 s). Each fail-closed case
+# is mutation-proven, so the coverage restored here is real rather than
+# collected: disabling the empty-backup guard's `live_nodes > 0 and
+# expected_nodes == 0` branch (tortoise/hosted_backup.py) fails
+# `test_import_empty_backup_over_live_422`, and mapping the swap-failure
+# `except RuntimeError` to 500 instead of 503 (tortoise/hosted_api.py) fails
+# `test_import_swap_failure_503_quarantined_live_untouched`.
+from fastapi.testclient import TestClient
+
+import tortoise.hosted_api as ha_mod
+from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import FakeControlPlane
+from tests.test_supabase_control import (
+    FREE_TEAM,
+    _key_row,
+    _membership_row,
 )
-
-from fastapi.testclient import TestClient  # noqa: E402, I001
-
-import tortoise.hosted_api as ha_mod  # noqa: E402
-from tortoise.hosted_backup import (  # noqa: E402
+from tortoise.hosted_api import app, get_current_user
+from tortoise.hosted_backup import (
     DUMP_FORMAT,
     RestoreVerificationError,  # noqa: F401
     _restore_into_temp_verify_swap,
     encrypt_backup,
 )
-from tortoise.hosted_api import app, get_current_user  # noqa: E402
-from tortoise.projection import FalkorProjection  # noqa: E402
-
-from tests._http_fixtures import patched_tortoise_sdk  # noqa: E402
-from tests.fake_control_plane import FakeControlPlane  # noqa: E402
-from tests.test_supabase_control import (  # noqa: E402
-    FREE_TEAM, _key_row, _membership_row,
-)
+from tortoise.projection import FalkorProjection
 
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -704,10 +706,10 @@ class TestImportValidationFailClosed:
         """A corrupted blob whose clear header was NOT rewritten is rejected by
         the sha256 integrity gate — pre-decrypt, pre-restore (#3545).
 
-        NOT behind ``@_import_deep``: the rejection is pre-restore, so the case
-        is cheap, and this is the only test pinning THIS branch's rejection
-        message together with the live-graph-untouched assertion — #1390's
-        parity E2E exercises the happy path only, and the un-skipped sibling
+        The rejection is pre-restore, so the case is cheap, and this is the
+        only test pinning THIS branch's rejection message together with the
+        live-graph-untouched assertion — #1390's parity E2E exercises the
+        happy path only, and the sibling
         ``test_import_quarantine_stamps_ledger`` reaches the same sha256 path
         for ledger stamping only.
         """
@@ -799,7 +801,6 @@ class TestImportValidationFailClosed:
         r = _post_import(tc, b"this is not an artifact", os.urandom(32))
         assert r.status_code == 422
 
-    @_import_deep
     def test_import_empty_backup_over_live_422(self, sb_client, as_user,
                                               capture_audit):
         """Empty-backup-over-live guard: a 0-node artifact must not wipe."""
@@ -815,7 +816,6 @@ class TestImportValidationFailClosed:
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["nodes"] == 2  # live untouched
 
-    @_import_deep
     def test_import_dangling_edge_quarantined_422(self, sb_client, as_user,
                                                   capture_audit):
         """Dangling-edge dump: restore_graph fails → 422 + quarantine; the
@@ -1485,7 +1485,6 @@ class TestImportPackConfigApplyFailures:
 
 
 class TestImportHappyPath:
-    @_import_deep
     def test_import_happy_path(self, sb_client, as_user, capture_audit):
         tc, fake, db_path = sb_client
         _seed_team(fake)
@@ -1630,7 +1629,6 @@ class TestImportIdempotencyAndSwapSafety:
         expected = hashlib.sha256(_canonical(payload)).hexdigest()
         assert fake.tables["organizations"][0].get("last_import_sha256") == expected
 
-    @_import_deep
     def test_import_swap_failure_503_quarantined_live_untouched(
             self, sb_client, as_user, monkeypatch, capture_audit):
         """A server-side swap failure (RuntimeError) maps to 503 + quarantine;

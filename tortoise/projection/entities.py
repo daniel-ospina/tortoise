@@ -20,7 +20,10 @@ from datetime import datetime, timezone
 # projection at module top, so the sdk-private `_content_hash` is NOT
 # importable here.
 from tortoise.ids import content_hash as _content_hash
-from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.live import (
+    decay_clause,  # #2490: rebuild folds decay terminal posteriors
+    epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
+)
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
 # ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
@@ -1100,6 +1103,14 @@ class _EntityHandlers:
         # text, declared so the replay open-set passthrough does not log a
         # FALSE undeclared-prop drift warning on every rebuild.
         "span_start", "span_end",
+        # #1724: the STABLE external anchor carried by extractor-minted
+        # statement Points (``github:issue:*`` from the GitHub indexer's
+        # dormant statement path, ``docs:<doc_id>#<claim key>`` from the docs
+        # miner). Both are IN-TREE producers, so the reason the two entries
+        # above carry applies verbatim: without this, the live write and every
+        # rebuild log a false "not declared" drift warning for a prop that is
+        # part of the documented statement contract.
+        "externalId",
         # #3689 review P2 (A): the four canonical annotator dims are legitimately
         # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
         # `_update_entity` — declaring them keeps the replay open-set
@@ -2010,6 +2021,15 @@ class _EntityHandlers:
         if not _writable_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
+        # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`
+        # edge derived from a `PointAdded` that precedes a later
+        # `SessionDeleted` was severed live by the delete's `DETACH DELETE`;
+        # a re-capture's fresh Session must not inherit the old incarnation's
+        # edge. Only active during `rebuild_all` pass 2.
+        _replay_del = self._replay_session_deleted_seq
+        if (_replay_del is not None
+                and _replay_del.get(session_id, -1) > self._replay_seq):
+            return
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
             params={"sid": session_id},
@@ -2019,6 +2039,69 @@ class _EntityHandlers:
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": point_id},
         )
+
+    def _fold_session_deleted(self, ev: dict, *, remove_session: bool = True,
+                              remove_source: bool = True) -> int:
+        """#7951: the ``:Session`` node's hard-delete carrier.
+
+        ``hosted_api._delete_session_sync`` removes the ``:Session`` with a raw
+        ``DETACH DELETE``. The node is NOT a canonical entity label
+        (``_CANONICAL_ENTITY_ID_PROPS`` has no ``Session``), so no
+        ``EntityMutated`` record can delete it — that fold would fall back to
+        the id-wide canonical delete and leave the Session standing while
+        ``SessionRecorded`` re-materialised it on replay. Without a carrier the
+        whole session deletion is invisible to ``derived = replay(journal)`` and
+        the next rebuild RESURRECTS it (with its ``CONTAINS`` edges re-wired).
+
+        The fold removes the ``:Source`` the session delete removes in the same
+        step — its agentSession stub, ``url = session:{id}`` — because that
+        node is re-materialised by ``rebuild_all``'s pass-2 ``_link_source``
+        from the deleted Points' own payloads, so it must be re-asserted
+        together with the container. Both nodes are keyed off the SAME
+        re-creation anchor (a later ``SessionRecorded`` for the id), so one
+        carrier cannot drift from the other.
+
+        Idempotent: a 0-row delete is the record's END STATE (a retried delete,
+        or a replay onto a graph the record already cleared), so it is NEVER a
+        fold-miss and must not be refused. ``DETACH`` drops the ``CONTAINS``
+        edges; the owned Points and Events themselves are removed by their own
+        ``EntityMutated`` op=delete records, which the same delete site emits.
+
+        ``remove_session`` / ``remove_source`` (#7951 P1-a) let the caller
+        suppress ONE of the two removals. They exist for ``rebuild_all``'s
+        DEFERRED re-apply: the Source has a SECOND journal re-creation path
+        the container anchor cannot see — ``_link_source`` mints
+        ``session:{id}`` from ANY journaled ``PointAdded`` carrying
+        ``extractedFrom=session:{id}`` — so a deferred re-apply carried out
+        after pass 2 must not delete a Source a LATER record re-materialised
+        while still deleting a container no later record re-materialised.
+        Both default ``True``: the inline folds (``apply`` / ``rebuild`` /
+        ``rebuild_all`` pass 1b) are chronology-ordered, so a later record's
+        own fold re-creates whatever the delete removed and no suppression is
+        needed.
+
+        Returns the number of Session nodes deleted (0 when ``remove_session``
+        is False, whatever the Source removal did).
+        """
+        from tortoise.projection import _writable_id
+
+        if not isinstance(ev, dict):
+            return 0
+        sid = ev.get("id")
+        if not _writable_id(sid):
+            return 0
+        if remove_source:
+            self.g.query(
+                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                params={"url": f"session:{sid}"},
+            )
+        if not remove_session:
+            return 0
+        r = self.g.query(
+            "MATCH (s:Session {id:$sid}) DETACH DELETE s RETURN count(s)",
+            params={"sid": sid},
+        )
+        return int(r.result_set[0][0]) if r.result_set else 0
 
     def _upsert(self, p: dict, contains_session: str | None = None) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
@@ -2617,10 +2700,26 @@ class _EntityHandlers:
         with null writes null (removes the property), mirroring the live SET.
 
         Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
-        signal): 1 = the target Point was found and folded, 0 = no Point
-        matched (hard-deleted / never re-created) or the record carries no
-        foldable value. Idempotent — a replayed/duplicate event re-applies the
-        same SET.
+        signal): 0 = no such node matched (hard-deleted / never re-created) or
+        the record carries no foldable value; 1 = the target epistemic node
+        (:Point, :Subject, :Object or :Event — #7853) was found and folded on
+        its single label; >1 when one id is carried by a node under several
+        epistemic labels (each label's query returns at most one row), which is
+        the live writers' multi-label sweep. Idempotent — a replayed/duplicate
+        event re-applies the same SET.
+
+        #7853: the target is NOT always a Point. The EP write-back journals a
+        ``ConfidenceChanged`` for every node it writes, and the widening makes
+        that any of the four epistemic labels — so a ``:Point``-only MATCH left
+        a non-Point belief write permanently unreplayable (``rebuild`` /
+        ``recover_from_log`` refused the journal with ``point-belief-miss``).
+        The id is index-anchored by keeping ONE label per query and sweeping
+        the four labels (``epistemic_label_queries``) — the same shape
+        ``tortoise/ep.py`` uses for its id-anchored reads, and the rule stated
+        at ``tortoise/live.py``: a label predicate over a bare ``MATCH (n)``
+        has no per-(label, property) index anchor, so it full-scans EVERY
+        ``ConfidenceChanged`` fold (and regresses the common ``:Point`` case
+        that ``origin/main`` served from the ``Point(id)`` index).
         """
         oid = ev.get("id")
         # #2884 review P1: the SAME id gate the sibling folds use. A bare
@@ -2662,12 +2761,27 @@ class _EntityHandlers:
             params[key] = value
         if not set_parts:
             return 0
-        result = self.g.query(
-            "MATCH (n:Point {id:$id}) SET " + ", ".join(set_parts) +
-            " RETURN n.id LIMIT 1",
-            params=params,
-        )
-        return len(result.result_set)
+        # #7853 P2 divergence: the LIVE writers (``TortoiseEP._write_node`` /
+        # ``_flush_cache``, ``TortoiseSDK.compute_confidence``,
+        # ``Dreamer._ep_run_batch``) all sweep ALL FOUR labels and never stop
+        # at the first match, so TWO SEPARATE NODES sharing one ``id`` — a
+        # ``:Point`` and a distinct ``:Object``, the shape the regression test
+        # builds — are both written. The replay fold used to ``break`` after the
+        # first non-empty result, so replay updated only the first label and
+        # silently disagreed with live on exactly that pair. (A SINGLE node
+        # carrying both labels is matched by each label's ``MATCH`` and written
+        # identically either way, so it is not the shape that diverges.) The SET
+        # is idempotent, so sweep them all and ACCUMULATE the count (never
+        # overwrite with a later empty label's 0, which would manufacture a
+        # false ``point-belief-miss``).
+        matched = 0
+        for _q in epistemic_label_queries(
+                "MATCH (n:{label} {id:$id}) SET " + ", ".join(set_parts) +
+                " RETURN n.id LIMIT 1"):
+            r = self.g.query(_q, params=params)
+            if r.result_set:
+                matched += len(r.result_set)
+        return matched
 
     # ── Entity nodes ───────────────────────────────────────────────
 

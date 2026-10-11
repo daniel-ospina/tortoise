@@ -32,7 +32,7 @@ The body's claim ("6/133 relative-date-lookup rows currently fire NOTHING")
 **HELD on re-measurement** — plain `classify_question` over the 6 committed
 census rows returns `None` for all six:
 
-```
+```bash
 python -c "from tortoise.assembly import classify_question; ..."   # 6/6 -> None
 ```
 
@@ -60,7 +60,7 @@ recorded as out-of-family with their owning issue, never absorbed.
 
 ### Align inheritance
 
-#2165's plan filed #2652–#2655 as *recorded follow-ups* with an explicit trigger
+The #2165 plan filed #2652–#2655 as *recorded follow-ups* with an explicit trigger
 (census). Its "Out of scope" note says ago-relative "needs LLM anchor+offset —
 constraint 6" — **#2655 is deliberately the deterministic subset of that**:
 fixed-date holidays and weekday offsets need no model, only `question_date`.
@@ -105,37 +105,37 @@ because `_RE_AGO` already rejected all of them).
 
 1. **`tortoise/calendar_anchors.py`** (new, pure — no graph, no model, no clock):
    `find_anchor_spans(question)`, `resolve_calendar_anchor(question, as_of)`.
-   * fixed-date holiday table (Valentine's, New Year's day/eve, Christmas
+   - fixed-date holiday table (Valentine's, New Year's day/eve, Christmas
      day/eve, Halloween, Independence day / the Fourth of July, St Patrick's
      day, April Fools', Veterans day) + optional explicit year;
-   * `last <weekday>` / `this past <weekday>` / `past <weekday>` → the most
+   - `last <weekday>` / `this past <weekday>` / `past <weekday>` → the most
      recent such weekday **strictly before** `as_of`;
-   * `last/this past/the past/this weekend` → the most recent Saturday on or
+   - `last/this past/the past/this weekend` → the most recent Saturday on or
      before `as_of`, plus its Sunday when that Sunday is not after `as_of`;
-   * **as-of discipline:** a fixed date in `as_of`'s year that is after `as_of`
+   - **as-of discipline:** a fixed date in `as_of`'s year that is after `as_of`
      rolls back one year; an explicit FUTURE year abstains. A resolved day is
      never after `as_of`.
-   * **ambiguity → abstain:** >1 distinct anchor span returns `None`.
+   - **ambiguity → abstain:** >1 distinct anchor span returns `None`.
 2. **`tortoise/assembly.py`**
-   * `AssemblyShape.RELATIVE_DATE = "relative-date-lookup"` (value = the census
+   - `AssemblyShape.RELATIVE_DATE = "relative-date-lookup"` (value = the census
      class name, so measurement attribution reads it literally);
-   * `classify_question`: an anchor branch evaluated BEFORE the guards, on a
+   - `classify_question`: an anchor branch evaluated BEFORE the guards, on a
      residual that has the anchor span **removed** — so an anchor-bearing
      question that also carries another shape's morphology (or a non-anchor
      relative offset) still returns `None`, exactly as today;
-   * `extract_subject_terms` returns `[]` for this shape (the day is the scope,
+   - `extract_subject_terms` returns `[]` for this shape (the day is the scope,
      not a subject) — the fired path branches before extraction;
-   * `collect_day_slices(port, days, *, per_day_cap)` — the as-of EQUALITY-day
+   - `collect_day_slices(port, days, *, per_day_cap)` — the as-of EQUALITY-day
      lookup over the typed spine: R2 ladder (`_tier_and_date`), **undated rows
      excluded** (an undated row can never satisfy a day equality), `id` dedupe,
      deterministic `(date, kind, id)` order, bounded by `bounded_fanout`, with
      the same admission census shape as `collect_slices`;
-   * `WalkerPort.day_rows(days, cap)` + the docker adapter (one batched
+   - `WalkerPort.day_rows(days, cap)` + the docker adapter (one batched
      prefix-range statement per day per kind — never row-level N+1);
-   * `synthesize_hits(..., date_anchor=…)`: a `DATE (<label>): <iso[, iso]>`
+   - `synthesize_hits(..., date_anchor=…)`: a `DATE (<label>): <iso[, iso]>`
      header + the day's rows, sorted; the subject-section loop is bypassed
      (there are no resolved subjects);
-   * `_assemble_connected`: branch `RELATIVE_DATE` → resolve the anchor from
+   - `_assemble_connected`: branch `RELATIVE_DATE` → resolve the anchor from
      `question_date` → `collect_day_slices` → **no rows on that day ⇒
      `fired=False` and legacy falls through** (the R1/P1-1 spirit: fire only
      when the fired block is a real replacement). The shared
@@ -190,8 +190,10 @@ Implemented as planned. Measured results pinned in tests:
 
 - census `relative-date-lookup`: **3/6 fire** (was 0/6); the 3 non-anchored rows
   stay non-firing with their owning issues recorded (#2652 / #2886 / no-anchor).
-- negative-set precision after the class correction: **2/69 = 0.9710** (≥ 0.95);
-  3 further census rows adjudicated INTO the class by morphology.
+- negative-set precision after the class correction: **1/29 = 0.9655** (≥ 0.95);
+  3 further census rows adjudicated INTO the class by morphology (the residual
+  set is current `main`'s 35 rows minus this lane's 3 anchored class rows and
+  those 3 re-adjudications).
 - pure lane **206 passed** · census neighbours **107 passed** · docker walker
   round-trips **14 passed**; the day-path SDK test passed against a real
   FalkorDB (later runs blocked by a native FalkorDB panic in the test container,

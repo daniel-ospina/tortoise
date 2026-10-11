@@ -182,8 +182,86 @@ def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
 _pending_telemetry: set = set()
 
 
+# ── #3675: result-bearing telemetry on ``mcp_tool_call`` ────────────────────
+# Until this, the row carried no result information at all, so ``status ==
+# "ok"`` — which means ONLY "the tool did not raise" — was the entire success
+# signal. A ``tortoise_search`` that returned 8 relevant points and one that
+# returned NOTHING were the same row. That is why the activation scorecard
+# (#3674) ships ``recall_attempted`` and refuses to ship "answered from
+# memory": it can see the ATTEMPT and not the ANSWER.
+#
+# ``result_count`` is the number of ITEMS the call returned. It is emitted when
+# the result shape makes the count KNOWABLE, and ``None`` when it does not —
+# ``None`` (or an absent key on a pre-#3675 row) and ``0`` are DIFFERENT FACTS:
+# ``0`` is "the tool ran and returned nothing", ``None`` is "this call's result
+# was not countable" (a write op returning ``{"id": ...}``, the wait-bound
+# refusal, a transport error). A consumer that reads the first as the second
+# recreates the exact ambiguity this prop exists to remove, so the two are never
+# collapsed here.
+#
+# ⚠️ NOT ``abstained``. #3675's body pairs ``result_count`` with an ``abstained``
+# flag for the ``POST /v1/ask`` abstention path (#1987) — but that path NO
+# LONGER EXISTS: ``tortoise_ask`` was made eval-only and removed from the MCP
+# surface, the SDK and REST (#3849 / #3929), and no MCP tool can abstain (the
+# reader/abstention machinery is reachable only from the eval lane). An
+# ``abstained`` prop would therefore have NO producer: it could only ever be
+# ``None`` (unreadable as "did not abstain") or a hardcoded ``False`` (a
+# fabricated fact about a call that never had the option). Neither is a
+# measurement, so the key is deliberately NOT registered. If an abstaining MCP
+# surface ever returns, register the prop together WITH its producer.
+#
+# ⚠️ COUNTS ONLY, never content. ``result_count`` is an integer, so no retrieved
+# text, point id, label or other free text can reach the analytics sink through
+# it — the PII guarantee (#501) is unaffected.
+
+#: Keys under which a tool result carries its item collection, in priority
+#: order. ``result`` is FastMCP's own ``x-fastmcp-wrap-result`` envelope for a
+#: function annotated ``-> list[...]`` — measured against the pinned FastMCP
+#: 3.4.6: every non-dict return is wrapped as ``{"result": value}``, and a
+#: function with no output schema gets no structured payload at all.
+#: ``results`` is ``tortoise_recall``'s non-subgraph envelope and ``nodes`` its
+#: subgraph one; both are on the scorecard's retrieval allowlist, so a shape
+#: that stopped being countable would blind the measurement rather than be
+#: silently miscounted.
+_MCP_RESULT_COLLECTION_KEYS = ("result", "results", "nodes")
+
+
+def _mcp_result_count(result: Any) -> int | None:
+    """Items returned by a dispatched tool call, or ``None`` when UNKNOWABLE.
+
+    Deliberately shape-driven and deliberately NOT a guess. Only a payload that
+    IS a collection, or a mapping carrying one under a known key, yields a
+    number. Everything else — a write op's ``{"id": ...}``, the wait-bound
+    refusal's ``{"error": {...}}``, a mapping whose ``results`` value is not a
+    list, a result with no structured payload — yields ``None`` and the key is
+    emitted as null. A heuristic that picked "the longest list" would produce a
+    PLAUSIBLE WRONG NUMBER, which is worse than no number: a consumer cannot
+    tell it from a right one, and the scorecard's whole contract is that a
+    count it reports is exact or refused.
+    """
+    payload = getattr(result, "structured_content", result)
+    # Defensive, per this seam's governing rule ("a telemetry bug must never
+    # mask or break the tool call itself"): the count is computed INSIDE the
+    # dispatch try block, so anything escaping here would be classified as an
+    # exec_error and RE-RAISED at the caller. The shapes above are plain
+    # isinstance/len checks on a real list, so this cannot fire today — it is
+    # the cost of a telemetry helper being allowed to sit on the hot path.
+    try:
+        if isinstance(payload, list):
+            return len(payload)
+        if isinstance(payload, dict):
+            for key in _MCP_RESULT_COLLECTION_KEYS:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return len(value)
+    except Exception:
+        return None
+    return None
+
+
 def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
-                                  latency_ms: int, error_kind: str | None) -> None:
+                                  latency_ms: int, error_kind: str | None,
+                                  result_count: int | None = None) -> None:
     """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
 
     ``status`` is one of this full set — the vocabulary is stated HERE because
@@ -206,7 +284,12 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
       (``error_kind = "transport_wait_bound"``).
 
     The first four are the #889 set; ``timeout``, ``cancelled`` and ``refused``
-    were added by #3834. The #888 research brief
+    were added by #3834. ``result_count`` (#3675) is the result-bearing prop:
+    the number of items the call returned, or ``None`` when the shape of the
+    result makes the count unknowable — see the block above, and read ``0`` and
+    ``None`` as two different facts.
+
+    The #888 research brief
     (``docs/epics/2026-08-11-888-surface-design/01-research-brief.md``) still
     lists only the original four — it is #888's artifact, not this lane's, so it
     is deliberately not edited here and this docstring is the live vocabulary.
@@ -217,9 +300,15 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
     daemon thread. Any failure is logged and swallowed — telemetry must never
     break a tool call.
     """
+    # ``result_count`` stays INSIDE this literal dict (rather than being added
+    # conditionally) on purpose: ``tests/test_telemetry_registration.py``'s
+    # structural guard resolves an emit site's prop keys from its dict literal,
+    # so a conditional add would put the new key OUTSIDE the guard that exists
+    # to catch exactly this class of silent strip.
     props = {"tool_name": _mcp_auth._sanitize_for_log(tool_name),
              "status": status,
-             "latency_ms": latency_ms, "error_kind": error_kind}
+             "latency_ms": latency_ms, "error_kind": error_kind,
+             "result_count": result_count}
 
     def _write() -> None:
         try:
@@ -759,11 +848,18 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # preview set, not on key presence in untrusted input.
         dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
     )
-    status, error_kind = "ok", None
+    status, error_kind, result_count = "ok", None, None
     t0 = _time.perf_counter()
     try:
         result = await _await_under_mcp_wait_bound(
             name, arguments, version=version, task_meta=task_meta)
+        # #3675: the items this call RETURNED. Counted here, before the status
+        # classification below, so the row carries the result of the dispatch
+        # whether that dispatch succeeded or failed: a transport-wait-bound
+        # refusal returns its own `{"error": ...}` result, which is not a
+        # collection and therefore counts as None — a refusal never reads as
+        # "returned 0 items".
+        result_count = _mcp_result_count(result)
         if getattr(result, "meta", None) and result.meta.get(_WAIT_BOUND_META_KEY):
             # #3834: the transport wait bound refused this dispatch. Its own
             # status (not exec_error) so "how often are we breaching 10 s" is
@@ -811,7 +907,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         latency_ms = int((_time.perf_counter() - t0) * 1000)
         try:
             _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
-                                          error_kind)
+                                          error_kind, result_count)
         except Exception:
             # A telemetry bug must never mask or break the tool call itself.
             _log.debug("mcp_tool_call telemetry emit failed", exc_info=True)
@@ -3606,7 +3702,7 @@ _ONBOARDING_STATE_TTL = 60.0
 # #3916: the two documented decide protocols file the SAME node (the option
 # set) under two different labels, so the `decide-completed` observation must
 # accept BOTH or it reports "not decided" for a decision that WAS recorded:
-#   * `tortoise/onboarding/SKILL.md` §5 — the generic MCP-tool protocol — files
+#   * `tortoise/onboarding/SKILL.md` §6 — the generic MCP-tool protocol — files
 #     one `decision` point per option; that is also the kind
 #     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
 #     and the label the #3784 observation originally keyed on;
@@ -3710,11 +3806,20 @@ async def _org_onboarding_complete() -> bool:
 
 def _onboarding_state() -> dict:
     """Read this org's onboarding progress — the merged projection (jsonb
-    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable')."""
-    from tortoise.hosted_api import _get_onboarding_projection as _read_state
+    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable').
+
+    #2007 (W12): the selfhost placeholder org has no control plane at all —
+    its FLOW projection is read straight off the graph node (REST twin GET
+    /v1/onboarding/state self-host leg; no Supabase, no hosted_api)."""
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    if org_id == SELFHOST_ORG_ID:
+        from tortoise.mcp_auth import _get_org_sdk
+        from tortoise.onboarding import selfhost as _sh
+        return _sh.read_selfhost_state(_get_org_sdk())
+    from tortoise.hosted_api import _get_onboarding_projection as _read_state
     return _read_state(org_id)
 
 
@@ -3905,7 +4010,7 @@ def _maybe_onboarding_auto_complete(*,
       ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
       PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
       or ``option``). BOTH documented decide protocols are observed: the
-      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §5) files
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §6) files
       one ``decision`` point per option, and the ``tortoise-decide`` skill
       files each option as ``option`` — the same node under two labels
       (#3916). A plain point write (e.g. the setup prompt's ``statement``)
@@ -3935,12 +4040,22 @@ def _maybe_onboarding_auto_complete(*,
     reports a real transition to complete; that helper pops the entry itself,
     so a completion is visible immediately.
 
-    Only fires in HTTP (hosted) mode with a real org_id — stdio and
-    self-host calls are no-ops."""
+    Only fires in HTTP (hosted) mode with a real org_id — stdio is a no-op;
+    the SELFHOST placeholder org is delegated to the self-hosted twin
+    (``onboarding/selfhost.py`` — graph-only, no Supabase, #2007 W12)."""
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
-    if not org_id or org_id == SELFHOST_ORG_ID:
-        return  # stdio / self-host: no hosted onboarding state
+    if not org_id:
+        return  # stdio/operator: no onboarding state
+    if org_id == SELFHOST_ORG_ID:
+        # #2007 (W12): the self-hosted observation lane. Same rule (#3784),
+        # no control plane: a successful agent write observes
+        # harness-connected + first-points-filed, a decision-shaped write
+        # additionally observes decide-completed, and the canonical
+        # fork-aware gate decides completion (monotonic). Fail-open.
+        from tortoise.onboarding import selfhost as _sh
+        _sh.observe_selfhost_write(decision_observed=decision_observed)
+        return
     # Fast check: if the 60s cache says complete, skip.
     now = _time.time()
     cached = _onboarding_state_cache.get(org_id)

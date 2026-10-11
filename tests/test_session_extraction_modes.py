@@ -19,6 +19,23 @@ import tempfile
 import pytest
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._provider_env import pin_provider_routing_env
+
+
+@pytest.fixture(autouse=True)
+def _pinned_provider_routing_env(monkeypatch):
+    """#3699: remove the AMBIENT provider-routing env for every test in this
+    module (canonical derivation: `tests/_provider_env.py`).
+
+    ``test_openai_only_key_v2_503_not_500`` asserts the fail-closed 503 detail
+    NAMES the routing keys, but its hand-listed delenv pair omits
+    ``TORTOISE_EXTRACTOR_PROVIDER`` and ``VENICE_API_KEY``: an ambient
+    ``TORTOISE_EXTRACTOR_PROVIDER=openrouter`` makes the gate raise on the
+    selector instead, and an ambient ``VENICE_API_KEY`` makes it not raise at
+    all — the same false-red class #3699 filed on the SDK-path twin. A test
+    that needs a provider still sets one explicitly.
+    """
+    pin_provider_routing_env(monkeypatch)
 
 
 def _provider_available():
@@ -26,11 +43,7 @@ def _provider_available():
     return hosted_api._llm_provider_available()
 
 
-def test_provider_availability(monkeypatch):
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+def test_provider_availability(monkeypatch, no_provider_keys):
     assert not _provider_available()
     # #722: ANTHROPIC_API_KEY is NOT a tortoise provider key — its presence
     # from unrelated host tooling must not fail the fail-closed gate open.
@@ -40,29 +53,26 @@ def test_provider_availability(monkeypatch):
     assert _provider_available()
 
 
-def test_provider_availability_mock_seam(monkeypatch):
+def test_provider_availability_mock_seam(monkeypatch, no_provider_keys):
     """TORTOISE_SESSION_LLM_MOCK=1 counts as configured (test seam)."""
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     assert _provider_available()
 
 
-def test_sdk_and_hosted_availability_agree(monkeypatch):
+def test_sdk_and_hosted_availability_agree(monkeypatch, no_provider_keys):
     """The hosted provider check and the SDK extractor builder must agree — a
     drift would attempt an extraction no extractor can serve (regression
-    guard for #822)."""
+    guard for #822).
+
+    ``no_provider_keys`` (#3695/#5477) makes the "both false" leg hermetic:
+    the two gates are compared against an EXPLICITLY empty provider env rather
+    than whatever the box happens to export."""
     from tortoise.sdk import _build_session_llm_extractor
 
     def _extractor_present():
         return _build_session_llm_extractor() is not None
 
     # both false (no key, no seam)
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     assert _provider_available() is False
     assert _extractor_present() is False
     # both true (real key)
@@ -214,7 +224,8 @@ def client(monkeypatch):
                 yield tc
 
 
-def test_no_provider_stores_and_surfaces_not_extracted(monkeypatch, client):
+def test_no_provider_stores_and_surfaces_not_extracted(
+        monkeypatch, client, no_provider_keys):
     """#3892 (owner ruling 2026-09-18): with NO provider key the hosted
     capture still STORES the session and its turns, skips ONLY the LLM
     extraction into memory points, and reports the visible "stored, not yet
@@ -223,11 +234,6 @@ def test_no_provider_stores_and_surfaces_not_extracted(monkeypatch, client):
     This test is the mutation guard for that ruling: reinstating the old
     503-first refusal (or dropping the store) makes it RED.
     """
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-
     marker = "keylessstoreproofzzq"
     conv = [{"role": "user",
              "content": f"we decided the {marker} capture must store its turns"}]
@@ -270,16 +276,12 @@ def test_no_provider_stores_and_surfaces_not_extracted(monkeypatch, client):
                for h in s.json()["results"]), s.json()
 
 
-def test_keyless_session_is_extraction_upgradable_with_a_key(monkeypatch, client):
+def test_keyless_session_is_extraction_upgradable_with_a_key(
+        monkeypatch, client, no_provider_keys):
     """#3892 / #4007: the keyless session records lane "none" + capture_ok
     False, and the hosted retry gate accepts "none" — so a LATER capture of
     the SAME session_id WITH a key RE-EXTRACTS on explicit request, instead of
     silently replaying. Never automatic: only the re-capture triggers it."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-
     conv = [{"role": "user", "content": "we decided to ship the upgrade path"}]
     r1 = client.post("/v1/sessions", json={
         "conversation": conv, "session_id": "s-keyless-upgrade"})
@@ -296,17 +298,13 @@ def test_keyless_session_is_extraction_upgradable_with_a_key(monkeypatch, client
         r2.json()
 
 
-def test_hosted_m2_lane_discloses_the_refused_keyless_retry(monkeypatch, client):
+def test_hosted_m2_lane_discloses_the_refused_keyless_retry(
+        monkeypatch, client, no_provider_keys):
     """#4188 / #4007 parity with the SDK's
     `test_m2_lane_refuses_the_keyless_retry_and_says_so`: a keyless session
     re-captured WITH a key while the deployment is on the non-convergent M2
     lane REPLAYS (the retry stays refused), and the receipt says WHY — never
     the false "already captured" of a fully-extracted session."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-
     conv = [{"role": "user", "content": "we decided to ship the upgrade path"}]
     r1 = client.post("/v1/sessions", json={
         "conversation": conv, "session_id": "s-hosted-m2-keyless"})
@@ -327,12 +325,20 @@ def test_hosted_m2_lane_discloses_the_refused_keyless_retry(monkeypatch, client)
     assert "TORTOISE_SESSION_EXTRACTOR=m2" in warnings, warnings
 
 
-def test_metering_counts_a_grown_keyless_recapture(monkeypatch, client):
+def test_metering_counts_a_grown_keyless_recapture(
+        monkeypatch, no_provider_keys, client):
     """#4188 (review cycle 3): the turn loop runs for EVERY request, so a
     keyless re-capture of a GROWN transcript writes NEW turn Points even
     though its branch extracts nothing. It must be metered — keying the meter
     on which branch ran (not on the actual write) was a billing/abuse blind
-    spot."""
+    spot.
+
+    This test TOGGLES the mock seam mid-body, so fixture ORDER is load-bearing:
+    ``no_provider_keys`` runs BEFORE ``client`` (pytest instantiates same-scope
+    fixtures in signature order), which lets ``client`` re-arm
+    TORTOISE_SESSION_LLM_MOCK=1 for leg 1; leg 2 then deletes it in the body to
+    go keyless. Scrub-after-client would silently weaken leg 1 into a second
+    keyless capture (#3695)."""
     import tortoise.hosted_api as ha_mod
     meter: list = []
     monkeypatch.setattr(
@@ -345,15 +351,17 @@ def test_metering_counts_a_grown_keyless_recapture(monkeypatch, client):
     r1 = client.post("/v1/sessions", json={
         "conversation": one, "session_id": "s-meter-grown"})
     assert r1.status_code == 200, r1.text
+    # ORDERING GUARD (#3695): leg 1 must really be the KEYED capture. If the
+    # scrub landed after the ``client`` fixture the seam would be gone and
+    # this leg would silently become a second keyless capture — a green test
+    # covering nothing.
+    assert r1.json()["extraction_mode"] != "no-provider", r1.json()
     assert meter, "a fresh capture must be metered"
 
     # 2) keyless re-capture of the SAME session with a GROWN transcript: the
     #    prior SUCCEEDED (so the retry gate does NOT fire) but the turn loop
     #    writes a new turn Point — metered on the actual write.
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     meter.clear()
     grown = [*one, {"role": "assistant", "content": "second turn"}]
     r2 = client.post("/v1/sessions", json={
@@ -365,7 +373,7 @@ def test_metering_counts_a_grown_keyless_recapture(monkeypatch, client):
 
 
 def test_keyless_recapture_of_unchanged_transcript_meters_nothing(
-        monkeypatch, client):
+        monkeypatch, client, no_provider_keys):
     """#4188 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
     transcript is an idempotent no-op — its turn ids are deterministic, so the
     loop MERGEs onto the same Points and writes ZERO nodes. `retry_failed_
@@ -379,11 +387,6 @@ def test_keyless_recapture_of_unchanged_transcript_meters_nothing(
         ha_mod, "_record_write_op",
         lambda org, nodes_written=0: meter.append(
             (org["org_id"], nodes_written)))
-
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
 
     conv = [{"role": "user", "content": "an unchanged keyless transcript"}]
     r1 = client.post("/v1/sessions", json={
@@ -404,7 +407,7 @@ def test_keyless_recapture_of_unchanged_transcript_meters_nothing(
 
 
 def test_prior_turn_count_read_failure_does_not_500_a_recapture(
-        monkeypatch, client):
+        monkeypatch, client, no_provider_keys):
     """#4188 (review cycle 3): the prior-stored-turn read feeds ONLY the
     write-op meter, and it runs AFTER the Session MERGE has committed. A
     transient graph error there must not 500 the capture, and must not abort
@@ -418,11 +421,6 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
         ha_mod, "_record_write_op",
         lambda org, nodes_written=0: meter.append(
             (org["org_id"], nodes_written)))
-
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
 
     conv = [{"role": "user", "content": "prior-read failure probe"}]
     r1 = client.post("/v1/sessions", json={
@@ -510,18 +508,19 @@ def test_default_llm_extracts_points(monkeypatch, client):
 
 # ── #1530 P2: gate match + route recording on the hosted path ───────────────
 
-def test_openai_only_key_v2_503_not_500(monkeypatch, client):
+def test_openai_only_key_v2_503_not_500(
+        monkeypatch, client, no_provider_keys):
     """#1530 gate match on the hosted path: an openai-only deployment passes
     the broad outer gate (_llm_provider_available) but the v2 extractor's
     adapter cannot consume OPENAI_API_KEY — the inner gate's ValueError
     converts to a clean fail-closed 503, NEVER an uncaught 500 (the #1468
     divergence lesson). P1 #1529: the request must be NON-empty — the
     whole-conversation blank gate (422) precedes the inner v2 gate, so an
-    empty body would 422 instead of exercising the provider-mismatch path."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    empty body would 422 instead of exercising the provider-mismatch path.
+
+    ``no_provider_keys`` is load-bearing (#3695): the inner gate is decided by
+    ``resolve_extractor_provider``, which also honours VENICE_API_KEY, so
+    without the scrub an ambient venice key turns this 503 into a 200."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
     r = client.post("/v1/sessions", json={"conversation": [
         {"role": "user", "content": "we decided to ship it"}]})
@@ -1041,7 +1040,8 @@ def test_capture_extract_off_then_on_recapture_extracts(monkeypatch, client):
     assert body["extracted"] >= 1, body
 
 
-def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client):
+def test_capture_extract_off_with_no_provider_discloses_both(
+        monkeypatch, client, no_provider_keys):
     """#4258 + #3892: when extraction is OFF **and** no provider key is present,
     BOTH reasons are true — the receipt keeps the `no-provider` mode (a missing
     key is the harder blocker) but must ALSO carry the extraction-disabled
@@ -1059,9 +1059,6 @@ def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client
     )
 
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
     assert ha_mod._llm_provider_available() is False
 
     def _post(marker):

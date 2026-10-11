@@ -1409,7 +1409,12 @@ async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
     events: list = []
     monkeypatch.setattr(
         ms, "_emit_mcp_tool_call_telemetry",
-        lambda org, name, status, latency, kind: events.append((status, kind)))
+        # #3675: mirrors the emitter's arity (`result_count` included). An
+        # exact-5-arg stub raised TypeError INSIDE the wrapper's own
+        # `except Exception` guard, so the event silently vanished and this
+        # test failed on an empty list instead of on the signature.
+        lambda org, name, status, latency, kind, result_count=None:
+            events.append((status, kind)))
     try:
         job = asyncio.ensure_future(ms.mcp.call_tool("_bound_cancel"))
         await asyncio.wait_for(started.wait(), timeout=5)

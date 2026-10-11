@@ -9,31 +9,45 @@ Status—census block). Everything else falls through to the legacy lane.
 MEASURED CONTRACT (pinned, not aspirational — recomputed against
 tests/_assembly_census.json, the committed 133-Q temporal taxonomy):
 
-* In-scope census rows that fire: 53/61. The 8 non-fires are the 5 duration /
+* In-scope census rows that fire: 50/55. The 5 non-fires are duration /
   count / single-anchor rows the SEMANTIC census filed under in-scope
   classes ("how long did it take", "how many charity events … before",
-  "how long have I been working before") + the 3 relative-date-lookup rows
-  that name NO calendar anchor — no shape template must fire on them; the
-  classifier's shape-based rejection is the point.
-* Measured-negative rows that fire: 2/69 = precision 0.9710 (floor ≥ 0.95,
-  R16). Both false fires are CENSUS-LABEL NOISE with an in-shape twin filed
-  under a positive class (pin adjudicated below): (a) 370a8ff4
-  "How many weeks had passed since I recovered from the flu when I went on
-  my 10th jog" — two-anchor interval-since morphology, twin interval rows
-  fire; (b) gpt4_70e84552_abs "Which task did I complete first, fixing the
-  fence or purchasing three cows from Peter?" — the _abs twin of a row
-  filed ordering/compare whose identical morphology fires.
+  "how long have I been working before") — no shape template must fire on
+  them; the classifier's shape-based rejection is the point.
+* Residual measured-negative rows that fire (after the #2652 ago/recency
+  promotion, the #2654 duration-state promotion, #2653's nary-ordering
+  re-measurement, and #2655's calendar-anchor day lookup): exactly 1
+  ADJUDICATED label-noise row below, on a residual set #2655 narrows
+  further by re-adjudicating three calendar-anchored rows INTO the fired
+  class (``_RELATIVE_DATE_CLASS_EXPANSION``). It IS counted in the
+  denominator and is the only permitted fire; see
+  ``test_census_negative_set_precision_floor`` for why the 0.95 RATIO
+  constant is no longer asserted there while the fire SET — the guard that
+  catches every new false fire — is.
+  370a8ff4 "How many weeks had passed since I recovered from the flu when
+  I went on my 10th jog" — two-anchor interval-since morphology, twin
+  interval rows fire. #2653 additionally moved the whole "nary-ordering"
+  class out of this set by re-measuring it: it was filed as 4 rows, but the
+  committed census stores 140-char question TRUNCATIONS, and only 2 are
+  genuine named-subject N-ary ordering questions — both now FIRE as
+  ORDERING with 3 terms (``test_census_nary_ordering_remeasured``). The
+  other two are gpt4_70e84552_abs, the binary `_abs` twin of an
+  ordering/compare row (fired already; now asserted with its class), and
+  gpt4_d6585ce8 ("the concerts and musical events I attended"), a
+  CLASS-PLURAL enumeration request that names no subjects — a different
+  feature, correctly never fired here.
 * #2655 CLASS CORRECTION (measured, same evidence standard as the two
   adjudications): the census's ``relative-date-lookup`` label UNDER-COUNTS
   its own class. Of its 6 rows only 3 name a calendar anchor; 3 further rows
   filed under OTHER classes (``recency/current-state`` ×2, ``other`` ×1) ARE
   plain calendar-anchor lookups ("… last Saturday?", "… last Tuesday?",
-  "… last Friday?") and now fire as ``RELATIVE_DATE``. They are moved OUT of
-  the negative denominator (the census class is re-read by MORPHOLOGY, not
-  by label) rather than counted as precision loss — the negative set is
-  therefore 72 − 3 = 69 rows, and the floor stays ≥ 0.95.
+  "… last Friday?") and now fire as ``RELATIVE_DATE``. They are re-read by
+  MORPHOLOGY and moved OUT of the negative denominator rather than counted
+  as precision loss; the class's 3 anchor-less rows stay in (and stay
+  non-firing), and the classification is measured separately by
+  ``test_census_relative_date_lookup_coverage``.
 
-Both adjudications keep the shape router (NOT the census labels) as the
+The adjudications keep the shape router (NOT the census labels) as the
 arbiter — mirrored in the module docstring.
 """
 from __future__ import annotations
@@ -47,36 +61,87 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from tortoise.assembly import (
+    _RE_OR_CHAIN,
     AssemblyShape,
+    RelativeAnchor,
     ResolveResult,
+    _count_is_fragment,
     classify_question,
     extract_subject_terms,
+    resolve_relative_anchor,
     resolve_subjects,
 )
 
 _CENSUS = json.loads(
     (Path(__file__).resolve().parent / "_assembly_census.json").read_text())
 
+# the three classes the shape router FIRES (the census's in-scope set)
+_IN_SCOPE_CLASSES = {"interval", "ordering/compare", "current-state"}
 # the measured-negative classes (the census's non-fireable sub-classes).
-# TWO labels have had their fireable subsets moved into a shape, and BOTH stay
-# listed here — the label IS the census's non-fireable class, and the rows whose
-# morphology a shape now covers are excluded by QID in
-# ``test_census_negative_set_precision_floor``:
-#   * #2654 "duration-state" — ``_DURATION_STATE_COVERED`` (5 of 7 rows);
-#   * #2655 "relative-date-lookup" — ``_RELATIVE_DATE_ANCHORED`` (3 of 6 rows).
-# The residual rows of both classes stay in the denominator and stay
-# non-firing.
+# #2653: "nary-ordering" is NOT here any more — the class was re-measured
+# and its 2 genuine named-subject rows now FIRE by design (see
+# test_census_nary_ordering_remeasured); the other two are a binary twin
+# that already fired and a class-plural request that is a different feature.
+# ── #2652 census re-measurement ──────────────────────────────────────────
+# The R13 reject-guard's ago/recency vocabulary was PROMOTED to the
+# AGO_RELATIVE shape (explicit offsets + recency — see
+# ``_REL_TIME_CLASSES``), so those two classes are the recall contract, not
+# negatives; the negative set for the precision floor is the RESIDUAL
+# measured set of the classes below, minus the rows both changes adjudicate
+# away (``_PROMOTED_MISFILED`` for #2652, ``_DURATION_STATE_COVERED`` for
+# #2654).
+# #2654: "duration-state" is still listed here — it IS the census's
+# non-fireable class LABEL — but the 5 rows whose morphology the state-entry
+# shape now covers are excluded from the set in
+# ``test_census_negative_set_precision_floor`` (via
+# ``_DURATION_STATE_COVERED``); the class's 2 residual rows stay in it.
+# #2655: the ``relative-date-lookup`` LABEL stays in the set (it IS the
+# census's non-fireable class), but its 3 calendar-anchored rows are excluded
+# by QID (``_RELATIVE_DATE_ANCHORED``) because the day lookup now fires on
+# them, and the 3 rows the census misfiled OUT of the class
+# (``_RELATIVE_DATE_CLASS_EXPANSION``) are re-adjudicated INTO it — see
+# ``test_census_negative_set_precision_floor``.
 _NEG_CLASSES = {
-    "ago-relative", "frequency/count", "duration-state",
-    "relative-date-lookup", "nary-ordering", "other",
-    "pattern/recurring", "offset-comparison", "recency",
+    "frequency/count", "duration-state", "relative-date-lookup",
+    "other", "pattern/recurring", "offset-comparison",
     "recency/current-state",
 }
-# the two adjudicated label-noise rows that MAY fire (pinned — do not grow
-# this list without a documented census divergence)
+# the census classes #2652 promotes to a FIRING shape (recall contract)
+_REL_TIME_CLASSES = {"ago-relative", "recency"}
+#: census rows FILED under a residual class that are MORPHOLOGICALLY part of
+#: the promoted family (a mis-file). They are removed from the negative set
+#: and asserted as promotions instead — scoring a known positive as a false
+#: fire would make the precision figure meaningless.
+_PROMOTED_MISFILED = {
+    "gpt4_4929293b",          # 'a week ago' — explicit offset, filed
+                              # relative-date-lookup
+}
+# the adjudicated label-noise rows that MAY fire (pinned — do not grow this
+# list without a documented census divergence).
+# #2653: gpt4_70e84552_abs is NO LONGER here — its census class
+# ("nary-ordering") was re-measured out of the negative set, so its fire is
+# asserted by ``test_census_nary_ordering_remeasured`` as that class's binary
+# twin rather than counted as a false fire in the residual set.
 _ADJUDICATED_FIRE = {
     "370a8ff4",               # interval-since twin (filed frequency/count)
-    "gpt4_70e84552_abs",      # ordering twin (filed nary-ordering)
+}
+# the FULL (untruncated) question texts of the census nary-ordering class.
+# tests/_assembly_census.json stores 140-char truncations, which is why this
+# class was measured as 4 rows that fire nothing: the truncation cuts
+# gpt4_f49edff3's third option away, leaving a 2-option tail no shape fires
+# on. Re-measured against the dataset, only these 2 are genuine 3+
+# named-subject ordering questions.
+_NARY_FULL_QUESTIONS = {
+    "gpt4_f49edff3": (
+        "Which three events happened in the order from first to last: the "
+        "day I helped my friend prepare the nursery, the day I helped my "
+        "cousin pick out stuff for her baby shower, and the day I ordered "
+        "a customized phone case for my friend's birthday?"),
+    "gpt4_18c2b244": (
+        "What is the order of the three events: 'I signed up for the "
+        "rewards program at ShopRite', 'I used a Buy One Get One Free "
+        "coupon on Luvs diapers at Walmart', and 'I redeemed $12 cashback "
+        "for a $10 Amazon gift card from Ibotta'?"),
 }
 # #2655: rows the census filed OUTSIDE relative-date-lookup that ARE plain
 # calendar-anchor lookups (each names a `last <weekday>` anchor and nothing
@@ -225,8 +290,9 @@ def test_current_state_fires(question, expected):
 def test_census_relative_date_lookup_coverage():
     """#2655 measured target: 3 of the 6 ``relative-date-lookup`` census rows
     fire (from 0/6 at HEAD). The other 3 name NO calendar anchor — one is an
-    ``ago``-offset day (#2652's class), one is ordering-within-a-month, one is
-    frequency/count (#2886's class) — and stay non-firing BY DESIGN.
+    ``ago``-offset day (#2652 now routes it to ``AGO_RELATIVE``, a different
+    shape), one is ordering-within-a-month, one is frequency/count (#2886's
+    class) — and are never THIS shape by design.
 
     The census's label is preserved verbatim here (this test measures the
     class as filed); the classifier's own class correction over the misfiled
@@ -236,13 +302,16 @@ def test_census_relative_date_lookup_coverage():
     rows = [r for r in _CENSUS["rows"] if r["cls"] == "relative-date-lookup"]
     assert len(rows) == 6
     fired = {r["qid"] for r in rows
-             if classify_question(r["question"]) is not None}
+             if classify_question(r["question"])
+             is AssemblyShape.RELATIVE_DATE}
     assert fired == {"71017277", "gpt4_f420262d", "gpt4_e414231f"}, fired
     assert {r["qid"] for r in rows} - fired == _RELATIVE_DATE_NON_ANCHOR
+    # the anchor-less remainder is never a DAY lookup — #2652's ago-offset
+    # row fires, but as AGO_RELATIVE, not as this shape
     for r in rows:
-        if r["qid"] in fired:
+        if r["qid"] not in fired:
             assert classify_question(r["question"]) \
-                is AssemblyShape.RELATIVE_DATE
+                is not AssemblyShape.RELATIVE_DATE
 
 
 @pytest.mark.parametrize("question", [
@@ -322,22 +391,54 @@ def test_relative_date_lookup_does_not_hijack_another_shape(question,
 # ── measured precision floor on the census negative set (R15/R16) ─────────
 
 def test_census_negative_set_precision_floor():
-    """Precision on the measured negative set >= 0.95.
+    """Precision on the RESIDUAL measured negative set ≥ 0.95 — the
+    #2652 + #2653 + #2654 + #2655 merged re-measurement.
 
-    The denominator is the census rows in the non-fireable class labels MINUS
-    every row whose morphology a shape now covers — #2654's 5 state-entry
-    duration-state rows and #2655's 3 calendar-anchored relative-date-lookup
-    rows — and MINUS the 3 rows the census misfiled OUT of relative-date-lookup
-    that are adjudicated INTO it by morphology (they fire as RELATIVE_DATE).
-    What remains is 67 rows, of which at most 2 may fire, and those 2 are
-    pinned to the adjudicated label-noise rows (a NEW false fire fails — the
-    floor is monotonic).
+    ALL FOUR changes shrink the negative denominator: #2653 removed the 4
+    nary-ordering rows it re-measures (``test_census_nary_ordering_remeasured``),
+    #2652 removed the 34 rows it promotes (``_REL_TIME_CLASSES`` ago-relative 31
+    + recency 2, plus the morphologically-promoted mis-file
+    ``_PROMOTED_MISFILED``), #2654 removed the 5 duration-state rows the
+    state-entry shape now fires on (``_DURATION_STATE_COVERED``, pinned by
+    ``test_census_duration_state_coverage``), and #2655 removed the 3
+    calendar-anchored ``relative-date-lookup`` rows the day lookup now fires
+    on (``_RELATIVE_DATE_ANCHORED``). What is left is the residual set
+    asserted below; the class's 2 residual-morphology duration-state rows
+    stay in and stay non-firing.
+
+    #2655 also ADJUDICATES IN 3 rows the census filed OUTSIDE the class —
+    plain ``last <weekday>`` lookups filed under recency/current-state ×2 and
+    other ×1 (``_RELATIVE_DATE_CLASS_EXPANSION``). They are re-read by
+    MORPHOLOGY, asserted to fire as RELATIVE_DATE, and leave the denominator
+    — the same rule the #2165 adjudication below uses.
+
+    The 1 remaining row #2165 Task 2 adjudicated as LABEL NOISE
+    (``_ADJUDICATED_FIRE``) is counted in the denominator and stays the ONLY
+    permitted fire: it fires as a DIFFERENT shape than the class the census
+    filed it under, so it is a declared positive, not a classifier error.
+    The guard that catches a regression is the SET assertion — no fire
+    outside the adjudicated row — plus the equality below; both are
+    denominator-invariant.
+
+    ⚠ The 0.95 RATIO constant is deliberately NOT asserted here. It is a
+    function of the denominator, and all four changes removed NON-firing
+    rows from it while the 1 fixed adjudicated fire stays: 1 of ~30 rows is
+    still ≥ 0.95, but the ratio is not the guard. Every regression the ratio
+    could catch is a NEW fire, which the set assertion catches first —
+    re-expressing that as a ratio would only restate it.
+
+    Re-measured against ``tests/_assembly_census.json``. The #2165 figure
+    (76/78 rejected) is NOT comparable: 34 of those 78 rows are now
+    deliberate positives (78 − 34 − the 5 #2654 state-entry rows − the 4
+    #2653 nary-ordering rows − the 3 #2655 calendar-anchored rows = the 32
+    asserted below).
     """
     rows = [r for r in _CENSUS["rows"]
             if r["cls"] in _NEG_CLASSES
+            and r["qid"] not in _PROMOTED_MISFILED
             and r["qid"] not in _DURATION_STATE_COVERED
             and r["qid"] not in _RELATIVE_DATE_ANCHORED]
-    assert len(rows) == 70
+    assert len(rows) == 32
     false_fires = [
         r for r in rows
         if classify_question(r["question"]) is not None]
@@ -351,28 +452,76 @@ def test_census_negative_set_precision_floor():
                is AssemblyShape.RELATIVE_DATE for r in reclassified)
     remaining = [r for r in false_fires
                  if r["qid"] not in _RELATIVE_DATE_CLASS_EXPANSION]
-    assert {r["qid"] for r in remaining} <= _ADJUDICATED_FIRE, \
-        f"unexpected false fires: {[(r['qid'], r['question'][:70]) for r in remaining]}"
-    assert len(remaining) <= 2, \
-        f"precision floor breached: {len(remaining)} fired"
+    fired = {r["qid"] for r in remaining}
+    assert fired <= _ADJUDICATED_FIRE, \
+        f"unexpected false fires: {[(r['qid'], r['cls'], r['question'][:70]) for r in remaining]}"
+    assert len(remaining) <= 1, \
+        f"precision floor breached: {len(remaining)}/{len(rows)} fired"
+    # ... and the adjudicated row is not merely tolerated — a change that
+    # stops it firing fails here (the floor is monotonic)
+    assert fired == _ADJUDICATED_FIRE, \
+        f"adjudicated label-noise fires drifted: {sorted(fired)}"
+    # the denominator #2655's re-adjudication leaves (the RATIO is
+    # deliberately not asserted — see the docstring)
     denominator = len(rows) - len(reclassified)
-    assert denominator == 67
-    assert 1 - len(remaining) / denominator >= 0.95
-    # the two adjudicated rows fire as their shapes (they are in-shape)
-    for r in remaining:
-        assert classify_question(r["question"]) is not None
+    assert denominator == 29
+
+
+def test_census_relative_time_recall():
+    """#2652 recall contract: EVERY promoted census row routes to the
+    AGO_RELATIVE shape — ago-relative 31/31 + recency 2/2 + the one
+    morphologically-promoted mis-file (measured)."""
+    rows = [r for r in _CENSUS["rows"]
+            if r["cls"] in _REL_TIME_CLASSES
+            or r["qid"] in _PROMOTED_MISFILED]
+    assert len(rows) == 34
+    misses = [(r["qid"], r["question"][:80]) for r in rows
+              if classify_question(r["question"])
+              is not AssemblyShape.AGO_RELATIVE]
+    assert not misses, f"promoted rows failed to route: {misses}"
+
+
+def test_census_nary_ordering_remeasured():
+    """#2653: the census's nary-ordering class, RE-MEASURED from the
+    UNTRUNCATED dataset question text (the committed census stores 140-char
+    truncations — see ``_NARY_FULL_QUESTIONS``).
+
+    Measured: 2 of the 4 rows are genuine 3+ named-subject ordering
+    questions and now FIRE as ORDERING with exactly 3 extracted terms; one
+    is the binary `_abs` twin that already fired; one is a class-plural
+    enumeration request that names no subjects and must never fire here.
+    """
+    by_qid = {r["qid"]: r for r in _CENSUS["rows"]}
+    nary_rows = [r for r in _CENSUS["rows"] if r["cls"] == "nary-ordering"]
+    assert {r["qid"] for r in nary_rows} == {
+        "gpt4_f49edff3", "gpt4_18c2b244", "gpt4_d6585ce8",
+        "gpt4_70e84552_abs"}, "census nary-ordering membership drifted"
+
+    # the 2 genuine N-ary rows: fired shape + 3 terms, on the FULL text
+    for qid, full in _NARY_FULL_QUESTIONS.items():
+        assert classify_question(full) is AssemblyShape.ORDERING, qid
+        terms = extract_subject_terms(full, AssemblyShape.ORDERING)
+        assert len(terms) == 3, (qid, terms)
+        assert all(t.strip() for t in terms), (qid, terms)
+
+    # the class-plural row names NO subjects -> never a shape (a different
+    # feature: enumerating every event of a class over a window)
+    assert classify_question(by_qid["gpt4_d6585ce8"]["question"]) is None
+
+    # the binary `_abs` twin still fires as the TWO-option form
+    twin = by_qid["gpt4_70e84552_abs"]["question"]
+    assert classify_question(twin) is AssemblyShape.ORDERING
+    assert len(extract_subject_terms(twin, AssemblyShape.ORDERING)) == 2
 
 
 def test_census_in_scope_recall_and_shape_rejections():
     """In-scope census rows: the 50 shape-typical rows fire; the 5 pinned
     duration/count mis-files do NOT (shape-based rejection is the point).
 
-    Unchanged by #2655: the relative-date-lookup class stays a NEGATIVE class
-    label (see ``_NEG_CLASSES``), so it is not part of this in-scope set, and
-    the anchor branch preserves every pre-#2655 in-scope decision by falling
-    through to the unchanged body.
-    """
-    rows = [r for r in _CENSUS["rows"] if r["cls"] not in _NEG_CLASSES]
+    The in-scope set is the census's three fired classes (interval /
+    ordering-compare / current-state, 55 rows — #2653's nary-ordering class
+    is measured separately by test_census_nary_ordering_remeasured)."""
+    rows = [r for r in _CENSUS["rows"] if r["cls"] in _IN_SCOPE_CLASSES]
     assert len(rows) == 55
     fired = [r for r in rows if classify_question(r["question"]) is not None]
     no_fire = [r for r in rows if classify_question(r["question"]) is None]
@@ -408,40 +557,513 @@ def test_census_duration_state_coverage():
         f"residual duration-state set drifted: {sorted(residual)}"
 
 
-def test_ago_relative_never_fires_even_with_state_morphology():
-    """R13 reject-on-relative-offset: 'ago'/'last <time>' kills the shape
-    even when the phrasing carries state morphology.
+def test_ago_relative_rejects_compounds_and_the_sibling_vocabulary():
+    """#2652 boundary: the relative-offset vocabulary is PROMOTED (see
+    ``test_ago_relative_shape_fires``); what still rejects is
 
-    #2655: the two CALENDAR-anchored rows that used to be pinned here
-    ("I received a piece of jewelry last Saturday from whom?", "What was the
-    airline that I flied with on Valentine's day?") moved to
-    ``test_relative_date_lookup_fires`` — that reversal is this issue's whole
-    point. Every NON-calendar relative offset stays rejected, including the
-    ordering question that merely CONTAINS an anchor next to an 'ago' offset.
+    * the R13 COMPOUND pin — a relative offset inside a two-subject
+      ordering/interval template (the offset is narrative anchor text
+      there, not the question's window), and
+    * the vocabulary two live sibling issues own: 'last <weekday>' /
+      'the past weekend' (calendar anchors — #2655) and bare 'latest' as
+      an ORDERING INSTRUCTION ('from earliest to latest' — #2653);
+    * a BARE 'ago' the promoted units do not cover (minutes/hours/centuries,
+      'a long time ago') — #2165's reject, narrowed to the residue. Without
+      it the question falls through to whatever template matches next, e.g.
+      "what is the current status of the couch two hours ago?" would fire
+      CURRENT_STATE with the offset embedded in the subject.
     """
     for q in [
-        "what is the current status of the couch two weeks ago?",
-        "What was the status of the couch two weeks ago?",
+        # R13 compound pin (relative offset + interval/ordering template)
         "How many days had passed since I bought the couch two weeks ago "
         "when I sold the dog bed?",
-        "How many weeks ago did I meet up with my aunt and receive the "
-        "crystal chandelier?",
-        "How many months ago did I start my current job at Google?",
-        # an anchor co-present with a NON-anchor offset is still not a date
-        # lookup AND still not an ordering question (the anchor must not act
-        # as a shield for another shape's morphology)
         "Which came first, buying the couch two months ago or selling the "
         "dog bed last Saturday?",
-        # a state question with a relative time adjunct is not a date lookup
+        # un-promoted 'ago' residue (any unit/quantifier #2652 does not own)
+        "what is the current status of the couch two hours ago?",
+        "What did I do a long time ago?",
+        "Which trip did I take three centuries ago?",
+        # compound number words — the offset template would otherwise read
+        # only the LAST word ('twenty two weeks' → 2) and fire a window ~20
+        # units wrong
+        "What did I do twenty two weeks ago?",
+        "What did I do thirty one days ago?",
+        # ... for EVERY separator spelling. A hyphen is a word separator
+        # too, so 'twenty-one' presents the same `\b` to the offset template
+        # as 'twenty one' — the guard must be spelling-independent (`\W+`),
+        # not an allow-list: U+2010/U+2011/U+2212 are non-word characters
+        # exactly like ASCII '-', and an allow-list read 'one' from a
+        # twenty-one-week question and anchored it at one week.
+        "What did I do twenty-one weeks ago?",
+        "What did I do twenty‐one weeks ago?",   # U+2010 HYPHEN
+        "What did I do twenty‑one weeks ago?",   # U+2011 NB-HYPHEN
+        "What did I do twenty−one weeks ago?",   # U+2212 MINUS
+        "What did I do twenty–one weeks ago?",   # U+2013 EN DASH
+        "What did I do thirty—one days ago?",    # U+2014 EM DASH
+        "What did I do thirty, one days ago?",
+        "What did I do thirty and one days ago?",
+        # a VERBAL RANGE / connector: the connector is word characters, so
+        # neither the word nor the numeral branch sees it, and the range's
+        # LAST bound is promoted as the count (a 2–5-week question answered
+        # from the 5-week window alone). The left bound is a NUMBER, word or
+        # digit — a digit-only left bound leaves the class half-open, so the
+        # SPELLED forms below are the pin for that fix: they promote if the
+        # range's left bound ever reverts to `\d+`.
+        "What did I do 2 to 5 weeks ago?",
+        "What did I do between 2 and 5 weeks ago?",
+        "What did I do 2 or 5 weeks ago?",
+        "What did I do 2 through 5 weeks ago?",
+        "What did I do two to five weeks ago?",
+        "What did I do two or five weeks ago?",
+        "What did I do one to three weeks ago?",
+        "What did I do two through five weeks ago?",
+        "What did I do two until five weeks ago?",
+        "What did I do two up to five weeks ago?",
+        "What did I do two–five weeks ago?",   # U+2013, no word connector
+        # ... and the range's LEFT side is not only a BARE bound: the same
+        # class the digit-only left bound left half-open, one level down — a
+        # left bound that repeats its unit, a quantifier left, a teen word
+        # and a connector outside the first pass's list all promoted the
+        # RIGHT bound as the count
+        "What did I do from 2 weeks to 3 months ago?",
+        "What did I do from one week to three weeks ago?",
+        "What did I do 2 weeks or 5 weeks ago?",
+        "What did I do 2 til 5 weeks ago?",
+        "What did I do 2 upto 5 weeks ago?",
+        "What did I do 2 up until 5 weeks ago?",
+        "What did I do several to five weeks ago?",
+        "What did I do a few to five weeks ago?",
+        "What did I do thirteen to five weeks ago?",
+        # ... and the connector can be a DASH, which branch 1 cannot reach
+        # once the left bound carries its own unit ('2 weeks' is not adjacent
+        # to the count) — the dash is the canonical range connector
+        "What did I do from 2 weeks – 3 months ago?",   # U+2013
+        "What did I do 2 weeks — 5 weeks ago?",         # U+2014
+        "What did I do 2 weeks - 5 weeks ago?",         # ASCII
+        # ... and a SPELLED place-value/decimal tail is a multi-part number
+        # too: the offset template reads the trailing word alone. The zero of
+        # 'two point oh five' may be spelled several ways
+        "What did I do two point five weeks ago?",
+        "What did I do twelve point three days ago?",
+        "What did I do two point oh five weeks ago?",
+        "What did I do two point zero five weeks ago?",
+        "What did I do two point o five weeks ago?",
+        # ... the connector may carry an 'up' prefix, in any of its spellings
+        "What did I do 2 weeks up till 5 weeks ago?",
+        "What did I do 2 weeks up through 5 weeks ago?",
+        "What did I do 2 weeks up thru 5 weeks ago?",
+        # ... and a BOUND may be a fraction, spelt or glyph
+        "What did I do one and a half to five weeks ago?",
+        "What did I do two and a half to five weeks ago?",
+        "What did I do 1½ to 2 weeks ago?",
+        # a multi-part NUMERAL is the same defect for digits: `_RE_AGO_OFFSET`
+        # reads `\d+`, so it matches the LAST digit run alone — '2.5 weeks
+        # ago' anchored at 5 weeks and '2,000 days ago' at 0 days (a window
+        # collapsed onto question_date). A digit followed by a WORD char is
+        # not a fragment, so the positive cases below must keep promoting.
+        "What did I do 2.5 weeks ago?",
+        "What did I do 2,000 days ago?",
+        "What did I do 2 000 days ago?",
+        "What did I do 1-2 weeks ago?",
+        # #2655: a state question with a calendar-anchor adjunct is not a
+        # date lookup (the anchor must not act as a shield), and a bare
+        # weekday / a declarative line with no wh-lookup is never one either
         "what is the current status of the couch last weekend?",
         "Is the couch still live last Saturday?",
-        # a weekday offset with no wh-lookup is not a question about the day
         "I bought the couch last Saturday.",
-        # bare weekday names are not anchors (which Tuesday?)
         "What did I do on Tuesday?",
     ]:
         assert classify_question(q) is None, q
         assert extract_subject_terms(q) == [], q
+        assert resolve_relative_anchor(q, "2026-09-10") is None, q
+
+
+def test_ago_relative_still_reads_a_standalone_digit_count():
+    """The multi-part-numeral guard must not eat a count that IS the whole
+    number: a digit followed by a WORD character is not a fragment."""
+    for q, count in [
+        ("I bought 2 things 3 days ago", 3),
+        ("on 3rd, 4 days ago", 4),
+        ("What did I do 22 weeks ago?", 22),
+        ("What did I do 10 days ago?", 10),
+    ]:
+        a = resolve_relative_anchor(q, "2026-09-10")
+        assert a is not None, q
+        assert (a.kind, a.count) == ("ago-offset", count), (q, a)
+
+
+def test_count_fragment_scan_is_linear():
+    r"""The count-fragment scan must stay LINEAR on a pathological input.
+
+    The guard it replaced was a regex with an ambiguous nested quantifier
+    (`(?:\W+|\s+and\s+)+$`), which backtracked over 2**N partitions:
+    measured 3 s at N=24 and never returned beyond. The input is bounded
+    (`MAX_ASK_QUESTION_CHARS`) but `run_ask_lane` has no timeout and a HANG
+    is not an exception the ask envelope can catch, so it was an
+    availability defect. This test does not time anything: it asserts the
+    scan terminates and returns the right verdict at the boundary sizes.
+
+    ⚠️ This pins the SCAN only. `classify_question` is super-linear for an
+    unrelated reason (`_RE_OR_CHAIN`, pinned separately below), so timing
+    the classifier here would assert the wrong thing; what matters is that
+    the guard the question reaches cannot hang on its input.
+
+    The question MUST carry an `ago-offset`: the scan is only reached from
+    `_relative_match` under `kind == "ago-offset"`, so a probe with no
+    offset ('twenty…x') never consults the guard and asserts nothing about
+    the ask path. '…x 1 day ago' is the production shape — on the ambiguous
+    form `classify_question` took 4.8 s at N=24 and hung at N=200.
+    """
+    for n in (24, 200, 1900, 2000):
+        pad = "twenty" + " " * n + "x"
+        # the scan itself, addressed directly: 'x' stops it, so the count
+        # in 'twenty   …   x 1 day ago' is the WHOLE number
+        assert _count_is_fragment(pad + " ") is False, n
+        # ... and through the entry points, where the guard is consulted
+        q = pad + " 1 day ago"
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, n
+        assert resolve_relative_anchor(q, "2026-09-10") is not None, n
+
+
+def test_or_chain_does_not_backtrack():
+    r"""`_RE_OR_CHAIN` must not be super-linear on a one-'or' question.
+
+    Its whitespace runs were `\s+` on both sides of a lazy `.+?`, which
+    overlap on whitespace, so a question with ONE 'or' and long space runs
+    retried every (start, split, end) triple before failing: 307 ms at
+    len 204 and ~4.8 s at len 404 for 'a' + ' '*200 + 'or' + ' '*200 + 'b'
+    (O(n^3.8)). It runs unconditionally in `classify_question` on the ask
+    path, which has no timeout, so this is the same availability defect the
+    ago guard was rewritten to remove — and it is the DOMINANT cost of the
+    classifier once the guard is linear.
+
+    The assertion is on the MATCH VERDICT at the boundary sizes, not on a
+    duration: under the `\s+` form this does not fail, it HANGS.
+    """
+    for n in (200, 500, 1000, 2000):
+        # one 'or', so there is NO chain — and the verdict must be False
+        assert _RE_OR_CHAIN.search(
+            "a" + " " * (n // 2) + "or" + " " * (n // 2) + "b") is None, n
+    # a real chain is still detected, both compactly and across padding
+    assert _RE_OR_CHAIN.search("A or B or C") is not None
+    assert _RE_OR_CHAIN.search("A or" + " " * 500 + "B or C") is not None
+
+
+def test_count_fragment_scan_stops_at_a_sentence_word():
+    """The scan's stopping rule is what makes a legitimate standalone count
+    promote: it crosses CONNECTIVE tokens and reports a whole number at the
+    first plain SENTENCE word, because nothing beyond that word can be part
+    of this number."""
+    # (text before the count, is it a fragment?). The `to ` row is the key
+    # one a single-token lookbehind gets WRONG: 'to' is a connective, but
+    # there is no number behind it, so the count is whole.
+    for prefix, fragment in [
+        ("I bought 2 things ", False),
+        ("on the 3rd of May, ", False),
+        ("I went to the store ", False),
+        ("I mentioned it to my friend ", False),
+        ("", False),
+        ("to ", False),              # connective with no number behind it
+        ("up to ", False),
+        ("2 to ", True),             # range
+        ("2 weeks to ", True),
+        ("2 weeks up till ", True),
+        ("up to and including ", False),
+        ("one and a half to ", True),
+        ("1½ to ", True),
+        ("at 3pm ", False),          # a digit joined to LETTERS is not a number
+        ("zero to ", True),          # a spelled zero is a cardinal, not a marker
+        ("nought to ", True),
+        ("at 4k ", False),
+        ("at 5G ", False),
+        ("2wks to ", True),          # ... unless the letters are its UNIT
+        ("24h to ", True),
+        ("2mo to ", True),
+        ("3d to ", True),
+        ("2 hrs to ", True),          # ... and the SPACED spelling of every
+        ("2hrs to ", True),           # one the glued path knows
+        ("2hours to ", True),
+        ("between 2 hrs and ", True),
+        ("2 mins to ", True),
+        ("2 hours ", False),         # a duration ENDS before the count: two
+        ("2 mins ", False),          # durations, not a range
+        ("3 secs ", False),
+        ("2 weeks ", False),
+        ("2hrs ", False),            # ... and the GLUED duration agrees with
+        ("2hours " , False),         # its spaced twin
+        ("24h ", False),
+        ("2wks ", False),
+        ("2 weeks / ", True),        # ... unless a range GLYPH connects them
+        ("2 weeks ~ ", True),
+        ("2 weeks & ", True),
+        ("2 weeks. ", False),        # sentence punctuation is not a connector
+        ("2 weeks, ", False),
+        ("2 weeks – ", True),
+        ("2 hours 5 days ", False),
+        # ... and the SAME termination holds across a DEGREE ADVERB: an
+        # adverb modifies the count, it does not link it to the earlier
+        # duration, so the scan must NOT cross the unit behind it
+        ("2 hours about ", False),
+        ("2 hours nearly ", False),
+        ("2 hours just ", False),
+        ("2hrs about ", False),
+        ("2 hours ~ about ", True),   # ... unless a GLYPH does link them
+        ("between 2 and about ", True),   # a connective CHAIN (already above)
+        ("2 to roughly ", True),
+        ("from 2 up to and including ", True),
+        ("twenty ", True),           # compound number word
+        ("twenty-", True),
+        ("hundred ", True),          # a bare SCALE word IS a bound
+        ("thousand ", True),
+        ("dozens of ", True),
+        ("two hundred ", True),
+        ("2.", True),                # multi-part numeral
+        ("2,", True),
+        ("two point ", True),        # spelled place value
+        ("two point oh ", True),
+        ("two point zero ", True),
+    ]:
+        assert _count_is_fragment(prefix) is fragment, prefix
+
+
+def test_count_fragment_duration_ends_across_a_degree_adverb():
+    """Regression (PR #8097 review, P1): a standalone count preceded by a
+    DURATION + degree adverb must still promote.
+
+    The unit-terminates rule used to key on the unit being the FIRST token
+    left of the count, so a degree adverb between a duration and the count
+    defeated it: the scan crossed the adverb, then the unit, then reached the
+    earlier duration's number and reported Fragment=True. That is a false
+    reject against the merge-base `5d75752f7` — the count is standalone and
+    must route to AGO_RELATIVE, not fall through to the legacy lane.
+
+    The fix keys the termination on whether a RANGE LINKER (connector word or
+    glyph) sits between the unit and the count, not on the unit's position.
+    On the pre-fix tree the first two assertions fail (`_count_is_fragment`
+    reports True; `classify_question` reports None); the control rows below
+    hold on both trees and pin that a real range is still rejected.
+    """
+    # mechanism probe: the duration's number lies behind an adverb, not a
+    # connector, so it is a NEW number — the count is whole
+    for prefix in ("I ran for 2 hours about ", "I ran for 2 hours nearly ",
+                   "I studied for 3 hours just ", "I slept for 8 hours "
+                   "exactly ", "I ran for a couple of hours about "):
+        assert _count_is_fragment(prefix) is False, prefix
+    # ... and through the two entry points the reviewer reproduced on, which
+    # must now route to AGO_RELATIVE with the STANDALONE count
+    for q, count in [
+        ("I ran for 2 hours about 3 days ago", 3),
+        ("I ran for a couple of hours about 3 days ago", 3),
+        ("I studied for 3 hours nearly 5 days ago", 5),
+        ("I trained for 2 hours just 3 days ago", 3),
+        ("I slept for 8 hours exactly 3 days ago", 3),
+        # controls: no adverb, or a bare adverb with no preceding duration
+        ("I ran for 2 hours 3 days ago", 3),
+        ("I ran about 3 days ago", 3),
+    ]:
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, q
+        anchor = resolve_relative_anchor(q, "2026-09-10")
+        assert anchor is not None, q
+        assert (anchor.kind, anchor.count) == ("ago-offset", count), (q, anchor)
+    # control: a real RANGE that merely qualifies its right bound is still a
+    # fragment, so the adverb does not blanket-disable the guard
+    for q in ("between 2 and about 5 weeks ago",
+              "2 to roughly 5 weeks ago"):
+        assert _count_is_fragment(q[:q.rfind(" 5 weeks ago") + 1]) is True, q
+        assert classify_question(q) is not AssemblyShape.AGO_RELATIVE, q
+
+
+def test_count_fragment_scan_crosses_a_connective_chain():
+    """The scan must cross an ARBITRARY run of connectives, not just one
+    token: a chain that reaches no number is whole ('up to and including 5'),
+    a chain that reaches one is a fragment ('2 up to and including 5').
+
+    A single-token check cannot tell these apart — both have a connective
+    immediately before the count — which is the defect this pins.
+    """
+    for prefix in ("up to ", "up to and including ", "from 2 and about "):
+        assert _count_is_fragment(prefix) is ("2" in prefix), prefix
+
+
+def test_count_fragment_scan_ignores_a_preceding_ordinal():
+    """An ordinal is a DATE reference, not a number span: 'on 3rd, 4 days
+    ago' must still promote count=4. Same for a token whose digits are joined
+    to letters — a time if it ends in 'pm', a label if it ends in 'k'/'G'."""
+    for prefix in ("on 3rd, ", "on the 22nd, ", "since the 1st, ",
+                   "what did I do at 3pm ", "I raised 4k ",
+                   "the 5G "):
+        assert _count_is_fragment(prefix) is False, prefix
+
+
+def test_ago_relative_shape_fires():
+    """#2652: explicit relative offsets route to AGO_RELATIVE — including
+    the state-morphology form the R13 guard used to kill (the CURRENT_STATE
+    shape must not claim *current* state for a past-time question; the
+    window shape answers the as-of question instead)."""
+    for q in [
+        "what is the current status of the couch two weeks ago?",
+        "What was the status of the couch two weeks ago?",
+        "How many weeks ago did I meet up with my aunt and receive the "
+        "crystal chandelier?",
+        "How many months ago did I start my current job at Google?",
+        "What kitchen appliance did I buy 10 days ago?",
+        "I mentioned participating in a sports event two weeks ago. What "
+        "was the event?",
+        "What did I do with Rachel on the Wednesday two months ago?",
+        "What was the significant buisiness milestone I mentioned four "
+        "weeks ago?",
+        "I mentioned cooking something for my friend a couple of days "
+        "ago. What was it?",
+        "Which book did I finish a week ago?",
+    ]:
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, q
+
+
+def test_most_recently_shape_fires():
+    """#2652 recency: the ADVERBIAL 'most recently' routes to AGO_RELATIVE
+    (the open as-of window: everything up to question_date). The
+    ATTRIBUTIVE 'most recent' does NOT — it stays a guard (main parity),
+    see ``test_nary_and_order_instruction_never_fire``."""
+    for q in [
+        "Which mode of transport did I use most recently, a bus or a "
+        "train?",
+        "Which streaming service did I start using most recently?",
+        "Which mode of transport did I use most recently?",
+    ]:
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, q
+
+
+# ── #2652 anchor+offset arithmetic (deterministic, question_date minus
+#    offset → as-of window) ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("question,qdate,kind,unit,count,anchor,lo,hi", [
+    # explicit numeric offsets: the window is the unit's half-span around
+    # the anchor (a '2 weeks ago' claim rounds to the nearest week)
+    ("what did I do 2 weeks ago?", "2026-09-10", "ago-offset", "week", 2,
+     "2026-08-27", "2026-08-24", "2026-08-30"),
+    ("What kitchen appliance did I buy 10 days ago?", "2026-09-10",
+     "ago-offset", "day", 10, "2026-08-31", "2026-08-31",
+     "2026-08-31"),
+    ("What was the significant buisiness milestone I mentioned four "
+     "weeks ago?", "2026-09-10", "ago-offset", "week", 4,
+     "2026-08-13", "2026-08-10", "2026-08-16"),
+    # 'a week ago' / 'a month ago' — the article is the count 1
+    ("Which book did I finish a week ago?", "2026-09-10", "ago-offset",
+     "week", 1, "2026-09-03", "2026-08-31", "2026-09-06"),
+    # calendar months/years (NOT 30/365 days) — the anchor is the same
+    # day-of-month a month earlier
+    ("What did I buy a month ago?", "2026-09-10", "ago-offset", "month",
+     1, "2026-08-10", "2026-07-26", "2026-08-25"),
+    ("how many months ago did I attend the festival?", "2026-09-10",
+     "ago-count", "month", None, None, "2025-08-06", "2026-09-10"),
+    # month-end clamp: 2026-03-31 minus one month = 2026-02-28
+    ("What did I do a month ago?", "2026-03-31", "ago-offset", "month",
+     1, "2026-02-28", "2026-02-13", "2026-03-15"),
+    ("how many years ago did I move here?", "2026-09-10", "ago-count",
+     "year", None, None, "2025-08-06", "2026-09-10"),
+])
+def test_relative_anchor_arithmetic(
+        question, qdate, kind, unit, count, anchor, lo, hi):
+    a = resolve_relative_anchor(question, qdate)
+    assert isinstance(a, RelativeAnchor), question
+    assert a.kind == kind
+    assert a.unit == unit
+    assert a.count == count
+    assert (a.anchor.isoformat() if a.anchor else None) == anchor
+    assert (a.window_lo.isoformat() if a.window_lo else None) == lo
+    assert (a.window_hi.isoformat() if a.window_hi else None) == hi
+
+
+def test_relative_anchor_fuzzy_determiners_widen_the_window():
+    """'a couple of days ago' is not exactly 2 days — the window widens by
+    the fuzzy tolerance instead of pinning a single day (never a
+    confidently wrong anchor)."""
+    from datetime import date as _date
+    a = resolve_relative_anchor(
+        "I mentioned cooking something for my friend a couple of days "
+        "ago. What was it?", "2026-09-10")
+    assert a is not None and a.kind == "ago-offset"
+    assert a.unit == "day" and a.count == 2 and a.fuzzy is True
+    assert a.anchor.isoformat() == "2026-09-08"
+    assert a.window_lo.isoformat() == "2026-09-06"
+    assert a.window_hi.isoformat() == "2026-09-10"
+    # an exact numeric count keeps a one-day window
+    exact = resolve_relative_anchor("what did I do 2 days ago?",
+                                    "2026-09-10")
+    assert exact.fuzzy is False
+    assert exact.window_lo == exact.window_hi == exact.anchor
+    # an ARTICLE means exactly one — 'a day ago' is not a fuzzy claim, and
+    # widening it to ±2 days would push the window PAST question_date
+    art = resolve_relative_anchor("what did I do a day ago?", "2026-09-10")
+    assert art is not None and art.count == 1 and art.fuzzy is False
+    assert art.window_lo == art.window_hi == art.anchor == _date(2026, 9, 9)
+    # ... and no as-of window ever extends past question_date (the question
+    # asks what was true AS OF it, so a future row is never an answer)
+    for q in ("what did I do a week ago?", "what did I do a couple of days "
+              "ago?", "what did I do 3 days ago?"):
+        w = resolve_relative_anchor(q, "2026-09-10")
+        assert w.window_hi <= _date(2026, 9, 10), (q, w.window_hi)
+
+
+def test_relative_anchor_recency_is_an_open_as_of_window():
+    """Recency has no offset to subtract — the anchor is unknown and the
+    window is the open past up to question_date (never a fabricated date)."""
+    a = resolve_relative_anchor(
+        "Which streaming service did I start using most recently?",
+        "2026-09-10")
+    assert a is not None and a.kind == "recency"
+    assert a.unit is None and a.count is None and a.anchor is None
+    assert a.window_hi.isoformat() == "2026-09-10"
+    assert (a.window_hi - a.window_lo).days == 400
+
+
+def test_resolver_and_router_agree_on_the_shape_boundary():
+    """The resolver is the router's second half, not a parallel definition
+    of the boundary. A question ``classify_question`` does NOT route to
+    AGO_RELATIVE must never yield an anchor, even when a promoted offset is
+    textually present — ``_relative_guarded`` alone is only the two-subject
+    half of that boundary. (Before this was pinned, 'How long had I been X
+    two weeks ago when Y' classified as None but resolved to a window, so a
+    caller that skipped the router could fire the wrong shape.)"""
+    q = ("How long had I been a member of 'Book Lovers Unite' two weeks "
+         "ago when I attended the meetup?")
+    assert classify_question(q) is None
+    assert resolve_relative_anchor(q, "2026-09-10") is None
+    # ... while the as-of state question the shape DOES own still resolves
+    q2 = "what is the current status of the couch two weeks ago?"
+    assert classify_question(q2) is AssemblyShape.AGO_RELATIVE
+    assert resolve_relative_anchor(q2, "2026-09-10") is not None
+
+
+def test_relative_anchor_never_raises():
+    """Deterministic degrade: no/invalid question_date, no anchor, blank
+    input — all return None (the caller then falls through to legacy)."""
+    assert resolve_relative_anchor("what did I do 2 weeks ago?",
+                                  None) is None
+    assert resolve_relative_anchor("what did I do 2 weeks ago?",
+                                  "not-a-date") is None
+    assert resolve_relative_anchor("what is the current status of the "
+                                  "couch?", "2026-09-10") is None
+    assert resolve_relative_anchor("", "2026-09-10") is None
+    assert resolve_relative_anchor(None, "2026-09-10") is None
+    # an UNREPRESENTABLE offset is an unparseable one: `_RE_AGO_OFFSET`
+    # accepts unbounded digits, so the arithmetic must not escape as
+    # ValueError/OverflowError (a raise surfaces as AskRetrievalUnavailable
+    # instead of the legacy fall-through)
+    assert resolve_relative_anchor(
+        "what did I do 100000 years ago?", "2026-09-10") is None
+    assert resolve_relative_anchor(
+        "what did I do 99999999999999999999 days ago?", "2026-09-10") is None
+    # ... and the WINDOW arithmetic is guarded too: the anchor can be
+    # representable while `anchor ± half` is not (2026 − 2025 years falls
+    # below date.min; a question_date at the top of date's range overflows
+    # on the other side)
+    assert resolve_relative_anchor(
+        "what did I do 2025 years ago?", "2026-01-15") is None
+    assert resolve_relative_anchor(
+        "what did I do 0 years ago?", "9999-12-31") is None
+    assert resolve_relative_anchor(
+        "what did I do 0 months ago?", "9999-12-31") is None
 
 
 def test_misfire_preference_with_two_named_options():
@@ -599,32 +1221,197 @@ def test_duration_state_does_not_steal_interval_or_rejected_forms():
         # R13: 'ago' kills the duration-state form too
         "How long had I been a member of 'Book Lovers Unite' two weeks ago "
         "when I attended the meetup?",
+        # R13 N-ary: the 3+ option list is a reject for EVERY template,
+        # duration-state included (the guard runs BEFORE the template)
+        "How long had I been dating Mark or Sarah or Tom when I moved?",
+        # R13 'ago' residue: an un-promoted offset (hours/minutes/…) is a
+        # window too — it must not be folded into the state subject
+        "How long had I been asleep one hour ago when the alarm rang?",
     ]:
         assert classify_question(q) is None, q
         assert extract_subject_terms(q) == [], q
 
 
-def test_nary_and_recency_never_fire():
-    """N-ary lists (3+ options), recency ('most recently'), and the
-    'how many days passed between the two Xs' compound single-subject form
-    never fire."""
+def test_nary_ordering_fires_with_n_terms():
+    """#2653: 3+ named options DECOMPOSE (R13's 'N-ary out of v1' is lifted)
+    — every delimiter family the pre-#2653 guard enumerated, plus the
+    corpus's colon-introduced list form."""
+    for q, expected in [
+        # colon + comma/and list (the corpus form; gpt4_f49edff3)
+        ("Which three events happened in order: the day I helped my friend, "
+         "the trip, and the party?",
+         ["I helped my friend", "the trip", "the party"]),
+        # colon + quoted list (gpt4_18c2b244 shape)
+        ("What is the order of the three events: 'A', 'B', and 'C'?",
+         ["'A'", "'B'", "'C'"]),
+        # repeated ' or '
+        ("Which did I get first, the couch or the chair or the table?",
+         ["the couch", "the chair", "the table"]),
+        # comma list + final ' or '
+        ("Which did I get first, the couch, the chair or the table?",
+         ["the couch", "the chair", "the table"]),
+        # colon + comma list + final ' or '
+        ("Which came first: my graduation, my wedding or my first child?",
+         ["my graduation", "my wedding", "my first child"]),
+        # 4 options
+        ("Which did I get first, the couch, the chair, the lamp or the "
+         "table?",
+         ["the couch", "the chair", "the lamp", "the table"]),
+        # a colon INSIDE a quoted option is not the list introducer — the
+        # span must not be cut there (the rsplit(":", 1) truncation)
+        ("Which did I get first, 'Star Wars: A New Hope', 'Empire', or "
+         "'Jedi'?",
+         ["'Star Wars: A New Hope'", "'Empire'", "'Jedi'"]),
+        # a time-of-day colon in the ordering HEAD is not the introducer
+        # either — the list colon after it is (the first-colon-cut
+        # regression)
+        ("What is the order of the events at 3:00: the couch, the chair, "
+         "and the lamp?",
+         ["the couch", "the chair", "the lamp"]),
+        # a POSSESSIVE apostrophe before the colon is not an opening quote —
+        # counting it as one hid the list colon and fell back to the marker
+        # span
+        ("What is the order of Sarah's events: the wedding, the trip, and "
+         "the party?",
+         ["the wedding", "the trip", "the party"]),
+    ]:
+        assert classify_question(q) is AssemblyShape.ORDERING, q
+        assert extract_subject_terms(q) == expected, q
+
+
+def test_nary_ordering_introducer_and_current_state_guards():
+    """The option-list introducer survives an apostrophe, an inch mark and a
+    time-of-day head, and a CURRENT_STATE subject is not an option list.
+
+    Each case is a family the colon-cut rewrite had to keep correct: a
+    possessive head ("day's") whose `'` must not mask the introducer; an
+    inch mark that leaves the quotes unpaired; a trailing time clause that
+    must not be taken for the introducer; and a quoted option that itself
+    contains a colon, which is ONE option and not two.
+    """
+    for q, expected in [
+        ("What is the order of the day's events at 3:00: the couch, the "
+         "chair, and the table?",
+         ["the couch", "the chair", "the table"]),
+        ("What is the order of the events at 5\" : the couch, the chair, and "
+         "the meeting at 3:00?",
+         ["the couch", "the chair", "the meeting at 3:00"]),
+        ("What is the order of: 'Star Wars: A New Hope', 'Empire', and "
+         "'Jedi'?",
+         ["'Star Wars: A New Hope'", "'Empire'", "'Jedi'"]),
+    ]:
+        assert classify_question(q) is AssemblyShape.ORDERING, q
+        assert extract_subject_terms(q) == expected, q
+    # "the order I placed:" is a CURRENT_STATE subject, not an option list
+    assert classify_question(
+        "What is the current status of the order I placed: the couch, the "
+        "chair, and the table?") is AssemblyShape.CURRENT_STATE
+    # an or-chain outside an ordering head is not a shape at all, even though
+    # `_nary_terms` alone would decompose it (origin/main answers None here).
+    # Without the ordering-head half of the exemption these come back as the
+    # duration-state / interval shapes.
+    for q in ["How long had I been dating: the lamp or the table or the chair "
+              "when it ended?",
+              "How many days had passed since I bought: the couch or the lamp "
+              "or the table when it ended?"]:
+        assert classify_question(q) is None, q
+    # an introducer colon inside an OPTION is not an introducer: the template
+    # matches, but with no introducer the segment keeps the ordering head, and
+    # the list must not fire on that leaked first term
+    assert classify_question(
+        "What is the order of the couch, the chair, and the meeting at "
+        "3:00") is None
+
+
+def test_binary_ordering_unaffected_by_the_nary_arm():
+    """The two-option path is BYTE-IDENTICAL (#2653 acceptance): every
+    binary delimiter family still yields exactly 2 terms, and a binary
+    question whose A-side merely CONTAINS a comma is not split into three
+    (the `_RE_OPTION_LEAD` guard — otherwise the R1 all-terms gate would fail
+    closed where the binary path used to fire)."""
+    for q, expected in [
+        ("Which vehicle did I take care of first in February, the bike or "
+         "the car?", ["the bike", "the car"]),
+        ("Which book did I finish reading first, 'The Hate U Give' or 'The "
+         "Nightingale'?", ["'The Hate U Give'", "'The Nightingale'"]),
+        ("Which event happened first, my cousin's wedding or Michael's "
+         "engagement party?",
+         ["my cousin's wedding", "Michael's engagement party"]),
+        ("which came first - the couch or the dog bed?",
+         ["the couch", "the dog bed"]),
+        ("Which did I get first: the couch or the dog bed?",
+         ["the couch", "the dog bed"]),
+        ("Which seeds were started first, the tomatoes or the marigolds?",
+         ["the tomatoes", "the marigolds"]),
+    ]:
+        assert classify_question(q) is AssemblyShape.ORDERING, q
+        terms = extract_subject_terms(q, AssemblyShape.ORDERING)
+        assert terms == expected, (q, terms)
+    # a comma INSIDE the A-side of a binary question (parenthetical clause)
+    # must not be read as a third option — the shape does not fire at all
+    assert classify_question(
+        "Which did I get first, 'The Hate U Give', which I loved, or 'The "
+        "Nightingale'?") is None
+
+
+def test_narrative_verbs_do_not_trip_the_advice_guard():
+    """#2653: bare 'pick/choose/decide' are ordinary narrative verbs. The
+    census's own N-ary row says 'the day I helped my cousin PICK OUT STUFF
+    for her baby shower' — a bare-verb advice guard rejected the shape for it,
+    silently excluding a measured row. Preference forms stay rejected."""
+    # narrative use -> the shape fires
+    assert classify_question(
+        "Which three events happened in the order from first to last: the "
+        "day I helped my friend prepare the nursery, the day I helped my "
+        "cousin pick out stuff for her baby shower, and the day I ordered a "
+        "customized phone case for my friend's birthday?"
+    ) is AssemblyShape.ORDERING
+    # preference use -> still rejected (R16)
     for q in [
-        "Which three events happened in order: the day I helped my friend, "
-        "the trip, and the party?",
+        "Which one shall I pick first, the couch or the dog bed?",
+        "Which to choose first, the couch or the dog bed?",
+        "Which would you pick first, the couch or the dog bed?",
+        "Which should I decide first, the couch or the dog bed?",
+        "Which one to pick first, the couch or the dog bed?",
+    ]:
+        assert classify_question(q) is None, q
+
+
+def test_nary_recency_and_class_plural_never_fire():
+    """Recency ('most recently'), the compound single-subject 'between the
+    two Xs' form, and the CLASS-PLURAL enumeration request (no NAMED
+    subjects) never fire — the N-ary arms need a decomposable option list,
+    and 'the concerts and musical events I attended' is not one."""
+    for q in [
         "What is the order of the six museums I visited from earliest to "
         "latest?",
-        "Which mode of transport did I use most recently, a bus or a "
-        "train?",
-        "Which streaming service did I start using most recently?",
+        "What is the order of the concerts and musical events I attended "
+        "in the past two months, starting from the earliest?",
+        "What is the order of the three trips I took in the past three "
+        "months, from earliest to latest?",
+        # the SAME ordering instruction spelled with the ATTRIBUTIVE 'most
+        # recent' — only the adverbial 'most recently' names a time, so the
+        # attributive stays a guard (as on main) and is not promoted
+        "What is the order of the six museums I visited from earliest to "
+        "most recent?",
+        "List the events from most recent to oldest.",
+        # ... and the guard must catch it BEFORE the shape templates, or the
+        # question falls through and fires ORDERING/CURRENT_STATE on a
+        # recency question main deliberately rejected
+        "Which did I buy first, my most recent phone or my laptop?",
+        "what is the current status of my most recent car?",
+        "Which came first, my most recent trip to Paris or my graduation?",
+        # ... including the hyphen/dash spellings: `\W+` makes the guard
+        # spelling-independent, so 'most-recent' is the same instruction
+        "Which did I buy first, my most-recent phone or my laptop?",
+        "what is the current status of my most‑recent car?",  # U+2010
         "How many days passed between the two deep-subject milestones?",
         "When did I buy the couch?",  # date-lookup w/o shape support (v1)
-        # 3+ option lists (review r2 P1 — every delimiter family)
-        "Which did I get first, the couch or the chair or the table?",
-        "Which did I get first, the couch, the dog bed or the sofa?",
-        "Which came first: my graduation, my wedding or my first child?",
+        # semicolon-delimited lists are NOT the measured form
         "Which came first; my graduation; my wedding or my first child?",
     ]:
         assert classify_question(q) is None, q
+        assert extract_subject_terms(q) == [], q
 
 
 def test_empty_and_garbage_input():
@@ -2269,6 +3056,123 @@ def test_render_ordering_line_and_sections():
     assert couch_ids[-1] == "pX-undated"
 
 
+# ── #2653: N-ary ordering — the N-way chain over the SAME dated spine ─────
+
+_D = __import__("datetime").date  # the #2653 fixtures' date constructor
+
+
+def _nary_slices(dated):
+    """AssemblySlices for an N-subject ordering render. ``dated`` is a list
+    of (object_id, name, date|None) in candidate order."""
+    return AssemblySlices(
+        state_rows=tuple(
+            {"object_id": o, "name": n, "status": "live",
+             "superseded_by": None, "superseded_at": None}
+            for o, n, _dt in dated),
+        timeline_rows=tuple(
+            {"object_id": o, "kind": "point", "id": f"p-{o}",
+             "content": f"event for {n}", "date": dt,
+             "tier": "dated" if dt is not None else "undated"}
+            for o, n, dt in dated),
+        evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+
+
+_THREE = [("obj-a", "couch", _D(2026, 8, 10)),
+          ("obj-b", "dog bed", _D(2026, 8, 14)),
+          ("obj-c", "bookshelf", _D(2026, 9, 1))]
+_THREE_TERMS = ["the couch", "the dog bed", "the bookshelf"]
+
+
+def test_render_nary_ordering_chain():
+    """#2653: 3 named options render ONE deterministic chain over each
+    subject's earliest dated row (the binary path's own anchor) — the whole
+    answer to "which came first, A, B or C"."""
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)]
+    hits = synthesize_hits(_nary_slices(_THREE),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["kind"] == "ordering"
+    assert hits[0]["content"] == (
+        "couch came first on 2026-08-10, then dog bed on 2026-08-14, "
+        "then bookshelf on 2026-09-01"), f"chain drifted: {hits[0]['content']!r}"
+
+
+def test_render_nary_ordering_chain_is_question_order_independent():
+    """Determinism: the chain is a property of the DATED SPINE, not of the
+    candidate order the resolver happened to return (a subject shuffle yields
+    zero delta — the binary path's matched-control contract)."""
+    base = [_cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)]
+    shuffled = [_cand("obj-c", "bookshelf", 0), _cand("obj-a", "couch", 1),
+                _cand("obj-b", "dog bed", 2)]
+    first = synthesize_hits(_nary_slices(_THREE),
+                            shape=AssemblyShape.ORDERING, candidates=base,
+                            halves=_THREE_TERMS)[0]["content"]
+    second = synthesize_hits(_nary_slices(_THREE),
+                             shape=AssemblyShape.ORDERING,
+                             candidates=shuffled,
+                             halves=_THREE_TERMS)[0]["content"]
+    assert first == second
+
+
+def test_render_nary_ordering_tie_group_then_rest():
+    """Same-day tie inside an N-ary chain: the tie group is named in OBJECT
+    ID order (phrasing-independent canon, as in the binary tie phrase), then
+    the later members follow."""
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 10)),
+             ("obj-c", "bookshelf", _D(2026, 9, 1))]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(dated)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["content"] == (
+        "couch and dog bed both appeared on 2026-08-10, then bookshelf on "
+        "2026-09-01"), f"tie chain drifted: {hits[0]['content']!r}"
+
+
+def test_render_nary_undated_subject_suppresses_the_chain():
+    """Fail-closed: the FULL order is claimed ONLY when every subject is
+    dated — a chain silently missing a member would state a confidently wrong
+    order. The per-subject sections still render (the evidence is not lost)."""
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 14)),
+             ("obj-c", "bookshelf", None)]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(dated)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert all(h.get("kind") != "ordering" for h in hits), hits
+    # the sections still carry every subject's rows
+    assert {h.get("object_id") for h in hits if h.get("object_id")} == {
+        "obj-a", "obj-b", "obj-c"}
+
+
+def test_both_halves_ok_is_all_terms_for_the_nary_width():
+    """R1 (#2653): the N-ary width comes from the EXTRACTED term count —
+    all N subjects must resolve or the shape fires nothing. Omitted
+    ``n_terms`` keeps the legacy two-half contract (existing callers)."""
+    from tortoise.assembly import ResolveResult
+    three = ResolveResult(candidates=tuple(
+        _cand(o, n, i) for i, (o, n, _d) in enumerate(_THREE)))
+    assert three.both_halves_ok(AssemblyShape.ORDERING, n_terms=3) is True
+    # a 4th term with no candidate -> all-N fails (no partial admit)
+    assert three.both_halves_ok(AssemblyShape.ORDERING, n_terms=4) is False
+    # one unresolved term -> fails whatever the width
+    partial = ResolveResult(
+        candidates=tuple(_cand(o, n, i)
+                         for i, (o, n, _d) in enumerate(_THREE[:2])),
+        unresolved=("the bookshelf",))
+    assert partial.both_halves_ok(AssemblyShape.ORDERING, n_terms=3) is False
+    # the legacy two-half contract is unchanged when n_terms is omitted
+    assert three.both_halves_ok(AssemblyShape.ORDERING) is False
+    assert ResolveResult(candidates=tuple(
+        _cand(o, n, i)
+        for i, (o, n, _d) in enumerate(_THREE[:2]))
+    ).both_halves_ok(AssemblyShape.ORDERING) is True
+
+
 def test_render_interval_diff_via_shared_helper():
     """interval: the diff line uses the SHARED _norm_date helper (same date
     semantics as the as-of boundary): buying (2026-08-10) -> selling
@@ -2991,7 +3895,8 @@ def _drive_subject_path(monkeypatch, resolver_port, walker_port, question, *,
                         question_date="2026-09-10"):
     """Drive `_assemble_connected`'s SUBJECT path with both graph seams
     stubbed — a DB-free regression pin for the #2655 refactor (the tail moved
-    into `_finish_fired`; the subject pipeline must be unchanged)."""
+    into the shared `_decorate_real_rows`/`_assemble_under_caps` helpers the
+    #2652 window path uses); the subject pipeline must be unchanged."""
     import tortoise.assembly as amod
     monkeypatch.setattr(amod, "docker_resolver_port", lambda sdk: resolver_port)
     monkeypatch.setattr(amod, "docker_walker_port", lambda sdk: walker_port)
@@ -3002,8 +3907,9 @@ def _drive_subject_path(monkeypatch, resolver_port, walker_port, question, *,
 
 def test_connected_subject_path_unchanged_by_the_refactor(monkeypatch):
     """CURRENT_STATE through the real orchestration: resolve -> walk ->
-    render -> _finish_fired. The state header and the dated spine survive the
-    #2655 tail extraction."""
+    render -> the shared `_decorate_real_rows`/`_assemble_under_caps` tail
+    the #2655 refactor extracted. The state header and the dated spine
+    survive the tail extraction."""
     walker = _fixture_walker_port()
     resolver = _DictObjectPort([{"id": "obj-couch", "name": "couch"}])
     block = _drive_subject_path(
@@ -3052,3 +3958,332 @@ def test_connected_subject_path_one_half_unresolved_still_falls_through(
     assert block.fired is False
     assert block.shape is None
     assert block.post_cap_lines == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2652 — window walk + AGO_RELATIVE render (stub port; the docker-lane
+# integration goldens live in tests/test_assembly_sdk.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+from tortoise.assembly import (  # noqa: E402
+    collect_window_slices,
+)
+
+
+class _DictWindowPort:
+    """In-memory window port: rows is the raw ``window_rows`` reply."""
+
+    def __init__(self, rows, *, raise_on_fetch=False):
+        self.rows = rows
+        self.calls = []
+        self.raise_on_fetch = raise_on_fetch
+
+    def window_rows(self, lo, hi, cap):
+        self.calls.append((lo, hi, cap))
+        if self.raise_on_fetch:
+            raise RuntimeError("boom")
+        return list(self.rows)
+
+
+def _win_rows():
+    return [
+        {"kind": "point", "id": "p-in-when", "content": "in window by when",
+         "when": "2026-08-10", "status": "live"},
+        # junk `when` + REAL createdAt: the R2 ladder must place this row by
+        # its real date, NOT drop it into the undated tier
+        {"kind": "point", "id": "p-junk-when", "content": "junk when",
+         "when": "garbage", "created_at": "2026-08-11", "status": "live"},
+        {"kind": "point", "id": "p-outside", "content": "too late",
+         "when": "2026-09-01", "status": "live"},
+        {"kind": "point", "id": "p-undated", "content": "no date at all",
+         "when": None, "created_at": "1970-01-01T00:00:00Z",
+         "status": "live"},
+        {"kind": "event", "id": "ev-1", "content": "an event",
+         "started_at": "2026-08-10", "status": "live"},
+    ]
+
+
+def test_window_slices_tier_filter_and_undated_exclusion():
+    """The window is a DATE-ARITHMETIC selector: rows are placed by the R2
+    ladder's normalized date (a junk `when` with a real createdAt is dated,
+    never dropped as undated), rows outside the window are excluded, and
+    UNDATED rows are excluded too (an undated line cannot satisfy an
+    elapsed-time window)."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+    assert anchor.window_lo.isoformat() == "2026-07-26"
+    assert anchor.window_hi.isoformat() == "2026-08-25"
+    port = _DictWindowPort(_win_rows())
+    slices = collect_window_slices(port, anchor)
+    got = [r["id"] for r in slices.timeline_rows]
+    # chronological, ties broken deterministically by id ('ev-1' < 'p-in-when')
+    assert got == ["ev-1", "p-in-when", "p-junk-when"]
+    assert [r["tier"] for r in slices.timeline_rows] == [
+        "started", "when", "created"]
+    assert [r["date"].isoformat() for r in slices.timeline_rows] == [
+        "2026-08-10", "2026-08-10", "2026-08-11"]
+    assert slices.admission["rows_admitted"] == 3
+    # ONE batched fetch, bounded
+    assert len(port.calls) == 1
+    assert slices.state_rows == ()
+
+
+def test_window_slices_recency_is_newest_first():
+    """'most recently' answers about the LATEST entries, so its spine is
+    ordered newest-first (the budget must hold the answer locus first)."""
+    anchor = resolve_relative_anchor("Which streaming service did I start using most recently?",
+                  "2026-09-10")
+    assert anchor.newest_first is True
+    slices = collect_window_slices(_DictWindowPort(_win_rows()), anchor)
+    assert [r["date"].isoformat() for r in slices.timeline_rows] == [
+        "2026-09-01", "2026-08-11", "2026-08-10", "2026-08-10"]
+    assert next(r["id"] for r in slices.timeline_rows) == "p-outside"
+
+
+def test_window_slices_count_form_is_newest_first_too():
+    """The COUNT form ('how many weeks ago …') has the same answer locus:
+    the elapsed time to the MOST RECENT occurrence. Its window is the widest
+    (the ~400-day envelope) while the port fetches newest-first under its
+    cap — so rendering oldest-first would hand the downstream budget the
+    rows the fetch just deprioritised, and drop the answer."""
+    anchor = resolve_relative_anchor(
+        "How many weeks ago did I meet up with my aunt?", "2026-09-10")
+    assert anchor.kind == "ago-count" and anchor.newest_first is True
+    slices = collect_window_slices(_DictWindowPort(_win_rows()), anchor)
+    assert [r["date"].isoformat() for r in slices.timeline_rows] == [
+        "2026-09-01", "2026-08-11", "2026-08-10", "2026-08-10"]
+
+
+def test_window_slices_port_raise_degrades_to_empty():
+    """A raising port degrades to empty slices (never a raise) — the caller's
+    empty-block guard then falls back to legacy."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+    slices = collect_window_slices(_DictWindowPort([], raise_on_fetch=True),
+                                   anchor)
+    assert slices.timeline_rows == ()
+    assert slices.admission["rows_admitted"] == 0
+    # a port with no window leg at all is the same degrade
+    class _NoLeg:
+        pass
+    assert collect_window_slices(_NoLeg(), anchor).timeline_rows == ()
+
+
+def test_window_slices_truncation_is_per_leg_not_a_row_count():
+    """`window_rows` issues TWO LIMIT-ed statements — points and events,
+    each `cap` — so truncation is a PER-LEG verdict. `len(rows) >= cap`
+    reported `truncated=True` for a window where NEITHER leg saturated
+    (3 points + 1 event at cap 4 is 4 rows), and `rows_requested = cap`
+    understated the walk (it asks for up to `2 * cap`)."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+
+    def _rows(n, kind):
+        dt = "when" if kind == "point" else "started_at"
+        return [{"kind": kind, "id": f"{kind}{i}", "content": "c",
+                 dt: "2026-08-10", "status": "live"} for i in range(n)]
+
+    both_short = collect_window_slices(
+        _DictWindowPort(_rows(3, "point") + _rows(1, "event")), anchor,
+        per_window_cap=4)
+    assert len(both_short.timeline_rows) == 4
+    assert both_short.admission["rows_requested"] == 8
+    assert both_short.admission["truncated"] is False
+    # ... a saturated leg IS truncation, at the SAME admitted row count
+    pts = collect_window_slices(_DictWindowPort(_rows(4, "point")), anchor,
+                                per_window_cap=4)
+    assert pts.admission["truncated"] is True
+    evs = collect_window_slices(_DictWindowPort(_rows(4, "event")), anchor,
+                                per_window_cap=4)
+    assert evs.admission["truncated"] is True
+
+
+def test_ago_render_window_header_and_elapsed_lines():
+    """The fired AGO block: ONE window header + a deterministic elapsed line
+    immediately before each dated row (`<date> — N days before <qd>`), so
+    the reader gets the offset arithmetic the deterministic tier owns.
+    Never a fabricated date: the header states the RANGE."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+    slices = collect_window_slices(_DictWindowPort(_win_rows()), anchor)
+    hits = synthesize_hits(slices, shape=AssemblyShape.AGO_RELATIVE,
+                           question_date="2026-09-10", anchor=anchor)
+    contents = [h["content"] for h in hits]
+    assert contents[0] == ("WINDOW (2026-07-26 -> 2026-08-25): "
+                           "1 month before 2026-09-10")
+    # per-row offset lines + the untouched real rows (no `date`/`tier`
+    # derivation keys leak into the render input)
+    assert "2026-08-10 — 31 days before 2026-09-10" in contents
+    assert "2026-08-11 — 30 days before 2026-09-10" in contents
+    assert [h["kind"] for h in hits[:3]] == ["time-window", "ago-offset",
+                                             "event"]
+    for h in hits:
+        assert "date" not in h and "tier" not in h
+
+
+def test_ago_render_empty_window_returns_nothing():
+    """A window with no dated row renders NOTHING (the caller's empty-block
+    guard then falls back to legacy) — never a content-less window header
+    replacing a working pool (#2165 P1-1)."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+    empty = AssemblySlices(timeline_rows=(), evidence_rows=(),
+                           admission={})
+    assert synthesize_hits(empty, shape=AssemblyShape.AGO_RELATIVE,
+                           question_date="2026-09-10", anchor=anchor) == []
+    # ...and without an anchor the shape renders nothing either
+    slices = collect_window_slices(_DictWindowPort(_win_rows()), anchor)
+    assert synthesize_hits(slices, shape=AssemblyShape.AGO_RELATIVE,
+                           question_date="2026-09-10", anchor=None) == []
+
+
+def test_ago_render_week_and_recency_wording():
+    wk = resolve_relative_anchor("what did I do 2 weeks ago?", "2026-09-10")
+    assert wk.window_lo.isoformat() == "2026-08-24"
+    assert wk.window_hi.isoformat() == "2026-08-30"
+    rec = resolve_relative_anchor("Which streaming service did I start using most recently?",
+               "2026-09-10")
+    slices = collect_window_slices(_DictWindowPort(_win_rows()), rec)
+    hits = synthesize_hits(slices, shape=AssemblyShape.AGO_RELATIVE,
+                           question_date="2026-09-10", anchor=rec)
+    assert hits[0]["content"] == (
+        "WINDOW (2025-08-06 -> 2026-09-10): most recent activity before "
+        "2026-09-10")
+
+
+def _ago_window_fixture(sdk, monkeypatch):
+    """#2652 live-lane window substrate — deliberately MINIMAL (three dated
+    points, no Objects/events/distractors): the assertion under test is DATE
+    selection, and a heavy fixture only adds unrelated failure modes
+    (embedder encodes, index builds) to it.
+
+    The embedder is PINNED OFF (the #2165 sdk module's autouse fixture does
+    the same): without it every ``create_point`` runs a real
+    sentence-transformers BERT encode — minutes-per-call on a loaded host and
+    irrelevant to a DATE-window assertion.
+
+    Geometry with question_date 2026-09-10: pw-a (2026-08-10) is EXACTLY 'a
+    month ago', pw-b (2026-09-01) is '9 days ago', pw-c (2026-07-01) is the
+    empty-window (2026-08-24..2026-08-30) substrate.
+    """
+    import tortoise.embeddings as _emb
+    monkeypatch.setattr(_emb, "compute_embedding",
+                        staticmethod(lambda content: None))
+    monkeypatch.setattr(_emb.EmbeddingModel, "get",
+                        staticmethod(lambda: None))
+    for pid, sess, when in (("pw-a", "sess-w-a", "2026-08-10"),
+                            ("pw-b", "sess-w-b", "2026-09-01"),
+                            ("pw-c", "sess-w-c", "2026-07-01")):
+        sdk.create_point("statement", f"windowed marker {pid}", id=pid,
+                         session_id=sess, is_episodic=True, status="draft",
+                         when=when, createdAt=when)
+
+
+@_docker_only
+def test_ago_relative_window_walk_live_month(_docker_sdk, monkeypatch):
+    """#2652 live lane: question_date MINUS a calendar month → the as-of
+    window over stored dates. The window is a HARD selector at BOTH ends —
+    the too-late (2026-09-01) and too-early (2026-07-01) rows are absent —
+    and no Object subject is involved (the selector is the TIME)."""
+    from tortoise.assembly import _assemble_connected
+    _ago_window_fixture(_docker_sdk, monkeypatch)
+    block = _assemble_connected(_docker_sdk, "what did I do a month ago?",
+                                question_date="2026-09-10")
+    assert block.fired is True and block.shape == "ago-relative"
+    joined = "\n".join(str(h.get("content")) for h in block.post_cap_lines)
+    assert "WINDOW (2026-07-26 -> 2026-08-25): 1 month before 2026-09-10" \
+        in joined
+    assert "windowed marker pw-a" in joined
+    assert "windowed marker pw-b" not in joined
+    assert "windowed marker pw-c" not in joined
+    assert block.subjects == ()
+    assert block.admission["rows_admitted"] == 1
+
+
+@_docker_only
+def test_ago_relative_window_walk_live_day(_docker_sdk, monkeypatch):
+    """#2652 live lane: a ONE-DAY window ('9 days ago') selects exactly the
+    row dated 2026-09-01 — no neighbours, no fabrication."""
+    from tortoise.assembly import _assemble_connected
+    _ago_window_fixture(_docker_sdk, monkeypatch)
+    day = _assemble_connected(_docker_sdk, "what did I do 9 days ago?",
+                              question_date="2026-09-10")
+    assert day.fired is True
+    day_joined = "\n".join(str(h.get("content")) for h in day.post_cap_lines)
+    assert "WINDOW (2026-09-01 -> 2026-09-01): 9 days before 2026-09-10" \
+        in day_joined
+    assert "windowed marker pw-b" in day_joined
+    assert "windowed marker pw-a" not in day_joined
+    assert "windowed marker pw-c" not in day_joined
+
+
+@_docker_only
+def test_ago_relative_window_walk_live_empty_and_unresolvable(
+        _docker_sdk, monkeypatch):
+    """#2652 live lane: a window with NO dated row falls back to legacy
+    (fired=False + empty block — never an empty pool replacement, #2165
+    P1-1); an absent/unparseable question_date never fires and never raises
+    (the caller falls through to the legacy lane)."""
+    from tortoise.assembly import _assemble_connected
+    _ago_window_fixture(_docker_sdk, monkeypatch)
+    empty = _assemble_connected(_docker_sdk, "what did I do 2 weeks ago?",
+                               question_date="2026-09-10")
+    assert empty.fired is False and empty.post_cap_lines == []
+    assert _assemble_connected(
+        _docker_sdk, "what did I do a month ago?",
+        question_date="not-a-date").fired is False
+    assert _assemble_connected(
+        _docker_sdk, "what did I do a month ago?",
+        question_date=None).fired is False
+
+
+def test_ordering_list_regex_is_linear_and_still_reads_the_colon_form():
+    """#2653's colon-list guard is anchored on "…: A, B, and C".
+
+    It must stay that way in BOTH directions, because the two failure modes
+    pull against each other and the regex originally failed the first one.
+
+    LINEARITY. The tail was ``:\\s*[^?]+?\\??\\s*$``, where ``\\s*`` and
+    ``[^?]+?`` both match whitespace: every offset inside a whitespace run is a
+    distinct split the engine re-tries before the ``$`` fails. Measured on the
+    PR head, ``_RE_ORDERING_LIST.match("which order: " + " "*1985 + "?x")`` took
+    25.3 s and ``classify_question`` on the same string took 21.5 s — and
+    ``tortoise.ask_lane._ask_validate`` ACCEPTS that string (2000 chars
+    = ``MAX_ASK_QUESTION_CHARS``), so a crafted question parked the ask lane for
+    twenty seconds with no timeout to catch it. `run_ask_lane` has no timeout:
+    a hang is not an exception its envelope can see.
+
+    The tail is now ``:\\s*[^?\\s][^?]*\\??\\s*$`` — ``\\s*`` and the option span
+    start on DISJOINT classes, so there is nothing to re-split: measured
+    0.0000 s at len 2000. The bound below is deliberately loose (4 orders of
+    magnitude above the fixed time, ~7x below the broken one) so it cannot be
+    a verdict about machine load — see #5049 for why that distinction matters.
+
+    FALSE NEGATIVES. The strictness is not free: the old form also matched a
+    colon followed by whitespace ALONE (``"which order: "`` -- the space was
+    consumed as the "option list"). Rejecting that is the intent, and the
+    control below pins it. Over all 133 questions of ``_assembly_census.json``
+    old and new agree on every row (0 mismatches), so the tightening is
+    invisible to real input.
+    """
+    import time
+
+    from tortoise.assembly import _RE_ORDERING_LIST
+
+    # Positive control: the measured corpus form still fires.
+    assert _RE_ORDERING_LIST.match(
+        "Which three events happened in the order from first to last: A, B, and C")
+    assert _RE_ORDERING_LIST.match(
+        "What is the order of the three events: 'A', 'B', and 'C'")
+    assert _RE_ORDERING_LIST.match("which order did I place: the bike, the car, and the train?")
+
+    # Negative control: no option list after the colon is not a list question.
+    assert not _RE_ORDERING_LIST.match("which order:")
+    assert not _RE_ORDERING_LIST.match("which order: ")
+    assert not _RE_ORDERING_LIST.match("which order: ?")
+
+    # Linearity: the adversarial shape must not be quadratic.
+    worst = "which order: " + " " * 1985 + "?x"
+    assert len(worst) <= 2000, "the probe must stay inside MAX_ASK_QUESTION_CHARS"
+    started = time.monotonic()
+    _RE_ORDERING_LIST.match(worst)
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.0, (
+        "the colon-list guard backtracked on whitespace again: "
+        f"{elapsed:.2f}s on a {len(worst)}-char question that _ask_validate "
+        "accepts. Keep the option span's first class disjoint from \\s*.")

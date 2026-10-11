@@ -53,8 +53,8 @@ other lanes' work and violate MECE; they are recorded, not silently dropped.
 Three rows the census filed **outside** `relative-date-lookup` are plain
 calendar-anchor lookups (each names a `last <weekday>` and nothing else). They
 now fire as `relative-date-lookup`, which is why the negative-set denominator in
-`tests/test_assembly_pure.py` was corrected by 3 (72 → 69) rather than the
-change being counted as precision loss:
+`tests/test_assembly_pure.py` is corrected by 3 rather than the change being
+counted as precision loss:
 
 | qid | census class | question |
 |---|---|---|
@@ -62,16 +62,22 @@ change being counted as precision loss:
 | `gpt4_468eb064` | `recency/current-state` | Who did I meet with during the lunch **last Tuesday**? |
 | `gpt4_fa19884d` | `other` | What is the artist that I started to listen to **last Friday**? |
 
-Negative-set precision after the correction: **2/69 = 0.9710** (floor ≥ 0.95),
-with the two remaining fires being the pre-existing, already-adjudicated
-in-shape twins (`370a8ff4`, `gpt4_70e84552_abs`).
+Negative-set precision after the correction: **1/29 = 0.9655** (floor ≥ 0.95).
+The denominator is the residual set on current `main` — the 35 rows left by
+the #2652/#2653/#2654 re-measurements — minus this lane's 3 calendar-anchored
+`relative-date-lookup` rows (35 → 32, ``_RELATIVE_DATE_ANCHORED``), minus the 3
+misfiled rows above that are re-adjudicated INTO the class (32 → 29,
+``_RELATIVE_DATE_CLASS_EXPANSION``). The single remaining fire is the
+pre-existing, already-adjudicated in-shape twin `370a8ff4` (the second twin the
+pre-merge draft counted, `gpt4_70e84552_abs`, left the denominator with #2653's
+nary-ordering re-measurement).
 
 ## 3. Legacy A-arm comparison (committed evidence)
 
 `docs/runbook/2578-measured-outcomes-133.jsonl` (arm `A-default-133q`) — for all
 six rows:
 
-```
+```text
 71017277       gold_admitted=False  reader_refusal=True
 gpt4_f420262d  gold_admitted=False  reader_refusal=True
 gpt4_e414231f  gold_admitted=False  reader_refusal=True

@@ -382,6 +382,67 @@ def _cmd_mine_conversation(args):
     return 0
 
 
+def _cmd_mine_docs(args):
+    """Mine a markdown docs corpus → DRAFT statement Points (#1724).
+
+    Composes the Slice-1 corpus index pass (Sources + D10-folded Document
+    Sources) with the deterministic claim pass on top; every point is written
+    ``status=draft`` and is promoted later with the existing
+    ``TortoiseSDK.promote_point`` — this verb never promotes.
+
+    ``--db`` is OPTIONAL-mandatory in the honest sense: without it the run could
+    not read the Sources it must attach claims to, so it is required. That is
+    the deliberate difference from ``mine-conversation``, whose log-only mode is
+    meaningful.
+    """
+    import sys
+
+    from tortoise.docs_miner import mine_docs
+
+    try:
+        from tortoise.config import is_db_uri, resolve_db_path
+        from tortoise.sdk import TortoiseSDK
+    except Exception as e:  # noqa: BLE001, RUF100
+        print(f"Error: Tortoise SDK unavailable ({e})", file=sys.stderr)
+        return 1
+
+    target = args.db if is_db_uri(args.db) else resolve_db_path(args.db)
+    sdk = TortoiseSDK(target)
+    try:
+        report = mine_docs(
+            sdk, args.dir,
+            corpus_name=args.corpus_name,
+            repo=args.repo,
+            about_entities=args.about or [],
+            max_claims_per_doc=args.max_claims_per_doc,
+            index_first=not args.no_index,
+        )
+    finally:
+        sdk.close()
+
+    print("=" * 60)
+    print(f"Docs mining — {report['directory']}")
+    print("=" * 60)
+    print(f"repo entity:        {report.get('repo') or '(none — no --repo and no org/repo shape)'}")
+    print(f"documents:          {report['documents']}")
+    print(f"indexed (Sources):  {report['indexed']}")
+    print(f"skipped unchanged:  {report['skipped_unchanged']}")
+    print(f"skipped non-doc:    {report['skipped_not_document']}")
+    print(f"docs mined:         {report['mined']}")
+    print(f"claims extracted:   {report['claims']}")
+    print(f"NEW Points:         {report['new_points']}")
+    print(f"existing Points:    {report['existing_points']}")
+    print(f"Objects wired:      {report['objects_wired']}")
+    if report["errors"]:
+        print(f"errors:             {len(report['errors'])} (see below)")
+        for err in report["errors"][:20]:
+            print(f"  - {err.get('file')}: {err.get('error')}")
+    print()
+    print("All Points are status=draft — review and promote with "
+          "TortoiseSDK.promote_point(point_id).")
+    return 0 if not report["errors"] else 1
+
+
 def _cmd_reconcile(args):
     """Replay unprojected EventRecorded entries from JSONL into FalkorDB."""
     import json, sys  # noqa: E401, F401, I001
@@ -2744,7 +2805,8 @@ def _cmd_install_hooks(args) -> int:
 
     Two independent halves:
 
-    * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
+    * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
+      cline / devin;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
       (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
@@ -3000,7 +3062,7 @@ def _install_read_hook_impl(args) -> int:
     Writes the per-harness UserPromptSubmit hook registration pointing at the
     SHIPPED volunteer-turn.sh (resolved from this package, so the registration
     survives site-package installs), enabling the per-turn volunteering-memory
-    reflex in codex / claude / cline.
+    reflex in codex / claude / cline / devin.
 
     Safety contract:
     - Existing unrelated registrations are NEVER touched: claude settings.json
@@ -3018,6 +3080,12 @@ def _install_read_hook_impl(args) -> int:
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
+    - Every write is ATOMIC (#3918): a fresh same-dir temp + ``os.replace``
+      via ``hook_install._atomic_write_text``, so a crash, ENOSPC or a kill
+      mid-write cannot truncate the user's own ``settings.json`` (or the
+      cline marker), and a hard-linked or leaf-symlinked target is REPLACED
+      rather than written through. An existing file keeps its mode; the
+      cline marker is set 0o755 as part of the swap.
     - A ``--dir`` root that is not a real directory (a regular file, a
       symlink to a file, or a dangling symlink) is REFUSED before either
       half writes, so a bad root fails the whole install with NOTHING on
@@ -3025,8 +3093,22 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
+
+    # #3918: every WRITE below goes through the shipped atomic helper — a
+    # fresh same-dir temp + ``os.replace`` (the pattern #3866 gave
+    # ``capture_install._atomic_bytes`` / ``hook_install._atomic_write_text``),
+    # never ``Path.write_text``.  ``write_text`` truncates the destination in
+    # place, so a crash, an ENOSPC or a kill between the truncate and the last
+    # byte leaves the user's own ``settings.json`` — the file holding THEIR
+    # hook registrations and unrelated settings — truncated or invalid JSON.
+    # ``rename(2)`` also replaces the directory ENTRY, which closes the
+    # leaf-symlink and hardlink write-through cases in the same move (#2385
+    # item 2).  The residual there — an intermediate directory component
+    # swapped for a symlink between the guard above and the write — is NOT
+    # closed by this and needs a per-component ``openat`` walk.
+    from tortoise.hook_install import _atomic_write_text
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
         print("Installable harness seams (per-turn volunteering-memory hook "
@@ -3041,6 +3123,16 @@ def _install_read_hook_impl(args) -> int:
               "with a merged SessionStart/SessionEnd entry (timeout 60)")
         print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
               "(→ volunteer-turn.sh cline)")
+        # Devin's file is the ONE JSON seam with no ``"hooks"`` wrapper: the
+        # hooks object IS the file (docs.devin.ai/cli/extensibility/hooks —
+        # "In .devin/hooks.v1.json, the hooks object is the entire file (no
+        # wrapper key needed)").  Devin ALSO reads `.claude/settings.json`
+        # hooks when read_config_from.claude is on (the default), so this
+        # standalone file is the seam that survives that compat toggle being
+        # turned off.
+        print("  tortoise install devin   → <dir>/.devin/hooks.v1.json "
+              "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
+              "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
               "tortoise-capture.ts (the capture extension; Pi has no "
               "shell-hook read seam)")
@@ -3048,7 +3140,7 @@ def _install_read_hook_impl(args) -> int:
               "(the sessionEnd capture hook; Cursor has no shell-hook read "
               "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
         print("Other seams (docs/matrix only, this wave): "
-              "devin, gemini, opencode — see "
+              "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
         return 0
 
@@ -3064,12 +3156,21 @@ def _install_read_hook_impl(args) -> int:
     quoted_script = _shlex.quote(str(script))
 
     # Per-harness registration targets. Registration contracts verified
-    # against harness primary docs: BOTH codex (.codex/hooks.json) and claude
-    # (.claude/settings.json) use the same event → matcher-group shape, where
-    # each event entry wraps handlers in {"hooks": [{type, command}]} — a flat
-    # {type, command} under the event key is silently ignored by codex's
-    # parser (hook_config.rs deserializes events as Vec<MatcherGroup>). Cline
-    # hooks are executable files at .cline/hooks/<EventName>.
+    # against harness primary docs: codex (.codex/hooks.json), claude
+    # (.claude/settings.json) and devin (.devin/hooks.v1.json) all use the
+    # same event → matcher-group shape, where each event entry wraps handlers
+    # in {"hooks": [{type, command}]} — a flat {type, command} under the
+    # event key is silently ignored by codex's parser (hook_config.rs
+    # deserializes events as Vec<MatcherGroup>). Cline hooks are executable
+    # files at .cline/hooks/<EventName>.
+    #
+    # Devin's file is the one JSON seam with NO wrapper key (see the
+    # `wrapped` flag below): ``.devin/hooks.v1.json`` IS the hooks object.
+    # Its UserPromptSubmit stdin carries ``prompt`` and its output contract is
+    # ``hookSpecificOutput.additionalContext`` — the same contract the shared
+    # script already emits for the ``devin`` harness arg (verified against
+    # docs.devin.ai/cli/extensibility/hooks + /hooks/lifecycle-hooks, the
+    # re-fetch the wave-1 matrix row left pending).
     if harness == "codex":
         target = root / ".codex" / "hooks.json"
         # Nested matcher-group shape (verified against codex primary docs).
@@ -3079,6 +3180,15 @@ def _install_read_hook_impl(args) -> int:
         target = root / ".claude" / "settings.json"
         registration = [{"hooks": [{"type": "command",
                                     "command": f"{quoted_script} claude"}]}]
+    elif harness == "devin":
+        target = root / ".devin" / "hooks.v1.json"
+        # Same nested matcher-group shape as codex/claude. The matcher key is
+        # omitted deliberately: Devin documents it as tool-event-only and says
+        # to "use "" or omit the matcher" for UserPromptSubmit — so the one
+        # registration shape is shared verbatim across all three JSON seams
+        # and the ownership/idempotency logic below stays single-path.
+        registration = [{"hooks": [{"type": "command",
+                                    "command": f"{quoted_script} devin"}]}]
     elif harness == "cline":
         target = root / ".cline" / "hooks" / "UserPromptSubmit"
         registration = None
@@ -3093,6 +3203,21 @@ def _install_read_hook_impl(args) -> int:
 
     dry = getattr(args, "dry_run", False)
     uninstall = getattr(args, "uninstall", False)
+
+    # The JSON seams differ in ONE way: codex/claude nest their hooks under a
+    # top-level ``"hooks"`` key, while Devin's ``.devin/hooks.v1.json`` IS the
+    # hooks object (docs.devin.ai/cli/extensibility/hooks: "In
+    # .devin/hooks.v1.json, the hooks object is the entire file (no wrapper
+    # key needed). In all other locations, hooks are nested under the
+    # \"hooks\" key").  Every other line of the read/merge/repair/uninstall
+    # path below is shared — one code path, two document shapes.
+    wrapped = harness in ("codex", "claude")
+
+    def _document(entries) -> dict:
+        """The on-disk document carrying ``entries`` for this harness."""
+        if wrapped:
+            return {"hooks": {"UserPromptSubmit": entries}}
+        return {"UserPromptSubmit": entries}
 
     # ── Root-shape guard (#7807): a ``--dir`` ROOT that is not a real
     #    directory — a regular FILE, a symlink to a file, or a DANGLING
@@ -3223,8 +3348,10 @@ def _install_read_hook_impl(args) -> int:
             print(f"Removed {target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(marker_content)
-            _os.chmod(target, 0o755)
+            # #3918: the exec bit goes on the TEMP, with the content — a
+            # post-replace ``chmod`` would let a crash ship a 0600 hook that
+            # exists but can never run.
+            _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
@@ -3305,13 +3432,21 @@ def _install_read_hook_impl(args) -> int:
             print(f"{target} exists but its top level is not a JSON object — "
                   "refusing to touch it. Merge manually.", file=_sys.stderr)
             return 1
-        hooks = existing_json.get("hooks")
-        if hooks is not None and not isinstance(hooks, dict):
-            print(f"{target} exists but its \"hooks\" field is not a JSON "
-                  "object — refusing to touch it. Merge manually.",
-                  file=_sys.stderr)
-            return 1
-        hooks = hooks or {}
+        # Unwrapped (devin): the top-level object IS the hooks map, so the
+        # other event keys (PreToolUse/SessionStart/…) live beside
+        # UserPromptSubmit and are preserved by the round-trip below.  The
+        # ``"hooks"`` shape check is codex/claude-only: on a devin file a
+        # ``hooks`` key would be a foreign event name, not a wrapper.
+        if wrapped:
+            hooks = existing_json.get("hooks")
+            if hooks is not None and not isinstance(hooks, dict):
+                print(f"{target} exists but its \"hooks\" field is not a JSON "
+                      "object — refusing to touch it. Merge manually.",
+                      file=_sys.stderr)
+                return 1
+            hooks = hooks or {}
+        else:
+            hooks = existing_json
         ups = hooks.get("UserPromptSubmit")
         if ups is not None and not isinstance(ups, list):
             print(f"{target} exists but its UserPromptSubmit entries are not "
@@ -3346,22 +3481,34 @@ def _install_read_hook_impl(args) -> int:
                 hooks["UserPromptSubmit"] = remaining
             else:
                 hooks.pop("UserPromptSubmit", None)
-            existing_json["hooks"] = hooks
-            if not hooks:
-                existing_json.pop("hooks", None)
+            if wrapped:
+                existing_json["hooks"] = hooks
+                if not hooks:
+                    existing_json.pop("hooks", None)
+            # Unwrapped (devin): ``hooks`` IS ``existing_json``, already
+            # updated in place.  Assigning ``existing_json["hooks"] =
+            # hooks`` here would self-reference the dict (json.dumps then
+            # recurses forever) and plant a bogus "hooks" event key.  An
+            # emptied document is left as ``{}`` and the FILE is never
+            # deleted — we did not necessarily create it.
             out = _json.dumps(existing_json, indent=2) + "\n"
             if dry:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
             else:
-                target.write_text(out)
+                # #3918: atomic write-back — a failed uninstall must leave the
+                # registration intact, never a truncated document.
+                _atomic_write_text(target, out)
                 print(f"Uninstalled volunteer-turn.sh from {target}")
             return 0
         # Merge: append our registration under UserPromptSubmit only when no
         # volunteer-turn.sh entry is present (idempotent — wrapper-aware).
         if not ours:
             ups.append(registration[0])
-            existing_json.setdefault("hooks", {})["UserPromptSubmit"] = ups
+            if wrapped:
+                existing_json.setdefault("hooks", {})["UserPromptSubmit"] = ups
+            else:
+                existing_json["UserPromptSubmit"] = ups
         else:
             # #2383/R2: an entry whose command points at a STALE script path
             # (venv/python relocation, or a committed config cloned to
@@ -3430,24 +3577,63 @@ def _install_read_hook_impl(args) -> int:
             # above does not catch — and the CLI died with a traceback.  The
             # sibling read above (``existing = target.read_text(...)``) has
             # always passed utf-8.
-            target.write_text(out)
+            _atomic_write_text(target, out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
         return 0
 
     if dry:
         print(f"[dry-run] would write {target}:")
-        print(_json.dumps({"hooks": {"UserPromptSubmit": registration}},
-                          indent=2))
+        print(_json.dumps(_document(registration), indent=2))
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            _json.dumps({"hooks": {"UserPromptSubmit": registration}},
-                        indent=2) + "\n")
+        _atomic_write_text(
+            target, _json.dumps(_document(registration), indent=2) + "\n")
         print(f"Installed {target}")
         if harness == "codex":
             print("Project-local codex hooks require one-time trust: run "
                   "`codex /hooks` in the project and approve the hook.")
+        if harness == "devin":
+            # Devin ALSO reads `.claude/settings.json` hooks (loaded when
+            # read_config_from.claude is on — the DEFAULT), so a repo that
+            # already carries our claude read-hook fires the reflex TWICE per
+            # turn: the duplicate is silent, and the injected block lands in
+            # the context twice.  Say so where the user chose this install
+            # instead of letting them discover it.  Nothing is removed for
+            # them — the claude registration may serve Claude Code too.
+            _claude_reg = root / ".claude" / "settings.json"
+            _cj = None
+            if _claude_reg.exists():
+                try:
+                    _cj = _json.loads(_claude_reg.read_text(encoding="utf-8"))
+                except MemoryError:
+                    raise  # exhaustion is not a refusal — the module's rule
+                except Exception:
+                    # ADVISORY ONLY. This note must never convert an install
+                    # that already wrote its registration into a reported
+                    # FAILURE.  The read is over a file we do not own, so any
+                    # shape it has — deeply nested JSON (RecursionError), a
+                    # non-UTF-8 byte (UnicodeDecodeError), a list — is a
+                    # reason to SAY NOTHING.  A bare `except Exception` (not a
+                    # tuple) is deliberate: an enumerated tuple is refutable
+                    # by the next member it omits, the exact escape that
+                    # shipped `TypeError` (#3987) and `UnicodeDecodeError`
+                    # (#3988) through this module's earlier boundaries.
+                    _cj = None
+            _inner = _cj.get("hooks") if isinstance(_cj, dict) else None
+            _cups = (_inner.get("UserPromptSubmit")
+                     if isinstance(_inner, dict) else None)
+            _dup = isinstance(_cups, list) and any(
+                "volunteer-turn.sh" in _entry_command(e) for e in _cups)
+            if _dup:
+                print(
+                    f"Note: {_claude_reg} ALSO registers "
+                    "volunteer-turn.sh, and Devin CLI reads `.claude/` hooks "
+                    "by default (read_config_from.claude) — the reflex will "
+                    "run twice per turn and inject the block twice. Keep one "
+                    "registration: `tortoise install claude --uninstall` "
+                    "removes the claude one, or disable "
+                    "read_config_from.claude in the Devin user config.")
         print("Hook fires on every user prompt; empty output = clean silence "
               "(nothing above the confidence gate or reflex unavailable).")
     return 0
@@ -3884,6 +4070,13 @@ def _cmd_session(args) -> int:
         # or a CORRUPT one — there is simply nothing to file, and that is not an
         # error the caller can act on.
         return _cmd_session_drain_best_effort(args)
+    if args.session_cmd == "disclosure":
+        # #3517: dispatched BEFORE the api_key gate on purpose. The disclosure is
+        # the accuracy artifact the agent-prompt install prints, and a
+        # self-hosted or not-yet-configured install still has to state the facts
+        # it just created — refusing it for want of a hosted key would make the
+        # one surface that exists to be accurate silent exactly there.
+        return _cmd_session_disclosure(args)
 
     # Transmitting-identity resolver (#2369 D1.2, #3660): this resolver runs
     # BEFORE dispatch, so the uploaders (`capture`) and the read-only
@@ -4404,6 +4597,22 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # the server extracts a session once). Surface it honestly instead of
     # claiming a fresh extraction happened.
     if body.get("extraction_mode") == "replayed":
+        # #4197 review: "replayed" is NOT proof that extraction ran. A replayed
+        # receipt carrying an upgrade-refused warning means the prior store-only
+        # capture was replayed and the upgrade was REFUSED — the session still
+        # has no memory points — so "already captured" is the false statement
+        # that warning exists to correct, and the deferral must be recorded like
+        # any other (it is the same class of silent loss as the store-only and
+        # degraded shapes).
+        _replayed_reason = _deferral_reason(body)
+        if _replayed_reason:
+            print(f"capture deferred: {_replayed_reason} — the turns are stored "
+                  "but no memory points were extracted.", file=_sys.stderr)
+            _replay_harness, _replay_file = _capture_deferral_target(args, harness)
+            _record_backlog_deferral(
+                session_id=session_id, harness=_replay_harness,
+                file_path=_replay_file, turns=turns, reason=_replayed_reason)
+            return 0
         print(f"Session {server_session} already captured — replayed (no new extraction).")
         return 0
     # P1 #1529: a status-only consumer must not report success on a failed
@@ -4411,11 +4620,25 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # errors with extraction_mode "error"/"empty" (the turn mutation already
     # happened; the body is the failure surface). Exit 1 with the errors on
     # stderr, never "Captured session: …" with extracted: 0.
-    if body.get("extraction_mode") in ("error", "empty") or body.get("errors"):
+    _degraded = _degraded_extraction(body)
+    if _degraded:
         print(
             f"capture failed: {body.get('errors') or body.get('extraction_mode')}",
             file=_sys.stderr,
         )
+        # #4197 review: the DEGRADED 2xx is a DEFERRAL here too, and this is the
+        # path that produces most of the backlog — the Claude Code SessionEnd
+        # hook. Recording it is what makes the loss recoverable: the 2xx stamps
+        # `filed_key` in the spool (so no later drain re-POSTs it), it CLEARS
+        # the capture-failure breadcrumb, no receipt is written by design, and
+        # the hook discards stderr (`2>/dev/null || exit 0`) — so without this
+        # record the turns are stored, un-extracted, and invisible to the one
+        # surface built to offer the re-capture. `sessions import` records the
+        # identical body (see `_degraded_extraction`).
+        _deferral_harness, _deferral_file = _capture_deferral_target(args, harness)
+        _record_backlog_deferral(
+            session_id=session_id, harness=_deferral_harness,
+            file_path=_deferral_file, turns=turns, reason=_degraded)
         return 1
     # #4188: never report an unqualified success for a DEFERRED capture — a
     # keyless store is a 2xx with extraction skipped. Surface the receipt's
@@ -4442,6 +4665,36 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
                          _CAPTURE_EXTRACTION_DISABLED_MODE):
         print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
               "memory points were extracted", file=_sys.stderr)
+        # #4197: this is a STORE-ONLY capture of a transcript the machine still
+        # has — record it in the saved-backlog ledger so the user can later be
+        # OFFERED (and priced) the choice to extract it, or to keep only future
+        # conversations. Best-effort; the offer must never cost the capture.
+
+        # #4197 review: record a transcript the RUN can re-read. For the Claude
+        # Code hook `--file` is the hook's own `mktemp` conversion, removed by
+        # its `trap` moments later — so the hook passes the DURABLE Claude
+        # project transcript (`~/.claude/projects/*/*.jsonl`) as
+        # `--transcript-path`. That file carries the parser-named shape
+        # (`claude-desktop`), NOT the capture alias (`claude`) `sessions import`
+        # has no parser for, so the ledger's harness is resolved to the parser
+        # name here. Falls back to `--file` so a manual `session capture` keeps
+        # its current behaviour.
+        _record_harness, _durable_file = _capture_deferral_target(args, harness)
+        _record_backlog_deferral(
+            session_id=session_id,
+            harness=_record_harness,
+            file_path=_durable_file,
+            turns=turns,
+            reason=(_CAPTURE_NO_PROVIDER_MODE
+                    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE
+                    else _CAPTURE_EXTRACTION_DISABLED_MODE))
+    else:
+        # #4197: extraction ran for this session — if it had been deferred
+        # before, its backlog entry is now retired. No offer here (see
+        # `_flush_backlog_offer`): this path is the hook's, and it runs on
+        # every capture.
+        _flush_backlog_offer(session_id=session_id,
+                             server_session_id=server_session, offer=False)
     if body.get("warnings"):
         print("capture warnings: " + "; ".join(
             str(w) for w in body["warnings"]), file=_sys.stderr)
@@ -4479,6 +4732,61 @@ def _cmd_session_drain_best_effort(args) -> int:
     except Exception as e:
         print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
         return 0
+
+
+def _record_drain_deferrals(root, summary) -> None:
+    """Record every 2xx a drain observed that STORED the turns un-extracted.
+
+    ``session drain`` is the THIRD consent-gated transmission primitive, and it
+    is how a session spooled by an interrupted capture is delivered — so a
+    store-only server response here was the same silent loss #4197 exists to
+    close: turns stored, no import receipt (by design), the capture-failure
+    breadcrumb cleared by the 2xx, and NO local record. The offer then missed
+    exactly the session it is for.
+
+    A DEGRADED 2xx counts too (:func:`_degraded_extraction`): the drain marks the
+    spool entry filed on ANY 2xx, so a body carrying extraction errors would
+    otherwise leave the stored turns invisible to the offer forever.
+
+    The spool keeps the turns but NOT the transcript path, so the entry is
+    recorded without one: the offer still enumerates and prices it, and
+    ``--process`` reports it as skipped with the remedy (re-run the import with
+    the transcript) instead of pretending the backlog is empty. A later record
+    that DOES know the path (a ``session capture`` of the same id) fills it in —
+    ``record_not_processed`` never erases a recorded path.
+
+    Every write goes through :func:`_record_backlog_deferral`, the single writer
+    for this ledger: a second, hand-rolled record shape here is how the probe
+    filter and the pricing rule drift apart between the writers.
+
+    Never raises: the drain's contract is exit 0, and losing the offer must
+    never cost the filing that already succeeded.
+    """
+    try:
+        from tortoise import capture_backlog
+        from tortoise.capture_spool import read_spool_meta, read_spool_turns
+
+        for sid, outcome in (summary.outcomes or {}).items():
+            if not sid or not outcome.ok:
+                continue
+            _reason = _deferral_reason(outcome.body)
+            if not _reason:
+                # Extraction ran — this entry is not a deferral.
+                continue
+            _meta = read_spool_meta(root, sid) or {}
+            _turns = read_spool_turns(root, sid)
+            _record_backlog_deferral(
+                session_id=sid,
+                harness=_meta.get("harness"),
+                # The spool holds the turns, not the path they came from.
+                file_path=None,
+                turns=len(_turns) or int(_meta.get("turns_count") or 0),
+                estimate=capture_backlog.estimate_units(_turns),
+                reason=_reason)
+    except Exception:
+        # Best-effort by the module's own contract — a ledger bug must never
+        # turn a filed session into a traceback (or a non-zero drain exit).
+        return
 
 
 def _cmd_session_drain(api_key: str, api_url: str,
@@ -4519,8 +4827,14 @@ def _cmd_session_drain(api_key: str, api_url: str,
               file=_sys.stderr)
         return 0
 
-    summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
+    root = spool_dir()
+    summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
+    # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
+    # the ledger exists to close — turns stored, no import receipt (by design),
+    # the capture-failure breadcrumb cleared by the 2xx, and no local record
+    # anywhere. Record it (best-effort, so the drain's exit-0 contract holds).
+    _record_drain_deferrals(root, summary)
     for d in summary.discarded:
         print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
               file=_sys.stderr)
@@ -4576,6 +4890,98 @@ def _cmd_session_spool(args) -> int:
         # on stderr and in `discarded.jsonl`.
         return 0
     print(f"Spooled session: {prep['session_id']}")
+    return 0
+
+
+def _cmd_session_disclosure(args) -> int:
+    """#3517: print the capture disclosure from runtime structured data.
+
+    This is the ONE renderer the onboarding prompt points at: the agent prints
+    this output verbatim, so the facts a user reads are mechanically derived and
+    can neither be model-authored nor drift from the dashboard's render of the
+    same source (``tortoise/config/capture_disclosure.json``).
+
+    Identity resolution is BEST-EFFORT and the exit code is always 0: the
+    disclosure is printed in the install environment, and a self-hosted or
+    not-yet-configured install still needs to state the facts. The hosted leg
+    adds the organization's LIVE ``session_recording`` flag and install-probe
+    key; when that read cannot happen, the reason goes to stderr and the
+    disclosure is rendered from the product defaults — never a fabricated
+    "live" value.
+    """
+    import json as _json
+    import sys as _sys
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    from tortoise import capture_disclosure as _cd
+
+    harness = getattr(args, "harness", None) or "claude"
+    api_key = api_url = None
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
+    except _ConfigError as e:
+        print(f"Config at {e} is invalid — cannot read the live recording "
+              "setting; rendering the self-hosted wording.", file=_sys.stderr)
+
+    hosted = bool(api_key and api_url)
+    recording: bool | None = None
+    probe_key = _cd.source()["recording"][
+        "install_probe_key_template"].format(harness=harness)
+    install_probe: str | None = None
+    state_read: str = "not-attempted"
+    if hosted:
+        try:
+            req = Request(
+                f"{api_url}/v1/onboarding/state",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            with urlopen(req, timeout=15) as resp:
+                body = _json.loads(resp.read())
+            state = body.get("onboarding") or {}
+            # Absent key reads the product default (default-ON, #1927) — the
+            # same `.get(..., True)` the capture gate itself uses, so the
+            # disclosure and the data plane cannot disagree about "on".
+            recording = bool(state.get("session_recording", True))
+            install_probe = state.get(probe_key) or None
+            state_read = "ok"
+        except HTTPError as e:
+            state_read = f"http-error-{e.code}"
+        except URLError as e:
+            state_read = f"unreachable: {e.reason}"
+        except ValueError as e:  # non-JSON body
+            state_read = f"unparseable-response: {e}"
+        if state_read != "ok":
+            print(f"Could not read the live onboarding state ({state_read}) — "
+                  "the disclosure below states the product defaults.",
+                  file=_sys.stderr)
+
+    kw = dict(harness=harness, hosted=hosted,
+              api_host=_cd.host_of(api_url), recording=recording)
+    kind = getattr(args, "kind", None) or "disclosure"
+    rendered = {
+        "disclosure": _cd.render_install_disclosure,
+        "confirmation": _cd.render_installed_confirmation,
+        "declined": _cd.render_declined_confirmation,
+    }[kind](**kw)
+    if getattr(args, "json", False):
+        print(_json.dumps({
+            "harness": harness,
+            "hosted": hosted,
+            "api_host": _cd.host_of(api_url),
+            "session_recording": recording,
+            "state_read": state_read,
+            probe_key: install_probe,
+            "kind": kind,
+            "text": rendered,
+            "disclosure": _cd.render_install_disclosure(**kw),
+            "first_capture_line": _cd.render_first_capture_line(**kw),
+            "installed_confirmation": _cd.render_installed_confirmation(**kw),
+            "declined_confirmation": _cd.render_declined_confirmation(**kw),
+            "step_accounting": _cd.step_accounting(),
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(rendered)
     return 0
 
 
@@ -5083,6 +5489,523 @@ def _clear_capture_error(harness: str) -> None:
         _capture_error_file(harness).unlink()
 
 
+# ── The saved-backlog offer and its action (#4197) ─────────────────────────
+#
+# #4197 (owner decision, recorded verbatim on the issue): the user is OFFERED
+# the choice to process the saved backlog — transcripts captured store-only
+# (no provider key, or extraction turned off) and never extracted — or to
+# keep only future conversations, with the backlog option visibly RECOMMENDED
+# and its COST visible before the spend. The three states (not-processed /
+# processed / declined) and the ledger live in `tortoise.capture_backlog`.
+#
+# The processing path deliberately REUSES `_cmd_sessions_import` (below) for
+# every entry: that path already drives the #2335 TRUE-retry re-capture, which
+# re-runs the capture's turn WRITE as well as its extraction — so the #4194
+# turn embedding lands for the stored turns too. A backlog run that re-ran
+# extraction only would leave every stored turn un-embedded and the option
+# would silently not fix the retrieval gap it is offered for.
+
+#: Ledger harness names that `sessions import`'s parsers spell differently.
+#: `claude` is the Claude Code SessionEnd hook's name for the Claude project
+#: store, whose parser is `claude-desktop` — the SAME `~/.claude/projects/*/
+#: *.jsonl` store (see `session_import/parsers.py`). Resolved at the RECORD
+#: site and again at the point of use, so a record written before this alias
+#: existed still processes.
+_BACKLOG_HARNESS_ALIASES = {"desktop": "claude-desktop",
+                            "claude": "claude-desktop"}
+
+
+def _backlog_parser_harness(harness: str | None) -> str | None:
+    """The name `sessions import` knows ``harness`` by, or ``harness`` itself."""
+    if not harness:
+        return harness
+    return _BACKLOG_HARNESS_ALIASES.get(str(harness), str(harness))
+
+
+def _backlog_provider_note() -> tuple[str | None, str | None]:
+    """``(provider, model)`` for the backlog cost line — best-effort.
+
+    Mirrors the doctor's seam exactly (``sdk._session_llm_provider`` /
+    ``_SESSION_LLM_DEFAULT_MODELS``) so the cost the offer shows names the same
+    provider the run would use. Never raises: the offer degrades to a cost
+    without a provider name, never to no offer.
+    """
+    import os
+    try:
+        from tortoise.sdk import (
+            _SESSION_LLM_DEFAULT_MODELS,
+            _session_llm_provider,
+        )
+        provider = _session_llm_provider()
+        model = (os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
+                 or _SESSION_LLM_DEFAULT_MODELS.get(provider or "", ""))
+        return provider, (model or None)
+    except Exception:
+        return None, None
+
+
+#: API hosts served by the HOSTED deployment, where extraction runs inside the
+#: SERVICE — the deployment sets the provider key (``docs/infra-runbook.md``),
+#: so this machine's provider env says nothing about whether a re-capture would
+#: extract. A run against one of these is never refused on the CLIENT's env.
+_HOSTED_API_HOSTS = frozenset({"api.premiselabs.co",
+                               "tortoise-y4mjjq.fly.dev"})
+
+
+def _api_url_host(api_url: str | None) -> str:
+    """The hostname of ``api_url`` (lower-cased), or ``""``. Never raises."""
+    from urllib.parse import urlsplit
+    url = str(api_url or "").strip()
+    if not url:
+        return ""
+    try:
+        return (urlsplit(url if "://" in url else f"//{url}").hostname
+                or "").lower()
+    except ValueError:
+        return ""
+
+
+def _backlog_provider_warning() -> str | None:
+    """A pre-flight note for a backlog run, or ``None`` when there is none.
+
+    The run re-POSTs through ``sessions import``, so extraction is decided
+    SERVER-side and the CLIENT's provider env is not evidence about it — on the
+    HOSTED lane it says nothing at all (the deployment holds the key), and
+    refusing there produced a recommended action a hosted user could not
+    perform plus a remedy they could not apply. So this is a NOTE, never a
+    refusal: the verdict per entry is read back from the ledger, which is what
+    keeps the run honest either way. It is only worth saying when this machine
+    has no key AND the target is self-hosted, where the local env is usually
+    the env the extractor runs in.
+    """
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
+    except Exception:
+        return None  # the per-entry import reports the config problem itself
+    if not api_key or _api_url_host(api_url) in _HOSTED_API_HOSTS:
+        return None
+    try:
+        from tortoise.hosted_api import _llm_provider_available
+        if _llm_provider_available():
+            return None
+    except Exception:
+        return None
+    _host = _api_url_host(api_url) or str(api_url or "")
+    return ("Note: no LLM provider key is configured on this machine "
+            "(OPENROUTER_API_KEY / DEEPSEEK_API_KEY etc.). The target is "
+            f"self-hosted ({_host}); if IT has no provider key either, every "
+            "entry below will be stored again and stay un-extracted.")
+
+
+def _print_backlog_offer() -> int:
+    """Print the backlog state + its recommended action; return the pending count.
+
+    SILENT when there is nothing to offer (an empty backlog yields no
+    recommendation) — otherwise every ordinary import would turn into an
+    advertisement for a feature the user has no reason to use.
+    """
+    from tortoise import capture_backlog
+    state = capture_backlog.summary()
+    if not capture_backlog.recommendation(state):
+        return 0
+    provider, model = _backlog_provider_note()
+    print(capture_backlog.format_report(state, provider=provider, model=model))
+    return int(state["counts"][capture_backlog.STATUS_NOT_PROCESSED])
+
+
+def _degraded_extraction(body) -> str | None:
+    """The deferral reason when a 2xx STORED the turns and extracted NOTHING.
+
+    ``None`` when extraction ran. The rule lives here, once, because THREE call
+    sites observe the same response body — ``sessions import``, ``session
+    capture`` and ``session drain`` — and when they disagreed the hook path lost
+    the case the whole feature exists for: the server stored the session and
+    failed to extract (a non-empty ``errors`` list, or an ``extraction_mode`` of
+    ``error``/``empty`` — the extraction-mode contract in
+    ``tortoise/hosted_api.py``), so the session has no memory points and must be
+    OFFERED for a re-capture rather than read as imported.
+    """
+    if not isinstance(body, dict):
+        return None
+    mode = body.get("extraction_mode")
+    if body.get("errors") or mode in ("error", "empty"):
+        return f"extraction failed: {mode or 'error'}"
+    return None
+
+
+def _deferral_reason(body) -> str | None:
+    """WHY a 2xx stored the session without extracting — ``None`` if extraction ran.
+
+    THE single definition of "this capture still needs a re-attempt", used by all
+    three writers (`sessions import`, `session capture`, `session drain`) so they
+    cannot disagree about one response body.  FOUR shapes qualify, and the first
+    is not an extraction MODE at all:
+
+    * a `replayed` receipt carrying an upgrade-refused warning.  The prior
+      store-only capture was replayed and the re-POST REFUSED the upgrade, so
+      the session STILL has no memory points — the SDK attaches that warning
+      precisely because "already captured" would be a false statement of this
+      state (`tortoise/sdk.py`).  Reading `replayed` as proof of extraction is
+      how the drain silently dropped the sessions this backfill exists to
+      recover.
+    * the two store-only modes (keyless #4188 / extraction-disabled #4258);
+    * a DEGRADED 2xx (see :func:`_degraded_extraction`).
+    """
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
+
+    if not isinstance(body, dict):
+        return None
+    _warns = body.get("warnings") or []
+    if _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns:
+        return "upgrade refused: extraction disabled"
+    if _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns:
+        return "upgrade refused: no provider key"
+    _mode = body.get("extraction_mode")
+    if _mode in (_CAPTURE_NO_PROVIDER_MODE, _CAPTURE_EXTRACTION_DISABLED_MODE):
+        return _mode
+    return _degraded_extraction(body)
+
+
+def _record_backlog_deferral(*, session_id: str, harness: str | None,
+                             file_path, turns, reason: str,
+                             estimate=None) -> None:
+    """Record ONE deferral in the saved-backlog ledger.
+
+    The single writer for every deferral site, so the probe filter and the
+    never-cost-the-capture rule cannot drift between them.  Best-effort by
+    construction (`capture_backlog` swallows its own failures).
+
+    ``turns`` is the CONVERSATION where the caller has it — so the price is the
+    real one — and a turn COUNT where it does not: ``session drain`` reads the
+    spooled turns, but the count is what it records.  ``estimate`` overrides the
+    derivation for a caller that has already priced the run.
+
+    A `session verify` probe's transcript is synthetic and lives in a tempdir
+    removed at exit; recording it would leave a ledger entry that no read
+    surface could ever act on (`--process` would fail on it forever).  The
+    drain already refuses probe ids for the same reason.
+    """
+    import time
+
+    from tortoise import capture_backlog
+    from tortoise.capture_spool import is_probe_session_id
+
+    if is_probe_session_id(session_id):
+        return
+    if estimate is None:
+        estimate = capture_backlog.estimate_units(turns)
+    if isinstance(turns, int):
+        turn_count = turns
+    else:
+        turn_count = (len(turns) if hasattr(turns, "__len__")
+                      else int(turns or 0))
+    capture_backlog.record_not_processed(
+        session_id=session_id, harness=harness,
+        file=str(file_path) if file_path else None,
+        turns=turn_count, estimate=estimate, reason=reason,
+        recorded_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+
+def _capture_deferral_target(args, harness: str | None) -> tuple:
+    """The ``(harness, transcript path)`` a `session capture` deferral records.
+
+    The Claude Code hook's `--file` is its OWN ``mktemp`` conversion, removed by
+    its ``trap`` moments later, so the DURABLE ``--transcript-path`` wins — and
+    it is the parser-named shape (``claude-desktop``), NOT the capture alias
+    (``claude``) that `sessions import` has no parser for.  Falling back to
+    `--file` keeps a manual `session capture` behaving as before.  Both
+    deferring branches of `_cmd_session_capture` resolve it HERE, so a future
+    edit cannot give one of them a transient path.
+    """
+    transcript = getattr(args, "transcript_path", None)
+    if not transcript:
+        return harness, getattr(args, "file", None)
+    return _backlog_parser_harness(harness), transcript
+
+
+def _flush_backlog_offer(*, session_id: str,
+                         server_session_id: str | None = None,
+                         offer: bool = True) -> None:
+    """Retire the extracted session's backlog entry, then offer what remains.
+
+    Call it ONLY where extraction provably ran — the receipt-write success
+    paths and the hook's extracted branch.  A DEGRADED 2xx (`extraction_mode`
+    error/empty, or a non-empty `errors` list) is NOT one of them: it defers
+    instead (see `_record_backlog_deferral`), so retiring here can never mark a
+    session `processed` that gained no memory points.
+
+    Both the client-side idempotency key and the server's echoed ``session_id``
+    are retired: they are the same value today (the client sends it), and
+    marking both keeps the ledger truthful if a future server ever mints its
+    own.
+
+    ``offer=False`` for the HOOK-DRIVEN capture path (``session capture``):
+    the bookkeeping must happen, but a hook's output is discarded or read by
+    an agent on every turn, and a recommendation repeated on every capture is
+    noise — not a recommendation. The offer belongs where a human is looking:
+    ``tortoise doctor``, the manual ``sessions import``, and
+    ``tortoise sessions backlog``.
+    """
+    import time
+
+    from tortoise import capture_backlog
+    _stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for _sid in {session_id, server_session_id}:
+        if _sid:
+            capture_backlog.mark_processed(_sid, processed_at=_stamp)
+    if offer:
+        _print_backlog_offer()
+
+
+def _cmd_sessions_backlog(args) -> int:
+    """#4197: report, process, or decline the SAVED backlog.
+
+    Three states, read from the local ledger (`tortoise.capture_backlog`):
+    ``not-processed`` (saved, never extracted), ``processed`` (the backlog run
+    extracted it), and ``declined`` (the recorded policy: future conversations
+    only). The names are the issue's own — no vocabulary is minted here.
+
+    ``--process`` is the ONLY path that spends model budget, it is reached only
+    by an explicit request, and the estimated cost is printed BEFORE the first
+    POST. An explicit later ``--process`` also overrides a previous
+    ``--future-only`` (the choice is re-offerable, #4197 AC5).
+    """
+    import time
+
+    from tortoise import capture_backlog
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    state = capture_backlog.summary()
+
+    if getattr(args, "forget", None):
+        # The deliberate way OUT of a record nothing can act on. A `session
+        # drain` deferral is recorded with NO transcript path (the spool keeps
+        # the turns, not the path), so `--process` can only skip it — and a
+        # record that inflates the pending count, the price and the `doctor`
+        # row while no command can clear it is a surface that cannot converge.
+        if not capture_backlog.forget(args.forget):
+            print(f"No saved-backlog record for {args.forget}.", file=sys.stderr)
+            return 1
+        print(f"Dropped the saved-backlog record for {args.forget}.")
+        return 0
+
+    if getattr(args, "future_only", False):
+        pending = int(state["counts"][capture_backlog.STATUS_NOT_PROCESSED])
+        if not capture_backlog.set_policy(capture_backlog.CHOICE_FUTURE_ONLY,
+                                         decided_at=now):
+            print("Could not record the choice (the local ledger is not "
+                  "writable).", file=sys.stderr)
+            return 1
+        print(f"Choice recorded: only future conversations will be "
+              f"extracted. {pending} saved session(s) stay un-extracted and "
+              f"are NOT re-extracted on their own.")
+        # `recommendation()` returns None when nothing is pending — printing it
+        # unguarded emitted a literal `None` on a backlog-free machine. Its
+        # declined text is the ACTIONABLE half only, so the choice is not
+        # announced a second time in a second wording.
+        _rec = capture_backlog.recommendation(capture_backlog.summary())
+        if _rec:
+            print(f"  {_rec}")
+        return 0
+
+    if getattr(args, "process", False):
+        return _process_saved_backlog(state, decided_at=now)
+
+    # `--json` is the MACHINE-READABLE state, and it is emitted for EVERY state
+    # including the empty one: an empty backlog is a STATE (the three-state
+    # contract is exactly that), and a consumer doing `json.loads(stdout)` must
+    # not receive prose — or, on the most common first-run state, nothing at
+    # all. Only JSON goes to stdout, mirroring `_cmd_fail` / `_emit_json`.
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(state, indent=2, sort_keys=True))
+        return 0
+
+    if not state["not_processed"] and not state["processed"]:
+        # SCOPED TO THE LOCAL RECORD, like `format_report`'s own caveat: the
+        # ledger is written by `sessions import` / `session capture` /
+        # `session drain` only — the Pi capture extension does not write it — so
+        # a host that DID capture store-only sessions can reach this branch, and
+        # "nothing was captured without extraction" would assert an absence this
+        # surface cannot observe.
+        print("No saved backlog — no session was LOCALLY RECORDED as captured "
+              "without extraction.")
+        return 0
+    provider, model = _backlog_provider_note()
+    print(capture_backlog.format_report(state, provider=provider, model=model))
+    return 0
+
+
+def _import_receipt_for(session_id: str) -> Path:
+    """The local import receipt for ``session_id`` — ONE derivation.
+
+    Shared by the receipt writer and by the backlog run's reconciliation, so the
+    two cannot disagree about where a receipt is (a divergence would either
+    revive a retired entry or wedge one forever).
+    """
+    import os
+
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir / f"{session_id}.json"
+
+
+#: The command that drops a record nothing can act on — named in the messages
+#: that report such a record, so the way out is discoverable where the dead end
+#: is reported rather than only in `--help`.
+_FORGET_HINT = "tortoise sessions backlog --forget <session-id>"
+
+
+def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
+    """Run the saved backlog through the EXISTING re-capture path.
+
+    Progress and completion are printed for every entry, so a long model-spend
+    run is never silent (#4197 AC6). The verdict per entry is read back from
+    the LEDGER, never inferred from the import's exit code: a re-import of a
+    still-keyless session exits 0 while staying store-only, and reporting that
+    as processed would be the one lie this whole feature exists to prevent.
+    """
+    import argparse as _argparse
+    import time
+
+    from tortoise import capture_backlog
+
+    # Nothing to do is decided FIRST — before any provider messaging. An empty
+    # (or transcript-less) backlog has no re-capture to spend on, so naming a
+    # provider key here would be a remedy for a call nothing is about to make
+    # (the note below and the refusal it replaced were both false in that
+    # state).
+    entries = [r for r in state["not_processed"] if r.get("file")]
+    without_file = [r for r in state["not_processed"] if not r.get("file")]
+    if not entries:
+        # "No saved backlog to process" would be FALSE when the backlog is
+        # non-empty but unprocessable (`session drain` records a deferral with
+        # no transcript path): it would hide both the entries and the guidance.
+        if without_file:
+            print("Nothing in the saved backlog can be processed "
+                  f"automatically: {len(without_file)} saved session(s) have "
+                  "no transcript path recorded.")
+            for record in without_file:
+                print(f"  skipped {record.get('session_id')}: no transcript "
+                      "path was recorded for it (re-run its import to set "
+                      f"one, or drop the record with `{_FORGET_HINT}`)")
+            return 0
+        print("No saved backlog to process.")
+        return 0
+
+    # The key gates extraction, not storage (#3892) — but WHOSE key is not this
+    # process's to assert. The re-POST asks the SERVER to extract, and on the
+    # hosted lane the deployment holds the provider key, so a gate on the
+    # CLIENT's env turned the recommended action into one a hosted user could
+    # not perform and named a remedy they could not apply. The run is therefore
+    # NOT gated on it; the per-entry verdict is read from the LEDGER, which is
+    # what keeps the run honest when nothing extracts. A note is still printed
+    # for the self-hosted case where the local env is the extractor's env.
+    _provider_note = _backlog_provider_warning()
+    if _provider_note:
+        print(_provider_note)
+
+    _policy_recorded = capture_backlog.set_policy(
+        capture_backlog.CHOICE_BACKLOG,
+        decided_at=decided_at)
+    if not _policy_recorded:
+        # The `--future-only` branch fails loudly on the same call, and it is
+        # right to: an unverified policy write cannot deliver the ordering's
+        # purpose. The run still proceeds (the user asked for it, and the
+        # per-entry verdict is read from the ledger), but the choice is NOT
+        # recorded — so the report below must not claim a policy this run is
+        # overriding. `state` is re-read after the write, so the override is
+        # applied to the re-read state, immediately before rendering.
+        print("Could not record the choice (the local ledger is not writable) "
+              "— the run continues, but a later `sessions backlog` will not "
+              "see it as chosen.", file=sys.stderr)
+    state = capture_backlog.summary()
+    entries = [r for r in state["not_processed"] if r.get("file")]
+    without_file = [r for r in state["not_processed"] if not r.get("file")]
+    if not _policy_recorded:
+        state = dict(state, choice=capture_backlog.CHOICE_BACKLOG,
+                     declined=False)
+    provider, model = _backlog_provider_note()
+    # `suppress_recommendation`: the report is rendered IMMEDIATELY before the
+    # run it describes, so recommending `--process` would tell the user to run
+    # the command already executing.
+    print(capture_backlog.format_report(state, provider=provider, model=model,
+                                        suppress_recommendation=True))
+
+    total = len(entries)
+    processed = failed = 0
+    for index, record in enumerate(entries, start=1):
+        session_id = str(record.get("session_id") or "")
+        print(f"  [{index}/{total}] re-capturing {session_id} "
+              f"({record.get('turns') or 0} turn(s)) …")
+        # RECONCILE FIRST: a local import receipt is PROOF the server took this
+        # session WITH extraction — every deferring shape returns before the
+        # receipt write — so a ledger entry that still says `not-processed`
+        # beside a receipt is a MISSED RETIREMENT (a kill between the two
+        # writes, or a `mark_processed` write that failed; both are documented
+        # as possible). Without this the entry would short-circuit at the
+        # receipt check BEFORE the POST, be counted failed, and leave
+        # `--process` exiting 1 and `doctor` warning forever, with no command
+        # able to clear it.
+        if _import_receipt_for(session_id).exists():
+            _stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            # Check the write, do not assume it: `mark_processed` returns
+            # False when the record cannot be read or the write does not land
+            # (the module documents every write as best-effort). Counting that
+            # as processed is the exact lie this function's docstring forbids —
+            # the ledger would still say `not-processed` while the run reports
+            # "N processed, 0 still not-processed" and exits 0. The sibling
+            # re-capture path below reads the verdict BACK from the ledger for
+            # the same reason, so the two halves of one loop must agree.
+            if capture_backlog.mark_processed(session_id, processed_at=_stamp):
+                processed += 1
+                print(f"  [{index}/{total}] {session_id}: extracted ✓ "
+                      "(reconciled from its import receipt)")
+            else:
+                failed += 1
+                print(f"  [{index}/{total}] {session_id}: still not extracted "
+                      "(could not retire the record from its import receipt)")
+            continue
+        rc = _cmd_sessions_import(_argparse.Namespace(
+            file=record.get("file"),
+            # The ledger may carry a harness the parsers spell differently
+            # (`claude` for the Claude Code hook). Without this a backlog entry
+            # written by the hook could never be processed — `parse_transcript`
+            # raises `no parser for harness 'claude'` — which is the exact
+            # harness path that produces the backlog.
+            harness=_backlog_parser_harness(record.get("harness")),
+            session_id=session_id or None,
+            # Inside a run, the per-entry progress line IS the report: letting
+            # the import's own offer print too would repeat the whole backlog
+            # summary once per entry, which reads as noise and buries the
+            # completion line (the one thing the run must be judged by).
+            _suppress_backlog_offer=True))
+        rec_status = next(
+            (r.get("status") for r in capture_backlog.sessions()
+             if r.get("session_id") == session_id), None)
+        if rc == 0 and rec_status == capture_backlog.STATUS_PROCESSED:
+            processed += 1
+            print(f"  [{index}/{total}] {session_id}: extracted ✓")
+        else:
+            failed += 1
+            print(f"  [{index}/{total}] {session_id}: still not extracted "
+                  f"(see the import output above) — kept in the backlog")
+
+    for record in without_file:
+        print(f"  skipped {record.get('session_id')}: no transcript path was "
+              "recorded for it (re-run its import to set one, or drop the "
+              f"record with `{_FORGET_HINT}`)")
+    print(f"Saved backlog run complete: {processed} processed, {failed} "
+          f"still not-processed, {len(without_file)} skipped.")
+    return 1 if failed else 0
+
+
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
     transcript from a harness store (codex / claude-desktop / pi).
@@ -5093,10 +6016,15 @@ def _cmd_sessions_import(args) -> int:
     (403 ⇒ exit 1, honest error, NO receipt) — and a RETRYABLE refusal
     (402/408/425/429/5xx) is additionally spooled for a later drain by
     `_spool_if_retryable` while still exiting 1 with no receipt (#4714) —
-    EXCEPT a deferred keyless
-    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
-    receipt so an explicit re-import can re-attempt extraction once a key is
-    configured. Re-import of the
+    EXCEPT every DEFERRING 2xx, which writes NO local receipt (and no
+    retirement) so an explicit re-import can still re-attempt extraction: a
+    store-only capture (`extraction_mode` `no-provider` #4188, or the team's
+    extraction-disabled setting #4258), a DEGRADED one (extraction
+    error/empty, or a non-empty `errors` list — see
+    :func:`_degraded_extraction`), and a `replayed` receipt carrying an
+    upgrade-refused warning (`_deferral_reason`, whose mode is neither
+    store-only nor degraded). Each also records the session in the
+    saved-backlog ledger. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported). A re-POST of
     an already-extracted session converges server-side (same session_id ⇒ no
     new Session or turn Points); a re-POST of a DEFERRED store-only session
@@ -5115,7 +6043,7 @@ def _cmd_sessions_import(args) -> int:
     server-side failure key unset, so the panel would read healthy over a
     session that was never captured.
     """
-    import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
+    import hashlib, json as _json, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -5181,10 +6109,7 @@ def _cmd_sessions_import(args) -> int:
         "imp_" + hashlib.sha256(raw).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
-    receipt_dir = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts")))
-    receipt = receipt_dir / f"{session_id}.json"
+    receipt = _import_receipt_for(session_id)
     if receipt.exists():
         print(f"Already imported: {session_id} (receipt present) — skipping.")
         return 0
@@ -5374,7 +6299,7 @@ def _cmd_sessions_import(args) -> int:
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:
                 return False
-            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
             receipt.write_text(_json.dumps({
                 "session_id": session_id,
                 "harness": harness, "file": str(file_path),
@@ -5391,6 +6316,14 @@ def _cmd_sessions_import(args) -> int:
             print(f"Imported session {session_id} ({len(turns)} turns, "
                   f"harness={harness}) — the refusal arrived after the "
                   "server committed it.", file=_sys.stderr)
+            # #4197: the server committed an extraction for this session, so
+            # any backlog entry for it is retired here too — this receipt is
+            # the OTHER success path (a retryable refusal the server had in
+            # fact committed), and leaving the entry pending would offer the
+            # user a session that is already extracted.
+            _flush_backlog_offer(
+                session_id=session_id,
+                offer=not getattr(args, "_suppress_backlog_offer", False))
             return True
         except Exception as exc:
             print(f"post-refusal confirmation failed: {exc}", file=_sys.stderr)
@@ -5468,14 +6401,14 @@ def _cmd_sessions_import(args) -> int:
         _spool_if_retryable(None, str(e))
         return 1
 
-    # Any 2xx is a success — the server stored the Session and wrote its
-    # per-harness receipt state key. A degraded extraction (error/empty) or
-    # server-side errors/warnings still imported the session; surface them as
-    # warnings, not failures (403 ⇒ fail above via HTTPError; a retryable
-    # 402/408/425/429/5xx — including 503 — is spooled by _spool_if_retryable
-    # and also fails).
-    if result.get("errors") or result.get("warnings") or \
-            result.get("extraction_mode") in ("error", "empty"):
+    # Any 2xx stored the Session, and the ONLY thing it proves is that the
+    # server took the turns. It does NOT prove extraction ran: a degraded body
+    # (`extraction_mode` error/empty, or a non-empty `errors` list) is the
+    # failure surface for a capture whose turn mutation already happened, so it
+    # is reported below and then deferred (no receipt) rather than treated as a
+    # completed import.
+    _degraded_body = _degraded_extraction(result)
+    if result.get("errors") or result.get("warnings") or _degraded_body:
         print("import warnings: " + str(
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
@@ -5508,12 +6441,32 @@ def _cmd_sessions_import(args) -> int:
     # either would make every later re-import skip the POST on a stale receipt,
     # so the session could never gain memory points, and would leave the
     # warning's own remedy an instruction the CLI itself makes unreachable.
-    _upgrade_refused = (
-        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
-        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
-    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
-                          _CAPTURE_EXTRACTION_DISABLED_MODE)
-            or _upgrade_refused):
+    # #4197 review: a DEGRADED 2xx — `extraction_mode` error/empty, or a
+    # non-empty `errors` list — STORED the turns and FAILED to extract. It
+    # DEFERS like the store-only shapes rather than taking a receipt: a receipt
+    # makes every later re-import short-circuit BEFORE the POST ("Already
+    # imported … receipt present — skipping"), so the session could never gain
+    # its memory points AND a ledger entry recorded for it could never be
+    # retired — a permanent, un-fixable entry on every read surface. Same rule,
+    # same no-receipt reason, and now the SAME predicate, as the store-only
+    # shapes below and as `session capture` / `session drain`.
+    _degraded = _degraded_extraction(result)
+    if _degraded:
+        print(f"import deferred: extraction failed "
+              f"({result.get('errors') or result.get('extraction_mode')}) — "
+              "turns stored, extraction skipped; re-run this import to "
+              "re-attempt extraction.", file=_sys.stderr)
+        _record_backlog_deferral(
+            session_id=session_id, harness=harness, file_path=file_path,
+            turns=turns, reason=_degraded)
+        return 0
+    # THE single predicate, and the SINGLE recorded reason: the `_why` below is
+    # the human-readable remedy, but the message the offer/report renders is the
+    # ledger's `reason` field, so that field must be the value `capture` and
+    # `drain` record for the same body (`_deferral_reason`) — not a second
+    # spelling computed here.
+    _reason = _deferral_reason(result)
+    if _reason:
         # #4258: the missing key and the turned-off setting are INDEPENDENT
         # reasons. When BOTH hold, the mode is "no-provider" but the receipt
         # also carries the disabled warning — the remedy must then name both
@@ -5539,14 +6492,35 @@ def _cmd_sessions_import(args) -> int:
             _remedy = "re-run this import once a key is configured."
         print(f"import deferred: {_why} — turns stored, extraction skipped; "
               f"{_remedy}", file=_sys.stderr)
+        # #4197: a store-only deferral is the ONLY capture outcome that would
+        # otherwise leave NO local trace (no receipt by design — a receipt
+        # would make every later re-import skip the POST on a stale receipt
+        # and the session could never gain its memory points — and the
+        # capture-failure breadcrumb was cleared by this 2xx). Record it in
+        # the SAVED-BACKLOG ledger, so the machine can enumerate its own
+        # backlog, price it, and report the user's choice (#4197).
+        # Best-effort: losing the offer must never cost the capture.
+        _record_backlog_deferral(
+            session_id=session_id, harness=harness, file_path=file_path,
+            turns=turns, reason=_reason)
         return 0
-    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
         "harness": harness, "file": str(file_path),
         "imported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "turns": len(turns),
     }, indent=2), encoding="utf-8")
+    # #4197: extraction ran for a session that may have been deferred before —
+    # retire its backlog entry, and OFFER the remaining backlog (recommended)
+    # at exactly the point the provider key just proved it works. The offer is
+    # silent when the backlog is empty, so an ordinary import is unchanged.
+    # (Every deferring shape — store-only and degraded — returned above, so
+    # reaching this receipt means extraction actually ran.)
+    _flush_backlog_offer(
+        session_id=session_id,
+        server_session_id=result.get("session_id", session_id),
+        offer=not getattr(args, "_suppress_backlog_offer", False))
     print(f"Imported session {result.get('session_id', session_id)} "
           f"({len(turns)} turns, harness={harness})")
     return 0
@@ -7401,10 +8375,16 @@ def _cmd_doctor(args):
             from falkordb import FalkorDB
 
             from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            from tortoise.projection import _bounded_server_socket_kwargs
+            # #3065: the probe's bounds come from the product's ONE resolution
+            # point too. The 5s/10s literals it carried were the pre-#2850
+            # hardcoded values, so `doctor` ignored an operator's
+            # TORTOISE_DB_SOCKET_TIMEOUT — a diagnostic run against a wedged
+            # server parked for the literal instead of the configured bound.
             dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
                                  username=probe_user, password=probe_pass,
                                  ssl=(parsed.scheme == "rediss"),
-                                 socket_connect_timeout=5, socket_timeout=10)
+                                 **_bounded_server_socket_kwargs())
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
@@ -7668,6 +8648,35 @@ def _cmd_doctor(args):
             results.append(("Session extraction", "❌" if hosted else "⚠️", detail))
     except Exception as e:
         results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
+
+    # 5.6 Saved backlog (#4197) — the SAVED transcripts that were captured
+    # store-only (no provider key, or extraction turned off) and never
+    # extracted, with their cost and the RECOMMENDED action. This is the point
+    # where the provider key's state is reported, so it is where the owner's
+    # choice belongs: the user learns that memory is present-but-undistilled
+    # and gets the one command that fixes it. Silent when the backlog is empty,
+    # so a clean environment's doctor output is byte-identical.
+    try:
+        from tortoise import capture_backlog
+        _backlog_state = capture_backlog.summary()
+        _backlog_rec = capture_backlog.recommendation(_backlog_state)
+        if _backlog_rec:
+            _bp, _bm = _backlog_provider_note()
+            _pending = _backlog_state["counts"][
+                capture_backlog.STATUS_NOT_PROCESSED]
+            results.append((
+                "Saved backlog", "⚠️",
+                f"{_pending} saved session(s) are LOCALLY RECORDED as "
+                f"captured without extraction (~{_backlog_state['cost_units']} "
+                f"estimated extraction unit(s)"
+                + (f" plus {_backlog_state['cost_unknown']} that could not be "
+                   "priced" if _backlog_state.get('cost_unknown') else "")
+                + f"{', ' + _bp if _bp else ''}). "
+                "A session extracted since by another path (MCP or the SDK) "
+                f"is not visible here. {_backlog_rec}"))
+    except Exception as e:
+        results.append(("Saved backlog", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # 6. Harness detection.  `Path.home()` sits INSIDE this boundary because
     # it can RAISE, not merely return: with `$HOME` a literal `~` (`~/x`
@@ -8344,6 +9353,23 @@ def _cmd_decide(args) -> int:
             # Try as a raw graph ID (pass-through)
             return name
 
+        # #7813: the decision-authoring path could not express a direction, so
+        # every operator it wired took create_operator's default — including the
+        # NANDs that mean "X attacks Y", which were silently recorded as mutual
+        # exclusion. `--direction` now lets the author choose; it is threaded to
+        # all three wiring loops below.
+        #
+        # ⛔ Pass the kwarg ONLY when a direction was chosen. create_operator's
+        # signature default is the string "bidirectional" (#807 — the authoring
+        # default), and an omitted kwarg keeps it. Passing direction=None
+        # explicitly would instead reach create_operator's `if direction is None`
+        # guard and canonicalize NAND → "unidirectional", reversing #807/#753/#86.
+        chosen_direction = getattr(args, "direction", None)
+
+        def _direction_kw() -> dict:
+            """Operator kwargs carrying the chosen direction (empty when unset)."""
+            return {"direction": chosen_direction} if chosen_direction is not None else {}
+
         # ── Create regular edges (IMPL/NAND) ──
         # Track created operators so relevance_edges can reuse them instead of
         # creating duplicates (same src/op_type/tgt in both sections).
@@ -8363,7 +9389,8 @@ def _cmd_decide(args) -> int:
                 continue
 
             try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], label=label)
+                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                         label=label, **_direction_kw())
                 created_ops[(src, op_type, tgt)] = op["id"]
                 all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
@@ -8376,7 +9403,8 @@ def _cmd_decide(args) -> int:
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                          **_direction_kw())
                 all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
@@ -8396,7 +9424,8 @@ def _cmd_decide(args) -> int:
                 # duplicate operators feeding EP twice).
                 op_id = created_ops.get((src, op_type, tgt))
                 if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
+                                             **_direction_kw())
                     op_id = op["id"]
                     all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
@@ -8987,6 +10016,34 @@ def main(argv: list[str] | None = None) -> int:
                     help="Graph to project into: FalkorDB docker:// URI or embedded path "
                          "(e.g. ~/.tortoise/tortoise.db). Omit for log-only mode "
                          "(writes mine-<source-id>.jsonl, no W-3 gate)")
+    md = sp.add_parser("mine-docs",
+                       help="Mine a markdown docs corpus → draft statement Points (#1724). "
+                            "Deterministic (no LLM, no tokens); re-mining an unchanged "
+                            "corpus reports 0 new Points. Self-hosted only — there is no "
+                            "MCP tool for this.")
+    md.add_argument("--dir", required=True,
+                    help="Absolute path of the markdown corpus (already staged by the "
+                         "GitHub docs fetcher, or any local docs directory)")
+    md.add_argument("--db", required=True,
+                    help="Graph to project into: FalkorDB docker:// URI or embedded path "
+                         "(e.g. ~/.tortoise/tortoise.db). Required — the miner attaches "
+                         "claims to the Document Sources this graph already holds")
+    md.add_argument("--corpus-name", default=None,
+                    help="Corpus name for the corpus:// Source identity "
+                         "(default: the directory's basename)")
+    md.add_argument("--repo", default=None,
+                    help="owner/name of the repo/project the docs belong to — becomes the "
+                         "aboutObject entity (externalId github:repo:owner/name). "
+                         "Default: derived from the staged path when it is "
+                         "<ingest-base>/<org>/<repo>")
+    md.add_argument("--about", action="append", default=None, metavar="ENTITY",
+                    help="Extra entity name to link claims to (repeatable)")
+    md.add_argument("--max-claims-per-doc", type=int, default=40,
+                    help="Bound on claims extracted per document (default 40). The cap "
+                         "is applied in document order, so it is stable run to run.")
+    md.add_argument("--no-index", action="store_true",
+                    help="Skip the corpus index pass (only mine Sources that already "
+                         "exist; docs without a Source are skipped with an error)")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
     sr.add_argument("--http", action="store_true",
                     help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
@@ -9140,6 +10197,16 @@ def main(argv: list[str] | None = None) -> int:
              "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
              "is not consent)")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
+    # #4197: the DURABLE source of the same transcript, when `--file` is a
+    # transient conversion. The Claude Code SessionEnd hook converts Claude's
+    # project transcript into a `mktemp` file and deletes it on exit, so a
+    # store-only deferral recorded against `--file` could never be re-processed.
+    # This points at `~/.claude/projects/*/*.jsonl` — the parser-named
+    # `claude-desktop` shape — and is what the saved-backlog ledger records.
+    session_capture.add_argument(
+        "--transcript-path", default=None,
+        help="Durable source transcript for the saved-backlog ledger when "
+             "--file is a transient conversion (#4197)")
     # #1727 Slice 2 (Task 14, T1-P11): the hook forwards Claude Code's real
     # session_id (idempotency key — re-capture converges to one Session) and
     # its harness (per-harness receipts). Both optional — the no-arg form
@@ -9193,6 +10260,27 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3517: the capture disclosure, rendered from runtime structured data. The
+    # onboarding prompt prints THIS output verbatim — the agent never authors the
+    # facts (epic #1714 R7 / decision 1). Sits in the existing session grammar
+    # (`capture|probe|verify|list|view`) rather than adding a top-level verb.
+    session_disclosure = session_sp.add_parser(
+        "disclosure",
+        help="Print the capture disclosure (what is recorded, where it goes, "
+             "where the off-switch is) — rendered from runtime state, never "
+             "model-authored (#3517)")
+    session_disclosure.add_argument(
+        "--harness", default="claude",
+        help="Harness the disclosure is about (default: claude)")
+    session_disclosure.add_argument(
+        "--kind", default="disclosure",
+        choices=["disclosure", "confirmation", "declined"],
+        help="Which template to render: `disclosure` (the facts, printed "
+             "after an install), `confirmation` (the short yes-branch line "
+             "naming the off-switch) or `declined` (the no-branch line)")
+    session_disclosure.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable form (facts + every rendered text)")
     # #3809: one-command behavioural install verification — fire the installed
     # seam and assert installed -> captured -> in-memory, exiting non-zero on
     # any broken link. Named `verify` to sit in the existing
@@ -9243,6 +10331,41 @@ def main(argv: list[str] | None = None) -> int:
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
+    # #4197 (owner decision): the SAVED BACKLOG — transcripts captured without a
+    # provider key (or with extraction turned off) and never extracted. The
+    # choice is offered with the backlog option RECOMMENDED and its cost visible
+    # BEFORE the spend, and it stays re-offerable. Processing reuses the
+    # `sessions import` re-capture path (the #2335 TRUE-retry gate), so the
+    # #4194 turn embedding lands for the stored turns too. A noun-verb
+    # subcommand of the existing `sessions` (backfill) namespace — NOT a new
+    # top-level verb, which would duplicate what `sessions import` owns.
+    sess_backlog = sessions_sp.add_parser(
+        "backlog",
+        help="Report, process, or decline the saved backlog — sessions "
+             "captured without extraction (#4197)")
+    _backlog_choice = sess_backlog.add_mutually_exclusive_group()
+    _backlog_choice.add_argument(
+        "--process", action="store_true",
+        help="Extract the saved backlog now (RECOMMENDED; spends model "
+             "budget — the estimate is printed first)")
+    _backlog_choice.add_argument(
+        "--forget", metavar="SESSION_ID", default=None,
+        help="Drop one saved-backlog record and stop counting it. The way out "
+             "of a record nothing can act on: a `session drain` deferral "
+             "records no transcript path, so `--process` can only skip it")
+    _backlog_choice.add_argument(
+        "--future-only", action="store_true",
+        help="Keep only future conversations: record the choice, leave the "
+             "saved transcripts un-extracted")
+    # `--json` is the MACHINE-READABLE state document, not an action. It sits in
+    # the same mutually exclusive group so an impossible combination is refused
+    # by argparse instead of being silently ignored: both action branches return
+    # before the report is reached, so `--future-only --json` used to print
+    # prose and no document at all.
+    _backlog_choice.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable state document (JSON only on stdout); "
+             "cannot be combined with --process / --future-only")
     # tortoise list-kinds
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")  # noqa: F841
     # tortoise context — memory digest for agent session-start hooks
@@ -9256,8 +10379,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "cursor", "pi"],
-        help="Harness to install (codex | claude | cline | cursor | pi)")
+        choices=["codex", "claude", "cline", "devin", "cursor", "pi"],
+        help="Harness to install (codex | claude | cline | devin | cursor | pi)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")
@@ -9333,6 +10456,10 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
+    dc.add_argument("--direction", choices=["bidirectional", "unidirectional"], default=None,
+                    help="Direction recorded on every operator this run wires (#7813): "
+                         "'bidirectional' (mutual, the default when omitted) or "
+                         "'unidirectional' (directed attack — no back-pressure).")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help=(
@@ -9448,6 +10575,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     elif args.cmd == "mine-conversation":
         return _cmd_mine_conversation(args)
+    elif args.cmd == "mine-docs":
+        return _cmd_mine_docs(args)
     elif args.cmd == "init":
         return _cmd_init(args)
     elif args.cmd == "setup":
@@ -9488,7 +10617,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "sessions":
         if args.sessions_cmd == "import":
             return _cmd_sessions_import(args)
-        print("Unknown sessions command. Try import.", file=sys.stderr)
+        if args.sessions_cmd == "backlog":
+            return _cmd_sessions_backlog(args)
+        print("Unknown sessions command. Try import or backlog.",
+              file=sys.stderr)
         return 1
     elif args.cmd == "index":
         if args.index_cmd == "github":

@@ -48,6 +48,14 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
+
+# #3514: the coming-soon demand capture's policy half (pinned literals, key
+# validation, server-derived org key, the bounded markers). Imported as a
+# module attribute so a test override reaches BOTH surfaces instead of leaving
+# a stale copy here.
+from tortoise import (
+    demand as _demand,
+)
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
@@ -96,6 +104,7 @@ from tortoise.hosted_backup import (
     prune_backups,
     restore_backup,
 )
+from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
@@ -1503,6 +1512,48 @@ def _sweep_oauth_retention() -> None:
         _logger.warning("oauth retention sweep failed: %s", exc)
 
 
+def _sweep_invite_ghosts() -> None:
+    """#1890: give the terminal-state invite-ghost sweep a LIVE caller.
+
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) deletes every
+    ``invite-{iid}`` placeholder Membership whose Invitation node is terminal
+    (accepted / revoked / expired / orphaned) — but it shipped with exactly
+    ONE caller: ``graph-scripts/backfill_invite_ghost_members.py``, which an
+    operator has to run by hand. So an invite that expired by the clock after
+    that one-time backfill left its ghost 'invited' row in ``list_members``
+    forever — the #1890 symptom — and the SDK method the issue names as
+    caller-less stayed caller-less. This is the #4241 shape: the sweep was
+    never wrong, it just never ran.
+
+    Scheduled, not operator-run — the same seam as the other sweeps: armed by
+    ``_run_boot_sweeps`` at boot and by ``_event_retention_loop`` on the
+    periodic interval (hourly by default). Idempotent by construction (a
+    second run finds nothing), so re-running every cycle is a no-op, and the
+    predicate is the reviewed #1908 one — a still-pending, unexpired invite's
+    placeholder is kept.
+
+    Registry-only: Supabase mode never constructs the registry graph (#669);
+    the control-plane lane's invitations are a Postgres table with its own
+    dedup index and no placeholder rows.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs and
+    never kills the runner.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        if is_supabase_enabled():
+            return
+        sdk = _make_sdk(namespace="registry")
+        result = sdk.sweep_invite_ghost_memberships()
+        if result.get("deleted"):
+            _logger.info("invite ghost sweep deleted %s terminal placeholder "
+                         "row(s) of %s examined",
+                         result["deleted"], result.get("found"))
+    except Exception as exc:  # a GC sweep must never crash the runner
+        _logger.warning("invite ghost sweep failed: %s", exc)
+
+
 def _reconcile_metering_periods() -> None:
     """#4241: give the period-bound repair a PERIODIC caller.
 
@@ -1680,6 +1731,13 @@ async def _event_retention_loop(interval: float) -> None:
             "oauth retention",
             functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
                               name="tortoise-boot-sweep"))
+        # #1890: the terminal-state invite-ghost sweep (#1908) was reachable
+        # only from a graph-script an operator ran by hand, so a ghost left by
+        # an invite that expired AFTER that one-off backfill never went away.
+        await _guarded_step(
+            "invite ghost sweep",
+            functools.partial(run_on_daemon_worker, _sweep_invite_ghosts,
+                              name="tortoise-boot-sweep"))
         # #4241: repair subscription orgs whose period anchor is unusable.
         # Before this, the idempotent repair had exactly one caller — its own
         # migration — so an org broken after that deploy never healed.
@@ -1723,6 +1781,9 @@ async def _run_boot_sweeps() -> None:
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("deleted-account purge", _purge_deleted_accounts),
                       ("oauth retention", _sweep_oauth_retention),
+                      # #1890: same runner as the periodic loop, so the boot and
+                      # periodic paths for the invite-ghost sweep cannot drift.
+                      ("invite ghost sweep", _sweep_invite_ghosts),
                       # #4241: the SAME runner as the periodic loop, so the
                       # boot and periodic paths for the anchor repair cannot
                       # drift apart — the property _guarded_step exists for.
@@ -12179,7 +12240,8 @@ _SWEEP_EVENT_DELETE_CYPHER = (
     "OPTIONAL MATCH (s:Session {id:$sid}) "
     "WITH count(s) AS present "
     "WHERE present = 0 "
-    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e"
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e "
+    "RETURN count(e)"
 )
 
 
@@ -13384,13 +13446,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # row, so the old shape never filtered (verified by execution: the
             # delete ran with a live Session present).
             with suppress(Exception):
-                proj.g.query(
+                _r = proj.g.query(
                     "OPTIONAL MATCH (s:Session {id:$sid}) "
                     "WITH count(s) AS present "
                     "WHERE present = 0 "
-                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
+                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p "
+                    "RETURN count(p)",
                     params={"sid": session_id, "ids": point_ids},
                 )
+                # #7951: journal the sweep ONLY when the guarded delete
+                # actually removed a node (a live Session makes the query a
+                # no-op, and journaling then would replay a delete live never
+                # made). Idempotent `EntityMutated` op=delete per id — without
+                # it the capture's own PointAdded lines resurrect the orphans.
+                if (_r.result_set and (_r.result_set[0][0] or 0)):
+                    for _pid in point_ids:
+                        sdk._journal_entity_mutation("Point", _pid, "delete")
         if minted_event and event_id:
             # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
             # the minted eventId is now DETERMINISTIC
@@ -13409,18 +13480,53 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # FalkorDB). Shared with tests via _SWEEP_EVENT_DELETE_CYPHER
             # (real-graph pin, both lanes).
             with suppress(Exception):
-                proj.g.query(
+                _r = proj.g.query(
                     _SWEEP_EVENT_DELETE_CYPHER,
                     params={"sid": session_id, "eid": event_id},
                 )
+                # #7951: journal the removed Event only when the guard let it
+                # through (see the Point block above).
+                if (_r.result_set and (_r.result_set[0][0] or 0)):
+                    sdk._journal_entity_mutation("Event", event_id, "delete")
+        # #7951: the agentSession Source stub + the container removal. The
+        # Source (url = session:{id}) is re-materialised by `rebuild_all`'s
+        # pass-2 `_link_source` from the orphaned Points' own payloads, so its
+        # removal must be journaled alongside the container. `Session` is NOT a
+        # canonical entity label, so no `EntityMutated` record can express it —
+        # `SessionDeleted` is the dedicated JSONL-only carrier
+        # (`_fold_session_deleted`), and it removes the Source in the same fold.
+        #
+        # The emit is GATED ON THE GUARDED DELETE'S OWN RESULT (review P2-d).
+        # The guard's `WHERE present = 0` and the Source delete execute as ONE
+        # command, so a same-id re-capture that MERGEd a fresh Session before
+        # this command makes it a NO-OP (0 rows) and NOTHING is journaled —
+        # which is the right answer. A SEPARATE `session_gone` live read could
+        # not see that: it could read "absent" and then emit a false
+        # `SessionDeleted` AFTER the re-capture's own `SessionRecorded`, which
+        # the deferred re-apply's seq gate cannot undo (the delete's seq is
+        # LATER than the re-capture's, so it looks like a genuine delete).
+        #
+        # RESIDUAL — stated, not claimed closed: the re-capture's Session MERGE
+        # can still land AFTER this command while its `SessionRecorded` was
+        # appended BEFORE it. Only the §17.1 atomic journal+graph write removes
+        # that last window; until then this sweep is best-effort and the
+        # re-capture's own capture wins. What the delete-result gate DOES close
+        # is the whole window in which the re-capture won before the delete ran
+        # — the case the old live-read gate mis-journaled.
+        source_removed = False
         with suppress(Exception):
-            proj.g.query(
+            _r = proj.g.query(
                 "OPTIONAL MATCH (s:Session {id:$sid}) "
                 "WITH count(s) AS present "
                 "WHERE present = 0 "
-                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                "MATCH (src:Source {url:$url}) DETACH DELETE src "
+                "RETURN count(src)",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
+            source_removed = bool(
+                _r.result_set and (_r.result_set[0][0] or 0))
+        if source_removed:
+            sdk._emit_event("SessionDeleted", id=session_id)
 
     receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
@@ -13492,7 +13598,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
     # 200 no-op) and the response marks first_capture=true so the calling
     # in-conversation agent fires the ONE-line announcement whose COPY
-    # CONTRACT lives in tortoise/onboarding/SKILL.md §6 (W2 owns the copy;
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §7 (W2 owns the copy;
+    # #3517: the wording itself is RENDERED from
+    # tortoise/config/capture_disclosure.json — the §7 section names the render
+    # rather than repeating it, so the copy has exactly one home.
     # W6 owns the trigger — never duplicate the wording here). capture-
     # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
     # CARD_STEPS excludes it; the post-write gate eval is monotonic and only
@@ -13811,7 +13920,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §6 copy).
+            # trigger for the in-conversation announcement (SKILL.md §7 copy
+            # contract; the wording renders from
+            # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
@@ -14092,8 +14203,14 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
     ).result_set
     state.entities = {(r[0], r[1] or "") for r in rows}
     rows = proj.g.query(
+        # #7902: the operator-input endpoint may carry any of the four
+        # epistemic labels (the same widening as sdk._find_operator and the
+        # commit_ops MITIGATES dedup below) — a hand-spelled (t:Point OR
+        # t:Event) here left a :Subject/:Object input operator invisible to
+        # reconciliation, so a re-sent payload burned the new-operator budget.
         "MATCH (o:Point {is_operator:true})-[r]->(t) "
-        "WHERE type(r) IN ['IMPL','NAND'] AND (t:Point OR t:Event) "
+        "WHERE type(r) IN ['IMPL','NAND'] "
+        f"AND {epistemic_disjunction('t')} "
         "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
     ).result_set
     ops: dict[str, dict] = {}
@@ -14112,8 +14229,10 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         t = op.target
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-            "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
-            "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set
@@ -15597,9 +15716,14 @@ async def activation_scorecard(
     """Activation funnel for the calling org over [since, until).
 
     Stages: captured -> stored -> memory_produced (session-scoped, graph),
-    recall_attempted (org/time-scoped, analytics), value_confirmed (a
-    REFUSAL — see the module). Every stage carries state + reason; a 0 is only
-    ever emitted with state == "measured".
+    recall_attempted, recall_returned (org/time-scoped, analytics), then
+    value_confirmed (a REFUSAL — see the module). Every stage carries state +
+    reason; a 0 is only ever emitted with state == "measured".
+
+    `recall_returned` (#3675) is the answer-bearing half of `recall_attempted`:
+    it counts retrieval calls whose `result_count` >= 1. It is a RETURN, not a
+    confirmation that anything was useful — `value_confirmed` remains the
+    refusal for that, and the module states the remaining gap.
 
     Defaults to the beta's own <= 24h criterion window. 422 on a malformed,
     naive, non-positive, or over-90-day window (a client error, never a silent
@@ -15612,6 +15736,49 @@ async def activation_scorecard(
 
     Fail-soft: an unreadable graph or analytics store yields `unavailable`,
     never a 500 and never a fabricated 0.
+    """
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+
+    _require_scope(org, "graphs:read", "activation_scorecard")
+    _reject_graph_bound_org_surface(org, "the activation scorecard")
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return await _scorecard_for_org(
+        org, since_iso, until_iso, logging.getLogger("tortoise.api"))
+
+
+async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
+                             log) -> dict:
+    """Compute ONE org's scorecard payload over an already-validated window.
+
+    ONE code path, TWO callers: the org-scoped endpoint
+    (``activation_scorecard``) and the operator cohort endpoint
+    (``activation_cohort``, #3676). A second implementation would let the two
+    surfaces disagree about the same org while both calling themselves "the
+    scorecard" — the quiet-mislabelling class this module exists to remove.
+
+    The CALLER owns authentication and window validation; this function owns the
+    per-org fail-soft behaviour. It is TOTAL against store failures (an
+    unreadable graph or analytics store yields ``unavailable``, never a 500)
+    and re-raises ONLY an ``HTTPException``: an authorization/tenancy denial
+    must not be swallowed into a 200 carrying `unavailable` stages.
+
+    ``org`` is the resolved tenancy dict on the org path and a minimal
+    ``{"org_id": ..., "graph_id": None}`` on the cohort path. That is
+    deliberate and behaviour-identical: the org path has already refused
+    graph-bound keys (``_reject_graph_bound_org_surface``), so ``_data_sdk``'s
+    graph-bound branch is unreachable for BOTH callers. The cohort path binds
+    no actor ON PURPOSE — the operator is not the tenant's actor, and
+    ``_bind_actor_context`` writes the ContextVar only when the dict actually
+    carries one.
     """
     from tortoise.activation_scorecard import (
         FUNNEL_QUERY as _FUNNEL,
@@ -15629,21 +15796,6 @@ async def activation_scorecard(
     from tortoise.activation_scorecard import (
         RECALL_PAGE_CAP as _CAP,
     )
-    from tortoise.activation_scorecard import (
-        WindowError as _WindowError,
-    )
-    from tortoise.activation_scorecard import (
-        normalize_window as _norm_window,
-    )
-
-    _require_scope(org, "graphs:read", "activation_scorecard")
-    _reject_graph_bound_org_surface(org, "the activation scorecard")
-    try:
-        since_iso, until_iso = _norm_window(since, until)
-    except _WindowError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    log = logging.getLogger("tortoise.api")
 
     def _read_graph() -> tuple[list, dict | None]:
         sdk = _data_sdk(org)
@@ -15727,7 +15879,12 @@ async def activation_scorecard(
 def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                  graph_error: str | None, analytics_state: str, log,
                  event: str, cap: int):
-    """Read the analytics rows for the window and fold them into stage 4.
+    """Read the analytics rows for the window and fold them into stages 4-5.
+
+    Returns `(stage_cell, detail)` where `detail` also carries stage 5's cell
+    (`recall_returned_cell`, lifted by `assemble`) — both stages are derived by
+    `recall_stages` from one read, one window and one precedence ladder, so they
+    cannot disagree about which rows they are counting.
 
     Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
     — NEVER a zero — for every case where the store cannot be trusted to be
@@ -15781,6 +15938,262 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                     org["org_id"], exc_info=True)
         return _recall_stages(
             None, None, reason="analytics_store_unreachable")
+
+
+# ── #3676: the cross-tenant cohort endpoint ────────────────────────────────
+# The beta cohort is structurally MULTI-ORG (the free tier allows one org per
+# person with no invites), so the org-scoped scorecard reports n=1 — a dogfood
+# read. This surface folds an EXPLICIT, operator-named org list into one cohort
+# number, so the cohort is queryable rather than scripted.
+#
+# AUTH — the internal MACHINE plane, and there is no other credential to use.
+# Four recorded reasons, in the order they bite:
+#   1. ADR-010 splits credentials into a HUMAN plane (session JWT, the browser)
+#      and a MACHINE plane (durable API key / agent identity). An operator
+#      running a cohort read is the MACHINE plane; there is no admin ROLE in the
+#      human plane to reuse, and inventing one would put a cross-tenant read
+#      behind a tenant-scoped session.
+#   2. ADR-010's machine plane has exactly one credential today that is not
+#      tenant-scoped: `FASTAPI_INTERNAL_KEY` (`_check_internal`). It already
+#      gates `/v1/internal/backups/restore`, `/purge` and `/sweep` — operations
+#      that read and REWRITE every tenant's graph. A read-only count over a list
+#      the operator names is strictly less than what this key can already do, so
+#      reusing it adds NO capability. A NEW `admin` secret was REJECTED: a second
+#      long-lived master credential widens the blast radius of a leak without
+#      narrowing what the holder can reach, and it would need its own rotation
+#      path (`docs/infra-runbook.md` already rotates this one).
+#   3. An org-scoped `tt_` key can NEVER satisfy `_check_internal`: the check is
+#      `hmac.compare_digest(bearer, FASTAPI_INTERNAL_KEY)` against a value an org
+#      key cannot obtain. That is acceptance criterion 1, by construction.
+#   4. `/v1/internal/` is the DOCUMENTED operator/cron prefix — the #3834
+#      transport-wait-bound exemption (`_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX`)
+#      exists because these routes "have no user and no user-patience budget to
+#      derive from". A cohort of N orgs is exactly such a batch job (no user
+#      waits on it, each org costs a graph scan), so it inherits that recorded
+#      ruling rather than widening it. A `/v1/admin/` prefix would have needed a
+#      THIRD exemption decision and a new path family to secure; the issue's
+#      "something like `/v1/admin/...`" is a suggestion, not a plan.
+#
+# ENUMERATION — the list is explicit and is echoed VERBATIM. There is no
+# wildcard, no "all orgs" token, no registry lookup, and the response contains no
+# org the caller did not name (asserted by a test). The cohort is a question the
+# operator can already answer by naming a list; this endpoint does not help them
+# DISCOVER one.
+#
+# AUDIT — decided explicitly, and it is a decision rather than an omission.
+# ONE `audit_events` row per request, through the existing append-only, RLS'd
+# `_async_audit` writer, with `org_id=""` — the same shape the non-org-scoped
+# `identity_link` operations already use. WHY ONE ROW AND NOT N: the ACTION is
+# one operator action (the cardinality is one), the ACTOR is the operator rather
+# than any tenant, and `audit_events.team_id` is what RLS makes tenant-visible —
+# writing N per-tenant rows would present one operator action as N tenant
+# operations and put a row in each tenant's trail for every read of a COUNT.
+# The cross-tenant-visible-notification question (should a tenant be told its
+# counts were read?) is a product/privacy decision with its own RLS answer and
+# is NOT invented here; the operator-plane row names every target org in
+# `detail`. Tenant-visible reads are also NOT the established posture: the
+# backup sweep reads every tenant's FULL graph and emits no audit rows at all.
+# FAIL-OPEN on the write, deliberately: the audit writer never raises (it falls
+# back to JSONL and counts drops), and #1529 already ruled that bookkeeping must
+# not 500 a serving path. Blocking a read because the sink is down would not
+# stop an abuser either — an abuser holds the key.
+
+#: The same accepted id shape the provisioning path validates
+#: (``provision_tenant`` / ``hosted_backup._validate_org_id``): the id becomes a
+#: graph namespace, so a malformed one is refused here rather than surfacing
+#: later as an opaque connect error.
+_COHORT_ORG_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+#: Refused BY NAME, case-insensitively. A wildcard token is how an explicit
+#: list silently becomes "every tenant on the platform" — the failure mode this
+#: endpoint is explicitly built NOT to have.
+_COHORT_WILDCARDS = frozenset({"all", "any", "*", "%", "every", "-1"})
+
+#: Per-org blast-radius bound. A single unreadable (or hung) org must cost THAT
+#: org's cell and nothing else, so the read is wrapped in a timeout and folds to
+#: `unavailable` with the org NAMED. The underlying worker hand-off is not
+#: cancellable (see ``_run_off_loop``), so the worker itself may finish late
+#: regardless — this bounds the RESPONSE, not the query.
+_COHORT_PER_ORG_TIMEOUT_S = 30.0
+
+#: Bounded parallelism, NOT a throughput target: the graph leg rides
+#: `_SCORECARD_EXECUTOR` (2 workers by default), so a wider fan-out only queues
+#: there while multiplying concurrent load on the shared control plane.
+_COHORT_MAX_CONCURRENCY = 4
+
+
+def _validate_cohort_orgs(raw: list[str] | None, max_orgs: int) -> list[str]:
+    """Validate the operator-supplied cohort list; return it verbatim, in order.
+
+    Every refusal below is deliberate and none of them is a silent repair:
+
+    * ABSENT/EMPTY — refused. A cohort with no members is not a cohort, and
+      defaulting to "everything" is precisely how a metrics endpoint becomes a
+      tenant-enumeration endpoint.
+    * WILDCARDS — refused by name (``all``/``any``/``every``/``*``/``%``/``-1``).
+    * ID FORMAT — the accepted shape (``_COHORT_ORG_ID_RE``).
+    * DUPLICATES — refused, never deduped: deduping hides a copy-paste error,
+      and summing both would inflate the cohort number AND its denominator.
+    * SIZE — at most ``max_orgs``, a blast-radius bound, not a cohort-size
+      requirement.
+    """
+    if not raw:
+        raise HTTPException(
+            status_code=422,
+            detail=("orgs is required and must name at least one org explicitly "
+                    "(repeat the parameter, e.g. ?orgs=org-a&orgs=org-b). This "
+                    "surface takes no wildcard and never enumerates orgs."))
+    seen: set[str] = set()
+    for org_id in raw:
+        if org_id.strip().lower() in _COHORT_WILDCARDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs must be an explicit list of org ids — {org_id!r} "
+                        "is a wildcard token, which this surface refuses: a "
+                        "wildcard is how an explicit cohort becomes an "
+                        "enumeration of every tenant."))
+        if not _COHORT_ORG_ID_RE.match(org_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs entry {org_id!r} is not a valid org id "
+                        "([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})"))
+        if org_id in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"orgs entry {org_id!r} was given more than once — "
+                        "refused rather than deduped, because a copy-paste "
+                        "duplicate silently inflates the cohort and its "
+                        "denominator"))
+        seen.add(org_id)
+    if len(raw) > max_orgs:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"orgs carries {len(raw)} entries; this endpoint accepts at "
+                    f"most {max_orgs} per request (a blast-radius bound, not a "
+                    f"cohort-size requirement) — split the cohort across "
+                    f"requests"))
+    return list(raw)
+
+
+@app.get("/v1/internal/activation/cohort")
+async def activation_cohort(
+    request: Request,
+    orgs: list[str] | None = Query(default=None),  # noqa: B008
+    since: str | None = None,
+    until: str | None = None,
+):
+    """Cross-tenant activation funnel over an EXPLICIT operator-named org list.
+
+    Operator-only (``_check_internal``, `FASTAPI_INTERNAL_KEY`): an org-scoped
+    `tt_` key cannot satisfy it. Read-only. Returns the same five-stage shape as
+    `GET /v1/activation/scorecard`, folded across the named orgs, and
+    deliberately carries NO `activated` field and no activation rate at any
+    depth (see `tortoise/activation_scorecard.py`).
+
+    The org list is echoed verbatim in `cohort_definition`; `dogfood_only` is
+    set for n=1. An org that could not be read — unreachable, refused, or over
+    the per-org timeout — makes its stages `partial`/`unavailable` with the org
+    NAMED, and is never summed as 0 (see `roll_up_cohort`).
+
+    The whole request is one window, validated once and passed to every org, so
+    the cohort is comparable across orgs and the boundary instant is treated
+    identically by every per-org read.
+    """
+    _check_internal(request)
+
+    from tortoise.activation_scorecard import (
+        MAX_COHORT_ORGS,
+        assemble_cohort,
+    )
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+    from tortoise.activation_scorecard import (
+        org_failure_reason as _org_failure_reason,
+    )
+
+    cohort = _validate_cohort_orgs(orgs, MAX_COHORT_ORGS)
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    log = logging.getLogger("tortoise.api")
+    limiter = asyncio.Semaphore(min(_COHORT_MAX_CONCURRENCY, len(cohort)))
+
+    async def _one_org(org_id: str) -> tuple[str, dict | None, str | None]:
+        """Read ONE org, total against every store failure.
+
+        The minimal org dict is the tenancy seam on purpose: `graph_id=None`
+        resolves the org DEFAULT graph through the same `_data_sdk` path the
+        org-scoped endpoint uses (graph-bound keys were already refused there),
+        and no actor is bound — the operator is not the tenant's actor.
+        """
+        try:
+            async with limiter:
+                payload = await asyncio.wait_for(
+                    _scorecard_for_org({"org_id": org_id, "graph_id": None},
+                                       since_iso, until_iso, log),
+                    timeout=_COHORT_PER_ORG_TIMEOUT_S)
+        except TimeoutError:
+            # NOTE: this arm also catches a builtin TimeoutError raised INSIDE
+            # the read (a driver's own timeout is not a builtin, but the
+            # distinction is not worth a wrong-shape error): either way the org
+            # did not answer in time and the honest report is `unavailable`.
+            log.warning("activation cohort: org %s exceeded %ss (fail-soft)",
+                        org_id, _COHORT_PER_ORG_TIMEOUT_S)
+            return org_id, None, "org_read_timeout"
+        except HTTPException as exc:
+            # A tenancy/authorization refusal for ONE org is that org's failure,
+            # not the cohort's — same fail-soft contract as an unreadable graph.
+            log.warning("activation cohort: org %s refused (%s)",
+                        org_id, exc.status_code)
+            return org_id, None, f"org_read_refused:{exc.status_code}"
+        except Exception as exc:
+            # Class NAME only, never `str(exc)`: an exception message can carry
+            # a DSN, a host or a credential fragment.
+            log.warning("activation cohort: org %s read failed (fail-soft): %s",
+                        org_id, type(exc).__name__, exc_info=True)
+            return org_id, None, f"org_read_failed:{type(exc).__name__}"
+        # A read that SUCCEEDED at the transport level can still have folded to
+        # `unavailable` (an unreadable graph or analytics store is absorbed into
+        # the payload rather than raised — see `_scorecard_for_org`). Surface
+        # THAT reason too, so `org_errors` explains every org the roll-up names
+        # in `orgs_unavailable` instead of leaving the operator to re-read it one
+        # org at a time. The predicate is the module's own, so the error map and
+        # the roll-up's verdict cannot disagree.
+        return org_id, payload, _org_failure_reason(payload)
+
+    results = await asyncio.gather(*(_one_org(o) for o in cohort))
+    payload = assemble_cohort(
+        orgs=cohort,
+        payloads=[cell[1] for cell in results],
+        errors=[cell[2] for cell in results],
+        since=since_iso, until=until_iso,
+        limits={"max_orgs": MAX_COHORT_ORGS,
+                "max_concurrency": _COHORT_MAX_CONCURRENCY,
+                "per_org_timeout_s": _COHORT_PER_ORG_TIMEOUT_S,
+                "auth": "internal_key"},
+    )
+
+    # Audit BEFORE returning, fail-open (see the block note): one row for one
+    # operator action, on the operator plane (`org_id=""`), naming every target
+    # org. `_async_audit` is off-loaded and its writer counts its own drops.
+    try:
+        await _async_audit(
+            request, "", "activation_cohort_read",
+            resource_type="activation_cohort",
+            detail={"orgs": list(cohort), "window": payload["window"],
+                    "orgs_measured": payload["orgs_measured"],
+                    "org_errors": payload["org_errors"]},
+        )
+    except Exception:
+        # #1529 precedent: bookkeeping must never turn a served read into a 500.
+        log.exception("activation cohort audit write failed (non-fatal)")
+    return payload
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
@@ -15915,6 +16328,14 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
         #    the Source's own eventId is the fallback leg for the Source-absent
         #    materialization path). A missing Event-write leaves no eventId —
         #    nothing to match, no dangling.
+        #    #7951: the owned Point ids are NOT gathered here any more. The
+        #    JSONL hard-delete records still need one per removed node, but a
+        #    separate gather query left a TOCTOU window: a concurrent capture
+        #    MERGEing a Point (with its CONTAINS edge) between the gather and
+        #    the DETACH DELETE was removed LIVE but never journaled, so a
+        #    replay RESURRECTED it (review P2-c). Step 3 journals from the
+        #    DELETE statement's OWN result, which is the set it actually
+        #    removed.
         ev_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
@@ -15933,10 +16354,21 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
         #    DETACH DELETE also drops their aboutObject edges — the linked
         #    WorkItem/Object entities themselves survive: deleting a transcript
         #    never deletes the issue/entity it referenced).
-        proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+        deleted_point_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "DETACH DELETE p RETURN p.id",
             params={"sid": session_id},
-        )
+        ).result_set
+        # #7951: journal each removed Point FROM THE DELETE'S OWN RESULT
+        # (review P2-c). `EntityMutated` op=delete is the established
+        # hard-delete record (#3299) whose fold removes the node; without it
+        # the PointAdded lines replay and the Points resurrect. Reading the
+        # ids off the delete — rather than from an earlier gather — closes the
+        # window in which a concurrent capture's Point was deleted live but
+        # left unjournaled.
+        for _row in deleted_point_rows:
+            if _row and _row[0]:
+                sdk._journal_entity_mutation("Point", _row[0], "delete")
 
         # 4) the sessionCaptured provenance Event(s) by the collected ids.
         if event_ids:
@@ -15944,6 +16376,9 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
                 "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
                 params={"ids": event_ids},
             )
+            # #7951: journal each removed Event (fold keys on `eventId`).
+            for _eid in event_ids:
+                sdk._journal_entity_mutation("Event", _eid, "delete")
 
         # 5) the agentSession Source stub (url = session:{id}) + the Session.
         proj.g.query(
@@ -15954,6 +16389,14 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
             "MATCH (s:Session {id:$sid}) DETACH DELETE s",
             params={"sid": session_id},
         )
+        # #7951: journal the container removal. `Session` is NOT a canonical
+        # entity label, so no `EntityMutated` record can express it —
+        # `SessionDeleted` is the dedicated JSONL-only carrier
+        # (`_fold_session_deleted`), and it removes the agentSession Source in
+        # the same fold (that node is re-materialised by rebuild_all's pass-2
+        # `_link_source` from the deleted Points, so it must be re-asserted
+        # with the container).
+        sdk._emit_event("SessionDeleted", id=session_id)
 
         # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
         #    steps above are individually atomic but the SEQUENCE is not — a
@@ -18481,24 +18924,36 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
-        from datetime import datetime, timedelta
 
         from tortoise.auth import hash_api_key as _hash
 
+        # #1890: expiry is a DERIVED terminal state. Asking the stored
+        # ``status`` alone is the bug — only the caller-less sweep ever writes
+        # 'expired', so an invite whose ``expires_at`` has passed still counted
+        # as a pending duplicate and 409'd every re-invite FOREVER.
+        # ``expires_at`` is the authority here, exactly as the accept paths,
+        # the Pro capacity read and ``cleanup_expired_invitations`` already
+        # treat it.
+        now = datetime.now(UTC).isoformat()
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND "
             "(i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i)",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+        # #1890: past the dup-check every invite this email has left is
+        # terminal, so their placeholders are swept BEFORE the new one is
+        # minted (see the helper — otherwise the expired invite's ghost
+        # survives the re-mint and the email shows up twice in list_members).
+        _sweep_terminal_invite_placeholders(sdk, org_id, email)
 
         token = str(_uuid.uuid4())
         token_hash = _hash(token)
         iid = _short_id()
-        now = datetime.now(UTC).isoformat()
         expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
         reg.query(
             "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role, "
@@ -18629,6 +19084,44 @@ async def invite_info(token: str):
         "inviter_email": inv.get("inviter_email") or "a team member",
         "expires_at": inv.get("expires_at"),
     }
+
+
+def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
+    """#1890: delete every ``invite-{iid}`` placeholder Membership for ONE
+    (org, email) whose Invitation node is TERMINAL — accepted, revoked, or
+    expired — and return how many Invitation nodes qualified.
+
+    This is #1908's terminal-state sweep (``sweep_invite_ghost_memberships``)
+    applied at the LIVE point where the ghost becomes visible: the mint. By
+    then every invite this email has left is terminal (the dup-check just
+    rejected a live pending one), and without this sweep the re-mint leaves
+    the old placeholder beside the new one, so ``list_members`` shows the
+    same email twice — once as a ghost.
+
+    Expiry is DERIVED from ``expires_at``, in the same form the accept paths
+    and ``cleanup_expired_invitations`` use: nothing live ever writes
+    ``status='expired'``, so a status-only predicate would keep the ghost of
+    an invite that expired by the clock. The predicate mirrors
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` so the two cannot classify
+    a node differently.
+
+    Deletes go through ``_delete_fake_invite_membership`` (best-effort, one
+    warning per row): a transient delete failure must not turn a re-invite
+    into a 500, and the fleet sweep is the backstop.
+    """
+    reg = sdk._get_registry()
+    now = datetime.now(UTC).isoformat()
+    rows = reg.query(
+        "MATCH (i:Invitation {org_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NOT NULL "
+        "OR i.status IN ['accepted', 'revoked', 'expired'] "
+        "OR (i.expires_at IS NOT NULL AND i.expires_at <= $now) "
+        "RETURN i.id",
+        params={"tid": org_id, "email": email, "now": now},
+    ).result_set
+    for (iid,) in rows:
+        _delete_fake_invite_membership(sdk, org_id, iid)
+    return len(rows)
 
 
 def _delete_fake_invite_membership(sdk, org_id: str, invitation_id: str) -> None:
@@ -25932,6 +26425,24 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # Mixed-key PATCH: jsonb-first, graph-second (scope pin 7) — a graph
     # failure after a jsonb success surfaces as a 500 fail-closed and the
     # retry converges (MERGE idempotent; no lost FLOW keys).
+    # #3517 (epic #1714 J3): `session_recording` and its companion
+    # `capture_revised` are ONE write. The MCP tool and the REST twin
+    # (`POST /v1/onboarding/session-recording`) both pass the pair, but the
+    # dashboard's Memory-sources toggle sends `session_recording` ALONE
+    # (`main.jsx::toggleSessionRecording` → `{session_recording: next}`), so the
+    # two surfaces wrote DIFFERENT state keys for the same intent — the
+    # prompt-yes/dashboard-unknown divergence the parity test forbids.
+    #
+    # The companion is added HERE, in the request→state translation this route
+    # already owns (it normalizes hyphenated keys and strips email/org_created
+    # one screen up), because a client PATCH is the only channel through which a
+    # PARTIAL body can arrive — both tool callers are ours and pass the pair.
+    # Adding it further down (the write primitive) would leave the surfaces
+    # handing different key sets to the ONE router, which is the shape
+    # `test_onboarding_endpoints.py::test_tool_and_dashboard_enable_write_same_keys`
+    # (and the #3540 partition) asserts against.
+    if "session_recording" in updates and "capture_revised" not in updates:
+        updates["capture_revised"] = True
     state = _update_onboarding_state(org["org_id"], **updates)
     if catalog is True:
         try:
@@ -26303,7 +26814,35 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
     seeded → two Subjects (compact: org-anchor seed-lite only) + memberOf
     + onboards edge/org_subject_id + first-points-filed step edge
     (created-signal) + fork-aware gate eval. Graph-down → 503 fail-loud
-    (FLOW-bearing write, retry-safe)."""
+    (FLOW-bearing write, retry-safe).
+
+    #2007 (W12): the SELFHOST placeholder org has no control plane and no
+    hosted anchor data — the two prompts ARE the anchor data. It is
+    delegated to the graph-only self-hosted lane
+    (``tortoise/onboarding/selfhost.py`` — the SAME implementation the
+    self-hosted REST route ``POST /v1/onboarding/seed`` calls), checked
+    BEFORE any control-plane read so no Supabase call can be reached on the
+    self-hosted path."""
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        from tortoise.mcp_auth import _get_org_sdk
+        from tortoise.onboarding import selfhost as _selfhost_lane
+        missing = [name for name, value in (("person_name", person_name),
+                                            ("org_name", org_name))
+                   if not (value or "").strip()]
+        if missing:
+            # Never invent an identity (DM-3): the agent asks the user the
+            # two questions, then calls again with both answers.
+            return {
+                "status": "needs_confirmation",
+                "gaps": missing,
+                "detail": ("Self-hosted onboarding asks the user two "
+                           "questions — their name and the organization's "
+                           "name. Never invent either; ask, then call again "
+                           "with both answers."),
+            }
+        return _selfhost_lane.seed_selfhost_anchors(
+            _get_org_sdk(), org_name=org_name, person_name=person_name)
     from tortoise.onboarding import seed as _seed
     if not _graph_available(org_id):
         raise HTTPException(status_code=503,
@@ -26911,6 +27450,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3675: the result-bearing half of the SAME row. Without it the
+    # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
+    # 8 points from one that returned nothing — both are ``status: "ok"`` —
+    # which is why the activation scorecard (#3674) could only ever ship
+    # ``recall_attempted``. An int (items returned) or ``None`` when the result
+    # shape makes the count unknowable; ``0`` and ``None`` are DIFFERENT FACTS
+    # and are never collapsed (see ``mcp_server._mcp_result_count``). Counts
+    # only — no retrieved text or point id can reach this key, so the #501 PII
+    # guarantee is unchanged.
+    "result_count",
     # #3359: capture_cost — the per-session cost driver (calibration data
     # only; never on the billing path). All measured fields must survive
     # the PII filter or the measurement is silently lost.
@@ -26947,6 +27496,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     # Registering them here repairs that shipped, silent loss; the structural
     # registration test is what keeps the two sets from drifting again.
     "plan", "tier",
+    # #3514 (epic #1714 J4): the coming-soon demand record. These four keys are
+    # the row's WHOLE payload — `integration_key` (which tile), `action`,
+    # `surface` (which UI) and the SERVER-derived `org_key` (which team, at
+    # ranking granularity). An unregistered prop is stripped here in silence,
+    # and a stripped `integration_key`/`org_key` under-counts demand with no
+    # diagnostic — which is why the registration test is parametrized over
+    # `demand.DEMAND_PROPS` rather than merely asserting "a row was written".
+    # `action` and `surface` are deliberately NOT reused names: nothing else in
+    # the flat allowlist emits them, so a drift cannot be masked by a sibling.
+    "integration_key", "action", "surface", "org_key",
     # #3834: the transport-level wait bound's breach event. `method` and
     # `latency_ms` are already registered above; `path` is the one new key.
     # Without it the refusal would be counted but the ROUTE would be stripped
@@ -27596,8 +28155,31 @@ async def _analytics_canary_loop() -> None:
 
 
 
+def _analytics_fallback_path() -> str | None:
+    """Resolve (and cache) the local analytics JSONL path; ``None`` if unusable.
+
+    ONE resolver for both the writer (``_track_analytics_event``) and the
+    #3514 demand reader, so the file a self-hosted click is written to and the
+    file the operator's demand query reads cannot drift to two different paths.
+    Directory creation belongs inside the best-effort guard: it used to sit
+    outside it, so a read-only HOME raised straight out of a function documented
+    never to raise (and into the GitHub OAuth callback).
+    """
+    global _ANALYTICS_FALLBACK_PATH
+    if _ANALYTICS_FALLBACK_PATH is None:
+        try:
+            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+            os.makedirs(fallback_dir, exist_ok=True)
+            _ANALYTICS_FALLBACK_PATH = os.path.join(
+                fallback_dir, "analytics_fallback.jsonl")
+        except Exception:
+            return None
+    return _ANALYTICS_FALLBACK_PATH
+
+
 def _track_analytics_event(org_id: str, event_name: str,
-                           properties: dict | None = None) -> str:
+                           properties: dict | None = None, *,
+                           local_fallback: bool = True) -> str:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
     Writes to Supabase analytics_events when SUPABASE_URL + a service key are
@@ -27637,6 +28219,16 @@ def _track_analytics_event(org_id: str, event_name: str,
     * ``"dropped"``      — the event reached NO sink (no writable fallback
                            directory, or the JSONL append itself failed). This
                            is #3677's loss class, and it is unrecoverable.
+
+    ``local_fallback=False`` (#3514) suppresses ONLY the JSONL arm. The default
+    is ``True`` — every pre-#3514 caller is byte-identical. The demand record
+    (#3514 / epic #1714 R2) requires the opposite of the fallback-everything
+    posture: on HOSTED a failed write must SURFACE and must write **no local
+    file** (the JSONL is the SELF-HOSTED degradation, taken only when Supabase
+    is unconfigured — pinned by a test, never read from a module global). So
+    with the sink configured-but-failing this returns ``dropped`` — the event
+    reached no sink, which is exactly what happened — instead of quietly
+    diverting it to an ephemeral VM's disk.
 
     ``fallback``/``dropped`` additionally increment
     ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
@@ -27733,27 +28325,23 @@ def _track_analytics_event(org_id: str, event_name: str,
             except Exception as e:  # bookkeeping is best-effort
                 _logger.warning("analytics success bookkeeping failed: %s", e)
                 return "supabase"
+    if not local_fallback:
+        # #3514: the caller owns the failure surface (`_demand_record_write`
+        # answers 503 and sends no ping), so on hosted there is no local file —
+        # the JSONL arm is the SELF-HOSTED sink, never a hosted safety net.
+        return _analytics_sink_dropped("hosted_write_failed")
     # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
-    global _ANALYTICS_FALLBACK_PATH
-    if _ANALYTICS_FALLBACK_PATH is None:
-        # Directory creation belongs INSIDE the best-effort guard: it used to
-        # sit outside it, so a read-only HOME raised straight out of a function
-        # documented never to raise (and into the GitHub OAuth callback).
-        try:
-            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
-            os.makedirs(fallback_dir, exist_ok=True)
-            _ANALYTICS_FALLBACK_PATH = os.path.join(
-                fallback_dir, "analytics_fallback.jsonl")
-        except Exception:
-            # #3820: the FOURTH silent path — the issue's table names three.
-            # Pre-#3820 this was a bare `return`: the event was dropped with no
-            # fallback line, no counter and no log — the same loss class as the
-            # append failure below, and the reason this exit now routes through
-            # the shared `_analytics_sink_dropped` helper.
-            return _analytics_sink_dropped("fallback_dir_unavailable")
+    fallback_path = _analytics_fallback_path()
+    if fallback_path is None:
+        # #3820: the FOURTH silent path — the issue's table names three.
+        # Pre-#3820 this was a bare `return`: the event was dropped with no
+        # fallback line, no counter and no log — the same loss class as the
+        # append failure below, and the reason this exit routes through the
+        # shared `_analytics_sink_dropped` helper.
+        return _analytics_sink_dropped("fallback_dir_unavailable")
     try:
         import json as _json
-        with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
+        with open(fallback_path, "a") as f:
             f.write(_json.dumps(event) + "\n")
     except Exception:
         # #3677 swallowed this; #3820 swallows it AND counts it — the event
@@ -29881,7 +30469,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         if not state.get("github_legacy_backfill_done"):
             try:
                 totals["backfill_minted"] = indexer.backfill_legacy_closed(
-                    org_sdk._get_proj())
+                    org_sdk._get_proj(), sdk=org_sdk)
             except Exception as e:
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
@@ -34257,6 +34845,469 @@ async def oauth_dcr_register(request: Request):
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/register")
     return JSONResponse(status_code=201, content=reg)
+
+
+# ── #3514 (epic #1714 J4): coming-soon demand capture ─────────────────
+#
+# A click on an unshipped integration tile IS the demand signal (epic #1714
+# decision #3). The click is RECORDED, never DELIVERED: one
+# `data_source_demand` row in the canonical append-only analytics store (R2),
+# one operator Telegram ping per `(integration_key, team)` inside the dedupe
+# window, and NOTHING else — no notify-intent state, no `Requested/Planned/
+# Shipped` lifecycle, no ship-time task. The operator emails interested teams
+# by hand.
+#
+# The policy half (pinned literals, validation, `org_key`, markers) lives in
+# `tortoise/demand.py`. This block is only the wiring: the record sink is the
+# EXISTING analytics path (no new table, no new transport), the ping is the
+# EXISTING `telegram_push.send_message`, and the markers are the existing
+# off-loop executor pattern.
+
+#: Dedicated pool for the ops ping. Deliberately NOT the loop's shared default
+#: executor (the #3060 starvation doctrine) and NOT the telemetry pool: a hung
+#: Telegram socket parks its worker for the transport timeout, and parking a
+#: telemetry worker would delay the RECORD writes this feature depends on.
+_DEMAND_PING_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_DEMAND_PING_WORKERS", 4), 8)),
+    thread_name_prefix="demand-ping")
+
+
+def _dispose_demand_ping_executor() -> None:
+    """Cancel queued pings and release the pool during thread shutdown.
+
+    Mirror of ``_dispose_capture_executor`` (including the ordering caveat: a
+    worker already inside ``send_message`` is not interruptible, and the only
+    thing bounding that wait is the worker's OWN timeout —
+    ``demand.DEMAND_SEND_TIMEOUT_S``).
+    """
+    with contextlib.suppress(Exception):
+        _DEMAND_PING_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_demand_ping_executor)
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_demand_ping_executor)
+
+
+def _demand_telegram_credentials() -> tuple[str, str]:
+    """(bot_token, chat_id) from the environment — empty strings when unset.
+
+    Same two names the alert channel reads (``backup_config``). Read at CALL
+    time, never captured at import: the self-hosted degradation is "Telegram is
+    skipped when ``TELEGRAM_*`` is unset", and a module-global read would make
+    that untrue for a process whose env changed after import.
+    """
+    return (os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
+            os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+
+
+def _demand_send_ping(text: str) -> bool:
+    """Send one Telegram ping. True only on a 2xx send. NEVER raises.
+
+    ``TelegramPushError`` (and every other failure) is swallowed here: R3 says
+    a transport error CANNOT fail the user's request, and this is the only
+    place that could have failed it. The timeout is passed EXPLICITLY from the
+    pinned constant rather than inherited from ``send_message``'s default, so
+    the hung-transport row has a pinned value to assert.
+    """
+    token, chat_id = _demand_telegram_credentials()
+    if not token or not chat_id:
+        # The self-hosted degradation: no operator channel configured, so the
+        # ping is SKIPPED — counted and logged, never a silent no-op that
+        # reads like a successful send.
+        _logger.info(
+            "demand ping skipped: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID unset")
+        return False
+    try:
+        from tortoise.telegram_push import send_message
+
+        send_message(token, chat_id, text,
+                     timeout=_demand.DEMAND_SEND_TIMEOUT_S)
+        return True
+    except Exception as exc:  # noqa: BLE001, RUF100 — R3: cannot fail the request
+        _logger.warning("demand ping failed (non-fatal): %s", exc)
+        return False
+
+
+def _demand_dispatch_ping(text: str, *, org_key: str,
+                          integration_key: str) -> bool:
+    """Fire-and-forget the ops ping. Returns True when it was DISPATCHED.
+
+    The click request NEVER waits for Telegram: this function returns before
+    the send runs, so a transport that neither returns nor raises cannot delay
+    the response (the epic's cycle-7 finding — an exception is not how "never
+    blocking" is violated; a send that never returns is). The only bound on the
+    parked worker is ``DEMAND_SEND_TIMEOUT_S``.
+
+    Exactly ONE send per ``(integration_key, team)`` inside
+    ``DEMAND_DEDUPE_WINDOW_S``, including under concurrency: the window is taken
+    with the ATOMIC ``claim`` (check-and-set in one step), not a check-then-set,
+    and the claim is RELEASED when the send does not return 2xx. So the marker
+    is retained only on a 2xx send (a failed send is never deduped) while two
+    simultaneous clicks for one integration still produce one send.
+
+    The marker is PROCESS-LOCAL: hosted runs a single uvicorn worker (the same
+    invariant the key rate limiter rests on), and two processes would each keep
+    their own window — the residual recorded on #3514.
+    """
+    key = _demand.marker_key(org_key=org_key,
+                             integration_key=integration_key)
+    if not _demand.DEMAND_MARKERS.claim(
+            _demand.MARK_SENT, key, _demand.DEMAND_DEDUPE_WINDOW_S):
+        # Inside the dedupe window: no second send. The click RECORD was still
+        # written — only the send is deduped.
+        return False
+
+    def _worker() -> None:
+        if _demand_send_ping(text):
+            return
+        # Not delivered (transport error, Telegram error, or no channel
+        # configured): DROP the claim so a later click re-attempts. Keeping it
+        # would make one transient failure silently suppress the demand signal
+        # for the whole window.
+        _demand.DEMAND_MARKERS.release(_demand.MARK_SENT, key)
+
+    _submit_off_loop(_DEMAND_PING_EXECUTOR, _worker)
+    return True
+
+
+async def _demand_record_write(org_id: str, *, integration_key: str,
+                               action: str, surface: str,
+                               org_key: str) -> str:
+    """Write the demand record and RETURN the sink outcome (#3514).
+
+    ``_emit_analytics_off_loop`` is the wrong seam here: it is ``best_effort``
+    and returns ``None``, so neither the outcome nor a failure could reach this
+    caller. R2 requires the opposite — the write's response is CHECKED and its
+    failure SURFACES — so the record rides the same off-loop path with the
+    result returned.
+
+    The props dict is written as a LITERAL at the emit site (rather than built
+    by the caller and forwarded) so `tests/test_telemetry_registration.py`'s
+    AST walk resolves this site's key set: a parameter would resolve to
+    ``keys=None`` and the site would fall out of the #3675 allowlist guard —
+    the exact silent hole that guard exists to close.
+
+    ``local_fallback=not intended`` pins the hosted/self-hosted split: the JSONL
+    is the SELF-HOSTED sink, taken only when no Supabase sink was intended, so a
+    hosted write that fails writes NO local file and answers 503 instead of
+    quietly diverting the record to an ephemeral VM's disk.
+    """
+    _url, _key, _configured, intended = _analytics_sink_probe()
+    try:
+        return await _cp_offload(
+            lambda: _track_analytics_event(
+                org_id, _demand.DEMAND_EVENT_NAME,
+                {"integration_key": integration_key, "action": action,
+                 "surface": surface, "org_key": org_key},
+                local_fallback=not intended),
+            op="demand_record", pool="telemetry")
+    except UnregisteredTelemetryKey:
+        raise  # #3821: the strict-mode registration guard must propagate
+    except Exception as exc:  # noqa: BLE001, RUF100 — a bound miss is a failed write
+        _logger.warning("demand record write failed: %s", exc)
+        return "dropped"
+
+
+def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
+    """Read demand rows. ``(rows, source)``; ``rows is None`` = unreadable.
+
+    ``source`` is one of ``supabase`` / ``local_jsonl`` / ``unavailable``.
+
+    `org_id=None` is the CROSS-ORG read, which the internal (operator) route is
+    the only caller of. The per-team read passes the auth-resolved ``org_id``
+    and filters on the ``org_id`` COLUMN — the tenancy anchor — so a team can
+    only ever read its own records; the filter is not derived from anything the
+    client sent.
+    """
+    url, key, configured, intended = _analytics_sink_probe()
+    if intended:
+        if not configured:
+            # Half-configured (URL without key, or the #3677 empty-string key):
+            # a sink was INTENDED and cannot serve, so this is not the
+            # self-hosted branch — the read is simply unavailable.
+            return None, "unavailable"
+        try:
+            response = _analytics_http_client(url, key).get(
+                f"{url}/rest/v1/analytics_events",
+                params={
+                    "select": "org_id,properties,created_at",
+                    "event_name": f"eq.{_demand.DEMAND_EVENT_NAME}",
+                    "order": "created_at.desc",
+                    "limit": str(_demand.DEMAND_READ_LIMIT),
+                    **({"org_id": f"eq.{org_id}"} if org_id else {}),
+                },
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            if not 200 <= response.status_code < 300:
+                return None, "unavailable"
+            # #3514 review P2: a 2xx is not a promise that the body is a list of
+            # row objects. A dict/string body previously escaped as `list(body)`
+            # and blew up later in `_demand_aggregate`/`_demand_click_count`
+            # (`row.get(...)`) — AFTER the record was written and the ping sent,
+            # so a malformed store answer turned a successful write into a 500.
+            # The local branch below is defensive about the same shape; this
+            # one now is too.
+            body = response.json()
+            if not isinstance(body, list):
+                _logger.warning(
+                    "demand read: store returned a non-list body (%s)",
+                    type(body).__name__,
+                )
+                return None, "unavailable"
+            return [row for row in body if isinstance(row, dict)], "supabase"
+        except Exception as exc:  # noqa: BLE001, RUF100 — a read failure is not a 500
+            _logger.warning("demand read failed: %s", exc)
+            return None, "unavailable"
+    path = _analytics_fallback_path()
+    if path is None:
+        return None, "unavailable"
+    rows: list[dict] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = _json.loads(line)
+                except Exception:
+                    continue  # a torn line is not a reason to lose the rest
+                if event.get("event_name") != _demand.DEMAND_EVENT_NAME:
+                    continue
+                if org_id and event.get("org_id") != org_id:
+                    continue
+                rows.append(event)
+    except FileNotFoundError:
+        return [], "local_jsonl"
+    except Exception as exc:  # noqa: BLE001, RUF100
+        _logger.warning("demand local read failed: %s", exc)
+        return None, "unavailable"
+    return rows, "local_jsonl"
+
+
+def _demand_aggregate(rows: list[dict]) -> tuple[list[dict], bool]:
+    """Per-integration demand: distinct orgs × clicks, deduped per (key, team).
+
+    The two halves answer the two questions the operator actually asks: HOW MANY
+    DISTINCT TEAMS want it (``org_count`` — the N=5 trigger that turns a demand
+    into a scoping issue, epic #1714 §6), and how loudly (``click_count``).
+    Deduping per ``(integration_key, org)`` is what stops one enthusiastic team
+    from reading as five. Returns ``(demand, truncated)``.
+    """
+    per: dict[str, dict] = {}
+    for row in rows:
+        props = row.get("properties") or {}
+        key = props.get("integration_key")
+        if not key:
+            continue  # a row without a key cannot be ranked; never guessed
+        org = row.get("org_id") or ""
+        entry = per.get(key)
+        if entry is None:
+            entry = per[key] = {
+                "integration_key": key, "click_count": 0, "_orgs": set(),
+                "first_clicked_at": None, "last_clicked_at": None}
+        entry["click_count"] += 1
+        if org:
+            entry["_orgs"].add(org)
+        stamp = row.get("created_at")
+        if stamp:
+            if entry["first_clicked_at"] is None or stamp < entry["first_clicked_at"]:
+                entry["first_clicked_at"] = stamp
+            if entry["last_clicked_at"] is None or stamp > entry["last_clicked_at"]:
+                entry["last_clicked_at"] = stamp
+    demand = [
+        {"integration_key": e["integration_key"],
+         "click_count": e["click_count"],
+         "org_count": len(e["_orgs"]),
+         "first_clicked_at": e["first_clicked_at"],
+         "last_clicked_at": e["last_clicked_at"]}
+        for e in per.values()
+    ]
+    # Ranked by distinct orgs × clicks — the review's ordering, so the operator
+    # reads the top of the list as the answer rather than re-sorting by hand.
+    demand.sort(key=lambda d: (-d["org_count"], -d["click_count"],
+                               d["integration_key"]))
+    return demand, len(rows) >= _demand.DEMAND_READ_LIMIT
+
+
+class DataSourceDemandRequest(BaseModel):
+    """The pinned request body: ``{integration_key, action, surface}``.
+
+    ``org_key`` is deliberately ABSENT: it is server-derived from the
+    authenticated team (a client-supplied one would corrupt the demand
+    ranking). An unknown field is ignored rather than rejected so a future
+    client's extra field cannot break capture — the demand signal is not a
+    surface to be strict about.
+    """
+
+    integration_key: str = ""
+    action: str = "click"
+    surface: str = ""
+
+
+@app.post("/v1/data-sources/demand")
+async def record_data_source_demand(
+        request: Request,
+        body: DataSourceDemandRequest,
+        org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """Record one click on an unshipped integration tile (epic #1714 R2/R3).
+
+    Dual-auth (session JWT OR ``tt_`` key), the established ``list_sessions``
+    precedent: the dashboard posts on the signed-in session, and an agent path
+    keeps working with its key. Ungated — this is not a management surface.
+
+    Ordering is load-bearing: the RECORD is written first and the ping is
+    dispatched only AFTER a successful write, so the ping can never announce a
+    click that was not recorded. A failed write answers 503 with
+    ``recorded: false`` and sends NOTHING — the caller must not render the
+    confirmation state for a click that was lost (R2, J4).
+
+    ``org_key`` in the response is the server-derived value the record carries,
+    so the client's inline "recorded" state is about the same fact the store
+    holds.
+    """
+    _reject_graph_bound_org_surface(org, "data-source demand")
+    org_id = org["org_id"]
+    org_key = _demand.derive_org_key(org_id)
+
+    error = (_demand.validate_integration_key(body.integration_key)
+             or _demand.validate_action(body.action)
+             or _demand.validate_surface(body.surface))
+    if error:
+        # 422 and NOTHING happens: no record, no ping (the epic's permitted
+        # reject arm). An unvalidated key would land in a queryable store and
+        # drive the operator's ping.
+        raise HTTPException(status_code=422, detail=error)
+    integration_key = body.integration_key.strip()
+    surface = (body.surface or "").strip()
+
+    allowed, retry_after = _demand.DEMAND_MARKERS.rate_ok(
+        org_id, cap=_demand.DEMAND_RATE_CAP_PER_MINUTE,
+        window=_demand.DEMAND_RATE_WINDOW_S)
+    if not allowed:
+        # The rate cap bounds RATE. 429 + Retry-After is the repo's convention
+        # for it; the record is not written, so the cap cannot be evaded by
+        # splitting a burst across integrations.
+        raise HTTPException(
+            status_code=429,
+            detail="demand rate cap exceeded — retry shortly (see Retry-After)",
+            headers={"Retry-After": str(max(1, int(retry_after + 0.999)))})
+    if not _demand.DEMAND_MARKERS.key_allowed(
+            org_id, integration_key,
+            cap=_demand.DEMAND_MAX_DISTINCT_KEYS_PER_TEAM):
+        # The CARDINALITY bound (the rate cap does not bound it): every novel
+        # key is a permanent store entry, so one caller could otherwise mint
+        # unbounded distinct demand keys. Same 429 + Retry-After shape.
+        raise HTTPException(
+            status_code=429,
+            detail=("integration-key cardinality cap reached for this team "
+                    "— retry shortly"),
+            headers={"Retry-After": str(int(_demand.DEMAND_RATE_WINDOW_S))})
+
+    # Replay safety lives on the client-supplied idempotency key, and ONLY on
+    # it. The pinned body has no field for one, so a header is the one channel
+    # that does not change the body contract. Without a key no server can tell
+    # a lost-response retry from a second genuine click, and R4 pins the store
+    # at ONE RECORD PER CLICK — so an unkeyed request always records.
+    idem = (request.headers.get("X-Idempotency-Key") or "").strip()
+    idem_key = f"{org_key}:{integration_key}:{idem}" if idem else ""
+    if idem_key and not _demand.DEMAND_MARKERS.claim(
+            _demand.MARK_RECORD, idem_key, _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
+        rows, source = _demand_store_rows(org_id)
+        return {"ok": True, "integration_key": integration_key,
+                "replayed": True, "org_key": org_key,
+                "click_count": _demand_click_count(rows, integration_key),
+                "source": source}
+
+    outcome = await _demand_record_write(
+        org_id, integration_key=integration_key, action=body.action,
+        surface=surface, org_key=org_key)
+    if outcome == "dropped":
+        if idem_key:
+            # The record is not on the sink, so the claim must not make the
+            # client's retry a no-op.
+            _demand.DEMAND_MARKERS.release(_demand.MARK_RECORD, idem_key)
+        raise HTTPException(
+            status_code=503,
+            detail={"recorded": False,
+                    "message": "the click was not recorded — please retry"})
+    _demand.DEMAND_MARKERS.register_key(org_id, integration_key)
+
+    # Recorded. The ping is a SEPARATE, best-effort fact from here on.
+    _demand_dispatch_ping(
+        _demand.format_ping(integration_key=integration_key,
+                            action=body.action, surface=surface,
+                            org_key=org_key),
+        org_key=org_key, integration_key=integration_key)
+
+    rows, source = _demand_store_rows(org_id)
+    return {"ok": True, "integration_key": integration_key,
+            "replayed": False, "org_key": org_key,
+            "click_count": _demand_click_count(rows, integration_key),
+            "source": source}
+
+
+def _demand_click_count(rows: list[dict] | None, integration_key: str) -> int | None:
+    """This team's recorded clicks for one integration; ``None`` when unreadable.
+
+    ``None`` is HONEST: a read that failed must not be rendered as the number
+    zero, which would tell the user their click was not counted when it was.
+    """
+    if rows is None:
+        return None
+    return sum(1 for row in rows
+               if (row.get("properties") or {}).get("integration_key")
+               == integration_key)
+
+
+@app.get("/v1/data-sources/demand")
+async def read_data_source_demand(
+        org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """The demand store's READ half, scoped to the authenticated team.
+
+    Same dual-auth precedent as the write. The filter is the auth-resolved
+    ``org_id``, so "a non-service-role caller cannot read another team's
+    records" holds by construction rather than by a client-supplied argument.
+    """
+    _reject_graph_bound_org_surface(org, "data-source demand")
+    rows, source = _demand_store_rows(org["org_id"])
+    if rows is None:
+        # Unreadable is a 503, never an empty list: "no demand" and "the store
+        # could not be read" must not render the same way.
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "DEMAND_STORE_UNAVAILABLE",
+                    "message": "the demand store could not be read"})
+    demand, truncated = _demand_aggregate(rows)
+    return {"ok": True, "source": source, "truncated": truncated,
+            "org_key": _demand.derive_org_key(org["org_id"]), "demand": demand}
+
+
+@app.get("/v1/internal/data-sources/demand")
+async def operator_data_source_demand(request: Request):
+    """The CROSS-ORG demand count — the operator plane (``FASTAPI_INTERNAL_KEY``).
+
+    This is what the monthly onboarding-cohort review reads and what #3541's
+    deferral trigger (N distinct orgs requesting an integration) evaluates; the
+    receipted ops check that consumes it is
+    ``docs/runbook/3514-demand-capture-ops.md``. It returns the same aggregation
+    over every team's rows, which is exactly why it is behind
+    ``_check_internal`` and not on the tenant surface.
+    """
+    _check_internal(request)
+    rows, source = _demand_store_rows(None)
+    if rows is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "DEMAND_STORE_UNAVAILABLE",
+                    "message": "the demand store could not be read"})
+    demand, truncated = _demand_aggregate(rows)
+    return {"ok": True, "source": source, "truncated": truncated,
+            "distinct_orgs": len({row.get("org_id") for row in rows
+                                  if row.get("org_id")}),
+            "demand": demand}
 
 
 # ── MCP mount (#236) ─────────────────────────────────────────────
