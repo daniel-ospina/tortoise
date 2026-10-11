@@ -298,27 +298,53 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
 
 
 def _walk_to_fork(page: Page) -> None:
-    """Re-entry → step 0 (read-only org summary) → the fork card."""
+    """Re-entry → the fork card, from wherever the Organization's state resumes.
+
+    #2005 (W9): the re-entry door DERIVES its entry step from the per-org
+    projection instead of restarting at step 0 (#2327), so this walk has two
+    legitimate shapes for the SAME fixture account:
+
+      * the projection is unmocked (the GET 401s — the DEFAULT in `_wire`), so
+        there is no per-org state to resume: the door opens at STEP 0, the
+        read-only org summary, which advances to the fork card. That is the
+        first-timer shape and the branch below still asserts it (#2323: an
+        account that already holds an org never mints a second one).
+      * the projection IS served and carries no fork VALUE: the once-per-org
+        fork question is open, so the door lands ON the fork card and step 0 is
+        skipped — which is the point of the change ("resume setup goes back to
+        creating a new org again" was the live defect).
+
+    Journeys whose projection already carries a fork value resume PAST this
+    card entirely; they do not call this helper.
+    """
     # #2744: the DOCUMENT always loads from the local built-dist preview.
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: create/join org — an account that already holds an org sees a
-    # read-only summary (never a second mint, #2323) and advances. #2912: the
-    # header h1 names the stage — 'Your Organization' for this read-only state.
-    # #2364 round-1 (kept through the merge): the org-holder step must never
-    # re-read the org-create title, wherever it renders.
-    expect(page.locator(".welcome-title")).to_have_text("Your Organization", timeout=10_000)
-    expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
-    page.get_by_role("button", name="Continue →").click()
+    # Either landing is valid here, so wait for the stage heading to settle on
+    # ONE of the two before deciding — never for a specific one.
+    title = page.locator(".welcome-title")
+    expect(title).to_have_text(
+        re.compile("Your Organization|Choose how you'll use Tortoise"), timeout=10_000)
+    if title.inner_text().startswith("Your Organization"):
+        # STEP 0: create/join org — an account that already holds an org sees a
+        # read-only summary (never a second mint, #2323) and advances. #2912:
+        # the header h1 names the stage for this read-only state. #2364
+        # round-1 (kept through the merge): the org-holder step must never
+        # re-read the org-create title, wherever it renders.
+        expect(page.locator("body")).not_to_contain_text("Create your Organization", timeout=10_000)
+        expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
+        page.get_by_role("button", name="Continue →").click()
     # STEP 1: fork card (was step 2 before orientation removal).
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
 
 
 def _walk_to_connect(page: Page) -> None:
-    """The shared prefix of every journey: re-entry → step 0 → fork SELF →
-    connect. The account already holds an org (_wire's team_row)."""
+    """The shared prefix of every journey: re-entry → (step 0 when the
+    projection carries no per-org state) → fork SELF → connect. The account
+    already holds an org (_wire's team_row). #2005 (W9): the entry step is
+    derived, so the step-0 read-only summary is the branch `_walk_to_fork`
+    takes only when the GET /v1/onboarding/state mock 401s."""
     _walk_to_fork(page)
     # #3218: the self-fork option is first-person now.
     page.get_by_role("button", name="For my internal setup").click()
@@ -1169,7 +1195,16 @@ def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
     `test_first_timer_wizard_build_fork_records_no_catalog_presented` above
     (the fork is the ONLY thing written), the per-fork counted rows in the
     dashboard JS unit tests, and the server-side gate in
-    test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
+    test_capabilities_endpoint.py / test_onboarding_auto_complete.py.
+
+    #2005 (W9): the door now DERIVES its entry step from this projection, and
+    the projection has both acts observed — so the journey lands on the done
+    screen DIRECTLY. The step-0 → read-only-fork → connect → Skip walk that
+    used to sit here was itself the #2327 restart (every door hardcoded step
+    0); re-walking a fully-set-up Organization is exactly what the epic's
+    indicator 3 forbids. The read-only FORK card is still covered through the
+    connect step's Back affordance and by the JS unit tests that pin
+    `forkStepState`."""
     _seed_cookie(page, "u-bld-2acts")
     proj = {"org_id": "team_o", "fork": "build", "status": "active",
             "onboarding_complete": False,
@@ -1179,15 +1214,48 @@ def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
     # a fixture premise, not an assertion — the app-derived pin is the done screen
     # below, which must render without a catalog step anywhere in it.
     _wire(page, role="owner", onboarding_projection=proj)
-    _walk_to_fork(page)  # fork already chosen server-side → Continue is present
-    page.get_by_role("button", name="Continue →").click()
-    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    _advance_to_done(page)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
+    page.get_by_role("button", name="Continue setup").click()
+    # Resume lands on the done screen: fork answered (build) AND the connection
+    # observed → no human wizard step is left.
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
     # No "catalog" text assert here: the done body contains none on any branch,
     # so it would pass unchanged on origin/main and pin nothing (cycle-3 finding).
+    # The BUILD branch never renders the SDK/catalog card on this path either.
+    expect(page.locator("body")).not_to_contain_text("Build catalog")
+
+
+def test_resume_door_lands_on_the_fork_card_instead_of_org_create(page: Page) -> None:
+    """#2005 (W9) indicator 3 / #2327: a re-entry whose Organization has NOT
+    answered the fork card resumes AT the fork card — never back at "Create your
+    Organization" (the live defect: "resume setup goes back to creating a new org
+    again").
+
+    The projection carries the org (team-named, written by org-create's eager
+    init) and NO fork value, which is the once-per-org fork question being open —
+    the same arm `forkStepState` gives the card. The read-only org summary is
+    skipped because the Organization already exists."""
+    _seed_cookie(page, "u-resume-fork")
+    _wire(page, role="owner", onboarding_projection={
+        "org_id": "team_o", "status": "active", "onboarding_complete": False,
+        "completed_steps": ["team-named"], "session_recording": True})
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
+    page.get_by_role("button", name="Continue setup").click()
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Choose how you'll use Tortoise", timeout=10_000)
+    # the restart this test exists to forbid, asserted in both directions
+    expect(page.locator("body")).not_to_contain_text("Create your Organization")
+    expect(page.locator("body")).not_to_contain_text("You're set up in")
+    # and the card is genuinely ANSWERABLE (the set-once projection would render
+    # its options disabled) — a resume that lands on a dead card is no fix
+    expect(page.get_by_role("button", name="For my internal setup")).to_be_enabled(
+        timeout=5_000)
+    page.get_by_role("button", name="For my internal setup").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
 
 
 # ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──

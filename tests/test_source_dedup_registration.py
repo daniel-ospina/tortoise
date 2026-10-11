@@ -181,10 +181,28 @@ def test_connector_source_path_does_not_mint_a_second_source():
 def test_connector_sweep_preserves_superseded_provenance():
     """N3: when the sweep deletes a superseded duplicate Source, the survivor
     inherits its accumulated tier/hash — the canonical-identity survivor is not
-    necessarily the node that carried the metadata."""
+    necessarily the node that carried the metadata.
+
+    #5214: the SURVIVOR here is a node the connector does NOT own
+    (`sourceKind='document'`, no hash), and that is now load-bearing rather
+    than incidental. The inheritance rule is "fill a GAP": the choke point
+    versions only the Sources it materialized (its own `sourceKind`), so a
+    connector-created survivor always arrives WITH a version and this arm could
+    never fire for it. Keeping the gap on a foreign-owned survivor is what
+    keeps the arm reachable — and it is the honest shape, since a duplicate
+    whose metadata comes from another writer is exactly the node whose hash the
+    survivor may legitimately lack.
+    """
     with fresh_sdk() as sdk:
         proj = sdk._get_proj()
         proj.g.query("MERGE (e:Event {eventId: 'evt-2'}) ON CREATE SET e.id='evt-2'")
+        # The canonical-identity node — adopted on touch by `resolve_source_key`,
+        # owned by another writer, and carrying NO hash (the gap to fill).
+        proj.g.query(
+            "MERGE (s:Source {url:'https://dup.example.com/a'}) "
+            "ON CREATE SET s.id='canon', s.sourceKind='document'"
+        )
+        # The superseded duplicate: a non-canonical spelling holding the metadata.
         proj.g.query(
             "MERGE (s:Source {url:'https://dup.example.com/a/'}) "
             "ON CREATE SET s.id='dup', s.sourceKind='document', "
@@ -203,11 +221,16 @@ def test_connector_sweep_preserves_superseded_provenance():
         url, tier, content_hash = rows[0]
         assert url == "https://dup.example.com/a"
         assert tier == "T0"  # inherited from the superseded node
-        assert content_hash == "hash1"
+        assert content_hash == "hash1"  # inherited — the survivor had none
 
 
 def test_connector_sweep_never_overwrites_the_survivor():
-    """#398: the survivor's own tier wins — inheritance only fills a gap."""
+    """#398: the survivor's own tier wins — inheritance only fills a gap.
+
+    #5214: both nodes are foreign-owned (`sourceKind='document'`) so the
+    connector version write does not touch either, and the assertion still
+    pins the ORIGINAL rule — a survivor that has a value keeps it.
+    """
     with fresh_sdk() as sdk:
         proj = sdk._get_proj()
         proj.g.query("MERGE (e:Event {eventId: 'evt-3'}) ON CREATE SET e.id='evt-3'")

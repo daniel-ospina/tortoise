@@ -34,6 +34,13 @@ The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
 writes NO statements; see ``_upsert_statement`` for the #1843-reserved
 machinery.
+
+Liveness (#3539 §D): ``index_repo`` accepts an optional ``on_progress`` beat
+so the caller's single-flight claim is kept alive by REAL progress, not by
+entry age. Beats fire on every completed GitHub API call (``_get`` — the
+network-yield boundary, so the walk is live across a long paginated fetch)
+and every ``_PROGRESS_EVERY_ITEMS`` processed items (the synchronous
+projection loop, which never yields).
 """
 from __future__ import annotations
 
@@ -53,6 +60,15 @@ logger = logging.getLogger(__name__)
 _GITHUB_API = "https://api.github.com"
 _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
+
+# #3539 §D progress-beat granularity for the caller's liveness heartbeat.
+# The beat is the JOB's last sign of progress, so a long-but-live walk must
+# beat DURING the walk — not only at repo boundaries — or a re-poll would
+# presume it dead and spawn a SECOND concurrent walk (duplicate statement
+# ids, version inflation, job-status races). It must also be
+# progress-driven, never a bare timer: a timer would keep beating for a HUNG
+# run, which is exactly the claim that must expire.
+_PROGRESS_EVERY_ITEMS = 25
 
 # #1989 review round 3 (security): upper bound for a plausible issue
 # number in a persisted cursor. #3552 made the cursor SERVER-OWNED (a client
@@ -118,7 +134,8 @@ class GitHubIndexer:
             await self._client.aclose()
         self._client = None
 
-    async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
+    async def _get(self, client: httpx.AsyncClient, url: str, *,
+                   on_progress=None) -> httpx.Response:
         """GET with bounded retry-with-backoff on 429/5xx (T1-P13).
 
         Terminal auth failures (401/403) raise immediately — the token is
@@ -126,7 +143,13 @@ class GitHubIndexer:
         budget and mask the real error. After bounded retries on 429/5xx a
         GitHubFetchError is raised (honest fail — the caller's cursor stays
         put).
+
+        ``on_progress`` (#3539 §D): the caller's liveness beat, called after
+        every completed response AND after every retry sleep — a long
+        ``Retry-After`` wait is a live run waiting, not a dead one, so it
+        must not let the single-flight claim go stale mid-run.
         """
+        beat = on_progress or (lambda: None)
         headers = {"Authorization": f"Bearer {self._token}",
                    "Accept": "application/vnd.github+json"}
         last_status = None
@@ -136,6 +159,7 @@ class GitHubIndexer:
             except httpx.HTTPError as e:
                 logger.warning("GitHub request failed (%s): %s", url, e)
                 await asyncio.sleep(2 ** attempt)
+                beat()
                 continue
             if r.status_code in (401, 403):
                 raise GitHubFetchError(
@@ -144,12 +168,15 @@ class GitHubIndexer:
             if r.status_code == 429:
                 retry_after = int(r.headers.get("Retry-After", 2 ** attempt))
                 await asyncio.sleep(retry_after)
+                beat()
                 last_status = 429
                 continue
             if r.status_code >= 500:
                 await asyncio.sleep(2 ** attempt)
+                beat()
                 last_status = r.status_code
                 continue
+            beat()  # a completed API call IS progress (#3539 §D)
             return r
         raise GitHubFetchError(
             f"GitHub request failed after retries (last status {last_status or 'transport'}) "
@@ -283,7 +310,8 @@ class GitHubIndexer:
             return None
 
     async def _fetch_page(self, client: httpx.AsyncClient, repo: str,
-                          cursor: dict | None) -> tuple[list[dict], str | None, int | None, bool]:
+                          cursor: dict | None,
+                          on_progress=None) -> tuple[list[dict], str | None, int | None, bool]:
         """Fetch one page of issues (updated desc) + next URL + last-page total
         estimate + whether this page's Link claimed more pages exist (rel="last").
 
@@ -308,7 +336,7 @@ class GitHubIndexer:
                 since_dt = base - timedelta(seconds=1)
                 since = "&since=" + since_dt.astimezone(UTC).isoformat()
         url = f"{_GITHUB_API}/repos/{repo}/issues?{params}{since}"
-        r = await self._get(client, url)
+        r = await self._get(client, url, on_progress=on_progress)
         if r.status_code != 200:
             raise GitHubFetchError(
                 f"GitHub issues fetch failed ({r.status_code}) for {repo}")
@@ -358,6 +386,17 @@ class GitHubIndexer:
         # oscillation).
         if drain and n["updated_at"] > cur_updated:
             return True
+        # #1990: in DIFF mode the cursor's boundary second is a LOWER BOUND
+        # of the readable region — every item strictly older than it is
+        # already indexed (the DIFF boundary invariant: a clean cursor is
+        # only ever minted by a run that processed-or-skipped its whole
+        # readable window, and a DRAIN completion re-establishes the claim
+        # globally because it walks the stream with no `since`). Skipping
+        # them here is what keeps the pre-boundary second from consuming the
+        # cap and regressing the cursor on dense-boundary repos (pre-#1990
+        # the DIFF probe only skipped the cursor's OWN second).
+        if not drain and n["updated_at"] < cur_updated:
+            return True
         # #1989 review round 3 (security): a malformed cursor `number`
         # (non-int, or implausibly huge) must NOT silently skip items at
         # the boundary second. Fail open to "process" (the item gets
@@ -371,10 +410,12 @@ class GitHubIndexer:
 
     async def _fetch_items(self, client: httpx.AsyncClient, repo: str,
                            cursor: dict | None,
-                           cap: int) -> tuple[list[dict], int | None, bool, bool]:
+                           cap: int,
+                           on_progress=None) -> tuple[list[dict], int | None, bool, bool, bool]:
         """Fetch issues (updated desc, paginated) up to ``cap``.
 
-        Returns (items, total_estimate, cap_hit, walk_complete).
+        Returns (items, total_estimate, cap_hit, walk_complete,
+        boundary_stop).
 
         ``walk_complete``: True when the walk ended on a page whose Link
         carried NO rel="last" (the API did not claim more pages exist). A
@@ -383,11 +424,20 @@ class GitHubIndexer:
         truncated-clear in ``index_repo`` must NOT fire on a walk that did
         not actually reach the stream end (#1989 review round 2).
 
+        ``boundary_stop`` (#1990): True when a DIFF walk stopped because the
+        stream descended strictly below the cursor's boundary second. Every
+        later page is OLDER than that second, hence outside the readable
+        region and (by the boundary invariant) already indexed, so nothing
+        was deferred — the rel="last" total is not a "remaining" measure on
+        such a walk.
+
         Two resume regimes (pinned by the plan's resume semantics):
-        - DIFF (previous run not cap-truncated; on dense-boundary repos the
-          −1s probe can re-cap mid-block and re-stamp `truncated` — the
-          bounded oscillation documented in plan §Follow-ups / fast-follow
-          #1990): first page `since = cursor.updated_at − 1s`; the whole
+        - DIFF (previous run not cap-truncated; #1990: items strictly older
+          than the boundary second are skipped and the walk STOPS when the
+          stream descends below it — the boundary second is a lower bound of
+          the readable region, so the pre-#1990 oscillation documented in
+          plan §Follow-ups / #1990 is gone): first page
+          `since = cursor.updated_at − 1s`; the whole
           walk stays since-bounded (GitHub carries `since` in Link next
           URLs). Only items updated at/after the boundary second are
           fetched; boundary-second items with number ≤ cursor.number are
@@ -408,6 +458,40 @@ class GitHubIndexer:
         block, so the minted composite cursor's boundary-second processed set
         is a contiguous ASC prefix — the cursor always expresses the true
         processed set (structural exact-once).
+
+        #1990 (DIFF boundary invariant): the composite cursor is exact-once
+        from the DRAIN side (#1895) but was NOT from the DIFF side — the
+        window is ``[cursor.updated_at − 1s, ∞)`` and ``_inside_cursor``
+        (DIFF) skipped only the cursor's OWN second, so the pre-boundary
+        second was re-probed on every poll. On a repo whose pre-boundary
+        second holds more items than ``cap`` the probe consumed the whole
+        cap, minted a cursor REGRESSED to that older second and re-stamped
+        ``truncated`` (the verified 4-poll DIFF/DRAIN oscillation), and the
+        ``since`` window covered the entire stream so every poll re-walked
+        it. The missing invariant: for every cursor this indexer can mint
+        WITHOUT ``truncated``, every stream item with
+        ``updated_at < cursor.updated_at`` is already indexed — a clean
+        cursor is only minted by a run that processed-or-skipped its whole
+        readable window, and a DRAIN completion re-establishes the claim
+        globally by walking the stream with no ``since``. So in DIFF mode
+        items strictly older than the boundary second are skipped
+        (``_inside_cursor``), and — because the stream is globally
+        non-increasing in ``updated_at`` (the same assumption the per-second
+        buffer above already relies on) — the walk STOPS as soon as the
+        stream descends below the boundary second instead of re-walking to
+        the stream end. A mis-ordered stream can only DELAY newer items
+        (the mint never advances past an unprocessed item), never lose them.
+
+        #1990 (readable-region truncation): the walk no longer decides
+        "truncated" the moment ``len(items)`` reaches ``cap``. It keeps
+        SCANNING (skipping provably-indexed items, appending nothing) until
+        a processable item is found (``cap_hit`` — the run is truncating
+        real work) or the readable region is exhausted (clean). This keeps
+        a cap cut that lands exactly at a block's last processable item
+        clean whenever nothing readable follows it — the DRAIN-minted
+        conservative cursor case included, where the pre-#1990 code
+        re-stamped ``truncated`` and ping-ponged DIFF/DRAIN forever on a
+        non-dense repo.
         """
         items: list[dict] = []
         total_estimate: int | None = None
@@ -417,72 +501,93 @@ class GitHubIndexer:
         drain = bool(cursor and cursor.get("truncated"))
         since_cursor = None if drain else cursor
         batch, next_url, total_estimate, final_has_last = await self._fetch_page(
-            client, repo, since_cursor)
+            client, repo, since_cursor, on_progress=on_progress)
 
-        def _flush(block: list[dict], *, final: bool = False) -> bool:
-            """Process ONE complete second-run ASC. True ⇒ cap hit (the
-            walk stops).
+        def _flush(block: list[dict]) -> None:
+            """Append ONE complete second-run's processable items, ASC.
 
-            ``final`` (walk end): a cap reached exactly at the block's last
-            processable item is NOT a truncation — the stream is exhausted
-            and everything was indexed, so no spurious ``truncated`` stamp
-            (the next poll would waste a full DRAIN re-walk; #1989 review
-            round 2). A cap cut mid-block still stamps it (the block's tail
-            is deferred backlog).
+            Sets ``cap_hit`` when a processable item is found while the cap
+            is already full — i.e. readable work remains undone, so the run
+            is TRUNCATED. ``#1990``: the caller does not stop merely because
+            ``len(items) == cap``; it keeps SCANNING the stream (skipping
+            provably-indexed items, appending nothing) until either a
+            processable item appears (``cap_hit`` — a real truncation) or
+            the readable region is exhausted (clean end). That is what makes
+            a cap cut landing exactly at a block's last processable item
+            clean when nothing readable follows it (#1989 review round 2)
+            WITHOUT the special-cased exemption, and it keeps the
+            truncation decision a property of the readable region rather
+            than of one block.
+
+            The per-block ``#1895`` ASC prefix invariant is unchanged: the
+            block is still flushed COMPLETE, so a cap cut always lands on a
+            contiguous ASC prefix of the boundary second.
             """
-            nonlocal items, cap_hit
+            nonlocal cap_hit
             block.sort(key=lambda i: int(
                 github_map._norm_issue(i)["number"] or 0))
-            for i, item in enumerate(block):
+            for item in block:
                 if self._inside_cursor(item, cursor, drain=drain):
                     continue
-                items.append(item)
                 if len(items) >= cap:
-                    if not final:
-                        cap_hit = True
-                        return True
-                    # final block: the no-truncation exemption only holds
-                    # when the walk GENUINELY reached the stream end (the
-                    # final page carried NO rel="last"). A premature end
-                    # (rel="last" present, rel="next" absent — truncated
-                    # Link header / gateway partial body) means more pages
-                    # exist: an exact-cap cut there is a REAL truncation,
-                    # because the hidden older backlog must be re-DRAINed
-                    # (#1989 review round 3 — clearing on a premature end
-                    # would exit into a since-bounded DIFF that never
-                    # reaches the un-fetched items = permanent loss).
-                    if not final_has_last:
-                        # clean end: truncated only if processable items
-                        # remain in the block past the cap cut
-                        for later in block[i + 1:]:
-                            if not self._inside_cursor(later, cursor,
-                                                       drain=drain):
-                                cap_hit = True
-                                break
-                    else:
-                        cap_hit = True
-                    return True
-            return False
+                    cap_hit = True
+                    return
+                items.append(item)
+
+        # #1990: the DIFF cursor's boundary second is a lower bound of the
+        # readable region (see the invariant in the docstring).
+        cur_updated = (cursor or {}).get("updated_at") or ""
+        diff_bounded = (not drain) and bool(cur_updated)
+
+        def _at_boundary(second: str) -> bool:
+            """True when the stream has descended strictly below the DIFF
+            cursor's boundary second — every later item is older (hence
+            already indexed) and unreadable."""
+            return bool(diff_bounded and second and second < cur_updated)
 
         current_second: str | None = None
         block: list[dict] = []
         while True:
             for item in batch:
                 second = github_map._norm_issue(item)["updated_at"]
+                if _at_boundary(second):
+                    # #1990: the stream descended strictly below the DIFF
+                    # cursor's boundary second → the pending block is
+                    # COMPLETE and is the last READABLE one. Flush it and
+                    # stop: every later page is older (provably indexed /
+                    # unreadable), so this is a clean end of the walk even
+                    # though more pages exist.
+                    _flush(block)
+                    if cap_hit:
+                        # a processable item remained (in the last readable
+                        # block) past the cap — deferred backlog, not clean
+                        return (items, total_estimate, True,
+                                not final_has_last, False)
+                    return items, total_estimate, False, True, True
                 if current_second is None:
                     current_second = second
                 elif second != current_second:
                     # previous second's run is COMPLETE — flush before the
                     # next one starts (a cap cut mid-flush lands on a
                     # complete ASC prefix, #1895)
-                    if _flush(block):
-                        return items, total_estimate, cap_hit, not final_has_last
+                    _flush(block)
+                    if cap_hit:
+                        return (items, total_estimate, True,
+                                not final_has_last, False)
                     current_second = second
                     block = []
                 block.append(item)
             if not next_url:
-                _flush(block, final=True)  # final run — complete at walk end
-                return items, total_estimate, cap_hit, not final_has_last
+                # walk end — the last block is complete here. `cap_hit`
+                # (a processable item past the cap) is a truncation; when
+                # the cap is full but NOTHING readable remained in the
+                # block, the run is clean. A PREMATURE end (rel="last"
+                # present, no rel="next") is never clean: the hidden pages
+                # may hold un-fetched backlog, so `walk_complete` is False
+                # and the mint stamps `truncated` (#1989 review round 3).
+                _flush(block)
+                return (items, total_estimate, cap_hit, not final_has_last,
+                        False)
             if since_cursor is None:
                 # DRAIN: GitHub's Link next-URL carries the `since` param —
                 # strip it so the walk continues the FULL sorted fetch into
@@ -493,7 +598,7 @@ class GitHubIndexer:
                 q.pop("since", None)
                 next_url = urlunsplit((parts.scheme, parts.netloc, parts.path,
                                        urlencode(q, doseq=True), parts.fragment))
-            r = await self._get(client, next_url)
+            r = await self._get(client, next_url, on_progress=on_progress)
             if r.status_code != 200:
                 raise GitHubFetchError(
                     f"GitHub issues fetch failed ({r.status_code})")
@@ -779,12 +884,19 @@ class GitHubIndexer:
 
     async def index_repo(self, sdk, repo: str, *, cursor: dict | None = None,
                          cap: int = _MAX_ITEMS_PER_RUN,
-                         quota_check=None) -> dict:
+                         quota_check=None,
+                         on_progress=None) -> dict:
         """Fetch + diff + project ONE repo. Returns per-repo stats.
 
         ``cursor``: composite (updated_at, number) from the previous run.
         ``quota_check``: callable re-checked per batch (raises
         QuotaExceededError); None = no quota gate (stdio/operator).
+        ``on_progress``: optional liveness beat (#3539 §D) — called on every
+        completed GitHub API call (inside ``_get``) and every
+        ``_PROGRESS_EVERY_ITEMS`` processed items, so the caller's
+        single-flight claim is kept alive by real progress rather than by
+        entry age. Expected to be cheap and NON-RAISING (see
+        ``hosted_api._heartbeat_index_job``).
 
         #1895: a 0-processed run that did NOT cap/quota-cut mints a CLEAN
         boundary cursor from the input (drops ``truncated``) so a fully-
@@ -809,8 +921,9 @@ class GitHubIndexer:
         # GitHubFetchError — the caller marks the job failed with a readable
         # error and the cursor is NOT advanced past unprocessed items
         # (T1-P13: honest fail; re-run resumes without gaps/dupes).
-        items, total_estimate, cap_hit, walk_complete = await self._fetch_items(
-            client, repo, cursor, cap)
+        items, total_estimate, cap_hit, walk_complete, boundary_stop = (
+            await self._fetch_items(
+                client, repo, cursor, cap, on_progress=on_progress))
         stats["total_fetched"] = len(items)
         last: dict | None = None
         # #1989 review round 2: track the NEWEST processed item too — a
@@ -846,6 +959,13 @@ class GitHubIndexer:
                 stats["statements_superseded"] += s_stats["statements_superseded"]
                 stats["events_minted"] += s_stats["events_minted"]
             stats["processed"] += 1
+            # #3539 §D progress beat: the projection loop is synchronous (it
+            # never yields), so without this a long single-repo walk beats
+            # only at the repo boundary — the stale window this heartbeat
+            # exists to close. Cheap (a dict write); never awaited.
+            if (on_progress is not None
+                    and stats["processed"] % _PROGRESS_EVERY_ITEMS == 0):
+                on_progress()
             # Advance the composite cursor past this processed item (only
             # ever to PROCESSED items — a mid-walk failure leaves it put).
             if n["updated_at"]:
@@ -858,8 +978,12 @@ class GitHubIndexer:
                               "number": n["number"]}
         # Honest truncation (P1-3): "N issues beyond window" from the
         # rel="last" upper-bound estimate — 0 when nothing is known to
-        # remain beyond the cap window.
-        if total_estimate is not None:
+        # remain beyond the cap window. #1990: a DIFF walk that stopped at
+        # the boundary second (everything on later pages is OLDER, hence
+        # already indexed) deferred nothing, so the stream-wide rel="last"
+        # total is not a "remaining" measure on it — reporting it would
+        # claim a backlog while the same poll reports a caught-up cursor.
+        if total_estimate is not None and not boundary_stop:
             stats["issues_beyond_window"] = max(
                 0, total_estimate - stats["processed"])
         if last is not None:

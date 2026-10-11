@@ -2924,3 +2924,107 @@ def test_a_second_project_with_no_required_binding_is_rejected(tmp_path) -> None
     )
     with pytest.raises(ValueError, match="no binding is marked"):
         cpb.load_manifest(p)
+
+
+# ---------------------------------------------------------------------------
+# #3522: the D1 session store's read-after-write precondition.
+#
+# THE INVARIANT. The session store is correct only while every read reaches the
+# PRIMARY. D1 read replication is inert until code calls the Sessions API:
+#
+#   "To use read replication, you must use the D1 Sessions API, otherwise all
+#    queries will continue to be executed only by the primary database."
+#   — developers.cloudflare.com/d1/best-practices/read-replication/
+#
+# A `withSession("first-unconstrained")` read may be served by a replica that has
+# not caught up — and the read that must not lag is `createSession` -> the very
+# next request (`getSession` / `resolveSession` / `getAccessTokenForSession`).
+# A replica miss reads as "no session", which the BFF must answer 401: the
+# browser is told it is signed out, the stale branch clears the arriving token,
+# and the sign-in revokes itself — the #3485 mechanism (F10).
+#
+# The CAS *writes* are not at risk (D1 routes writes to the primary regardless),
+# so the exposure is entirely on the read leg. See
+# `docs/engineering/auth/d1-session-store.md` §3.
+#
+# WHY A STATIC GATE. The deployment half — read replication stays disabled for
+# `tortoise-sessions` — is a platform setting with no repo-visible
+# representation. This is the code-visible half, and it is the half a diff can
+# break: enabling replication alone changes nothing, while adding a session-API
+# read is exactly what would turn a lagging replica into a sign-out.
+#
+# NON-VACUITY. A gate that scans nothing passes, so the scan must also prove it
+# saw real D1 usage (the pattern `test_no_legacy_token_path.py` also follows).
+# ---------------------------------------------------------------------------
+
+#: The D1 Sessions API, in both spellings the docs and a diff produce. Matching
+#: `withSession` as an identifier plus a call paren catches `db.withSession(`,
+#: `db . withSession (`, and `db["withSession"]`-style lookups in a call.
+_D1_SESSIONS_API_RE = re.compile(r"withSession")
+
+#: A prepared statement — the D1 API this codebase DOES use.
+_D1_PREPARE_RE = re.compile(r"\.prepare\s*\(")
+
+#: Directories that are not source (a vendored bundle or a build output must not
+#: decide a source gate's verdict — nor make it slow).
+_SCAN_SKIP_DIRS = frozenset({"node_modules", "dist", ".wrangler", "vendor"})
+
+
+def _website_ts_sources() -> list[Path]:
+    """Every `.ts` under `website/` that is source, not a build artifact."""
+    out: list[Path] = []
+    for path in sorted((REPO / "website").rglob("*.ts")):
+        rel = path.relative_to(REPO / "website")
+        if _SCAN_SKIP_DIRS & set(rel.parts):
+            continue
+        out.append(path)
+    return out
+
+
+def test_no_d1_sessions_api_is_used() -> None:
+    """#3522 §3: nothing may opt a read into the D1 Sessions API.
+
+    The session store depends on read-after-write (a just-created handle must be
+    readable on the next request) and on revocation being observed immediately.
+    Both are properties of the PRIMARY. A replica-served read turns either into
+    "no session" -> 401 -> the #3485 sign-in loop.
+    """
+    offenders = [
+        path.relative_to(REPO).as_posix()
+        for path in _website_ts_sources()
+        if _D1_SESSIONS_API_RE.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "the D1 Sessions API is used in source, which routes reads to a read "
+        f"replica and breaks read-after-write for the session store: {offenders}. "
+        "Reads in this store must reach the primary — drop the session API, or "
+        "constrain EVERY session to `first-primary` and update "
+        "docs/engineering/auth/d1-session-store.md §3 together with this gate "
+        "(#3522)."
+    )
+
+
+def test_the_d1_sessions_api_scan_is_not_vacuous() -> None:
+    """A gate that always passes is not a gate.
+
+    Asserts the scan actually covered the BFF: a plausible number of `.ts`
+    sources were read AND real D1 usage was seen in more than one of them. If a
+    directory move or a broken glob emptied the scan set, this fails loudly
+    instead of reporting clean.
+    """
+    sources = _website_ts_sources()
+    assert len(sources) >= 40, (
+        f"the D1 scan read only {len(sources)} .ts files under website/ — the "
+        "scan set is broken, so its clean verdict means nothing"
+    )
+    d1_sites = []
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        if "SESSIONS" in text and _D1_PREPARE_RE.search(text):
+            d1_sites.append(path.relative_to(REPO).as_posix())
+    assert len(d1_sites) >= 2, (
+        "the D1 scan found the `SESSIONS` binding used with a prepared statement "
+        f"in only {len(d1_sites)} files ({d1_sites}) — the session store's own "
+        "reads are no longer visible to this scan, so it could not have detected "
+        "a Sessions-API read"
+    )

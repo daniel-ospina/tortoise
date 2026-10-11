@@ -40,6 +40,23 @@ harness, reused rather than forked. Nothing here prices from a second
 table, and nothing here is on the billing path: the customer-visible unit
 stays ``write_ops``.
 
+#3840 (lane B7 — the metric set). The report also renders the extraction
+TOKEN figures the issue's metric list names: input, output and **total**
+tokens (the total DERIVED — ``prompt + completion`` — never stored as a
+fourth counter that could drift from its own parts), per window, per stage
+and per team; plus tokens per CAPTURE at the **median and 95th percentile**
+(a mean is dominated by outliers), measured over the SAME included sessions
+as the ``$`` percentiles so the two reads can never describe different
+captures. Three disclosures ride the token block, because a token count we
+could not see must never read as a tiny extraction: ``partial_captures`` (a
+call happened whose tokens we could not see), ``tokenless_captures`` (calls
+were metered yet produced no usable token count — absent, zero or rejected; it
+overlaps ``invalid_token_captures``) and
+``invalid_token_captures`` (a negative or non-integral stored count, rejected
+rather than shaped — #5854's rule on the reader side). This is calibration
+only — no ceiling and no policy; the metric set itself is defined in
+``docs/ops/extraction-cost-metrics.md``.
+
 Usage
 -----
 Live (needs ``SUPABASE_URL`` + a service key of either name —
@@ -262,10 +279,20 @@ def team_rollup(rows: list[dict]) -> list[dict]:
             "total_usd": dist["total_usd"],
             "fully_priced": dist["fully_priced"],
             "calls": sum(costing._as_int(p.get("calls")) for p in props),
-            "prompt_tokens": sum(
-                costing._as_int(p.get("prompt_tokens")) for p in props),
-            "completion_tokens": sum(
-                costing._as_int(p.get("completion_tokens")) for p in props),
+            # #3840: the team's token figures come from the SAME repriced
+            # distribution the team's spend does, so a team's ``total_usd``
+            # and its ``total_tokens`` describe ONE set of captures. Summing
+            # the raw rows here instead would count captures the percentile
+            # excludes as ``excluded_no_calls`` / ``excluded_unmeasured`` —
+            # the window total (``distribution.tokens.total``) and the sum of
+            # the per-team totals would then disagree, and two token totals
+            # that will not reconcile is the #5868 defect in a new place.
+            "prompt_tokens": dist["tokens"]["prompt"],
+            "completion_tokens": dist["tokens"]["completion"],
+            # the single figure comparable across providers and models,
+            # derived from the two measured halves rather than stored as a
+            # fourth counter that can drift from its own parts
+            "total_tokens": dist["tokens"]["total"],
             "harnesses": _harness_ids(group),
         })
     # Heaviest first, team id breaking ties: the report's whole posture is that
@@ -336,6 +363,53 @@ def _overflow_disclosure_lines(count: int, indent: str = "  ") -> list[str]:
     ]
 
 
+def _token_section(tokens: dict) -> list[str]:
+    """#3840: the extraction-cost metric set's TOKEN section.
+
+    Rendered on BOTH paths that can carry token evidence — the priced window
+    and the "rows exist but nothing could be priced" branch — because those
+    tokens are measured even when the pricing map cannot put a dollar figure
+    on them, and a calibration figure that only appears once the map is
+    complete is invisible exactly when the map is what is missing.
+
+    Kept out of the `$` launch-gate block deliberately: tokens are comparable
+    across providers and models, dollars are not once the model changes, and
+    the issue's scope is calibration — no ceiling, no policy.
+    """
+    lines = [
+        "── extraction tokens (#3840: internal calibration, no ceiling) ──",
+        f"  captures counted : {tokens['sessions']}",
+        f"  input tokens     : {tokens['prompt']}",
+        f"  output tokens    : {tokens['completion']}",
+        f"  total tokens     : {tokens['total']}",
+        f"  p50 tokens/capture : {tokens['p50']:.1f}",
+        f"  p95 tokens/capture : {tokens['p95']:.1f}",
+        f"  max tokens/capture : {tokens['max']}",
+    ]
+    if tokens["lower_bound"]:
+        # A mean would have hidden this; the median/p95 pair must not. Every
+        # cause is named, because "some captures are a floor" is not
+        # actionable while "three had metered calls carrying no token field"
+        # is.
+        causes = [
+            f"{tokens['partial_captures']} capture(s) had a call whose "
+            "tokens we could not see",
+            # "no usable token count", NOT "no token field": a capture whose
+            # field was present but rejected is counted here AND in
+            # ``invalid_token_captures``, and two causes that contradict each
+            # other about the same capture would make the warning unreadable.
+            f"{tokens['tokenless_captures']} had metered calls carrying "
+            "no usable token count",
+        ]
+        if tokens["invalid_token_captures"]:
+            causes.append(
+                f"{tokens['invalid_token_captures']} carried a token count "
+                "that is not a count (rejected, not shaped)")
+        lines.append("  ⚠ token counts are a LOWER BOUND — "
+                     + ", ".join(causes))
+    return lines
+
+
 def render(rows: list[dict], *, top: int, since_label: str) -> str:
     """The human/CI-readable report. Returns the text; caller prints it."""
     dist = costing.cost_per_session_distribution(rows)
@@ -382,6 +456,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         # pointer, and this is the path where the reader has least else to go on
         add(f"  calls served without a charge     : {dist['calls_without_cost']}")
         lines.extend(_overflow_disclosure_lines(dist["route_cost_overflows"]))
+        add("")
+        lines.extend(_token_section(dist["tokens"]))
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -411,6 +487,9 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
                 f"{dist['n']} counted sessions have lanes we could not "
                 "price; their contribution is a LOWER BOUND.")
     add("")
+    # #3840: the token figures ride this branch too — see ``_token_section``.
+    lines.extend(_token_section(dist["tokens"]))
+    add("")
     add("── honesty / disclosure counters ───────────────────────────────")
     add(f"  excluded, no calls at all      : {dist['excluded_no_calls']}")
     add(f"  excluded, calls but unmetered  : {dist['excluded_unmeasured']}")
@@ -432,6 +511,7 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         bucket = by_stage[stage]
         add(f"  {stage}: calls={bucket['calls']} "
             f"in={bucket['prompt_tokens']} out={bucket['completion_tokens']} "
+            f"total={bucket['prompt_tokens'] + bucket['completion_tokens']} "
             f"reported={_fmt_usd(bucket['provider_reported_usd'])} "
             f"mapped={_fmt_usd(bucket['map_priced_usd'])} [NOT additive]"
             + (f" UNPRICED_CALLS={bucket['unpriced_calls']}"
@@ -444,6 +524,7 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
                     flag += "  [ESTIMATED RATE]"
                 add(f"      {provider} / {model}: calls={lane['calls']} "
                     f"in={lane['prompt_tokens']} out={lane['completion_tokens']}"
+                    f" total={lane['prompt_tokens'] + lane['completion_tokens']}"
                     f" reported={_fmt_usd(lane['provider_reported_usd'])}"
                     f" mapped={_fmt_usd(lane['map_priced_usd'])}"
                     f" [NOT additive]{flag}")
@@ -458,6 +539,10 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
             f"priced={entry['priced_sessions']}/{entry['sessions']} "
             f"calls={entry['calls']} "
             f"in={entry['prompt_tokens']} out={entry['completion_tokens']} "
+            # ``tokens=``, not ``total=``: on this line ``total=`` is the
+            # team's USD spend, and a second meaning for the same label on
+            # one line is how a reader swaps tokens for dollars.
+            f"tokens={entry['total_tokens']} "
             f"total={_fmt_usd(entry['total_usd'])} harness={named}"
             + ("" if entry["fully_priced"] else "  [PARTIALLY PRICED]"))
     if len(teams) > top:
@@ -466,9 +551,13 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
     add("")
     add(f"── {top} heaviest sessions ──────────────────────────────────────")
     for entry in dist["heaviest"][:top]:
+        # #3840: ``tok=`` is the capture's TOTAL tokens — the same "this
+        # capture was unusually expensive" drill-down, read in the unit that
+        # survives a model change.
         add(f"  {_fmt_usd(entry['cost_usd'])}  "
             f"{entry['session_id']}  calls={entry['calls']}/"
-            f"{entry['measured_calls']}m  src={entry['source']}")
+            f"{entry['measured_calls']}m  tok={entry['total_tokens']}  "
+            f"src={entry['source']}")
     if not dist["heaviest"]:
         add("  (none)")
     return "\n".join(lines)

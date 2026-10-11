@@ -690,3 +690,66 @@ Objective 1's Pi leg has two halves with different verification statuses:
   `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
   `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
   for Pi.
+
+## #3542 amendment (2026-10-11) — the codex spike is RESOLVED: codex is a hook seam, and it shipped
+
+*Appended by `#3542`; the reviewed text above is unchanged. Under this repo's plan convention an
+amendment records what is now known and leaves the reviewed text intact — but three statements
+above are **factually stale**, and they are named below so a reader of §4 / §6 does not act on
+them.*
+
+**The spike's answer, and the refuted premise.** `#3542` was filed on the premise that *"Codex has
+no session-end hook"*, taken from the research brief's matrix row (`docs/research/1714-memory-capture-onboarding.md:38`
+— *"⚠️ no first-class session-end hook documented for capture"*, tier **T2 (post-hoc; near-real-time
+poll)**). That premise is **false, and was verified false live**: Codex CLI **0.154.0** has a
+default-on hooks system whose `$CODEX_HOME/hooks.json` is the only hook source the CLI reads, with a
+`SessionEnd` event. The T2 half of the row was right about the **parse** — the session's rollout
+JSONL (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`) is what gets read — but wrong about the
+**trigger**: the trigger is T1 automatic, not a poll. So codex is a **hook seam like claude**, not a
+poller, and the hybrid in §2 gains no new leg from it.
+
+**This landed before this issue was scoped.** `#3818` (PR **#4024**, commit **`5abb22c29`**,
+2026-09-18, *"the Codex capture seam — SessionEnd install, live-verified"*) shipped the whole
+deliverable, and `#3819` (cursor) shipped the sibling spike. Every ask of `#3542` is in the tree:
+
+| `#3542` ask | Where it landed |
+|---|---|
+| the mechanism, verified | `tortoise/codex-hooks/session-end.sh` — reads the `SessionEnd` stdin JSON, detaches a worker (Codex kills a synchronous hook at a hard ~1 s budget, measured), which files the rollout via `tortoise sessions import --harness codex` → `parse_codex` (`tortoise/session_import/parsers.py:190`) on the same `/v1/sessions` contract the claude seam uses |
+| the install path | `tortoise install codex` → `capture_install._install_home_scoped` (`tortoise/capture_install.py:973`), `capture_install.codex_home` (`:821`), `capture_install.merge_codex_capture_hooks` (`:943`), `hook_install._codex_layout` (`tortoise/hook_install.py:707`). HOME-scoped `$CODEX_HOME/hooks.json`, **absolute** command |
+| honest grid exposure (status + install) | `HARNESS_CAPTURE_SEAM.codex` (`website/apps/dashboard/src/harnesses.js:89`) → `HARNESS_CAPTURE_SUPPORT.codex` **derived** true (`:98`) → `CODEX_CAPTURE_INSTALL` (`:351`) → `HARNESS_CAPTURE_INSTALL.codex` (`:590`); `HARNESS_CAPTURE_REQUIRES_OPT_IN.codex = true` (`:117`); **no** `HARNESS_CAPTURE_REASON.codex` row (`:609`) — a supported harness renders the capture step, never a reason |
+
+**The stale statements, named.** §4's `#3542` row (`:297`) and §6's `#3542` entry (`:539-541`) both
+say *"the `codex: false` row ships today"* and *"`#3542` must land before the `codex: false` row
+flips"*; §4's `#3516` row (`:281`) names *"the `codex: false` tripwire assertions in
+`harnesses.test.js`"* as new work. **There is no `codex: false` row, and there is no constant to
+flip:** `HARNESS_CAPTURE_SUPPORT.codex` is *derived from the seam map* (`harnesses.js:102`), so the trip described in §4 cannot fire
+and must not be built. The assertions that do exist pin the *derivation* and the *install copy*, not
+a literal: `harnesses.test.js:379` (*"capture support is derived from the seam"* — `HARNESS_CAPTURE_SUPPORT[h] === seamHarnesses.includes(h)`, plus the install-step leg) and `:418` (*"the Codex
+capture install copy honours $CODEX_HOME"*). §7's unresolved item 3 (no literal date on `#3542`'s gate) is moot with the
+deferral retired.
+
+**The deferral is retired, and this changes one line of `#3516`.** `#3516`'s body still carries
+*"codex has no session-end hook — it needs a spike, not a patch; that deferral is recorded
+explicitly here"*. That sentence is superseded by this amendment: `#3516`'s unsupported-row duty is
+unchanged for `claude-desktop` / `claude-web` / `chatgpt`, and its codex row is **not** its work.
+
+**What is genuinely NOT covered — recorded, not papered over.** The seam is *hook-only*: capture
+rides `SessionEnd`, so a Codex process **SIGKILLed / crashed before session end files nothing**, and
+nothing re-reads `$CODEX_HOME/sessions/**/rollout-*.jsonl` afterwards. The hybrid's store-sync
+backstop is not an option today — `#3515` (its Pi leg, `tortoise/pi-extension/store-sync.ts`) is
+**unimplemented**, so there is no backstop for any harness to extend. A never-trusted hook fails open
+the same way (that limit *is* disclosed: `tortoise install codex` prints the trust requirement —
+`CODEX_CAPTURE_INSTALL`, and the live install smoke test confirms it).
+
+**Live follow-ups on the shipped seam — already filed, not this issue's work.** `#4025` (the *read*
+half installs to a project-local file Codex never reads), `#4062` (`hooks upgrade --harness codex
+--dir .` writes a RELATIVE command and reports success), `#5245` (`install codex --uninstall` leaves
+the HOME-scoped capture seam live without saying so).
+
+**Verified for this amendment (2026-10-11, this worktree).** `tests/test_codex_capture_hook.py` +
+`tests/test_capture_install.py` + `tests/test_hook_upgrade.py` → **350 passed**;
+`tests/test_session_import_codex.py` → **46 passed**; `node --test src/harnesses.test.js` in
+`website/apps/dashboard` → **19 passed**. Live install into an isolated `HOME`: `tortoise install
+codex` wrote `$CODEX_HOME/hooks/tortoise-session-end.sh` and merged the `SessionEnd` entry with the
+script's **absolute** path into `$CODEX_HOME/hooks.json`. The seam is CI-selected for a change to
+its own files (`config/ci-surfaces.yml:643`, `:1439`).

@@ -70,6 +70,7 @@ from .projection import (
     _promotion_point_with_operator,
     _writable_id,
     hard_deleted_pairs,
+    journal_epistemic_existence,
     journal_first_materialization,
     journal_hard_delete_seqs,
     journal_object_surviving_keys,
@@ -255,10 +256,13 @@ _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
 # never reads the Source, so the replay can only reproduce what the payload states.)
 
 # #548: operators store NO `content`/`pointKind` as node properties (the live
-# writer creates the node without them). The journal SEAM synthesizes both
-# (`sdk.py` — "Operators may not store 'content' as a node property (#548);
-# `_upsert_point_props` requires it — synthesize a fallback") because the replay
-# writer sets them unconditionally.
+# writer creates the node without them). The replay writer sets them
+# UNCONDITIONALLY (`n.content=$content` with `p.get("content", "")` — the
+# `_WRITER_DEFAULTS` empty string; `n.pointKind=coalesce($pk, n.pointKind)`), so
+# on an OPERATOR node they are ONE-SIDED by design. #5089 removed the extra
+# label the journal seam used to SYNTHESIZE on top of that (`sdk.py`: a
+# fabricated `IMPL(inputs)` content that no writer had stored and the replay then
+# persisted) — the asymmetry is now the empty string alone.
 #
 # On an OPERATOR node they are therefore ONE-SIDED by design (the live graph
 # lacks them, the journal/replay has them) — but they are NOT silently dropped:
@@ -269,8 +273,8 @@ _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
 # invisible blind spot.
 _OPERATOR_ABSENT_PROPS: frozenset[str] = frozenset({"content", "pointKind"})
 _OPERATOR_ABSENT_REASON = (
-    "#548 — operators store no `content`/`pointKind`; the journal seam "
-    "synthesizes both because the replay writer sets them unconditionally"
+    "#548 — operators store no `content`/`pointKind`; the replay writer "
+    "sets both unconditionally, so the journal side carries them"
 )
 
 # Writer defaults for keys it sets with a DETERMINISTIC default. When the
@@ -928,6 +932,13 @@ def _fold_journal(events: list[dict]) -> dict:
     # (first materialization seq), not a creation-id set, is what lets a
     # create→hard-delete→fold journal still refuse.
     _first_materialized = journal_first_materialization(events)
+    # #7936 review: the ORDERED creation/hard-delete boundary, hoisted ONCE
+    # beside the existence map. `_apply_one`'s non-Point belief exemption asks
+    # whether the target EXISTS at the record — a first-materialization map plus
+    # a last-delete-wins map cannot express a re-creation or a delete on either
+    # side of the write, so the reference verdict would disagree with
+    # `rebuild_all`.
+    _epistemic_existence = journal_epistemic_existence(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         # Same normalisation the writer applies (`_apply_one`/`apply`): the
@@ -1073,7 +1084,8 @@ def _fold_journal(events: list[dict]) -> dict:
             continue
         _apply_one(by_id, ev,
                    journal_first_materialized=_first_materialized,
-                   journal_seq=seq)
+                   journal_seq=seq,
+                   journal_existence=_epistemic_existence)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
@@ -1829,6 +1841,23 @@ def check_consistency(log_path: str, projection, *,
     # whose id is not a string) would COLLAPSE and the size check would pass
     # while the graph holds more nodes than the journal — a fail-open. The
     # comparison still uses `graph_by_id`; the count does not.
+    #
+    # ⛔ #7936 KNOWN GAP (content leg): both the journal side
+    # (`journal_by_id = _fold_journal(events)`) and the graph side below are
+    # POINT-ONLY, and `db_hash` is a digest of this Point-only dict. So a wrong,
+    # stale, or unjournaled BELIEF on a `:Subject`/`:Object`/`:Event`
+    # (`confidence` / `posterior_alpha` / `posterior_beta` / `lastDreamedAt` /
+    # `outdated`) is INVISIBLE here: `_compare_views` never sees the id, the
+    # non-Point leg (`_compare_entities`) compares presence and Object `status`
+    # only, and the Point-only fingerprint cannot move. `check_consistency`
+    # therefore returns `ok=True` for a graph whose non-Point belief diverges.
+    # The non-folded exemption above (`projection._reference_fold_non_point_target`)
+    # correctly STOPS reporting a HEALTHY non-Point belief as a miss, but this
+    # content blind spot is the other half of #7936 and is NOT contained here —
+    # it needs the `(label, id)` re-key of both sides and of the fingerprint.
+    # Pinned as a DOCUMENTED GAP (not as correct) by
+    # `tests/test_7853_confidence_label_propagation.py::
+    # test_content_comparison_known_gap_non_point_belief_is_invisible`.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
@@ -2449,6 +2478,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # live, so this chronological engine must not refuse it. `journal_seq` is
     # passed per record below (the map alone cannot decide the order).
     first_materialized = journal_first_materialization(events)
+    # #7936 review: the ORDERED creation/hard-delete boundary for the belief
+    # gate — label-agnostic and delete-aware, the sibling of the map above.
+    epistemic_existence = journal_epistemic_existence(events)
     apply_kwargs: dict = {}
     _pass_seq = False
     try:
@@ -2461,6 +2493,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
     if "journal_first_materialized" in _apply_params:
         apply_kwargs["journal_first_materialized"] = first_materialized
         _pass_seq = "journal_seq" in _apply_params
+    if "journal_existence" in _apply_params:
+        apply_kwargs["journal_existence"] = epistemic_existence
     # #3585 (R8/R9): this apply-based engine folds inside the non-folded
     # collector too. A refused event means the recovery REPLAYED an incomplete
     # journal — reporting `recovered: True` there is the false PASS #3947's

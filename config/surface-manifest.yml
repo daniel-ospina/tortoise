@@ -21,6 +21,35 @@ response_fields:
   field: status
   emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
+# #2294: the OTHER half of the terminal vocabulary. ``status`` alone cannot
+# express ``invalidate_point``'s terminal state — that writer sets
+# ``outdated=true`` and leaves ``status`` untouched (``supersede_point`` is the
+# one that stamps ``status='superseded'``), so a status-only reader served an
+# invalidated claim as CURRENT. Emitted only when true, so every live hit stays
+# byte-identical; the flag rides the search-result wire so every consumer can
+# apply the shared ``live.is_terminal_status`` (#2901) instead of re-declaring
+# a status subset at a call site.
+- response: tortoise_search
+  field: outdated
+  emitted_when: 'the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises WITHOUT stamping status) — present only when true'
+  unchanged_when_off: 'n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay byte-identical'
+# #5581 (the #5038 read-path half): the Point-level §4.6 currency verdict and
+# the sourced disclosure that rides with a `stale` verdict. INSIDE the existing
+# flag-gated `provenance` block, so the addition needs the block's flag rather
+# than a new one. Recorded here for the same reason as every other response
+# field — an unrecorded addition has no approval behind it and the carve-out
+# does not cover it. The placement was ALREADY RULED (Policy B, #5038: the
+# check is a read on the EXISTING read surfaces — no new MCP tool, no new SDK
+# method, no stored `status` field), so #4282's tool/method rule is not engaged;
+# see docs/plans/2026-09-25-5038-source-version-anchor.md §8 O3.
+- response: tortoise_search
+  field: provenance.currency
+  emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point — the §4.6 AGGREGATE over the Point''s `extractedFrom` links: current (every link current, at least one link), stale (ANY link behind), unknown (no link, or a pair with an absent operand). Never one link''s verdict, and never a stored field (tortoise/search_engine.py::aggregate_currency is its ONE home)'
+  unchanged_when_off: 'yes — the whole `provenance` block is absent when the flag is off, so the row is byte-identical'
+- response: tortoise_search
+  field: provenance.fyi
+  emitted_when: 'the same flag AND a `stale` verdict with at least one behind link — {reason: source-version-drift, sources: [{source, recorded, current, currency}]}, the OUT-OF-DATE FACT DISCLOSED CARRYING ITS SOURCE (owner ruling 2026-09-26: withheld as the answer, disclosed as a sourced FYI). Omitted for current/unknown, so its absence means `no drift` rather than `drift we failed to name`'
+  unchanged_when_off: 'yes — nested in the same flag-gated `provenance` block; absent when the flag is off'
 - response: tortoise_session_capture
   field: capture_redactions
   emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
@@ -67,6 +96,29 @@ response_fields:
   field: _idx
   emitted_when: 'always, on every connected node — the traversed edge''s idx (underscore-prefixed like the sibling _relationship key, #6101)'
   unchanged_when_off: 'n/a — not flag-gated; additive key on each connected node, present (null where the edge carries no idx), and the categorised lists are unchanged'
+# #2598 (the draft-honesty half; the ingest-default half needs a registry +
+# baseline re-cut, so it is NOT here): a DRAFT row's belief rendering on the
+# state recall. Two entries because the change is two things — an ADDITIVE key
+# and a VALUE change on an existing one — and neither is flag-gated, so both
+# are recorded rather than left to the #4282 carve-out. The tool/method rule is
+# not engaged: no tool is added or removed, and no SDK method is; the read is on
+# the EXISTING recall surface (the #5038 Policy B precedent recorded above in this
+# this block). The value change is strictly scoped — only a row whose status is
+# `draft` AND whose belief EP has not measured, i.e. exactly the rows that used
+# to render a fabricated 0.5. Every live row keeps its number, its key set and
+# its order.
+- response: tortoise_recall
+  field: recall_ranking.draft
+  emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive rule), so every live hit is byte-identical. It is the machine-readable badge: the status vocabulary is not something a consumer should have to know to see that a row is staged. tortoise_recall mode=state and mode=custom (both serve recall_state); mode=gaps has its own ranker'
+  unchanged_when_off: 'yes — not flag-gated; the key is ABSENT on every non-draft row'
+- response: tortoise_recall
+  field: recall_ranking.confidence
+  emitted_when: 'the same rows as recall_ranking.draft, and only when EP has NOT measured the claim (no persisted posterior, and no non-baseline legacy ep_alpha — the #3276 measured predicate): confidence becomes null. A draft that DOES carry a persisted posterior (demoted after a real EP run) keeps its measured number, because there the number is real and only the staging is the news. Rationale: a draft is EP-inert (live._live_only excludes it at every factor-extraction call site), so no belief is computed for it, and the neutral 0.5 it used to report could outrank a measured live claim below 0.5 (#2598 repro). The min_confidence floor refuses an uncomputed draft for any POSITIVE floor; the default 0.0 floor keeps it, so drafts stay recallable and the ranker places them after every live row'
+  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. This is a value change on an existing key, scoped to rows whose rendered number was never measured. Live rows: identical number, identical key set, identical order. Uncalibrated LIVE rows keep the documented #898 neutral 0.5 (a recorded decision this change does not reopen)'
+- response: tortoise_recall
+  field: recall_ranking.confidence_source
+  emitted_when: 'the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured" without knowing the status vocabulary'
+  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence; every live row keeps its "posterior"/"neutral" verdict'
 counts:
   tools: 82
   sdk_public_methods: 150
@@ -5426,11 +5478,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.sweep_invite_ghost_memberships.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling'
+  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

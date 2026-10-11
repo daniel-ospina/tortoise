@@ -32,6 +32,7 @@ message norms are L1 = |η1|+|η2|) — AFTER the #326 fix:
 """
 from __future__ import annotations  # noqa: I001
 
+import inspect
 import types
 
 import pytest  # noqa: F401
@@ -328,7 +329,10 @@ class _RecordingEP(TortoiseEP):
     def _affected_claims(self, operator_ids, max_hops=2, include_draft=False):
         return set(self._affected)
 
-    def _affected_factors(self, affected_claims, include_draft=False):
+    def _affected_factors(self, affected_claims, include_draft=False, skipped=None):
+        # #6105: run() forwards its dropped-factor sink
+        # (``skipped=self._last_skipped_factors``); a stale override without
+        # this parameter makes every stubbed run() raise TypeError.
         return list(self._factors)
 
     def _load_cache(self, affected_claims):
@@ -346,6 +350,31 @@ class _RecordingEP(TortoiseEP):
         self._final_node_cache = dict(getattr(self, "_node_cache", {}))
         self._final_msg_cache = dict(getattr(self, "_msg_cache", {}))
         super()._clear_caches()
+
+
+def test_recording_ep_affected_factors_tracks_base_signature():
+    """Signature-parity pin (#6105): ``_RecordingEP`` stubs the graph I/O
+    boundary, and ``run()`` dispatches to ``_affected_factors`` dynamically.
+    When run() forwards the dropped-factor sink (``skipped=``) the override
+    must accept it, or every stubbed run() raises TypeError and the three
+    run()-path tests below silently stop exercising the loop. Assert the
+    override accepts every parameter the real method exposes so future
+    additions to ``TortoiseEP._affected_factors`` fail loudly here instead
+    of reddening CI only through the unrelated run() tests.
+    """
+    base_params = inspect.signature(TortoiseEP._affected_factors).parameters
+    override_params = inspect.signature(_RecordingEP._affected_factors).parameters
+    missing = [name for name in base_params if name not in override_params]
+    assert not missing, (
+        f"_RecordingEP._affected_factors is missing base parameter(s) {missing} "
+        f"— run() will raise TypeError when it forwards them (#6105)"
+    )
+    # The sink must actually be accepted through the override, not only named.
+    ep = _RecordingEP(_stub_proj())
+    ep._factors = [("op", "NAND", ["a", "b"], 1.0, None, "bidirectional")]
+    sink: list = []
+    assert ep._affected_factors({"a", "b"}, include_draft=False, skipped=sink) == \
+        [("op", "NAND", ["a", "b"], 1.0, None, "bidirectional")]
 
 
 def test_run_empty_affected_claims_early_returns():

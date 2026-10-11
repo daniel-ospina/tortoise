@@ -379,6 +379,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
+    # #3644: the version-window pins construct embedded stores by db-path and
+    # assert the writer's window semantics (the transition record's
+    # `validFrom`/`previousValidTo`, legacy replay, the stub writer). A
+    # redirected construction would run against the server and certify a lane
+    # the file does not target. Registered with the ``carve_out`` list in
+    # config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality) — PR #8016 code-review
+    # ISSUE 2: the file was carve-out-labelled but absent from both.
+    "test_source_version_window_3644",
     # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
     # silent vecf32-overwrite behaviour (the server lane lands the same write),
     # so they must construct a real embedded store — a redirected construction

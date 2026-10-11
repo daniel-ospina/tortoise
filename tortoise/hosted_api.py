@@ -1503,6 +1503,48 @@ def _sweep_oauth_retention() -> None:
         _logger.warning("oauth retention sweep failed: %s", exc)
 
 
+def _sweep_invite_ghosts() -> None:
+    """#1890: give the terminal-state invite-ghost sweep a LIVE caller.
+
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) deletes every
+    ``invite-{iid}`` placeholder Membership whose Invitation node is terminal
+    (accepted / revoked / expired / orphaned) — but it shipped with exactly
+    ONE caller: ``graph-scripts/backfill_invite_ghost_members.py``, which an
+    operator has to run by hand. So an invite that expired by the clock after
+    that one-time backfill left its ghost 'invited' row in ``list_members``
+    forever — the #1890 symptom — and the SDK method the issue names as
+    caller-less stayed caller-less. This is the #4241 shape: the sweep was
+    never wrong, it just never ran.
+
+    Scheduled, not operator-run — the same seam as the other sweeps: armed by
+    ``_run_boot_sweeps`` at boot and by ``_event_retention_loop`` on the
+    periodic interval (hourly by default). Idempotent by construction (a
+    second run finds nothing), so re-running every cycle is a no-op, and the
+    predicate is the reviewed #1908 one — a still-pending, unexpired invite's
+    placeholder is kept.
+
+    Registry-only: Supabase mode never constructs the registry graph (#669);
+    the control-plane lane's invitations are a Postgres table with its own
+    dedup index and no placeholder rows.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs and
+    never kills the runner.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        if is_supabase_enabled():
+            return
+        sdk = _make_sdk(namespace="registry")
+        result = sdk.sweep_invite_ghost_memberships()
+        if result.get("deleted"):
+            _logger.info("invite ghost sweep deleted %s terminal placeholder "
+                         "row(s) of %s examined",
+                         result["deleted"], result.get("found"))
+    except Exception as exc:  # a GC sweep must never crash the runner
+        _logger.warning("invite ghost sweep failed: %s", exc)
+
+
 def _reconcile_metering_periods() -> None:
     """#4241: give the period-bound repair a PERIODIC caller.
 
@@ -1680,6 +1722,13 @@ async def _event_retention_loop(interval: float) -> None:
             "oauth retention",
             functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
                               name="tortoise-boot-sweep"))
+        # #1890: the terminal-state invite-ghost sweep (#1908) was reachable
+        # only from a graph-script an operator ran by hand, so a ghost left by
+        # an invite that expired AFTER that one-off backfill never went away.
+        await _guarded_step(
+            "invite ghost sweep",
+            functools.partial(run_on_daemon_worker, _sweep_invite_ghosts,
+                              name="tortoise-boot-sweep"))
         # #4241: repair subscription orgs whose period anchor is unusable.
         # Before this, the idempotent repair had exactly one caller — its own
         # migration — so an org broken after that deploy never healed.
@@ -1723,6 +1772,9 @@ async def _run_boot_sweeps() -> None:
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("deleted-account purge", _purge_deleted_accounts),
                       ("oauth retention", _sweep_oauth_retention),
+                      # #1890: same runner as the periodic loop, so the boot and
+                      # periodic paths for the invite-ghost sweep cannot drift.
+                      ("invite ghost sweep", _sweep_invite_ghosts),
                       # #4241: the SAME runner as the periodic loop, so the
                       # boot and periodic paths for the anchor repair cannot
                       # drift apart — the property _guarded_step exists for.
@@ -18481,24 +18533,36 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
-        from datetime import datetime, timedelta
 
         from tortoise.auth import hash_api_key as _hash
 
+        # #1890: expiry is a DERIVED terminal state. Asking the stored
+        # ``status`` alone is the bug — only the caller-less sweep ever writes
+        # 'expired', so an invite whose ``expires_at`` has passed still counted
+        # as a pending duplicate and 409'd every re-invite FOREVER.
+        # ``expires_at`` is the authority here, exactly as the accept paths,
+        # the Pro capacity read and ``cleanup_expired_invitations`` already
+        # treat it.
+        now = datetime.now(UTC).isoformat()
         dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND "
             "(i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN count(i)",
-            params={"tid": org_id, "email": email},
+            params={"tid": org_id, "email": email, "now": now},
         ).result_set[0][0]
         if dup:
             raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+        # #1890: past the dup-check every invite this email has left is
+        # terminal, so their placeholders are swept BEFORE the new one is
+        # minted (see the helper — otherwise the expired invite's ghost
+        # survives the re-mint and the email shows up twice in list_members).
+        _sweep_terminal_invite_placeholders(sdk, org_id, email)
 
         token = str(_uuid.uuid4())
         token_hash = _hash(token)
         iid = _short_id()
-        now = datetime.now(UTC).isoformat()
         expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
         reg.query(
             "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role, "
@@ -18629,6 +18693,44 @@ async def invite_info(token: str):
         "inviter_email": inv.get("inviter_email") or "a team member",
         "expires_at": inv.get("expires_at"),
     }
+
+
+def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
+    """#1890: delete every ``invite-{iid}`` placeholder Membership for ONE
+    (org, email) whose Invitation node is TERMINAL — accepted, revoked, or
+    expired — and return how many Invitation nodes qualified.
+
+    This is #1908's terminal-state sweep (``sweep_invite_ghost_memberships``)
+    applied at the LIVE point where the ghost becomes visible: the mint. By
+    then every invite this email has left is terminal (the dup-check just
+    rejected a live pending one), and without this sweep the re-mint leaves
+    the old placeholder beside the new one, so ``list_members`` shows the
+    same email twice — once as a ghost.
+
+    Expiry is DERIVED from ``expires_at``, in the same form the accept paths
+    and ``cleanup_expired_invitations`` use: nothing live ever writes
+    ``status='expired'``, so a status-only predicate would keep the ghost of
+    an invite that expired by the clock. The predicate mirrors
+    ``TortoiseSDK.sweep_invite_ghost_memberships`` so the two cannot classify
+    a node differently.
+
+    Deletes go through ``_delete_fake_invite_membership`` (best-effort, one
+    warning per row): a transient delete failure must not turn a re-invite
+    into a 500, and the fleet sweep is the backstop.
+    """
+    reg = sdk._get_registry()
+    now = datetime.now(UTC).isoformat()
+    rows = reg.query(
+        "MATCH (i:Invitation {org_id:$tid, email:$email}) "
+        "WHERE i.accepted_at IS NOT NULL "
+        "OR i.status IN ['accepted', 'revoked', 'expired'] "
+        "OR (i.expires_at IS NOT NULL AND i.expires_at <= $now) "
+        "RETURN i.id",
+        params={"tid": org_id, "email": email, "now": now},
+    ).result_set
+    for (iid,) in rows:
+        _delete_fake_invite_membership(sdk, org_id, iid)
+    return len(rows)
 
 
 def _delete_fake_invite_membership(sdk, org_id: str, invitation_id: str) -> None:
@@ -29540,22 +29642,46 @@ async def github_branches(repo: str,
 
 # ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
 
-_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at, started_at, org_id}
-# Owner/generation token per job (P2, PR #1792): a TTL-evicted entry
+_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at, started_at, heartbeat_at, org_id}
+# Owner/generation token per job (P2, PR #1792): a liveness-evicted entry
 # (presumed-dead, replaced by a newer run) must not let the stale run keep
 # writing status / resurrect a live walk. Kept OUT of the job dict so the
 # poll response can never leak it.
 _INDEX_JOB_OWNERS: dict[str, str] = {}
 
-# Per-org single-flight TTL (T2-P2 + cycle-3 P1-3): a `started` entry
-# older than this is presumed dead (Fly restart / hung run) — evicted so a
-# hung run never bricks the org; the just-reused in-flight entry is never
-# evicted. Single-process assumption recorded: per-event-loop atomic; a
-# DB-backed job lock is the documented path only if Fly scales horizontally.
-_INDEX_JOB_TTL_S = 30 * 60
+# Per-org single-flight liveness window (#3539 §D): a `started` entry whose
+# HEARTBEAT has not moved for this long is presumed dead (a hung run, a
+# cancelled task) — evicted so a dead run never bricks the org. Eviction is a
+# LIVENESS check, NOT entry age: a cursor-correct walk of a 1,700-issue org can
+# legitimately outlive any fixed TTL, and an age-based rule evicted it mid-run,
+# so a re-poll inside a long run spawned a SECOND concurrent walk (duplicate
+# statement ids, version inflation, job-status races). The heartbeat is the
+# run's LAST STATUS WRITE (see `_heartbeat_index_job`) plus its per-page /
+# per-N-item beats — so a merely LONG run keeps its claim, and a stopped
+# heartbeat expires it. Single-process assumption recorded: per-event-loop
+# atomic; a DB-backed job lock is the documented path only if Fly scales
+# horizontally.
+_INDEX_JOB_STALE_S = 30 * 60
 # Post-terminal eviction (T1-P14): the job stays pollable for an hour, then
 # vanishes — the UI renders an eviction-expired poll as "status expired".
 _INDEX_JOB_EVICT_S = 3600
+
+
+def _heartbeat_index_job(job_id: str, owner: str | None) -> None:
+    """Stamp the run's liveness heartbeat (#3539 §D).
+
+    Called on every progress beat (``on_progress`` from ``index_repo``) AND
+    folded into every status write, so the stamp IS the run's last sign of
+    life — the property ``_start_index_job`` uses to decide a claim is dead.
+
+    Owner-gated exactly like ``_job``: a liveness-evicted/replaced entry must
+    not be resurrected by a beat from the stale run.
+    """
+    if _INDEX_JOB_OWNERS.get(job_id) != owner:
+        return  # entry evicted/replaced — abort silently
+    job = _INDEX_JOBS.get(job_id)
+    if job is not None:
+        job["heartbeat_at"] = time.time()
 
 
 def _start_index_job(org_id: str, *, kind: str = "github") -> tuple[str, bool]:
@@ -29576,9 +29702,10 @@ def _start_index_job(org_id: str, *, kind: str = "github") -> tuple[str, bool]:
     1. Guard-check FIRST: a `started` entry for the org AND kind is
        REUSED (return its job_id with is_new=False) — kills the TOCTOU
        probe→create duplicate.
-    2. Only then evict terminal entries or `started` older than the 30-min
-       TTL (presumed-dead); the just-reused in-flight entry is never
-       evicted.
+    2. Only then evict terminal entries, or `started` entries whose
+       HEARTBEAT has gone stale (presumed-dead: a hung/cancelled run); the
+       just-reused in-flight entry is never evicted. Age is NEVER the test
+       (#3539 §D) — a long live walk keeps beating and keeps its claim.
     3. Otherwise mint a fresh job entry (is_new=True) stamped with a
        generation/owner token.
     """
@@ -29590,10 +29717,13 @@ def _start_index_job(org_id: str, *, kind: str = "github") -> tuple[str, bool]:
         if job.get("kind", "github") != kind:
             continue
         if job.get("status") == "started":
-            started = job.get("started_at") or job.get("created_at") or now
-            if now - started < _INDEX_JOB_TTL_S:
+            # LIVENESS, not age: the heartbeat is the run's last status write
+            # / progress beat. A run that is merely LONG keeps beating.
+            beat = job.get("heartbeat_at") or job.get("started_at") \
+                or job.get("created_at") or now
+            if now - beat < _INDEX_JOB_STALE_S:
                 return jid, False  # guard-check FIRST — reuse the in-flight job
-            # presumed-dead (TTL exceeded) — evict, then fall through
+            # heartbeat stopped → presumed-dead, evict, then fall through
             _INDEX_JOBS.pop(jid, None)
             _INDEX_JOB_OWNERS.pop(jid, None)
             continue
@@ -29605,7 +29735,8 @@ def _start_index_job(org_id: str, *, kind: str = "github") -> tuple[str, bool]:
                            "points_created": 0, "error": None,
                            "org_id": org_id, "kind": kind,
                            "created_at": now,
-                           "started_at": now}
+                           "started_at": now,
+                           "heartbeat_at": now}
     _INDEX_JOB_OWNERS[job_id] = secrets.token_hex(8)
     return job_id, True
 
@@ -29748,9 +29879,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
 
     P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
     `_start_index_job` reports is_new; as a belt-and-suspenders guard this
-    function ALSO aborts when it no longer owns the job entry (TTL-evicted
-    / replaced by a newer run) — a stale run must never keep writing
-    status or resurrect a live walk.
+    function ALSO aborts when it no longer owns the job entry
+    (liveness-evicted / replaced by a newer run) — a stale run must never keep
+    writing status or resurrect a live walk.
 
     ⚠️ #3718 residual (#4709): this body's graph work is INLINE — the
     dominant `indexer.index_repo` projection walk (its own `_get_proj()`
@@ -29777,11 +29908,15 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     without them the file matches main's result exactly.
     """
     from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
-    # P2: generation/owner token stamped at mint. A TTL-evicted entry
+    # P2: generation/owner token stamped at mint. A liveness-evicted entry
     # (presumed-dead, replaced by a newer run) must not let THIS run keep
     # writing status — it aborts silently at the next status-write or
     # repo boundary.
     owner = _INDEX_JOB_OWNERS.get(job_id)
+
+    def _beat() -> None:
+        """Progress beat handed to the walk (#3539 §D)."""
+        _heartbeat_index_job(job_id, owner)
 
     def _job(**fields) -> None:
         """Update the job entry ONLY while this run still owns it."""
@@ -29790,6 +29925,10 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         job = _INDEX_JOBS.get(job_id)
         if job is not None:
             job.update(fields)
+            # #3539 §D: every status write is also a liveness beat — the
+            # heartbeat IS the run's last status write, so the single-flight
+            # guard can tell a LONG run from a DEAD one.
+            _heartbeat_index_job(job_id, owner)
 
     try:
         encrypted = _github_token_enc(org_id)
@@ -29877,7 +30016,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
             if _INDEX_JOB_OWNERS.get(job_id) != owner:
                 break  # lost ownership (entry evicted/replaced) — abort
             result = await indexer.index_repo(
-                org_sdk, repo_name, cursor=cursors.get(repo_name) or None)
+                org_sdk, repo_name, cursor=cursors.get(repo_name) or None,
+                on_progress=_beat)
             totals["points_created"] += result["points_created"]
             totals["statements_superseded"] += result["statements_superseded"]
             totals["events_minted"] += result["events_minted"]
@@ -30159,6 +30299,9 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
         job = _INDEX_JOBS.get(job_id)
         if job is not None:
             job.update(fields)
+            # #3539 §D: the docs job shares `_start_index_job`'s liveness
+            # guard, so it must beat on the same terms as the github walk.
+            _heartbeat_index_job(job_id, owner)
 
     # Stamp the docs stats on the entry up front — a job that fails early
     # (unset base, quota preflight, unconnected) still reports honest
