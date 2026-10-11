@@ -562,6 +562,21 @@ def test_langgraph_malformed_state_never_raises(state):
     assert isinstance(node(state), dict)
 
 
+def test_lone_surrogate_costs_one_codepoint_not_the_whole_window():
+    """A lone surrogate cannot be UTF-8 encoded, and the reflex's own validator
+    encodes every turn — so one bad codepoint used to raise and discard the
+    ENTIRE window, the usable turns included. Plain ``str`` is the declared
+    content type: a truncated surrogate pair (``json.loads('"\\ud83d"')``) or a
+    ``surrogateescape`` decode produces this without any hostile object."""
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [_Msg("human", "ok \ud800"), _Msg("human", "latest")]})
+    window = seen["window"]
+    assert [turn["content"] for turn in window] == ["ok ", "latest"]
+    # and the window the real validator gets is encode-safe
+    from tortoise.volunteer import validate_request
+    validate_request(window)
+
+
 def test_adk_model_turns_are_normalized_not_dropped():
     """ADK's assistant role is literally ``model``; unnormalized, every ADK
     assistant turn was filtered out of the window before the reflex saw it."""

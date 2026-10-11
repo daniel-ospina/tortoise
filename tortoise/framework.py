@@ -206,6 +206,14 @@ def _bounded_window(turns: list[Any]) -> list[dict]:
         # and the whole window could empty out (nothing injected). The earlier
         # guard already rejects a turn that is only whitespace.
         content = content.rstrip()
+        # Drop codepoints that cannot be UTF-8 encoded — a LONE SURROGATE, which a
+        # truncated surrogate pair off a cut stream (``json.loads('"\\ud83d"')``)
+        # or an ``errors="surrogateescape"`` decode produces. The encode below is
+        # what the reflex's own validator does, so a surrogate there raises and
+        # takes the WHOLE window with it — every other turn included — for one
+        # bad codepoint. Sanitizing here costs only the codepoint. Plain ``str``
+        # is the declared content type, so this is not a hostile-input guard.
+        content = content.encode("utf-8", "ignore").decode("utf-8")
         if len(kept) >= MAX_WINDOW_TURNS:
             break
         # Room left for CONTENT once this turn's own overhead is reserved.
@@ -273,10 +281,12 @@ def _window_from_langgraph(state: Any) -> list[dict]:
     non-list ``messages``, a message missing its attributes) nor a malformed
     content passes through as a raise. Content is flattened with ``str`` for
     exactly that reason — a multimodal block whose ``text`` is not a string, or
-    a message whose ``content`` is not, becomes text rather than a ``TypeError``.
-    The caller still keeps this inside its fail-open boundary: totality here is
-    what makes the module's "never raises into the app's turn" contract hold for
-    an object of any shape, not just the shapes with a test.
+    a message whose ``content`` is not, becomes text rather than a ``TypeError``
+    — and :func:`_bounded_window` drops codepoints that cannot be UTF-8 encoded
+    so a lone surrogate costs one codepoint rather than the window. The caller
+    still keeps this inside its fail-open boundary: totality here is what makes
+    the module's "never raises into the app's turn" contract hold for an object
+    of any shape, not just the shapes with a test.
     """
     messages = state.get("messages") if isinstance(state, dict) else None
     if not isinstance(messages, (list, tuple)):
