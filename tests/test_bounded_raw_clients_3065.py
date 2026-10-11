@@ -53,6 +53,21 @@ _EXPECTED_SITES = {
     "tortoise/backup.py": 1,             # BGSAVE
     "tortoise/projection/__init__.py": 2,  # embedded + server branches
     "tortoise/session_indexer.py": 1,    # graph-entity keyword lookup
+    "tortoise/acl_graph_users.py": 1,    # the ACL admin client
+    "tortoise/hosted_backup.py": 1,      # the restore-swap copy client
+}
+
+#: Sites whose read bound lives OUTSIDE the constructor call, each pinned to the
+#: test that FAILS if the bound is removed. An entry here is a CLAIM, not a
+#: waiver: #3065's defect was an unbounded ``recv()``, so a site may only be
+#: listed alongside something that proves its bound exists. The inventory above
+#: still pins these files, so a SECOND client in one of them reds on the count.
+_BOUND_LIVES_ELSEWHERE = {
+    # ``redis.Redis(connection_pool=ConnectionPool(**kwargs))``, built with
+    # ``kwargs["socket_timeout"] = _restore_swap_timeout_s()`` (#3813) and NO
+    # retry. The bound belongs to the POOL, so the call node cannot show it.
+    "tortoise/hosted_backup.py":
+        "tests/test_dr_endpoints.py::TestRestoreSwapReadBound",
 }
 
 
@@ -362,12 +377,23 @@ def test_an_absent_read_bound_parks_the_caller_in_recv():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _constructs_a_client(node: ast.Call) -> bool:
-    """True for ``FalkorDB(...)`` / ``falkordb.FalkorDB(...)`` / ``guarded_client(...)``."""
+    """True for a raw client construction, whatever its class is called.
+
+    Three class shapes reach the same socket: the falkordb wrapper
+    (``FalkorDB(...)``), the package's guard seam (``guarded_client(...)``),
+    and a BARE redis client (``redis.Redis(...)`` / ``redis.StrictRedis(...)``
+    / ``redis.from_url(...)``). Recognising only the first two is a blind spot
+    that was MEASURED, not assumed: a bare unbounded ``redis.Redis`` added to
+    ``tortoise/`` left this guard green, because no predicate matched it and
+    the inventory therefore never changed (#3065 follow-up).
+    """
     func = node.func
     if isinstance(func, ast.Name):
-        return func.id in {"FalkorDB", "guarded_client"}
+        return func.id in {"FalkorDB", "guarded_client", "Redis",
+                           "StrictRedis", "from_url"}
     if isinstance(func, ast.Attribute):
-        return func.attr in {"FalkorDB", "guarded_client"}
+        return func.attr in {"FalkorDB", "guarded_client", "Redis",
+                             "StrictRedis", "from_url"}
     return False
 
 
@@ -403,7 +429,9 @@ def test_every_product_client_is_constructed_with_a_read_bound():
             if not isinstance(node, ast.Call) or not _constructs_a_client(node):
                 continue
             found[rel] = found.get(rel, 0) + 1
-            if not _carries_a_read_bound(node):
+            if (_constructs_a_client(node)
+                    and not _carries_a_read_bound(node)
+                    and rel not in _BOUND_LIVES_ELSEWHERE):
                 offenders.append(f"{rel}:{node.lineno}")
 
     assert not offenders, (
@@ -437,8 +465,41 @@ def test_the_guard_itself_reads_the_shapes_it_claims_to():
     assert _constructs_a_client(_only_call("falkordb.FalkorDB(host='h')"))
     assert not _constructs_a_client(_only_call("some_other(host='h')"))
 
+    # The blind spot this guard used to have: a BARE redis client reached the
+    # same socket and matched nothing, so an unbounded one shipped unseen.
+    assert _constructs_a_client(_only_call("redis.Redis(host='h', port=1)"))
+    assert _constructs_a_client(_only_call("Redis(host='h', port=1)"))
+    assert _constructs_a_client(_only_call("redis.StrictRedis(host='h')"))
+    assert _constructs_a_client(_only_call("redis.from_url('redis://h')"))
+
     assert not _carries_a_read_bound(_only_call("guarded_client(FalkorDB, host='h')"))
+    assert not _carries_a_read_bound(_only_call("redis.Redis(host='h', port=1)"))
     assert _carries_a_read_bound(
         _only_call("guarded_client(FalkorDB, host='h', socket_timeout=10)"))
     assert _carries_a_read_bound(
         _only_call("guarded_client(FalkorDB, **_bounded_server_socket_kwargs())"))
+
+
+def test_every_bound_elsewhere_claim_names_a_live_test():
+    """An exemption may not outlive the test that justifies it.
+
+    ``_BOUND_LIVES_ELSEWHERE`` is the one place where a construction with no
+    visible bound is allowed through, so the proof it carries has to exist:
+    otherwise the entry rots into a silent hole of exactly the shape #3065 was.
+    """
+    for rel, node_id in _BOUND_LIVES_ELSEWHERE.items():
+        path = REPO_ROOT / rel
+        assert path.exists(), f"exempt site is gone: {rel}"
+        assert "::" in node_id, ("an exemption must name its proving test, "
+                                 f"not a bare file: {node_id!r}")
+        test_file, _, test_name = node_id.partition("::")
+        branch, _, cls = test_name.rpartition("::")
+        cls = branch or cls
+        assert test_name, f"no test named for {rel}"
+        src = (REPO_ROOT / test_file).read_text(encoding="utf-8")
+        assert f"class {cls}" in src, (
+            f"the test proving {rel}'s bound is elsewhere no longer exists: "
+            f"{node_id}")
+        assert "socket_timeout" in src, (
+            f"{test_file} no longer mentions socket_timeout — the bound that "
+            f"justifies exempting {rel} may be gone")
