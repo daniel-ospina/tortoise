@@ -30,12 +30,13 @@
 // value it renders) fails these tests rather than passing them.
 //
 // RESIDUAL, stated so it is not mistaken for coverage: the <h1> is extracted as
-// the element itself, so a conditional wrapped AROUND the whole element (or a
-// change to its className) is outside this pin — the element would simply not be
-// found, which fails LOUD rather than passing vacuously. The announcement is
-// pinned as the statement prefix that computes its argument; a variable sourced
-// from a component-scope helper this probe does not bind throws rather than
-// passing.
+// the element itself, so this pin does NOT see a conditional wrapped AROUND the
+// whole element — the open-tag literal survives the wrapper, so the probe still
+// renders the element unconditionally and stays green. (A change to its className
+// IS seen: the element is no longer found, which fails LOUD rather than passing
+// vacuously.) The announcement is pinned as the statement prefix that computes
+// its argument; a variable sourced from a component-scope helper this probe does
+// not bind throws rather than passing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
