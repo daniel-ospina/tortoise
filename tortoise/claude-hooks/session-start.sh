@@ -12,9 +12,15 @@
 #   cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 #   chmod +x .claude/hooks/session-start.sh
 #   # then add to .claude/settings.json:
-#   # #3754: an explicit timeout is set too — Claude Code's command-hook default on
-#   # SessionStart is 600s, so a hung `tortoise context` would stall the session
-#   # for 10 minutes; 60s bounds it with ~6× headroom over the measured path.
+#   # #3754/#3803: an explicit timeout is set too — Claude Code's command-hook default
+#   # on SessionStart is 600s, so a hung `tortoise context` would stall the session
+#   # for 10 minutes; 60s bounds it. This comment used to say "~6× headroom over
+#   # the measured path" — no SessionStart measurement ever backed that figure;
+#   # the ratio is 60/9.26, the session-END measurement carried across events
+#   # (#3803). The measured digest path is 3.40s cold / 2.1s warm against a
+#   # populated embedded store, and the guard's 20s SessionStart floor — a
+#   # PROJECT bound of 15s API wait + 3.4s measured cold start — is what keeps a
+#   # too-small timeout from being shipped.
 #   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }] } }
 #
 # The hook prints a Tortoise memory digest to stdout, which Claude Code
