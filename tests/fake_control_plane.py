@@ -1198,8 +1198,25 @@ class FakeControlPlane:
                               and k.get("revoked_at") is None
                               and k.get("created_via") != "bootstrap"]
                     if len(active) >= cap:
-                        oldest = min(active, key=lambda k: k.get("created_at") or "")
-                        oldest["revoked_at"] = now_iso
+                        # #1872: the victim is the LEAST-RECENTLY-USED key
+                        # (never-used first), mirroring recover_team_key's
+                        # `(last_used_at IS NOT NULL) ASC, last_used_at ASC
+                        # NULLS FIRST, created_at ASC NULLS FIRST` — NOT the
+                        # oldest-created one (that rotated a live credential
+                        # while an unused key sat beside it; #1854's bug class
+                        # on the keyless lane). The row this call mints is not
+                        # in `active` (it is appended below), which is the
+                        # fake's structural equivalent of the RPC's
+                        # `id IS DISTINCT FROM v_inserted_id` exclusion —
+                        # without it a NULL-first order would make a
+                        # freshly-minted key revoke itself.
+                        victim = min(
+                            active,
+                            key=lambda k: (k.get("last_used_at") is not None,
+                                           k.get("last_used_at") or "",
+                                           k.get("created_at") or ""),
+                        )
+                        victim["revoked_at"] = now_iso
                     key_rows.append({
                         "id": f"key_{tid}_{lookup[:12]}",
                         "org_id": tid,

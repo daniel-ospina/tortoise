@@ -21511,9 +21511,10 @@ class TortoiseSDK:
         """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
-        oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
-        is token-attributable ('st_' + left(token_hash, 12)) — never a
-        caller-supplied identity. Returns {api_key, org_id, org_name,
+        of the least-recently-used non-bootstrap key (#750.10 semantics,
+        #1854/#1872 LRU ordering — never-used first) mirror the SQL;
+        created_by is token-attributable ('st_' + left(token_hash, 12)) —
+        never a caller-supplied identity. Returns {api_key, org_id, org_name,
         tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
         token is unknown/revoked or the org is soft-deleted.
         """
@@ -21569,18 +21570,38 @@ class TortoiseSDK:
             # target scan (expired keys don't count — never wedge, and never
             # let the oldest-LIVE key be the revoke collateral for expired
             # rows above the cap; matches the session-key recovery lanes).
+            #
+            # #1872: victim selection is #1854-LRU — never-used (NULL
+            # last_used_at) first, then least-recently-used, created_at as the
+            # final tiebreak — NOT oldest-created. Pre-#1872 the oldest-created
+            # scan rotated a LIVE credential while a never-used key sat beside
+            # it (the #1854 bug class, on the keyless-token lane).
+            #
+            # The just-minted key is EXCLUDED from the victim scan, and that
+            # exclusion is load-bearing rather than tidiness: this lane INSERTs
+            # BEFORE it counts (the self-healing ordering above), so the new row
+            # is inside the candidate set with last_used_at NULL by
+            # construction. Under a NULL-first order it would be the FIRST
+            # candidate and revoke ITSELF whenever every pre-existing key had
+            # already been used — returning a dead key to the caller. The COUNT
+            # still includes the new row; that is what keeps the over-cap check
+            # self-healing.
             rows = reg.query(
                 "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
-                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
+                "RETURN k.id, k.last_used_at, k.created_at",
                 params={"tid": org_id, "now": now_iso},
             ).result_set
-            if len(rows) > max_keys and rows:
-                reg.query(
-                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
-                    params={"id": rows[0][0], "now": now_iso},
-                )
+            if len(rows) > max_keys:
+                victims = [r for r in rows if r[0] != kid]
+                victims.sort(key=lambda r: (r[1] is not None, r[1] or "",
+                                            r[2] or ""))
+                if victims:
+                    reg.query(
+                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                        params={"id": victims[0][0], "now": now_iso},
+                    )
         self._audit(org_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"api_key": api_key, "org_id": org_id,
