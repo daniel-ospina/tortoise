@@ -28,11 +28,7 @@ aboutObjects: tortoise
 > runbook's historical window and may sit off the strict email guard shape, so
 > the default procedure below finds nothing in its DELETE set — see **§6.1** for
 > `--all-e2e-live` + `--include-residue` (Guard D). §1–§6 remain the record of the
-> original red window, and their identifiers mix the two eras: §2's table, Q1, Q3,
-> Q4 and the §6 verify query carry the #3543 `teams` → `organizations` /
-> `team_id` → `org_id` rename, while §1, §2's sample minted row and §6's
-> delete-order prose keep the 2026-09-02 `teams` spelling, and §4 declares its
-> own mix in its label.
+> original red window, reproduced as written on 2026-09-02.
 
 ---
 
@@ -369,11 +365,12 @@ Recurrence procedure (dry-run first; `SUPABASE_ACCESS_TOKEN` + users via
 `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` or `--delete-users-via sql`). **Use a
 separate `--manifest`** in every case: the default
 `2146-e2e-live-orphans.manifest.json` (154 team rows) is the FalkorDB companion's
-only drop record for those teams (the 2026-09-03 red-window run's own record is
+drop record for those teams (the 2026-09-03 red-window run's own record is
 the committed `graph-scripts/2146-orphan-manifest.json`, 222 graph entries). The
-clobber guard refuses to overwrite a manifest whenever the new enumeration found
-no Guard-A (strict-shape) teams — a promoted residue team still refuses; only a
-recurrence that mints Guard-A teams would overwrite it. Using a separate manifest
+clobber guard refuses to overwrite a manifest that holds team graph names
+whenever the new enumeration found no Guard-A (strict-shape) teams — a promoted
+residue team still refuses; only a recurrence that mints Guard-A teams would
+overwrite it. Using a separate manifest
 is therefore unconditional —
 `2146_falkordb_graph_cleanup.py` reads `manifest["teams"]` and returns "nothing to
 do" on an empty list. The separate path keeps both:
@@ -418,10 +415,10 @@ the #5971 run), so phase `users` is all it needs.
 JSON (full rows); (b) optional `--dump-csv` for a CSV snapshot before any
 delete; (c) the audit_events append-only rows survive the team deletion as the
 purge trail; (d) re-running any phase is a no-op (idempotent) — with one
-exception: the manifest refuses to be overwritten with no Guard-A (strict-shape)
-team rows (a post-success re-enumeration, or a recurrence whose rows are all
-users — its
-`teams` is the FalkorDB companion's only drop record), so the FalkorDB phase
+exception: a manifest that holds team graph names refuses to be overwritten when
+the new enumeration has no Guard-A (strict-shape) team rows (a post-success
+re-enumeration, or a recurrence whose rows are all users — its `teams` is the
+FalkorDB companion's drop record), so the FalkorDB phase
 always has its target list; re-enumerate a recurrence to its own `--manifest`
 (see §6.1) to keep that list, or remove the file to force a fresh empty
 enumeration. If an operator
