@@ -12,8 +12,10 @@ names and asserts that object is callable:
 * ``entry.sdk_method == ""`` → ``getattr(mcp_server, entry.name)``  (custom MCP handler — the
   entry's own declared surface; these are the entries whose tool body lives in mcp_server.py)
 
-The LIVE registered surface (``mcp._list_tools()`` — the tools an agent is
-actually served) is resolved a second, independent way, so "resolves to a live
+The LIVE registered surface (``mcp._list_tools()`` — the transform-free
+component list every registry entry must be on, i.e. the stdio agent surface;
+the HTTP listing is NARROWER BY DESIGN and is not what this file pins — see
+accepted residual 3) is resolved a second, independent way, so "resolves to a live
 method" is asserted on the surface an agent calls, not only on the declaration.
 
 GREEN TODAY (#4035 / PR #4043): the four entries this instrument recorded dead —
@@ -72,6 +74,75 @@ registry), so no small-scale genuine regression can be pre-excused as "the
 redesign". When the rendezvous opens, the instruction is to RETARGET the
 instrument at Phase 0.4 — never to weaken or delete the INSTRUMENT to make it green.
 The rendezvous MACHINERY itself is transition-scoped and is deleted at that retarget.
+
+Accepted residuals (#3905). The four false-green / false-red paths found while
+scoping #3900 are each closed here or recorded with the mechanism that keeps them
+accepted — an unrecorded residual is how a guard silently stops guarding:
+
+1. ``handler_only`` LOCATION COUPLING — ACCEPTED (owner: the registration seam,
+   #2210 / #454). ``_resolve`` resolves an empty ``sdk_method`` through
+   ``getattr(mcp_server, entry.name)`` — a module-GLOBAL name — while
+   ``FastMCPAdapter.register_all`` is handed ``{t.name: globals()[t.name] …}``
+   (``mcp_server.py``, the module-bottom ``_adapter.register_all``) and merely
+   WARNS when a name is absent (``register_all`` — "no handler — skipped"). A
+   handler moved to a submodule while the adapter still resolves it is a
+   legitimate refactor that reds the resolution case for that entry. The
+   instrument cannot see the adapter's own handler map, so closing the coupling
+   means closing the seam — #2210/#454's change, not this one. The BEHAVIOUR is
+   covered independently of the module-global name:
+   ``test_live_mcp_surface_registers_every_entry`` proves the entry is served and
+   ``test_live_mcp_tools_are_callable`` proves the served tool has a callable
+   ``fn``.
+
+2. ``hosted_only`` DECLARED BUT UNWIRED — ACCEPTED (owner: the #1935 wiring
+   change). ``ToolDefinition.hosted_only`` is declared (``tool_registry.py``) and
+   set on ``tortoise_pack_install``; NOTHING reads it, so every registry entry is
+   registered on every surface and the both-direction equality in
+   ``test_live_mcp_surface_registers_every_entry`` is the correct assertion
+   TODAY. The moment #1935 wires the flag, a self-host run legitimately serves
+   one fewer entry and that equality would red a CORRECT deployment, so the
+   wiring change must carry the one-directional form — the missing set contained
+   in ``{e.name for e in TOOL_REGISTRY if e.hosted_only}`` while the extra set
+   stays empty — and must not reach for a hide-by-transform implementation:
+   ``_HTTPToolFilter`` is the precedent for exactly that, and it drops the 7
+   ``http_policy=False`` entries (measured, see residual 3), which ARE on the
+   stdio MCP surface. Weakening the equality NOW to pre-empt the wiring would
+   instead buy a permanent false GREEN on every hosted_only entry while the flag
+   is inert — the wrong trade, and why this is recorded rather than pre-applied.
+
+3. PRIVATE fastmcp API — ACCEPTED: the public swap was TESTED AND REJECTED. The
+   preference was to read the PUBLIC ``mcp.list_tools()``; it is not adoptable on
+   this tree, and ``mcp._list_tools()`` is KEPT, because the public call applies
+   the instance's transforms and ``create_http_app()`` attaches ``_HTTPToolFilter``
+   to the shared module-level ``mcp`` (``mcp_server.py``, registered once),
+   executed at import by ``tortoise/hosted_api.py`` — which the test lane pulls
+   in. Measured under pytest: ``list_tools()`` and
+   ``list_tools(run_middleware=False)`` BOTH return 75 of 82 names, missing
+   exactly the 7 ``http_policy=False`` entries, while ``_list_tools()`` returns
+   82. In a BARE interpreter the filter is not yet attached and both calls return
+   82 — so the public swap would be green locally and red in the lane that runs
+   it, the worst kind of coupling: a guard whose subject changes with the
+   process. The issue's "no transform is attached to the global mcp" premise is
+   stale for this tree.
+   What the residual actually requires is the coupling COMMENT and the
+   dep-upgrade TRIPWIRE — both present — plus correcting this instrument's own
+   claim to name the transform-free REGISTRATION surface rather than the
+   HTTP-filtered listing. The private-call coupling is commented at the
+   assertions and pinned by ``test_live_surface_dependency_tripwire``.
+
+4. COVERAGE-PREDICATE FRAGILITY — CLOSED, with the ``-k``/xdist residual stated.
+   The case set is read from the decorator's OWN argument list
+   (``_parametrized_cases`` → ``pytestmark`` argvalues), never from ``_TARGETS``
+   and never from a naive ``item.name`` filter — which is EMPTY for parametrized
+   ids and would false-RED. The import-time gate is not deselectable and the
+   in-test receipt covers EXECUTION; the residual that a deselected or
+   xdist-partial run can shorten ``_EXECUTED`` is stated on
+   ``test_resolution_exercises_every_registry_entry`` and can only be a false RED,
+   never a false GREEN. The skip vector is closed without a checked-in nodeid
+   list: the skip-guard manifest is EMITTED from ``--collect-only`` over the same
+   file list the run uses (``tools/skip-guard.py --emit-manifest``), so these
+   node-ids are expected automatically (verified: 86 expected — 82 parametrized +
+   4 plain — emitted for this file).
 """
 from __future__ import annotations
 
@@ -284,6 +355,14 @@ def _parametrized_cases():
     collection while ``_TARGETS`` itself stays full: an assertion on ``_TARGETS``
     is tautological in exactly the case that matters. Reading the marks also keeps
     the count correct when the run deselects items.
+
+    This is the closure of #3905 residual 4, and it is deliberately NOT a
+    ``pytest_collection_modifyitems`` hook keyed on ``item.function.__name__`` /
+    ``hasattr(item, "callspec")``: a hook runs AFTER ``-k``/``-m``/node-id
+    selection (and per xdist worker sees only its assigned slice), where pytest's
+    ``item.name`` for a parametrized id is ``"<test>[<param>]"`` — a naive filter
+    is EMPTY and false-REDs. The decorator's own argvalues are the collected case
+    set, are available during collection, and cannot be deselected.
     """
     for mark in test_every_registered_entry_resolves_to_a_live_method.pytestmark:
         if mark.name == "parametrize":
@@ -344,7 +423,17 @@ def test_resolution_exercises_every_registry_entry():
 
 
 def test_live_mcp_surface_registers_every_entry():
-    """Every registry entry is on the LIVE, agent-facing FastMCP surface.
+    """Every registry entry is on the LIVE, transform-free FastMCP surface.
+
+    Read through ``mcp._list_tools()``, NOT the public ``mcp.list_tools()``
+    (residual 3, #3905 — the public swap was measured and REJECTED): the public
+    call applies the instance's transforms, and ``create_http_app()`` attaches
+    ``_HTTPToolFilter`` to this shared module-level ``mcp``, so under the test
+    lane ``list_tools()`` returns 75 of 82 — missing exactly the 7
+    ``http_policy=False`` entries this assertion must see. ``_list_tools()``
+    resolves the components without transforms and returns 82. The private-API
+    coupling is deliberate and pinned by
+    ``test_live_surface_dependency_tripwire``.
 
     Mutation that REDs this assertion: make the adapter skip an entry (e.g.
     ``if entry.name == "tortoise_query": continue`` inside
@@ -364,6 +453,11 @@ def test_live_mcp_surface_registers_every_entry():
 def test_live_mcp_tools_are_callable():
     """Each live tool resolves to a callable ENTRYPOINT — not just a name.
 
+    Read through ``mcp._list_tools()`` (residual 3, #3905); see
+    ``test_live_mcp_surface_registers_every_entry`` for why the public
+    ``list_tools()`` was rejected, and ``test_live_surface_dependency_tripwire``
+    for the coupling pin.
+
     The entrypoint is ``FunctionTool.fn``. Asserting on ``run`` instead (as this
     once did) verifies nothing: ``FunctionTool.run`` is defined on the class, so
     it is callable for every instance ``_list_tools()`` can return — a registered
@@ -376,3 +470,41 @@ def test_live_mcp_tools_are_callable():
     assert tools, "live MCP surface is empty (fail-closed)"
     not_callable = [t.name for t in tools if not callable(getattr(t, "fn", None))]
     assert not not_callable, f"live MCP tools with no callable entrypoint: {not_callable}"
+
+
+# --- dependency coupling: the private ``_list_tools()`` (residual 3, #3905) ---
+# The live-surface assertions resolve the registration surface through
+# fastmcp's PRIVATE ``FastMCP._list_tools()``, because the public
+# ``list_tools()`` applies the ``_HTTPToolFilter`` that ``create_http_app()``
+# attaches to this shared instance (measured: 75 of 82). Three facts about the
+# private method are load-bearing: it stays present, it stays async on a
+# ``FastMCP`` instance, and each returned tool exposes ``.name`` and ``.fn``. A
+# fastmcp upgrade can change any of them, and the breakage would present as a
+# guard that resolves nothing rather than as a dependency error — so the version
+# below is a deliberate TRIPWIRE, not a pin on the dependency.
+_FASTMCP_VERIFIED_VERSION = "3.4.6"
+
+
+def test_live_surface_dependency_tripwire():
+    """TRIPWIRE (#3905 residual 3): re-verify fastmcp's ``_list_tools()`` contract.
+
+    Deliberately REDs on ANY fastmcp upgrade. That is the point: the three facts
+    in the comment above are what the live-surface assertions rest on, and a
+    silent change to any of them would otherwise turn those assertions into
+    no-ops. On a red here, re-verify the facts AND re-measure the public/private
+    split (``list_tools()`` vs ``_list_tools()``, 75 vs 82 expected on this
+    tree), then move ``_FASTMCP_VERIFIED_VERSION`` and this test together.
+    """
+    import fastmcp
+
+    assert fastmcp.__version__ == _FASTMCP_VERIFIED_VERSION, (
+        f"fastmcp {fastmcp.__version__} != the verified {_FASTMCP_VERIFIED_VERSION}. "
+        "Re-verify that FastMCP._list_tools() is present, async, returns objects "
+        "exposing 'name' and 'fn', and that the public list_tools() still applies "
+        "the _HTTPToolFilter (tests/test_surface_resolution.py, residual 3), then "
+        "move _FASTMCP_VERIFIED_VERSION."
+    )
+    assert callable(getattr(mcp_server.mcp, "_list_tools", None)), (
+        "FastMCP no longer exposes _list_tools() — the live-surface assertions in "
+        "this module can no longer resolve the registration surface"
+    )

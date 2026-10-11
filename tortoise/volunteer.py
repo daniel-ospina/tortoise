@@ -64,6 +64,12 @@ logger = logging.getLogger(__name__)
 # ── Contract constants (plan §3.2/§6.2/§6.3 — pinned by the contract tests) ─
 MAX_WINDOW_TURNS = 1000
 MAX_WINDOW_BYTES = 15 * 1024
+# Per-turn JSON overhead `validate_request` charges on top of the UTF-8 content
+# bytes. Exported because the byte boundary is a SHARED contract: a producer
+# that bounds a window has to budget exactly the bytes this validator counts,
+# or it builds a narrower window than it could send — or, worse, one this
+# validator REJECTS (`tortoise/framework.py`, which bounds framework windows).
+PER_TURN_OVERHEAD_BYTES = 64
 MAX_POINTERS_CAP = 5
 DEFAULT_MAX_POINTERS = 3
 DEFAULT_MIN_CONFIDENCE = 0.7
@@ -205,7 +211,7 @@ def validate_request(
                 "INVALID_CONTENT", f"window[{i}].content must be a string")
         # Deterministic byte bound (UTF-8 — the constant is BYTES, not
         # characters: multibyte content must not admit ~4× the cap).
-        total += len(content.encode("utf-8")) + 64  # per-turn JSON overhead
+        total += len(content.encode("utf-8")) + PER_TURN_OVERHEAD_BYTES  # per-turn overhead
         if total > MAX_WINDOW_BYTES:
             raise VolunteerValidationError(
                 "WINDOW_TOO_LARGE_BYTES",

@@ -3393,7 +3393,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # instead of cutting it silently, so the bytes the seam POSTs changed and every
 # installed generation-1 copy must read as stale.  The branch predates it, so
 # this number comes from main, not from #5838.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 10, "codex": 3, "cursor": 3,
+_EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 3,
                              "pi": 2}
 
 
@@ -3421,6 +3421,15 @@ def test_shipped_install_contract_generations(harness):
     deletes), so claude moved 9→10 — and that bump is what carries the fix to
     already-installed hosts, whose hook bytes are frozen at install time and
     whose ledger entries would otherwise stay permanently un-processable.
+    #3796 changed the claude hooks' BEHAVIOUR once more (session-start.sh now
+    DISPATCHES the install-probe beacon in the background and reaps it after the
+    digest, instead of serializing the POST behind a digest this script does not
+    bound; discovery is also resolved exactly once into three pre-initialised
+    variables), so claude moved 10→11.  The bump is again the ONLY thing that
+    carries the new dispatch order to an already-installed host: its hook bytes
+    are frozen at install time, so without it every existing install keeps
+    serializing the beacon behind the digest forever while
+    `tortoise hooks status` reports it current.
     The codex/cursor seams take the same slot split, but their marker was
     already at 3 on main (#5919) and this branch agreed, so NO number moved for
     them: their stale installed copies are caught by the installed-copy byte

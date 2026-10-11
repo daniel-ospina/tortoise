@@ -218,6 +218,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3065 (bounded-socket resolver): the indexer case FORCES the docker lane
+    # (setenv IS the input — the real `_graph_entity_keywords` construction must
+    # be observed carrying the resolved read bound, and a URI-less construction
+    # would take the embedded lane and prove nothing), and the doctor-probe case
+    # STRIPS the env URI (DELIBERATE_EMBEDDED_LANE — the probe is driven by an
+    # explicit `--db`, so a leaked ambient URI must not shadow it). Both sites
+    # are the fixture-param monkeypatch, which auto-restores at teardown — no
+    # lane leaks into a later docker-lane test.
+    "test_bounded_raw_clients_3065.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                          r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #3892: the read-path status test points the endpoint at a DECLARED but
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.

@@ -36,13 +36,20 @@ warns when a claude registration would make the reflex fire twice per turn.
 | #2120 | OpenClaw | per-turn hook surface = AgentRequest hook | `~/.openclaw/*.claw` AgentRequest handler → `volunteer-turn.sh openclaw` | `handle_AgentRequest` → context dict | hook output mapping documented; harness-store parser scaffolded |
 | #2121 | Hermes | `pre_llm_call` (agents-hub) | `.agents.yml` actions | tool-result text = the block | hook output mapping documented; parser entry added |
 | #2124* | Gemini CLI / OpenCode / other Claude-hooks-compatibles | `UserPromptSubmit`/equivalent | harness-specific | harness-specific | shared script's default emits the bare block (harmless where unsupported) |
-| #2125 | Frameworks (SDK-level middleware: Vercel AI SDK / LangChain / Mastra / OpenAI Agents SDK) | per-request middleware | project code import `tortoise/framework.py` | tool-role message with the block | **not wave-1** — demand-gated per the issue; wave-1 shared script's bare-block default is the interim |
+| #2125 | Frameworks (SDK-level middleware: Google ADK / LangGraph / Semantic Kernel) | ADK `before_model_callback`; LangGraph pre-model node; SK Prompt Render Filter | project code imports `tortoise/framework.py` and registers the returned hook | the reflex `block` appended to the prompt (ADK: request instructions; LangGraph: one appended message; SK: `rendered_prompt` prefix) | shipped, **opt-in** — `tortoise/framework.py` + the `#2125` seam grade |
 
 \* #2124 (harness adapters) is demand-gated per the issue — shared script
 coverage + the per-harness READ registration land first (codex / claude /
 cline / devin shipped); session-store PARSERS for the newly-added harnesses
 and the remaining registration files (gemini, opencode) follow demand. Do not
 build a speculative parser for a platform with unproven distribution.
+
+> **#2125 framework-name drift (recorded 2026-10-15):** this row previously
+> listed *Vercel AI SDK / LangChain / Mastra / OpenAI Agents SDK*. Issue #2125's
+> title + scope — **Google ADK, LangGraph, Semantic Kernel** — are the
+> authoritative pair (they trace to `platform-landscape.md` §3, "Tier 2 —
+> adapters"), and they are what `tortoise/framework.py` implements. The old
+> list was a sketch written before the issue was filed; the issue wins.
 
 ## Fail-open / fail-closed posture (all seams)
 
@@ -65,9 +72,63 @@ build a speculative parser for a platform with unproven distribution.
 - W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 
+## Frameworks (#2125) — SDK-level middleware, injection only
+
+A framework app owns its own sessions and files them with the EXISTING
+ingestion (`POST /v1/sessions`) — there is no harness session format to parse.
+The only missing piece per framework is the per-turn **injection** hook:
+`tortoise/framework.py` supplies one thin, duck-typed, fail-open adapter per
+documented extension point, and every adapter calls the ONE canonical reflex
+(`tortoise/volunteer.py`) through a provider the app supplies.
+
+| Framework | Extension point (primary docs) | Adapter |
+|---|---|---|
+| Google ADK | `before_model_callback(callback_context, llm_request)` — mutate the `LlmRequest` before the call | `adk_before_model_callback(reflex)` |
+| LangGraph | a node immediately before the model node, appending to `messages` | `langgraph_pre_model_node(reflex)` |
+| Semantic Kernel | Prompt Render Filter — override `context.rendered_prompt` after `await next(context)` | `semantic_kernel_prompt_render_filter(reflex)` |
+
+One-line agent-installable registration (the app already has `tortoise-graph`
+installed — no extra package, no framework dependency pulled in by Tortoise):
+
+```python
+# Google ADK
+from tortoise.framework import adk_before_model_callback, sdk_reflex
+agent = LlmAgent(name="...", model="...",
+                 before_model_callback=adk_before_model_callback(sdk_reflex(sdk)))
+
+# LangGraph
+from tortoise.framework import langgraph_pre_model_node, sdk_reflex
+graph.add_node("volunteer", langgraph_pre_model_node(sdk_reflex(sdk)))
+graph.add_edge("volunteer", "model")           # immediately before the model node
+
+# Semantic Kernel
+from semantic_kernel.filters import FilterTypes
+from tortoise.framework import semantic_kernel_prompt_render_filter, sdk_reflex
+kernel.add_filter(FilterTypes.PROMPT_RENDERING,
+                  semantic_kernel_prompt_render_filter(sdk_reflex(sdk)))
+```
+
+Providers: `sdk_reflex(sdk)` (in-process `TortoiseSDK.volunteer_context()`) or
+`http_reflex(base_url, api_key)` (`POST /v1/context`). Endpoint and credential
+are EXPLICIT arguments — embedded middleware carries no ambient identity
+resolution; the #2369 D1 chain belongs to the hook process, not the app.
+
+Posture, identical to the harness seams: **content fail-open** (degraded,
+clean-empty, unreachable, or a framework object of an unexpected shape injects
+NOTHING and never raises into the turn; Semantic Kernel's own `next` error is
+the app's and DOES propagate) and **W4 opt-in** (importing
+`tortoise.framework` pulls in no framework and registers nothing — the app
+registers the hook explicitly).
+
 ## Verification
 
 W3 harness seam grade (tests/eval/harness or tests/test_*): executes the
 SHIPPED `volunteer-turn.sh` against a seeded embedded graph and asserts the
 per-harness output contract carries the reflex block (see the wave-1 seam
 test in tests/).
+
+The framework seams are graded the same way by
+`tests/test_framework_middleware.py` (#2125): one seeded embedded graph drives
+all three adapters through the REAL `sdk_reflex` provider and asserts the
+identical block lands in each framework's prompt, plus the fail-open / opt-in /
+window-bounding contract.

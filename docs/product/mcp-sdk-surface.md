@@ -404,8 +404,8 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.reconcile_sessions` | reached by no registered MCP tool; caller categories: cli | tooling, docs | **review** | no MCP tool binds it; callers: cli |
 | `TortoiseSDK.close` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.session_index_health` | reached by no registered MCP tool; caller categories: cli, engine | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine |
+| `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine, tenant-rest |
 | `TortoiseSDK.apikey_create` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |
-| `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |
 | `TortoiseSDK.recall_gaps` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 | `TortoiseSDK.recall_subgraph` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 
