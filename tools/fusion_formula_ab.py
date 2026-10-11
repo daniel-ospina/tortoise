@@ -73,7 +73,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/fusion_formula_ab.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`.venv/bin/python tools/fusion_formula_ab.py`"
+        f"`uv run python tools/fusion_formula_ab.py`"
     )
 
 import argparse
