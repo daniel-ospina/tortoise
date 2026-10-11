@@ -820,6 +820,13 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #7951: a session DELETE must survive `derived = replay(journal)`. The
+  # guarded surface is the journal fold + the hosted delete path
+  # (`tortoise/sdk.py`, `tortoise/projection/__init__.py`,
+  # `tortoise/hosted_api.py`) — an `sdk.py`-only change selects `core`, so
+  # without this entry the delete-resurrection guard would not run on the
+  # change that can re-open the hole.
+  - test_7951_delete_resurrection.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
