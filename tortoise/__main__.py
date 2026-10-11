@@ -4523,6 +4523,61 @@ def _cmd_session_drain_best_effort(args) -> int:
         return 0
 
 
+def _record_drain_deferrals(root, summary) -> None:
+    """Record every STORE-ONLY 2xx a drain observed in the backlog ledger.
+
+    ``session drain`` is the THIRD consent-gated transmission primitive, and it
+    is how a session spooled by an interrupted capture is delivered — so a
+    store-only server response here was the same silent loss #4197 exists to
+    close: turns stored, no import receipt (by design), the capture-failure
+    breadcrumb cleared by the 2xx, and NO local record. The offer then missed
+    exactly the session it is for.
+
+    The spool keeps the turns but NOT the transcript path, so the entry is
+    recorded without one: the offer still enumerates and prices it, and
+    ``--process`` reports it as skipped with the remedy (re-run the import with
+    the transcript) instead of pretending the backlog is empty. A later record
+    that DOES know the path (a ``session capture`` of the same id) fills it in —
+    ``record_not_processed`` never erases a recorded path.
+
+    Never raises: the drain's contract is exit 0, and losing the offer must
+    never cost the filing that already succeeded.
+    """
+    try:
+        import time
+
+        from tortoise import capture_backlog
+        from tortoise.capture_spool import read_spool_meta, read_spool_turns
+        from tortoise.sdk import (
+            _CAPTURE_EXTRACTION_DISABLED_MODE,
+            _CAPTURE_NO_PROVIDER_MODE,
+        )
+
+        for sid, outcome in (summary.outcomes or {}).items():
+            if not sid or not outcome.ok:
+                continue
+            _mode = (outcome.body or {}).get("extraction_mode")
+            if _mode not in (_CAPTURE_NO_PROVIDER_MODE,
+                             _CAPTURE_EXTRACTION_DISABLED_MODE):
+                continue
+            _meta = read_spool_meta(root, sid) or {}
+            _turns = read_spool_turns(root, sid)
+            capture_backlog.record_not_processed(
+                session_id=sid,
+                harness=_meta.get("harness"),
+                # The spool holds the turns, not the path they came from.
+                file=None,
+                turns=len(_turns) or int(_meta.get("turns_count") or 0),
+                estimate=capture_backlog.estimate_units(_turns),
+                reason=_mode,
+                recorded_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                          time.gmtime()))
+    except Exception:
+        # Best-effort by the module's own contract — a ledger bug must never
+        # turn a filed session into a traceback (or a non-zero drain exit).
+        return
+
+
 def _cmd_session_drain(api_key: str, api_url: str,
                        exclude_session_id: str | None = None) -> int:
     """Replay every spooled session that has not been filed (#3963).
@@ -4561,8 +4616,14 @@ def _cmd_session_drain(api_key: str, api_url: str,
               file=_sys.stderr)
         return 0
 
-    summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
+    root = spool_dir()
+    summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
+    # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
+    # the ledger exists to close — turns stored, no import receipt (by design),
+    # the capture-failure breadcrumb cleared by the 2xx, and no local record
+    # anywhere. Record it (best-effort, so the drain's exit-0 contract holds).
+    _record_drain_deferrals(root, summary)
     for d in summary.discarded:
         print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
               file=_sys.stderr)
@@ -5180,6 +5241,59 @@ def _backlog_provider_note() -> tuple[str | None, str | None]:
         return None, None
 
 
+#: API hosts served by the HOSTED deployment, where extraction runs inside the
+#: SERVICE — the deployment sets the provider key (``docs/infra-runbook.md``),
+#: so this machine's provider env says nothing about whether a re-capture would
+#: extract. A run against one of these is never refused on the CLIENT's env.
+_HOSTED_API_HOSTS = frozenset({"api.premiselabs.co",
+                               "tortoise-y4mjjq.fly.dev"})
+
+
+def _api_url_host(api_url: str | None) -> str:
+    """The hostname of ``api_url`` (lower-cased), or ``""``. Never raises."""
+    from urllib.parse import urlsplit
+    url = str(api_url or "").strip()
+    if not url:
+        return ""
+    try:
+        return (urlsplit(url if "://" in url else f"//{url}").hostname
+                or "").lower()
+    except ValueError:
+        return ""
+
+
+def _backlog_provider_warning() -> str | None:
+    """A pre-flight note for a backlog run, or ``None`` when there is none.
+
+    The run re-POSTs through ``sessions import``, so extraction is decided
+    SERVER-side and the CLIENT's provider env is not evidence about it — on the
+    HOSTED lane it says nothing at all (the deployment holds the key), and
+    refusing there produced a recommended action a hosted user could not
+    perform plus a remedy they could not apply. So this is a NOTE, never a
+    refusal: the verdict per entry is read back from the ledger, which is what
+    keeps the run honest either way. It is only worth saying when this machine
+    has no key AND the target is self-hosted, where the local env is usually
+    the env the extractor runs in.
+    """
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
+    except Exception:
+        return None  # the per-entry import reports the config problem itself
+    if not api_key or _api_url_host(api_url) in _HOSTED_API_HOSTS:
+        return None
+    try:
+        from tortoise.hosted_api import _llm_provider_available
+        if _llm_provider_available():
+            return None
+    except Exception:
+        return None
+    _host = _api_url_host(api_url) or str(api_url or "")
+    return ("Note: no LLM provider key is configured on this machine "
+            "(OPENROUTER_API_KEY / DEEPSEEK_API_KEY etc.). The target is "
+            f"self-hosted ({_host}); if IT has no provider key either, every "
+            "entry below will be stored again and stay un-extracted.")
+
+
 def _print_backlog_offer() -> int:
     """Print the backlog state + its recommended action; return the pending count.
 
@@ -5306,22 +5420,17 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
 
     from tortoise import capture_backlog
 
-    # The key gates extraction, not storage (#3892): without a provider every
-    # re-import would STORE/defers again, spend nothing, extract nothing, and
-    # the run would end by claiming a progress it did not make. Refuse up
-    # front instead, naming the remedy.
-    try:
-        from tortoise.hosted_api import _llm_provider_available
-        _provider_ok = bool(_llm_provider_available())
-    except Exception:
-        _provider_ok = False
-    if not _provider_ok:
-        print("Cannot process the saved backlog: no LLM provider key is "
-              "configured — the re-capture would store the turns again and "
-              "extract nothing. Set one of OPENROUTER_API_KEY / "
-              "DEEPSEEK_API_KEY (etc.) and re-run "
-              "`tortoise sessions backlog --process`.")
-        return 1
+    # The key gates extraction, not storage (#3892) — but WHOSE key is not this
+    # process's to assert. The re-POST asks the SERVER to extract, and on the
+    # hosted lane the deployment holds the provider key, so a gate on the
+    # CLIENT's env turned the recommended action into one a hosted user could
+    # not perform and named a remedy they could not apply. The run is therefore
+    # NOT gated on it; the per-entry verdict is read from the LEDGER, which is
+    # what keeps the run honest when nothing extracts. A note is still printed
+    # for the self-hosted case where the local env is the extractor's env.
+    _provider_note = _backlog_provider_warning()
+    if _provider_note:
+        print(_provider_note)
 
     # Record the choice BEFORE rendering the report. The report's own
     # recommendation is derived from the recorded policy, so rendering first
@@ -5334,10 +5443,19 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
     entries = [r for r in state["not_processed"] if r.get("file")]
     without_file = [r for r in state["not_processed"] if not r.get("file")]
     if not entries:
+        # "No saved backlog to process" would be FALSE when the backlog is
+        # non-empty but unprocessable (`session drain` records a deferral with
+        # no transcript path): it would hide both the entries and the guidance.
+        if without_file:
+            print("Nothing in the saved backlog can be processed "
+                  f"automatically: {len(without_file)} saved session(s) have "
+                  "no transcript path recorded.")
+            for record in without_file:
+                print(f"  skipped {record.get('session_id')}: no transcript "
+                      "path was recorded for it (re-run its import to set "
+                      "one)")
+            return 0
         print("No saved backlog to process.")
-        for record in without_file:
-            print(f"  skipped {record.get('session_id')}: no transcript path "
-                  "was recorded for it (re-run its import to set one)")
         return 0
     provider, model = _backlog_provider_note()
     print(capture_backlog.format_report(state, provider=provider, model=model))
@@ -8027,10 +8145,11 @@ def _cmd_doctor(args):
                 capture_backlog.STATUS_NOT_PROCESSED]
             results.append((
                 "Saved backlog", "⚠️",
-                f"{_pending} saved session(s) were captured without "
-                f"extraction (~{_backlog_state['cost_units']} estimated "
-                f"extraction unit(s){', ' + _bp if _bp else ''}). "
-                f"{_backlog_rec}"))
+                f"{_pending} saved session(s) are LOCALLY RECORDED as "
+                f"captured without extraction (~{_backlog_state['cost_units']} "
+                f"estimated extraction unit(s){', ' + _bp if _bp else ''}). "
+                "A session extracted since by another path (MCP or the SDK) "
+                f"is not visible here. {_backlog_rec}"))
     except Exception as e:
         results.append(("Saved backlog", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))

@@ -55,7 +55,10 @@ the transcript it kept, and the choice its user made.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 __all__ = [
@@ -143,20 +146,36 @@ def _session_path(session_id: str) -> Path:
 def _write_json(path: Path, record: dict) -> bool:
     """Write ``record`` at ``path`` atomically-enough, never raising.
 
-    Written to a sibling temp then ``replace``d: two capture hooks can defer at
-    the same moment (per-turn hooks fire concurrently), and a reader that
-    catches a half-written record would report a session with no file and no
-    estimate — the offer would understate the backlog it exists to show.
+    Written to a UNIQUE sibling temp then ``replace``d: two capture hooks can
+    defer at the same moment (per-turn hooks fire concurrently), and a reader
+    that catches a half-written record would report a session with no file and
+    no estimate — the offer would understate the backlog it exists to show.
+
+    The temp name is unique PER WRITER (``mkstemp``), not a fixed
+    ``<name>.tmp``. A shared temp name would let two writers of the SAME
+    session id interleave their writes and one ``replace`` publish a torn
+    record — the very hazard this staging exists to prevent, so a fixed name
+    would have made the guard decorative. The temp keeps the ``.tmp`` suffix
+    that :func:`sessions` filters on, and is removed on any failure.
     """
+    tmp_path: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(record, indent=2, sort_keys=True),
-                       encoding="utf-8")
-        tmp.replace(path)
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                        prefix=path.name + ".",
+                                        suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, indent=2, sort_keys=True))
+        os.replace(tmp_name, path)
+        tmp_path = None  # consumed by the replace
         return True
     except Exception:
         return False
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
 
 
 def _read_json(path: Path) -> dict | None:
@@ -238,8 +257,13 @@ def record_not_processed(*, session_id: str, harness: str | None = None,
         record = {
             "session_id": str(session_id),
             "status": STATUS_NOT_PROCESSED,
-            "harness": harness,
-            "file": str(file) if file else None,
+            # A record written WITHOUT a transcript path must never ERASE one a
+            # previous writer recorded: `session capture` knows the durable
+            # transcript and a later `session drain` of the same session does
+            # not (the spool keeps the turns, not the path). Losing the path
+            # would leave an entry the run can no longer act on.
+            "harness": harness or (existing or {}).get("harness"),
+            "file": str(file) if file else (existing or {}).get("file"),
             "turns": _as_int(turns) or 0,
             "estimate": _as_int(estimate),
             # WHY it was store-only.  The two reasons are independent levers
@@ -401,6 +425,15 @@ def format_report(state: dict, *, provider: str | None = None,
                  f"{processed} processed, "
                  f"{'declined' if state.get('declined') else 'not declined'}.")
     if pending:
+        # THIS IS A LOCAL RECORD, NOT THE SERVER'S STATUS. The ledger is retired
+        # only by the capture/re-import paths that come back through THIS
+        # machine; a session later extracted by another path (the hosted MCP
+        # `tortoise_session_capture`, or `TortoiseSDK.capture_session`) is
+        # invisible here, so a `not-processed` line can be stale. Say so rather
+        # than assert a state this surface cannot know — the server-side status
+        # read is #3520's, deliberately not absorbed here.
+        lines.append("  (Local record only: a session extracted since by another "
+                     "path — MCP or the SDK — is not visible here.)")
         provider_note = ""
         if provider:
             provider_note = (f" (extraction provider: {provider}"
