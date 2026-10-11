@@ -330,6 +330,15 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
     # pins that the module really exists.
     "test_finding_provenance.py": [],
+    # #1423: the same module live-FalkorDB availability probe shape as #3301
+    # above — `_probe(candidates)` constructs, issues `RETURN 1`, and closes,
+    # over candidate URIs (the env URI plus _live_utils docker/legacy
+    # fallbacks). It can never pass graph_name= (it is precisely testing
+    # whether a candidate is reachable) and the file contains NO DETACH at
+    # all: every per-test graph in it is a `graph_name=test_subj1423_<hex>`
+    # projection built from _WORKING_URI, so no shared-path handle in this
+    # file is ever bulk-DETACHed.
+    "test_subject_supersession_1423.py": [r"from_uri\(uri\)"],
 }
 
 _FROM_URI_EXEMPT_FILES = {
