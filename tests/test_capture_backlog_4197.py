@@ -25,9 +25,9 @@ MUTATIONS THAT RED THESE:
   * make `set_policy` store an unknown choice, or make `read_policy` default to
     `declined` for an absent policy → the report claims a choice the user never
     made;
-  * drop the provider gate from `--process` → a keyless run "processes" every
-    entry, extracts nothing, and claims progress (the run's verdict is read
-    from the ledger, which is what keeps that honest).
+  * gate `--process` on the CLIENT's provider env → the hosted lane's
+    recommended action is refused with a remedy its user cannot apply (the P1
+    this suite pins in both directions).
 """
 from __future__ import annotations
 
@@ -64,7 +64,12 @@ def places(monkeypatch, tmp_path):
         {"api_key": "tt_test", "api_url": "https://legit.example.com"}),
         encoding="utf-8")
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "TORTOISE_SESSION_LLM_MOCK"):
+              "GEMINI_API_KEY", "TORTOISE_SESSION_LLM_MOCK",
+              # The upload identity must come from the fixture's own
+              # `credentials.json`, never from an ambient shell — otherwise the
+              # hosted/self-hosted direction a test pins would be decided by
+              # the developer's environment.
+              "TORTOISE_API_KEY", "TORTOISE_API_URL"):
         monkeypatch.delenv(k, raising=False)
     return home, receipts
 
@@ -306,20 +311,68 @@ def test_backlog_json_emits_the_state_for_an_empty_backlog(places, capsys):
     assert state["declined"] is False
 
 
-def test_backlog_process_without_a_provider_refuses_and_spends_nothing(
-        places, capsys):
+def _set_api_url(home, url: str) -> None:
+    (home / ".tortoise" / "credentials.json").write_text(
+        json.dumps({"api_key": "tt_test", "api_url": url}), encoding="utf-8")
+
+
+def test_backlog_process_is_not_refused_on_a_hosted_target(places, capsys):
+    """P1: on the HOSTED lane extraction is decided SERVER-side (the
+    deployment sets the provider key), so a client with no local key must still
+    be able to run the RECOMMENDED action. The old gate read the CLIENT's env,
+    refused, and named a remedy a hosted user could not apply.
+
+    MUTATION THAT REDS THIS: restore the unconditional
+    `_llm_provider_available()` refusal in `_process_saved_backlog`.
+    """
     home, _ = places
+    _set_api_url(home, "https://api.premiselabs.co")
     transcript = _transcript(home, "a.jsonl")
     backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
                                  estimate=12, reason="no LLM provider key",
                                  file=str(transcript))
-    with mock.patch("urllib.request.urlopen") as urlopen:
+    urlopen, posted = _posting(lambda payload: _extracted_body("s_1"))
+    with mock.patch("urllib.request.urlopen", urlopen):
         rc = main.main(["sessions", "backlog", "--process"])
     out = capsys.readouterr().out
 
+    assert rc == 0, out
+    assert [p["session_id"] for p in posted] == ["s_1"], \
+        "the hosted run must reach the POST the user asked for"
+    assert "Cannot process" not in out
+    assert "no LLM provider key is configured on this machine" not in out, \
+        "the hosted lane gets no client-side key note"
+    assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
+
+
+def test_backlog_process_notes_a_missing_key_only_for_a_self_hosted_target(
+        places, capsys):
+    """The genuinely-local direction: the note names the SELF-HOSTED target
+    and a remedy its user can apply. It is a NOTE, not a refusal — the run's
+    per-entry verdict comes from the LEDGER, so it is safe to attempt, and a
+    refusal would still assert a server-side fact the client cannot have.
+
+    MUTATION THAT REDS THIS: drop `_backlog_provider_warning()` → the local
+    user gets no signal at all.
+    """
+    home, _ = places
+    _set_api_url(home, "https://selfhosted.example.com")
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
+                                 estimate=12, reason="no LLM provider key",
+                                 file=str(transcript))
+    urlopen, posted = _posting(lambda payload: _store_only_body("s_1"))
+    with mock.patch("urllib.request.urlopen", urlopen):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert "self-hosted (selfhosted.example.com)" in out, out
+    assert "OPENROUTER_API_KEY" in out and "DEEPSEEK_API_KEY" in out
+    assert [p["session_id"] for p in posted] == ["s_1"], \
+        "a note is not a refusal — the run still attempts the re-capture"
+    # The verdict is read from the ledger, so a still-store-only run is honest.
     assert rc == 1
-    assert not urlopen.called, "no key ⇒ no POST, no spend, no false progress"
-    assert "no LLM provider key" in out
+    assert "still not extracted" in out
     assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
 
 
@@ -947,3 +1000,164 @@ def test_json_refuses_to_be_combined_with_an_action(places):
         main.main(["sessions", "backlog", "--future-only", "--json"])
     with pytest.raises(SystemExit):
         main.main(["sessions", "backlog", "--process", "--json"])
+
+
+# ── `session drain`: the THIRD consent-gated transmission primitive ─────────
+
+
+def test_a_drain_delivered_store_only_session_is_recorded(places, capsys,
+                                                          tmp_path,
+                                                          monkeypatch):
+    """`session drain` files a session spooled by an interrupted capture, and a
+    store-only server response there left NO local record at all — turns stored,
+    no receipt (by design), the capture-failure breadcrumb cleared by the 2xx —
+    so the offer missed exactly the case it exists for. The drain must record
+    it.
+
+    The spool keeps the turns but not the transcript PATH, so the entry is
+    recorded without one; the read surface and `--process` say so instead of
+    claiming the backlog is empty.
+
+    MUTATION THAT REDS THIS: drop `_record_drain_deferrals` from
+    `_cmd_session_drain`.
+    """
+    from tortoise.capture_spool import (
+        PostOutcome,
+        Snapshot,
+        spool_dir,
+        write_spool_entry,
+    )
+
+    home, _ = places
+    _set_api_url(home, "https://legit.example.com")
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    turns = [{"role": "user", "content": "stored turn"},
+             {"role": "assistant", "content": "stored reply"}]
+    write_spool_entry(spool_dir(), Snapshot(
+        session_id="s_drained", turns=turns, source="t", machine_id="m",
+        harness="claude"))
+
+    monkeypatch.setattr(
+        main, "_session_post",
+        lambda api_key, api_url: (lambda payload: PostOutcome(
+            ok=True, status=200, body=_store_only_body("s_drained"))))
+    rc = main.main(["session", "drain"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    record = backlog.sessions()[0]
+    assert record["session_id"] == "s_drained"
+    assert record["harness"] == "claude"
+    assert record["turns"] == 2
+    assert record["reason"] == "no-provider"
+    assert record["file"] is None, "the spool holds turns, not the path"
+
+
+def test_a_drain_record_never_erases_a_known_transcript_path(places):
+    """A record written WITHOUT a path must not erase one a previous writer
+    recorded: `session capture` knows the durable transcript, the drain does
+    not. Losing the path would leave an entry the run can no longer act on.
+
+    MUTATION THAT REDS THIS: make `record_not_processed` rebuild the record
+    from its own arguments alone (the pre-fix shape).
+    """
+    home, _ = places
+    transcript = home / "a.jsonl"
+    transcript.write_text("User: hi\nAssistant: yes\n", encoding="utf-8")
+    assert backlog.record_not_processed(
+        session_id="s_1", harness="claude-desktop", file=str(transcript),
+        turns=2, estimate=6) is True
+    assert backlog.record_not_processed(
+        session_id="s_1", harness="claude", turns=2, estimate=6,
+        reason="no-provider") is True
+
+    assert backlog.sessions()[0]["file"] == str(transcript)
+
+
+def test_process_reports_unprocessable_entries_instead_of_claiming_no_backlog(
+        places, capsys):
+    """A drain-recorded entry has no transcript path. `--process` must not say
+    "No saved backlog to process" — the backlog is not empty, it is
+    unprocessable — and must give the remedy.
+
+    MUTATION THAT REDS THIS: restore the `if not entries: print("No saved
+    backlog to process.")` early return that skipped the skipped-entry lines.
+    """
+    backlog.record_not_processed(session_id="s_drained", harness="claude",
+                                 turns=4, estimate=12, reason="no-provider")
+    rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "No saved backlog to process" not in out
+    assert "no transcript path" in out
+    assert "s_drained" in out
+    assert "skipped" in out
+
+
+# ── The read surface must not assert a state it cannot know ────────────────
+
+
+def test_the_read_surface_reports_a_local_record_not_a_server_verdict(
+        places, capsys):
+    """The ledger is retired only by the capture/re-import paths on THIS
+    machine, so a session extracted since by another path (the hosted MCP
+    `tortoise_session_capture`, or `TortoiseSDK.capture_session`) is invisible
+    here. The report and `doctor` must say the record is LOCAL rather than
+    assert a state this surface cannot know — the server-side status read is
+    #3520's, deliberately not absorbed here.
+
+    MUTATION THAT REDS THIS: restore the unqualified "were captured without
+    extraction" wording.
+    """
+    home, _ = places
+    backlog.record_not_processed(session_id="s_1", harness="pi", turns=10,
+                                 estimate=30, reason="no LLM provider key",
+                                 file=str(home / "a.jsonl"))
+    assert main.main(["sessions", "backlog"]) == 0
+    out = capsys.readouterr().out
+    assert "Local record only" in out
+    assert "not visible here" in out
+
+    main.main(["doctor", "--path", str(home / "doctor.db")])
+    doctor_out = capsys.readouterr().out
+    line = next(ln for ln in doctor_out.splitlines() if "Saved backlog" in ln)
+    assert "LOCALLY RECORDED" in line
+    assert "not visible here" in line
+
+
+# ── The staged write must be atomic PER WRITER ─────────────────────────────
+
+
+def test_each_ledger_writer_stages_through_its_own_temp_file(places,
+                                                             monkeypatch):
+    """The temp-then-`replace` is atomic only if every writer owns its temp
+    file. A fixed `<name>.tmp` is shared by two concurrent writers of the SAME
+    session (per-turn hooks fire concurrently): their writes interleave and one
+    `replace` publishes a TORN record, which `_read_json` then reads as
+    "nothing recorded" — the entry silently drops out of the offer.
+
+    MUTATION THAT REDS THIS: restore `tmp = path.with_name(path.name + ".tmp")`.
+    """
+    import os as _os
+
+    seen: list[str] = []
+    real_replace = _os.replace
+
+    def spy(src, dst):
+        seen.append(str(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_os, "replace", spy)
+    assert backlog.record_not_processed(session_id="s1", turns=1, estimate=1)
+    assert backlog.record_not_processed(session_id="s1", turns=2, estimate=2)
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1], "each writer needs its OWN temp file"
+    assert all(name.endswith(".tmp") for name in seen)
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    assert not list(backlog.backlog_dir().glob("*.tmp")), \
+        "a consumed temp file must not be left behind"

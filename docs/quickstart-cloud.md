@@ -236,12 +236,20 @@ under `$TORTOISE_IMPORT_RECEIPT_DIR`'s parent). It records the transcript path,
 harness, turn count and estimate — never transcript content.
 
 **Which capture paths populate it.** A deferral is recorded by `sessions
-import` and by `session capture` (the Claude Code SessionEnd hook, which
-records the durable Claude project transcript so a later `--process` can
-actually re-read it). Two paths do **not** write the ledger yet, so on them the
-report stays silent until the session is imported explicitly: a session filed
-by the spool drain (`tortoise session drain`, e.g. after a SessionEnd hook was
-cancelled) and the Pi capture extension.
+import`, by `session capture` (the Claude Code SessionEnd hook, which records
+the durable Claude project transcript so a later `--process` can actually
+re-read it), and by `session drain` when a session spooled by an interrupted
+capture is filed and the server stores it without extracting. The drain knows
+the spooled turns but not the transcript path they came from, so its record has
+no transcript path: `--process` reports it as skipped and tells you to re-run
+that session's import with the transcript instead of pretending the backlog is
+empty. One path does **not** write the ledger yet, so on it the report stays
+silent until the session is imported explicitly: the Pi capture extension.
+
+**This is a local record, not the server's verdict.** A session extracted by
+another path since it was deferred — the hosted MCP `tortoise_session_capture`,
+or `TortoiseSDK.capture_session` — is not visible in the local ledger, so a
+`not-processed` entry can be stale until the next `--process` replays it.
 
 ## 4. Use the REST API
 
