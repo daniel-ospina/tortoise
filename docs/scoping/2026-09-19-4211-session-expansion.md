@@ -229,7 +229,8 @@ post-retrieval graph chain is already 17.5 ms p50, 22 % of the retrieval budget 
 ## 5. What already exists — and the exact delta
 
 **A modification of an existing mechanism is a better outcome than a new one.** `tortoise/session_reinjection.py`
-(C4, **#2517**, **PR #3577** — open and merge-conflicting) already:
+(C4, **#2517**, **PR #3577** — **merged 2026-09-22**; it is NOT present at this doc's pinned `e75091e` because it
+landed after it, so read it on `main`) already:
 - fetches a seeded hit's own session's turns over `(s:Session)-[:CONTAINS]->(p:Point)` — **product-real**;
 - splices them additively, anchored after the session's last base rank;
 - is OFF by default and eval-armed.
@@ -249,14 +250,16 @@ post-retrieval graph chain is already 17.5 ms p50, 22 % of the retrieval budget 
 
 **Other existing mechanisms, precisely located:**
 - `GraphRanker` (`tortoise/ranking.py`, #25) — reorders only; the ask lane does not use it.
-- `expand_structural_hops` (`tortoise/search_engine.py:1066`) — introduces candidates over `:IMPL|NAND`;
+- `expand_structural_hops` (`tortoise/search_engine.py:1113`) — introduces candidates over `:IMPL|NAND`;
   zero such edges on the failing store; the ask lane never enables it.
 - `coverage_loop` C3-1 (`tortoise/coverage_loop.py`) — entity-facet completeness via Object/aboutObject;
   no Objects on capture stores (#3664) ⇒ no facets ⇒ no-op.
 
 **Governance:** this issue **does not duplicate #2517** — it is the product-graph seed fix + relevance
-selection + product wiring; it must reuse C4's module rather than author a parallel one. If #2517 lands
-first, #4211 shrinks to the seed/selection/wiring delta; if #2517 stalls, #4211 owns the whole leg.
+selection + product wiring. **C4 (#2517, PR #3577) has LANDED**, so its module and contract exist on
+`main` and the shared mechanism is reused rather than re-authored — what #4211 adds is the seed it
+keys on, the session-scoped selection, and fusion in rank space. Had #2517 stalled, #4211 would have
+owned the whole leg.
 
 ---
 
@@ -272,8 +275,16 @@ primary instrument; the reader run is the cross-check.
 **labelled branch baseline** — never presented as the shipped product's (the W6C rule).
 
 **Primary per-question criterion — never an aggregate.** For **each** of the 5 window-miss questions the
-gold turn(s) must be **inside the 40-item assembled reader context with the arm ON** and outside with it
-OFF. **Pass = 5/5.** Report each question's gold rank before/after **and the assembled token count**
+gold turn must be **inside the 40-item assembled reader context with the arm ON** (8 gold turns
+across the 5 questions). What makes it per-turn rather than per-question is **where the turn starts**:
+
+- a gold turn **outside** the cut with the arm OFF must be brought inside **by the arm** — that is the
+  recall the arm claims (§1 records 7 of the 8 turns there: ranks 55, 66, 83, 88, 92, 146, 152);
+- a gold turn **already inside** with the arm OFF must **stay** inside (no regression). `0a995998`'s
+  `answer_afa9873b_2_t10` is fused rank **19 — in cut** (§1), so the arm is not what admits it, and an
+  "outside with it OFF" requirement cannot apply to it.
+
+**Pass = 5/5 questions, 8/8 gold turns.** Report each question's gold rank before/after **and the assembled token count**
 (the window is 97.4 % saturated — a win that evicts other evidence is not a win).
 
 **Precision counter-metric.** `turn_recall@10` / `nDCG@10` on the 21-question fixture, and a
@@ -289,7 +300,9 @@ passing every criterion; record every cell.
 - **F1** — the dense leg alone (#4202) already puts all 5 golds inside the cut ⇒ not needed; close.
 - **F2** — any window-miss question's gold stays outside the cut with the arm ON ⇒ no recall delivered.
 - **F3** — a reproducible per-question correct→incorrect regression ⇒ the precision guard failed.
-- **F4** — leg p50 > 15 ms ⇒ the stated budget is blown.
+- **F4** — leg p50 > 10 ms ⇒ the stated budget is blown. The budget above IS **p50 ≤ 10 ms**, so the
+  threshold is the budget: the 10–15 ms band is a blown budget and fires F4, not a pass. (An earlier
+  draft fired only above 15 ms, which left that band with no decision rule at all.)
 
 Any firing closes #4211 with the **negative result**, not a shipped no-op.
 
