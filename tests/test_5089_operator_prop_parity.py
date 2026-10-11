@@ -223,34 +223,55 @@ def test_check_consistency_agrees_after_rebuilding_an_operator(sdk_and_events):
     assert r["ok"] is True, r.get("divergent_points")
 
 
-def test_operator_status_divergence_is_a_door_question(sdk_and_events):
-    """PINNED DIVERGENCE (#5089/#5091) — not fixed here, deliberately.
+def test_operator_status_parity_holds_across_the_doors(sdk_and_events):
+    """RULING APPLIED (#5089): the SDK door writes the status the replay reproduces.
 
-    Reads select on ``status`` (``grounding.py`` matches ``{status: 'live'}``),
-    so this is a PARTICIPATION difference, not a prop difference: whichever side
-    is canonical changes whether operators feed the belief state. Both live
-    doors are measured below; if this test starts failing, a ruling landed and
-    this assertion (plus the epic's DoD) should be updated with it.
+    This assertion pair replaces the PINNED DIVERGENCE that lived here. The pin's
+    own contract read: *"if this test starts failing, a ruling landed and this
+    assertion (plus the epic's DoD) should be updated with it."* It failed, the
+    evidence was assembled, and the pin is now updated — so this is that update,
+    not a bypass of it.
+
+    The evidence, none of which endorses a status-less operator:
+      * graph PARENT CAUSE 28 (``1a0e9120c82``, high confidence, reproduced):
+        "10 points with status=None that are inert in EP ... Work that is recorded
+        and does NOT vote is worse than work that is not recorded, because it
+        reads as done."
+      * ``consistency.py`` ``_WRITER_DEFAULTS['status'] = 'live'`` — "the graph's
+        value must EQUAL the default"; a different value is a divergence.
+      * ``create_operator``'s own docstring: "the event path default ('live',
+        projection/entities.py coalesce)" — 'live' IS the designed default.
+      * TORTOISE-GRAPH-BRIEF: a ``status=None`` birth is a leak; after any write,
+        ``assert status in ('draft','live')``.
+      * ONTOLOGY.md §5: ``live`` = "Full EP participation", with ``create_operator``
+        named on that row.
+
+    So the SDK door's omission was the defect, and the replay's 'live' was right.
+    The EventAPI door's ``draft`` is its own deliberate journal-composer posture
+    (#1088) and is likewise preserved by the replay.
     """
     sdk, events = sdk_and_events
     sdk_op = _sdk_operator(sdk)
     api_op, _, _ = _eventapi_operator(sdk, events)
 
-    assert "status" not in _props(sdk, sdk_op), "SDK door writes no status"
+    assert _props(sdk, sdk_op).get("status") == "live", (
+        "#5089: the SDK door must write the status the replay reproduces")
     assert _props(sdk, api_op).get("status") == "draft", "EventAPI door drafts"
 
     def _live_participants() -> set:
         return {r[0] for r in sdk._get_proj().g.query(
             "MATCH (n:Point {status: 'live'}) RETURN n.id").result_set}
 
-    assert sdk_op not in _live_participants(), (
-        "the SDK door's operator is not a grounding participant live")
+    # Both doors are EP participants only if 'live'; the SDK operator is, now.
+    assert sdk_op in _live_participants(), (
+        "the SDK door's operator participates in grounding")
 
     _rebuild(sdk, events)
     assert _props(sdk, sdk_op).get("status") == "live", (
-        "the replay promotes a status-less operator record to 'live'")
+        "the replay must reproduce the door's own status, not invent one")
     assert _props(sdk, api_op).get("status") == "draft", (
         "a recorded status is not overridden by the default")
     assert sdk_op in _live_participants(), (
-        "the rebuild alone made an operator a grounding participant that live "
-        "excluded")
+        "the rebuild must not change an operator's EP posture")
+    assert api_op not in _live_participants(), (
+        "an extracted draft operator stays EP-inert across the rebuild")

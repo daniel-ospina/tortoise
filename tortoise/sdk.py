@@ -10757,14 +10757,26 @@ class TortoiseSDK:
         # #780: extraction operators (promote_source=False) carry status:'draft' so
         # the EP draft filter excludes them; the event path default ('live',
         # projection/entities.py coalesce) is overridden by the explicit status.
+        #
+        # #5089 (epic: derived = replay(journal)): the status is written on BOTH
+        # postures. Only the extraction posture used to set it, so a DEFAULT
+        # (`promote_source=True`) operator was born status-less — and the replay
+        # writer's coalesce default ('live') then did NOT reproduce the live graph.
+        # The graph's standing rule after any write is `status in ('draft','live')`
+        # (a status-less Point is EP-inert while a rebuilt one is live, so the
+        # operator silently changed EP posture); and `consistency._WRITER_DEFAULTS`
+        # states the rule this restores — "When the journal omits one, the graph's
+        # value must EQUAL the default". 'live' IS that default, per this writer's
+        # own docstring: "the event path default ('live', projection/entities.py
+        # coalesce) is overridden by the explicit status." So the door, not the
+        # replay, was the omission.
         extra_props = []
         params = {"id": pid, "op": op_type, "direction": direction}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
-        if not promote_source:
-            extra_props.append("status:$st")
-            params["st"] = "draft"
+        extra_props.append("status:$st")
+        params["st"] = "live" if promote_source else "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
