@@ -530,7 +530,7 @@
     "one_hop_reach": "A one-hop CONTAINS walk from the top-40 pool reaches ALL gold turns in ALL 5 window-miss questions (8/8 gold turns), including both turns that never enter the 120-pool (0a995998 at 146/152).",
     "edge_substrate": "On the failing store the only edge type is (Session)-[:CONTAINS]->(turn); IMPL/NAND/about* are 0. PPR degenerates to a weighted session expansion.",
     "existing_mechanisms": "expand_structural_hops traverses :IMPL|NAND (0 edges here) and the ask lane sets structural_hops=0; GraphRanker reorders only; coverage_loop C3-1 needs Objects/aboutObject (capture writes none, #3664); session_reinjection C4 (#2517/PR#3577) fetches via CONTAINS but its seed needs a session_id a product turn lacks, and its first-5-distinct-session rule misses 4 of 5 gold sessions.",
-    "within_session_k": "Gold turns' session-scoped FTS ranks: 1, 4, 4, 6, 8, 9, 2, 6 \u2014 a per-session K=10 covers all.",
+    "within_session_k": "Gold turns' session-scoped FTS ranks: 1, 4, 4, 6, 8, 9, 1, 6 \u2014 a per-session K=10 covers all.",
     "latency": "Expansion fetch 2.2-12.1 ms (122-198 sibling rows); deep FTS 2.2-4.5 ms; zero LLM calls."
   },
   "discrepancy_reported": "e9327a54 gold turn measured at fused rank 88 here; M1 (docs/research/2026-09-19-m1-read-path-latency-profile.md \u00a75) recorded 30 (in cut). Class unchanged (below/at the 40-cut differs); not reconciled, reported."
