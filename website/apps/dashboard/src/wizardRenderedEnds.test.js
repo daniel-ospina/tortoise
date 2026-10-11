@@ -443,3 +443,59 @@ test('#5820: the extractors fail LOUD rather than passing vacuously', async () =
     `${ANNOUNCE_DECL} + WIZARD_SCOPE_UNBOUND_SENTINEL`, 'unbound scope read')
   await assert.rejects(renderWizardEnds(unbound, [DISCRIMINATING]), /WIZARD_SCOPE_UNBOUND_SENTINEL/)
 })
+
+// ── #3728 review (P2): the focus guard is PINNED, not merely asserted ────────
+// The step-announcement effect re-runs when org membership lands. What keeps
+// that re-run from yanking focus is the init branch seeding
+// `lastWizardStepRef.current` — without it the FIRST post-mount re-run always
+// computes `stepChanged === true` (the ref is still -1), so a membership flip on
+// step 0 moves focus to the wizard container. This EXECUTES the extracted effect
+// body with mocked refs and reads whether `focus()` was called, so the guarantee
+// is pinned by the value it produces rather than by the presence of a line.
+async function focusCallsOverRuns(source) {
+  const { open, close } = announcementEffectBlock(source)
+  const body = source.slice(open + 1, close)
+  const [probe] = await evalExpressions([`(() => {
+    const wizardStageLabel = () => 'LABEL'
+    const setWizardStepAnnounce = () => {}
+    const wizardFocusInit = { current: false }
+    const lastWizardStepRef = { current: -1 }
+    let focusCalls = 0
+    const wizardCardRef = { current: { focus: () => { focusCalls += 1 } } }
+    const welcomeMode = true
+    const authed = true
+    const LEGACY_WIZARD_ARCHIVED = false
+    const effectivelyPaused = false
+    const serverHarnessConnected = false
+    const isBuildFork = false
+    let wizardStep = 0
+    let welcomeHasOrg = false
+    const run = () => {${body}}
+    run()                    // mount: the init run seeds the ref and returns
+    welcomeHasOrg = true     // membership lands — a flag-only dep change
+    run()
+    const afterFlagOnly = focusCalls
+    wizardStep = 1           // a GENUINE step change
+    run()
+    return { afterFlagOnly, afterStepChange: focusCalls }
+  })()`])
+  return probe.value
+}
+
+test('#3728: a flag-only re-run at step 0 does not steal focus, a step change does', async () => {
+  const r = await focusCallsOverRuns(mainJsxSrc)
+  assert.equal(r.afterFlagOnly, 0,
+    'landing org membership on step 0 must refresh the announcement WITHOUT moving focus')
+  assert.equal(r.afterStepChange, 1,
+    'a genuine step change must still move focus exactly once')
+})
+
+test('#3728 falsifiability: dropping the init-branch seed re-introduces the focus steal', async () => {
+  const unseeded = patch(mainJsxSrc,
+    '      lastWizardStepRef.current = wizardStep\n      return\n    }',
+    '      return\n    }',
+    'remove the init-branch seed')
+  const r = await focusCallsOverRuns(unseeded)
+  assert.equal(r.afterFlagOnly, 1,
+    'without the seed the first post-mount flag-only re-run would move focus (the defect)')
+})
