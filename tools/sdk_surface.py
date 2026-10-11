@@ -48,8 +48,8 @@ disagreement in either direction:
      `config/surface-manifest.yml` were cut from. Sees what is *reachable* on the class,
      including anything attached outside the class body — `tortoise/sdk.py` already contains
      exactly that pattern (`TortoiseSDK._EVENT_PURGE_LAST = now`, line 2376).
-  3. **APPROVED BASELINE** — the `sdk:` rows of `config/surface-manifest.yml`, the frozen,
-     owner-approved set (#3863).
+  3. **FROZEN BASELINE** — the `sdk:` rows of `config/surface-manifest.yml`, the frozen set
+     (#3863).
 
 AST and REFLECTION are not the same question, and nothing reconciled them until this file.
 They agree exactly today (150 / 150). They are not guaranteed to keep agreeing: a public
@@ -60,10 +60,11 @@ part company.
 WHAT THIS IS NOT
 ----------------
 It is not a second approval gate. `config/sdk-surface.json` carries no approval semantics —
-`config/surface-manifest.yml` remains the approved baseline, and its gate
+`config/surface-manifest.yml` remains the frozen baseline, and its gate
 (`tools/surface-guard.py`) remains the merge-blocking one. This declaration records
-*identity*; the baseline records *approval*. `--check` asserts the two agree, so they cannot
-drift apart.
+*identity*; the approval lives in `docs/product/canonical-mcp-tools.md`, which a
+`tools/surface_manifest.py cut` copies into the manifest (#4185). `--check` asserts the two
+agree, so they cannot drift apart.
 
 Neither artifact proves approval. `--check` is a CONSISTENCY check: a change that updates the
 `TortoiseSDK` class and this declaration together passes it. Adding or removing a public
@@ -119,7 +120,7 @@ def _read_text_or_refuse(path: Path, what: str) -> str:
     """Read an evidence text file, or refuse in the same contract as the other surfaces.
 
     The doc staleness read is an evidence read exactly like `load_declaration` /
-    `approved_from_manifest`: a path that exists but cannot be read (a directory, a permission
+    `frozen_from_manifest`: a path that exists but cannot be read (a directory, a permission
     error, bad encoding) must produce the documented `SURFACE CHECK REFUSED`, not a raw
     traceback (#4516 review). The declaration's own text is captured by `load_declaration`'s
     single read, so it needs no second read here.
@@ -177,7 +178,7 @@ def declared_from_ast() -> set[str]:
 def reflected_from_runtime() -> set[str]:
     """The REACHABLE public surface — what `getattr(TortoiseSDK, name)` can resolve.
 
-    This is the view `tests/test_surface_resolution.py` consumes and the view the approved
+    This is the view `tests/test_surface_resolution.py` consumes and the view the frozen
     baseline was cut from. It sees attributes attached outside the class body; the AST walk
     does not.
 
@@ -200,21 +201,21 @@ def reflected_from_runtime() -> set[str]:
         ) from exc
 
 
-def approved_from_manifest(path: Path = MANIFEST_FILE) -> set[str]:
-    """The approved baseline's SDK rows — the frozen, owner-approved set (#3863)."""
+def frozen_from_manifest(path: Path = MANIFEST_FILE) -> set[str]:
+    """The frozen baseline's SDK rows (#3863)."""
     import yaml
 
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise SurfaceEvidenceUnreadable(f"the approved baseline {path} does not exist") from None
+        raise SurfaceEvidenceUnreadable(f"the frozen baseline {path} does not exist") from None
     except Exception as exc:  # any read failure is a fail-closed failure
         raise SurfaceEvidenceUnreadable(
-            f"the approved baseline {path} could not be read: {type(exc).__name__}: {exc}"
+            f"the frozen baseline {path} could not be read: {type(exc).__name__}: {exc}"
         ) from exc
     if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
         raise SurfaceEvidenceUnreadable(
-            f"the approved baseline {path} is malformed: expected a mapping with a `rows:` key"
+            f"the frozen baseline {path} is malformed: expected a mapping with a `rows:` key"
         )
     return {
         str(row["method"])
@@ -266,7 +267,7 @@ def render_json(declared: set[str]) -> str:
 
 AST_VIEW = "the live AST class body of `TortoiseSDK`"
 REFLECTION_VIEW = "runtime reflection (`dir(TortoiseSDK)` + `callable`)"
-APPROVED_VIEW = "the approved baseline (`config/surface-manifest.yml` `sdk:` rows)"
+FROZEN_VIEW = "the frozen baseline (`config/surface-manifest.yml` `sdk:` rows)"
 
 
 def _disagreements(reference: set[str], views: tuple[tuple[str, set[str]], ...]) -> list[str]:
@@ -300,19 +301,19 @@ def reconcile_declaration(
     frozen: set[str],
     live_ast: set[str],
     reflected: set[str],
-    approved: set[str],
+    frozen_baseline: set[str],
 ) -> list[str]:
     """`--check`: the frozen declaration vs all three views, in both directions."""
     return _disagreements(
         frozen,
-        ((AST_VIEW, live_ast), (REFLECTION_VIEW, reflected), (APPROVED_VIEW, approved)),
+        ((AST_VIEW, live_ast), (REFLECTION_VIEW, reflected), (FROZEN_VIEW, frozen_baseline)),
     )
 
 
 def reconcile_code_views(live_ast: set[str], reflected: set[str]) -> list[str]:
     """`--render`: do the two views derived FROM THE CODE agree about what the surface is?
 
-    This is the only precondition for writing. The approved baseline is deliberately NOT
+    This is the only precondition for writing. The frozen baseline is deliberately NOT
     part of it: approval is a human act that happens *after* a method exists, so requiring
     it here would make the documented order (define → render → get approved) impossible.
     The baseline is cross-checked by `--check`, which is what CI runs.
@@ -320,11 +321,11 @@ def reconcile_code_views(live_ast: set[str], reflected: set[str]) -> list[str]:
     return _disagreements(live_ast, ((REFLECTION_VIEW, reflected),))
 
 
-def render_doc(frozen: set[str], reflected: set[str], approved: set[str]) -> str:
+def render_doc(frozen: set[str], reflected: set[str], frozen_baseline: set[str]) -> str:
     """The human-facing half: the declaration, and the one procedure a contributor needs."""
     agreement = (
         " — all agree."
-        if len(frozen) == len(reflected) == len(approved) and frozen == reflected == approved
+        if len(frozen) == len(reflected) == len(frozen_baseline) and frozen == reflected == frozen_baseline
         else ". They do NOT all agree; see `tools/sdk_surface.py --check`."
     )
     return f"""# The declared public surface of `TortoiseSDK`
@@ -369,10 +370,10 @@ declaration against three views derived by genuinely different means, in both di
 |---|---|---|
 | **AST** | `_sdk_targets()` class-body walk of `tortoise/sdk.py` | what is **defined** in the class |
 | **REFLECTION** | `dir(TortoiseSDK)` + `callable` | what is **reachable**, incl. attributes attached outside the class body |
-| **APPROVED** | `config/surface-manifest.yml` `sdk:` rows | what an **owner approved** (#3863) |
+| **FROZEN** | `config/surface-manifest.yml` `sdk:` rows | the frozen snapshot the declaration is reconciled against — a drift control, **not** the approved target (#3863/#4185) |
 
 At the render that produced this file: AST **{len(frozen)}** · reflection **{len(reflected)}**
-· approved **{len(approved)}**{agreement}
+· frozen **{len(frozen_baseline)}**{agreement}
 
 AST and reflection are *not* the same question, and nothing reconciled them before this file.
 `tortoise/sdk.py` already attaches one attribute outside the class body
@@ -391,9 +392,11 @@ gap between the two counts — which is why both are reported.
    without human approval (the #4282 mandate): the surface is the contract every agent and
    customer integration is built on, so a change materially affects customer outcomes. Ask
    Daniel (repo `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY") before you write the code
-   or re-cut anything. Only then add the method's `sdk:` row to `config/surface-manifest.yml`
-   and set `approval` on that row to the PR number and Daniel's handle. This declaration
-   records *identity*; the manifest records *approval*. `uv run python tools/surface-guard.py`
+   or re-cut anything. Only then record the approval in `docs/product/canonical-mcp-tools.md`
+   (`approval_status` / `approvedBy` / `approved` / `approval_pr`) and add the method's `sdk:` row to
+   `config/surface-manifest.yml`. This declaration records *identity*; the approval lives in the
+   canonical doc, which a `tools/surface_manifest.py cut` copies into the manifest (#4185).
+   `uv run python tools/surface-guard.py`
    is RED until that row exists — but a green guard is a CONSISTENCY result, not consent: a
    change that updates the class and the manifest together passes it, so it cannot tell an
    approved addition from an unapproved one. Daniel's review is what carries the approval.
@@ -411,7 +414,7 @@ until the replacement it points a caller at exists.
 
 ## Related
 
-- `docs/product/mcp-sdk-surface.md` — the curated list the owner reads, and the approved
+- `docs/product/mcp-sdk-surface.md` — the curated list the owner reads, and the frozen
   baseline's human form (#3863).
 - `docs/product/bridge-table.md` — Phase 0.1: every tool and its single SDK destination.
 - `docs/product/canonical-sdk-methods.md` — all {len(frozen)} methods in groups (#1521).
@@ -431,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         live_ast = declared_from_ast()
         reflected = reflected_from_runtime()
-        approved = approved_from_manifest(args.manifest)
+        frozen_baseline = frozen_from_manifest(args.manifest)
         # `--render` CREATES the declaration, so reading it is only a precondition of
         # `--check`. Requiring it to pre-exist would make the first render impossible.
         frozen, declaration_text = (
@@ -441,11 +444,11 @@ def main(argv: list[str] | None = None) -> int:
         return _refuse(exc)
 
     json_text = render_json(live_ast)
-    doc_text = render_doc(live_ast, reflected, approved)
+    doc_text = render_doc(live_ast, reflected, frozen_baseline)
 
     if args.check:
         try:
-            problems = reconcile_declaration(frozen, live_ast, reflected, approved)
+            problems = reconcile_declaration(frozen, live_ast, reflected, frozen_baseline)
             # Text staleness is a separate check from the name sets: it catches a hand-edited
             # metadata field, which the name-set comparison cannot see. It is performed on
             # WHATEVER path was actually read — never gated on Path equality with ANY default.
@@ -474,9 +477,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{i}. {problem}\n")
             return 1
         print(
-            f"OK — the declaration matches the code and the approved baseline: "
+            f"OK — the declaration matches the code and the frozen baseline: "
             f"{len(frozen)} public {CLASS_NAME} methods "
-            f"(AST {len(live_ast)}, reflection {len(reflected)}, approved {len(approved)})."
+            f"(AST {len(live_ast)}, reflection {len(reflected)}, frozen {len(frozen_baseline)})."
         )
         return 0
 
@@ -497,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"wrote {args.declaration}")
     print(f"wrote {args.doc}")
     print(f"  declared public {CLASS_NAME} methods: {len(live_ast)}")
-    print(f"  AST {len(live_ast)} · reflection {len(reflected)} · approved {len(approved)}")
+    print(f"  AST {len(live_ast)} · reflection {len(reflected)} · frozen {len(frozen_baseline)}")
     return 0
 
 

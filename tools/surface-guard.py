@@ -3,9 +3,9 @@
 
 WHAT THIS CATCHES
     An UNRECORDED change to the agent-facing surface: a new (or removed, or
-    re-bound, or re-served) MCP tool or public SDK method that the approved
+    re-bound, or re-served) MCP tool or public SDK method that the frozen
     baseline in `config/surface-manifest.yml` does not declare, and a changed
-    DECLARATION behind an approved name — a parameter default or an annotation,
+    DECLARATION behind a frozen-baseline name — a parameter default or an annotation,
     which the MCP `inputSchema` publishes and the code object does not contain
     (#4192). The MCP tool surface and the SDK endpoints are the contract every
     agent depends on; drifting in a diff nobody reads is the defect this gate
@@ -24,7 +24,7 @@ WHAT THIS DOES NOT DO — READ IT BEFORE TRUSTING A GREEN RUN
 
 HOW IT WORKS
     It EXECUTES the declaration (imports TOOL_REGISTRY, introspects
-    TortoiseSDK) and compares it against the approved baseline in
+    TortoiseSDK) and compares it against the FROZEN baseline in
     `config/surface-manifest.yml`. It never reads the declaration as text, so a
     rename that keeps the text similar still shows up as one removal plus one
     addition.
@@ -32,8 +32,19 @@ HOW IT WORKS
     The baseline is FROZEN. This gate deliberately does not regenerate it: if it
     did, a new registry entry would enter the baseline by itself and the gate
     could never go red. A re-cut (`tools/surface_manifest.py cut`) is a human act
-    that must follow the #4282 mandate — approval from Daniel FIRST — and it
-    resets every `approval` field, so an old approval cannot be inherited.
+    that must follow the #4282 mandate — approval from Daniel FIRST.
+
+    THE APPROVAL IS READ, NOT TYPED (#4185). The top-level
+    `approval_status`/`approval_principal`/`approval_pr`/`approval_date` are READ
+    from `docs/product/canonical-mcp-tools.md`. This gate reds when a manifest that
+    CLAIMS an approval disagrees with that document (a hand-edit made the copy
+    lie). A manifest staged on `pending-owner-approval` with all four fields null
+    makes NO claim and is skipped on purpose — that is the pre-flip state of a
+    change that lands in two PRs (#4185; the flip is #8144). The old PER-ROW
+    `approval` requirement is GONE — it belonged to the frozen-snapshot model the
+    #4282/#4185 ruling overrides. The per-row field is still carried as an audit
+    record and a re-cut still refuses to blank it silently (#4598); it is no
+    longer the approval gate.
 
     RETIRED NAMES (#3883)
     A retired name is removed from `TOOL_REGISTRY` but must still RESOLVE, and must
@@ -47,9 +58,12 @@ FAIL-CLOSED
     that cannot read its evidence must not report success — that is how the
     #1382 regression class stayed green for days (see tools/skip-guard.py).
 
-    Exit 0 = declaration matches the approved baseline.
+    Exit 0 = declaration matches the FROZEN baseline (the freeze is not the approved
+    target — see docs/product/canonical-mcp-tools.md and tools/surface-target-check.py).
     Exit 1 = expansion, removal, a served-surface change, an exemption
-             transition, an unapproved row, an unresolvable retired name, or
+             transition, a CLAIMED approval that disagrees with
+             docs/product/canonical-mcp-tools.md, a live surface grown past the
+             frozen `high_water_counts` pin, an unresolvable retired name, or
              unreadable evidence.
 
 Usage:
@@ -181,6 +195,68 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 DEFAULT_MANIFEST = ROOT / "config" / "surface-manifest.yml"
+CANONICAL_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+
+
+def _frontmatter(path: Path) -> dict:
+    """The YAML frontmatter of a product doc, or raises when it carries none
+    (missing / unclosed / non-mapping / unparseable).
+
+    Deliberately NOT a `{}` fallback: a gate that cannot read its evidence must
+    not report success, and an empty mapping reads as "nothing to check".
+    """
+    import yaml
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} is missing — the owner's approval lives there, and a gate that "
+            "cannot read its evidence must not report success."
+        )
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        raise ValueError(
+            f"{path} carries no YAML frontmatter — the owner's approval is recorded there, "
+            "and a gate that cannot read its evidence must not report success."
+        )
+    end = text.find("\n---", 3)
+    if end < 0:
+        raise ValueError(f"{path} opens a frontmatter block that is never closed")
+    data = yaml.safe_load(text[3:end])
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}'s frontmatter is not a mapping")
+    return data
+
+
+def _canonical_approval(path: Path | None = None) -> dict:
+    """The owner's approval, READ from `docs/product/canonical-mcp-tools.md`.
+
+    Self-contained on purpose: `tools/surface-guard.py` is pinned to the base ref in CI
+    precisely so a PR cannot influence the gate through the checkout's own modules, so
+    this reader must not import one. `tools/surface_manifest.py::read_approval` is the
+    sibling for the generator side; the two are intentionally separate copies, exactly
+    as `_read_manifest` already is.
+
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    """
+    fm = _frontmatter(Path(path) if path else CANONICAL_DOC)
+    if not fm.get("approval_status"):
+        raise ValueError(
+            f"{path or CANONICAL_DOC} records no `approval_status`, so it is not an "
+            "approval record."
+        )
+    pr = fm.get("approval_pr")
+    approved = fm.get("approved")
+    return {
+        "status": str(fm["approval_status"]),
+        "principal": str(fm["approvedBy"]) if fm.get("approvedBy") else None,
+        # RAW truthiness, matching `surface_manifest.py::read_approval`: a raw `0`, `false`
+        # or `[]` is falsy to the generator, so it must be falsy here too. Stringifying
+        # first turns `0` into `"0"` and lets this gate honour an approval the generator
+        # refuses (found by review, 2026-10-10).
+        "pr": str(pr) if pr else None,
+        "date": str(approved) if approved is not None else None,
+    }
 
 
 def die(message: str) -> int:
@@ -212,12 +288,17 @@ def _source_transforms(path: Path | None = None) -> set[str]:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    parser.add_argument(
+        "--approval-doc",
+        default=str(CANONICAL_DOC),
+        help="the owner's approval record the manifest's approval is DERIVED from (#4185)",
+    )
     args = parser.parse_args(argv[1:])
 
     manifest_path = Path(args.manifest)
     if not manifest_path.exists():
         return die(
-            f"approved surface baseline not found at {manifest_path}. "
+            f"frozen surface baseline not found at {manifest_path}. "
             "The gate cannot verify the surface without its baseline, and a gate that "
             "cannot read its evidence must not report success. Restore the baseline "
             "(it is checked in), or cut a new one in a reviewed PR."
@@ -229,7 +310,7 @@ def main(argv: list[str]) -> int:
         with manifest_path.open() as fh:
             doc = yaml.safe_load(fh)
     except Exception as exc:
-        return die(f"could not read the approved surface baseline {manifest_path}: {exc}")
+        return die(f"could not read the frozen surface baseline {manifest_path}: {exc}")
 
     if not isinstance(doc, dict) or "rows" not in doc:
         return die(f"{manifest_path} is malformed: expected a mapping with a `rows:` key.")
@@ -271,7 +352,7 @@ def main(argv: list[str]) -> int:
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             return die(
-                f"the approved baseline's `{field}` carries duplicate name(s): {duplicates[:5]}. "
+                f"the frozen baseline's `{field}` carries duplicate name(s): {duplicates[:5]}. "
                 "A name-keyed comparison drops all but the last, so the duplicate is content "
                 "no check here verifies. Re-cut the baseline."
             )
@@ -384,15 +465,15 @@ def main(argv: list[str]) -> int:
     # callable over the protocol while appearing in NEITHER enumeration (verified: a live
     # `fastmcp.Client` called it while the guard exited 0). Since intercepting resolution
     # requires a registered transform, so gating the transform set closes the ACCIDENTAL
-    # version of that route (and the approved-name check catches a foreign class reusing an
-    # approved name).
+    # version of that route (and the frozen-baseline-name check catches a foreign class
+    # reusing a frozen-baseline name).
     #
     # THREAT SURFACE, DECLARED — this is what the gate does and does not cover:
     #   in scope:  a tool that becomes reachable as a SIDE EFFECT of a change to the
     #              declaration, the registry, or the registered providers/transforms —
     #              the accidental-expansion class, which is how this surface grew to 99.
     #   out of scope: a party who deliberately writes code in-process to defeat it — a
-    #              class that copies an approved transform's identity, a function that
+    #              class that copies a frozen-baseline transform's identity, a function that
     #              forges `__code__`, or simply editing this guard. That party has commit
     #              access to these files, so no gate here can constrain them; the control
     #              for that class is required review, not this check (§ CONTRIBUTING.md).
@@ -405,7 +486,7 @@ def main(argv: list[str]) -> int:
         )
     # A SUBSET test, not equality: `mcp._transforms` is lifecycle-dependent (`_HTTPToolFilter`
     # appears only once the HTTP app is built), so requiring an exact match would red
-    # spuriously. What matters is that nothing BEYOND the approved set is registered.
+    # spuriously. What matters is that nothing BEYOND the frozen set is registered.
     #
     # TWO SOURCES, because neither alone can fire in the process CI runs:
     #   * RUNTIME `mcp._transforms` — catches a transform registered in-process;
@@ -418,7 +499,7 @@ def main(argv: list[str]) -> int:
     source_transforms = _source_transforms()
     live_transforms = sorted(runtime_transforms | source_transforms)
     # The NAME alone is not the identity: a class can be called `_HTTPToolFilter` and do
-    # something else, so an approved name must also be DEFINED where the declaration lives.
+    # something else, so a frozen-baseline name must also be DEFINED where the declaration lives.
     foreign_transforms = sorted(
         {
             f"{type(_t).__module__}.{type(_t).__qualname__}"
@@ -430,19 +511,19 @@ def main(argv: list[str]) -> int:
     unapproved_transforms = sorted((runtime_transforms | source_transforms) - set(baseline_transforms))
     if foreign_transforms:
         problems.append(
-            f"transform class(es) reusing an approved name but defined outside "
+            f"transform class(es) reusing a frozen-baseline name but defined outside "
             f"tortoise.mcp_server: {foreign_transforms}. A class name is not an identity — "
-            "a transform doing something else under an approved name needs approval."
+            "a transform doing something else under a frozen-baseline name needs approval."
         )
     if unapproved_transforms:
         problems.append(
             f"unapproved server transform(s): {unapproved_transforms} "
-            f"(approved: {sorted(baseline_transforms)}, live: {live_transforms}). A transform "
+            f"(baseline: {sorted(baseline_transforms)}, live: {live_transforms}). A transform "
             "can route tools without listing them, so it needs explicit approval and a re-cut."
         )
 
-    # --- the SERVED IMPLEMENTATION of each approved tool -------------------------
-    # `mcp.add_tool(fn, name=<an approved name>)` REPLACES that tool's implementation while
+    # --- the SERVED IMPLEMENTATION of each frozen-baseline tool -------------------------
+    # `mcp.add_tool(fn, name=<a frozen-baseline name>)` REPLACES that tool's implementation while
     # leaving the name set and the entry count identical, so it passed every check above
     # (verified: a live client then invoked the shadow function). Comparing the identity of
     # the component behind each name catches a count-preserving substitution.
@@ -492,7 +573,7 @@ def main(argv: list[str]) -> int:
     missing_served = sorted(baseline_tools - served_tools)
     if missing_served:
         problems.append(
-            f"{len(missing_served)} tool(s) in the approved baseline are NOT served by the "
+            f"{len(missing_served)} tool(s) in the frozen baseline are NOT served by the "
             f"MCP server any more: {missing_served}. A declared tool that silently stops "
             "being offered is a removal and needs approval."
         )
@@ -518,7 +599,7 @@ def main(argv: list[str]) -> int:
         # A PRESENT but unfingerprintable component (no `__code__`, e.g. a
         # functools.partial) is malformed evidence, not absence: treating it as
         # skippable let a same-name substitution with no code object through
-        # (verified: a partial shadow of an approved tool exited 0).
+        # (verified: a partial shadow of a frozen-baseline tool exited 0).
         if live is None:
             problems.append(
                 f"the tool served as `{name}` has no code-object identity (its callable "
@@ -530,11 +611,11 @@ def main(argv: list[str]) -> int:
         if live != stored:
             problems.append(
                 f"the implementation served as `{name}` changed: the baseline recorded "
-                f"{stored!r}, the server now serves {live!r}. Replacing an approved tool's "
+                f"{stored!r}, the server now serves {live!r}. Replacing a frozen-baseline tool's "
                 "implementation is a surface change and needs explicit approval — rename the "
-                "new tool, or re-cut the baseline in the approved PR."
+                "new tool, or re-cut the baseline once the change is approved (CONTRIBUTING.md)."
             )
-        # --- the SERVED DECLARATION of each approved tool (#4192) --------------------
+        # --- the SERVED DECLARATION of each frozen-baseline tool (#4192) --------------------
         # A parameter default / annotation is not in the code object, and the MCP schema
         # publishes it, so `add_tool` over the same `__code__` with a tampered `__defaults__`
         # served different behaviour under ONE `served_from` (verified: exit 0 before this
@@ -558,14 +639,14 @@ def main(argv: list[str]) -> int:
             )
 
     # A duplicate-name entry is an unapproved registry entry the name-set comparison
-    # cannot see: `declared_tools` is a set, so a second ToolDefinition reusing an
-    # approved name leaves the guard green while the registry grew.
+    # cannot see: `declared_tools` is a set, so a second ToolDefinition reusing a
+    # frozen-baseline name leaves the guard green while the registry grew.
     baseline_tool_count = sum(
         1 for r in rows if isinstance(r, dict) and not str(r.get("name", "")).startswith("sdk:")
     )
     if len(TOOL_REGISTRY) != baseline_tool_count:
         problems.append(
-            f"TOOL_REGISTRY has {len(TOOL_REGISTRY)} entries but the approved baseline has "
+            f"TOOL_REGISTRY has {len(TOOL_REGISTRY)} entries but the frozen baseline has "
             f"{baseline_tool_count} — the registry changed in a way the name comparison cannot "
             "see (a duplicate name, or a removed-and-added pair)."
         )
@@ -573,27 +654,27 @@ def main(argv: list[str]) -> int:
     # --- 1. expansion: a tool or SDK method the owner never approved ---------
     for name in sorted(declared_tools - baseline_tools):
         problems.append(
-            f"NEW MCP TOOL `{name}` is registered but is not in the approved baseline. "
+            f"NEW MCP TOOL `{name}` is registered but is not in the frozen baseline. "
             "Adding a tool expands what every agent can call; it needs an explicit human "
-            "decision (see #3863). If it is approved, add the row to "
-            "config/surface-manifest.yml in a PR that records the approval."
+            "decision (see #3863). If it is approved, record the approval in "
+            "docs/product/canonical-mcp-tools.md and re-cut the baseline (CONTRIBUTING.md)."
         )
     for name in sorted(declared_sdk - baseline_sdk - exemptions):
         problems.append(
-            f"NEW PUBLIC SDK METHOD `TortoiseSDK.{name}` is not in the approved baseline. "
+            f"NEW PUBLIC SDK METHOD `TortoiseSDK.{name}` is not in the frozen baseline. "
             "A public method is an endpoint; it needs an explicit human decision (see #3863)."
         )
 
-    # --- 2. removal: an approved entry that disappeared ---------------------
+    # --- 2. removal: a frozen-baseline entry that disappeared ---------------------
     for name in sorted(baseline_tools - declared_tools):
         problems.append(
-            f"REMOVED MCP TOOL `{name}` was in the approved baseline and is gone from the "
+            f"REMOVED MCP TOOL `{name}` was in the frozen baseline and is gone from the "
             "declaration. Silently dropping a surface entry breaks callers; if this is "
             "intended it is an owner decision and the baseline must be updated with it."
         )
     for name in sorted(baseline_sdk - declared_sdk):
         problems.append(
-            f"REMOVED SDK METHOD `TortoiseSDK.{name}` was in the approved baseline and is gone."
+            f"REMOVED SDK METHOD `TortoiseSDK.{name}` was in the frozen baseline and is gone."
         )
 
     # --- 3. the served surface moved ---------------------------------------
@@ -672,7 +753,7 @@ def main(argv: list[str]) -> int:
 
     # --- 5. retired names (#3883): a retired name RESOLVES and WARNS ---------
     # Retiring a name is a surface change like adding one, so the name must be in the
-    # approved baseline's `retired:` block or the gate reds. The inverse matters more:
+    # frozen baseline's `retired:` block or the gate reds. The inverse matters more:
     # #3883 makes the WARNING the contract. If a name is recorded as retired and
     # `get_tool` no longer resolves it, a caller gets a bare "tool not found" — the
     # silent removal this mechanism exists to prevent. So the gate EXECUTES the
@@ -698,14 +779,14 @@ def main(argv: list[str]) -> int:
 
     for name in sorted(set(declared_retired) - set(baseline_retired_map)):
         problems.append(
-            f"NEW RETIRED TOOL `{name}` is declared retired but is not in the approved "
+            f"NEW RETIRED TOOL `{name}` is declared retired but is not in the frozen "
             "baseline's `retired:` block. Retiring a name removes it from every agent's "
             "surface; it needs an explicit human decision (#3863)."
         )
     for name in sorted(set(baseline_retired_map) - set(declared_retired)):
         problems.append(
-            f"`{name}` is retired in the approved baseline but NOT declared retired. "
-            "An approved retirement that was reverted is a surface change; re-cut the baseline."
+            f"`{name}` is retired in the frozen baseline but NOT declared retired. "
+            "A frozen-baseline retirement that was reverted is a surface change; re-cut the baseline."
         )
     for name, use_instead in sorted(declared_retired.items()):
         if not use_instead:
@@ -758,7 +839,35 @@ def main(argv: list[str]) -> int:
                 f"baseline's {baseline_retired_map.get(name)!r}."
             )
 
-    # --- 6. approval, once the list has been approved ----------------------
+    # --- 6. approval: READ from the canonical doc, never typed here (#4185) ------
+    # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    #
+    # The manifest's `approval_status` is still the staged `pending-owner-approval` while
+    # `docs/product/canonical-mcp-tools.md` records `approved` / `daniel-ospina` / PR 4120 —
+    # two files that disagree about one fact BY DESIGN until the flip lands (#8144). The
+    # approval is DERIVED from that document
+    # (`tools/surface_manifest.py::read_approval`), so what this section verifies is the
+    # one thing a derived field can still get wrong: a manifest that CLAIMS an approval
+    # and was HAND-EDITED away from the source it is supposed to mirror.
+    #
+    # READ IT HERE, INDEPENDENTLY. The guard is deliberately self-contained, and the doc is
+    # the evidence the approval rests on. A manifest claiming `approved` must be backed by a
+    # canonical doc that says so, with a principal and a PR — the same three facts, read
+    # from the file the owner actually edits.
+    #
+    # This REPLACES the old per-row `approval` requirement, which belonged to the
+    # frozen-snapshot model this change overrides: it forced a fresh owner approval on
+    # every surface-touching PR, which is exactly the five-times-re-asked defect (#4185).
+    # The per-row field is still carried as an audit record and a re-cut still refuses to
+    # blank it silently (#4598); it is no longer the approval GATE.
+    #
+    # CI's `surface-guard` pins the BASE copy of THIS file: it copies `origin/main`'s guard
+    # over the PR's and runs it against the PR tree, so a change to what the guard
+    # ENFORCES cannot be green in its own PR. This change derives `approval_status` from
+    # the canonical doc, so a re-cut FLIPS the manifest to `approved` — which is why the
+    # committed copy is still staged here (#8144) — while the base copy still enforces the
+    # per-row `approval` rule, which fires on that status and demands a recorded approval
+    # on every row and every `retired:` entry that lacks one.
     status = doc.get("approval_status")
     if status not in ("pending-owner-approval", "approved"):
         problems.append(
@@ -766,52 +875,135 @@ def main(argv: list[str]) -> int:
             "'pending-owner-approval' or 'approved' — the gate cannot tell whether this "
             "surface has been approved, so it must not pass."
         )
-    if status == "approved":
-        # A RETIREMENT is a surface change too (#3883/#3863): it SHRINKS the
-        # agent-facing surface, and `retired:` is not part of `rows` — so an
-        # approval loop over `rows` alone left every retired name exempt from
-        # the one human-approval control (the same exempt-class defect an
-        # earlier round fixed for the `sdk:` rows).
-        retired_rows = doc.get("retired") or []
-        for row in [*rows, *retired_rows]:
-            if not isinstance(row, dict):
-                problems.append(f"malformed row (not a mapping): {row!r}")
-                continue
-            approval = row.get("approval")
-            text = str(approval).strip()
-            # "a PR number plus the approving principal's handle" — enforced, not merely
-            # stated. A bare date and a bare boolean both used to pass.
-            if (
-                not approval
-                or text.lower() in ("tbd", "todo", "yes", "true", "approved")
-                or "@" not in text
-                or not any(ch.isdigit() for ch in text)
-            ):
+    try:
+        approval_doc = Path(args.approval_doc)
+        canonical = _canonical_approval(approval_doc)
+    except Exception as exc:
+        return die(
+            f"could not read the owner's approval from {approval_doc}: "
+            f"{type(exc).__name__}: {exc}. The gate cannot tell whether this surface is "
+            "approved, so it must not pass."
+        )
+    # A claim is either the `approved` STATUS or any non-null copy field. A manifest on
+    # `pending-owner-approval` with all four fields null is the PRE-#4185 state and is
+    # skipped on purpose (#4185 landed in two PRs: CI's required `surface-guard` pins the
+    # BASE copy, whose per-row rule fires on `approved`, so the committed manifest must
+    # stay `pending` in this PR). The moment a manifest CLAIMS an approval — status or a
+    # field — it must be a faithful copy of the canonical doc, and every branch below
+    # applies exactly as before. So the skip is scoped to the empty claim, never a
+    # tampered one.
+    claimed = status == "approved" or any(
+        doc.get(f) for f in ("approval_principal", "approval_pr", "approval_date")
+    )
+    if claimed:
+        if status != canonical["status"]:
+            problems.append(
+                f"`approval_status` is {status!r} in the manifest but {canonical['status']!r} "
+                f"in {approval_doc}. The manifest's approval is DERIVED from that document "
+                "(#4185) — the manifest holds a stale COPY: re-cut (`tools/surface_manifest.py cut`, "
+                "adding `--allow-approval-reset` if it reports recorded per-row references) "
+                "so it re-reads the document. Edit the document only if the document is the thing "
+                "that is wrong; do not hand-edit the manifest."
+            )
+        if status == "approved" and (
+            canonical["status"] != "approved"
+            or not canonical["principal"]
+            or not canonical["pr"]
+        ):
+            problems.append(
+                f"`approval_status: approved` is not backed by {approval_doc}: it records "
+                f"status={canonical['status']!r}, principal={canonical['principal']!r}, "
+                f"pr={canonical['pr']!r}. The approval is READ from that document, not "
+                "typed into the manifest."
+            )
+        # No hand-set field may disagree with the source of truth. The manifest carries a
+        # COPY of the approval for readers; this catches an edit that made the copy lie.
+        for field, want in (
+            ("approval_principal", canonical["principal"]),
+            ("approval_pr", canonical["pr"]),
+            ("approval_date", canonical["date"]),
+        ):
+            got = doc.get(field)
+            if (got or None) != (want or None):
                 problems.append(
-                    f"`{row.get('name')}` has no recorded approval "
-                    f"(approval={approval!r}) while `approval_status: approved`. Approval is a "
-                    "PR number plus the approving principal's handle — never `yes`, never a "
-                    "bare date."
+                    f"`{field}` is {got!r} in the manifest but {want!r} in "
+                    f"{approval_doc}. The manifest's approval is DERIVED from that document — if the "
+                    "document itself is missing a field, record it there (a re-cut refuses an `approved` "
+                    "with no principal or PR); otherwise re-cut (`tools/surface_manifest.py cut`, adding "
+                    "`--allow-approval-reset` if it reports recorded per-row references) to "
+                    "re-read it. Do not hand-edit the manifest."
+                )
+
+    # --- 7. the growth pin, checked INDEPENDENTLY of the re-cut (#4185 review P1) -----
+    # `counts:` is re-derived on every `cut`, so a PR that adds a tool and re-cuts the
+    # baseline moves the number every drift check compares against and the growth is
+    # invisible — the baseline cannot be its own growth control. This pin is NOT
+    # re-derived: `cut` carries it forward (`_carried_high_water_counts`) and the gate
+    # reds when the live surface EXCEEDS it, so growth stays visible even across a re-cut.
+    # Raising it is a deliberate edit in the approving PR, and it is the machine half of
+    # "a re-cut over a grown surface cannot be green by construction".
+    high_water = doc.get("high_water_counts")
+    if not isinstance(high_water, dict) or not all(
+        isinstance(high_water.get(k), int) and not isinstance(high_water.get(k), bool)
+        for k in ("tools", "sdk_public_methods")
+    ):
+        problems.append(
+            "the frozen baseline carries no usable `high_water_counts` pin (it needs "
+            "integer `tools` and `sdk_public_methods`). Without it a re-cut over a grown "
+            "surface is green by construction; restore it (see CONTRIBUTING.md)."
+        )
+    else:
+        for label, live_n, key in (
+            ("MCP tools", len(declared_tools), "tools"),
+            ("public SDK methods", len(declared_sdk), "sdk_public_methods"),
+        ):
+            if live_n > high_water[key]:
+                problems.append(
+                    f"the live surface GREW past the frozen high-water pin: {label} live "
+                    f"{live_n} > pin {high_water[key]}. A re-cut CANNOT raise this pin "
+                    "silently — raise `high_water_counts` explicitly in the PR that "
+                    "records the owner's approval for the growth."
                 )
 
     if problems:
-        print(f"::error::{len(problems)} surface violation(s) — the approved baseline is out of date.")
+        print(f"::error::{len(problems)} surface violation(s) — the frozen baseline is out of date.")
         print(
             "The agent-facing surface cannot grow without an explicit human decision (#3863).\n"
         )
         for i, problem in enumerate(problems, 1):
             print(f"{i}. {problem}\n")
         print(
-            "If the change IS approved: update config/surface-manifest.yml in this PR and set "
-            "`approval` on each affected row to the PR number and the approving principal's "
-            "handle. See docs/product/mcp-sdk-surface.md for the list the owner reads."
+            "If the change IS approved: record the approval in "
+            f"{approval_doc} (status/principal/PR/date) **and re-cut** "
+            "(`tools/surface_manifest.py cut`, adding `--allow-approval-reset` if it reports "
+            "recorded per-row references) so the manifest re-reads it — recording it in the "
+            "document alone leaves this copy stale. The per-row `approval` field is an audit record, not the gate."
         )
         return 1
 
+    # The banner states the MANIFEST's staged status and the DOCUMENT's recorded status as
+    # two separate facts (#4185 review). It used to print `approval_status=<status> is READ
+    # from <doc>`, which was wrong twice over: the value printed came from the manifest, and
+    # a staged `pending-owner-approval` approves nothing. On a manifest that CLAIMS an
+    # approval the claim was compared; on a staged one nothing was compared, and saying so
+    # is the difference between a green run that means something and one that does not.
+    if claimed:
+        approval_line = (
+            f"The manifest CLAIMS an approval (approval_status={status}) and it matches "
+            f"{approval_doc} (which records {canonical['status']!r})"
+        )
+    else:
+        approval_line = (
+            f"The manifest is STAGED on approval_status={status} and makes NO claim, so "
+            f"nothing was compared against {approval_doc} (which records "
+            f"{canonical['status']!r}) — the flip is a separate change (#8144)"
+        )
     print(
-        f"OK — the declaration matches the approved baseline: "
+        f"OK — the declaration matches the FROZEN baseline: "
         f"{len(declared_tools)} MCP tools, {len(declared_sdk)} public SDK methods "
-        f"({len(exemptions)} exempt), approval_status={status}."
+        f"({len(exemptions)} exempt). {approval_line}. The frozen baseline is NOT the "
+        f"owner's approved TARGET — run tools/surface-target-check.py for compliance "
+        f"with the target."
     )
     return 0
 
