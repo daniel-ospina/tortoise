@@ -15818,7 +15818,11 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             # POSITIONAL columns (r[0..3] is the id/created/turns/extracted
             # count), so a column placed anywhere earlier would silently
             # re-bind every one of them. r[8]/r[9] are new; nothing above moves.
-            "s.capture_ok, s.capture_extractor "
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
+            # (r[10..12]). #3520 landed first and holds r[8]/r[9]; placing these
+            # there instead would have silently re-bound `extraction`.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -15875,6 +15879,14 @@ def _session_row_dict(r, members_by_id: dict) -> dict:
         # positional contract is `r[8]`/`r[9]`, and #5498's binding assert just
         # below keeps the wire dict and the shared declaration from drifting.
         "extraction": session_extraction_status(r[8], r[9]),
+        # #3516 §B / #3515 piece 12: the floor's inputs and the producer lane,
+        # APPENDED AFTER #3520's pair (r[10..12]). Null when absent — a legacy
+        # or hook-less row carries no capture instant and no floor can be
+        # evaluated against it, which the verdict reports as DISABLED rather
+        # than as a pass.
+        "client_captured_at": r[10],
+        "client_captured_at_source": r[11],
+        "capture_lane": r[12],
     }
     assert set(d) == set(SESSION_LIST_FIELDS), (
         f"session projection drifted: wire={sorted(d)} "
@@ -15956,7 +15968,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # #3520: APPENDED at the END — the existing sess[0..6] mapping is
             # unchanged (sess[7]/sess[8] are the new pair), and the detail
             # endpoint must serve the SAME extraction status the list does.
-            "s.capture_ok, s.capture_extractor",
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
+            # (sess[9..11]) — #3520 holds sess[7]/sess[8].
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -16067,6 +16082,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         # detail projection too, so the wire key set is the shared declaration
         # plus the detail-only fields (the #5498 binding assert below).
         "extraction": session_extraction_status(sess[7], sess[8]),
+        # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
+        # This is the read the install-verify path needs to evaluate the floor
+        # at all — serving them is what turns `client_capture_floor_verdict`
+        # from an unconsumed function into a consumable one. sess[9..11], after
+        # #3520's pair.
+        "client_captured_at": sess[9],
+        "client_captured_at_source": sess[10],
+        "capture_lane": sess[11],
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,

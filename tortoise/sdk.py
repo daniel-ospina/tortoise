@@ -26844,7 +26844,17 @@ class TortoiseSDK:
             # sess[0..6] mapping is unchanged, and the SDK read must serve the
             # SAME extraction status the hosted surfaces do (#5498 binds the
             # three key sets to one declaration).
-            "s.capture_ok, s.capture_extractor",
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's
+            # columns (sess[9..11]). #3520 landed on main first and took
+            # sess[7]/sess[8], so these must FOLLOW it — a union that placed
+            # them at sess[7] would have silently re-bound `extraction` to the
+            # provenance columns, which is the positional corruption this
+            # projection's own header warns about.
+            # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
+            # test, so this lane cannot serve a different vocabulary from the
+            # hosted endpoint it mirrors.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -26908,6 +26918,11 @@ class TortoiseSDK:
             # part of the SDK read by construction rather than a second
             # opinion).
             "extraction": session_extraction_status(sess[7], sess[8]),
+            # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
+            # sess[9..11] — they follow #3520's columns, which hold 7 and 8.
+            "client_captured_at": sess[9],
+            "client_captured_at_source": sess[10],
+            "capture_lane": sess[11],
             "extracted": extracted_count,
             "turn_points": turn_points,
             "extracted_points": extracted_points,

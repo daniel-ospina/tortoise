@@ -408,14 +408,22 @@ def test_new_columns_appended_at_end():
     were each appended at the END so the existing `r[0..3]` count mapping never
     shifted. An insert would silently re-bind id/created_at/turns/extracted.
     """
-    # 1. The DECLARATION order: the new field is last in the shared list.
-    assert SESSION_LIST_FIELDS[-1] == "extraction"
-    assert SESSION_READ_FIELDS[-1] == "extraction"
-    # The detail projection carries it before its detail-only extras, so the
+    # 1. The DECLARATION order: everything added after the base columns is at
+    #    the END, and inside that appended tail the order is #3520's pair then
+    #    #3516's triplet. Deliberately NOT "extraction is last": that was true
+    #    only while it was the newest addition, and pinning it would make the
+    #    NEXT append illegal instead of making an INSERT illegal — the actual
+    #    invariant is that nothing is inserted before an existing column.
+    assert SESSION_LIST_FIELDS[-1] == "capture_lane"
+    assert SESSION_READ_FIELDS[-1] == "capture_lane"
+    assert SESSION_LIST_FIELDS[-4:] == (
+        "extraction", "client_captured_at", "client_captured_at_source",
+        "capture_lane")
+    # The detail projection carries them before its detail-only extras, so the
     # list field order is a PREFIX of the detail order (the prepend rule the
     # module documents).
     assert SESSION_DETAIL_FIELDS[:len(SESSION_LIST_FIELDS)] == SESSION_LIST_FIELDS
-    assert SESSION_DETAIL_FIELDS.index("extraction") == len(SESSION_LIST_FIELDS) - 1
+    assert SESSION_DETAIL_FIELDS.index("extraction") == len(SESSION_LIST_FIELDS) - 4
 
     # 2. The WIRE dict, built by the REAL handler helper from a positional row.
     #    r[0..9]: the pre-existing columns keep their indices; the pair is r[8]/r[9].
@@ -428,8 +436,11 @@ def test_new_columns_appended_at_end():
         "claude",                    # r[5] s.harness
         "mbp-14",                    # r[6] s.machine_id
         "claude-sonnet-4",           # r[7] s.model
-        True,                        # r[8] s.capture_ok          (NEW)
-        "v2",                        # r[9] s.capture_extractor   (NEW)
+        True,                        # r[8] s.capture_ok          (#3520)
+        "v2",                        # r[9] s.capture_extractor   (#3520)
+        1700000000.0,                # r[10] s.client_captured_at         (#3516)
+        "cli_observed",              # r[11] s.client_captured_at_source  (#3516)
+        "hook",                      # r[12] s.capture_lane               (#3516)
     )
     d = _ha._session_row_dict(row, {})
     assert d["id"] == "sess-1"
@@ -442,9 +453,12 @@ def test_new_columns_appended_at_end():
     assert d["model"] == row[7]
     assert d["extraction"] == {
         "status": "stored-and-processed", "extractor": "v2", "outcome_known": True}
-    # THE PIN: the wire dict's key ORDER ends with the new field (dicts preserve
-    # insertion order; the handler appends after `model`).
-    assert list(d)[-1] == "extraction", list(d)
+    assert d["client_captured_at"] == 1700000000.0
+    assert d["client_captured_at_source"] == "cli_observed"
+    assert d["capture_lane"] == "hook"
+    # THE PIN: the wire dict's key ORDER ends with the NEWEST appended field
+    # (dicts preserve insertion order; the handler appends after `model`).
+    assert list(d)[-1] == "capture_lane", list(d)
     assert list(d)[:4] == ["id", "created_at", "turns", "extracted"]
     assert set(d) == set(SESSION_LIST_FIELDS)
 
@@ -461,10 +475,11 @@ def test_new_columns_appended_at_end():
     assert selected == [
         "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
+        "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
     ], (
-        f"the #3520 columns must be the LAST two in the RETURN clause of "
-        f"GET /v1/sessions (got {selected}) — the column list is built "
-        "positionally, so an insert anywhere earlier re-binds r[0..3]")
+        f"#3520's pair and #3516's triplet must be the LAST columns of the "
+        f"RETURN clause, in that order (got {selected}) — the column list is "
+        "built positionally, so an insert anywhere earlier re-binds r[0..3]")
     assert "count(p)" in clause
     # The detail handler's clause, the same rule (sess[0..6] unchanged).
     detail_head = source.index(
@@ -474,4 +489,5 @@ def test_new_columns_appended_at_end():
     assert detail_sel == [
         "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
+        "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
     ], detail_sel

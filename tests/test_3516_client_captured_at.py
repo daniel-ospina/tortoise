@@ -1079,3 +1079,77 @@ def test_source_is_never_erased_or_overwritten_by_a_later_writer():
                              source="backstop-stem")
     assert _stamp(sdk, sid, "source") == "hook-stem", (
         "the later producer relabelled the record")
+
+
+# ── #3516: the floor's inputs must be READABLE, or nothing can consume them ──
+#
+# The disposition on #3516 said the floor "has zero production callers". That
+# was true but understated the cause: the read projection never SERVED the
+# inputs, so no consumer could have called the verdict with a real record even
+# if one had been wired. The fix is on the read path, so the test has to read.
+
+
+def test_the_floor_inputs_are_served_on_the_session_read_path(tmp_path):
+    """`client_captured_at` / `client_captured_at_source` reach a caller.
+
+    This is the precondition for the store-proven floor: before it, a consumer
+    could store the instant and never retrieve it. The assertion is the
+    END-TO-END artifact — a real POST read back off `GET /v1/sessions/{id}` and
+    fed to the verdict function — not that a column was added.
+
+    MUTATION THAT REDS THIS: drop the triplet from the detail SELECT (or from
+    `SESSION_READ_FIELDS`, which the projection bind turns into an import-time
+    failure).
+    """
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha_mod
+    from tests.test_hosted_api import (
+        _patch_tortoise_sdk_init,
+        _restore_tortoise_sdk_init,
+        _seed_team_graphs,
+    )
+    from tortoise.capture_install import (
+        VERDICT_PASSED,
+        client_capture_floor_verdict,
+    )
+
+    org = "team-3516-floor-read"
+    db_path = os.path.join(str(tmp_path), "floor-read.db")
+    orig = _patch_tortoise_sdk_init(db_path)
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    sdk = ha_mod._make_sdk(namespace="registry")
+    _seed_team_graphs(sdk, org, "pro", None)
+    try:
+        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        h = {"Authorization": f"Bearer {key['api_key']}"}
+        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/sessions", headers=h, json={
+                "conversation": [{"role": "user", "content": "hello"}],
+                "session_id": "s-3516-floor-read",
+                "harness": "claude",
+                "capture_lane": "hook",
+                "client_captured_at": INSTALL + 10.0,
+                "client_captured_at_source": "cli_observed",
+            })
+            assert r.status_code == 200, r.text[:300]
+            d = tc.get("/v1/sessions/s-3516-floor-read", headers=h)
+            assert d.status_code == 200, d.text[:300]
+            body = d.json()
+        # (1) the projection REALLY serves them (not just the GET's own dict)
+        assert body.get("client_captured_at") == pytest.approx(INSTALL + 10.0), (
+            f"the read path did not serve the floor's instant: {body.keys()}")
+        assert body.get("client_captured_at_source") == "cli_observed"
+        assert body.get("capture_lane") == "hook"
+        # (2) and they are enough to evaluate the floor — the whole point
+        verdict, reason = client_capture_floor_verdict(
+            body["client_captured_at"],
+            body["client_captured_at_source"],
+            INSTALL,
+        )
+        assert verdict == VERDICT_PASSED, reason
+    finally:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+        _restore_tortoise_sdk_init(orig)
