@@ -2170,6 +2170,16 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
+  # #3512: this pins the RECORD of the Pi seam's home (the epic #1714 plan and
+  # `tortoise/pi-hooks/README.md`) against the tree — the plan named
+  # `tortoise/pi-extension/` for months while the artifact that ships lives at
+  # `tortoise/pi-hooks/`. Same selection reasoning as the sibling directly above
+  # and the same fallback: `tortoise/pi-hooks/README.md` matches no
+  # SOURCE_PATTERNS entry, so a README-only edit selects `core` through the
+  # `tortoise/` prefix — which is the only arm that runs the guard on the change
+  # it guards. (A `docs/` edit is deliberately skipped by NON_PYTHON_PREFIXES,
+  # so the plan's own copy is covered by review of the `.md`, not by this arm.)
+  - test_pi_capture_disposition.py
   # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
   # `tortoise/session_import/` maps to no named surface, so a parsers.py change
   # selects `core` via the fallback — registered only under `api` (its
