@@ -406,6 +406,14 @@ test('#3728 falsifiability: a label input missing from the deps is a violation',
     'literal options (paused/buildFork) must NOT be demanded as deps')
   assert.deepEqual(announcementInputsAndDeps(depsSnippet('step')).deps, ['step'],
     'the deps parser must read the array, not a slice of the body')
+  // #3728 review (P2): an option value that is neither a literal nor a bare
+  // identifier must FAIL LOUD rather than be silently skipped — otherwise a new
+  // label input written as an expression would be demanded as no dep at all.
+  assert.throws(
+    () => announcementInputsAndDeps(depsSnippet('step')
+      .replace('hasOrg: welcomeHasOrg', 'hasOrg: Boolean(welcomeHasOrg)')),
+    /unmodelled wizardStageLabel option value/,
+    'an expression-valued label input must be refused, not skipped')
 })
 
 test('#3728: the real file lists every announcement input as a dep', () => {

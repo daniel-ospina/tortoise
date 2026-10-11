@@ -1885,8 +1885,10 @@ function claimIntentInFlight() {
     // disclosure (wizardShowPaste) must not yank focus from the control the
     // user just activated, and neither must an invite accept: `welcomeHasOrg`
     // IS a dep (#3728) so accepting an invite DOES re-run this effect, and the
-    // stepChanged guard below is what keeps focus on the control the user
-    // just activated (no step change, no focus move).
+    // stepChanged guard below adds NO focus move on a non-step-change re-run.
+    // What happens to focus when the activated control UNMOUNTS (the invite row
+    // is removed) is a DOM outcome this guard cannot govern — see the RESIDUAL
+    // note in wizardRenderedEnds.test.js.
     const stepChanged = lastWizardStepRef.current !== wizardStep
     lastWizardStepRef.current = wizardStep
     if (!stepChanged) return
