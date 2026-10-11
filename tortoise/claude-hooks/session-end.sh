@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 9
+# tortoise-hook-version: 10
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # #3615 (generation bump 3→4): the capture step now requires the explicit
@@ -358,6 +358,7 @@ raise SystemExit(main(["index", "directory",
   if [ "$CAPTURE_ENABLED" = "1" ]; then
     TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
     TORTOISE_CAPTURE_FILE="$TMP" \
+    TORTOISE_HOOK_TRANSCRIPT_PATH="$TRANSCRIPT_PATH" \
     "$PYTHON_BIN" -c '
 import sys
 sys.path[:] = [p for p in sys.path if p not in ("", ".")]
@@ -366,6 +367,12 @@ import os
 from tortoise.__main__ import main
 argv = ["session", "capture", "--file", os.environ["TORTOISE_CAPTURE_FILE"],
         "--harness", "claude"]
+# #4197: `$TMP` is deleted by the hook trap at exit, so the saved-backlog
+# ledger must record the DURABLE source (the Claude project transcript) or a
+# store-only deferral could never be re-processed. Passed via env, never
+# interpolated into the -c source (every path here is untrusted shell input).
+if os.environ.get("TORTOISE_HOOK_TRANSCRIPT_PATH"):
+    argv += ["--transcript-path", os.environ["TORTOISE_HOOK_TRANSCRIPT_PATH"]]
 if os.environ.get("TORTOISE_HOOK_SESSION_ID"):
     argv += ["--session-id", os.environ["TORTOISE_HOOK_SESSION_ID"]]
 raise SystemExit(main(argv))
@@ -403,6 +410,9 @@ print(session_corpus_dir())' 2>/dev/null || true)"
   # #3615: only when capture consent is explicit (see the gate above).
   if [ "$CAPTURE_ENABLED" = "1" ]; then
     CAPTURE_ARGS=(--file "$TMP" --harness claude)
+    # #4197: `$TMP` is removed by this hook's own `trap` at exit; the durable
+    # source the saved-backlog ledger must record is Claude's project transcript.
+    [ -n "$TRANSCRIPT_PATH" ] && CAPTURE_ARGS+=(--transcript-path "$TRANSCRIPT_PATH")
     [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
     tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
   fi

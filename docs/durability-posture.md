@@ -407,7 +407,10 @@ false):
 | `_searchText` | RECORDED | §4.6's coalesce-on-create / overwrite-on-hash-diff fold over `title`. Rides the record like every other clause. |
 | open extras (`summary`, `topics`, `sourceDate`, `is_episodic`, `credibilityTier`, `documentKind`, `format`, `sessionId`, `eventId`, …) | RECORDED | `_persist_extra_props` passthrough with `_SOURCE_HANDLED`. `tier=`/tier-form `sourceKind` mirror to `credibilityTier`. |
 | `reliability`, `reliabilityComponents`, `reliability_derived_at` | **NOT AUTHORITATIVE** | The #398 **query-time cache**. Recomputed on rebuild by design, not restored — the §3 pattern for a cache. Excluded from the replay-parity assertion for that reason, not for convenience. |
-| `validFrom`, `validTo`, `expiredAt` | **declared, never written** | `ONTOLOGY.md` §4.6/§4.7 declare them; no writer sets them today, so a replay cannot lose what no write ever wrote. The window half of §4.6's *Versioning* clause — **#3644** (the journalling half landed in **#5024**). |
+| `validFrom` | **RECORDED** | The CURRENT version's valid-time start (§4.6/#3644). Minted **once** by `create_source` on the SAME clock as `updatedAt` and carried on the record, so the node and every record it journals agree by construction. Written **only** through `_upsert_source`'s hash-diff gate (create, stub completion, real transition) — never on a no-op re-check, never on a hash-less write. **No `coalesce(…, $now)` fallback**: a record that carries none (every pre-#3644 journal line, a stub mint) replays to a source with NO `validFrom`, because an absent start is an **open start** (§4.1/#3654) — a replay-clock stamp would both invent a version start and diverge from the live node. **⚠️ RECORDED does not mean always-current:** `_upsert_document` (`DocumentCreated`) and `_materialize_session_source` (capture) also move `contentHash` and write no `validFrom`, so they can leave a **present-but-stale** start. Extending the gate to them needs a minted instant that is also replayable; **#3644**, pinned by `tests/test_source_version_window_3644.py::test_pinned_gap__*`. |
+| `validTo` | **JOURNAL-ONLY** | The PRIOR version's window close, carried as `previousValidTo` on the `SourceVersioned` record (equal to that record's `validFrom` by construction — §4.6: *“the journal record that opens a new version closes the old one in the same act”*). It is **deliberately not a node property**: there is one node per `url` and it holds the CURRENT version, whose window is OPEN — Cypher cannot write a NULL property, so absent IS the open end. Nothing writes a `:Source` removal yet (#3590 S2 owns the field). |
+| `expiredAt` | **declared, never written** | `ONTOLOGY.md` §4.6/§4.7 declare the transaction-time end; no `:Source` writer sets it, because no `:Source` REMOVAL path exists yet — the field's meaning is exactly the decision **#3590** S2 owes (the same decision that keeps Point's `expiredAt` from distinguishing "replaced" from "withdrawn"). A replay cannot lose what no write ever wrote. |
+| `previousValidTo` | **RECORDED** (record-only) | #3644: the prior window's close, on the `SourceVersioned` record. Never a node property (`_SOURCE_HANDLED` skips it, exactly like `previousContentHash`). |
 <!-- source-field-split:end -->
 
 **The replay fold IS the live writer.** `_fold_source_versioned` delegates to
@@ -416,7 +419,8 @@ restate them and drifted in three fields (`urlAliases`, `sourcePath`,
 `canonicalUrl`) — each a live != replay divergence, found by the review gate
 rather than by a test. Parity now holds **by construction**: there is no second
 clause list to fall out of sync, and the transition record's own contribution is
-the one fact the writer cannot derive — `previousContentHash`.
+the one fact the writer cannot derive — `previousContentHash` (and, since
+**#3644**, the prior window's close, `previousValidTo`).
 
 The write path is **repeat-safe** on top of the split: a re-check that finds the
 same bytes journals **nothing** (a `SourceVersioned` only when the hash really

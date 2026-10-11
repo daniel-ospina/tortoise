@@ -150,6 +150,12 @@ def test_session_end_forwards_harness_and_session_id(tmp_path, transcript):
     # the capture invocation carries --harness claude AND --session-id
     assert "--harness claude" in calls, calls
     assert "--session-id s-hook-abc" in calls, calls
+    # #4197: AND the DURABLE transcript. The hook's `--file` is its own
+    # `mktemp` conversion, deleted by its `trap` on exit, so a store-only
+    # deferral recorded against `--file` could never be re-processed by
+    # `tortoise sessions backlog --process`. This is the only assertion that
+    # the shipped hook actually forwards the durable source.
+    assert f"--transcript-path {transcript}" in calls, calls
 
 
 def test_session_end_exit0_on_capture_failure(tmp_path, transcript):

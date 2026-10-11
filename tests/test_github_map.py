@@ -35,7 +35,9 @@ REST_ISSUE = {
 GHCLI_ISSUE = {
     "number": 42,
     "title": "Fix login bug",
-    "state": "open",
+    # `gh issue list --json state` returns UPPERCASE — the shape this fixture
+    # must carry, or nothing exercises the casing `_norm_issue` normalises.
+    "state": "OPEN",
     "createdAt": "2026-07-10T10:00:00Z",
     "updatedAt": "2026-07-19T12:00:00Z",
     "closedAt": None,
@@ -99,6 +101,22 @@ def test_event_id_never_emits_observation_or_github_state():
 
 
 # ── gh-CLI vs REST shape equivalence ───────────────────────────────
+
+def test_ghcli_uppercase_state_is_normalized():
+    """#8019: `gh` returns `OPEN`/`CLOSED` (verified live) while REST returns
+    lower case. `_norm_issue` must lower-case them so the digest, `endedAt` and
+    every close/reopen transition agree across producers.
+
+    FAILS IF the raw casing is kept: `state` stays `OPEN`, `endedAt` is None on
+    the gh-CLI close, and `diff_lifecycle` never sees a transition."""
+    assert gm._norm_issue(GHCLI_ISSUE)["state"] == "open"
+    closed = dict(GHCLI_ISSUE, state="CLOSED",
+                  closedAt="2026-07-19T12:00:00Z")
+    ev = gm.issue_to_event(closed, "test/repo")
+    assert ev["eventKind"] == "github.issue.closed"
+    assert ev["endedAt"] == "2026-07-19T12:00:00Z"
+    assert gm.diff_lifecycle(GHCLI_ISSUE, closed) == ["closed"]
+
 
 def test_ghcli_and_rest_shapes_map_identically():
     """Field-name/casing adaptation is pinned: both producers emit

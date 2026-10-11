@@ -681,6 +681,14 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
+  # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
+  # change selects `api`, not the full matrix). The file's largest subject is
+  # that CLI half (`sessions backlog`, `--process`, `--future-only`, the
+  # `doctor` row) plus the capture deferral sites, so a `__main__.py`-only
+  # change must run it. Dual-registered with `core`, which covers the ledger
+  # module — see the core entry.
+  - test_capture_backlog_4197.py
   # #2814: guards tortoise/__main__.py's rebuild reporting (the CLI is the
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
@@ -794,6 +802,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
@@ -804,6 +813,16 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
+  # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
+  # named SOURCE_PATTERN, so it falls through to `core` — registering the
+  # guard here is what makes it run on a change to the ledger alone. The CLI
+  # half lives in `tortoise/__main__.py`, an exact `api` SOURCE_PATTERN that is
+  # NOT a SHARED_MODULE: a `__main__.py`-only change selects `api`, NOT the
+  # full matrix, so this `core` entry alone would leave it unguarded. Hence the
+  # dual registration with `api` (the #2938 convention every sibling CLI guard
+  # follows) — see the `api` entry.
+  - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
   - test_ci_stall_identify.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
@@ -1155,6 +1174,29 @@ surfaces:
   # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
   # do not count it among the pins that fail on the unfixed base.
   - test_source_rematerialisation_5024.py
+  # #3644 (§4.6 *Versioning*, the WINDOW half): a version transition must OPEN
+  # the new version's window and CLOSE the prior one in the same act —
+  # `create_source` mints the window instant once (the same clock as
+  # `updatedAt`), `_upsert_source` writes the node's `validFrom` through the
+  # same hash-diff gate as `version`, and the `SourceVersioned` record carries
+  # `validFrom` + `previousValidTo`. `core` is the arm that owns the change:
+  # `tortoise/projection/entities.py` (where `_upsert_source` and
+  # `_fold_source_versioned` live) selects `core`, per
+  # `python3 tools/ci_selection.py --changed tortoise/projection/entities.py`.
+  # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
+  # (already the full matrix). The prior-window test closes the graph and reads
+  # the JOURNAL alone (there is one node per `url`, so the history can only live
+  # in the record chain), so this file is the guard for that invariant.
+  # Fail-before/pass-after evidence: on the unfixed base (production files
+  # stashed, test file in place) **14 of the 19 fail** — everything that reads a
+  # window plus the four review-round pins (a stalled clock, a backward clock
+  # step, the caller-asserted window/transition keys, and the MCP boundary).
+  # The 5 that pass are FORWARD guards, not fail-before evidence: the
+  # no-op repeat-safety pin, the legacy open-start pin, the legacy-hash-change
+  # pin (nothing writes a window on the base, so "not inherited" holds
+  # trivially), the stub open-start pin and the journal-only-payload pin. All 19
+  # pass here.
+  - test_source_version_window_3644.py
   # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
   # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
   # select the `core` surface, so the guard for the anchor runs with the code it
@@ -1425,6 +1467,12 @@ surfaces:
   - test_3516_client_captured_at.py
   - test_connector_loader.py
   - test_connector_secrets.py
+  # #5214: the connector Source's CONTENT VERSION — the Source half that makes
+  # the #5199 derivation anchor land on the connector path instead of reading
+  # NULL. `tortoise/projection/entities.py` (the choke point) selects `core`, so
+  # the guard runs with the code it guards. Lane: embedded (like the sibling
+  # `test_connector_sources.py` below) — deliberately NOT carve_out-registered.
+  - test_connector_source_version_5214.py
   - test_connector_sources.py
   # #5011: divergence detection is by CONTENT, not size — the per-projection
   # watermark + graph baseline live in a sidecar next to the journal, written by
@@ -2303,6 +2351,12 @@ surfaces:
   - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
+  # #2294: the D8 decoration gate must see the LEGACY flag-only terminal state
+  # (``invalidate_point`` leaves ``status`` untouched) — guards
+  # ``tortoise/ask_lane.py``'s gate, so an ask_lane-only PR must run it (a
+  # SOURCE_PATTERNS match REPLACES the core fallback). Also under `core` for
+  # the ``tortoise/search_engine.py`` half (the additive ``outdated`` key).
+  - test_2294_ask_degradation_gate.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
@@ -2766,6 +2820,14 @@ carve_out:
 # excluded from EVERY docker leg, so this lane is the one that runs all five.
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
+# #3644: PR #8016 code-review ISSUE 2. The durations note claimed the embedded
+# carve-out lane, but the file was absent from this list AND from
+# TEST_NO_REDIRECT_STEMS, so it ran in the DEFAULT docker lane while its 22.0s
+# weight (an embedded-lane measurement) fed the docker shard packing. The file
+# carries no URI requirement and its own docstring targets the embedded lane
+# (`TORTOISE_TEST_CARVE_OUT=1`), so it is registered here — where the measured
+# weight is the lane it actually runs in.
+- test_source_version_window_3644.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
@@ -3277,6 +3339,7 @@ durations:
   test_mcp_rename_table.py: 3.0
   test_sdk_rename_table.py: 6.1
   test_sdk_surface.py: 32.6
+  test_connector_source_version_5214.py: 20.0  # #5214: 13 tests; embedded lane (like test_connector_sources.py). Local wall time ~135s of which ~110s is the ONE-OFF embedding-model load on a cold cache (this machine cannot fetch it — the hermetic egress guard blocks HF), so ~20s is the steady-state figure; locally measured, not a junit sweep
   test_connector_sources.py: 1.7
   test_e2e9_point_in_time.py: 2.6
   test_file_human_approval.py: 2.4
@@ -3711,6 +3774,7 @@ durations:
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_source_change_notice_5516.py: 65.0  # #5516: 12 tests; docker lane (#1647 default) — locally measured (64s docker, 66s embedded)
   test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
+  test_source_version_window_3644.py: 22.0  # #3644: 19 tests, embedded carve-out lane; locally measured (8-27s across clean runs; fleet-contention sensitive — redislite start failures under load, not assertions)
   test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7

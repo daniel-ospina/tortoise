@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +30,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import fleet_state as fs
+
+
+def _stamp(age_s: float = 0.0) -> str:
+    """A ``generated_at`` stamp exactly as ``build_state`` writes one, ``age_s`` old.
+
+    Freshness is judged on this stamp (#7957), so a fixture that omits it is an
+    UNREADABLE-AGE cache — never a fresh one.
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - age_s))
 
 S_4A = "01a0d5bb-c98a-71b9-9516-47f7a78550a5"
 S_6 = "01a0d5bb-d13c-736d-8260-5cb3af6b7b05"
@@ -393,10 +406,10 @@ def test_build_state_pins_the_conflict_wiring_at_the_caller(monkeypatch) -> None
         "/tmp/wA": {"branch": "refs/heads/fix/700-a"},
         "/tmp/wB": {"branch": "refs/heads/fix/700-a"},
     })
-    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: [
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows([
         {"number": 700, "title": "contested", "headRefName": "fix/700-a",
-         "headRefOid": "", "url": "u"}])
-    monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: [])
+         "headRefOid": "", "url": "u"}], measured=True))
+    monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: fs.GitHubRows(measured=True))
     st = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
     assert st["conflicts"] == [700], "two lanes' branches both name PR 700"
     assert st["conflict_claimants"] == {"700": ["A", "B"]}
@@ -609,7 +622,7 @@ def test_first_user_message_reads_a_real_session_line(tmp_path: Path) -> None:
 
 def _state_file(tmp_path: Path, lane: dict) -> str:
     p = tmp_path / "fleet-state.json"
-    p.write_text(json.dumps({"lanes": [lane]}))
+    p.write_text(json.dumps({"lanes": [lane], "generated_at": _stamp(0)}))
     return str(p)
 
 
@@ -674,7 +687,7 @@ def test_live_sources_degrade_to_empty_on_null_json(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=None,
-                 by_sid=None, prs=()):
+                 by_sid=None, prs=(), prs_measured=True, prs_error=""):
     monkeypatch.setattr(fs, "load_registry", lambda: list(registry))
     monkeypatch.setattr(
         fs, "cmux_workspaces",
@@ -685,8 +698,10 @@ def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=N
     monkeypatch.setattr(fs, "load_overrides", lambda: dict(overrides or {}))
     monkeypatch.setattr(fs, "session_index", lambda: (dict(by_sid or {}), {}))
     monkeypatch.setattr(fs, "worktrees", lambda _root: {})
-    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: list(prs))
-    monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: [])
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        prs, measured=prs_measured, error=prs_error))
+    monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: fs.GitHubRows(
+        [], measured=prs_measured, error=prs_error))
     return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
 
 
@@ -912,3 +927,487 @@ def test_cmd_bind_all_skips_terminal_lanes(tmp_path, monkeypatch, capsys) -> Non
     rc = fs.main(["--state", state, "bind", "--all", "--dry-run", "--json"])
     assert rc == 0
     assert live not in capsys.readouterr().out, "a terminal lane must not be a bind target"
+
+
+# ---------------------------------------------------------------------------
+# #7957 H1/H2/H5 — the cache's age is SELF-REPORTED and BOUNDED, and a FAILED
+# board read is never an answer. The epic's headline defect, in-repo: a state
+# written in the morning answered a question asked at night, with no age on it.
+# ---------------------------------------------------------------------------
+
+def test_state_age_seconds_reads_the_measured_stamp_not_the_mtime(tmp_path) -> None:
+    """`generated_at` is a real measurement stamp, so it carries the age of the
+    READING. The file's mtime carries no such meaning (#7159)."""
+    assert fs.state_age_seconds({"generated_at": _stamp(1800)}) == pytest.approx(1800, abs=5)
+    # an ABSENT, empty or garbage stamp is UNKNOWN — never "fresh"
+    assert fs.state_age_seconds({}) is None
+    assert fs.state_age_seconds({"generated_at": ""}) is None
+    assert fs.state_age_seconds({"generated_at": "yesterday"}) is None
+    assert fs.state_age_seconds({"generated_at": None}) is None
+
+
+def test_state_freshness_boundary_is_the_window_not_a_hunch() -> None:
+    fresh = fs.state_freshness({"generated_at": _stamp(fs.STATE_FRESH_S - 30)})
+    assert fresh["stale"] is False
+    assert fresh["age_seconds"] > 0
+
+    stale = fs.state_freshness({"generated_at": _stamp(fs.STATE_FRESH_S + 30)})
+    assert stale["stale"] is True
+    assert "window" in stale["reason"]
+
+    unknown = fs.state_freshness({"generated_at": ""})
+    assert unknown["stale"] is True, "an unreadable stamp is never current"
+    assert unknown["age_seconds"] is None and "UNKNOWN" in unknown["reason"]
+
+    # the human rendering carries the number AND the marker
+    assert fs.render_state_age(fresh).startswith("state_age=")
+    assert "STALE" not in fs.render_state_age(fresh)
+    assert "STALE(>900s)" in fs.render_state_age(stale)
+    assert fs.render_state_age(unknown) == "state_age=? (unreadable stamp)"
+
+
+def test_a_stamp_in_the_future_is_unreadable_not_the_freshest_possible_state() -> None:
+    """`max(0.0, …)` reported a future stamp as age ZERO — the freshest state there
+    is — so a future-dated or corrupt cache answered forever and was never rebuilt,
+    which is the exact failure the age window exists to remove (#7957 H1)."""
+    future = fs.state_freshness({"generated_at": _stamp(-3600)})
+    assert future["age_seconds"] is None, "a future stamp is not an age of zero"
+    assert future["stale"] is True, "an unknown age is never current"
+    assert "UNKNOWN" in future["reason"]
+    assert fs.state_age_seconds({"generated_at": _stamp(-86400)}) is None
+
+    # ...but ordinary clock skew between the writer and this reader is NOT a future
+    # stamp, and must still read as fresh — the guard is a sanity bound, not a trap.
+    skewed = fs.state_freshness({"generated_at": _stamp(-5)})
+    assert skewed["stale"] is False and skewed["age_seconds"] == 0.0
+
+    assert fs.STATE_CLOCK_SKEW_S < fs.STATE_FRESH_S, "skew must not exceed the window"
+
+
+def test_cmd_free_a_malformed_free_record_is_not_an_offerable_lane(tmp_path, capsys) -> None:
+    """`free` is an INVITATION TO DISPATCH, so a record that merely SAYS it is free
+    but cannot be read must not be offered. The guard used to cover only the flag, so
+    a `{"free": true}` stub passed the filter and then raised KeyError on the fields
+    below — a traceback where the caller needed "no genuinely free lane" (#7957 H4)."""
+    state = _state_file(tmp_path, {"free": True})
+    assert fs.main(["--state", state, "free"]) == 0
+    assert fs.main(["--state", state, "free", "--json"]) == 0
+    assert "no genuinely free lane" in capsys.readouterr().out
+
+
+def test_write_state_json_survives_concurrent_repairs_of_one_cache(tmp_path) -> None:
+    """Every reader that finds a stale cache tries to repair it, so a FIXED temp name
+    is shared by concurrent writers: all but one lose `os.replace` to
+    FileNotFoundError and their repair is dropped, re-paying the full rebuild on the
+    next read (#7957 H2). The write must be atomic AND collision-free."""
+    path = tmp_path / "state.json"
+    payload = {"generated_at": "2020-01-01T00:00:00+0000", "pad": "x"}
+    results: list[bool] = []
+
+    def write() -> None:
+        results.append(fs._write_state_json(path, payload))
+
+    threads = [threading.Thread(target=write) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results), f"a concurrent repair was silently dropped: {results}"
+    assert json.loads(path.read_text()) == payload, "the cache was left torn"
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was leaked"
+
+
+def test_write_state_json_does_not_narrow_the_cache_mode(tmp_path) -> None:
+    """`tempfile.mkstemp` creates 0600 and `os.replace` made THAT the cache's final mode,
+    silently narrowing a file that was 0644 and locking out a non-owner reader (a
+    container, a group process) with no error at write time, only a failure to read later.
+    The mode must be what `Path.write_text` produces — compared against a real file rather
+    than a constant, so the assertion holds under any umask (#7957 H2)."""
+    reference = tmp_path / "reference"
+    reference.write_text("x")
+
+    path = tmp_path / "state.json"
+    assert fs._write_state_json(path, {"generated_at": _stamp(0)}) is True
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+
+def test_write_state_json_does_not_leave_a_cache_unreadable(tmp_path) -> None:
+    """Copying an existing cache's mode verbatim perpetuates the very failure the mode
+    handling exists to prevent: a 0o000 cache would be rewritten 0o000, unreadable by
+    everyone including its writer, so every read rebuilds and rewrites the same unusable
+    file (#7957 H2)."""
+    path = tmp_path / "state.json"
+    path.write_text("{}")
+    os.chmod(path, 0o000)
+
+    assert fs._write_state_json(path, {"generated_at": _stamp(0)}) is True
+    assert stat.S_IMODE(path.stat().st_mode) != 0o000, "the cache must not stay unreadable"
+    assert json.loads(path.read_text())["generated_at"]
+
+
+def test_write_state_json_does_not_leak_the_descriptor_it_opened(tmp_path, monkeypatch) -> None:
+    """`with os.fdopen(...)` must own the descriptor on EVERY path, including a
+    `json.dumps` failure inside the block. A spy on `os.close` cannot see this — the
+    `with` closes at the C level — so prove it with `fstat`, which fails with EBADF only
+    if the descriptor was really closed."""
+    opened: list[int] = []
+    real_open = os.open
+
+    def spy_open(path_: object, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path_, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(fs.os, "open", spy_open)
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(tmp_path / "state.json", circular)
+
+    assert opened, "the temp was never created"
+    with pytest.raises(OSError):
+        os.fstat(opened[0])  # EBADF: the descriptor was really closed
+
+
+def test_write_state_json_closes_no_descriptor_it_does_not_own(tmp_path, monkeypatch) -> None:
+    """This function must not close a descriptor by hand at all: `os.fdopen` finalises and
+    closes the FileIO when a later stage of the call fails, so a second close hits
+    whatever the freed number was reused for (#7957 H2: readers repair concurrently)."""
+    closed: list[int] = []
+    real_close = os.close
+
+    def spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(fs.os, "close", spy_close)
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(tmp_path / "state.json", circular)
+
+    assert closed == [], f"the `with` owns the descriptor; it must not be closed here: {closed}"
+
+
+def test_write_state_json_cleans_up_when_the_payload_is_unserialisable(tmp_path) -> None:
+    """A payload `json.dumps` cannot render (a circular reference) is a CALLER bug, not an
+    I/O failure, so it propagates rather than being reported as a failed cache write — but
+    it must still leave neither a temp file nor a half-written cache behind, because every
+    reader that finds a stale cache takes this path."""
+    path = tmp_path / "state.json"
+    circular: dict[str, object] = {"generated_at": _stamp(0)}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        fs._write_state_json(path, circular)
+
+    assert not path.exists(), "a failed write must not fabricate a cache"
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was leaked"
+
+
+def test_lane_json_carries_the_age_of_the_answer(tmp_path, capsys) -> None:
+    """The human channel reads the stderr line; a machine consumer reading `lane
+    --json` must be able to learn the age of what it was handed (#7957 H1)."""
+    state = _state_file(tmp_path, {
+        "identity": {"lane": "L"}, "session": {}, "liveness": {}, "claim": {},
+    })
+    assert fs.main(["--state", state, "lane", "L", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "freshness" in payload
+    assert payload["freshness"]["stale"] is False
+
+
+def _load(args_list: list[str]):
+    return fs._load_or_build(fs.build_parser().parse_args(args_list))
+
+
+def _hermetic_rebuild(monkeypatch, *, lane: str = "FRESH-LANE"):
+    """A `build_state` that answers without a single live source, plus the two
+    resolvers `_load_or_build` calls first (which would otherwise shell out)."""
+    built = {
+        "generated_at": _stamp(0),
+        "lanes": [{"identity": {"lane": lane}}],
+        "reconciliation": {"github_measured": True, "github_error": ""},
+    }
+    monkeypatch.setattr(fs, "build_state", lambda **_kw: built)
+    monkeypatch.setattr(fs, "resolve_repo", lambda _repo: "o/r")
+    monkeypatch.setattr(fs, "resolve_repo_root", lambda _repo: "/tmp")
+    return built
+
+
+def test_a_stale_cache_is_rebuilt_and_repaired_not_served_as_current(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """THE headline defect (#7957 H1/H2). A cache 4h old must not answer a question
+    asked now — the served age is BOUNDED, not merely labelled — and the expired cache
+    is repaired so the next reader does not pay for the same rebuild."""
+    path = tmp_path / "fleet-state.json"
+    path.write_text(json.dumps({
+        "generated_at": _stamp(4 * 3600),
+        "lanes": [{"identity": {"lane": "STALE-LANE"}}],
+    }))
+    _hermetic_rebuild(monkeypatch)
+
+    out = _load(["--state", str(path), "free"])
+
+    lanes = [lane["identity"]["lane"] for lane in out["lanes"]]
+    assert lanes == ["FRESH-LANE"], "a 4h-old cache must not be served as current"
+    assert out["freshness"]["stale"] is False
+    on_disk = json.loads(path.read_text())
+    assert on_disk["lanes"][0]["identity"]["lane"] == "FRESH-LANE", \
+        "the expired cache must be repaired, or every later reader rebuilds again"
+    err = capsys.readouterr().err
+    assert "STALE(>900s)" in err and "rebuilding before answering" in err
+
+
+def test_a_cache_with_no_readable_stamp_is_never_current(tmp_path, monkeypatch) -> None:
+    """An unknown age is NOT freshness. Both shapes (absent, garbage) must rebuild."""
+    _hermetic_rebuild(monkeypatch)
+    for raw in ({}, {"generated_at": ""}, {"generated_at": "not-a-time"}):
+        path = tmp_path / f"state-{len(json.dumps(raw))}.json"
+        path.write_text(json.dumps({"lanes": [{"identity": {"lane": "UNSTAMPED"}}], **raw}))
+        out = _load(["--state", str(path), "free"])
+        assert [lane["identity"]["lane"] for lane in out["lanes"]] == ["FRESH-LANE"], raw
+
+
+def test_allow_stale_reads_the_aged_cache_on_purpose_and_marks_it_stale(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The value is still PUBLISHED past the window — marked stale, never presented as
+    current (the #7871 resolution: render the age, do not suppress the reading)."""
+    path = tmp_path / "fleet-state.json"
+    path.write_text(json.dumps({
+        "generated_at": _stamp(3 * 3600),
+        "lanes": [{"identity": {"lane": "AGED-LANE"}}],
+    }))
+    monkeypatch.setattr(fs, "build_state", lambda **_kw: pytest.fail(
+        "--allow-stale must read the cache, not rebuild"))
+
+    out = _load(["--state", str(path), "--allow-stale", "free"])
+
+    assert [lane["identity"]["lane"] for lane in out["lanes"]] == ["AGED-LANE"]
+    assert out["freshness"]["stale"] is True
+    assert out["freshness"]["age_seconds"] > fs.STATE_FRESH_S
+    err = capsys.readouterr().err
+    assert "STALE(>900s)" in err and "NOT current" in err
+
+
+def test_a_fresh_cache_is_served_without_rebuilding(tmp_path, monkeypatch, capsys) -> None:
+    """Control: the rebuild is for EXPIRY, not for every read — and the age it
+    answered from is still printed (H1: never inferred by hand)."""
+    path = tmp_path / "fleet-state.json"
+    path.write_text(json.dumps({
+        "generated_at": _stamp(60),
+        "lanes": [{"identity": {"lane": "CACHED-LANE"}}],
+    }))
+    monkeypatch.setattr(fs, "build_state", lambda **_kw: pytest.fail(
+        "a fresh cache must be served, not rebuilt"))
+
+    out = _load(["--state", str(path), "free"])
+
+    assert [lane["identity"]["lane"] for lane in out["lanes"]] == ["CACHED-LANE"]
+    assert out["freshness"]["stale"] is False
+    err = capsys.readouterr().err
+    assert "state_age=1m" in err and "source=cache" in err
+
+
+def test_every_reader_prints_the_age_it_answered_from(tmp_path, monkeypatch, capsys) -> None:
+    """`free` is the dispatch invitation; the run must say what it answered from."""
+    lane = {"identity": {"lane": "L"}, "free": False, "session": {"sid": None}}
+    state = _state_file(tmp_path, lane)
+    assert fs.main(["--state", state, "free"]) == 0
+    assert "state_age=" in capsys.readouterr().err
+
+
+def test_gh_json_declares_whether_the_read_was_measured(monkeypatch) -> None:
+    """"Could not read it" and "the answer is empty" are different facts (#7957 H5)."""
+    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: '[{"number": 1}]')
+    rows = fs.gh_json(["pr", "list"])
+    assert rows == [{"number": 1}]
+    assert rows.measured is True and rows.error == ""
+
+    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: "")
+    rows = fs.gh_json(["pr", "list"], what="gh pr list")
+    assert rows == [] and rows.measured is False
+    assert "no parsable JSON" in rows.error
+
+    # a chatty failure, a null, and a non-list payload are all UNMEASURED
+    for payload, expect in (("rate limit exceeded", "no parsable JSON"),
+                            ("null", "NoneType")):
+        monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60, p=payload: p)
+        r = fs.gh_json(["pr", "list"], what="gh pr list")
+        assert r.measured is False and expect in r.error
+
+    # a PLAIN sequence carries no provenance and is UNMEASURED — never assumed read
+    assert fs.GitHubRows([{"number": 2}]).measured is False
+
+
+def test_build_state_records_the_board_provenance(monkeypatch) -> None:
+    unread = _fleet_build(monkeypatch, registry=[], live={}, measured=True, prs=(),
+                          prs_measured=False, prs_error="gh pr list timed out")
+    assert unread["reconciliation"]["github_measured"] is False
+    assert unread["reconciliation"]["github_error"] == "gh pr list timed out"
+    assert unread["summary"]["github_measured"] is False
+    assert fs.github_provenance(unread) == {"measured": False, "error": "gh pr list timed out"}
+
+    read = _fleet_build(monkeypatch, registry=[], live={}, measured=True, prs=(),
+                        prs_measured=True)
+    assert read["reconciliation"]["github_measured"] is True
+    assert fs.github_provenance(read) == {"measured": True, "error": ""}
+
+
+def test_github_provenance_tolerates_a_pre_provenance_cache() -> None:
+    """A cache written before this field existed must still be readable — only an
+    EXPLICIT failure makes a reader refuse (the `conflict_map` tolerance)."""
+    assert fs.github_provenance({}) == {"measured": True, "error": ""}
+    assert fs.github_provenance({"reconciliation": {}}) == {"measured": True, "error": ""}
+    assert fs.github_provenance({"reconciliation": {"github_measured": False,
+                                                   "github_error": "x"}}) == {
+        "measured": False, "error": "x"}
+
+
+def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
+    """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
+    state with an empty fleet and free every lane into capacity on the next read."""
+    fake = {"generated_at": _stamp(0), "lanes": [], "terminal": [], "orphans": [],
+            "violations": [], "conflicts": [], "conflict_claimants": {},
+            "index": {"prs": {}, "issues": {}},
+            "reconciliation": {"workspaces_measured": True,
+                               "github_measured": False,
+                               "github_error": "gh pr list timed out"},
+            "summary": {"lanes": 0, "bound": 0, "unknown_binding": 0,
+                        "binding_missing_but_live": 0, "genuinely_free": 0,
+                        "violations": 0, "orphans": 0, "conflicts": 0,
+                        "terminal": 0, "recoverable": 0, "retired": 0,
+                        "workspaces_measured": True, "github_measured": False}}
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    rc = fs.cmd_build(argparse.Namespace(out=str(out), state=str(out), json=False))
+    assert rc == 2, "an unread board must not be reported as a successful build"
+    assert not out.exists(), "a failed read must never be written as fact"
+    err = capsys.readouterr().err
+    assert "NOT CACHED" in err and "gh pr list timed out" in err
+
+
+def _unread_state(**extra):
+    return {
+        "index": {"prs": {}, "issues": {}},
+        "conflicts": [],
+        "lanes": [{"identity": {"lane": "BUSY-REALLY"}, "free": True,
+                   "session": {"sid": "a" * 36}}],
+        "orphans": [],
+        "reconciliation": {"workspaces_measured": True, "github_measured": False,
+                           "github_error": "gh pr list timed out"},
+        **extra,
+    }
+
+
+def test_who_never_asserts_nobody_from_an_unread_board(monkeypatch, capsys) -> None:
+    """A failed read is exactly when a claim LOOKS absent (#7957 H5)."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_state())
+    rc = fs.cmd_who(argparse.Namespace(number=999999, json=False))
+    cap = capsys.readouterr()
+    assert rc == 2
+    assert "no lane holds it" not in cap.out
+    assert "UNREADABLE" in cap.err and "gh pr list timed out" in cap.err
+
+
+def test_free_refuses_to_offer_capacity_from_an_unread_board(monkeypatch, capsys) -> None:
+    """`free` is an INVITATION TO DISPATCH: with the board unread, every "holds N
+    PR(s)" reason disappears and a working lane reads as capacity (#7158's class)."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_state())
+    assert fs.cmd_free(argparse.Namespace(json=False)) == 2
+    cap = capsys.readouterr()
+    assert "BUSY-REALLY" not in cap.out, "no lane may be offered from an unread board"
+    assert "UNREADABLE" in cap.err
+
+
+def test_conflicts_and_orphans_refuse_an_unread_board(monkeypatch, capsys) -> None:
+    """An empty list is an ALL-CLEAR; it must not be manufactured by a failed read."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_state())
+    assert fs.cmd_conflicts(argparse.Namespace(json=False)) == 2
+    assert fs.cmd_orphans(argparse.Namespace(json=False)) == 2
+    err = capsys.readouterr().err
+    assert err.count("UNREADABLE") == 2
+
+
+def test_a_measured_board_is_still_answered(monkeypatch, capsys) -> None:
+    """Control against over-refusing: a MEASURED board answers exactly as before
+    (the refusal is for a failure, not for an empty fleet)."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: {
+        "index": {"prs": {}, "issues": {}}, "conflicts": [], "lanes": [],
+        "reconciliation": {"github_measured": True, "github_error": ""},
+    })
+    rc = fs.cmd_who(argparse.Namespace(number=999999, json=False))
+    out = capsys.readouterr().out
+    assert rc == 1 and "no lane holds it" in out
+    assert fs.cmd_free(argparse.Namespace(json=False)) == 0
+
+
+def test_a_lane_read_is_warned_not_suppressed_on_an_unread_board(
+    monkeypatch, capsys
+) -> None:
+    """`lane`'s session/liveness sections are valid whatever the board says, so it
+    answers — and SAYS which half is incomplete."""
+    lane = {"identity": {"lane": "L", "workspace": "W", "worktree": "/wt",
+                         "branch": "b", "head_sha": "d" * 40},
+            "session": {"sid": "a" * 36, "source": "disk", "file": "/s.jsonl",
+                        "pi_pid": 1, "pid_alive": True, "binding_missing": False},
+            "liveness": {"cpu_delta_seconds": 0.0, "cpu_sample_seconds": 3.0,
+                         "descendant_count": 0, "pane_working": False,
+                         "pane_quiescent": True, "pane_stalled_turn": False},
+            "claim": {"prs": (), "issues": (), "evidence": {}},
+            "free": True, "not_free_reasons": [], "terminal": {}, "work": {"prs": []}}
+    monkeypatch.setattr(fs, "_load_or_build",
+                        lambda _args: _unread_state(lanes=[lane]))
+    assert fs.cmd_lane(argparse.Namespace(lane="L", json=False)) == 0
+    cap = capsys.readouterr()
+    assert "lane      L" in cap.out
+    assert "UNREADABLE" in cap.err and "incomplete" in cap.err
+
+
+def test_free_never_offers_a_lane_whose_record_cannot_be_read(monkeypatch, capsys) -> None:
+    """A malformed lane record is NOT free (fail-closed, the module's polarity) and the
+    command whose answer is "send work here" must degrade rather than crash."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: {
+        "lanes": [{"identity": {"lane": "NO-FREE-KEY"}}, 3, None],
+        "reconciliation": {"github_measured": True, "github_error": ""},
+    })
+    assert fs.cmd_free(argparse.Namespace(json=False)) == 0
+    out = capsys.readouterr().out
+    assert "NO-FREE-KEY" not in out
+    assert "no genuinely free lane" in out
+
+
+def test_a_json_reader_carries_the_age_in_the_payload(tmp_path, monkeypatch, capsys) -> None:
+    """H1 for the MACHINE channel: the orchestrator reads JSON, so the age must be in
+    the payload — not only in a stderr line it may never capture."""
+    path = tmp_path / "fleet-state.json"
+    path.write_text(json.dumps({
+        "generated_at": _stamp(0),
+        "index": {"prs": {}, "issues": {}},
+        "conflict_claimants": {}, "conflicts": [], "lanes": [],
+    }))
+    assert fs.main(["--state", str(path), "who", "999999", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["freshness"]["stale"] is False
+    assert 0 <= payload["freshness"]["age_seconds"] < fs.STATE_FRESH_S
+    assert payload["freshness"]["window_seconds"] == fs.STATE_FRESH_S
+
+
+def test_payload_freshness_is_computed_from_the_state_not_trusted_from_prose() -> None:
+    """A fixture (or a cache written by an older build) carries no `freshness` block;
+    the payload must still state the age it can compute, and never claim a `rebuilt`
+    it cannot prove."""
+    stale = fs.payload_freshness({"generated_at": _stamp(3600)})
+    assert stale["stale"] is True and stale["rebuilt"] is False
+    assert stale["age_seconds"] == pytest.approx(3600, abs=5)
+
+    annotated = fs.payload_freshness({
+        "generated_at": _stamp(1), "freshness": {"rebuilt": True}})
+    assert annotated["stale"] is False and annotated["rebuilt"] is True
+
+    assert fs.payload_freshness(3)["stale"] is True, "a non-state is never current"

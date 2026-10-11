@@ -54,6 +54,40 @@ doc_status: live
 >   endpoints: the write path admits `:Point`/`:Event` only until #7902 lands, so
 >   the model must not read as a live end-to-end shape.
 >
+> **Changelog v3.23 (2026-10-10 — issue #3644 — the §4.6 *Versioning* WINDOW half is implemented on `:Source`):**
+> §4.6 declared the Source version window and `#5024` landed the *version-anchor*
+> half (a hash transition journals a `SourceVersioned` record naming
+> `previousContentHash`). The window half was *declared, never written*: no
+> writer set `validFrom`/`validTo`/`expiredAt`, so *"the journal record that
+> opens a new version closes the old one in the same act"* was an intention, not
+> a recorded act. **Implemented now, exactly as §4.6 words it:** `create_source`
+> mints the window instant **once**, on the same clock as `updatedAt`;
+> `_upsert_source` writes the node's `validFrom` through the same hash-diff gate
+> as `version`/`updatedAt` (create, stub completion, real transition — never a
+> no-op re-check, never a hash-less write); and the `SourceVersioned` record
+> carries **both** window facts — `validFrom` (the new version's open, the node's
+> window start) and `previousValidTo` (the prior version's close), the **same
+> instant by construction**, so the chain is exactly contiguous. **`previousValidTo`
+> is record-only**: one node per `url`, the node holding the CURRENT version whose
+> window is open (absent `validTo` IS the open end — Cypher cannot write NULL), so
+> a prior version's close can only be a journal fact. An absent `validFrom` is an
+> **open start** and is never synthesized at replay time (`$vf` is the recorded
+> instant, never `coalesce($vf, $now)`), so every legacy journal line replays
+> byte-identically to the source it was written from. §4.7's Source column moves
+> `validFrom`/`validTo` ❌ → ⚠️ (§4.6 field table `❌` → `⚠️`), with the two
+> different reasons stated in the † footnote. **Also not claimed, and deliberately
+> so:** the invariant holds on the `create_source`/`_upsert_source` path only —
+> `_upsert_document` and `_materialize_session_source` are further `:Source`
+> `contentHash` writers that do **not** move the window, so a stamped source can
+> be left with a present-but-stale start; extending the gate to them needs a
+> minted instant that is also replayable (a separate clock/mint decision), is
+> tracked on **#3644**, and is **pinned, not silenced**, by
+> `tests/test_source_version_window_3644.py::test_pinned_gap__*`. **Not claimed, and deliberately so:**
+> the node's `validTo`/`expiredAt` need a `:Source` REMOVAL path — that field's
+> meaning is **#3590** S2's decision — and a caller-asserted valid-time start
+> needs the inversion guards the Point window needed (#3980/#4021/#5358/#5360);
+> `Subject`/`Object` windows remain ❌ (§4.2/§4.3).
+>
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
 > as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,
@@ -334,9 +368,13 @@ doc_status: live
 >   `:Source` keyed `url`. `#5024` **landed** — a content-changing re-fetch now
 >   journals a `SourceVersioned` record naming the superseded `contentHash`, a
 >   no-op re-fetch journals nothing, and a replay reproduces the node (the
->   per-field split is in `docs/durability-posture.md` → R2). Still open: the
+>   per-field split is in `docs/durability-posture.md` → R2). ~~Still open: the
 >   version **window** `validFrom`/`validTo`/`expiredAt`, which no writer sets
->   (**#3644**); and `#5038` (the version model).
+>   (**#3644**)~~ — **since v3.23 the `:Source` window half is implemented**
+>   (`validFrom` on the node; `validFrom` + `previousValidTo` on the
+>   `SourceVersioned` record), and what stays open is the node's
+>   `validTo`/`expiredAt` (**#3590** S2, the removal-field decision); and
+>   `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 >
@@ -1023,8 +1061,8 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
-| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
-| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ⚠️ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). **`validFrom` is written since #3644**: `_upsert_source` sets it to the version's OBSERVATION instant (the same instant `create_source` mints for `updatedAt`, one clock read, carried on the record) through the same hash-diff gate as `version`/`updatedAt` — a create, a stub completion, or a real transition, never a no-op re-check. A version has no content-side date of its own (a version *is* "the content as read at an instant"), which is why the observation instant is definitional here and not the borrowed write clock §4.1/#3654 forbids for a Point; a caller-asserted start (a known publication date) is a separate additive input, deliberately not accepted yet. Coverage is the `create_source`/`_upsert_source` path only — a stub minted by `_link_source` writes none, and **absent means an open/unbounded start** (the replay never stamps one: `$vf` is recorded, never `coalesce($vf, $now)`). **Two further `:Source` writers move the version anchor without moving the window** — `_upsert_document` (the `DocumentCreated` fold) and `_materialize_session_source` (the capture path) — so a source this path stamped can be left with a **present-but-stale** start (tracked on **#3644**, pinned by `test_pinned_gap__*`). **`validTo` is written as a JOURNAL fact, not a node property**: the node holds the CURRENT version, whose window is open (absent IS the open end — Cypher cannot write NULL), so the prior version's close lives on the `SourceVersioned` record as `previousValidTo`, equal to that record's `validFrom` by construction (§4.6's "closes the old one in the same act"). A `:Source` REMOVAL sets the node's `validTo`; no such path exists yet (#3590 S2). A prior version's window is a journal record — see *Versioning* |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642). Still unwritten: no `:Source` removal path exists, and the removal field's meaning is exactly the decision **#3590** S2 owns (the same one that leaves Point's `expiredAt` unable to distinguish *replaced* from *withdrawn*). A version transition does NOT set it — `validTo`/`previousValidTo` is the window fact |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
 | `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 (v3.15) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
@@ -1056,11 +1094,13 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 
 **Stale is a read, and `stale` is not `wrong`.** A **Point** is **stale** when its recorded `sourceVersion` differs from its source's current `contentHash` — a **derived predicate**, not a stored status, so nothing can drift. A stale entity **was true of the content that was read** and **remains standing**: supersession is **deferred until the replacement exists**, and when re-inference produces the successor the stale entity is superseded through `CORRECTS`. **Superseded, never deleted** — the previous belief stays queryable alongside the new one. This is the deliberate policy: **a stale belief is strictly better than no belief**, because immediate removal would leave the graph asserting nothing about a subject it previously had a position on.
 
+**A version's window is opened and the prior one closed in the same act (`#3644`).** The version's valid-time start is the instant it was **observed** — `create_source` mints it once, on the same clock as `updatedAt`, and `_upsert_source` writes it only through the hash-diff gate, so a no-op re-check moves neither the node nor the journal. The `SourceVersioned` record carries **both** window facts: `validFrom` (the new version's open, the node's window start) and `previousValidTo` (the prior version's close). The two are the **same instant by construction** — one minted clock under two names, which is what *"closes the previous version's window and records the new one"* means — so the window chain is exactly contiguous rather than "contiguous modulo a fallback". The window is **half-open, `[validFrom, validTo)`**: `previousValidTo == validFrom` therefore places the shared instant in exactly one version — the new one — rather than in both. A `:Source` reader must **not** reuse the Point lane's closed predicate (`_covers`: `validFrom <= t <= validTo`), which would double-cover that instant; no `:Source` reader exists yet, so this is the contract the first one must implement. `previousValidTo` is a **record-only** key: there is one node per `url`, the node holds the current version, and its window is **open** (absent `validTo` is the open end), so the prior version's close can only live in the journal. An absent `validFrom` is an **open start** and is never synthesized at replay time — a legacy record (or a `_link_source` stub, which writes no window) replays to a source with no window, exactly as it was written. **The invariant holds on the `create_source`/`_upsert_source` path only.** Two other `:Source` writers move the version anchor (`contentHash`/`version`) without moving the window, so a source this path stamped can be left with a **present-but-stale** start: `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`) and `_materialize_session_source` (the session-capture path, which rewrites `contentHash` without advancing `version` and is replayed by nothing). Extending the gate to them needs a minted instant that is **also replayable** — a clock/mint decision this change does not take — and is tracked on **#3644**; the gap is pinned (never silenced) by `tests/test_source_version_window_3644.py::test_pinned_gap__*`.
+
 **Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
 
 **`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
 
-**Implementation status (`#5024`, 2026-09-24).** The *version-anchor* half of this section is now implemented: a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. **The window half is still a declared gap:** the record names the superseded *version* but does not close a `validTo`/open a `validFrom`, because no writer sets those fields on the node at all (**#3644**). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
+**Implementation status (`#5024`, 2026-09-24; window half `#3644`, 2026-10-10).** Both halves are now implemented. The *version-anchor* half (#5024): a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. The *window* half (#3644): the same record now carries the version window — `validFrom` (the new version's open, written to the node through the same hash-diff gate) and `previousValidTo` (the prior version's close, a record-only fact) — so closing the prior window is a **recorded act**, and a rebuild reproduces the node's window; the prior window is recoverable from the journal alone. **What remains open** (and is deliberately not claimed): the node's `validTo`/`expiredAt`, which need a `:Source` **removal** path — the field's meaning is **#3590** S2's decision; and a caller-asserted valid-time start (a known publication date), which needs the inversion guards the Point window needed (#3980, #4021, #5358, #5360). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
 
 ### §4.7 Temporal Model (canonical)
 
@@ -1113,13 +1153,13 @@ declared, not built (implementation is tracked separately):
 
 | Slot | Point | Subject | Object | Event | Source |
 |------|-------|---------|--------|-------|--------|
-| valid start | `validFrom` ⚠️ | `validFrom` ❌ | `validFrom` ❌ | `startedAt` ✅ (alias) | `validFrom` ❌ |
-| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | `endedAt` ✅ (alias) | `validTo` ❌ |
+| valid start | `validFrom` ⚠️ | `validFrom` ❌ | `validFrom` ❌ | `startedAt` ✅ (alias) | `validFrom` ⚠️ † |
+| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | `endedAt` ✅ (alias) | `validTo` ⚠️ † |
 | txn start | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ✅ | `capturedAt` ⚠️ | `ingestedAt` ✅ |
-| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
+| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ † |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** A content-changing re-fetch is no longer a silent in-place mutation: since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, and since `#3644` that record also carries the **version window** (`validFrom` + `previousValidTo`, the same minted instant) while the node's `validFrom` is written through the same hash-diff gate — so a replay reproduces the node's window and the prior window is recoverable from the journal alone. Both Source window rows are **⚠️, not ✅, for two different reasons**: the valid **start** is written on the `create_source`/`_upsert_source` path only (a `_link_source` stub mints none, and absent ⇒ open/unbounded start; `_upsert_document` and `_materialize_session_source` move the version anchor **without** the window, so a stamped source can carry a present-but-stale start — **#3644**, pinned by `test_pinned_gap__*`), and the valid **end** is a **record-only** fact — the node holds the CURRENT version, whose window is open (absent = open end), so the prior version's `validTo` lives on the record as `previousValidTo` and a node `validTo` would need a `:Source` **removal** path that does not exist yet (**#3590** S2, which also owns `expiredAt`).
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths only; an undated session (mining W-4) stamps no `validFrom` at all

@@ -378,15 +378,29 @@ class TestIdempotency:
         with fresh_sdk() as sdk:
             proj = sdk._get_proj()
             proj.apply(gh_issue_event())
+            first = proj.g.query(
+                "MATCH (s:Source) RETURN s.contentHash, s.version"
+            ).result_set[0]
             proj.apply(gh_issue_event())
             assert _count(proj, "Source") == 1
             assert _count(proj, "Event") == 1
             assert _edge_count(proj, "Source", "url", GH_URL,
                                "references", "Event", "eventId",
                                "github-issue-test/repo-42") == 1
-            # no version bump on re-materialization (unlike _upsert_source)
-            rows = proj.g.query("MATCH (s:Source) RETURN s.version").result_set
-            assert rows[0][0] is None
+            # no version bump on re-materialization (unlike _upsert_source).
+            # #5214: the Source now carries a CONTENT version (the choke point
+            # writes `contentHash` + the §4.6 ordinal for a real per-item URL),
+            # so the pre-#5214 `version IS NULL` pin is replaced by the property
+            # it was standing in for — the (hash, ordinal) pair must be STABLE
+            # across a re-poll. An identical re-apply writes nothing at all (the
+            # digest is unchanged and the version write is gated on a
+            # difference), so a churning re-materialization shows up here as
+            # 1 -> 2, or as a different hash.
+            after = proj.g.query(
+                "MATCH (s:Source) RETURN s.contentHash, s.version"
+            ).result_set[0]
+            assert after == first, f"re-poll must not churn the version: {first!r} -> {after!r}"
+            assert first[1] == 1, f"§4.6: the ordinal is 1 at the first version: {first!r}"
 
     def test_reapply_over_pre_existing_document_stub_keeps_kind(self):
         """#398 never-overwrite contract: a pre-existing `_link_source` stub

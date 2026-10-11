@@ -34,6 +34,13 @@ The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
 writes NO statements; see ``_upsert_statement`` for the #1843-reserved
 machinery.
+
+Liveness (#3539 §D): ``index_repo`` accepts an optional ``on_progress`` beat
+so the caller's single-flight claim is kept alive by REAL progress, not by
+entry age. Beats fire on every completed GitHub API call (``_get`` — the
+network-yield boundary, so the walk is live across a long paginated fetch)
+and every ``_PROGRESS_EVERY_ITEMS`` processed items (the synchronous
+projection loop, which never yields).
 """
 from __future__ import annotations
 
@@ -53,6 +60,15 @@ logger = logging.getLogger(__name__)
 _GITHUB_API = "https://api.github.com"
 _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
+
+# #3539 §D progress-beat granularity for the caller's liveness heartbeat.
+# The beat is the JOB's last sign of progress, so a long-but-live walk must
+# beat DURING the walk — not only at repo boundaries — or a re-poll would
+# presume it dead and spawn a SECOND concurrent walk (duplicate statement
+# ids, version inflation, job-status races). It must also be
+# progress-driven, never a bare timer: a timer would keep beating for a HUNG
+# run, which is exactly the claim that must expire.
+_PROGRESS_EVERY_ITEMS = 25
 
 # #1989 review round 3 (security): upper bound for a plausible issue
 # number in a persisted cursor. #3552 made the cursor SERVER-OWNED (a client
@@ -118,7 +134,8 @@ class GitHubIndexer:
             await self._client.aclose()
         self._client = None
 
-    async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
+    async def _get(self, client: httpx.AsyncClient, url: str, *,
+                   on_progress=None) -> httpx.Response:
         """GET with bounded retry-with-backoff on 429/5xx (T1-P13).
 
         Terminal auth failures (401/403) raise immediately — the token is
@@ -126,7 +143,13 @@ class GitHubIndexer:
         budget and mask the real error. After bounded retries on 429/5xx a
         GitHubFetchError is raised (honest fail — the caller's cursor stays
         put).
+
+        ``on_progress`` (#3539 §D): the caller's liveness beat, called after
+        every completed response AND after every retry sleep — a long
+        ``Retry-After`` wait is a live run waiting, not a dead one, so it
+        must not let the single-flight claim go stale mid-run.
         """
+        beat = on_progress or (lambda: None)
         headers = {"Authorization": f"Bearer {self._token}",
                    "Accept": "application/vnd.github+json"}
         last_status = None
@@ -136,6 +159,7 @@ class GitHubIndexer:
             except httpx.HTTPError as e:
                 logger.warning("GitHub request failed (%s): %s", url, e)
                 await asyncio.sleep(2 ** attempt)
+                beat()
                 continue
             if r.status_code in (401, 403):
                 raise GitHubFetchError(
@@ -144,12 +168,15 @@ class GitHubIndexer:
             if r.status_code == 429:
                 retry_after = int(r.headers.get("Retry-After", 2 ** attempt))
                 await asyncio.sleep(retry_after)
+                beat()
                 last_status = 429
                 continue
             if r.status_code >= 500:
                 await asyncio.sleep(2 ** attempt)
+                beat()
                 last_status = r.status_code
                 continue
+            beat()  # a completed API call IS progress (#3539 §D)
             return r
         raise GitHubFetchError(
             f"GitHub request failed after retries (last status {last_status or 'transport'}) "
@@ -283,7 +310,8 @@ class GitHubIndexer:
             return None
 
     async def _fetch_page(self, client: httpx.AsyncClient, repo: str,
-                          cursor: dict | None) -> tuple[list[dict], str | None, int | None, bool]:
+                          cursor: dict | None,
+                          on_progress=None) -> tuple[list[dict], str | None, int | None, bool]:
         """Fetch one page of issues (updated desc) + next URL + last-page total
         estimate + whether this page's Link claimed more pages exist (rel="last").
 
@@ -308,7 +336,7 @@ class GitHubIndexer:
                 since_dt = base - timedelta(seconds=1)
                 since = "&since=" + since_dt.astimezone(UTC).isoformat()
         url = f"{_GITHUB_API}/repos/{repo}/issues?{params}{since}"
-        r = await self._get(client, url)
+        r = await self._get(client, url, on_progress=on_progress)
         if r.status_code != 200:
             raise GitHubFetchError(
                 f"GitHub issues fetch failed ({r.status_code}) for {repo}")
@@ -371,7 +399,8 @@ class GitHubIndexer:
 
     async def _fetch_items(self, client: httpx.AsyncClient, repo: str,
                            cursor: dict | None,
-                           cap: int) -> tuple[list[dict], int | None, bool, bool]:
+                           cap: int,
+                           on_progress=None) -> tuple[list[dict], int | None, bool, bool]:
         """Fetch issues (updated desc, paginated) up to ``cap``.
 
         Returns (items, total_estimate, cap_hit, walk_complete).
@@ -417,7 +446,7 @@ class GitHubIndexer:
         drain = bool(cursor and cursor.get("truncated"))
         since_cursor = None if drain else cursor
         batch, next_url, total_estimate, final_has_last = await self._fetch_page(
-            client, repo, since_cursor)
+            client, repo, since_cursor, on_progress=on_progress)
 
         def _flush(block: list[dict], *, final: bool = False) -> bool:
             """Process ONE complete second-run ASC. True ⇒ cap hit (the
@@ -493,7 +522,7 @@ class GitHubIndexer:
                 q.pop("since", None)
                 next_url = urlunsplit((parts.scheme, parts.netloc, parts.path,
                                        urlencode(q, doseq=True), parts.fragment))
-            r = await self._get(client, next_url)
+            r = await self._get(client, next_url, on_progress=on_progress)
             if r.status_code != 200:
                 raise GitHubFetchError(
                     f"GitHub issues fetch failed ({r.status_code})")
@@ -779,12 +808,19 @@ class GitHubIndexer:
 
     async def index_repo(self, sdk, repo: str, *, cursor: dict | None = None,
                          cap: int = _MAX_ITEMS_PER_RUN,
-                         quota_check=None) -> dict:
+                         quota_check=None,
+                         on_progress=None) -> dict:
         """Fetch + diff + project ONE repo. Returns per-repo stats.
 
         ``cursor``: composite (updated_at, number) from the previous run.
         ``quota_check``: callable re-checked per batch (raises
         QuotaExceededError); None = no quota gate (stdio/operator).
+        ``on_progress``: optional liveness beat (#3539 §D) — called on every
+        completed GitHub API call (inside ``_get``) and every
+        ``_PROGRESS_EVERY_ITEMS`` processed items, so the caller's
+        single-flight claim is kept alive by real progress rather than by
+        entry age. Expected to be cheap and NON-RAISING (see
+        ``hosted_api._heartbeat_index_job``).
 
         #1895: a 0-processed run that did NOT cap/quota-cut mints a CLEAN
         boundary cursor from the input (drops ``truncated``) so a fully-
@@ -810,7 +846,7 @@ class GitHubIndexer:
         # error and the cursor is NOT advanced past unprocessed items
         # (T1-P13: honest fail; re-run resumes without gaps/dupes).
         items, total_estimate, cap_hit, walk_complete = await self._fetch_items(
-            client, repo, cursor, cap)
+            client, repo, cursor, cap, on_progress=on_progress)
         stats["total_fetched"] = len(items)
         last: dict | None = None
         # #1989 review round 2: track the NEWEST processed item too — a
@@ -846,6 +882,13 @@ class GitHubIndexer:
                 stats["statements_superseded"] += s_stats["statements_superseded"]
                 stats["events_minted"] += s_stats["events_minted"]
             stats["processed"] += 1
+            # #3539 §D progress beat: the projection loop is synchronous (it
+            # never yields), so without this a long single-repo walk beats
+            # only at the repo boundary — the stale window this heartbeat
+            # exists to close. Cheap (a dict write); never awaited.
+            if (on_progress is not None
+                    and stats["processed"] % _PROGRESS_EVERY_ITEMS == 0):
+                on_progress()
             # Advance the composite cursor past this processed item (only
             # ever to PROCESSED items — a mid-walk failure leaves it put).
             if n["updated_at"]:
