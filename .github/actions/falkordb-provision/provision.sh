@@ -56,8 +56,29 @@ HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 log() { printf '#6673 %s\n' "$*" >&2; }
 annotate_error() { printf '::error::%s\n' "$*"; }
 
-GHCR_OWNER="${FALKORDB_GHCR_OWNER:-daniel-ospina}"
+GHCR_OWNER="${FALKORDB_GHCR_OWNER:-${GITHUB_REPOSITORY_OWNER:-daniel-ospina}}"
+# GHCR requires a lowercase path; the mirror workflow and the python-ci leg both
+# derive the owner dynamically, so this end must too — a hardcoded owner would
+# silently stop matching after a transfer, rename or fork (masked, because
+# mirror.gcr.io leads).
+GHCR_OWNER="$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')"
 MIRROR_HOST="${FALKORDB_MIRROR_HOST:-mirror.gcr.io}"
+
+# Fail closed on a graph name that is not a plain identifier, BEFORE anything is
+# created OR pulled: it is written verbatim into $GITHUB_ENV, which is
+# line-delimited, so a newline in the value would append ARBITRARY env vars for
+# every later step of the job. All five callers pass a literal today — but this
+# action is reusable, and this is not a property to depend on. It must also
+# precede the image resolver: refusing an invalid input must not first spend a
+# pull (Docker Hub quota) or leave docker side effects for the refusal path.
+if [ -n "$URI_GRAPH" ]; then
+  case "$URI_GRAPH" in
+    *[!A-Za-z0-9_-]*)
+      annotate_error "uri_graph must be a plain graph identifier (A-Za-z0-9_-); refusing a value that could inject into GITHUB_ENV"
+      exit 1
+      ;;
+  esac
+fi
 
 # A reference's first path component is a REGISTRY HOST only when it contains a
 # '.' or a ':' (or is literally `localhost`) — Docker's own rule. So
@@ -65,13 +86,20 @@ MIRROR_HOST="${FALKORDB_MIRROR_HOST:-mirror.gcr.io}"
 # and `localhost:5000/...` are not. An already-qualified reference is used AS
 # GIVEN: this action must not silently rewrite a caller's explicit registry.
 image_candidates() {
-  case "${1%%/*}" in
-    *.*|*:*|localhost) printf '%s' "$1" ;;
-    *) printf '%s\n%s\n%s' \
-         "$MIRROR_HOST/$1" \
-         "ghcr.io/$GHCR_OWNER/${1##*/}" \
-         "$1" ;;
+  # The slash test is load-bearing: without it a SLASHLESS Docker Hub reference
+  # such as `redis:7` has no `/`, so `${1%%/*}` is the whole string, it matches
+  # `*:*`, and the reference is misread as an already-qualified registry — the
+  # mirror tiers are then never attempted. A first component is a host only when
+  # a `/` separates it from the rest.
+  case "$1" in
+    */*) case "${1%%/*}" in
+           *.*|*:*|localhost) printf '%s' "$1"; return 0 ;;
+         esac ;;
   esac
+  printf '%s\n%s\n%s' \
+    "$MIRROR_HOST/$1" \
+    "ghcr.io/$GHCR_OWNER/${1##*/}" \
+    "$1"
 }
 
 # Best-first image references, one per word (a reference never contains a space).
@@ -101,7 +129,7 @@ if [ -z "$RUN_IMAGE" ]; then
   done
 fi
 if [ -z "$RUN_IMAGE" ]; then
-  annotate_error "could not obtain '$IMAGE' from '$MIRROR_HOST/$IMAGE' or the Docker Hub upstream — no container can start, so no test in this job can run (#7867)"
+  annotate_error "could not obtain '$IMAGE' from any of: ${IMAGE_CANDIDATES[*]} — no container can start, so no test in this job can run (#7867)"
   exit 1
 fi
 
@@ -110,20 +138,6 @@ fi
 # under `set -e` (127: command not found) on every path — no container started,
 # no port was exported, and the matrix went dark for a reason that had nothing to
 # do with any registry.
-
-# Fail closed on a graph name that is not a plain identifier, BEFORE anything
-# is created: it is written verbatim into $GITHUB_ENV, which is
-# line-delimited, so a newline in the value would append ARBITRARY env vars
-# for every later step of the job. All five callers pass a literal today —
-# but this action is reusable, and this is not a property to depend on.
-if [ -n "$URI_GRAPH" ]; then
-  case "$URI_GRAPH" in
-    *[!A-Za-z0-9_-]*)
-      annotate_error "uri_graph must be a plain graph identifier (A-Za-z0-9_-); refusing a value that could inject into GITHUB_ENV"
-      exit 1
-      ;;
-  esac
-fi
 
 # Ownership label: one value per JOB INSTANCE. The teardown step selects on
 # it, so this job can remove exactly its own containers.
