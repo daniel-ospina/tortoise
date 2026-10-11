@@ -97,6 +97,11 @@ BACKLOG_DIR_LEAF = "capture-backlog"
 _POLICY_DIR = "policy"
 _POLICY_FILE = "choice.json"
 
+#: The policy record's path in the layout this module's first iteration used —
+#: the ledger's TOP level, beside the session records. Read-only fallback (see
+#: :func:`read_policy`); never written.
+_LEGACY_POLICY_FILE = "policy.json"
+
 #: The three states.  Taken from #4197's own acceptance criteria — "the read
 #: path's status reflects all three states (not processed / processed /
 #: declined) without coining new vocabulary".
@@ -146,7 +151,7 @@ def _policy_path() -> Path:
 
 
 def _session_path(session_id: str) -> Path:
-    """The record path for one ``session_id``.
+    """The record path for one ``session_id`` — and an INJECTIVE map.
 
     ``session_id`` reaches this from a CLI argument and from a server response,
     so it is a path segment derived from untrusted text: the separator, dot
@@ -154,11 +159,24 @@ def _session_path(session_id: str) -> Path:
     left to ``pathlib`` (a ``../..`` id would otherwise write OUTSIDE the
     ledger and a reader scanning the directory would never see the record it
     wrote — a silent write-nothing).
+
+    Substitution alone is NOT injective — `a/b`, `a..b` and `" a b "` all
+    address one record — and that is not a cosmetic point: the writers preserve
+    a previously recorded transcript path, so two colliding ids would share one
+    record and the second would inherit the first's ``file``, making
+    ``--process`` re-import one session's transcript under a DIFFERENT session
+    id. A digest of the RAW id is therefore part of the name whenever the
+    sanitiser changed it, which keeps an ordinary (UUID-shaped) id's filename
+    readable and gives two distinct ids distinct records.
     """
-    safe = str(session_id).strip()
+    raw = str(session_id)
+    safe = raw.strip()
     for bad in ("/", "\\"):
         safe = safe.replace(bad, "_")
     safe = safe.replace("..", "_") or "_unnamed"
+    if safe != raw:
+        digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+        safe = f"{safe}-{digest[:8]}"
     return backlog_dir() / f"{safe}.json"
 
 
@@ -339,7 +357,16 @@ def read_policy() -> dict:
     has already committed.
     """
     try:
-        return _read_json(_policy_path()) or {}
+        record = _read_json(_policy_path())
+        if not record:
+            # A ledger written by an EARLIER layout kept the record at the top
+            # level. The shape never shipped (this module debuts in this
+            # change), but a development machine can still hold one, and
+            # reading it as "the user was never asked" would silently reverse an
+            # explicit "keep only future conversations". Read-only fallback; the
+            # next write moves it.
+            record = _read_json(backlog_dir() / _LEGACY_POLICY_FILE)
+        return record or {}
     except Exception:
         return {}
 
@@ -385,7 +412,24 @@ def sessions() -> list[dict]:
         if rec and rec.get("status") in BACKLOG_STATUSES:
             records.append(rec)
     records.sort(key=_sort_key)
-    return records
+    # ONE record per session id, the LATEST write winning. Two records can share
+    # an id only through an orphan left by an earlier layout or by a path
+    # collision, but the `--process` verdict lookup takes the FIRST match — so
+    # the older record would pin the session as never-extracted forever, and the
+    # pending count and price would stay inflated. Order is by first appearance,
+    # so the report and its follow-up still agree.
+    deduped: list[dict] = []
+    seen: dict[str, int] = {}
+    for rec in records:
+        key = str(rec.get("session_id") or "")
+        if not key:
+            deduped.append(rec)
+        elif key in seen:
+            deduped[seen[key]] = rec
+        else:
+            seen[key] = len(deduped)
+            deduped.append(rec)
+    return deduped
 
 
 def summary() -> dict:

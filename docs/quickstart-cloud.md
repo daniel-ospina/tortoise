@@ -239,8 +239,12 @@ harness, turn count and estimate — never transcript content.
 import`, by `session capture` (the Claude Code SessionEnd hook, which records
 the durable Claude project transcript so a later `--process` can actually
 re-read it), and by `session drain` when a session spooled by an interrupted
-capture is filed and the server stores it without extracting. The drain knows
-the spooled turns but not the transcript path they came from, so its record has
+capture is filed and the server stores it without extracting. A *degraded*
+success counts on all three — a 2xx whose body reports an extraction `error`,
+an `empty` extraction, or a non-empty `errors` list stored the turns and
+extracted nothing, so it is offered for a re-capture exactly like a store-only
+one. The drain knows the spooled turns but not the transcript path they came
+from, so its record has
 no transcript path: `--process` reports it as skipped and tells you to re-run
 that session's import with the transcript instead of pretending the backlog is
 empty. One path does **not** write the ledger yet, so on it the report stays

@@ -1161,3 +1161,240 @@ def test_each_ledger_writer_stages_through_its_own_temp_file(places,
     assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
     assert not list(backlog.backlog_dir().glob("*.tmp")), \
         "a consumed temp file must not be left behind"
+
+
+# ── A DEGRADED 2xx defers at EVERY writer, not just at `sessions import` ────
+
+
+def test_a_degraded_capture_records_the_deferral_and_still_fails(places,
+                                                                 tmp_path,
+                                                                 capsys):
+    """`session capture` is the Claude Code SessionEnd hook — where most of the
+    backlog comes from — and a DEGRADED 2xx there used to leave NO trace at all:
+    the 2xx stamps `filed_key` in the spool (so no later drain re-POSTs it), it
+    clears the capture-failure breadcrumb, no receipt is written by design, and
+    the hook discards stderr (`2>/dev/null || exit 0`). The turns were stored
+    with no memory points and the offer never saw them. Only the `sessions
+    import` site was pinned, so the other two writers were free to disagree.
+
+    MUTATION THAT REDS THIS: move the `_degraded_extraction` branch back to a
+    bare `return 1` (the pre-fix shape, which ran BEFORE the store-only branch
+    that records).
+    """
+    home, _ = places
+    transient = _text_transcript(home, "hook-tmp.jsonl")
+    durable = _claude_transcript(home, "project.jsonl")
+    degraded = _store_only_body("s_deg")
+    degraded.update({"extraction_mode": "error", "extracted": 0, "ok": False,
+                     "errors": ["upstream provider 500"]})
+
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: degraded)[0]):
+        rc = main.main(["session", "capture", "--file", str(transient),
+                        "--harness", "claude",
+                        "--transcript-path", str(durable),
+                        "--session-id", "s_deg"])
+    transient.unlink()  # the hook's own trap does this moments later
+
+    assert rc == 1, "a degraded extraction is still a FAILED capture"
+    assert "capture failed" in capsys.readouterr().err
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1, \
+        "the stored-but-un-extracted session must be offered for a re-capture"
+    record = backlog.sessions()[0]
+    # …and it must carry the transcript a later run can RE-READ: the hook's
+    # `--file` is gone, so only the durable path is actionable.
+    assert record["file"] == str(durable)
+    assert record["harness"] == "claude-desktop", \
+        "the parser-named harness, not the capture alias"
+    assert record["reason"] == "extraction failed: error"
+
+
+def test_a_degraded_drain_is_recorded(places, capsys, tmp_path, monkeypatch):
+    """The third writer. `flush_spool` marks the entry filed on ANY 2xx, so a
+    drain-delivered degraded extraction was unreachable by the offer forever.
+
+    MUTATION THAT REDS THIS: narrow `_record_drain_deferrals` back to the two
+    store-only modes.
+    """
+    from tortoise.capture_spool import PostOutcome, Snapshot, spool_dir, write_spool_entry
+
+    home, _ = places
+    (home / ".tortoise" / "credentials.json").write_text(
+        json.dumps({"api_key": "tt_test",
+                    "api_url": "https://legit.example.com"}), encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    write_spool_entry(spool_dir(), Snapshot(
+        session_id="s_deg_drain",
+        turns=[{"role": "user", "content": "stored turn"},
+               {"role": "assistant", "content": "stored reply"}],
+        source="t", machine_id="m", harness="claude"))
+    degraded = _store_only_body("s_deg_drain")
+    degraded.update({"extraction_mode": "empty", "extracted": 0, "ok": False,
+                     "errors": []})
+
+    monkeypatch.setattr(
+        main, "_session_post",
+        lambda api_key, api_url: (lambda payload: PostOutcome(
+            ok=True, status=200, body=degraded)))
+    rc = main.main(["session", "drain"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    record = backlog.sessions()[0]
+    assert record["session_id"] == "s_deg_drain"
+    assert record["reason"] == "extraction failed: empty"
+    assert record["turns"] == 2
+    assert record["file"] is None, "the spool holds turns, not the path"
+
+
+# ── The id -> path map is INJECTIVE ────────────────────────────────────────
+
+
+def test_colliding_session_ids_never_share_a_record(places):
+    """`_session_path` sanitises by SUBSTITUTION, which merges `a/b`, `a..b` and
+    `a_b` onto one path. That is not cosmetic: the writers PRESERVE a recorded
+    transcript path, so the second id would inherit the first's `file` and
+    `--process` would re-import one session's transcript under a DIFFERENT
+    session id — memory points attributed to the wrong session. A digest of the
+    RAW id disambiguates.
+
+    MUTATION THAT REDS THIS: drop the `safe != raw` digest from `_session_path`.
+    """
+    first = _transcript(backlog.backlog_dir().parent, "first.jsonl")
+    backlog.record_not_processed(session_id="a/b", harness="pi",
+                                 file=str(first), turns=4, estimate=12)
+    backlog.record_not_processed(session_id="a..b", harness="pi",
+                                 turns=7, estimate=21)
+    backlog.record_not_processed(session_id="a_b", harness="pi",
+                                 turns=2, estimate=6)
+
+    records = {r["session_id"]: r for r in backlog.sessions()}
+    assert set(records) == {"a/b", "a..b", "a_b"}, \
+        "three distinct ids must be three distinct records"
+    assert records["a..b"].get("file") is None, \
+        "a colliding id must never inherit another session's transcript"
+    assert records["a/b"]["file"] == str(first)
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 3
+
+
+def test_a_session_id_can_never_be_written_outside_the_ledger(places):
+    """The injectivity digest must not weaken the traversal guard it joined: a
+    `../..` id still lands INSIDE the ledger, and still lands somewhere the
+    directory scan can see (a write the reader cannot see is a write-nothing)."""
+    assert backlog.record_not_processed(session_id="../../etc/passwd",
+                                        turns=1, estimate=3) is True
+    directory = backlog.backlog_dir()
+    written = list(directory.glob("*.json"))
+    assert len(written) == 1
+    assert written[0].parent == directory
+    assert [r["session_id"] for r in backlog.sessions()] == ["../../etc/passwd"]
+
+
+# ── One record per session id, and the LATEST one wins ─────────────────────
+
+
+def test_two_records_for_one_id_report_the_latest(places):
+    """An orphan that shares a session id (an earlier layout left one, or a path
+    collision) must not pin the session's state: the `--process` verdict lookup
+    takes the FIRST match by `recorded_at`, so an older `not-processed` record
+    would report a session as never-extracted forever and keep the pending count
+    and price inflated.
+
+    MUTATION THAT REDS THIS: return the sorted list without the dedupe.
+    """
+    backlog.record_not_processed(session_id="s_dup", turns=4, estimate=12)
+    orphan = backlog.backlog_dir() / "orphan.json"
+    orphan.write_text(json.dumps({
+        "session_id": "s_dup", "harness": "pi", "file": None,
+        "turns": 4, "estimate": 12, "reason": "no LLM provider key",
+        "recorded_at": "2000-01-01T00:00:00Z", "status": "processed",
+    }), encoding="utf-8")
+
+    records = backlog.sessions()
+    assert [r["session_id"] for r in records] == ["s_dup"], \
+        "one id must be one record"
+    assert records[0]["status"] == backlog.STATUS_PROCESSED, \
+        "the LATEST write wins, whatever the filename ordering"
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+    assert state["counts"][backlog.STATUS_PROCESSED] == 1
+
+
+# ── The policy record's earlier, top-level layout is still READ ────────────
+
+
+def test_a_legacy_top_level_policy_record_is_still_honoured(places):
+    """The policy record moved into its own subdirectory. The shape never
+    shipped (this module debuts in this change), but a development machine can
+    still hold the old one, and reading it as "the user was never asked" would
+    silently REVERSE an explicit "keep only future conversations" into "the
+    choice is still open" — the conflation the module exists to keep apart.
+
+    MUTATION THAT REDS THIS: drop the `_LEGACY_POLICY_FILE` fallback.
+    """
+    (backlog.backlog_dir()).mkdir(parents=True, exist_ok=True)
+    (backlog.backlog_dir() / "policy.json").write_text(json.dumps(
+        {"choice": backlog.CHOICE_FUTURE_ONLY,
+         "decided_at": "2026-01-01T00:00:00Z"}), encoding="utf-8")
+
+    assert backlog.read_policy()["choice"] == backlog.CHOICE_FUTURE_ONLY
+    state = backlog.summary()
+    assert state["declined"] is True
+    assert state["choice"] == backlog.CHOICE_FUTURE_ONLY
+
+    # …and the fallback is READ-ONLY: the next recorded choice uses the new
+    # location, so the old file can never win again.
+    assert backlog.set_policy(backlog.CHOICE_BACKLOG,
+                              decided_at="2026-02-02T00:00:00Z") is True
+    assert (backlog.backlog_dir() / "policy" / "choice.json").is_file()
+    assert backlog.read_policy()["choice"] == backlog.CHOICE_BACKLOG
+
+    # A record with no session id is NOT a session record: the legacy policy
+    # file must not be enumerated as one.
+    assert backlog.sessions() == []
+
+
+# ── Both cost surfaces render an UNPRICED entry the same way ───────────────
+
+
+def test_doctor_renders_an_unpriced_entry(places, capsys, tmp_path):
+    """`cost_units` sums an unpriced entry as 0, so a doctor row that reads only
+    `cost_units` prints "~0 estimated extraction unit(s)" for a backlog that is
+    merely unknown-priced — the inverse of the cost-visible-before-the-spend
+    promise, and a divergence from `format_report`, which says so.
+
+    MUTATION THAT REDS THIS: drop the `cost_unknown` clause from the doctor row.
+    """
+    home, _ = places
+    with mock.patch("tortoise.sdk._session_extraction_estimate",
+                    side_effect=RuntimeError("estimator unavailable")):
+        assert backlog.record_not_processed(
+            session_id="s_unpriced", harness="pi", turns=3,
+            estimate=backlog.estimate_units([{"role": "user", "content": "x"}]),
+            file=str(home / "a.jsonl")) is True
+
+    main.main(["doctor", "--path", str(tmp_path / "doctor.db")])
+    line = next(ln for ln in capsys.readouterr().out.splitlines()
+                if "Saved backlog" in ln)
+    assert "~0 estimated extraction unit(s)" in line
+    assert "could not be priced" in line, \
+        "an unpriced backlog must not read as a free one"
+
+
+def test_future_only_write_failure_goes_to_stderr(places, capsys):
+    """This CLI's failure contract is human text on STDERR (#875 P2), asserted
+    by `_cmd_fail` and followed by every sibling refusal. A caller that consumes
+    stdout would otherwise see failure prose where the report belongs.
+
+    MUTATION THAT REDS THIS: drop `file=sys.stderr` from that print.
+    """
+    with mock.patch.object(backlog, "set_policy", return_value=False):
+        rc = main.main(["sessions", "backlog", "--future-only"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "Could not record the choice" not in captured.out
+    assert "Could not record the choice" in captured.err
