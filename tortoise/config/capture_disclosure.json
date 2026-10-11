@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "_why": [
+    "#3517 (epic #1714, decision 1): the capture disclosure is a SINGLE SOURCE OF",
+    "TRUTH so the facts a user reads cannot drift from what is recorded or from",
+    "the dashboard that renders the same setting. The disclosure is NOT",
+    "consent machinery (B2: recording is a product setting, default-ON,",
+    "contract + notice) — it exists because a WRONG disclosure is a UX bug.",
+    "The agent never authors this prose: it prints the output of",
+    "`tortoise session disclosure` verbatim. The dashboard imports this same",
+    "file at build time (the cross-site single-source assertion is #3513's).",
+    "Every placeholder is filled from runtime structured data — see",
+    "tortoise/capture_disclosure.py."
+  ],
+
+  "recording": {
+    "state_key": "session_recording",
+    "companion_key": "capture_revised",
+    "default_on": true,
+    "off_switch_effect": "while it is off the server refuses new files with a 409, so nothing new is recorded",
+    "mcp_tool": "tortoise_onboarding_session_recording",
+    "rest": "PATCH /v1/onboarding/state",
+    "install_probe_key_template": "install_probe_{harness}"
+  },
+
+  "destinations": {
+    "off_switch": {
+      "hosted_label": "Settings → Memory sources → Agent sessions",
+      "hosted_heading_id": "settings-memory-heading",
+      "self_hosted_label": "the session_recording setting on your organization"
+    },
+    "view_delete": {
+      "hosted_label": "Settings → Captured sessions",
+      "hosted_heading_id": "settings-capture-heading",
+      "self_hosted_label": "your Tortoise store (tortoise session list / tortoise session view)"
+    }
+  },
+
+  "facts": {
+    "recorded_hosted": "the session's turns — your prompts and the agent's replies",
+    "recorded_self_hosted": "the session's turns — your prompts and the agent's replies",
+    "beacon_hosted": "a start beacon carrying the harness name and a timestamp only — no conversation content",
+    "beacon_self_hosted": "nothing beyond the session's own turns — this path emits no server-visible install beacon",
+    "destination_hosted": "your organization's Tortoise graph on {api_host}",
+    "destination_self_hosted": "your own Tortoise store at {api_host}",
+    "state_on": "Session recording for {harness} is ON and the recorder is installed.",
+    "state_off": "The recorder for {harness} is installed, but this organization's recording setting is OFF — nothing is filed until you turn it back on at {off_switch}.",
+    "state_unknown": "The recorder for {harness} is installed. Recording is ON by default; I could not read this organization's live setting."
+  },
+
+  "templates": {
+    "install_disclosure": "{state}\n  - What is recorded: {recorded}.\n  - Also sent at the start of each session: {beacon}.\n  - Where it goes: {destination}.\n  - Turn it off: {off_switch} — {off_switch_effect}.\n  - See or delete what was captured: {view_delete}.",
+    "installed_confirmation": "Done — {harness} now records sessions into {destination}. You can turn it off again at {off_switch} ({off_switch_effect}).",
+    "declined_confirmation": "Nothing was installed and nothing will be recorded. The recording setting stays visible at {off_switch}, currently OFF — turn it on there whenever you want it.",
+    "first_capture_line": "Heads up: I'll remember this session so you can recall it later. View/delete in {view_delete}."
+  }
+}

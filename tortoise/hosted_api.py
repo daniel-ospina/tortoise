@@ -13544,7 +13544,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
     # 200 no-op) and the response marks first_capture=true so the calling
     # in-conversation agent fires the ONE-line announcement whose COPY
-    # CONTRACT lives in tortoise/onboarding/SKILL.md §6 (W2 owns the copy;
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §7 (W2 owns the copy;
+    # #3517: the wording itself is RENDERED from
+    # tortoise/config/capture_disclosure.json — the §7 section names the render
+    # rather than repeating it, so the copy has exactly one home.
     # W6 owns the trigger — never duplicate the wording here). capture-
     # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
     # CARD_STEPS excludes it; the post-write gate eval is monotonic and only
@@ -13863,7 +13866,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §6 copy).
+            # trigger for the in-conversation announcement (SKILL.md §7 copy
+            # contract; the wording renders from
+            # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
@@ -26034,6 +26039,24 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # Mixed-key PATCH: jsonb-first, graph-second (scope pin 7) — a graph
     # failure after a jsonb success surfaces as a 500 fail-closed and the
     # retry converges (MERGE idempotent; no lost FLOW keys).
+    # #3517 (epic #1714 J3): `session_recording` and its companion
+    # `capture_revised` are ONE write. The MCP tool and the REST twin
+    # (`POST /v1/onboarding/session-recording`) both pass the pair, but the
+    # dashboard's Memory-sources toggle sends `session_recording` ALONE
+    # (`main.jsx::toggleSessionRecording` → `{session_recording: next}`), so the
+    # two surfaces wrote DIFFERENT state keys for the same intent — the
+    # prompt-yes/dashboard-unknown divergence the parity test forbids.
+    #
+    # The companion is added HERE, in the request→state translation this route
+    # already owns (it normalizes hyphenated keys and strips email/org_created
+    # one screen up), because a client PATCH is the only channel through which a
+    # PARTIAL body can arrive — both tool callers are ours and pass the pair.
+    # Adding it further down (the write primitive) would leave the surfaces
+    # handing different key sets to the ONE router, which is the shape
+    # `test_onboarding_endpoints.py::test_tool_and_dashboard_enable_write_same_keys`
+    # (and the #3540 partition) asserts against.
+    if "session_recording" in updates and "capture_revised" not in updates:
+        updates["capture_revised"] = True
     state = _update_onboarding_state(org["org_id"], **updates)
     if catalog is True:
         try:

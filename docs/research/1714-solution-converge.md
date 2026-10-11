@@ -12,6 +12,19 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 >
 > **Read in full before decomposition** — includes the 4 slices, the Phase 7 Review Incorporations section (which amends specific slices), and this header note. The consent-gate, fetch-order, revert, prop-contract, and webhook-eventId fixes ARE propagated into the slice bodies below; the Phase 7 section adds the remaining P2/P3 items.
 
+---
+
+**⛔ WITHDRAWN CONTRACT — the 403 consent gate described below is DEAD. Do not implement it.**
+
+This research brief is the pre-decision record, and it still describes a **server-enforced 403 consent gate** (`POST /v1/sessions` and `tortoise_session_capture` refusing an un-opted-in team with 403, "the enforced flag IS the consent", `capture_opt_in`), plus the consent-record keys (`consent_version`, `session_recording_opted_in_at`). **Every one of those is superseded and none of it is the contract:**
+
+- **#1927** replaced the 403 gate with a **default-ON setting** whose opt-out is a quiet **409**.
+- **#1714 decision B2** settled the model outright: recording is a **SETTING, not a consent ritual**; the legal basis is **contract + notice** (T&C / privacy policy); the off-switch is kept as good UX; **no consent record is written**.
+- The withdrawn keys are **not** registered state keys and must not be added.
+- The non-LLM disclosure survives for **factual accuracy** (a wrong disclosure is a UX bug), **not** for consent integrity — and there is no "persist the approval before the install runs" requirement.
+
+The live capture contract is `tortoise/onboarding/SKILL.md` §5 (the install ask) and §7 (the announcement), rendering from `tortoise/config/capture_disclosure.json`. Read the 403 material below as HISTORY — and if you are about to act on it, stop and read the two sections named above instead.
+
 ## Chosen Approach
 
 **Family 3 — Split-the-indexer with a shared stateless `tortoise/github_map.py`**, reworking `github_indexer.py` in place into a two-phase fetch+diff → project pipeline. All ontology mapping (entities/events/statements/lifecycle) lives in ONE shared module imported by BOTH the indexer (hosted) and the orphaned connector (self-hosted/pipeline_cli). Statement Points via explicit-id SDK writes (`create_point(kind="statement", id=…)`, `aboutObject`→WorkItem, `extractedFrom`→Source). Capture verification: server receipt primary for T1/T3, client write-first for T2, disclosure-only until receipt. 4 slices, each independently shippable; **T2 (import CLI + Codex/Desktop parsers) lands INSIDE Slice 2 after T1+T3** (per user staging — not deferred to a later slice; issue Target 4 requires Codex verified in-slice).

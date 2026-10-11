@@ -48,9 +48,18 @@ from __future__ import annotations
 # and a circular import makes the reverse direction impossible.)
 # ══════════════════════════════════════════════════════════════════════════
 
+#: The staged (not-yet-published) status, as ONE literal. A draft is CURRENT
+#: (not-yet-published, not dead) but EP-INERT: every factor-extraction call site
+#: excludes it via ``_live_only``, so EP never measures a draft and no posterior
+#: is ever computed for one. Read surfaces that must RENDER a draft (label it,
+#: demote it below live, refuse to show a belief number) import THIS rather than
+#: re-spelling ``'draft'`` at the call site (#2598) — the same "one literal, no
+#: per-surface re-declaration" rule ``TERMINAL_EXCLUDED_STATUSES`` above is under.
+DRAFT_STATUS = "draft"
+
 #: The non-terminal members of the Point vocabulary — a Point in one of these
 #: is CURRENT (draft is not-yet-published, not dead).
-CURRENT_POINT_STATUS_VALUES = frozenset({"draft", "live"})
+CURRENT_POINT_STATUS_VALUES = frozenset({DRAFT_STATUS, "live"})
 
 #: The vocabulary's terminal members (ontology §5: retracted/superseded are
 #: terminal; ``outdated`` is the legacy supersede/invalidate status;
@@ -190,6 +199,16 @@ def _alive_flag(clause: str) -> str:
     return f"(CASE WHEN {_terminal_expression(clause)} THEN false ELSE true END)"
 
 
+def is_draft_status(status) -> bool:
+    """True when ``status`` is the staged (not-yet-published) status.
+
+    The Python twin of the ``'{DRAFT_STATUS}'`` literal ``_live_only``
+    excludes: a reader that must LABEL or DEMOTE a draft (rather than drop it)
+    calls this instead of comparing against a re-spelled string.
+    """
+    return (status or "") == DRAFT_STATUS
+
+
 def is_terminal_status(status, outdated: bool = False) -> bool:
     """Python mirror of the Cypher terminal predicate (status in the
     terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
@@ -213,7 +232,8 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
     terminal = _terminal_excluded(clause)
     if include_draft:
         return terminal
-    return f"(({clause} IS NULL OR {clause} <> 'draft') AND {terminal})"
+    return (f"(({clause} IS NULL OR {clause} <> '{DRAFT_STATUS}') "
+            f"AND {terminal})")
 
 
 # ══════════════════════════════════════════════════════════════════════════
