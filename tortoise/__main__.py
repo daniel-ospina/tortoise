@@ -2787,6 +2787,18 @@ def _cmd_install_hooks(args) -> int:
               "sessionEnd entry in ~/.cursor/hooks.json to "
               "uninstall capture.")
         return 0
+    # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
+    # injection IS the native plugin, and the capture installer owns the whole
+    # install. Routing `--uninstall` here would inspect — and could rewrite — a
+    # CLINE registration while the plugin stayed live.
+    if uninstall and harness == "openclaw":
+        print("openclaw has no shell-hook read seam — nothing for --uninstall "
+              "to remove. The plugin is left in place: run "
+              "`openclaw plugins uninstall tortoise`, or delete "
+              "~/.openclaw/extensions/tortoise/ and the "
+              "plugins.entries.tortoise block in ~/.openclaw/openclaw.json, "
+              "to uninstall the seam.")
+        return 0
     # `--list` / no harness prints the catalogue.
     if listing or uninstall:
         rc = _install_read_hook(args)
@@ -2836,7 +2848,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "codex", "pi", "cursor"):
+    if harness in ("claude", "codex", "pi", "cursor", "openclaw"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2844,6 +2856,13 @@ def _cmd_install_hooks(args) -> int:
         # Pi has no shell-hook read seam — its only seam is the capture
         # extension; `_install_capture_seam` already reported the install,
         # the no-op, and the MCP/restart guidance.
+        return 0
+    # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
+    # injection IS the native plugin, so the capture installer's report is the
+    # whole install. Falling through to `_install_read_hook` would inspect —
+    # and could rewrite — a CLINE registration (that helper's `else` branch)
+    # as if it were OpenClaw's.
+    if harness == "openclaw":
         return 0
     if harness == "cursor":
         # Cursor has no shell-hook read seam either: the sessionEnd capture
@@ -2924,6 +2943,25 @@ def _install_capture_seam(args, install_capture) -> int:
             "have no editor-lifetime session boundary. sessionEnd is tied to "
             "the IDE session, not a cloud agent chat.' If you use cloud "
             "agents, their sessions are not filed by this seam.")
+    if args.harness == "openclaw" and not getattr(args, "dry_run", False):
+        # #2120: the plugin is discovered under the HOME-scoped
+        # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
+        # user who installed while a gateway was live would otherwise conclude
+        # the seam is inert (fail-open = silence).  Name the restart AND the
+        # ingestion command — the captured spool is useless until it is
+        # imported, and a printed success over an unimported spool is the
+        # #3808 R13 class.
+        from tortoise.capture_install import openclaw_home
+        plugin_root = openclaw_home(_P.home()) / "tortoise"
+        print(
+            f"OpenClaw loads plugins at Gateway startup: restart it (or run "
+            f"`openclaw plugins reload tortoise`) so the plugin at "
+            f"{plugin_root} binds its hooks. Sessions are captured to "
+            "$OPENCLAW_STATE_DIR/tortoise/turns/ (default "
+            "~/.openclaw/tortoise/turns/), one FILE per session — file them "
+            "with `tortoise sessions import --harness openclaw <file>`, e.g. "
+            "`for f in ~/.openclaw/tortoise/turns/*.jsonl; do tortoise "
+            "sessions import --harness openclaw \"$f\"; done`.")
     return 0
 
 
@@ -9896,8 +9934,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "cursor", "pi"],
-        help="Harness to install (codex | claude | cline | cursor | pi)")
+        choices=["codex", "claude", "cline", "cursor", "pi", "openclaw"],
+        help="Harness to install (codex | claude | cline | cursor | pi | "
+             "openclaw)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")

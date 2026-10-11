@@ -1275,12 +1275,19 @@ def test_cross_surface_harness_vocab_contract():
 
     # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
     assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
-    # both server surfaces stay exactly the pinned 6-harness vocabulary.
+    # The analytics vocabulary is the DASHBOARD copy-attribution beacon's set —
+    # it must stay exactly the wizard's leaf population (asserted below), so it
+    # is unchanged.  The SessionRequest vocabulary is a SUPERSET: #2120 added
+    # OpenClaw, whose seam ships no live dashboard copy row (the plugin installs
+    # sessions through `tortoise sessions import`, and the archived-reference
+    # HARNESS_INSTALL entry is not rendered), so there is no copy to attribute
+    # and no leaf to add.
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
     assert frozenset({
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+        "openclaw",
     }) == _SESSION_HARNESS_VALUES
 
     # 2. the WIZARD contract (#2936). The client declares only the EXCEPTIONS

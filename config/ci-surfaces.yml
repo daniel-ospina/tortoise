@@ -639,6 +639,17 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #2120: the OpenClaw two-way seam — `tortoise/openclaw-plugin/` (the native
+  # plugin: manifest, entry, spool writer), the installer in
+  # tortoise/capture_install.py, the version contract in tortoise/hook_install.py,
+  # and `tortoise sessions import --harness openclaw` through
+  # tortoise/session_import/parsers.py. None of those match a named
+  # SOURCE_PATTERNS entry (the plugin directory and the two modules classify
+  # `core` via the `tortoise/` fallback). Dual-registered with `core` because
+  # the same tests drive `tortoise install openclaw` (tortoise/__main__.py) and
+  # the harness vocabulary in tortoise/hosted_api.py, both `api`-classified —
+  # without this leg a CLI-only or vocabulary-only change would run no guard.
+  - test_openclaw_seam.py
   # #3809: `tortoise session verify` — the one-command install verification
   # that drives the REAL installed hook and the real `tortoise` CLI. Its
   # sources are tortoise/session_verify.py (an ENGINE path matching no
@@ -1420,6 +1431,11 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #2120: the OpenClaw seam. This is the CORE arm (the plugin artifact, the
+  # installer, the version contract and the parser are all `tortoise/`-fallback
+  # paths); see the api arm for the CLI + hosted-vocabulary half of the same
+  # dual registration.
+  - test_openclaw_seam.py
   # #3809: `tortoise session verify` — the one-command install verification
   # that drives the REAL installed hook and the real `tortoise` CLI. Its
   # sources are tortoise/session_verify.py (an ENGINE path matching no
@@ -3768,6 +3784,10 @@ durations:
   test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
   test_pi_capture_hooks.py: 10.3
+  # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
+  # artifact + installer + parser, one node --test subprocess, and one real
+  # `tortoise install openclaw` CLI run into a temp HOME.
+  test_openclaw_seam.py: 7.0
   test_product_rerank.py: 0.1
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.2

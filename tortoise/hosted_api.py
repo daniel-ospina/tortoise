@@ -6860,12 +6860,14 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -11836,6 +11838,11 @@ async def toggle_api_key_enabled(
 # must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    # #2120: the OpenClaw seam. Without this member a
+    # `tortoise sessions import --harness openclaw` POST is refused 422 and
+    # OpenClaw sessions can never carry a capture receipt — the ingestion half
+    # of the two-way seam would be unreachable however correctly it parsed.
+    "openclaw",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -24459,12 +24466,14 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
