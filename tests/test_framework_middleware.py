@@ -78,14 +78,34 @@ class _Content:
 
 
 class _AdkRequest:
-    """ADK ``LlmRequest``: mutable ``contents`` + the mutator the docs name."""
+    """ADK ``LlmRequest``: mutable ``contents`` + ``append_instructions``.
+
+    The mutator mirrors the REAL contract, not a convenient one. Every released
+    ``google-adk`` takes ``list[str]`` (v0.1.0-v1.14.0) or
+    ``list[str] | types.Content`` (v2.0.0 onward) and REJECTS a bare ``str`` —
+    v2.x with ``TypeError``, v0.x/v1.x by joining the string character by
+    character. A fake that accepted a ``str`` is what let "the ADK adapter
+    silently never injects" through, so this one refuses it the same way.
+    """
 
     def __init__(self, turns: list[tuple[str, str]]) -> None:
         self.contents = [_Content(role, text) for role, text in turns]
-        self.system_instruction: list[str] = []
+        self.system_instruction: str = ""
 
-    def append_instructions(self, instructions: str) -> None:
-        self.system_instruction.append(instructions)
+    def append_instructions(self, instructions) -> None:
+        if isinstance(instructions, list) and all(
+                isinstance(item, str) for item in instructions):
+            joined = "\n\n".join(instructions)
+            self.system_instruction = (
+                f"{self.system_instruction}\n\n{joined}"
+                if self.system_instruction else joined)
+            return
+        if isinstance(instructions, _Content):  # v2.x also accepts types.Content
+            self.contents.append(instructions)
+            return
+        raise TypeError(
+            "instructions must be list[str] or types.Content, "
+            f"got {type(instructions).__name__}.")
 
 
 class _AdkRequestNoAppend:
@@ -198,7 +218,7 @@ def test_real_reflex_block_rides_every_framework_prompt(seeded_sdk):
     # Google ADK — before_model_callback
     adk_request = _AdkRequest([("user", _PROMPT)])
     assert adk_before_model_callback(reflex)(None, adk_request) is None  # model call proceeds
-    assert adk_request.system_instruction == [expected]
+    assert adk_request.system_instruction == expected
 
     # LangGraph — pre-model node
     langgraph_out = _lg(reflex)({"messages": [_Msg("human", _PROMPT)]})
@@ -219,7 +239,7 @@ def test_fail_open_when_the_reflex_raises():
 
     adk_request = _AdkRequest([("user", _PROMPT)])
     assert adk_before_model_callback(boom)(None, adk_request) is None
-    assert adk_request.system_instruction == []
+    assert adk_request.system_instruction == ""
     assert len(adk_request.contents) == 1  # no extra turn injected
 
     assert _lg(boom)({"messages": [_Msg("human", _PROMPT)]}) == {}
@@ -262,8 +282,36 @@ def test_semantic_kernel_propagates_the_frameworks_own_error():
 def test_adk_uses_append_instructions_and_leaves_contents_alone():
     request = _AdkRequest([("user", _PROMPT)])
     adk_before_model_callback(_reflex())(None, request)
-    assert request.system_instruction == ["REFLEX BLOCK"]
+    assert request.system_instruction == "REFLEX BLOCK"
     assert len(request.contents) == 1  # no extra turn injected
+
+
+def test_adk_append_instructions_is_passed_a_list_not_a_bare_string():
+    """The argument must be ``list[str]``: a bare ``str`` is a ``TypeError`` on
+    ADK v2.x and a character-by-character join on v0.x/v1.x — and either way the
+    block never reaches the prompt while the fail-open boundary hides it.
+
+    The fake above now enforces the real signature, so this pins the exact
+    argument rather than trusting it.
+    """
+    calls: list = []
+
+    class _Strict:
+        def __init__(self):
+            self.contents = [_Content("user", _PROMPT)]
+            self.system_instruction = ""
+
+        def append_instructions(self, instructions):
+            calls.append(instructions)
+            if not (isinstance(instructions, list)
+                    and all(isinstance(i, str) for i in instructions)):
+                raise TypeError("instructions must be list[str] or types.Content")
+            self.system_instruction = "\n\n".join(instructions)
+
+    request = _Strict()
+    assert adk_before_model_callback(_reflex())(None, request) is None
+    assert calls == [["REFLEX BLOCK"]], "append_instructions got a non-list argument"
+    assert request.system_instruction == "REFLEX BLOCK"
 
 
 def test_adk_fallback_appends_a_user_content(monkeypatch):
@@ -554,6 +602,45 @@ def _stub_context_server():
     return server, thread
 
 
+class _Redirector(BaseHTTPRequestHandler):
+    """Answers every POST with a 302 to ANOTHER host (a second local server)."""
+
+    sink_url: ClassVar[str] = ""
+
+    def do_POST(self):
+        self.send_response(302)
+        self.send_header("Location", type(self).sink_url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        return None
+
+
+class _SinkRecorder(BaseHTTPRequestHandler):
+    """The redirect target: records anything that reaches it."""
+
+    seen: ClassVar[list] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        type(self).seen.append({
+            "path": self.path,
+            "auth": self.headers.get("Authorization"),
+            "body": self.rfile.read(length),
+        })
+        payload = json.dumps(
+            {"block": "LEAKED BLOCK", "degraded_reason": None}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        return None
+
+
 def test_http_reflex_posts_the_canonical_body_and_injects():
     server, thread = _stub_context_server()
     try:
@@ -576,6 +663,38 @@ def test_http_reflex_posts_the_canonical_body_and_injects():
 def test_http_reflex_unreachable_is_fail_open():
     reflex = http_reflex("http://127.0.0.1:1", "tsk_test")
     assert _lg(reflex)({"messages": [_Msg("human", _PROMPT)]}) == {}
+
+
+def test_http_reflex_refuses_a_redirect_and_never_forwards_the_credential():
+    """A 3xx must NOT be followed with the credential attached.
+
+    urllib follows redirects by default and copies the request headers onto the
+    redirected request — only Content-Length/Content-Type are stripped — so a
+    configured endpoint answering 302 to another host (an http->https
+    canonicalising proxy, a misconfigured or compromised endpoint, a typo'd
+    ``base_url``) would send ``Authorization: Bearer <key>`` to a host the app
+    never named AND inject that host's response body into the prompt.
+    """
+    _SinkRecorder.seen = []
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), _SinkRecorder)
+    sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+    sink_thread.start()
+    _Redirector.sink_url = f"http://127.0.0.1:{sink.server_address[1]}/evil"
+    redirector = ThreadingHTTPServer(("127.0.0.1", 0), _Redirector)
+    red_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+    red_thread.start()
+    try:
+        reflex = http_reflex(
+            f"http://127.0.0.1:{redirector.server_address[1]}", "tsk_SUPER_SECRET")
+        out = _lg(reflex)({"messages": [_Msg("human", _PROMPT)]})
+    finally:
+        for server, thread in ((redirector, red_thread), (sink, sink_thread)):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    assert out == {}, "a redirect must inject nothing, not the target's body"
+    assert _SinkRecorder.seen == [], "the credential was forwarded to another host"
 
 
 # ── Opt-in + dependency-free (W4 user-exposure gate) ───────────────────────

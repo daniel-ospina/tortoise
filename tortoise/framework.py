@@ -86,6 +86,30 @@ HTTP_TIMEOUT_S = 15.0
 Reflex = Callable[[list[dict]], Any]
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect instead of following it with the credential attached.
+
+    urllib's default opener FOLLOWS redirects, and `HTTPRedirectHandler` copies
+    the original request headers onto the redirected request — only
+    `Content-Length`/`Content-Type` are stripped, so `Authorization: Bearer
+    <key>` goes with it. A configured endpoint answering 302/307/308 to another
+    host (an http->https canonicalising proxy, a misconfigured or compromised
+    endpoint, a typo'd `base_url`) would therefore hand the app's Tortoise
+    credential to a host it never named, and inject that host's response body.
+
+    Returning `None` makes urllib raise `HTTPError` on the 3xx instead; the
+    fail-open boundary turns that into "inject nothing".
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Built once: the handler is stateless, and this keeps the credential-binding
+# property in one place rather than at every call site.
+_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
 # ── The injectable block (fail-open boundary) ──────────────────────────────
 
 def block_from(response: Any) -> str:
@@ -146,7 +170,7 @@ def http_reflex(base_url: str, api_key: str | None = None, **options: Any) -> Re
             data=json.dumps({"window": window, **{**options, **kwargs}}).encode(),
             headers=headers,
         )
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+        with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
             return json.loads(resp.read())
     return reflex
 
@@ -275,7 +299,15 @@ def _adk_inject(llm_request: Any, block: str) -> None:
     """Append the block to the LLM request via ADK's own documented mutators."""
     append = getattr(llm_request, "append_instructions", None)
     if callable(append):
-        append(block)  # docs: ADK callbacks may modify the LlmRequest before the call
+        # The argument is a ONE-ELEMENT list, and that is load-bearing: every
+        # released ADK declares ``append_instructions(list[str])`` (v0.1.0
+        # through v1.14.0) or ``Union[list[str], types.Content]`` (v2.0.0 on),
+        # and a bare ``str`` is either ``TypeError`` (v2.x) or — worse — joined
+        # CHARACTER by character (v0.x/v1.x). Either way the block never reaches
+        # the prompt, and the fail-open boundary makes it look like nothing was
+        # wrong to inject. docs: ADK callbacks may modify the LlmRequest before
+        # the call.
+        append([block])
         return
     from google.genai import types  # lazy: optional dependency
 
