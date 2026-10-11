@@ -86,7 +86,7 @@ When the owner answers a question, the answer is **relayed to the artifact the n
 - **a comment on the decision issue** — the default; the issue is what a lane actually reads;
 - **the decision section of the plan doc** that governs the work;
 - **a Tortoise point** carrying the decision, when it outlives the issue;
-- **the gate's own record**, where the work is gated by a manifest: the MCP/SDK surface rule records the owner's approval on the row's `approval` field (a PR number and Daniel's handle) in `config/surface-manifest.yml` — `CONTRIBUTING.md` → "The MCP tool surface and public SDK methods cannot grow by accident" is the procedure this rule is cited from.
+- **the gate's own record**, where the work is gated by a manifest: the MCP/SDK surface rule records the owner's approval in `docs/product/canonical-mcp-tools.md` (a PR number and Daniel's handle), which the next `tools/surface_manifest.py cut` copies into `config/surface-manifest.yml` (the manifest is a committed snapshot, never a live reader) — `CONTRIBUTING.md` → "The MCP tool surface and public SDK methods cannot grow by accident" is the procedure this rule is cited from.
 
 The relay is the point. A decision that is not recorded on the artifact is not a decision — it is a default that holds until the next lane re-decides it.
 
