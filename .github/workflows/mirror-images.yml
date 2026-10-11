@@ -1,0 +1,78 @@
+name: mirror-images
+
+# #7867: python-ci pulls its container images from Docker Hub, where ANONYMOUS
+# pulls are limited to 100 / 3600 s per egress IP — and every self-hosted runner
+# in this fleet shares one egress. Exhausting that quota killed every container
+# job in python-ci at the same moment, before pytest ran, so no run carried a
+# `FAILED <nodeid>` line and the merge rail correctly refused it with no
+# attributable failure identity: a whole-fleet merge blocker presenting as a
+# per-PR red, on a checkout whose tests were green all along.
+#
+# Fix direction B (needs nothing from the owner): keep a first-party copy of
+# those images in GHCR, which authenticates with `GITHUB_TOKEN`. There is no
+# anonymous quota to exhaust and no credential to provision — direction A would
+# need a Docker Hub account, a token, and a repository secret.
+#
+# The pull sites (.github/actions/falkordb-provision/provision.sh and the
+# workflow-lint leg of python-ci.yml) PREFER GHCR and fall back to the Docker Hub
+# reference, so this mirror being empty or late degrades the fix — it never
+# breaks the build. Being a `workflow_dispatch` job, this file is only
+# dispatchable once it is on the default branch, which is why the fallbacks
+# matter: they keep CI working between the merge and the first mirror run.
+#
+# The job runs on a GITHUB-HOSTED runner on purpose. Its three source pulls are
+# the only anonymous Docker Hub requests left, and a hosted runner has its own
+# egress IP — running this on the self-hosted fleet would spend the very quota
+# it exists to stop spending. Three pulls a day is negligible even if it did.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `target` is the name the pull sites derive from the source reference:
+        # they take the LAST path component, so `falkordb/falkordb-server:v4.20.6`
+        # resolves to `ghcr.io/<owner>/falkordb-server:v4.20.6`. Renaming a target
+        # here therefore requires the same change in provision.sh's
+        # image_candidates() — one name, two places, and no test can see the join.
+        include:
+          - source: falkordb/falkordb-server:v4.20.6
+            target: falkordb-server
+          - source: falkordb/falkordb-server:latest
+            target: falkordb-server
+          - source: rhysd/actionlint:1.7.12
+            target: actionlint
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror ${{ matrix.source }}
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ghcr.io/${{ github.repository_owner }}/${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # GHCR requires a lowercase repository path; a GitHub owner usually is
+          # already, but an org with capitals would otherwise fail here.
+          tag="${SOURCE##*:}"
+          target="$(printf '%s:%s' "$TARGET" "$tag" | tr '[:upper:]' '[:lower:]')"
+          # Always pull and push: an unchanged digest re-pushes to a no-op, and
+          # `latest` has to be free to move. Three anonymous pulls a day is far
+          # inside Docker Hub's 100/3600 s even when nothing is cached.
+          docker pull --platform linux/amd64 "$SOURCE"
+          docker tag "$SOURCE" "$target"
+          docker push "$target"
+          printf 'mirrored %s -> %s\n' "$SOURCE" "$target" >> "$GITHUB_STEP_SUMMARY"

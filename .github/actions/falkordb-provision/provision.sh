@@ -21,9 +21,78 @@ IMAGE="${FALKORDB_IMAGE:?}"
 LEGACY="${FALKORDB_LEGACY:-true}"
 URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
 # Health-gate bound (seconds) for the PING loop — NOT a bound on the image
-# pull, which happens inside `docker run` before the loop starts (a cold pull
-# is bounded only by the step/job `timeout-minutes`).
+# pull. The pull is resolved explicitly below, before any container starts, so
+# its only bound is the step/job `timeout-minutes`.
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
+
+# #7867: Docker Hub rate-limits ANONYMOUS pulls per egress IP (100 / 3600 s —
+# measured against the live token endpoint; the issue body's "6 h" is wrong),
+# and the fleet's self-hosted runners share that egress. One burst exhausted the
+# quota, after which EVERY container job in python-ci died at `docker run` —
+# before pytest ran, so the run carried no `FAILED <nodeid>` line and the merge
+# rail correctly refused it with no attributable failure identity.
+#
+# Fix direction B from the issue — the one that needs NOTHING from the owner:
+# mirror these images into GHCR, which authenticates with `GITHUB_TOKEN`, so
+# there is no anonymous Docker Hub quota to exhaust and no credential to
+# provision (direction A would need a DOCKERHUB_USERNAME/TOKEN secret).
+# `docker/login-action` is a step in this action, and
+# .github/workflows/mirror-images.yml populates the mirror.
+#
+# Candidate order, most-preferred first. Every tier is a PREFERENCE rather than
+# a replacement, so no single registry can darken this surface again:
+#   1. GHCR           — first-party, GITHUB_TOKEN-authenticated.
+#   2. mirror.gcr.io  — Google's Docker Hub pull-through cache; it serves before
+#                       the GHCR mirror has been populated.
+#   3. as given       — the Docker Hub upstream (today's behaviour).
+GHCR_OWNER="${FALKORDB_GHCR_OWNER:-daniel-ospina}"
+MIRROR_HOST="${FALKORDB_MIRROR_HOST:-mirror.gcr.io}"
+
+# A reference's first path component is a REGISTRY HOST only when it contains a
+# '.' or a ':' (or is literally `localhost`) — Docker's own rule. So
+# `falkordb/falkordb-server:v4.20.6` is Docker Hub, while `mirror.gcr.io/...`
+# and `localhost:5000/...` are not. An already-qualified reference is used AS
+# GIVEN: this action must not silently rewrite a caller's explicit registry.
+image_candidates() {
+  case "${1%%/*}" in
+    *.*|*:*|localhost) printf '%s' "$1" ;;
+    *) printf '%s\n%s\n%s' \
+         "ghcr.io/$GHCR_OWNER/${1##*/}" \
+         "$MIRROR_HOST/$1" \
+         "$1" ;;
+  esac
+}
+
+# Best-first image references, one per word (a reference never contains a space).
+# shellcheck disable=SC2206  # deliberate word-splitting of a reference list
+IMAGE_CANDIDATES=($(image_candidates "$IMAGE"))
+
+# Resolve ONCE, before any container starts. A warm self-hosted runner usually
+# already HAS the image, so the local check runs first across every candidate: a
+# rate-limited registry must not fail a job that needs no pull at all (that is
+# the whole defect).
+RUN_IMAGE=""
+for candidate in "${IMAGE_CANDIDATES[@]}"; do
+  if docker image inspect "$candidate" >/dev/null 2>&1; then
+    RUN_IMAGE="$candidate"
+    log "image $candidate already present locally (requested $IMAGE)"
+    break
+  fi
+done
+if [ -z "$RUN_IMAGE" ]; then
+  for candidate in "${IMAGE_CANDIDATES[@]}"; do
+    if docker pull "$candidate" >/dev/null 2>&1; then
+      RUN_IMAGE="$candidate"
+      log "pulled $candidate (requested $IMAGE)"
+      break
+    fi
+    log "pull failed for $candidate — trying the next source"
+  done
+fi
+if [ -z "$RUN_IMAGE" ]; then
+  annotate_error "could not obtain '$IMAGE' from the mirror ('$IMAGE_PRIMARY') or upstream — no container can start, so no test in this job can run (#7867)"
+  exit 1
+fi
 
 # The two log helpers are used from the first validation below, so they are
 # defined before it.
@@ -120,7 +189,7 @@ start() {
   if ! docker run -d --rm --name "$name" --label "$LABEL" \
       -e REDIS_ARGS="$redis_args" \
       -p 127.0.0.1:0:6379 \
-      "$IMAGE" >/dev/null; then
+      "$RUN_IMAGE" >/dev/null; then
     # Annotated explicitly: `set -e` would otherwise abort with docker's stderr
     # as the only trace, and the contract is that every failure of this step is
     # a visible annotation.
@@ -146,8 +215,8 @@ start() {
 
   # Health gate — the `services:` health-cmd equivalent (5s x 10 retries),
   # widened to 60s for slow starts on a loaded runner. It does NOT cover the
-  # image pull, which happens inside `docker run` above (the pull is bounded by
-  # the step/job timeout-minutes only).
+  # image pull, which provision.sh resolves explicitly BEFORE this loop (the
+  # pull is bounded by the step/job timeout-minutes only).
   for i in $(seq 1 "$HEALTH_TIMEOUT"); do
     # shellcheck disable=SC2086  # $auth is a deliberate 0-or-2 word "cli args"
     if docker exec "$name" redis-cli $auth ping 2>/dev/null | grep -q PONG; then
@@ -162,7 +231,7 @@ start() {
   return 1
 }
 
-log "starting passworded service from $IMAGE (label $LABEL)"
+log "starting passworded service from $RUN_IMAGE (label $LABEL)"
 start "$NAME_PW" "--requirepass falkordb --save ''" "-a falkordb"
 PW_PORT="$(cat "$PORT_FILE")"
 echo "TORTOISE_TEST_DOCKER_PORT=$PW_PORT" >> "$GITHUB_ENV"
@@ -184,4 +253,4 @@ fi
 # dial a closed port and the availability-skip guards would red.
 trap - EXIT
 rm -f "$PORT_FILE"
-log "provisioned $IMAGE (label $LABEL) — containers stay up for this job"
+log "provisioned $RUN_IMAGE (label $LABEL) — containers stay up for this job"

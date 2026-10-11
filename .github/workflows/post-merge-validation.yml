@@ -267,7 +267,12 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         uses: ./.github/actions/falkordb-provision
         with:
-          image: falkordb/falkordb-server:latest
+          # #7867: a service container's image is pulled by the runner with no
+          # fallback hook, so point it straight at the pull-through mirror.
+          # Docker Hub rate-limits ANONYMOUS pulls per egress IP (100 / 3600 s)
+          # and the fleet's runners share it — see the resolver in
+          # .github/actions/falkordb-provision/provision.sh.
+          image: mirror.gcr.io/falkordb/falkordb-server:latest
           uri_graph: tortoise_test_matrix
       # #1474 skip path — python-ci's push run on this tree was green; only
       # comment "covered" (aggregator reports success; no second pytest run).

@@ -14,7 +14,11 @@ description: >-
   ephemeral port cannot collide, so N runners can run services jobs at once.
 inputs:
   image:
-    description: FalkorDB server image (each caller keeps its own pin).
+    description: >-
+      FalkorDB server image (each caller keeps its own pin). A Docker Hub
+      reference is resolved by provision.sh through the pull-through mirror
+      first, falling back to the upstream tag (#7867: anonymous Docker Hub
+      pulls are rate-limited per egress IP, which the fleet's runners share).
     required: false
     default: falkordb/falkordb-server:v4.20.6
   legacy:
@@ -24,8 +28,9 @@ inputs:
   health_timeout:
     description: >-
       Seconds to wait for each container's PING after it is started. This does
-      NOT bound the image pull (that happens inside `docker run`, before the
-      loop) — a cold pull is bounded only by the step/job timeout-minutes.
+      NOT bound the image pull (that is resolved before any container starts,
+      in provision.sh) — a cold pull is bounded only by the step/job
+      timeout-minutes.
     required: false
     default: "60"
   uri_graph:
@@ -39,6 +44,21 @@ inputs:
 runs:
   using: composite
   steps:
+    # #7867 direction B: GHCR authenticates with the workflow token, so the
+    # images this action needs can be pulled without spending the fleet's shared
+    # ANONYMOUS Docker Hub quota. `github.token` (not `secrets.GITHUB_TOKEN`) is
+    # the form that is readable from inside a composite action. The login is
+    # best-effort on purpose: if it fails — or the GHCR mirror is not populated
+    # yet, which is the state on the very PR that adds this file — provision.sh
+    # still resolves the image from its other candidates.
+    - name: Log in to GHCR (best effort)
+      continue-on-error: true
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
     - name: Start FalkorDB services on ephemeral host ports (#6673)
       shell: bash
       env:

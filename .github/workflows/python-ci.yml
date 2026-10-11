@@ -3200,8 +3200,31 @@ jobs:
             echo "no workflow files matched — refusing to certify an empty surface"
             exit 1
           fi
+          # #7867: same best-first resolution as falkordb-provision/provision.sh —
+          # GHCR -> mirror.gcr.io -> the Docker Hub reference as given. The GHCR
+          # tier is first-party (authenticates with the workflow token) and is the
+          # one .github/workflows/mirror-images.yml populates; the login is
+          # best-effort so an unpopulated mirror falls through to the next tier
+          # instead of failing this leg.
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            printf '%s' "$GITHUB_TOKEN" \
+              | docker login ghcr.io -u "${GITHUB_ACTOR:?}" --password-stdin >/dev/null 2>&1 || true
+          fi
+          actionlint_image=""
+          for candidate in \
+            "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/actionlint:1.7.12" \
+            "mirror.gcr.io/rhysd/actionlint:1.7.12" \
+            "rhysd/actionlint:1.7.12"; do
+            if docker pull "$candidate" >/dev/null 2>&1; then
+              actionlint_image="$candidate"
+              echo "using $candidate"
+              break
+            fi
+            echo "pull failed for $candidate — trying the next source" >&2
+          done
           docker run --rm -v "$PWD:/repo" -w /repo \
-            rhysd/actionlint:1.7.12 -shellcheck= "${files[@]}"
+            "${actionlint_image:?no actionlint image could be pulled (GHCR, then mirror.gcr.io, then Docker Hub)}" \
+            -shellcheck= "${files[@]}"
 
   python-ci-gate:
     if: always()
