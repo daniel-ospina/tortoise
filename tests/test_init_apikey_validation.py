@@ -187,7 +187,9 @@ class TestInitApiKeyEnhancements:
         assert out["org_id"] == "team123"
         assert out["api_url"] == "https://api.premiselabs.co"
         assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
-        assert out["mcp"]["auth_header"] == "Bearer tt_testkey"
+        # #5109: the --json path is machine-consumed by agents, so the header must
+        # name the env var — a literal key here is the same leak as stdout.
+        assert out["mcp"]["auth_header"] == "Bearer ${TORTOISE_API_KEY}"
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
         claude = out["mcp"]["configs"]["claude"]
         assert claude["file"] == ".mcp.json"

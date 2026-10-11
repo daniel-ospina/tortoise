@@ -29,6 +29,7 @@ import contextlib
 import io
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -89,25 +90,65 @@ def test_the_written_mcp_file_itself_stays_key_free(tmp_path, monkeypatch) -> No
     )
 
 
-def test_resolution_form_survives_a_shell_roundtrip(tmp_path) -> None:
-    """The migration hint must still SET a usable key — not just stop leaking.
+def test_the_real_resolution_constant_actually_resolves(tmp_path) -> None:
+    """Guard the CONSTANT, not a lookalike.
 
-    Guards the obvious wrong fix: deleting the line entirely (which would leave
-    the user with no way to populate ``$TORTOISE_API_KEY`` and would silently
-    break every onboarding that relied on it).
+    A previous version hand-built the expression, so it passed even when the real
+    constant was emptied or renamed to the wrong JSON field — i.e. it guarded
+    nothing. Import the production function and drive it through a real shell.
     """
     import subprocess
 
-    cfg = tmp_path / "tortoise-config.json"
-    cfg.write_text(json.dumps({"apiKey": KEY, "apiUrl": URL}))
-    expr = (
-        "python3 -c 'import json,pathlib;"
-        "print(json.loads(pathlib.Path(\"" + str(cfg) + "\").read_text())[\"apiKey\"])'"
-    )
+    from tortoise.__main__ import _key_resolution_expr
+
+    cfg = tmp_path / "credentials.json"
+    cfg.write_text(json.dumps({"api_key": KEY, "api_url": URL}))
+    expr = _key_resolution_expr(cfg)
+    assert KEY not in expr, "the expression itself must never contain the value"
     got = subprocess.run(
-        ["/bin/sh", "-c", f'export TORTOISE_API_KEY=$({expr}); printf %s "$TORTOISE_API_KEY"'],
+        ["/bin/sh", "-c", f'export TORTOISE_API_KEY={expr}; printf %s "$TORTOISE_API_KEY"'],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    assert got == KEY, "the printed resolution expression must actually resolve the key"
+    assert got == KEY, (
+        "the REAL _key_resolution_expr must resolve the key from the file the CLI "
+        "wrote — an emptied constant or a wrong field name (apiKey vs api_key) "
+        "silently exports nothing"
+    )
+
+
+def test_resolution_expr_points_at_the_path_it_was_given(tmp_path) -> None:
+    """The path must be threaded, not hard-coded: `init --api-key` saves to
+    `<cwd>/.tortoise`, so a hard-coded `~/.tortoise/credentials.json` would
+    export a stale or absent key (review finding, #5109)."""
+    from tortoise.__main__ import _key_resolution_expr
+
+    a = tmp_path / "a" / "credentials.json"
+    b = tmp_path / "b" / "credentials.json"
+    assert str(a) in _key_resolution_expr(a)
+    assert str(b) in _key_resolution_expr(b)
+    assert _key_resolution_expr(a) != _key_resolution_expr(b)
+
+
+def test_json_payload_uses_the_env_form_not_the_literal() -> None:
+    """The `--json` payload is the AGENT-consumed path (#304).
+
+    Asserted at the SOURCE, because that is where the regression lands: the
+    payload is built inline in `_main`'s init flow, so the honest guard is that
+    no `auth_header` is ever interpolated from a key variable again.
+    """
+    src = (
+        Path(__file__).resolve().parent.parent / "tortoise" / "__main__.py"
+    ).read_text(encoding="utf-8")
+    offenders = [
+        ln for ln in src.splitlines()
+        if "auth_header" in ln and "api_key" in ln
+    ]
+    assert not offenders, (
+        "the --json payload interpolates a live key — the agent-consumed path "
+        f"must emit ${{TORTOISE_API_KEY}}: {offenders}"
+    )
+    assert '"auth_header": "Bearer ${TORTOISE_API_KEY}"' in src, (
+        "the --json payload must name the env var explicitly"
+    )
