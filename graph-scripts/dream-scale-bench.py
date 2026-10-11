@@ -171,7 +171,7 @@ def main() -> int:
 
     from tortoise.dream import (DEFAULT_WINDOW_BUDGET,  # noqa: I001
                                 resolve_window_budget)
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK, _derive_graph_name
 
     os.environ.setdefault("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
     budget = args.budget if args.budget is not None else resolve_window_budget(None)
@@ -267,16 +267,26 @@ def main() -> int:
     finally:
         if args.drop:
             try:
-                name = getattr(sdk._get_proj(), "_graph_name", None)
-                # Only ever the graph THIS run minted (the namespace-derived
-                # names). Anything else — a tenant graph, a default graph — is
-                # refused rather than risk a GRAPH.DELETE against live data.
-                allowed = {args.namespace, f"org_{args.namespace}"}
-                if name not in allowed:
+                proj = sdk._get_proj()
+                name = getattr(proj, "_graph_name", None)
+                # Only ever the graph THIS run minted. The expected name is the
+                # SDK's OWN derivation (``_derive_graph_name``), not a hardcoded
+                # ``org_{ns}`` pair: a ``test_*``/``tortoise_test*`` namespace
+                # mints ``{ns}_tortoise``, so the pair refused a legitimate drop.
+                # Anything else — a tenant graph, a default graph — is refused
+                # rather than risk a GRAPH.DELETE against live data.
+                expected = _derive_graph_name(namespace=args.namespace,
+                                              graph_name=None)
+                if name != expected:
                     raise RuntimeError(
                         f"refusing to drop a graph this run did not mint: "
-                        f"{name!r} (expected one of {sorted(allowed)})")
-                sdk._get_proj().g.query(f"GRAPH.DELETE {name}")
+                        f"{name!r} (expected {expected!r})")
+                # GRAPH.DELETE is a Redis command, not Cypher: ``graph.query``
+                # sends it as a Cypher body — FalkorDB parses it as one and
+                # rejects it, and the old ``except`` swallowed that, so the
+                # documented cleanup silently left the graph behind (#5084).
+                # The canonical channel is the client's ``delete()``.
+                proj.g.delete()
                 print(f"# dropped graph {name}")
             except Exception as exc:
                 print(f"# WARNING: drop failed: {exc}", file=sys.stderr)

@@ -267,7 +267,7 @@ class TestBudgetBoundaries:
         assert (_stamp(proj, _region_by_name(f, "medium").claims[0])
                 == STAMP_MEDIUM)
 
-    def test_budget_none_resolves_to_configured_default(self):
+    def test_budget_none_resolves_to_configured_default(self, monkeypatch):
         """budget=None → the CONFIGURED default budget (epic 903-C3 + #1338).
 
         Two contracts, both load-bearing:
@@ -285,7 +285,11 @@ class TestBudgetBoundaries:
           original 200-op selector-cap semantics: a 201-op fan-out with
           ``budget=200`` truncates to exactly 200 and never runs unbounded.
         """
-        from tortoise.dream import resolve_window_budget
+        from tortoise.dream import DREAM_WINDOW_BUDGET_ENV, resolve_window_budget
+        # The env override IS this feature's new configuration; clear any
+        # ambient value so BOTH the default assertion and the window pass below
+        # measure the default, not the developer's shell.
+        monkeypatch.delenv(DREAM_WINDOW_BUDGET_ENV, raising=False)
         assert DEFAULT_WINDOW_BUDGET > 0
         assert resolve_window_budget(None) == DEFAULT_WINDOW_BUDGET
         # F2 equivalence: budget=None ≡ budget=DEFAULT_WINDOW_BUDGET on a

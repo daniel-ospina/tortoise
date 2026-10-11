@@ -178,6 +178,10 @@ class TestBudgetConfigurability:
     def test_env_sets_the_default_and_explicit_wins(self):
         old = os.environ.get(DREAM_WINDOW_BUDGET_ENV)
         try:
+            # An ambient value IS the configuration this feature adds; clear it
+            # before asserting the DEFAULT, or a developer's exported budget
+            # legitimately wins and the assertion is a false red.
+            os.environ.pop(DREAM_WINDOW_BUDGET_ENV, None)
             assert resolve_window_budget(None) == DEFAULT_WINDOW_BUDGET
             os.environ[DREAM_WINDOW_BUDGET_ENV] = "4242"
             assert resolve_window_budget(None) == 4242
