@@ -551,3 +551,76 @@ Run: both lane commands from Task 8 + revert smoke. Expected: PASS.
 ### review-fix loop — cycle 3 (FIXER pass)
 
 19 issues fixed (6 P1 + 13 P2 — plan doc only): **P1-1** Task 4 test (n3) split at the WRITER boundary — the `s4_delta_reemit_suspect` flag-firing half MOVED to Task 6 Step 5 as a new replay fixture (u); **P1-2** Task 10 Step 1 probe (e) — the delta-off control smoke (bounded qid subset, `TORTOISE_S4_DELTA=0`, `--workers 5`, shared-qid medians) enumerated + all four Task 0 Step 4 / Task 10 Acceptance / final Acceptance references point at probe (e); **P1-3** wholesale copy pinned KEY-FILTERED (excludes `llm`/`recovery`/`error_census`/accumulator-owned keys) + accumulator-survival assertion in Task 1 Step 6 (b); **P1-4** run.py `outcomes_to_report` projection allowlist (:2065-2135) extended with the full gate-key set + report-projection fixture (b3) + report.json-as-evidence stated (Task 1 Step 4); **P1-5** all-clean GREEN fixture with mutation checks (R_new 0.49→0.51 flips to the disambiguation path; zeroed gate key → exit-1) + RESTATEMENT exit code pinned (exit-0 — a documented compliant verdict is a PASS, Task 10 Step 3); **P1-6** Task 4 fixture (r) — S2-partial × truncated-delta × clean retry (monotone union over the PARTIAL base; a truncated-out-item correction APPENDS — no S2 original to collide with); **P2-1** Task 3 (k) defers the `s2_complete` half to Task 4 (i) + Task 4 (h) marked vacuous-until-Task-6 (Task 2 (b) precedent); **P2-2** Task 5 Files block rewritten (Verify the Task 4-landed dispatch; Modify factory refactor + `s4_delta_on` writer + `.env.example`) + Task 4 Files lists the `delta` kwarg; **P2-3** `_S4_R_NEW_THRESHOLD`/`_S4_VERBATIM_AGG_RATIO` DEFINED in Task 6 Step 1 adjacent to `_S4_REEMIT_SUSPECT_RATIO` (import has a writer); **P2-4** I-2-2 split (retry design + anchor logic) + new I-2-2a (env-coercion rule), LEGEND + 5 coercion usage sites updated; **P2-5** Task 6 run command adds `or stats_recorded`; **P2-6** judge-key list adds `s4_skipped`/`s4_delta_fallback`/`s4_delta_fallback_failed`; **P2-7** I-9 basis pinned (per-CALL primary vs the 15-call baseline; truncated-SESSION count reported for diagnosis) across LEGEND/§1.9/Task 10 Acceptance/Step 3/final criteria; **P2-8** the retry threads the choke-point-captured `core_only` alongside `delta` + Task 5 Step 4(e) pin extended to the core_only flag on the retry path (both directions); **P2-9** Task 4 fixture (s) — malformed retry output (`s4_shape_error` bumps, valid section merges MONOTONE, `s4_delta_fallback` still records); **P2-10** latency median computed over sessions where S4 RAN (S4-skipped excluded with the count recorded; no crash, no silent 0 deflation) + judge-key relaxation (`s4_skipped` present OR `s4_latency_ms` absent is valid); **P2-11** Task 6 test (r) extended with the fallback-session variant (attempt-1-pinned invariant; retry stats NOT folded into the `s4_merge` block); **P2-12** probe (c) extended to TOTAL context (representative large prompt; context-exceeded 400 → clamp / `s4_delta_fallback_failed`, never silent); **P2-13** Task 1 Step 6 (f) asserts the latency keys (`s2_latency_ms`/`s4_latency_ms`) follow the same SUM rule.
+
+---
+
+## Execution record — 2026-10-10 (partial lane: delta contract core lands)
+
+**Status: PARTIAL.** The structural fix (Prompt + gate + compliance observability)
+landed; the measurement/E2E half of this plan did not. This section is the
+rebase/scope record Task 0 mandated plus the rollout runbook Tasks 5/11 owed.
+
+### What landed (all in `tortoise/extractor_v2.py` unless noted)
+
+| Plan item | Landing |
+|---|---|
+| Task 2 — delta templates R1-R7 | `S4_TMPL_DELTA` / `S4_TMPL_CORE_ONLY_DELTA`, derived by `_derive_s4_delta()` from the LEGACY constants (which stay byte-identical — the revert path). The derivation RAISES on an anchor-count drift, so a future edit cannot silently ship a half-delta contract. Includes R6 (the core-only `#1695` "Re-emit them VERBATIM" clause reconciled with R2) and R7 (operator/slot references may name an unchanged S2 item WITHOUT re-emitting it). |
+| Task 5 — env toggle + render dispatch | `_s4_delta_enabled()` = `env_flag("TORTOISE_S4_DELTA", True)` (DEFAULT-ON; garbage → default, never coerced). `render_s4_prompt(..., delta=...)` and `run_s4(..., delta=...)` gained keyword-only selectors; `extract_session_v2` captures the flag ONCE at the S4 choke point and threads it (no mid-run mixed contracts). |
+| Task 3 — merge-gate fix + empty-delta semantics | The gate now fires on ANY content-bearing section (`_s4_section_is_content`) — the legacy 4-section check DROPPED a retractions-only / chain_notes-only / link_before_create-only delta (silent data loss, pre-existing in legacy mode too). Malformed known sections are censused (`s4_shape_error`) per section while the VALID sections still merge; an empty delta is a SILENT no-changes recorded as `stats.s4_delta_empty` (the old "S4 returned an empty list" warning fired on the normal no-gaps case and was removed). |
+| Task 6 — compliance observability | `_S4_REEMIT_SUSPECT_RATIO = 0.5`; `stats.s4_delta_reemit_suspect` fires (delta mode only) when `verbatim_reemissions ≥ 0.5 × s2_items` — the pure re-emission signal, never `corrected_by_s4`. |
+| Task 11 (partial) — runbook | `.env.example` carries the toggle with the fail-open warning (comments on their own line); the runbook is this section. |
+| Tests | `tests/test_extractor_v2.py::TestS4DeltaContract1789` (19 tests: rules, anchor counts, loud-failure, revert byte-identity, env value handling, dispatch matrix, retractions-only merge, empty/all-empty silent, malformed-section merge, suspect flag fire/absent/legacy-exempt). `tests/conftest.py` pins `TORTOISE_S4_DELTA=0` so the pre-existing legacy assertions stay authoritative; delta tests opt in. |
+
+### What did NOT land (and why)
+
+1. **Task 1 (per-stage token/latency plumbing) is ALREADY LANDED by #2408** —
+   `_accumulate_seam_out_tokens` writes `s2_out_tokens`/`s4_out_tokens` and
+   `s4_merge` rides the run record (`tests/test_longmem_runner.py`, `tests/test_ingest_v2_parallel.py`).
+   The residual columns this plan wanted (per-stage LATENCY, `s2_complete`,
+   `s4_skipped`, `s4_fallback_*`) remain unbuilt.
+2. **Task 4 (elevated-cap delta retry) is ALREADY PROVIDED by the #2134
+   escalation net** (merged post-plan-write): `_complete_parsed` re-runs the
+   SAME rendered prompt at `_extractor_escalation_tokens(base)` (default 32000
+   = 2× the 16000 cap) on a `finish_reason == "length"` truncation. Under
+   delta the initial render IS the delta template, so the escalation is
+   already an elevated-cap DELTA retry. The plan's separate
+   `_S4_DELTA_FALLBACK_CAP` + attempt-1 monotone merge + `s4_delta_fallback*`
+   census classes were NOT built (would duplicate the existing net); the
+   monotone-merge and census-residual work is the tracked residual here.
+3. **Task 10 (fresh 50-Q E2E)** was NOT run — it needs `DEEPSEEK_API_KEY`,
+   a live FalkorDB, and ~4h at `--workers 5`. The issue's numeric targets
+   (R_new < 0.5, accuracy ≥ 0.826, chunk@20 ≥ 0.738) are therefore
+   **UNVERIFIED**; the delta contract's MAGNITUDE remains unmeasured (the
+   #2408/gate census measured the re-emission SHARE, not the delta run).
+4. **Task 8 (full-suite both lanes)** was not completed inside this lane —
+   the extraction-adjacent suites were run (evidence in the PR). The
+   longmem runner suite exceeded the lane's time budget.
+5. **Task 3's rung-4 ladder widening** (`_longest_valid_prefix` → all 7
+   `_OUTPUT_SCHEMA` sections) was deliberately NOT taken: it changes S2
+   truncation semantics in BOTH modes and the plan itself scoped that as a
+   deliberate behaviour change needing the Task 8 S2-path audit. A truncated
+   retractions-only delta therefore still rung-5 fails. Filed as residual here.
+6. **Task 9** (docstring) and **Task 7** (adapter token forwarding — only
+   needed by the unbuilt residual measurement) not touched.
+
+### Revert runbook (Task 11)
+
+- **Revert:** `TORTOISE_S4_DELTA=0` → the legacy complete-list template renders
+  byte-identical (`test_revert_render_is_byte_identical`). The Task 3 merge-gate
+  fix + the empty-delta silence are DELIBERATE behaviour changes that apply in
+  BOTH modes — the revert is a PROMPT-RENDER revert, not a behaviour revert.
+- **Observability:** `stats.s4_delta` (effective choke-point flag),
+  `stats.s4_delta_empty` (delta ran, found nothing — absent when content was
+  present), `stats.s4_delta_reemit_suspect` (delta mode only), the existing
+  `stats.s4_merge.{verbatim_reemissions,corrected_by_s4,s2_items}`.
+- **FAIL-OPEN warning:** an unrecognized or inline-commented value
+  (`TORTOISE_S4_DELTA=0  # revert`) resolves to the DEFAULT (delta). Comments
+  belong on their own line — `.env.example` shows the shape.
+- **Escalation:** if a real run shows `s4_delta_reemit_suspect` on > 20% of
+  sessions (model compliance < 80%), revert and escalate the S-C runtime
+  two-shot per §1.6.
+
+### Companion issue filed
+
+- **#8039** — same-session retraction resolution (`_resolve_retraction` matches
+  S3 priors only; the §1.7.1 deferral had no tracking issue).
