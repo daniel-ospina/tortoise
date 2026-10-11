@@ -295,14 +295,17 @@ class TestPromotionPolicy:
         assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
         # #5089: this connection carries no `reify`, so `_connection_route`
         # returns 'direct' and NO operator node is minted — `ids["connections"]
-        # [0]` is the direct-edge descriptor, and `get_point` on it is `{}`.
-        # Assert THAT, because `assert "status" not in {}` was unfalsifiable (it
-        # held whatever the operator door did). The operator NODE's status
-        # contract — 'live' under auto since #5089 — is asserted where a node
-        # actually exists: test_mcp_server.py's reify=True case.
-        assert sdk.get_point(op_id) == {}, (
+        # [0]` is the direct-edge descriptor, not an id. Assert the NODE ABSENCE
+        # with a graph query. (Round 5: the previous form here,
+        # `assert sdk.get_point(op_id) == {}`, was STILL unfalsifiable —
+        # `get_point` returns `{}` for any unknown input, so it held even when a
+        # mutation minted a real operator node. Proved by mutation, not argued.)
+        assert _operator_count(sdk) == 0, (
             "a direct-route connection must not mint an operator node"
         )
+        # And the entry is the direct-edge DESCRIPTOR, not a node id (which is
+        # what made a `get_point(op_id) == {}` assertion unable to fail).
+        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
 
     def test_auto_nand_promotes_source_live(self, sdk):
         # Promotion is op-type-agnostic: NAND wires the same #131 path
@@ -442,10 +445,11 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"
         assert sdk.get_point(pB)["status"] == "draft"
-        # #5089: no `reify` → 'direct' route → no operator node (see the note in
-        # test_auto_promotes_source_live; the old key-absence assertion was
-        # unfalsifiable).
-        assert sdk.get_point(op_id) == {}
+        # #5089: no `reify` → 'direct' route → no operator node. Assert the node
+        # absence by GRAPH QUERY: `get_point(op_id) == {}` would also hold for an
+        # unknown input, so it cannot fail (round 5).
+        assert _operator_count(sdk) == 0
+        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
 
     def test_keyword_only_enforced(self, sdk):
         # Q2-lock: positional auto-promotion must NOT silently opt in — a
