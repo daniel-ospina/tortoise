@@ -235,6 +235,14 @@ ledger lives beside your import receipts (`~/.tortoise/capture-backlog/`, or
 under `$TORTOISE_IMPORT_RECEIPT_DIR`'s parent). It records the transcript path,
 harness, turn count and estimate — never transcript content.
 
+**Which capture paths populate it.** A deferral is recorded by `sessions
+import` and by `session capture` (the Claude Code SessionEnd hook, which
+records the durable Claude project transcript so a later `--process` can
+actually re-read it). Two paths do **not** write the ledger yet, so on them the
+report stays silent until the session is imported explicitly: a session filed
+by the spool drain (`tortoise session drain`, e.g. after a SessionEnd hook was
+cancelled) and the Pi capture extension.
+
 ## 4. Use the REST API
 
 Base URL `https://api.premiselabs.co`, header `Authorization: Bearer tt_YOUR_KEY` on every request.

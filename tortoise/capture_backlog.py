@@ -81,10 +81,14 @@ __all__ = [
 #: :func:`tortoise.hook_install.local_state_dir`, never re-derived here.
 BACKLOG_DIR_LEAF = "capture-backlog"
 
-#: The filename of the policy record.  A v4-style session id can never be
-#: ``policy`` (the writers mint ``imp_`` / ``session_`` prefixed ids), and the
-#: scan skips this name explicitly rather than relying on that.
+#: The filename of the policy record.  The session-id namespace and this name
+#: are kept apart by :func:`_session_path`, which RELOCATES a session whose
+#: sanitised id would land on the reserved stem.  Reserving it in the WRITE
+#: path — not only in the scan that skips it — is load-bearing: the "a v4-style
+#: id can never be ``policy``" assumption is false for the CLI, which accepts a
+#: free-form ``--session-id``.
 _POLICY_FILE = "policy.json"
+_RESERVED_LEAF = "policy"
 
 #: The three states.  Taken from #4197's own acceptance criteria — "the read
 #: path's status reflects all three states (not processed / processed /
@@ -127,6 +131,12 @@ def _session_path(session_id: str) -> Path:
     for bad in ("/", "\\"):
         safe = safe.replace(bad, "_")
     safe = safe.replace("..", "_") or "_unnamed"
+    if safe == _RESERVED_LEAF:
+        # A session id may not address the policy record: ``sessions()`` skips
+        # this leaf by NAME, so a session record written at it would be
+        # invisible to every read surface AND would corrupt the recorded
+        # choice — two silent losses from one free-form `--session-id policy`.
+        safe = f"_{safe}"
     return backlog_dir() / f"{safe}.json"
 
 
@@ -163,7 +173,22 @@ def _read_json(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def estimate_units(conversation: list[dict] | None) -> int:
+def _as_int(value: object) -> int | None:
+    """``value`` as an int, or ``None`` when it is absent or not a number.
+
+    Applied to RECORD CONTENTS read back from disk (and to estimates that could
+    not be computed).  A ledger a human or an older build edited must read as
+    "unpriced", never as a traceback — and never as a free run.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def estimate_units(conversation: list[dict] | None) -> int | None:
     """The product's OWN pre-write cost unit for extracting ``conversation``.
 
     Delegates to :func:`tortoise.sdk._session_extraction_estimate` — the same
@@ -171,6 +196,11 @@ def estimate_units(conversation: list[dict] | None) -> int:
     shows and the number the server charges cannot disagree.  A missing/odd
     conversation yields 0 rather than raising (the offer must degrade to "cost
     unknown", never to no offer).
+
+    An estimator FAILURE returns ``None``, which is NOT ``0``: a genuinely
+    empty conversation costs nothing, while an unpriced one is unknown.  Folding
+    the two together advertises a run that WILL spend model budget as free —
+    the inverse of the cost-visible-before-the-spend acceptance criterion.
     """
     if not conversation:
         return 0
@@ -178,12 +208,12 @@ def estimate_units(conversation: list[dict] | None) -> int:
         from tortoise.sdk import _session_extraction_estimate
         return int(_session_extraction_estimate(conversation))
     except Exception:
-        return 0
+        return None
 
 
 def record_not_processed(*, session_id: str, harness: str | None = None,
                          file: str | None = None, turns: int = 0,
-                         estimate: int = 0, reason: str | None = None,
+                         estimate: int | None = 0, reason: str | None = None,
                          recorded_at: str | None = None) -> bool:
     """Record that ``session_id`` was captured STORE-ONLY — never extracted.
 
@@ -210,8 +240,8 @@ def record_not_processed(*, session_id: str, harness: str | None = None,
             "status": STATUS_NOT_PROCESSED,
             "harness": harness,
             "file": str(file) if file else None,
-            "turns": int(turns or 0),
-            "estimate": int(estimate or 0),
+            "turns": _as_int(turns) or 0,
+            "estimate": _as_int(estimate),
             # WHY it was store-only.  The two reasons are independent levers
             # (#4258): naming the wrong one sends the user to a remedy that
             # cannot work, which is exactly what the CLI's deferral message
@@ -258,8 +288,17 @@ def read_policy() -> dict:
     not answered), which is emphatically not the same thing as "declined".  The
     three-state report must keep those apart or it would report a choice the
     user never made.
+
+    Never raises, derivation included: ``backlog_dir()`` touches
+    ``Path.home()`` and is documented as fallible (``$HOME`` as a literal
+    ``~``), and this runs on a capture's success path — a local-bookkeeping
+    failure must degrade to "not asked", never to a traceback after the POST
+    has already committed.
     """
-    return _read_json(backlog_dir() / _POLICY_FILE) or {}
+    try:
+        return _read_json(backlog_dir() / _POLICY_FILE) or {}
+    except Exception:
+        return {}
 
 
 def set_policy(choice: str, *, decided_at: str | None = None) -> bool:
@@ -271,8 +310,11 @@ def set_policy(choice: str, *, decided_at: str | None = None) -> bool:
     """
     if choice not in _POLICY_CHOICES:
         return False
-    return _write_json(backlog_dir() / _POLICY_FILE,
-                       {"choice": choice, "decided_at": decided_at})
+    try:
+        return _write_json(backlog_dir() / _POLICY_FILE,
+                           {"choice": choice, "decided_at": decided_at})
+    except Exception:
+        return False
 
 
 def sessions() -> list[dict]:
@@ -326,8 +368,14 @@ def summary() -> dict:
             STATUS_NOT_PROCESSED: len(not_processed),
             STATUS_PROCESSED: len(processed),
         },
-        "cost_units": sum(int(r.get("estimate") or 0) for r in not_processed),
-        "turns": sum(int(r.get("turns") or 0) for r in not_processed),
+        # Costs are summed over the entries that COULD be priced, and the
+        # unpriced ones are counted separately rather than collapsing to 0 —
+        # see `estimate_units`.
+        "cost_units": sum(_as_int(r.get("estimate")) or 0
+                          for r in not_processed),
+        "cost_unknown": sum(1 for r in not_processed
+                            if _as_int(r.get("estimate")) is None),
+        "turns": sum(_as_int(r.get("turns")) or 0 for r in not_processed),
         "policy": policy,
         "choice": choice,
         # The vocabulary the report renders.  ``declined`` is reported from the
@@ -357,15 +405,20 @@ def format_report(state: dict, *, provider: str | None = None,
         if provider:
             provider_note = (f" (extraction provider: {provider}"
                              f"{', model ' + model if model else ''})")
+        _priced = int(state.get("cost_units") or 0)
+        _unknown = int(state.get("cost_unknown") or 0)
+        _cost = (f"~{_priced} estimated extraction unit(s)" if not _unknown
+                 else f"~{_priced} estimated extraction unit(s), plus "
+                      f"{_unknown} entry(ies) that could not be priced")
         lines.append(
-            f"  Cost if processed now: ~{int(state.get('cost_units') or 0)} "
-            f"estimated extraction unit(s) across "
-            f"{int(state.get('turns') or 0)} saved turn(s){provider_note}.")
+            f"  Cost if processed now: {_cost} "
+            f"across {int(state.get('turns') or 0)} saved turn(s){provider_note}.")
         for rec in state.get("not_processed", []):
+            _est = _as_int(rec.get("estimate"))
             lines.append(
                 f"  - {rec.get('session_id')} [{rec.get('harness') or 'harness?'}]"
-                f" {rec.get('turns') or 0} turn(s), est. "
-                f"{rec.get('estimate') or 0} unit(s)"
+                f" {_as_int(rec.get('turns')) or 0} turn(s), est. "
+                f"{_est if _est is not None else 'cost unknown'} unit(s)"
                 f"{' — ' + str(rec.get('reason')) if rec.get('reason') else ''}")
     rec = recommendation(state)
     if rec:

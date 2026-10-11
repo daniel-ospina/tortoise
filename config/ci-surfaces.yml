@@ -681,6 +681,14 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
+  # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
+  # change selects `api`, not the full matrix). The file's largest subject is
+  # that CLI half (`sessions backlog`, `--process`, `--future-only`, the
+  # `doctor` row) plus the capture deferral sites, so a `__main__.py`-only
+  # change must run it. Dual-registered with `core`, which covers the ledger
+  # module — see the core entry.
+  - test_capture_backlog_4197.py
   # #2814: guards tortoise/__main__.py's rebuild reporting (the CLI is the
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
@@ -807,9 +815,12 @@ surfaces:
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
-  # guard here is what makes it run on a change to the ledger alone. (A
-  # `__main__.py` change selects the FULL matrix, so the CLI half is covered
-  # either way; the module-only PR is the one this entry exists for.)
+  # guard here is what makes it run on a change to the ledger alone. The CLI
+  # half lives in `tortoise/__main__.py`, an exact `api` SOURCE_PATTERN that is
+  # NOT a SHARED_MODULE: a `__main__.py`-only change selects `api`, NOT the
+  # full matrix, so this `core` entry alone would leave it unguarded. Hence the
+  # dual registration with `api` (the #2938 convention every sibling CLI guard
+  # follows) — see the `api` entry.
   - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
   - test_ci_stall_identify.py

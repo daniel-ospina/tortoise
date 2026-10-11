@@ -81,6 +81,34 @@ def _transcript(tmp_path: Path, name: str = "session.jsonl", turns: int = 4):
     return path
 
 
+def _claude_transcript(tmp_path: Path, name: str = "project.jsonl",
+                       turns: int = 4):
+    """A transcript in the `claude-desktop` shape — the shape the Claude Code
+    hook's DURABLE source (`~/.claude/projects/*/*.jsonl`) carries, and the one
+    the saved-backlog ledger records for a hook-captured deferral."""
+    lines = [
+        json.dumps({"type": "assistant" if i % 2 else "user",
+                    "message": {"role": "assistant" if i % 2 else "user",
+                                "content": f"saved turn {i} with content"}})
+        for i in range(turns)
+    ]
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _text_transcript(tmp_path: Path, name: str = "hook-tmp.jsonl",
+                     turns: int = 4):
+    """A transcript in the `User:`/`Assistant:` text form `session capture`
+    parses (`_parse_transcript`) — what the Claude Code hook's `mktemp`
+    conversion holds, and what that hook passes as `--file`."""
+    lines = [f"{'User' if i % 2 == 0 else 'Assistant'}: saved turn {i} with content"
+             for i in range(turns)]
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 class _FakeResponse:
     def __init__(self, body: dict):
         self._body = json.dumps(body).encode("utf-8")
@@ -254,14 +282,27 @@ def test_backlog_json_emits_the_machine_readable_state(places, capsys):
     out = capsys.readouterr().out
 
     assert rc == 0
-    # The report comes first, then the JSON document.
-    document = out[out.index("\n{") + 1:]
-    state = json.loads(document)
+    # JSON ONLY on stdout — a consumer doing `json.loads(out)` must not have to
+    # strip a human report first (mirrors `_cmd_fail` / `_emit_json`).
+    state = json.loads(out)
     assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
     assert state["cost_units"] == 12
     assert state["declined"] is False
     assert state["statuses"] == [backlog.STATUS_NOT_PROCESSED,
                                  backlog.STATUS_PROCESSED]
+
+
+def test_backlog_json_emits_the_state_for_an_empty_backlog(places, capsys):
+    """An empty backlog is a STATE, not an absence: the machine-readable
+    document must exist for it too, rather than an early-return sentence."""
+    rc = main.main(["sessions", "backlog", "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    state = json.loads(out)
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+    assert state["counts"][backlog.STATUS_PROCESSED] == 0
+    assert state["declined"] is False
 
 
 def test_backlog_process_without_a_provider_refuses_and_spends_nothing(
@@ -490,3 +531,252 @@ def test_the_stored_backlog_survives_an_unwritable_ledger(places, capsys):
         assert backlog.record_not_processed(session_id="s_1", turns=1,
                                             estimate=3) is False
     assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+
+
+# ── The contracts the read path and the run must not violate ───────────────
+
+
+def test_a_degraded_extraction_does_not_retire_the_entry(places, tmp_path):
+    """A receipt is NOT proof that extraction ran. A DEGRADED 2xx
+    (`extraction_mode` error/empty, or a non-empty `errors` list) writes a
+    receipt while extracting nothing — retiring the ledger entry there would
+    mark a session `processed` that gained no memory points, which is the one
+    lie this feature exists to prevent."""
+    _, receipts = places
+    transcript = _transcript(tmp_path)
+    backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
+                                 file=str(transcript), estimate=12,
+                                 reason="no LLM provider key")
+    degraded = _store_only_body("s_1")
+    degraded.update({"extraction_mode": "error", "extracted": 0, "ok": False,
+                     "errors": ["upstream provider 500"], "warnings": []})
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: degraded)[0]):
+        rc = main._cmd_sessions_import(main.argparse.Namespace(
+            file=str(transcript), harness="pi", session_id="s_1"))
+
+    assert rc == 0, "a degraded 2xx is still a 2xx — the receipt rule is unchanged"
+    assert (receipts / "s_1.json").exists()
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1, \
+        "the entry must stay pending: no extraction ever ran for it"
+    assert state["counts"][backlog.STATUS_PROCESSED] == 0
+
+
+def test_a_session_may_not_address_the_policy_record(places):
+    """`sessions()` skips `policy.json` by NAME, so a session record written
+    there would be invisible to every read surface AND would destroy the
+    recorded choice — two silent losses from one free-form `--session-id`."""
+    assert backlog.set_policy(backlog.CHOICE_FUTURE_ONLY, decided_at="t") is True
+    assert backlog.record_not_processed(session_id="policy", turns=2,
+                                        estimate=6) is True
+
+    assert backlog.read_policy()["choice"] == backlog.CHOICE_FUTURE_ONLY, \
+        "the session record must not overwrite the policy"
+    assert [r["session_id"] for r in backlog.sessions()] == ["policy"], \
+        "the entry must still be visible to the read surfaces"
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    assert backlog.summary()["declined"] is True
+
+
+def test_an_unresolvable_home_cannot_break_the_read_path(monkeypatch):
+    """`Path.home()` is fallible (`$HOME` as a literal `~`) and these run on a
+    capture's SUCCESS path — a local-bookkeeping failure must degrade to the
+    neutral state, never to a traceback after the POST has committed.
+    Precedent: `test_hook_run_observation.py`'s resolvable-home guard."""
+    monkeypatch.setenv("HOME", "~")
+    monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+    assert backlog.sessions() == []
+    assert backlog.read_policy() == {}
+    assert backlog.set_policy(backlog.CHOICE_BACKLOG) is False
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+    assert state["declined"] is False
+    assert backlog.recommendation(state) is None
+
+
+def test_a_malformed_record_reads_as_unpriced_not_as_a_traceback(places):
+    """The read path runs after a successful capture: a record a human (or an
+    older build) edited must read as unpriced, never as a crash and never as a
+    free run."""
+    target = backlog.backlog_dir() / "s_bad.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({
+        "session_id": "s_bad", "status": backlog.STATUS_NOT_PROCESSED,
+        "turns": "not-a-number", "estimate": "not-a-number",
+    }), encoding="utf-8")
+
+    state = backlog.summary()
+    assert state["counts"][backlog.STATUS_NOT_PROCESSED] == 1
+    assert state["cost_units"] == 0
+    assert state["cost_unknown"] == 1
+    report = backlog.format_report(state)
+    assert "could not be priced" in report
+    assert "cost unknown" in report
+
+
+def test_the_offer_price_is_the_product_estimator(places):
+    """The number the offer shows and the number the hosted 402 gate charges
+    are the SAME unit (`sdk._session_extraction_estimate`), so a regression
+    that re-priced the offer locally would show up here."""
+    from tortoise.sdk import _session_extraction_estimate
+
+    conversation = [{"role": "user", "content": "a" * 400},
+                    {"role": "assistant", "content": "b" * 400}]
+    assert backlog.estimate_units(conversation) == \
+        int(_session_extraction_estimate(conversation))
+    assert backlog.estimate_units(conversation) > 0
+    assert backlog.estimate_units(None) == 0
+    assert backlog.estimate_units([]) == 0
+
+
+def test_a_verify_probe_is_never_recorded_in_the_backlog(places, tmp_path):
+    """A `session verify` probe's transcript is synthetic and lives in a
+    tempdir removed at exit; recording it would leave a ledger entry that no
+    read surface could ever act on."""
+    from tortoise.capture_spool import is_probe_session_id
+
+    probe_id = "verify-claude-20261011T000000Z-abcdef"
+    assert is_probe_session_id(probe_id)
+    transcript = _transcript(tmp_path)
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _store_only_body(probe_id))[0]):
+        rc = main._cmd_sessions_import(main.argparse.Namespace(
+            file=str(transcript), harness="pi", session_id=probe_id))
+
+    assert rc == 0
+    assert backlog.sessions() == []
+
+
+def test_future_only_on_an_empty_backlog_prints_no_recommendation(places,
+                                                                 capsys):
+    """`recommendation()` is `None` when nothing is pending; printing it
+    unguarded emitted a literal `None`."""
+    rc = main.main(["sessions", "backlog", "--future-only"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "None" not in out
+    assert backlog.read_policy()["choice"] == backlog.CHOICE_FUTURE_ONLY
+
+
+def test_the_process_report_matches_the_action_it_starts(places, capsys,
+                                                        monkeypatch):
+    """Overriding a prior `--future-only` must READ as an override: rendering
+    the PRE-run state printed "the saved backlog is NOT extracted" immediately
+    before extracting it."""
+    home, _ = places
+    transcript = _transcript(home, "a.jsonl")
+    backlog.record_not_processed(session_id="s_1", harness="pi", turns=4,
+                                 estimate=12, file=str(transcript))
+    assert backlog.set_policy(backlog.CHOICE_FUTURE_ONLY, decided_at="t") is True
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _extracted_body("s_1"))[0]):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    run_report = out.split("[1/1]")[0]
+    assert "NOT extracted" not in run_report
+    # The report describes the run being STARTED: the policy override is
+    # recorded first, so the state reads `not declined`, not `declined`.
+    assert "not declined" in run_report
+
+
+def test_an_unwritable_ledger_fails_softly_for_real(places):
+    """The "every write is best-effort and never raises" contract is only
+    proven against a REAL failure — a regular file where the ledger directory
+    must be — not against a mock that guarantees the result."""
+    directory = backlog.backlog_dir()
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    directory.write_text("not a directory", encoding="utf-8")
+
+    assert backlog.record_not_processed(session_id="s_1", turns=1,
+                                        estimate=3) is False
+    assert backlog.mark_processed("s_1") is False
+    assert backlog.set_policy(backlog.CHOICE_BACKLOG) is False
+    assert backlog.sessions() == []
+    assert backlog.summary()["counts"][backlog.STATUS_NOT_PROCESSED] == 0
+
+
+# ── The hook path: recorded durably, and actually re-processable ───────────
+
+
+def test_a_store_only_session_capture_records_the_durable_transcript(
+        places, tmp_path):
+    """The Claude Code hook's `--file` is its own `mktemp` conversion, deleted
+    on exit — so `--transcript-path` (the durable Claude project transcript) is
+    what the ledger must record, under the PARSER name `claude-desktop`, not
+    the capture alias `claude` that `sessions import` has no parser for."""
+    home, _ = places
+    transient = _text_transcript(home, "hook-tmp.jsonl")
+    durable = _claude_transcript(home, "project.jsonl")
+
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _store_only_body("s_hook"))[0]):
+        rc = main._cmd_session_capture(
+            main.argparse.Namespace(file=str(transient), harness="claude",
+                                    transcript_path=str(durable),
+                                    session_id="s_hook", model=None),
+            "tt_test", "https://legit.example.com")
+    transient.unlink()  # the hook's `trap` — gone before the user ever asks
+
+    assert rc == 0
+    record = backlog.sessions()[0]
+    assert record["status"] == backlog.STATUS_NOT_PROCESSED
+    assert record["file"] == str(durable), \
+        "a deleted temp path can never be re-processed"
+    assert record["harness"] == "claude-desktop", \
+        "the parser name for the durable file — `claude` has no parser"
+    assert durable.exists()
+
+
+def test_a_hook_recorded_entry_is_actually_processable(places, capsys,
+                                                      monkeypatch):
+    """The point of recording the DURABLE transcript: an entry written by the
+    hook path must be re-capturable, not merely listed. Both halves of the old
+    defect would red this — the deleted temp path AND the `claude` harness
+    `parse_transcript` refuses."""
+    home, _ = places
+    transient = _text_transcript(home, "hook-tmp.jsonl")
+    durable = _claude_transcript(home, "project.jsonl")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _store_only_body("s_hook"))[0]):
+        assert main._cmd_session_capture(
+            main.argparse.Namespace(file=str(transient), harness="claude",
+                                    transcript_path=str(durable),
+                                    session_id="s_hook", model=None),
+            "tt_test", "https://legit.example.com") == 0
+    transient.unlink()
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    urlopen, posted = _posting(lambda payload: _extracted_body("s_hook"))
+    with mock.patch("urllib.request.urlopen", urlopen):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert [p["session_id"] for p in posted] == ["s_hook"]
+    assert "1 processed, 0 still not-processed" in out
+    assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
+
+
+def test_a_legacy_claude_harness_record_still_processes(places, capsys,
+                                                       monkeypatch):
+    """A record written before the harness alias existed (`claude`, the hook's
+    capture name) must still process: `parse_transcript` knows
+    `claude-desktop`, and the alias is resolved at the point of use."""
+    home, _ = places
+    transcript = _claude_transcript(home, "legacy.jsonl")
+    backlog.record_not_processed(session_id="s_legacy", harness="claude",
+                                 turns=4, estimate=12, file=str(transcript))
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with mock.patch("urllib.request.urlopen",
+                    _posting(lambda payload: _extracted_body("s_legacy"))[0]):
+        rc = main.main(["sessions", "backlog", "--process"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "1 processed, 0 still not-processed" in out
+    assert backlog.summary()["counts"][backlog.STATUS_PROCESSED] == 1
