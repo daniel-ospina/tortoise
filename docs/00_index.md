@@ -100,5 +100,6 @@ aboutObjects: tortoise
 | #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
 | #3525 CSP for the app origin + `no-store` regression guard — scope + plan, with the `Set-Cookie`-stripping / `_headers`-bypass `### Integration Docs` record | `docs/plans/2026-09-22-3525-csp-no-store.md` |
 | #3644 the `:Source` version WINDOW — `validFrom` on the node + `validFrom`/`previousValidTo` on the `SourceVersioned` record (the §4.6 *Versioning* window half after #5024's anchor half); the remaining rows (`Object`/`Subject` windows, `expiredAt`, Event `capturedAt`) are recorded as still open | `docs/plans/2026-10-10-3644-source-version-window.md` |
+| #1990 the DIFF boundary invariant — items older than the cursor's second are provably indexed (skip + stop the walk at the boundary), truncation decided on the READABLE REGION; residual (the newest-block-over-cap ping-pong) split out as #8090 | `docs/plans/2026-10-11-1990-diff-boundary-invariant.md` |
 | Retention and deletion — the one promise (canonical) | `docs/retention-and-deletion.md` |
 | Durability posture — the one authority: mechanism, loss window, and the strongest verification actually performed, per deployment (canonical, #2881) | `docs/durability-posture.md` |
