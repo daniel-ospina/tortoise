@@ -749,7 +749,7 @@ unchanged for `claude-desktop` / `claude-web` / `chatgpt`, and its codex row is 
 **What is genuinely NOT covered — recorded, not papered over.** The seam is *hook-only*: capture
 rides `SessionEnd`, so a Codex process **SIGKILLed / crashed before session end files nothing**, and
 nothing re-reads `$CODEX_HOME/sessions/**/rollout-*.jsonl` afterwards. The hybrid's store-sync
-backstop is not an option today — `#3515` (its Pi leg, `tortoise/pi-extension/store-sync.ts`) is
+backstop is not an option today — `#3515` (its Pi leg, `tortoise/pi-hooks/store-sync.ts`) is
 **unimplemented**, so there is no backstop for any harness to extend. A never-trusted hook fails open
 the same way (that limit *is* disclosed: `tortoise install codex` prints the trust requirement —
 `CODEX_CAPTURE_INSTALL`, and the live install smoke test confirms it).
