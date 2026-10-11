@@ -15794,6 +15794,9 @@ async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
         MCP_TELEMETRY_EVENT as _EVENT,
     )
     from tortoise.activation_scorecard import (
+        RECALL_MAX_PAGES as _MAX_PAGES,
+    )
+    from tortoise.activation_scorecard import (
         RECALL_PAGE_CAP as _CAP,
     )
 
@@ -15857,7 +15860,7 @@ async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
                        else "unset")
     recall_cell, recall_detail = await asyncio.to_thread(
         _read_recall, org, since_iso, until_iso, lifetime, graph_error,
-        analytics_state, log, _EVENT, _CAP)
+        analytics_state, log, _EVENT, _CAP, _MAX_PAGES)
 
     payload = assemble(
         org_id=org["org_id"], since=since_iso, until=until_iso,
@@ -15878,7 +15881,7 @@ async def _scorecard_for_org(org: dict, since_iso: str, until_iso: str,
 
 def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                  graph_error: str | None, analytics_state: str, log,
-                 event: str, cap: int):
+                 event: str, cap: int, max_pages: int):
     """Read the analytics rows for the window and fold them into stages 4-5.
 
     Returns `(stage_cell, detail)` where `detail` also carries stage 5's cell
@@ -15886,15 +15889,31 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
     `recall_stages` from one read, one window and one precedence ladder, so they
     cannot disagree about which rows they are counting.
 
-    Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
+    Deliberately returns a NON-measured cell
     — NEVER a zero — for every case where the store cannot be trusted to be
     complete. Which of the two non-measured states applies follows the
     module's vocabulary rule: `unavailable` for the RECOVERABLE failures (not
-    configured, unreachable, a full page — the read helper has no offset
-    support, so a full page is a lower bound), and `not_measurable` for an org
-    that has never produced memory, where there is nothing to recall from and
-    no retry would change it. Conflating those two would accuse a healthy org
-    of failing to report.
+    configured, unreachable, a walk that could not be certified as COMPLETE —
+    an uncertified walk is a lower bound, and a lower bound is not a count),
+    and `not_measurable` for an org that has never produced memory, where
+    there is nothing to recall from and no retry would change it. Conflating
+    those two would accuse a healthy org of failing to report.
+
+    #4038: the read WALKS the window to completion through
+    ``SupabaseControlPlane.query_all`` (keyset on `id`, ending on an EMPTY
+    page). It used to be ONE request at ``cap`` rows, which turned a full page
+    into `unavailable` (`analytics_page_cap_truncated`) — so the platform's
+    most active orgs, the ones the lane exists to measure, were exactly the
+    ones that could not be measured. `rows, complete` is the seam's
+    certificate: `complete` False means the rows are a lower bound and BOTH
+    stages 4 and 5 are told so via `truncated` (stage 5 inherits stage 4's
+    refusal ladder, so the widening reaches it for free).
+
+    A seam WITHOUT ``query_all`` (an older/double control plane) keeps the
+    pre-#4038 single-page shape and its fail-closed rule — a full page is
+    still refused, never counted. That is the same dispatch
+    ``_iter_registered_orgs`` uses for a total-aware read, and it keeps a
+    seam that cannot page from silently under-reporting.
     """
     from tortoise.activation_scorecard import (
         recall_stages as _recall_stages,
@@ -15907,26 +15926,38 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
         return _recall_stages(None, None, reason=graph_error)
     try:
         from tortoise.supabase_control import get_control_plane
-        analytics_rows = get_control_plane().query(
-            "analytics_events",
-            select=["event_name", "properties", "created_at"],
-            filters=[("org_id", "eq", org["org_id"]),
-                     ("event_name", "eq", event),
-                     # `gte` (not `gt`) so this leg is [since, until) — the
-                     # SAME interval as the graph legs. With `gt`, a tool call
-                     # landing exactly ON `since` was excluded while a session
-                     # created at that same instant was included, so the funnel
-                     # could disagree with itself on the boundary instant.
-                     ("created_at", "gte", since),
-                     ("created_at", "lt", until)],
-            order="created_at.desc",
-            limit=cap,
-        )
-        # The fold runs INSIDE the fail-soft guard: a store/proxy that returns
-        # an array of non-mapping elements must become `unavailable`, not an
-        # AttributeError 500 — the endpoint's own contract.
-        truncated = (isinstance(analytics_rows, list)
-                     and len(analytics_rows) >= cap)
+        cp = get_control_plane()
+        # `id` is SELECTED because it is the walk's cursor: the value has to
+        # come back on the row for the next page to be requested from it. It is
+        # not folded into any count (the fold reads `properties` and
+        # `created_at`) and never reaches the payload.
+        select = ["id", "event_name", "properties", "created_at"]
+        filters = [("org_id", "eq", org["org_id"]),
+                   ("event_name", "eq", event),
+                   # `gte` (not `gt`) so this leg is [since, until) — the
+                   # SAME interval as the graph legs. With `gt`, a tool call
+                   # landing exactly ON `since` was excluded while a session
+                   # created at that same instant was included, so the funnel
+                   # could disagree with itself on the boundary instant.
+                   ("created_at", "gte", since),
+                   ("created_at", "lt", until)]
+        walker = getattr(cp, "query_all", None)
+        if callable(walker):
+            analytics_rows, complete = walker(
+                "analytics_events", select=select, filters=filters,
+                page_size=cap, max_pages=max_pages)
+            truncated = not complete
+        else:
+            analytics_rows = cp.query(
+                "analytics_events", select=select, filters=filters,
+                order="created_at.desc", limit=cap,
+            )
+            # The fold runs INSIDE the fail-soft guard: a store/proxy that
+            # returns an array of non-mapping elements must become
+            # `unavailable`, not an AttributeError 500 — the endpoint's own
+            # contract. Same for a store that answers with a non-list.
+            truncated = (isinstance(analytics_rows, list)
+                         and len(analytics_rows) >= cap)
         return _recall_stages(
             analytics_rows,
             (lifetime or {}).get("first_memory_at"),
