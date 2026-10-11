@@ -969,8 +969,11 @@ def test_analytics_write_path_unset_is_unavailable_never_zero(client):
 
 
 def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypatch):
-    """The read helper has no offset/Range, so a full page is a LOWER BOUND.
-    A lower bound is not a count."""
+    """A seam that CANNOT page (no ``query_all``) still gets the pre-#4038
+    single-page contract: a full page is a LOWER BOUND, and a lower bound is not
+    a count. #4038 pages the leg to completion, so this refusal is now scoped to
+    a store that offers no way to advance — dropping the fallback would let such
+    a seam silently under-report."""
     import tortoise.supabase_control as sc
     from tortoise.activation_scorecard import RECALL_PAGE_CAP
     _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=1, extracted=1)
@@ -979,6 +982,7 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
 
     class _Full:
+        # `query` only — no `query_all`, so the walk is unavailable to the read.
         def query(self, *a, **kw):
             return [{"properties": {"tool_name": "tortoise_search"},
                      "created_at": "2026-09-16T13:00:00+00:00"}] * RECALL_PAGE_CAP
@@ -989,6 +993,137 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     assert stage["value"] is None, stage
     assert stage["state"] == "unavailable", stage
     assert stage["reason"] == "analytics_page_cap_truncated", stage
+
+
+def _window_rows(n: int) -> list[dict]:
+    """``n`` in-window, allowlisted ``mcp_tool_call`` rows as the seam returns
+    them (``id`` included — it is the walk's cursor)."""
+    return [{"id": f"ev-{i:06d}", "event_name": "mcp_tool_call",
+             "created_at": "2026-09-16T13:00:00+00:00",
+             "properties": {"tool_name": "tortoise_search"}}
+            for i in range(n)]
+
+
+def test_a_busy_org_pages_to_completion_and_reports_a_measured_count(client, monkeypatch):
+    """#4038, THE regression. Every hosted MCP tool call emits a row, so an
+    actively-used org fills the 1000-row page by mid-morning; the read then
+    reported `unavailable` (`analytics_page_cap_truncated`) for being BUSY —
+    the blind spot landing on exactly the most interesting orgs. Paged to
+    completion, the same window is a MEASURED count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    n = RECALL_PAGE_CAP + 5
+    rows = _window_rows(n)
+
+    class _Paging:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_all(self, table, **kw):
+            self.calls.append(kw)
+            # Two pages, then the empty one that CERTIFIES — `complete=True`.
+            return rows, True
+
+        def query(self, table, **kw):
+            # The pre-#4038 `query` shape, kept HERE as the mutation probe: on
+            # the old single-request read this is a FULL page, so the stage
+            # reads `unavailable` — the failure #4038 names.
+            return rows[:RECALL_PAGE_CAP]
+
+    seam = _Paging()
+    monkeypatch.setattr(sc, "get_control_plane", lambda: seam)
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == n, stage
+    assert body["detail"]["recall_rows_fetched"] == n, body["detail"]
+    assert body["detail"]["recall_truncated"] is False, body["detail"]
+    # The payload states the BOUND it read under, so a reader can tell "counted"
+    # from "counted up to a limit".
+    from tortoise.activation_scorecard import RECALL_MAX_PAGES
+    assert body["detail"]["recall_page_cap"] == RECALL_PAGE_CAP, body["detail"]
+    assert body["detail"]["recall_page_limit"] == RECALL_MAX_PAGES, body["detail"]
+    # The walk is asked with the module's OWN page size and bound, and — the
+    # half that keeps the paging from quietly changing the question — with the
+    # SAME window predicate the single-page read used, cursor column included.
+    assert seam.calls and len(seam.calls) == 1, seam.calls
+    call = seam.calls[0]
+    assert call["page_size"] == RECALL_PAGE_CAP, call
+    assert call["max_pages"] == RECALL_MAX_PAGES, call
+    assert "id" in call["select"], call
+    assert ("created_at", "gte", "2026-09-16T00:00:00+00:00") in call["filters"], call
+    assert ("created_at", "lt", "2026-09-17T00:00:00+00:00") in call["filters"], call
+    assert ("org_id", "eq", ORG["org_id"]) in call["filters"], call
+
+
+def test_an_incomplete_walk_is_unavailable_never_a_lower_bound(client, monkeypatch):
+    """A walk that could not CERTIFY completion (a page cap, a server that
+    ignored `order`, a store that will not advance past the cursor) is a lower
+    bound however many rows it did return. It must read `unavailable`, exactly
+    as the pre-#4038 single full page did — the fix widens what CAN be counted,
+    it does not loosen what may be called a count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    rows = _window_rows(RECALL_PAGE_CAP + 5)
+
+    class _Uncertified:
+        def query_all(self, table, **kw):
+            return rows, False
+
+        def query(self, table, **kw):
+            return rows[:RECALL_PAGE_CAP]
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _Uncertified())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_page_cap_truncated", stage
+    # The rows that WERE read are still reported for visibility — the refusal is
+    # the count, not the observation.
+    assert body["detail"]["recall_rows_fetched"] == len(rows), body["detail"]
+    assert body["detail"]["recall_truncated"] is True, body["detail"]
+    # ...and no lower bound is published under the exact-count name.
+    assert body["detail"]["recall_attempted_after_memory"] is None, body["detail"]
+
+
+def test_a_walk_that_raises_is_unavailable_not_a_partial_count(client, monkeypatch):
+    """A read FAILURE mid-walk is not an incomplete result: the seam raises, the
+    read's fail-soft guard turns it into `analytics_store_unreachable`, and no
+    prefix of the rows reaches any count. (A short page followed by an error is
+    the case the fix direction names.)"""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _DiesMidWalk:
+        def query_all(self, table, **kw):
+            raise RuntimeError("supabase down after page 1")
+
+        def query(self, table, **kw):
+            # A failure is a failure whichever seam shape the store offers: the
+            # read must not get a count out of either.
+            raise RuntimeError("supabase down after page 1")
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _DiesMidWalk())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_store_unreachable", stage
+    assert body["detail"]["recall_rows_fetched"] is None, body["detail"]
 
 
 def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeypatch):

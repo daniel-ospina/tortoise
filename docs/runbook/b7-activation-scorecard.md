@@ -54,7 +54,7 @@ The two non-measured states are **not** interchangeable:
 
 | State | Means | Examples |
 | --- | --- | --- |
-| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated`, `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection) |
+| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated` (the walk could not be certified COMPLETE — see below), `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection) |
 | `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (the surviving gap is whether a returned item was *used*, which no surface records) |
 
 The window guard **fails closed**: a row that is out of window, or that cannot
@@ -272,8 +272,14 @@ straddles it. This is in the payload's `limitations` too.
 Carried in the payload's `limitations` list — read it before citing a number.
 `recall_attempted` cannot distinguish an answered query from an empty one on its
 own (that is what `recall_returned` adds) and neither can be attributed to a
-session or a graph; the analytics read is capped at 1000 rows (a truncated page
-reports `unavailable`, never a partial count); `recall_returned` is an upper
-bound — a returned candidate is not a used one; `value_confirmed` is not
-measurable; and `memory_produced` is extraction-succeeded, not
-memory-that-helped.
+session or a graph; `recall_returned` is an upper bound — a returned candidate is
+not a used one; `value_confirmed` is not measurable; and `memory_produced` is
+extraction-succeeded, not memory-that-helped.
+
+The analytics read is **keyset-paged to completion** on `id` (#4038), up to
+`recall_page_cap × recall_page_limit` rows (1000 × 100) per window. A walk that
+cannot be certified COMPLETE reports `unavailable` — `analytics_page_cap_truncated`
+when the bound was reached, the store ignored `order`, or it would not advance
+past the cursor, and `analytics_store_unreachable` when it failed mid-walk —
+never a partial count. Both `recall_attempted` and `recall_returned` inherit that
+ladder, so neither can be a lower bound published as exact.
