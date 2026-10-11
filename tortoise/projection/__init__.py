@@ -5148,10 +5148,11 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # for an id that is NOT a forward reference. That covers BOTH the
             # never-created id AND the create → hard-delete → belief-write
             # journal (`first <= seq`), which the previous set-membership test
-            # wrongly exempted (the trap). A write whose Point exists but whose
-            # every carried value fails the value gate is `rebuild_all`-only
-            # (it folds 0 rows there); mirroring THAT would need the value gate
-            # re-run here, and it remains a documented bound. A non-Point
+            # wrongly exempted (the trap). This arm is the id that is ABSENT
+            # from the in-memory `points` index, so the value gate cannot be
+            # re-run here; the "Point exists but every carried value is corrupt"
+            # case is NOT this arm — it is the `if p:` arm above, which records
+            # the same `point-belief-miss` `rebuild_all` records. A non-Point
             # target is exempted ABOVE (and never reaches here). #7936 P2-2:
             # the forward-reference gate is LABEL-AGNOSTIC
             # (``_epistemic_forward_reference``) — a non-Point write that

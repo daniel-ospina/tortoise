@@ -994,8 +994,21 @@ class TortoiseEP:
         The bound is graph-size-relative: it only gates once the graph has
         enough claims to make a whole-graph closure a cost problem
         (>= _EP_GUARD_MIN_GRAPH_CLAIMS), and a legitimately dense 10-50
-        claim zone in a small graph always stays exact. One cheap count
-        query, called only in the max_hops=None regime.
+        claim zone in a small graph always stays exact. One count query,
+        called only in the max_hops=None regime.
+
+        #7853 — this is DELIBERATELY the one epistemic read that is NOT an
+        ``epistemic_label_queries`` sweep. It has no id anchor to index
+        (``live.py``'s per-label rule is about id-anchored reads), and it must
+        count each node ONCE: a node can carry BOTH ``:Point`` and ``:Object``
+        (the entity/version-tracking shape — ``sdk.update_point`` probes
+        ``MATCH (n:Point:Object {id:$id})``), so SUMMING per-label counts would
+        count it twice. An inflated denominator makes the degeneration guard
+        fire early and TRUNCATE a genuine closure — which changes the
+        posteriors, not merely the cost. The single disjunction query is the
+        only form that counts distinct nodes without shipping every id back,
+        and one whole-graph count per unbounded-regime hop is the accepted
+        price of the widening.
         """
         rows = self.g.query(
             "MATCH (n) "
@@ -1575,18 +1588,23 @@ class TortoiseEP:
             # `set_point_baseline`): journaling it correctly requires the
             # statement's OUTCOME, not its input params.
             if self._emit is not None:
-                # #7853: single disjunction query (not a per-label sweep) so a
-                # multi-labelled node is read — and journaled — exactly once.
-                rows = self.g.query(
-                    "MATCH (n) "
-                    f"WHERE {epistemic_disjunction('n')} AND n.id IN $ids "
-                    "AND coalesce(n.baseline_set, false) = false "
-                    "RETURN n.id",
-                    params={"ids": list(run_evidence)},
-                ).result_set
-                for row in rows:
-                    self._emit("ConfidenceChanged", id=row[0],
-                               posterior_alpha=None, posterior_beta=None)
+                # #7853: this read IS id-anchored (``n.id IN $ids``), so it
+                # takes ``live.py``'s id-anchored shape — a per-label sweep that
+                # keeps the label and its per-(label, id) index — and de-dups in
+                # Python, so a node carrying more than one epistemic label is
+                # still journaled exactly once.
+                _seen_evidence: set[str] = set()
+                for _q in epistemic_label_queries(
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        "AND coalesce(n.baseline_set, false) = false "
+                        "RETURN n.id"):
+                    for row in self.g.query(
+                            _q, params={"ids": list(run_evidence)}).result_set:
+                        if row[0] in _seen_evidence:
+                            continue
+                        _seen_evidence.add(row[0])
+                        self._emit("ConfidenceChanged", id=row[0],
+                                   posterior_alpha=None, posterior_beta=None)
 
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)
