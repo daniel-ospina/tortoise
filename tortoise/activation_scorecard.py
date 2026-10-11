@@ -166,11 +166,24 @@ RETRIEVAL_TOOL_ALLOWLIST_WIDE: frozenset[str] = RETRIEVAL_TOOL_ALLOWLIST | froze
 # The analytics event the hosted MCP dispatch point emits per client tool call.
 MCP_TELEMETRY_EVENT = "mcp_tool_call"
 
+# The analytics read's PAGE SIZE, handed to ``SupabaseControlPlane.query_all``.
 # PostgREST caps an unpaginated read at the project's max-rows (1000 by
-# default). ``SupabaseControlPlane.query`` exposes no offset/Range, so a full
-# page means the count is only a LOWER BOUND — a lower bound is not a count,
-# and is reported as ``unavailable``, never as a measured value.
+# default), so this is also the hint that makes the common case one request.
+# It is a HINT, not an assumption: a deployment capped LOWER now costs more
+# pages rather than silently under-counting, because the walk ends on an EMPTY
+# page, never on a page that is merely short (#4038 — the pre-fix read took a
+# full page for a lower bound and refused; see the limitations).
 RECALL_PAGE_CAP = 1000
+
+# The MOST pages the stage-4 walk will read before it refuses to certify the
+# count (#4038). A bound is required — its length IS the read's latency and
+# memory, and the read sits on a per-org path with a 30s cohort timeout — but
+# exceeding it must stay a refusal (`analytics_page_cap_truncated`), never a
+# partial count published as measured. 100 pages is 100x the size at which the
+# pre-fix read gave up entirely: an org sustaining >100k `mcp_tool_call` rows in
+# one window still reads `unavailable`, honestly, and the fix for that tail is
+# a server-side aggregate, not a longer walk this surface holds in memory.
+RECALL_MAX_PAGES = 100
 
 # Default window = the beta's own <= 24h criterion (product-success-eval.md §5).
 DEFAULT_WINDOW = timedelta(hours=24)
@@ -592,6 +605,7 @@ def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | 
         "result_count_prop": RESULT_COUNT_PROP,
         "recall_rows_fetched": None,
         "recall_page_cap": RECALL_PAGE_CAP,
+        "recall_page_limit": RECALL_MAX_PAGES,
         "recall_truncated": False,
         "unparseable_analytic_rows": None,
         "unclassifiable_analytic_rows": None,
@@ -1061,16 +1075,23 @@ LIMITATIONS: tuple[str, ...] = (
     "GUARANTEE, not a limitation: it is asserted by a test, because the two "
     "legs are separate queries and could drift.",
     "Self-hosted orgs are not covered: the analytics store is hosted-lane only.",
-    "The analytics read assumes the store's page limit is RECALL_PAGE_CAP. A "
-    "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "
-    "a short page that looks complete, so recall_attempted would read measured "
-    "while under-counting. The cap cannot be probed from here.",
-    "A BUSY org that HAS produced memory (>= RECALL_PAGE_CAP MCP tool calls "
-    "in the window) reads `unavailable` (`analytics_page_cap_truncated`), not "
-    "a count: the analytics leg is a single unpaginated read, so a full page "
-    "is a lower bound. (An org with no lifetime memory reads "
-    "`not_measurable` instead — the no-memory check deliberately precedes the "
-    "page-cap check.) Paging the leg to completion is #4038.",
+    "The analytics read is keyset-paged to COMPLETION on `id` (#4038): it walks "
+    "pages until the store returns an EMPTY one, so a page that is merely SHORT "
+    "— a deployment whose PostgREST db-max-rows (or a proxy cap) sits below "
+    "`recall_page_cap`, which used to look complete and under-count — costs "
+    "more requests instead of a smaller number. Completion is REFUSED, and the "
+    "stage reads `unavailable` (`analytics_page_cap_truncated`), when the walk "
+    "cannot certify it: it exceeds `recall_page_limit` pages, a page is not "
+    "strictly ascending on `id` (the server ignored `order`), a page carries no "
+    "usable `id` to carry the cursor, or the store will not advance past the "
+    "cursor. A lower bound is never published as a count.",
+    "A BUSY org no longer reads `unavailable` for being busy: the pre-#4038 read "
+    "stopped at `recall_page_cap` (1000) rows and called a full page a lower "
+    "bound, which landed `unavailable` on exactly the most-used orgs. The "
+    "binding bound is now `recall_page_cap * recall_page_limit` rows in ONE "
+    "window; past it the stage still refuses rather than under-reporting. (An "
+    "org with no lifetime memory reads `not_measurable` instead — the "
+    "no-memory check deliberately precedes the page-cap check.)",
     "Stage 4 is GATED on `first_memory_at` from the org DEFAULT graph while it "
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "

@@ -2983,7 +2983,7 @@ jobs:
       # required `surface-guard` job would go green on a rewritten gate.
       #
       # PIN THE ENFORCEMENT, NOT THE GENERATOR. `tools/surface-guard.py` is the
-      # gate — it compares the declaration against the approved baseline, and it
+      # gate — it compares the declaration against the frozen baseline, and it
       # is SELF-CONTAINED (its own `_read_manifest`, deliberately independent of
       # `tools/surface_manifest.py`), so nothing in the PR's tree can influence
       # it. Pinning `tools/surface_manifest.py` as well looked symmetrical and was
@@ -3046,6 +3046,16 @@ jobs:
         run: |
           python3 tools/surface_manifest.py render
           git diff --exit-code -- docs/product/mcp-sdk-surface.md
+      # ── THE TARGET COMPLIANCE GAP, SURFACED BUT NOT GATING (#4185) ─────────
+      # The gap between the live surface (82/150) and the owner-approved target
+      # (26/40) is genuine, so a REQUIRED check would red `main` and block every
+      # unrelated merge while the migration is in flight. But a check nobody runs
+      # reports to nobody: this step prints the numbers and the deltas on EVERY
+      # run, and `continue-on-error` keeps it informational. The `::error::`
+      # annotation still shows up on the run page, so the gap stays visible.
+      - name: Surface target compliance (informational, #4185)
+        continue-on-error: true
+        run: python3 tools/surface-target-check.py
 
   # ── THE REQUIRED GATE OBSERVES EVERY SHARD IT CERTIFIES ──────────────────
   # `python-ci-gate` is a REQUIRED status check AND the only `merge_condition`
