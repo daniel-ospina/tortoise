@@ -175,8 +175,8 @@ def test_every_live_key_print_carries_a_5109_note() -> None:
         if "#5109 NOTE" not in window:
             missing.append((lineno, text))
     assert not missing, (
-        "every remaining live-key print must carry a `#5109 NOTE` (deliberate, "
-        f"owner-routed) — these do not: {missing}"
+        "every remaining live-key print must carry a `#5109 NOTE` saying why "
+        f"the value is echoed — these do not: {missing}"
     )
 
 

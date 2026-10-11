@@ -1847,7 +1847,8 @@ def _cmd_signup(args) -> int:
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
         # back into this org if the key is lost). Shown once, like the key.
-        # #5109 NOTE: DELIBERATE (test-pinned) — owner-routed, not reversed here.
+        # #5109 NOTE: DELIBERATE — the recovery token is echoed under the same
+        # "shown once" contract as the key above (#1709).
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
@@ -1861,9 +1862,8 @@ def _cmd_signup(args) -> int:
         print(f"   1. Open {dashboard}")
         print(f"   2. Sign in with GitHub or Google")  # noqa: F541
         # #5109 NOTE: DELIBERATE — this echoes a key already persisted above,
-        # but the dashboard claim flow needs the value in hand, and the
-        # behaviour is test-pinned (tests/test_cli_claim.py). Raised as an owner
-        # decision on #5109 rather than reversed in flight.
+        # but the dashboard claim flow needs the value in hand. Raised as an
+        # owner decision on #5109 rather than reversed in flight.
         print(f"   3. Paste this key when prompted:")  # noqa: F541
         print(f"      {data['key']}")
         print("   Your verified identity attaches to THIS team — same key,"
@@ -2422,8 +2422,8 @@ def _cmd_org_keys_create(args) -> int:
     # #5109 NOTE: DELIBERATE show-once — `team keys create` returns the plaintext
     # exactly here (only a hash is stored), so printing it is the only way to hand
     # it to the user. Test-pinned (tests/test_cli_team_keys.py). The `--json` twin
-    # above returns it in the payload for the same reason. Owner-routed on #5109;
-    # do NOT "tidy" this print away — it would break key provisioning.
+    # above returns it in the payload for the same reason. Do NOT "tidy" this print
+    # away — it would break key provisioning.
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
@@ -9917,7 +9917,7 @@ def _cmd_key_create(args) -> int:
     # Create the verifiable API key and print ONLY this one.
     # #5109 NOTE: DELIBERATE show-once — the plaintext is returned exactly here
     # and exists nowhere else (only a hash is stored), so printing it is the
-    # only way to hand it to the user. Owner-routed, not changed in flight.
+    # only way to hand it to the user. Do NOT "tidy" it away.
     key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
