@@ -92,6 +92,27 @@ workspace list retires NOTHING, and ``reconciliation.workspaces_measured`` says
 so — a cmux outage must never hide a real lane, and a fail-open path must not be
 silent.
 
+FRESHNESS — the cache carries its own age, and a failed read is never an answer (#7957)
+--------------------------------------------------------------------------------------
+This module's readers answer from a CACHE, and until now they answered from it at
+ANY age: a state written in the morning answered a question asked at night, with no
+age reported anywhere. That is the defect the capstone epic #7957 names at the
+goal-state instrument (H1: freshness is self-reporting; H2: the verdict agrees with
+reality; H5: failure is loud and honest) — the same one-line rule applies here:
+
+  * every invocation reports ``state_age=…``, computed from the state's own
+    ``generated_at`` stamp (never inferred by hand);
+  * the cache is FRESH for ``STATE_FRESH_S`` (900 s — the fleet's incumbent
+    ``OBJECTIVE_FRESH_S``); past it the reader **rebuilds before answering**, so the
+    age served is bounded rather than merely labelled. ``--allow-stale`` reads the
+    aged cache on purpose, and then it is rendered ``STALE(>900s)``;
+  * an unreadable/absent stamp is **never** current — an unknown age rebuilds;
+  * a FAILED ``gh`` read is not ``"no open PRs"``. ``open_prs``/``open_issues``
+    carry the read's provenance (``measured`` / ``error``); ``build`` writes
+    nothing when the board was unmeasured (a failed read is never cached), and
+    ``who``/``free``/``conflicts``/``orphans`` REFUSE to answer from one instead of
+    asserting a negative — an unread board must never free a lane into capacity.
+
 USAGE
 -----
   fleet_state.py build [--out PATH] [--sample S] [--json]
@@ -104,7 +125,9 @@ USAGE
   fleet_state.py bind [--all | -w WS -s SID] [--dry-run] [--json]
 
 The reader commands read ``~/.pi/agent/state/fleet-state.json`` (written by
-``build``); pass ``--refresh`` to rebuild first.
+``build``); pass ``--refresh`` to rebuild first. A cache past ``STATE_FRESH_S`` is
+rebuilt automatically (say ``--allow-stale`` to read it as-is and see it marked
+``STALE(>900s)``); every run prints the age it answered from on stderr.
 """
 
 from __future__ import annotations
@@ -128,6 +151,7 @@ import subprocess
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +179,14 @@ DEFAULT_SAMPLE_S = 3.0
 #: can occasionally flag a very slow model call is safe, while a value below the
 #: latency would cry wolf on every long call.
 STALLED_TURN_SECONDS = 600.0
+
+#: How long a CACHED state may be served before a reader rebuilds instead (#7957 H1).
+#: One number, matching the fleet's incumbent ``OBJECTIVE_FRESH_S = 900``
+#: (``~/.pi/agent/scripts/turn-classify.py``), so every derived view the orchestrator
+#: steers from ages out on the same boundary. Reported as ``state_age=…`` on every
+#: run; the value is still PUBLISHED past the window (``--allow-stale``) — marked
+#: stale, never presented as current.
+STATE_FRESH_S = 900.0
 
 # --- paths ------------------------------------------------------------------
 
@@ -1022,27 +1054,62 @@ def worktrees(repo_root: str) -> dict[str, dict[str, str]]:
     return result
 
 
-def gh_json(args: Sequence[str], timeout: int = 60) -> list[dict[str, Any]]:
+class GitHubRows(list):
+    """The ``gh list`` answer carrying the READ'S provenance (#7957 H5).
+
+    A plain ``[]`` cannot distinguish "GitHub says there are no open PRs" from "gh
+    could not be read" — and the difference is the whole answer: with an unread
+    board a lane that holds two PRs reads as holding none, so it is offered as free
+    capacity (#7158's class), and ``who`` answers "nobody holds it" from a read that
+    never happened. ``measured`` records which of the two happened; ``error`` names
+    the cause when it is False. A PLAIN sequence (a hand-built fixture, an older
+    caller) declares no provenance and is treated as UNMEASURED — provenance must be
+    stated, never assumed, because the fail-open direction here invents capacity.
+    """
+
+    measured: bool
+    error: str
+
+    def __init__(self, rows: Iterable[Any] = (), *, measured: bool = False, error: str = "") -> None:
+        super().__init__(rows)
+        self.measured = measured
+        self.error = error
+
+
+def gh_json(args: Sequence[str], timeout: int = 60, *, what: str = "gh") -> GitHubRows:
+    """Run ``gh … --json`` and say whether the READ was MEASURED (#7957).
+
+    "Could not read it" and "the answer is empty" are different facts, and only the
+    first is a reason to refuse to answer. ``measured`` is True only when the command
+    SUCCEEDED (``_run`` degrades a non-zero exit to "") and the payload parsed as a
+    JSON list — a chatty failure, a rate-limit notice, a ``null`` and a truncated
+    body all come back UNMEASURED with the cause attached.
+    """
     out = _run(["gh", *args], timeout=timeout)
     try:
         data = json.loads(out)
-        return data if isinstance(data, list) else []
     except Exception:
-        return []
+        return GitHubRows(measured=False, error=f"{what} returned no parsable JSON")
+    if not isinstance(data, list):
+        return GitHubRows(
+            measured=False,
+            error=f"{what} returned {type(data).__name__}, not a list",
+        )
+    return GitHubRows(data, measured=True)
 
 
-def open_prs(repo: str, limit: int = 400) -> list[dict[str, Any]]:
+def open_prs(repo: str, limit: int = 400) -> GitHubRows:
     return gh_json([
         "pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
         "--json", "number,title,headRefName,headRefOid,mergeable,mergeStateStatus,url,isDraft,updatedAt",
-    ])
+    ], what="gh pr list")
 
 
-def open_issues(repo: str, limit: int = 800) -> list[dict[str, Any]]:
+def open_issues(repo: str, limit: int = 800) -> GitHubRows:
     return gh_json([
         "issue", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
         "--json", "number,title,assignees,labels,updatedAt,url",
-    ])
+    ], what="gh issue list")
 
 
 def process_table() -> tuple[dict[int, float], dict[int, int]]:
@@ -1127,8 +1194,19 @@ def build_state(
     overrides = load_overrides()
     by_sid, by_dir = session_index()
     wts = worktrees(repo_root)
-    prs = open_prs(repo)
-    issues = open_issues(repo)
+    # #7957: the board's PROVENANCE travels with the rows. An unread board is not an
+    # empty board — `measured` is False and the cause is named, so a reader can refuse
+    # to assert rather than assert a negative, and `build` can refuse to cache it.
+    prs_read = open_prs(repo)
+    issues_read = open_issues(repo)
+    prs = list(prs_read)
+    issues = list(issues_read)
+    github_measured = bool(getattr(prs_read, "measured", False)) and bool(
+        getattr(issues_read, "measured", False)
+    )
+    github_error = str(
+        getattr(prs_read, "error", "") or getattr(issues_read, "error", "") or ""
+    )
     # An empty session store means the store could not be read (the fleet always has
     # live pi sessions); with no measured pids, ``pid_alive`` is UNMEASURED.
     liveness_measured = bool(live)
@@ -1465,6 +1543,10 @@ def build_state(
         "reconciliation": {
             "workspaces_measured": workspaces_measured,
             "error": workspaces_error,
+            # #7957 H5: the board's own provenance, so a cache that was built from a
+            # failed read can never be served as an answer by a later reader.
+            "github_measured": github_measured,
+            "github_error": github_error,
         },
         "conflicts": conflicts,
         "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},
@@ -1483,6 +1565,7 @@ def build_state(
             "recoverable": sum(1 for t in terminal_lanes if t["state"] == "RECOVERABLE"),
             "retired": sum(1 for t in terminal_lanes if t["state"] == "RETIRED"),
             "workspaces_measured": workspaces_measured,
+            "github_measured": github_measured,
         },
     }
 
@@ -1493,11 +1576,59 @@ def build_state(
 
 
 def _load_or_build(args: argparse.Namespace) -> dict[str, Any]:
-    if not args.refresh and Path(args.state).exists():
+    """Serve the cached state — but only within ``STATE_FRESH_S`` (#7957 H1/H2/H5).
+
+    The old contract was "if the file exists, answer from it", which served a
+    four-hour-old board as current with no age on the answer (the epic's headline
+    defect, in-repo). The contract now is:
+
+      * fresh stamp            -> serve, annotated with its exact age;
+      * stale OR unreadable    -> REBUILD before answering (the age served is bounded,
+        not merely labelled), say so on stderr, and repair the cache when the fresh
+        read was itself measured — otherwise the next reader pays for the same
+        rebuild. ``--allow-stale`` opts into reading the aged cache on purpose, which
+        is then annotated ``stale`` and rendered ``STALE(>900s)``;
+      * ``--refresh``          -> rebuild as before.
+
+    ``freshness`` is attached to whatever is returned (also for freshly built
+    states), so every answer carries its own age and no reader can be fooled by
+    hand-comparing timestamps.
+    """
+    path = Path(getattr(args, "state", DEFAULT_OUT))
+    cached: Any = None
+    existed = path.exists()
+    if existed:
         try:
-            return json.loads(Path(args.state).read_text())
+            cached = json.loads(path.read_text())
         except Exception:
-            pass
+            cached = None
+    if not isinstance(cached, dict):
+        if existed and not getattr(args, "refresh", False):
+            print(
+                f"fleet-state: {path} is unreadable (not a JSON object) — rebuilding",
+                file=sys.stderr,
+            )
+        cached = None
+    elif not getattr(args, "refresh", False):
+        fr = state_freshness(cached)
+        if not fr["stale"]:
+            _report_state_age(fr, source="cache")
+            return _annotate_freshness(cached, fr)
+        if getattr(args, "allow_stale", False):
+            print(
+                f"fleet-state: {render_state_age(fr)} — serving the CACHED answer because "
+                "--allow-stale was passed; it is NOT current",
+                file=sys.stderr,
+            )
+            return _annotate_freshness(cached, fr)
+        print(
+            f"fleet-state: {render_state_age(fr)} — rebuilding before answering "
+            "(pass --allow-stale to read the aged cache on purpose)",
+            file=sys.stderr,
+        )
+    # A reader that rebuilds an expired cache is doing what the expiry requires: the
+    # value it returns is a fresh MEASUREMENT, not a served cache. `build` owns its
+    # own write path (`--out`), so the repair-write below skips it.
     state = build_state(
         repo=resolve_repo(args.repo),
         repo_root=resolve_repo_root(args.repo),
@@ -1507,7 +1638,163 @@ def _load_or_build(args: argparse.Namespace) -> dict[str, Any]:
         ci_verdict=None if getattr(args, "no_ci", False) else make_ci_verdict(),
         live_diff=None if getattr(args, "no_ci", False) else make_live_diff(),
     )
+    fr = state_freshness(state)
+    # Repair the expired cache — but never from an UNMEASURED read (#7957 H5: a failed
+    # read is never cached), and never from `build`, which owns its own write path.
+    if (
+        github_provenance(state)["measured"]
+        and getattr(args, "cmd", None) != "build"
+        and _write_state_json(path, state)
+    ):
+        print(f"fleet-state: cache repaired at {path}", file=sys.stderr)
+    _report_state_age(fr, source="rebuilt")
+    return _annotate_freshness(state, fr, rebuilt=True)
+
+
+def state_age_seconds(state: Mapping[str, Any]) -> float | None:
+    """The age of the state's OWN ``generated_at`` stamp, or None when unreadable.
+
+    ``build_state`` writes a real measurement stamp, so the age is a property of the
+    reading, not of the file's mtime (the #7159 lesson: never derive an age from a
+    timestamp that means something else). ``None`` means "cannot be read" — which is
+    NOT "fresh": an unknown age is never served as current.
+    """
+    raw = state.get("generated_at") if isinstance(state, Mapping) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        # `build_state` always writes an offset (`%z`); a naive stamp is LOCAL.
+        ts = ts.astimezone()
+    return max(0.0, time.time() - ts.timestamp())
+
+
+def state_freshness(state: Mapping[str, Any]) -> dict[str, Any]:
+    """``{age_seconds, stale, reason}`` for a cached state (#7957 H1)."""
+    age = state_age_seconds(state)
+    if age is None:
+        return {
+            "age_seconds": None,
+            "stale": True,
+            "reason": (
+                "the state carries no readable `generated_at` stamp, so its age is "
+                "UNKNOWN — an unknown age is never current (#7957 H1)"
+            ),
+        }
+    if age > STATE_FRESH_S:
+        return {
+            "age_seconds": age,
+            "stale": True,
+            "reason": (
+                f"the state is {int(age)}s old, past the {int(STATE_FRESH_S)}s window "
+                "(#7957 H1/H2)"
+            ),
+        }
+    return {"age_seconds": age, "stale": False, "reason": ""}
+
+
+def render_state_age(fr: Mapping[str, Any]) -> str:
+    """``state_age=15m`` / ``state_age=298m STALE(>900s)`` / ``state_age=?``.
+
+    Minutes for the human value (the incumbent rendering in
+    ``~/.pi/agent/scripts/turn-classify.py``), while the DECISION uses exact seconds —
+    so rounding never moves the boundary.
+    """
+    age = fr.get("age_seconds")
+    if age is None:
+        return "state_age=? (unreadable stamp)"
+    label = f"state_age={int(float(age) // 60)}m"
+    return f"{label} STALE(>{int(STATE_FRESH_S)}s)" if fr.get("stale") else label
+
+
+def _annotate_freshness(
+    state: dict[str, Any], fr: Mapping[str, Any], *, rebuilt: bool = False
+) -> dict[str, Any]:
+    if isinstance(state, dict):
+        age = fr.get("age_seconds")
+        state["freshness"] = {
+            "age_seconds": None if age is None else round(float(age), 3),
+            "stale": bool(fr.get("stale")),
+            "window_seconds": STATE_FRESH_S,
+            "reason": str(fr.get("reason") or ""),
+            "rebuilt": bool(rebuilt),
+        }
     return state
+
+
+def _report_state_age(fr: Mapping[str, Any], *, source: str) -> None:
+    """Every run says the age it answered from (H1: never infer it by hand)."""
+    print(f"fleet-state: {render_state_age(fr)} (source={source})", file=sys.stderr)
+
+
+def _write_state_json(path: Path, state: Mapping[str, Any]) -> bool:
+    """Best-effort atomic cache write. A torn cache is worse than none."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2, default=str))
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def github_provenance(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Did the BOARD this state was built from actually read (#7957 H5)?
+
+    A cache written before this field existed carries no provenance; it is treated as
+    MEASURED — the same tolerant reading ``conflict_map`` takes for a
+    pre-``conflict_claimants`` cache. Only an EXPLICIT failure makes a reader refuse
+    to answer, so a legacy cache cannot wedge the fleet.
+    """
+    rec = state.get("reconciliation") if isinstance(state, Mapping) else None
+    if not isinstance(rec, Mapping) or "github_measured" not in rec:
+        return {"measured": True, "error": ""}
+    return {
+        "measured": bool(rec.get("github_measured")),
+        "error": str(rec.get("github_error") or ""),
+    }
+
+
+def payload_freshness(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The freshness block for a JSON payload (H1 for the MACHINE channel).
+
+    A human reads the stderr line; the orchestrator reads JSON. Both must carry the
+    age, computed from the state itself rather than trusted from prose, so a consumer
+    can never have to guess whether the answer it just got is current.
+    """
+    fr = state_freshness(state) if isinstance(state, Mapping) else {
+        "age_seconds": None, "stale": True, "reason": "not a state object"
+    }
+    annotated = state.get("freshness") if isinstance(state, Mapping) else None
+    return {
+        "age_seconds": fr["age_seconds"],
+        "stale": fr["stale"],
+        "window_seconds": STATE_FRESH_S,
+        "reason": fr["reason"],
+        "rebuilt": bool(annotated.get("rebuilt")) if isinstance(annotated, Mapping) else False,
+    }
+
+
+def _board_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
+    """True when the command may answer. A FAILED read is never an answer (#7957 H5).
+
+    The alternative is what the tool did until now: print the empty-board answer
+    ("no lane holds it", "no ownership conflicts", a lane offered as free) from a read
+    that never happened. Refusing is the honest outcome, and the exit code says so.
+    """
+    gp = github_provenance(state)
+    if gp["measured"]:
+        return True
+    print(
+        f"{cmd}: GitHub is UNREADABLE ({gp['error'] or 'cause unknown'}) — {what}; "
+        "nothing is asserted rather than asserted empty (#7957 H5)",
+        file=sys.stderr,
+    )
+    return False
 
 
 def resolve_repo(repo: str | None) -> str:
@@ -1565,8 +1852,25 @@ def make_live_diff() -> Callable[[int], str | None] | None:
 def cmd_build(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
     out = Path(args.out or args.state)
+    # #7957 H5: a failed read is never CACHED. Writing an unread board as the new state
+    # would replace the last good one with an empty fleet — and on the next read free
+    # every lane into capacity. Refuse, leave the previous cache untouched, and say so
+    # with a non-zero exit.
+    gp = github_provenance(state)
+    if not gp["measured"]:
+        if args.json:
+            print(json.dumps(state, indent=2, default=str))
+        print(
+            "⛔ NOT CACHED: the GitHub board could not be read "
+            f"({gp['error'] or 'cause unknown'}) — a failed read is never written as "
+            f"fact (#7957 H5); {out} is left untouched",
+            file=sys.stderr,
+        )
+        return 2
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(state, indent=2, default=str))
+    if not _write_state_json(out, state):
+        print(f"could not write {out}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(state, indent=2, default=str))
     else:
@@ -1661,7 +1965,8 @@ def cmd_who(args: argparse.Namespace) -> int:
             live = lane_live_map(state)
             out = {"number": args.number, "kind": label, "lanes": entry["lanes"],
                    "live": {lbl: live.get(lbl) for lbl in entry["lanes"]},
-                   "evidence": entry["evidence"]}
+                   "evidence": entry["evidence"],
+                   "freshness": payload_freshness(state)}
             if args.json:
                 print(json.dumps(out, indent=2))
             else:
@@ -1677,7 +1982,7 @@ def cmd_who(args: argparse.Namespace) -> int:
         live = lane_live_map(state)
         out = {"number": args.number, "kind": "PR", "conflict": True,
                "lanes": who, "live": {lbl: live.get(lbl) for lbl in who},
-               "evidence": {}}
+               "evidence": {}, "freshness": payload_freshness(state)}
         if args.json:
             print(json.dumps(out, indent=2))
         else:
@@ -1689,8 +1994,13 @@ def cmd_who(args: argparse.Namespace) -> int:
             print("  a reused workspace can inherit the previous lane's worktree; "
                   "resolve the worktree before assigning")
         return 0
+    # #7957 H5: "no lane holds it" must never be asserted from a read that FAILED.
+    # The board being unreadable is exactly when a claim looks absent.
+    if not _board_readable(state, "who", f"cannot say whether a lane holds #{args.number}"):
+        return 2
     if args.json:
-        print(json.dumps({"number": args.number, "kind": None, "lanes": [], "evidence": {}}))
+        print(json.dumps({"number": args.number, "kind": None, "lanes": [], "evidence": {},
+                          "freshness": payload_freshness(state)}))
     else:
         print(f"#{args.number}: no lane holds it (no mechanical ownership evidence)")
     return 1
@@ -1706,11 +2016,18 @@ def _conflict_sort_key(kv: tuple[str, list[str]]) -> tuple[int, int, str]:
 
 def cmd_conflicts(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # An empty conflict list is an ALL-CLEAR; it must not be manufactured by a board
+    # that could not be read (#7957 H5).
+    if not _board_readable(state, "conflicts", "cannot rule out ownership conflicts"):
+        return 2
     cmap = conflict_map(state)
     live = lane_live_map(state)
     if args.json:
         # liveness must survive --json: an automation consumer reads this, and
         # "which claimant is dead" is the decision the channel exists for.
+        # ⛔ No `freshness` key in THIS payload: it is a PR-number -> claimants MAP, and
+        # a non-numeric key would break any consumer reading a key as a PR number. The
+        # age for this command travels on stderr (every run prints it).
         print(json.dumps({
             num: {"claimants": who, "live": {lbl: live.get(lbl) for lbl in who}}
             for num, who in cmap.items()
@@ -1744,6 +2061,15 @@ def cmd_lane(args: argparse.Namespace) -> int:
     if lane is None:
         print(f"no lane matching {args.lane!r}", file=sys.stderr)
         return 1
+    # `lane`'s identity/session/liveness sections are lane-derived and valid whatever
+    # the board says; its PR sections are not. Warn, never suppress (#7957 H5).
+    gp = github_provenance(state)
+    if not gp["measured"]:
+        print(
+            f"lane: GitHub is UNREADABLE ({gp['error'] or 'cause unknown'}) — the work/CI "
+            "sections of this lane are incomplete (#7957 H5)",
+            file=sys.stderr,
+        )
     print(json.dumps(lane, indent=2, default=str) if args.json else _render_lane(lane))
     return 0
 
@@ -1779,9 +2105,23 @@ def _render_lane(lane: Mapping[str, Any]) -> str:
 
 def cmd_free(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
-    free = [lane_ for lane_ in state["lanes"] if lane_["free"]]
+    # #7957 H4/H5: `free` is an INVITATION TO DISPATCH. With the board unread, every
+    # `holds N PR(s)` reason disappears and lanes that are in fact working read as idle
+    # capacity — the #7158 class. Refuse instead of offering it.
+    if not _board_readable(state, "free", "cannot tell a working lane from idle capacity"):
+        return 2
+    # A lane record we cannot read is NOT free (fail-closed, the same polarity as every
+    # other unmeasured signal in this module) — and a malformed cache degrades rather
+    # than crashing the one command whose answer is "send work here".
+    lanes = state.get("lanes")
+    lanes = lanes if isinstance(lanes, (list, tuple)) else []
+    free = [
+        lane_ for lane_ in lanes
+        if isinstance(lane_, Mapping) and lane_.get("free") is True
+    ]
     if args.json:
         print(json.dumps({"free": [lane_["identity"]["lane"] for lane_ in free],
+                          "freshness": payload_freshness(state),
                           "detail": [{"lane": lane_["identity"]["lane"],
                                       "session_source": lane_["session"]["source"],
                                       "liveness": lane_["liveness"]} for lane_ in free]}, indent=2))
@@ -1795,6 +2135,10 @@ def cmd_free(args: argparse.Namespace) -> int:
 
 def cmd_orphans(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # The "unclaimed PR" orphan class is derived from the board; "none" from an unread
+    # board is a false all-clear (#7957 H5).
+    if not _board_readable(state, "orphans", "cannot detect work with no live owner"):
+        return 2
     print(json.dumps(state["orphans"], indent=2, default=str) if args.json else "\n".join(
         f"  [{o['kind']}] {o.get('number', o.get('lane', '?'))}: {o['reason']}" for o in state["orphans"]
     ) or "  none")
@@ -1902,6 +2246,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample", type=float, default=DEFAULT_SAMPLE_S,
                    help="CPU/pane sample window seconds (0 disables the pane read)")
     p.add_argument("--refresh", action="store_true", help="rebuild even if the state file exists")
+    p.add_argument(
+        "--allow-stale",
+        action="store_true",
+        dest="allow_stale",
+        help=(
+            "read a cache older than 900s as-is instead of rebuilding; the answer is "
+            "still rendered STALE(>900s) (#7957)"
+        ),
+    )
     p.add_argument("--no-ci", action="store_true", help="skip the per-PR CI verdict fetch (offline/fast)")
     sub = p.add_subparsers(dest="cmd", required=True)
 

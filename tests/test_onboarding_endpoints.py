@@ -1317,7 +1317,7 @@ def test_cross_surface_harness_vocab_contract():
     def attributed(leaf: str) -> str | None:
         """`analyticsHarnessOf`'s rule, verbatim: an alias wins (a `null` alias
         means NOT attributable), anything else is its own value."""
-        return aliases[leaf] if leaf in aliases else leaf
+        return aliases.get(leaf, leaf)
 
     # 2a. Every leaf the LIVE wizard can put on screen resolves into the
     # vocabulary — and the resolved set IS the vocabulary, so a narrowed or

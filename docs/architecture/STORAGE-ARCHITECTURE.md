@@ -707,7 +707,7 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 - **`references` carries more than one meaning, so the gap is not uniform.** Its declared target set is `Event | Object | Source` (§3.4), and the in-repo writers do not all mean the same thing by it:
   - **identity / mention** — a connector `Object` materialized at the projection choke point (`projection/entities.py::_materialize_connector_source`; `connectors/github.py:305` mirrors it idempotently). The Source's `url` **is** the artifact. The Source still has versions, but the target is **not read from** them, so a recorded version here would be a non-answer rather than a stale mark.
-  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ⚠️ **Addressed is not the same as closed on this path:** no connector writes `contentHash` and the choke point creates its Source with `contentHash = ''` (the Source MERGE in `projection/entities.py::_materialize_connector_source`), so the anchor is **absent** for connector-derived Events — honest (no version is known), but *"are these entities about the content we currently hold?"* stays unanswerable there until a connector records a content hash (tracked in `#5214`). The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
+  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ✅ **Now CLOSED on the connector path (`#5214`, 2026-10-13): a connector Source carries a real content version, so the anchor LANDS here.** The choke point writes `contentHash` = `_connector_content_hash(inner)`, the **sha256 of the materialized connector payload** — the content we actually read, i.e. ONTOLOGY §4.6's *"the digest of the content read"*. It is a digest of the payload rather than per-`sourceKind` code on purpose: each connector emits its own payload shape (`github_map`'s single vocabulary for GitHub, the connector's own mapper for Slack/Linear), so keying the digest to the payload scopes it per kind with no registry to keep in sync, and one item state hashes EQUAL across the producers that mint different `eventId`s for it (the poll path mints `…-created` for an already-closed issue, the webhook path `…-closed` — folding the id in would advance the version on a producer switch, a false stale on every other poll). The `contentHash` + the §4.6 ordinal `version` move together, gated in the query so an unchanged re-poll writes nothing at all. **Ownership:** the version is written only on a `:Source` whose **own `sourceKind` is a registered connector kind** — i.e. one this choke point materialized. The choke point already treats an existing kind as authoritative (#398, never re-stamped), so the writer that owns the kind owns the version; without that gate a connector poll would overwrite another writer's `contentHash` on a shared url (sweep contract: *the survivor's own metadata wins*). The consequence is deliberate: a node another writer owns stays **UNVERSIONED** — reading `unknown`, never `current`. ⚠️ **Three residuals, all deliberate:** (1) a **container-level fallback key** (`slack:{channel}`, `linear:{team_key}`) names no item — every message shares that one Source — so it keeps `contentHash = ''` and stays honestly unanchored (a per-message digest there would advance the version on every poll and mark every sibling derivation stale); (2) the digest is over what the connector **holds**, so a change the payload does not carry (the GitHub **body**, which no poll path fetches) is not a version transition — tracked in `#8010`; (3) a `_link_source`/document stub that the connector did **not** create is not adopted into versioning. The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
   - **referential containment** — `Source → Source` (the session→external `MERGE (a)-[:references]->(b)` in `hosted_api.py::_execute_commit_writes`). A provenance chain, not a derivation of either target's content.
 
   ⇒ **The version question is a property of what the link means, not of the target's label.** That is why a blanket `sourceVersion` on every `references` edge is the wrong shape: it would stamp a non-answer on the identity and containment forms.
@@ -732,7 +732,7 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 ⚠️ **On the repair path the anchor comes from the TARGET, not the Source.** `backfill_sources` sets the Source to the file's **current** hash while the legacy Event keeps the `file_hash` it was captured with (W2, "file edited since capture") — so anchoring `s.contentHash` there would report a **stale Event as current**, the precise failure this anchor exists to expose. `link_source_to_legacy_event` therefore anchors `e.file_hash` (equal to `s.contentHash` whenever the file has not changed), and anchors nothing when the Event records no hash.
 
-⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll (a connector re-poll that bumps the Source with no target rebuild), and the ON CREATE/ON MATCH pair cannot distinguish the two cases on its own. Recorded for the owner on `#5199`.
+⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll — and since `#5214` that re-poll is no longer hypothetical on the connector path, the Source **does** advance there while no target is rebuilt, so `ON CREATE` is what keeps that read honest (`stale`). Removing it would make exactly that case read `current`. Recorded for the owner on `#5199`.
 
 ⚠️ **No backfill, deliberately.** An edge written before this change carries no recorded version and is **not** retro-stamped: the version it was read from is **unknown**, and writing today's hash would fabricate a `current` read. Its honest state is **absent** — which is precisely why the anchor is a derived comparison and never a stored `status`.
 
@@ -798,7 +798,7 @@ Because `based_on` carries ids that address **different tables**, a "which of th
 
 ### 11.1 Why the connections are not the cost problem — measured
 
-Our `aboutObject` links are **property-free**: a full-repo search found **zero** `aboutObject` edges carrying any property (`rg -n 'aboutObject \{'` → **0 matches / 1,842 files**). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
+Our `aboutObject` links are **property-free**: the write path emits `MERGE (s)-[:aboutObject]->(t)` and **never a `SET`** (`projection/edges.py`, `create_about_edge` — `:344` at the pinned revision), and a full-repo search for a property-bearing edge finds **none** (`rg -n 'aboutObject \{'` → **0 matches at the 2026-09-23 pin `c79ba1cf2`**; **2** at HEAD on 2026-10-10, both display strings inside a test — `tests/test_commit_endpoint.py:1214`/`:1217`). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
 
 Estimated footprint in Postgres (two 16-byte ids, one B-tree index, standard tuple + index overhead):
 
@@ -1246,6 +1246,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **Why folding the owner's middle tier in is correct:** the owner's tiers 2 and 3 (*"TLDR epistemic/events related to an entity"* vs *"fuller data around an entity"*) are **the same tier at two depths**, and depth is exactly what a **sufficiency router** already controls — see §12.4. **A third tier adds a routing decision and a failure mode, not a capability.**
 
+**⚠️ And this table assumes each tier is COMPLETE — under §2.0's hybrid the cache is not.** The sufficiency router below routes on **answer depth inside a tier that holds the node at all**; a node the cache does not hold is a **different event with a different repair** (§17.3), and the two routers must not be merged.
+
 ### 12.4 Escalate on SUFFICIENCY, not on query type — the load-bearing rule
 
 **The obvious design is to classify the query ("simple → summary, complex → raw") and route on that. It is the design that fails.**
@@ -1303,6 +1305,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 3. **Build the sufficiency router, not a complexity classifier** (§12.4) — and check it against `#2354`'s "never auto-resolve" discipline.
 4. **Build the write-back** (§12.5) — otherwise escalation is a permanent tax rather than an investment.
 
+**⚠️ Two more items §17 adds, and they are NOT part of items 3 and 4.** §17.3's **residency router** (*a cache miss → fetch from the truth store*) is a **second, distinct router** from item 3's **sufficiency router** (*short evidence → escalate a tier*), and it is decidable **only** against §17.2's **completeness marker**. **Do not extend item 3's router to cover residency** — the two route on different facts, and collapsing them is the §17.3 defect. See `#7952` (the marker) → `#7953` (the router).
+
 **⚠️ And the discipline that keeps this honest: our own numbers for the cost TIERS still do not exist.** Every tier figure above is **published third-party** and must be re-measured on our data before any lever is committed. ✅ **What IS now measured is our own retrieval latency (§12.1d) and our own memory composition (§12.1) — those are no longer borrowed.** *(⚠️ The former "our 95.6 MB measurement", cited here, has been **withdrawn as wrong** — §12.1.)*
 
 ## 13. Issue map — what this document informs
@@ -1331,6 +1335,9 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
 | §9.6 source versioning | — | **the version must be recorded on the extraction link as `sourceVersion`**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 | §12.1a index shape | `#5090` · `#5331` | **the decision is the size-earned conditional index (C)** — not per-tenant partitioning, not a shared filtered index. The partition comparison is a measured *alternative*: `PARTITION BY` flat to T=500 (96.6 ms at T=2,100, unexplained), the partial-index form degrading to 83 ms at T=500 |
+| §17.2 the completeness marker | **`#7952`** | a read for a node outside the known-hot set returns explicit **`not-hot`** — **never empty** — and coherence is reconciled as a **number**, not a boolean. This is the input §17.3's router reads |
+| §17.3 the residency router | **`#7953`** | a residency miss is not an insufficiency: **fetch from the truth store**, never escalate a tier, never surface an absence. Decidable only against §17.2's marker (**hard edge**) |
+| §17.4 the two-store cost model | **`#7954`** | price **both** stores (Postgres compute + disk **and** FalkorDB RAM) plus the blended total §5–§6 omit |
 | §17 the five gaps | **`#7951`** (17.1) · **`#7952`** (17.2) · **`#7953`** (17.3) · **`#7954`** (17.4) · **`#7955`** (17.5) · **`#7967`** (the surface map) | what the record/cache split still needs: a write-path chokepoint, cache coherence + a completeness marker, partial-cache semantics, a two-store cost model, and a field-level placement table. **None is a new decision** — each follows from §2.0. ⚠️ **Corrected 2026-10-10 — this row previously read `#5089` (17.1) · `#5090` (17.5), which named the wrong owners:** **the routing half of §17.1 is `#7951`'s** (`#5089` owns the journal half — §17.1 says so itself), and **§17.5's placement ENUMERATION is `#7955`'s** (`#5090` is a *consumer* of the vector layer, not the enumeration). The five gaps are children of **`#7879`**; **`#7950`** is the capstone that verifies them; **`#7968`**/**`#7969`**/**`#7971`** carry the schema, the record projection and the cache projection, and **`#7970`** the read path. The integration-surface map every one of them cites is **`#7967`** → `docs/epics/2026-10-10-7879-postgres-record/01-test-design.md` |
 
 **Not yet filed from this document (candidates, not decisions):**
@@ -1339,24 +1346,31 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
   **The primary search path does NOT read it.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for this path.**
 
-  **It IS load-bearing elsewhere — four default-ON sites, two of them customer-callable:**
+  **It IS load-bearing elsewhere — ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE** (all line numbers pinned to `c79ba1cf2`; the symbols are authoritative):
 
-  | # | site | what it reads for | kind |
+  | # | site | what it reads for | reach |
   |---|---|---|---|
-  | 1 | `sdk.py:6397` — SDK **`belief_timeline`** (`mcp_server.py:3126` exposes it) | walks decision → Object named by topic | traversal |
-  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** | finds seed claims via Object | traversal |
-  | 3 | `extractor_v2.py:1934` | the classifier's "same entity?" gate | traversal |
-  | 4 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | traversal, **2-hop** |
+  | 1 | `sdk.py:6411` — SDK **`belief_timeline`** (MCP `tortoise_belief_timeline`, `tool_registry.py:391`) | walks decision → Object named by topic | **customer-callable** |
+  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (`sdk.py:7516`; hosted REST `hosted_api.py:6294`) | finds seed claims via Object | **customer-callable** (⚠️ the MCP handler `tortoise_topic_summarize` is registered nowhere and never served — `#7988`) |
+  | 3 | `ranking.py:1195`/`:1206` — SDK **`recall_subgraph`** (`ranking.SubgraphExpander._neighbors`) | its default `completeness="full"` walks **every** relationship type (`MATCH (n)-[r]->(m)`) — so it reads the edge **without naming it** and no grep can find it | **customer-callable** |
+  | 4 | `ranking.py:461` / `:714` — **`search(order_by="graph")`** (MCP `tortoise_search`) | event and point degree centrality | **customer-callable** |
+  | 5 | `extractor_v2.py:1934` (`_enrich_point_priors`) | the classifier's "same entity?" gate | default-ON, write path |
+  | 6 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | default-ON, write path, **2-hop** |
+  | 7 | `sdk.py:14744` (`_entity_key_expansion_pass`) | the entity-key alias harvest | **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`) |
+  | 8 | `assembly.py:573`/`:789`/`:809` (`alias_objects`, `collect_slices`) | the connected-assembly slices | **OFF by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
+  | 9 | `subgraph.py:312`/`:319-320` (`build_subgraph`) | the `#3011` epistemic-subgraph engine | **eval harness only** (`tools/longmem_eval/context_assembly_arms.py`) |
+  | 10 | `aggregate.py:502` (`collect_anchor_census`) | the aggregative-verdict anchor census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
+  | 11 | `coverage_loop.py:238` (`facet_census`) | the rule-based facet census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
 
-  Plus `sdk.py:14744` (`_entity_key_expansion_pass`) — **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`). And **23 test files assert the edge.**
+  And **36 test files assert the edge at the pin** (41 at HEAD, 2026-10-10).
 
-  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break two public surfaces.
+  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break **four** customer-callable surfaces. ⚠️ **An earlier version of this table named four sites and called TWO of them customer-callable — that undercounts on both axes, and the count is the whole argument: `recall_subgraph` and `search(order_by="graph")` were missing** (review finding B2.7, `REVIEW-CONSOLIDATED-2026-09-23.md`).
 
-  **But the structural door stays open:** a full-repo search found **zero** `aboutObject` edges carrying **any property** (`rg -n 'aboutObject \{'` → 0 matches / 1,842 files). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
+  **But the structural door stays open:** **no** `aboutObject` edge carries **any property** — `create_about_edge` (`projection/edges.py:344`) emits `MERGE (s)-[:aboutObject]->(t)` with no `SET`, and the search for a property-bearing edge returns **zero** at the pin (2 at HEAD, both test display strings — `tests/test_commit_endpoint.py:1214`/`:1217`). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
 
   **⚠️ `#4240` is half-right, and the true half is the sharper argument.** Capture-path edges **are** journaled (`EntityLinked`, `#3664`; replayed by `projection/entities.py:785+`). **Indexer-path edges are NOT** - `_connect_issue_objects` (`sdk.py:20154`) calls `create_about_edge` with no journal write, and `test_index_restore.py:373-403` asserts `count(*) == 0` after rebuild. **So the finding is not "this edge saves no storage" but "this edge class is internally inconsistent about durability"** - a cleanup question, arguably more urgent than stored-vs-derived.
 
-  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** We have neither today.
+  **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** ⚠️ **CORRECTED 2026-10-10: this sentence used to end *"We have neither today"*, which was true at the pin but is stale — `#5010` has since CLOSED and the cap is implemented** (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, wired query-side; PR `#5057`). At 200 it **binds nothing today** (worst hub 123 — the next bullet).
 
   **What remains UNKNOWN, and would flip the recommendation:** whether `belief_timeline` / `topic_summarize` are **ever actually called** in production. If they are reachable-but-unused, Hindsight's premise is restored and deriving becomes correct.
 
@@ -1509,9 +1523,41 @@ For the record, since two members of the design rest on it:
 
 ### 17.3 Partial-cache semantics — a residency miss is not an insufficiency
 
-**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router.
+**§12.3's tier table assumes each tier is COMPLETE.** Under the hybrid, **FalkorDB is partial by design** — the limit is held high precisely so this is **deferred**, not absent. §12.4's sufficiency router is the seed, but it routes on **answer depth**; it is not a residency router. **⚠️ The rule and the router's contract below were stated 2026-10-10 (`#7953`); the gap itself was identified 2026-10-08 (`#7869`).**
 
 **The two events are different and need different responses:** *"the evidence I hold does not answer this"* (escalate a tier) versus *"this node is not in the cache"* (fetch from the truth store). **Collapsing them either escalates unnecessarily or — worse — treats a cache miss as a negative finding.**
+
+#### ⭐ THE RULE — a residency miss never surfaces as an absence
+
+> **A node the cache cannot see is a MISS ON RESIDENCY, not a finding of absence. It is never reported as *"no such node"*, never as `empty`, and never as an insufficiency that escalates a tier.**
+
+1. **Never an absence.** The cache is partial **by design** (§2.0). A node outside the known-hot set is *unknown to this store*, not missing from the record — and an absence is the one wrong answer that is **indistinguishable from a right one** (§17.2, seen from the read side).
+2. **Never an escalation.** A residency miss is repaired by **fetching from the truth store** (Postgres). Walking to a colder graph tier is the **sufficiency** router's repair, for a different fact (§12.4).
+3. **Never a silent drop.** If the truth fetch cannot be made, the read is **impaired** and must say so — the read path already classifies a leg that did not run as the recorded status vocabulary's `degraded` (`tortoise/read_status.py`), and an impaired read must never be re-read as *"nothing matched"*.
+
+#### The two routers are TWO artifacts — do not merge them
+
+| | **sufficiency router** (§12.4 · §12.8 item 3) | **residency router** (this section) |
+|---|---|---|
+| the fact it reads | *does the evidence I already hold answer this?* | *is this node in the known-hot set at all?* |
+| its input | the assembled evidence, already in hand | **the completeness marker** (§17.2) |
+| its repair | **escalate a tier** — go deeper | **fetch from the truth store** — go to the record |
+| it fires when | the node IS resident and the evidence is short | the node is NOT resident |
+| a wrong answer looks like | an unnecessary escalation — expensive, still correct | **a cache miss reported as a negative finding — wrong, and invisible** |
+
+**Both route on a measured property of the RESULT, never a predicted property of the question** — that is §12.4's discipline, and it holds for both. A residency router that classifies the *query* instead re-introduces the write-before-query barrier §12.4 rejects.
+
+#### ⛔ THE HARD EDGE: marker → router
+
+**Without §17.2's marker the router cannot exist.** `not-hot` is the *only* signal that separates the two events; an empty result set carries no signal at all — which is exactly why an empty result is *"indistinguishable from no such node"*. **The marker is the router's INPUT, not its sibling:** a router built first would have to invent the marker's contract. That is the §17.3 ordering edge — `#7952` → `#7953`.
+
+#### The marker is NOT a fifth status term
+
+⚠️ **`not-hot` must not be minted as a fifth term of the read-status vocabulary.** That vocabulary is **RECORDED** — `available | empty | degraded | unconfigured`, **ONE** home, `tortoise/status_vocabulary.py` (`:82`), consumed by the read path (`tortoise/read_status.py`) and the client boundary, and its own text forbids a fifth term (`:27`). A residency verdict is a **directive about where to look**, not a status of the read — so it must not be *named* as a term. **How it is exposed is `#7952`'s call** (its own field, the `response_fields` pattern the status field itself uses, #3863, is the available precedent); what this section fixes is the **constraint**: the four terms keep naming what they name, and `not-hot` is not one of them.
+
+**The consequence, stated against the code that could break it:** under the hybrid, **`hits == 0` alone no longer establishes `empty`**. A zero-hit read is `empty` only when **the record was consulted** and held nothing; a node that was never hot must **not** be reported as `empty` (it is `degraded` when the truth fetch could not be made). That assumption is exactly what `tortoise/read_status.py::classify_read_status` encodes today — which is why the marker needs a field, not a term.
+
+**Owner and verification.** `#7953` — interface **D**, part 2; test-design `#7967` surfaces **S4** (e2e: a non-resident read returns `not-hot`, never empty) and **S5** (unit + integration: a miss is never a negative finding, and no unnecessary tier escalation). **Depends on `#7952`** (the marker); **blocks `#7970`** (serving reads from the record). **Deferred, not absent:** with a **complete** cache the marker cannot fire and this router is unreachable — which is why §2.0 holds the limit high, and why this work is *design now, build at the partiality trigger*.
 
 ### 17.4 A two-store cost model — the existing tables price ONE store
 

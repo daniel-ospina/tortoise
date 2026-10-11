@@ -141,6 +141,8 @@ const PI_MCP_CONFIG_ENV = {
   },
 }
 
+// #3802: reference-only — the only reader is the archived rollback render; see
+// the reachability note above `HARNESS_INSTALL`.
 // #1694: per-harness UI steps shown above the snippet (NOT part of the
 // copied content). The user follows these, then copies the payload below
 // (prompt / commands / file JSON). Step objects support { label, code,
@@ -225,10 +227,13 @@ export const harnessDisplayName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAM
 // caller owns the user-facing fallback copy.
 export const knownHarnessName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || null
 
+// #3802: reference-only (read only by the archived rollback render) — see the
+// reachability note above `HARNESS_INSTALL`.
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
 export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 
+// #3802: reference-only (read only by the archived rollback render).
 // Harnesses whose install copy embeds the skill-install step in a self-
 // contained prompt (Pi) — nothing extra is appended after the copy.
 export const HARNESS_SKILLS_IN_PROMPT = ['pi']
@@ -400,6 +405,25 @@ tortoise install cursor
 # editor is the supported capture surface for this seam; a cloud-agent chat
 # has no sessionEnd to hook.`
 
+// ⛔ REFERENCE-ONLY COPY (#3802). `HARNESS_INSTALL` — together with
+// `HARNESS_STEPS`, `HARNESS_SKILLS`, `HARNESS_PERSIST`, `HARNESS_SKILLLESS`,
+// `HARNESS_SKILLS_IN_PROMPT` and `HARNESS_SKILLS_IN_STEPS` — has ZERO live
+// render consumers: its only reader is the `{LEGACY_WIZARD_ARCHIVED && …}`
+// render in `main.jsx`, and that flag is a hard `false` (main.jsx's own comment
+// says so). It is KEPT, not dead: that block IS the A0 rollback path (#1997 W1,
+// epic §8), so an edit here reaches no user *until a rollback flips the flag*.
+// What a user receives TODAY comes from other surfaces:
+//   * the agent PROMPT — `wizardPrompts.js` `wizardPromptText` (the dashboard
+//     never shows `claude mcp add`; it hands the agent "Add Tortoise MCP at
+//     <url>"), pinned against the RENDERED value in `wizardPrompts.test.js`;
+//   * `HARNESS_CAPTURE_INSTALL` — the Memory-sources capture row in `main.jsx`,
+//     the copy a user actually pastes for session capture (#1728 / #3754);
+//   * `website/docs.html` — the public install commands for a manual setup.
+// So an edit to a SHIPPED behavior in this block must be mirrored to the
+// carrier above, and the test asserting that behavior must assert the carrier
+// too (#3802). `src/wizardArchived.test.js` pins the reachability itself — this
+// family losing its last live read site, or gaining one, reds there.
+//
 // #1710: the copyable payload is EXACTLY what the user pastes into the
 // harness target (terminal / config file / chat). The lead-in instructions
 // ("Run this command:", "Paste this into...") live in HARNESS_INTRO /
@@ -503,12 +527,16 @@ export const SKILLS_CLAIM = `Install the Tortoise skills (${SKILLS_LIST})`
 export const ONBOARDING_INSTRUCTIONS_URL =
   'https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md'
 
+// #3802: reference-only (read only by the archived rollback render).
 // #1710: harnesses whose skills + persist are rendered as HARNESS_STEPS
 // (with per-step Copy buttons) instead of being appended to the copy —
 // the copy is a JSON file body (Cursor), and a curl/export appended to it
 // would break the file paste.
 export const HARNESS_SKILLS_IN_STEPS = ['cursor']
 
+// #3802: reference-only (read only by the archived rollback render); the live
+// skills-install step is in the agent prompt (`wizardPromptText`) — see the
+// reachability note above `HARNESS_INSTALL`.
 // #1710: bare command with a comment lead-in only (paste-safe in a
 // terminal — the prose used to be plain text inside the copy, which
 // errored when pasted as-is).
@@ -642,6 +670,7 @@ export const HARNESS_CAPTURE_STATUS_LABEL = {
 export const HARNESS_CAPTURE_LAST_ATTEMPT = (detail) =>
   `Last attempt — ${detail}`
 
+// #3802: reference-only (read only by the archived rollback render).
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.
 export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`

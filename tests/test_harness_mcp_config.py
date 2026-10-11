@@ -170,11 +170,27 @@ class TestClaudeHookTimeouts:
     documented 600 s. The 9.26 s floor is a SessionEnd measurement, asserted
     only where that measurement exists.
 
-    FOUR surfaces ship the same `settings.json` snippet, and a copy that loses
-    its `timeout` re-opens the bug on that surface alone:
+    FOUR surfaces carry the same `settings.json` snippet, and a copy that loses
+    its `timeout` re-opens the bug on that surface alone. #3802 corrected this
+    docstring's reachability claim: the first is NOT shipped to any user today.
+    `HARNESS_INSTALL` is read only by main.jsx's archived
+    `{LEGACY_WIZARD_ARCHIVED && …}` render (the flag is a hard `false`;
+    `website/apps/dashboard/src/wizardArchived.test.js` pins that census), so it
+    is the A0 ROLLBACK copy. It is asserted here ANYWAY, deliberately:
 
-    1. `harnesses.js` `HARNESS_INSTALL.claude` — the full install copy
-    2. `harnesses.js` `HARNESS_CAPTURE_INSTALL.claude` — the Memory-sources step
+      * the guard is cheap — it is a JSON parse of a literal already in the file;
+      * a rollback re-enables that render, and it must not re-open #3754 then;
+      * dropping the leg would leave the rollback path's `settings.json` entirely
+        unguarded (the `session-end.sh`/`session-start.sh` legs cover only the
+        in-repo install comments, not the dashboard copy).
+
+    Do NOT delete surface 1 without also deciding who guards the rollback copy —
+    and note that surface 2 is the LIVE carrier for the dashboard copy a user
+    pastes (the Memory-sources row), so an edit meant to reach users belongs
+    there (`harnesses.test.js` asserts that row separately, #3802):
+
+    1. `harnesses.js` `HARNESS_INSTALL.claude` — the A0 ROLLBACK copy (reference-only today, #3802)
+    2. `harnesses.js` `HARNESS_CAPTURE_INSTALL.claude` — the LIVE Memory-sources step
     3. `session-end.sh` header — the in-repo install comment
     4. `session-start.sh` header — the in-repo install comment
 
