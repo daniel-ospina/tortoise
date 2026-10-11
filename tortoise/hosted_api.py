@@ -34486,7 +34486,7 @@ def _demand_send_ping(text: str) -> bool:
         send_message(token, chat_id, text,
                      timeout=_demand.DEMAND_SEND_TIMEOUT_S)
         return True
-    except Exception as exc:  # noqa: BLE001 — R3: cannot fail the request
+    except Exception as exc:  # noqa: BLE001, RUF100 — R3: cannot fail the request
         _logger.warning("demand ping failed (non-fatal): %s", exc)
         return False
 
@@ -34566,7 +34566,7 @@ async def _demand_record_write(org_id: str, *, integration_key: str,
             op="demand_record", pool="telemetry")
     except UnregisteredTelemetryKey:
         raise  # #3821: the strict-mode registration guard must propagate
-    except Exception as exc:  # noqa: BLE001 — a bound miss is a failed write
+    except Exception as exc:  # noqa: BLE001, RUF100 — a bound miss is a failed write
         _logger.warning("demand record write failed: %s", exc)
         return "dropped"
 
@@ -34604,7 +34604,7 @@ def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
             if not 200 <= response.status_code < 300:
                 return None, "unavailable"
             return list(response.json()), "supabase"
-        except Exception as exc:  # noqa: BLE001 — a read failure is not a 500
+        except Exception as exc:  # noqa: BLE001, RUF100 — a read failure is not a 500
             _logger.warning("demand read failed: %s", exc)
             return None, "unavailable"
     path = _analytics_fallback_path()
@@ -34628,7 +34628,7 @@ def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
                 rows.append(event)
     except FileNotFoundError:
         return [], "local_jsonl"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("demand local read failed: %s", exc)
         return None, "unavailable"
     return rows, "local_jsonl"
