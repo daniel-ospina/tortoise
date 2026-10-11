@@ -25,6 +25,7 @@ Every test names the mutation that REDs it.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -209,10 +210,8 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
             "this observed SEQUENCE, not concurrency — the assertion proves "
             "nothing about starvation")
     finally:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
         proc.wait(timeout=30)
 
 
