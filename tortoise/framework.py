@@ -285,10 +285,16 @@ def _window_from_langgraph(state: Any) -> list[dict]:
     for message in messages:
         role = getattr(message, "type", None) or type(message).__name__.lower()
         content = getattr(message, "content", None)
-        if isinstance(content, list):  # multimodal content blocks
+        if isinstance(content, list):
+            # LangChain types this as ``str | list[str | dict]`` — a list member
+            # may be a plain string, not a content block. Handling only the
+            # dicts silently flattened a legal ``["Hello", " world"]`` to "",
+            # and an empty turn is discarded, so a user turn's text vanished
+            # (with nothing injected when it was the only turn).
             content = "".join(
-                str(block.get("text") or "")
-                for block in content if isinstance(block, dict)
+                str(block.get("text") or "") if isinstance(block, dict)
+                else str(block)
+                for block in content
             )
         turns.append({
             "role": _LANGGRAPH_ROLES.get(role, "user"),
@@ -404,8 +410,10 @@ def semantic_kernel_prompt_render_filter(reflex: Reflex) -> Callable:
         try:
             rendered = getattr(context, "rendered_prompt", None) or ""
             # Through the SAME bounded builder as the other two adapters: the
-            # rendered prompt is one turn, and an over-cap one is rejected by
-            # the reflex and silently injects nothing.
+            # rendered prompt is one turn, and an over-cap one is truncated to
+            # fit the reflex's byte budget (tail kept) and injected with that
+            # truncated window — never handed over whole, which the reflex would
+            # reject and the fail-open boundary would silently swallow.
             block = _safe_block(
                 reflex, _bounded_window([{"role": "user", "content": rendered}]))
             if block:

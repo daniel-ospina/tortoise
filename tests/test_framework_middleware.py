@@ -366,6 +366,21 @@ def test_langgraph_maps_roles_and_multimodal_blocks():
     assert seen["window"][-1]["content"] == "multi modal"
 
 
+def test_langgraph_list_content_may_hold_plain_strings():
+    """LangChain types message content as ``str | list[str | dict]`` — a list
+    member may be a plain string, not a content block. Handling only the dicts
+    flattened a legal ``["Hello", " world"]`` to "", and the empty turn was
+    then discarded: a user turn's text vanished (nothing injected at all when it
+    was the only turn)."""
+    reflex, seen = _spy()
+    _lg(reflex)({"messages": [_Msg("human", ["Hello", " world"])]})
+    assert seen["window"] == [{"role": "user", "content": "Hello world"}]
+
+    reflex2, seen2 = _spy()
+    _lg(reflex2)({"messages": [_Msg("human", [{"type": "text", "text": "a"}, "b"])]})
+    assert seen2["window"] == [{"role": "user", "content": "ab"}]
+
+
 def test_langgraph_message_factory_override():
     """A graph whose model rejects a second system message can choose its own type."""
     out = langgraph_pre_model_node(
