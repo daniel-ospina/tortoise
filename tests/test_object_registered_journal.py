@@ -781,3 +781,140 @@ class TestCasReplayParity:
                 caplog.clear()
         finally:
             sdk.close()
+
+
+# ── #7951: THE JOURNAL ORDERING CONTRACT ────────────────────────────────────
+#
+# The contract (and its failure-mode argument) is at the top of
+# `tortoise/sdk.py`: **journal first, then project.** `_apply_and_journal` is
+# the sanctioned live door for a pre-built entity record; the append is the
+# COMMIT POINT and the fold follows. These tests pin the rule rather than the
+# docstring:
+#   * a failure injected into the FOLD leaves the record on the TRUTH journal
+#     and NO node in the derived graph — and a replay heals the lag;
+#   * a failed APPEND is not followed by a fold (the derived store must never
+#     lead the journal).
+# Under the old apply-first ordering the first test's record would never have
+# reached the journal and the write would be lost for good.
+
+class TestJournalOrderingContract:
+    @staticmethod
+    def _record():
+        return {
+            "type": "ObjectRegistered",
+            "id": "obj-order-contract",
+            "name": "order-contract-object",
+            "object_kind": "core:strategy",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+
+    def test_apply_failure_keeps_journal_committed_and_replay_heals(
+            self, tmp_path, monkeypatch):
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "order.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            real_apply = type(proj).apply
+
+            def _fail_apply(self, event, *a, **kw):
+                # ORDER is asserted at the fold itself: the append has already
+                # happened when the fold runs.
+                assert [e for e in _journaled(sdk, events)
+                        if e.get("type") == "ObjectRegistered"], (
+                    "the fold ran before the append — the journal ordering "
+                    "contract is violated (#7951)")
+                raise RuntimeError("fold boom (test)")
+
+            monkeypatch.setattr(type(proj), "apply", _fail_apply)
+            with pytest.raises(RuntimeError, match="fold boom"):
+                sdk._apply_and_journal(proj, self._record())
+            # (1) TRUTH committed — the record is on the journal.
+            assert [e for e in _journaled(sdk, events)
+                    if e.get("type") == "ObjectRegistered"], "journal committed"
+            # (2) DERIVED lags — the fold failed, so there is no node.
+            assert not _object_row(proj, "order-contract-object"), (
+                "the fold failed, so the graph must only LAG — no node")
+            monkeypatch.setattr(type(proj), "apply", real_apply)
+            # (3) RECOVERY — replay materialises the committed record.
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            assert _object_row(proj, "order-contract-object"), (
+                "replay must heal the journal-ahead window (#7951 contract)")
+        finally:
+            sdk.close()
+
+    def test_failed_append_is_not_followed_by_a_fold(self, tmp_path,
+                                                     monkeypatch):
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "order2.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+
+            def _raise_append(self, event):
+                raise OSError("disk full (test)")
+
+            monkeypatch.setattr(EventLog, "append", _raise_append)
+            sdk._apply_and_journal(proj, self._record())
+            assert not _object_row(proj, "order-contract-object"), (
+                "a failed append must not be followed by a fold — the derived "
+                "store must never lead the journal (#7951 contract)")
+            assert not [e for e in _journaled(sdk, events)
+                        if e.get("type") == "ObjectRegistered"]
+        finally:
+            sdk.close()
+
+
+# ── #7951: CONTRACT EXCEPTION 1 — a replay engine must not journal ──────────
+#
+# `tortoise reconcile` (`__main__.py`) reads the journal and folds the records
+# it finds missing from the graph. It is a REPLAY engine, not a writer, so the
+# contract forbids it from journaling: appending would write back the very
+# records it just read, growing the log on every repair. The work list flagged
+# this `proj.apply` site as a candidate; it is not.
+
+class TestReconcileIsApplyOnly:
+    def test_reconcile_folds_without_appending_to_the_journal(self, tmp_path,
+                                                              monkeypatch):
+        from types import SimpleNamespace
+
+        from tortoise import __main__ as cli
+        from tortoise.projection import FalkorProjection
+
+        events = tmp_path / "events.jsonl"
+        EventLog(str(events)).append({
+            "version": "1.0",
+            "type": "EventRecorded",
+            "event": {
+                "eventId": "recon-7951",
+                "eventKind": "meeting",
+                "subject": "alice",
+                "object": "session-7951",
+                "startedAt": "2026-01-01T00:00:00Z",
+            },
+            "createdAt": "2026-01-01T00:00:00Z",
+        })
+        before = events.read_bytes()
+
+        sdk = TortoiseSDK(str(tmp_path / "recon.db"))
+        proj = sdk._get_proj()
+        monkeypatch.setattr("tortoise.config.is_docker_uri", lambda *_: True)
+        monkeypatch.setattr(FalkorProjection, "from_uri",
+                            classmethod(lambda cls, uri, graph_name=None: proj))
+        # ``_cmd_reconcile`` closes its projection; keep ours open to observe.
+        monkeypatch.setattr(FalkorProjection, "close", lambda self: None)
+        try:
+            rc = cli._cmd_reconcile(
+                SimpleNamespace(log=str(events), db="docker://fake"))
+            assert rc == 0
+            # A replay engine folds but does NOT journal.
+            assert events.read_bytes() == before, (
+                "reconcile appended to the journal — a replay engine must be "
+                "APPLY-ONLY (#7951 contract, exception 1)")
+            assert proj.g.query(
+                "MATCH (e:Event {eventId:'recon-7951'}) RETURN count(e)"
+            ).result_set[0][0] == 1
+        finally:
+            sdk.close()

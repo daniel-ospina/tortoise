@@ -161,29 +161,268 @@ _RE_MOST_RECENT = re.compile(r"\bmost\s+recently\b", re.IGNORECASE)
 # consume (minutes/hours/centuries, 'a long time ago'). Checked only AFTER
 # the promoted vocabulary routes, so it can never eat a promoted offset.
 _RE_AGO_RESIDUAL = re.compile(r"\bago\b", re.IGNORECASE)
-# A count that is the TRAILING PART of a multi-part number, matched against
-# the text just before the count. Two spellings, one invariant ('the matched
-# count is the whole number'):
-#   * a compound NUMBER WORD — 'twenty two' / 'twenty-one' / 'twenty–one'.
-#     The separator is `\W+` — deliberately NOT an allow-list. `\W` is
-#     Unicode-aware, so SPACE, the ASCII hyphen, the whole Unicode
-#     hyphen/dash/minus family (U+2010..U+2015, U+2212) and a comma all
-#     qualify, and `\b` sees a boundary before the trailing count word for
-#     every one of them. An allow-list is what let 'twenty-one' (and U+2010
-#     / U+2011 / U+2212) slip through and anchor a 21-week question at one
-#     week. The `and` connective ('twenty and one') is the one separator
-#     that is not `\W`, so it is named explicitly.
-#   * a multi-part NUMERAL — '2.5', '2,000', '2 000', '1-2'. `_RE_AGO_OFFSET`
-#     reads `\d+`, so it matches the LAST digit run alone and the question
-#     promoted at that fragment ('2.5 weeks ago' → 5 weeks; '2,000 days
-#     ago' → 0 days, a window collapsed to question_date). `\d\W*$` catches
-#     it: a digit followed only by non-word characters up to the count.
-#     A digit followed by a WORD character is not a fragment ('2 things 3
-#     days ago' must still promote count=3, and '3rd, 4 days ago' count=4).
-_RE_COMPOUND_NUMBER = re.compile(
-    r"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|"
-    r"thousand|million)\b(?:\W+|\s+and\s+)+$"
-    r"|\d\W*$", re.IGNORECASE)
+# ⛔ WHY THIS IS A TOKEN SCAN AND NOT A REGEX OF NUMBER SPELLINGS.
+# Earlier revisions of this guard were a REGEX denylist of number SPELLINGS,
+# and six review rounds each closed one spelling and found the next: a
+# digit-only left bound left the SPELLED bounds open
+# ('two to five weeks ago' → 5); making the left a number word left the ones
+# carrying their OWN unit open ('from 2 weeks to 3 months ago' → 3); a
+# connector list left 'til'/'upto'/'up until' open; a place-value list left
+# 'point zero'/'point o' open; a cardinal left bound left fractions open ('one
+# and a half to five weeks ago' → 5, '1½ to 2 weeks ago' → 2); and a dash was
+# not in the connector class ('2 weeks - 5 weeks ago' → 5). Enumerating NUMBER
+# SPELLINGS is open-ended — there is always another way to write a number — so
+# the guard no longer tries. It asks the INVARIANT instead:
+#
+#     the count is trustworthy iff, scanning LEFT from it, we reach the end
+#     of the number expression — i.e. we run out of CONNECTIVE tokens —
+#     BEFORE we reach another NUMBER token
+#
+# Reaching a number token through nothing but connectives means the count is
+# the RIGHT BOUND (or the trailing piece) of a longer number, and the template
+# read only that piece. That is the whole rule.
+#: tokens that can sit BETWEEN two parts of one number, or between the bounds
+#: of a range, and so are part of neither bound: conjunctions, range
+#: connectors, place-value markers, fraction words, the offset units, degree
+#: adverbs that can qualify a bound ('and about five'). A plain SENTENCE word
+#: ('things', 'store', 'Wednesday', 'May', 'iPhone') is deliberately absent:
+#: that is what ends the scan, and so what makes a legitimately standalone
+#: count ('I bought 2 things 3 days ago' → 3) promote.
+#:
+#: ⛔ THE LIMIT, STATED HONESTLY. THREE residuals, all bounded work rather
+#: than an invariant over natural language:
+#:   (a) a CONNECTIVE that is not in the list below ends the scan and lets the
+#:       count promote, so a range written with it ('2 to <unlisted> 5 weeks
+#:       ago') still promotes 5;
+#:   (b) a NUMERAL spelling the vocabularies do not carry — a cardinal word
+#:       outside `_NUMBER_WORDS`, or a unit spelling outside
+#:       `_NUMERAL_UNIT_SUFFIXES` (the one set BOTH paths use, so this residual
+#:       is the same for glued and spaced bounds) — likewise ends the scan, so
+#:       a range's left bound written that way promotes the right bound;
+#:   (c) a range joined by a SEPARATOR GLYPH outside `_RANGE_GLYPHS`: the bare
+#:       unit before the count then reads as the end of a duration and the
+#:       right bound is promoted (the unit-terminates rule's price: the glyph
+#:       is not a linker, so it does not keep the unit a bridge).
+#: Every direction is recorded here so the next reader does not over-trust the
+#: guard — and so a later tightening does not "simplify" one of these away.
+#:
+#: ⛔ `_NUMERAL_UNIT_SUFFIXES` is ALSO the unit vocabulary the SPACED path
+#: bridges, unioned into `_NUMBER_CONTINUATION_WORDS` above — do not re-list
+#: the units there. Same set, both spellings: '2 hrs to 5 days ago' and
+#: '2hrs to 5 days ago' must not disagree.
+_NUMERAL_UNIT_SUFFIXES = frozenset({
+    "d", "day", "days", "w", "wk", "wks", "week", "weeks",
+    "mo", "mos", "month", "months", "y", "yr", "yrs", "year", "years",
+    "h", "hr", "hrs", "hour", "hours", "m", "min", "mins", "minute",
+    "minutes", "s", "sec", "secs", "second", "seconds",
+})
+#: the words that LINK two bounds of a range. A duration's unit is a range's
+#: LEFT BOUND only when one of these sits between it and the count ('2 weeks
+#: to 5 days ago', 'between 2 hrs and 5 days ago'); across a DEGREE ADVERB it
+#: is still the end of a duration ('2 hours about 5 days ago'). Kept separate
+#: from `_DEGREE_ADVERBS` for exactly that reason — they used to share a set,
+#: so the scan saw a number to the left of an adverb and mistook it for a
+#: second bound (a false reject against `origin/main`).
+#: 'up' is here precisely so that EVERY 'up <connector>' spelling ('up to',
+#: 'up till', 'up through', 'up until') is traversed without being listed.
+_RANGE_CONNECTORS = frozenset({
+    "and", "or", "to", "up", "upto", "unto", "till", "til", "until",
+    "through", "thru",
+    # ... and the rest of an inclusive-connector PHRASE, which is traversed
+    # token by token: 'up to and including 5', 'to or beyond 5'
+    "including", "inclusive", "inclusively", "onwards", "onward",
+    "beyond", "before", "after",
+})
+#: degree adverbs that can QUALIFY a bound without being one. They stay
+#: traversable — a range's right bound may be qualified ('between 2 and about
+#: 5 weeks ago', '2 to roughly 5 weeks ago') — but they do NOT link two
+#: bounds, so they never turn a preceding unit into a range's left bound. A
+#: token in this set therefore leaves the scan's `bridged` flag unset.
+_DEGREE_ADVERBS = frozenset({
+    "about", "around", "roughly", "nearly", "approximately", "almost",
+    "exactly", "precisely", "just", "only", "merely", "some", "another",
+    "less", "more", "than", "over", "under",
+})
+#: tokens that sit INSIDE a number expression but link nothing: place-value /
+#: decimal markers, the quantifier link word, and the fraction words (the
+#: ZEROS are cardinals, not markers). Traversable, but not range linkers.
+_NUMBER_INTERNAL_WORDS = frozenset({
+    "point", "dot", "oh", "o",
+    "of",
+    "half", "halves", "quarter", "quarters", "third", "thirds",
+})
+#: every token the scan crosses while looking for a number behind the count.
+#: The three groups are UNIONED IN deliberately; they differ only in whether
+#: crossing them makes a preceding unit a range's left bound (`_RANGE_CONNECTORS`)
+#: or not (the adverbs and the number-internal markers).
+_NUMBER_CONTINUATION_WORDS = (_RANGE_CONNECTORS | _DEGREE_ADVERBS
+                              | _NUMBER_INTERNAL_WORDS
+                              | _NUMERAL_UNIT_SUFFIXES)
+# ⛔ The unit spellings are NOT listed above — they are UNIONED IN, because a
+# RANGE's left bound may carry its own unit ('from 2 weeks – 3 months ago',
+# 'between 2 hrs and 5 days ago') and the connector between the two bounds is
+# then just a separator, so the unit is what the scan must bridge. Deriving
+# them from `_NUMERAL_UNIT_SUFFIXES` is deliberate: when the two vocabularies
+# were written out separately the glued path learned 'hrs'/'hours' and the
+# spaced path did not, so '2hrs to 5 days ago' rejected while '2 hrs to 5 days
+# ago' promoted 5. One source, so they cannot drift apart again.
+#: the NUMBER vocabulary: a token that IS a number expression's bound. The
+#: cardinals and the quantifiers are here (NOT in the connective set) because
+#: reaching one is exactly what proves the count is a right bound — 'twenty
+#: two weeks ago' reaches 'twenty' and is a fragment; 'up to 3 weeks ago'
+#: reaches only connectives ('to', 'up') and is a whole number. Includes the
+#: TENS/SCALE words `_RE_AGO_OFFSET` itself does not read (it stops at
+#: 'twelve') — rejecting those counts is the whole reason the guard exists.
+#: The SCALE words are here too, in both numbers: a bare one IS the bound
+#: ('hundred 5 weeks ago', 'dozens of 5 weeks ago'), so classifying them as
+#: connectives let the scan run off the start and promote a count
+#: `origin/main` refused.
+_NUMBER_WORDS = frozenset({
+    "a", "an", "couple", "few", "several",
+    "zero", "nought", "naught",
+    "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+    "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+    "eighty", "ninety",
+    "hundred", "hundreds", "thousand", "thousands", "million",
+    "millions", "billion", "billions", "dozen", "dozens", "score",
+    "scores",
+})
+#: a numeral token may carry a fraction glyph the tokenizer does not split
+#: off ('1½', '3¾') and still be a number; but a token whose digits are joined
+#: to LETTERS is a number only when those letters are its UNIT ('2wks', '24h',
+#: '2mo') — otherwise it is a time, a quantity label or an ordinal ('3pm',
+#: '4k', '5G', '3rd') and a count after it is a whole number.
+#:
+#: The distinction matters in ONE direction more than the other. Treating a
+#: glued numeral as NOT a number deletes a range's left bound from the scan,
+#: so '2wks to 5 days ago' would promote the RIGHT bound — the wrong-window
+#: failure the guard exists to prevent. Treating it as a number costs the
+#: promotion on 'at 3pm 5 days ago', which falls back to the legacy lane and
+#: never anchors wrongly. Where the two collide, fail safe.
+#:
+#: ⛔ `_NUMERAL_UNIT_SUFFIXES` is ALSO the unit vocabulary the SPACED path
+#: bridges, unioned into `_NUMBER_CONTINUATION_WORDS` above — do not re-list
+#: the units there. Same set, both spellings: '2 hrs to 5 days ago' and
+#: '2hrs to 5 days ago' must not disagree.
+_FRACTION_GLYPHS = "½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞"
+#: the range/alternative GLYPHS. A bare duration before the count TERMINATES it
+#: ('2 hours 5 days ago'), but a glyph between them is itself a range connector
+#: ('from 2 weeks – 3 months ago', '2 weeks / 5 days ago'), so the unit is a
+#: bridge there after all. Sentence punctuation ('.', ',', ';') is deliberately
+#: NOT here — '2 weeks. 5 days ago' is two sentences, not a range.
+_RANGE_GLYPHS = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212/\\|~&+"
+
+
+def _is_numeric(ch: str) -> bool:
+    return ch.isdigit() or ch in _FRACTION_GLYPHS
+
+
+def _is_number_token(token: str) -> bool:
+    """True when `token` IS a bound of a number expression."""
+    if not token:
+        return False
+    if token.lower() in _NUMBER_WORDS:
+        return True
+    if all(_is_numeric(ch) for ch in token):
+        return True
+    split = 0
+    while split < len(token) and _is_numeric(token[split]):
+        split += 1
+    if split == 0:
+        return False
+    return token[split:].lower() in _NUMERAL_UNIT_SUFFIXES
+
+
+def _continues_number(token: str) -> bool:
+    """True when `token` can be sitting INSIDE the number expression."""
+    return token.lower() in _NUMBER_CONTINUATION_WORDS
+
+
+def _is_unit_length_token(token: str) -> bool:
+    """True when `token` is the TAIL of a duration: a bare unit ('hrs'), or a
+    numeral glued to one ('2hrs'). Both spellings must behave the same way in
+    the scan — '2hrs 5 days ago' and '2 hrs 5 days ago' are the same sentence.
+    """
+    low = token.lower()
+    if low in _NUMERAL_UNIT_SUFFIXES:
+        return True
+    split = 0
+    while split < len(token) and _is_numeric(token[split]):
+        split += 1
+    return 0 < split < len(token) and token[split:].lower() in (
+        _NUMERAL_UNIT_SUFFIXES)
+
+
+def _count_is_fragment(text_before: str) -> bool:
+    """True when the count is the RIGHT BOUND (or trailing piece) of a
+    longer number, so promoting it would answer from a confidently wrong
+    window.
+
+    Scans LEFT from the count, token by token, over separator runs. It stops
+    — and reports a WHOLE number — at the first token that is neither a
+    number nor a connective; it reports a FRAGMENT at the first token that
+    IS a number. So the scan crosses any run of connectives, which is what
+    makes 'up to 3 weeks ago' a whole number (only 'to'/'up' on the left)
+    while '2 to 5 weeks ago' and 'one and a half to five weeks ago' are
+    fragments (a number waits behind the connectives).
+
+    A duration's unit ('hours', '2hrs') terminates the scan — it starts a
+    NEW number — UNLESS a RANGE LINKER (a `_RANGE_CONNECTORS` word or a
+    `_RANGE_GLYPHS` glyph) sits between the unit and the count. So '2 hours
+    5 days ago' is two durations (whole), '2 hrs to 5 days ago' is a range
+    (fragment), and '2 hours about 5 days ago' is two durations again: the
+    adverb MODIFIES the count, it does not link a second bound, so it must
+    not let the scan reach the earlier duration's number. Tracking the
+    linker (`bridged`) across the whole scan — not just the first token — is
+    what keeps the adverb from re-opening the false reject the first-token
+    rule closed.
+
+    Linear in len(text_before) — a plain scan, no regex, so it cannot
+    backtrack (the regex this replaced was an availability defect: an
+    ambiguous nested quantifier that took 3 s at N=24 and never returned
+    beyond, in an ask path with no timeout).
+    """
+    i = len(text_before)
+    bridged = False
+    while True:
+        j = i
+        while j > 0 and not text_before[j - 1].isalnum():
+            j -= 1
+        k = j
+        while k > 0 and text_before[k - 1].isalnum():
+            k -= 1
+        if k == j:            # ran off the start: nothing to the left
+            return False
+        token = text_before[k:j]
+        if any(ch in _RANGE_GLYPHS for ch in text_before[j:i]):
+            # a range GLYPH between the count and this token links them even
+            # though no connector WORD is present ('2 weeks / 5 days ago',
+            # 'from 2 weeks – 3 months ago'): record it so a duration's unit
+            # stays a bridge there.
+            bridged = True
+        if _is_unit_length_token(token) and not bridged:
+            # A DURATION ENDS HERE. '2 hours 5 days ago' is two durations, not
+            # a range: the count starts a NEW number, and the unit in front of
+            # it belongs to the number before that. A unit is a bridge only
+            # when a RANGE LINKER sits between it and the count ('2 hrs to 5
+            # days ago', 'between 2 hrs and 5 days ago', '2 weeks / 5 days
+            # ago') — across an adverb or nothing at all it terminates the
+            # scan instead. Without this the union above made the guard reject
+            # '2 hours 5 days ago', which promotes on `origin/main`; keying it
+            # on the LINKER rather than on the FIRST token keeps the adverb
+            # spellings ('2 hours about 5 days ago') from re-opening that
+            # reject.
+            return False
+        if _is_number_token(token):
+            return True
+        if not _continues_number(token):
+            return False
+        if token.lower() in _RANGE_CONNECTORS:
+            bridged = True
+        i = k
+
 # duration-state semantics that are STILL never a two-subject shape: "how
 # long" with a state verb ("how long have I been working before …"), "how
 # many <unit> did I spend / had I been", "how long did (I|the narrator)
@@ -215,12 +454,16 @@ _RE_FREQUENCY = re.compile(
 # INSTRUCTION residue ('latest' as in 'from earliest to latest'; 'most
 # recent' as in 'from earliest to most recent' or 'my most recent phone')
 # stays a guard, exactly as on main. Only the ADVERBIAL 'most recently' is
-# promoted to AGO_RELATIVE above, and `\bmost\s+recent\b` does NOT match it
-# ('recently' has no word boundary after 'recent'). The guard is checked
-# BEFORE the shape templates, so an attributive recency question can never
-# fall through and fire ORDERING/CURRENT_STATE/INTERVAL.
+# promoted to AGO_RELATIVE above. `\W+` (not `\s+`) is what makes the guard
+# spelling-independent: 'most-recent' / 'most‑recent' (U+2010) are the same
+# instruction — the class the sibling compound guard was hardened for — and
+# `\W+` still cannot match the adverbial, because it must be followed by
+# `recent` and then `\b`, and 'recently' has no boundary after 'recent'.
+# The guard is checked BEFORE the shape templates, so an attributive
+# recency question can never fall through and fire
+# ORDERING/CURRENT_STATE/INTERVAL.
 _RE_RECENCY = re.compile(
-    r"\bmost\s+recent\b|\blatest\b|\bthe\s+last\s+one\b", re.IGNORECASE)
+    r"\bmost\W+recent\b|\blatest\b|\bthe\s+last\s+one\b", re.IGNORECASE)
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
@@ -235,7 +478,18 @@ _RE_ADVICE = re.compile(
 # ("first, A, B or C") — both checked in classify_question after the
 # ordering match (bounded two-option questions carry exactly one " or " and
 # a comma-free A-side).
-_RE_OR_CHAIN = re.compile(r"\s+or\s+.+?\s+or\s+", re.IGNORECASE | re.DOTALL)
+#
+# ⛔ The whitespace runs are SINGLE `\s`, not `\s+`. With `\s+` on both
+# sides of the lazy `.+?` the quantifiers overlap — '\s+' and '.' both match
+# whitespace — so on a question with ONE 'or' and long space runs the engine
+# retries every (start, split, end) triple before failing: measured 307 ms at
+# len 204 and ~4.8 s at len 404 for 'a' + ' '*200 + 'or' + ' '*200 + 'b', i.e.
+# O(n^3.8). `_RE_OR_CHAIN.search` runs unconditionally in `classify_question`
+# on the ask path and `run_ask_lane` has no timeout, so a question inside
+# MAX_ASK_QUESTION_CHARS could wedge a lane — the same availability defect the
+# ago guard above was rewritten to remove. A single `\s` absorbs the same
+# whitespace (the lazy `.+?` covers any extra) and removes the ambiguity.
+_RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
 
 # ── shape templates (ordered high-precision) ─────────────────────────────
 
@@ -317,12 +571,15 @@ def _relative_match(question: str):
         m = rx.search(question)
         if m is None:
             continue
-        if kind == "ago-offset" and _RE_COMPOUND_NUMBER.search(
+        if kind == "ago-offset" and _count_is_fragment(
                 question[:m.start("count")]):
-            # a COMPOUND number word ('twenty two weeks ago') — the
-            # determiner alternation matched only its LAST word, which
-            # would anchor the window ~20 units wrong. Not a promoted
-            # form: fall through (the bare-'ago' residue then rejects it).
+            # a count that is the TRAILING PIECE of a longer number — a
+            # compound number word ('twenty two weeks ago'), a multi-part
+            # numeral ('2.5 weeks ago'), a range ('2 to 5 weeks ago'), a
+            # spelled place-value tail ('two point oh five weeks ago'). The
+            # template matched only the last piece, which would anchor the
+            # window ~20 units wrong. Not a promoted form: fall through
+            # (the bare-'ago' residue then rejects it).
             continue
         return kind, m
     return None
@@ -2089,13 +2346,23 @@ def collect_window_slices(port, anchor: RelativeAnchor, *,
         timeline.append(row)
     timeline.sort(key=lambda r: (r.get("date"), r.get("id", "")),
                   reverse=anchor.newest_first)
+    # `window_rows` issues TWO LIMIT-ed statements — points and events, each
+    # `cap` — so "was anything truncated" is a PER-LEG question and
+    # `len(rows) >= cap` answers it wrongly: 3 points + 1 event at cap=4 is
+    # 4 rows with neither leg saturated, reported truncated. The port tags
+    # each row with its leg (`kind`, the discriminator `evidence_rows`
+    # already uses), so the per-leg counts are recoverable without changing
+    # the port contract. `rows_requested` is the sum of the two caps for the
+    # same reason — the walk asked for up to `2 * cap` rows.
+    event_rows = sum(1 for r in rows if r.get("kind") == "event")
+    truncated = (len(rows) - event_rows) >= cap or event_rows >= cap
     return AssemblySlices(
         state_rows=(),
         timeline_rows=tuple(timeline),
         evidence_rows=tuple(r for r in timeline
                             if r.get("kind") == "point"),
-        admission={"rows_requested": cap, "rows_admitted": len(timeline),
-                   "truncated": len(rows) >= cap})
+        admission={"rows_requested": 2 * cap, "rows_admitted": len(timeline),
+                   "truncated": truncated})
 
 
 # ══════════════════════════════════════════════════════════════════════════

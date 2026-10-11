@@ -744,3 +744,52 @@ class TestW3PipelineWiring:
         blocked = sdk.promote_point(rows[0][0])
         assert blocked["blocked"] is True
         assert blocked["reason"] == "batch_quarantined", blocked
+
+
+# ── #7951: the journal ordering contract on the mining lane ─────────────────
+#
+# The sizing measurement on #7951 flagged `mining.py:883` as a `proj.apply`
+# "door" by the `.apply(` scan. On inspection it is NOT an unjournaled door:
+# `ConversationMiner._emit_event` appends the EventRecorded envelope to the
+# JSONL log FIRST and only then folds it — it already obeys THE JOURNAL
+# ORDERING CONTRACT (module top of `tortoise/sdk.py`). This pins that, so a
+# future edit cannot quietly invert it, and proves the write reaches the
+# journal and survives replay.
+
+class TestMiningJournalOrdering:
+    def test_emit_event_journals_before_fold_and_survives_replay(
+            self, mining_sdk, tmp_path, monkeypatch):
+        import tortoise.mining as mining
+        from tortoise.api import EventAPI
+
+        sdk = mining_sdk
+        proj = sdk._get_proj()
+        log = EventLog(str(tmp_path / "events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="t",
+                       projection=proj)
+
+        real_apply = type(proj).apply
+
+        def _assert_order(self, event, *a, **kw):
+            # the append has ALREADY happened when the fold runs.
+            assert [e for e in EventLog(str(tmp_path / "events.jsonl")).read_all()
+                    if e.get("type") == "EventRecorded"], (
+                "mining folded before appending — contract violated (#7951)")
+            return real_apply(self, event, *a, **kw)
+
+        ev = mining.ConversationMiner._make_event(
+            event_id="meeting-7951", event_kind="meeting",
+            subject="alice", object="session-7951", source="corpus://7951")
+        monkeypatch.setattr(type(proj), "apply", _assert_order)
+        mining.ConversationMiner._emit_event(api, ev)
+        monkeypatch.setattr(type(proj), "apply", real_apply)
+
+        journal = EventLog(str(tmp_path / "events.jsonl")).read_all()
+        assert [e for e in journal if e.get("type") == "EventRecorded"], journal
+        assert proj.g.query(
+            "MATCH (e:Event {eventId:'meeting-7951'}) RETURN count(e)"
+        ).result_set[0][0] == 1
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert proj.g.query(
+            "MATCH (e:Event {eventId:'meeting-7951'}) RETURN count(e)"
+        ).result_set[0][0] == 1, "mining Event did not survive replay (#7951)"

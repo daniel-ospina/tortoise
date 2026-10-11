@@ -43,9 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from tortoise.assembly import (
+    _RE_OR_CHAIN,
     AssemblyShape,
     RelativeAnchor,
     ResolveResult,
+    _count_is_fragment,
     classify_question,
     extract_subject_terms,
     resolve_relative_anchor,
@@ -364,6 +366,60 @@ def test_ago_relative_rejects_compounds_and_the_sibling_vocabulary():
         "What did I do thirty—one days ago?",    # U+2014 EM DASH
         "What did I do thirty, one days ago?",
         "What did I do thirty and one days ago?",
+        # a VERBAL RANGE / connector: the connector is word characters, so
+        # neither the word nor the numeral branch sees it, and the range's
+        # LAST bound is promoted as the count (a 2–5-week question answered
+        # from the 5-week window alone). The left bound is a NUMBER, word or
+        # digit — a digit-only left bound leaves the class half-open, so the
+        # SPELLED forms below are the pin for that fix: they promote if the
+        # range's left bound ever reverts to `\d+`.
+        "What did I do 2 to 5 weeks ago?",
+        "What did I do between 2 and 5 weeks ago?",
+        "What did I do 2 or 5 weeks ago?",
+        "What did I do 2 through 5 weeks ago?",
+        "What did I do two to five weeks ago?",
+        "What did I do two or five weeks ago?",
+        "What did I do one to three weeks ago?",
+        "What did I do two through five weeks ago?",
+        "What did I do two until five weeks ago?",
+        "What did I do two up to five weeks ago?",
+        "What did I do two–five weeks ago?",   # U+2013, no word connector
+        # ... and the range's LEFT side is not only a BARE bound: the same
+        # class the digit-only left bound left half-open, one level down — a
+        # left bound that repeats its unit, a quantifier left, a teen word
+        # and a connector outside the first pass's list all promoted the
+        # RIGHT bound as the count
+        "What did I do from 2 weeks to 3 months ago?",
+        "What did I do from one week to three weeks ago?",
+        "What did I do 2 weeks or 5 weeks ago?",
+        "What did I do 2 til 5 weeks ago?",
+        "What did I do 2 upto 5 weeks ago?",
+        "What did I do 2 up until 5 weeks ago?",
+        "What did I do several to five weeks ago?",
+        "What did I do a few to five weeks ago?",
+        "What did I do thirteen to five weeks ago?",
+        # ... and the connector can be a DASH, which branch 1 cannot reach
+        # once the left bound carries its own unit ('2 weeks' is not adjacent
+        # to the count) — the dash is the canonical range connector
+        "What did I do from 2 weeks – 3 months ago?",   # U+2013
+        "What did I do 2 weeks — 5 weeks ago?",         # U+2014
+        "What did I do 2 weeks - 5 weeks ago?",         # ASCII
+        # ... and a SPELLED place-value/decimal tail is a multi-part number
+        # too: the offset template reads the trailing word alone. The zero of
+        # 'two point oh five' may be spelled several ways
+        "What did I do two point five weeks ago?",
+        "What did I do twelve point three days ago?",
+        "What did I do two point oh five weeks ago?",
+        "What did I do two point zero five weeks ago?",
+        "What did I do two point o five weeks ago?",
+        # ... the connector may carry an 'up' prefix, in any of its spellings
+        "What did I do 2 weeks up till 5 weeks ago?",
+        "What did I do 2 weeks up through 5 weeks ago?",
+        "What did I do 2 weeks up thru 5 weeks ago?",
+        # ... and a BOUND may be a fraction, spelt or glyph
+        "What did I do one and a half to five weeks ago?",
+        "What did I do two and a half to five weeks ago?",
+        "What did I do 1½ to 2 weeks ago?",
         # a multi-part NUMERAL is the same defect for digits: `_RE_AGO_OFFSET`
         # reads `\d+`, so it matches the LAST digit run alone — '2.5 weeks
         # ago' anchored at 5 weeks and '2,000 days ago' at 0 days (a window
@@ -393,6 +449,209 @@ def test_ago_relative_still_reads_a_standalone_digit_count():
         assert (a.kind, a.count) == ("ago-offset", count), (q, a)
 
 
+def test_count_fragment_scan_is_linear():
+    r"""The count-fragment scan must stay LINEAR on a pathological input.
+
+    The guard it replaced was a regex with an ambiguous nested quantifier
+    (`(?:\W+|\s+and\s+)+$`), which backtracked over 2**N partitions:
+    measured 3 s at N=24 and never returned beyond. The input is bounded
+    (`MAX_ASK_QUESTION_CHARS`) but `run_ask_lane` has no timeout and a HANG
+    is not an exception the ask envelope can catch, so it was an
+    availability defect. This test does not time anything: it asserts the
+    scan terminates and returns the right verdict at the boundary sizes.
+
+    ⚠️ This pins the SCAN only. `classify_question` is super-linear for an
+    unrelated reason (`_RE_OR_CHAIN`, pinned separately below), so timing
+    the classifier here would assert the wrong thing; what matters is that
+    the guard the question reaches cannot hang on its input.
+
+    The question MUST carry an `ago-offset`: the scan is only reached from
+    `_relative_match` under `kind == "ago-offset"`, so a probe with no
+    offset ('twenty…x') never consults the guard and asserts nothing about
+    the ask path. '…x 1 day ago' is the production shape — on the ambiguous
+    form `classify_question` took 4.8 s at N=24 and hung at N=200.
+    """
+    for n in (24, 200, 1900, 2000):
+        pad = "twenty" + " " * n + "x"
+        # the scan itself, addressed directly: 'x' stops it, so the count
+        # in 'twenty   …   x 1 day ago' is the WHOLE number
+        assert _count_is_fragment(pad + " ") is False, n
+        # ... and through the entry points, where the guard is consulted
+        q = pad + " 1 day ago"
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, n
+        assert resolve_relative_anchor(q, "2026-09-10") is not None, n
+
+
+def test_or_chain_does_not_backtrack():
+    r"""`_RE_OR_CHAIN` must not be super-linear on a one-'or' question.
+
+    Its whitespace runs were `\s+` on both sides of a lazy `.+?`, which
+    overlap on whitespace, so a question with ONE 'or' and long space runs
+    retried every (start, split, end) triple before failing: 307 ms at
+    len 204 and ~4.8 s at len 404 for 'a' + ' '*200 + 'or' + ' '*200 + 'b'
+    (O(n^3.8)). It runs unconditionally in `classify_question` on the ask
+    path, which has no timeout, so this is the same availability defect the
+    ago guard was rewritten to remove — and it is the DOMINANT cost of the
+    classifier once the guard is linear.
+
+    The assertion is on the MATCH VERDICT at the boundary sizes, not on a
+    duration: under the `\s+` form this does not fail, it HANGS.
+    """
+    for n in (200, 500, 1000, 2000):
+        # one 'or', so there is NO chain — and the verdict must be False
+        assert _RE_OR_CHAIN.search(
+            "a" + " " * (n // 2) + "or" + " " * (n // 2) + "b") is None, n
+    # a real chain is still detected, both compactly and across padding
+    assert _RE_OR_CHAIN.search("A or B or C") is not None
+    assert _RE_OR_CHAIN.search("A or" + " " * 500 + "B or C") is not None
+
+
+def test_count_fragment_scan_stops_at_a_sentence_word():
+    """The scan's stopping rule is what makes a legitimate standalone count
+    promote: it crosses CONNECTIVE tokens and reports a whole number at the
+    first plain SENTENCE word, because nothing beyond that word can be part
+    of this number."""
+    # (text before the count, is it a fragment?). The `to ` row is the key
+    # one a single-token lookbehind gets WRONG: 'to' is a connective, but
+    # there is no number behind it, so the count is whole.
+    for prefix, fragment in [
+        ("I bought 2 things ", False),
+        ("on the 3rd of May, ", False),
+        ("I went to the store ", False),
+        ("I mentioned it to my friend ", False),
+        ("", False),
+        ("to ", False),              # connective with no number behind it
+        ("up to ", False),
+        ("2 to ", True),             # range
+        ("2 weeks to ", True),
+        ("2 weeks up till ", True),
+        ("up to and including ", False),
+        ("one and a half to ", True),
+        ("1½ to ", True),
+        ("at 3pm ", False),          # a digit joined to LETTERS is not a number
+        ("zero to ", True),          # a spelled zero is a cardinal, not a marker
+        ("nought to ", True),
+        ("at 4k ", False),
+        ("at 5G ", False),
+        ("2wks to ", True),          # ... unless the letters are its UNIT
+        ("24h to ", True),
+        ("2mo to ", True),
+        ("3d to ", True),
+        ("2 hrs to ", True),          # ... and the SPACED spelling of every
+        ("2hrs to ", True),           # one the glued path knows
+        ("2hours to ", True),
+        ("between 2 hrs and ", True),
+        ("2 mins to ", True),
+        ("2 hours ", False),         # a duration ENDS before the count: two
+        ("2 mins ", False),          # durations, not a range
+        ("3 secs ", False),
+        ("2 weeks ", False),
+        ("2hrs ", False),            # ... and the GLUED duration agrees with
+        ("2hours " , False),         # its spaced twin
+        ("24h ", False),
+        ("2wks ", False),
+        ("2 weeks / ", True),        # ... unless a range GLYPH connects them
+        ("2 weeks ~ ", True),
+        ("2 weeks & ", True),
+        ("2 weeks. ", False),        # sentence punctuation is not a connector
+        ("2 weeks, ", False),
+        ("2 weeks – ", True),
+        ("2 hours 5 days ", False),
+        # ... and the SAME termination holds across a DEGREE ADVERB: an
+        # adverb modifies the count, it does not link it to the earlier
+        # duration, so the scan must NOT cross the unit behind it
+        ("2 hours about ", False),
+        ("2 hours nearly ", False),
+        ("2 hours just ", False),
+        ("2hrs about ", False),
+        ("2 hours ~ about ", True),   # ... unless a GLYPH does link them
+        ("between 2 and about ", True),   # a connective CHAIN (already above)
+        ("2 to roughly ", True),
+        ("from 2 up to and including ", True),
+        ("twenty ", True),           # compound number word
+        ("twenty-", True),
+        ("hundred ", True),          # a bare SCALE word IS a bound
+        ("thousand ", True),
+        ("dozens of ", True),
+        ("two hundred ", True),
+        ("2.", True),                # multi-part numeral
+        ("2,", True),
+        ("two point ", True),        # spelled place value
+        ("two point oh ", True),
+        ("two point zero ", True),
+    ]:
+        assert _count_is_fragment(prefix) is fragment, prefix
+
+
+def test_count_fragment_duration_ends_across_a_degree_adverb():
+    """Regression (PR #8097 review, P1): a standalone count preceded by a
+    DURATION + degree adverb must still promote.
+
+    The unit-terminates rule used to key on the unit being the FIRST token
+    left of the count, so a degree adverb between a duration and the count
+    defeated it: the scan crossed the adverb, then the unit, then reached the
+    earlier duration's number and reported Fragment=True. That is a false
+    reject against the merge-base `5d75752f7` — the count is standalone and
+    must route to AGO_RELATIVE, not fall through to the legacy lane.
+
+    The fix keys the termination on whether a RANGE LINKER (connector word or
+    glyph) sits between the unit and the count, not on the unit's position.
+    On the pre-fix tree the first two assertions fail (`_count_is_fragment`
+    reports True; `classify_question` reports None); the control rows below
+    hold on both trees and pin that a real range is still rejected.
+    """
+    # mechanism probe: the duration's number lies behind an adverb, not a
+    # connector, so it is a NEW number — the count is whole
+    for prefix in ("I ran for 2 hours about ", "I ran for 2 hours nearly ",
+                   "I studied for 3 hours just ", "I slept for 8 hours "
+                   "exactly ", "I ran for a couple of hours about "):
+        assert _count_is_fragment(prefix) is False, prefix
+    # ... and through the two entry points the reviewer reproduced on, which
+    # must now route to AGO_RELATIVE with the STANDALONE count
+    for q, count in [
+        ("I ran for 2 hours about 3 days ago", 3),
+        ("I ran for a couple of hours about 3 days ago", 3),
+        ("I studied for 3 hours nearly 5 days ago", 5),
+        ("I trained for 2 hours just 3 days ago", 3),
+        ("I slept for 8 hours exactly 3 days ago", 3),
+        # controls: no adverb, or a bare adverb with no preceding duration
+        ("I ran for 2 hours 3 days ago", 3),
+        ("I ran about 3 days ago", 3),
+    ]:
+        assert classify_question(q) is AssemblyShape.AGO_RELATIVE, q
+        anchor = resolve_relative_anchor(q, "2026-09-10")
+        assert anchor is not None, q
+        assert (anchor.kind, anchor.count) == ("ago-offset", count), (q, anchor)
+    # control: a real RANGE that merely qualifies its right bound is still a
+    # fragment, so the adverb does not blanket-disable the guard
+    for q in ("between 2 and about 5 weeks ago",
+              "2 to roughly 5 weeks ago"):
+        assert _count_is_fragment(q[:q.rfind(" 5 weeks ago") + 1]) is True, q
+        assert classify_question(q) is not AssemblyShape.AGO_RELATIVE, q
+
+
+def test_count_fragment_scan_crosses_a_connective_chain():
+    """The scan must cross an ARBITRARY run of connectives, not just one
+    token: a chain that reaches no number is whole ('up to and including 5'),
+    a chain that reaches one is a fragment ('2 up to and including 5').
+
+    A single-token check cannot tell these apart — both have a connective
+    immediately before the count — which is the defect this pins.
+    """
+    for prefix in ("up to ", "up to and including ", "from 2 and about "):
+        assert _count_is_fragment(prefix) is ("2" in prefix), prefix
+
+
+def test_count_fragment_scan_ignores_a_preceding_ordinal():
+    """An ordinal is a DATE reference, not a number span: 'on 3rd, 4 days
+    ago' must still promote count=4. Same for a token whose digits are joined
+    to letters — a time if it ends in 'pm', a label if it ends in 'k'/'G'."""
+    for prefix in ("on 3rd, ", "on the 22nd, ", "since the 1st, ",
+                   "what did I do at 3pm ", "I raised 4k ",
+                   "the 5G "):
+        assert _count_is_fragment(prefix) is False, prefix
+
+
 def test_ago_relative_shape_fires():
     """#2652: explicit relative offsets route to AGO_RELATIVE — including
     the state-morphology form the R13 guard used to kill (the CURRENT_STATE
@@ -418,8 +677,10 @@ def test_ago_relative_shape_fires():
 
 
 def test_most_recently_shape_fires():
-    """#2652 recency: 'most recently/most recent' routes to AGO_RELATIVE
-    (the open as-of window: everything up to question_date)."""
+    """#2652 recency: the ADVERBIAL 'most recently' routes to AGO_RELATIVE
+    (the open as-of window: everything up to question_date). The
+    ATTRIBUTIVE 'most recent' does NOT — it stays a guard (main parity),
+    see ``test_nary_and_order_instruction_never_fire``."""
     for q in [
         "Which mode of transport did I use most recently, a bus or a "
         "train?",
@@ -753,6 +1014,10 @@ def test_nary_and_order_instruction_never_fire():
         "Which did I buy first, my most recent phone or my laptop?",
         "what is the current status of my most recent car?",
         "Which came first, my most recent trip to Paris or my graduation?",
+        # ... including the hyphen/dash spellings: `\W+` makes the guard
+        # spelling-independent, so 'most-recent' is the same instruction
+        "Which did I buy first, my most-recent phone or my laptop?",
+        "what is the current status of my most‑recent car?",  # U+2010
         "How many days passed between the two deep-subject milestones?",
         "When did I buy the couch?",  # date-lookup w/o shape support (v1)
         # 3+ option lists (review r2 P1 — every delimiter family)
@@ -2896,6 +3161,34 @@ def test_window_slices_port_raise_degrades_to_empty():
     class _NoLeg:
         pass
     assert collect_window_slices(_NoLeg(), anchor).timeline_rows == ()
+
+
+def test_window_slices_truncation_is_per_leg_not_a_row_count():
+    """`window_rows` issues TWO LIMIT-ed statements — points and events,
+    each `cap` — so truncation is a PER-LEG verdict. `len(rows) >= cap`
+    reported `truncated=True` for a window where NEITHER leg saturated
+    (3 points + 1 event at cap 4 is 4 rows), and `rows_requested = cap`
+    understated the walk (it asks for up to `2 * cap`)."""
+    anchor = resolve_relative_anchor("what did I do a month ago?", "2026-09-10")
+
+    def _rows(n, kind):
+        dt = "when" if kind == "point" else "started_at"
+        return [{"kind": kind, "id": f"{kind}{i}", "content": "c",
+                 dt: "2026-08-10", "status": "live"} for i in range(n)]
+
+    both_short = collect_window_slices(
+        _DictWindowPort(_rows(3, "point") + _rows(1, "event")), anchor,
+        per_window_cap=4)
+    assert len(both_short.timeline_rows) == 4
+    assert both_short.admission["rows_requested"] == 8
+    assert both_short.admission["truncated"] is False
+    # ... a saturated leg IS truncation, at the SAME admitted row count
+    pts = collect_window_slices(_DictWindowPort(_rows(4, "point")), anchor,
+                                per_window_cap=4)
+    assert pts.admission["truncated"] is True
+    evs = collect_window_slices(_DictWindowPort(_rows(4, "event")), anchor,
+                                per_window_cap=4)
+    assert evs.admission["truncated"] is True
 
 
 def test_ago_render_window_header_and_elapsed_lines():

@@ -675,6 +675,14 @@ state-readable from that surface:
   (#4282). Until then this source is dashboard-only — do **not** invent a tool
   name for it. Pinned by `tests/test_tool_registry.py`
   (`TestAgentAddressableIntegrations`).
+  **Extracting claims FROM those documents is a self-hosted CLI verb, not a
+  tool** (#1724): `tortoise mine-docs --dir <corpus> --db <graph>` walks the
+  staged corpus and writes **draft** `statement` Points with
+  `extractedFrom` → the document Source. It is deterministic (no LLM, no
+  tokens) and re-mining an unchanged corpus adds 0 Points. It is CLI-only on
+  **every** transport — hosted included — so do **not** invent an MCP tool
+  name for it either; promote the drafts with the existing
+  `TortoiseSDK.promote_point`.
 
 Design rule for the NEXT integration: ship the tool-surface enable + state
 read **first**, and let the grid render what the backend already exposes. An

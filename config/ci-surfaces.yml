@@ -558,6 +558,15 @@ surfaces:
   # predicate is not vacuous (#5100, #5013). Sits with the quota surface
   # because the predicate under test IS the `documents` cap.
   - test_document_source_gold.py
+  # #1724: DUAL-REGISTERED with `core`. No single arm covers every file the
+  # change touches — `tortoise/docs_miner.py` matches no SOURCE_PATTERNS entry
+  # (so it falls through to `core`), while `tortoise/__main__.py` is an EXACT
+  # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback, so a
+  # `mine-docs`-verb-only edit (the `_cmd_mine_docs` wiring this file pins)
+  # would select `api` alone. Registered on both arms for the same reason as
+  # test_7809_hosted_prewarm_warmup_flag.py above: a guard that never runs on
+  # the diff it guards is the #1349/#2938/#3154 silent-drop class.
+  - test_docs_miner.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
@@ -839,6 +848,13 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #7951: a session DELETE must survive `derived = replay(journal)`. The
+  # guarded surface is the journal fold + the hosted delete path
+  # (`tortoise/sdk.py`, `tortoise/projection/__init__.py`,
+  # `tortoise/hosted_api.py`) — an `sdk.py`-only change selects `core`, so
+  # without this entry the delete-resurrection guard would not run on the
+  # change that can re-open the hole.
+  - test_7951_delete_resurrection.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -851,6 +867,7 @@ surfaces:
   - test_capture_backlog_4197.py
   - test_audit_fallback_home_isolation.py
   - test_ci_stall_identify.py
+  - test_docs_miner.py
   # #4071: guards that the URI-less embedded test lane cannot resolve a bare
   # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
   # the writer path #4028 left open, so residue regenerated after each purge.

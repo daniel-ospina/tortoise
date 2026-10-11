@@ -754,7 +754,7 @@ def test_backfill_marker_set_only_on_success(client, tmp_path, monkeypatch):
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
     fail_backfill = {"fail": True}
 
-    def _flaky_backfill(self, proj):
+    def _flaky_backfill(self, proj, *, sdk=None):
         if fail_backfill["fail"]:
             raise RuntimeError("backfill boom")
         return 0

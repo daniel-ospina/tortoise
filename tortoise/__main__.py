@@ -382,6 +382,67 @@ def _cmd_mine_conversation(args):
     return 0
 
 
+def _cmd_mine_docs(args):
+    """Mine a markdown docs corpus → DRAFT statement Points (#1724).
+
+    Composes the Slice-1 corpus index pass (Sources + D10-folded Document
+    Sources) with the deterministic claim pass on top; every point is written
+    ``status=draft`` and is promoted later with the existing
+    ``TortoiseSDK.promote_point`` — this verb never promotes.
+
+    ``--db`` is OPTIONAL-mandatory in the honest sense: without it the run could
+    not read the Sources it must attach claims to, so it is required. That is
+    the deliberate difference from ``mine-conversation``, whose log-only mode is
+    meaningful.
+    """
+    import sys
+
+    from tortoise.docs_miner import mine_docs
+
+    try:
+        from tortoise.config import is_db_uri, resolve_db_path
+        from tortoise.sdk import TortoiseSDK
+    except Exception as e:  # noqa: BLE001, RUF100
+        print(f"Error: Tortoise SDK unavailable ({e})", file=sys.stderr)
+        return 1
+
+    target = args.db if is_db_uri(args.db) else resolve_db_path(args.db)
+    sdk = TortoiseSDK(target)
+    try:
+        report = mine_docs(
+            sdk, args.dir,
+            corpus_name=args.corpus_name,
+            repo=args.repo,
+            about_entities=args.about or [],
+            max_claims_per_doc=args.max_claims_per_doc,
+            index_first=not args.no_index,
+        )
+    finally:
+        sdk.close()
+
+    print("=" * 60)
+    print(f"Docs mining — {report['directory']}")
+    print("=" * 60)
+    print(f"repo entity:        {report.get('repo') or '(none — no --repo and no org/repo shape)'}")
+    print(f"documents:          {report['documents']}")
+    print(f"indexed (Sources):  {report['indexed']}")
+    print(f"skipped unchanged:  {report['skipped_unchanged']}")
+    print(f"skipped non-doc:    {report['skipped_not_document']}")
+    print(f"docs mined:         {report['mined']}")
+    print(f"claims extracted:   {report['claims']}")
+    print(f"NEW Points:         {report['new_points']}")
+    print(f"existing Points:    {report['existing_points']}")
+    print(f"Objects wired:      {report['objects_wired']}")
+    if report["errors"]:
+        print(f"errors:             {len(report['errors'])} (see below)")
+        for err in report["errors"][:20]:
+            print(f"  - {err.get('file')}: {err.get('error')}")
+    print()
+    print("All Points are status=draft — review and promote with "
+          "TortoiseSDK.promote_point(point_id).")
+    return 0 if not report["errors"] else 1
+
+
 def _cmd_reconcile(args):
     """Replay unprojected EventRecorded entries from JSONL into FalkorDB."""
     import json, sys  # noqa: E401, F401, I001
@@ -9924,6 +9985,34 @@ def main(argv: list[str] | None = None) -> int:
                     help="Graph to project into: FalkorDB docker:// URI or embedded path "
                          "(e.g. ~/.tortoise/tortoise.db). Omit for log-only mode "
                          "(writes mine-<source-id>.jsonl, no W-3 gate)")
+    md = sp.add_parser("mine-docs",
+                       help="Mine a markdown docs corpus → draft statement Points (#1724). "
+                            "Deterministic (no LLM, no tokens); re-mining an unchanged "
+                            "corpus reports 0 new Points. Self-hosted only — there is no "
+                            "MCP tool for this.")
+    md.add_argument("--dir", required=True,
+                    help="Absolute path of the markdown corpus (already staged by the "
+                         "GitHub docs fetcher, or any local docs directory)")
+    md.add_argument("--db", required=True,
+                    help="Graph to project into: FalkorDB docker:// URI or embedded path "
+                         "(e.g. ~/.tortoise/tortoise.db). Required — the miner attaches "
+                         "claims to the Document Sources this graph already holds")
+    md.add_argument("--corpus-name", default=None,
+                    help="Corpus name for the corpus:// Source identity "
+                         "(default: the directory's basename)")
+    md.add_argument("--repo", default=None,
+                    help="owner/name of the repo/project the docs belong to — becomes the "
+                         "aboutObject entity (externalId github:repo:owner/name). "
+                         "Default: derived from the staged path when it is "
+                         "<ingest-base>/<org>/<repo>")
+    md.add_argument("--about", action="append", default=None, metavar="ENTITY",
+                    help="Extra entity name to link claims to (repeatable)")
+    md.add_argument("--max-claims-per-doc", type=int, default=40,
+                    help="Bound on claims extracted per document (default 40). The cap "
+                         "is applied in document order, so it is stable run to run.")
+    md.add_argument("--no-index", action="store_true",
+                    help="Skip the corpus index pass (only mine Sources that already "
+                         "exist; docs without a Source are skipped with an error)")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
     sr.add_argument("--http", action="store_true",
                     help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
@@ -10455,6 +10544,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     elif args.cmd == "mine-conversation":
         return _cmd_mine_conversation(args)
+    elif args.cmd == "mine-docs":
+        return _cmd_mine_docs(args)
     elif args.cmd == "init":
         return _cmd_init(args)
     elif args.cmd == "setup":
