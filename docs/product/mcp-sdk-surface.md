@@ -79,15 +79,20 @@ Daniel's review is what carries the approval.
 ## What the gate compares — and what it does not
 
 The freeze this document serves is on **tools and endpoints**. The gate compares the live
-declaration against the approved list below. It fails on three kinds of name-level change:
+declaration against the frozen baseline below. It fails on three kinds of name-level change:
 
-1. **A new tool** — an MCP tool that is not on the approved list.
-2. **A new endpoint** — a public SDK method that is not on the approved list.
-3. **An approved entry disappearing** — a tool or endpoint that is on the list and is no
+1. **A new tool** — an MCP tool that is not in the frozen baseline.
+2. **A new endpoint** — a public SDK method that is not in the frozen baseline.
+3. **A frozen-baseline entry disappearing** — a tool or endpoint that is on the list and is no
    longer offered.
 
-It also fails when the implementation behind an approved name is swapped for a different
+It also fails when the implementation behind a frozen-baseline name is swapped for a different
 one, because that changes the endpoint while leaving the name intact.
+
+**This frozen baseline is a snapshot of what EXISTS, not the owner-approved TARGET.** The
+target is recorded in [`canonical-mcp-tools.md`](canonical-mcp-tools.md) and
+[`beta-sdk-surface.md`](beta-sdk-surface.md); `tools/surface-target-check.py` reds while the
+live surface differs from it.
 
 Those are the name-level checks. The gate **additionally** fails on several served-surface and
 evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed

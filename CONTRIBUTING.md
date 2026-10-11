@@ -54,7 +54,9 @@ later), we need a clear license grant from every outside contributor. See the
 > **WHAT TO DO.** Get Daniel's approval **first**, before you write the change or re-cut
 > anything, through the repo `AGENTS.md` "USER QUESTIONS" / "DECISION RELAY" path: say which
 > tool or method, what it does, and why it is needed. Then follow the steps below, which record
-> that approval on the row. A green gate is **not** the approval — see *What the gates do and
+> that approval in `docs/product/canonical-mcp-tools.md`; a later `tools/surface_manifest.py cut`
+> copies it into the manifest.
+> A green gate is **not** the approval — see *What the gates do and
 > do not prove* below.
 
 Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
@@ -64,7 +66,7 @@ retired 16 names; the live surface is 82 MCP tools, and the gate's baseline in
 `config/surface-manifest.yml` records every one of them.)
 
 The gate: **`tools/surface-guard.py`** (CI job `surface-guard`, part of the required `python-ci-gate`)
-compares the live declaration against the approved baseline in
+compares the live declaration against the frozen baseline in
 [`config/surface-manifest.yml`](config/surface-manifest.yml) and **fails closed** on any added tool,
 any added public SDK method, any removal, any **changed SDK binding** (which method a tool fronts), any
 change to how a tool is served (HTTP vs stdio-only), a registry whose entry count no longer matches the
@@ -108,22 +110,31 @@ are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEY
 `NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
 `basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
 flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
-`response_fields`. One
-consequence worth stating plainly: those columns **are** editable in a PR, so the review evidence a reader
+`approval_date` / `high_water_counts` / `response_fields`. The top-level `approval_*` keys are **read from**
+`docs/product/canonical-mcp-tools.md` by `tools/surface_manifest.py::read_approval`, but in this PR they
+are still **excluded** from that comparison (#4185 lands in two PRs — see "CI's `surface-guard` pins
+the BASE copy" below). What catches a hand-edit that disagrees with the document is
+`tools/surface-guard.py`, whose provenance comparison applies whenever a manifest **claims** an
+approval; the follow-up removes them from this list when it flips the committed copy. One
+consequence worth stating plainly: the remaining columns **are** editable in a PR, so the review evidence a reader
 sees in the generated document is not gate-verified — the served surface is. So hand-editing the
 baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived
 cell is a red build, not a shortcut: change the registry, then re-cut.
 
-Two things have no automatic path and are updated by hand as part of a re-cut: the `approval` fields (a
-re-cut resets them to `null` and marks the baseline `pending-owner-approval`, so the owner re-records
-them — see "To propose an addition"), and `baseline_counts` in
+Two things a re-cut does not carry forward, and that are updated by hand: the per-row
+`approval` audit reference (a re-cut resets it to `null` and refuses to do so silently, #4598 —
+restoring one is OPTIONAL and nothing validates it; the approval itself now lives in the canonical
+doc, not on the row), and `baseline_counts` in
 [`config/surface-order.yml`](config/surface-order.yml), the frozen keyword distribution the derived
 `counts:` is checked against. The check reads that table for `keywords`, `tokens`, `family_rank` **and**
 `baseline_counts`, and refuses a table whose shapes or ranks are wrong or whose `baseline_counts` is
 empty — an empty table cannot turn the distribution check off. If an added tool moves the distribution,
 the check reds until the order table records the new expectation. Note what the approval reference does
-and does not do: the gate verifies its **shape** (a PR number and an `@handle`), never that the review it
-names exists. The carrier for the approval is the **#4282 mandate above and Daniel's review** — not a
+and does not do: **nothing machine-validates it.** The approval itself lives in
+`docs/product/canonical-mcp-tools.md`, which a later `tools/surface_manifest.py cut`
+copies into the manifest (#4185); the per-row `approval` is an
+audit reference, not a gate. The carrier for the approval is the **#4282 mandate above and Daniel's
+review** — not a
 machine control. (The repository ruleset the #3863 scope doc proposed as that carrier was **rejected by
 the owner on #4282** as over-engineering; do not re-introduce one.)
 
@@ -162,9 +173,9 @@ to the others:
 2. **Injected by a server-level transform** (`mcp.add_transform`, whose `list_tools` appends a tool —
    `mcp_server.py` already uses that API for `_HTTPToolFilter`). Caught by the **`allowed_transforms`**
    check, which is derived from the `add_transform` call sites in `mcp_server.py` and reds on any
-   transform beyond the approved set.
-3. **Replacing an approved tool's implementation** — `mcp.add_tool(fn)` where `fn` reuses an approved
-   name silently REPLACES it while leaving the name set and the entry count identical. Caught by the
+   transform beyond the frozen set.
+3. **Replacing a frozen-baseline tool's implementation** — `mcp.add_tool(fn)` where `fn` reuses a
+   frozen-baseline name silently REPLACES it while leaving the name set and the entry count identical. Caught by the
    per-row **`served_from`** fingerprint, which records the **code object** behind each tool
    (`co_filename:sha256` over the code object's bytecode, names and constants) — deliberately not
    `__module__`/`__qualname__`, which are writable strings a shadow implementation can simply copy
@@ -206,17 +217,61 @@ or annotation still reds CI; what differs is only which copy measures it — a P
 `tools/surface_manifest.py` could defeat the second half in the same commit, exactly as it could
 defeat the twelve `check` properties. The implementation half keeps the stronger guarantee.
 
+**They also compare the declaration to a *snapshot*, not to the owner's *target*.** The baseline in
+`config/surface-manifest.yml` is frozen from the implementation, so a surface that is roughly 3x over
+the owner-approved target recorded in
+[`docs/product/canonical-mcp-tools.md`](docs/product/canonical-mcp-tools.md) and
+[`docs/product/beta-sdk-surface.md`](docs/product/beta-sdk-surface.md) still passes every gate —
+which is exactly how the owner came to be asked for the same approval five times (#4185).
+**`tools/surface-target-check.py`** closes that gap: it reads the target out of those two docs and
+reds when the live surface differs, printing the numbers and the deltas. The target is never a
+constant in code; if the docs stop carrying an unambiguous number the tool refuses. It is
+deliberately **not** in the required CI gate while the gap is genuinely open (a permanently-red
+required check would block unrelated merges), so run it directly:
+
+```bash
+uv run python tools/surface-target-check.py
+```
+
+**CI's `surface-guard` pins the BASE copy of `tools/surface-guard.py`**: it copies `origin/main`'s
+guard over the PR's and runs it against the PR tree, so a change to what the guard *enforces*
+cannot be green in its own PR. #4185 therefore lands in **two PRs**, and this paragraph is the
+prescription:
+
+1. **This PR** lands `read_approval` and `tools/surface-target-check.py` with the committed manifest
+   still `approval_status: pending-owner-approval` and the four top-level `approval_*` keys still in
+   `NON_DERIVABLE_DOC_KEYS`. The base guard sees `pending` (passes) and `check` excludes the keys
+   (passes). The guard's provenance comparison is scoped to a manifest that *claims* an approval, so
+   the empty `pending` copy is skipped rather than treated as a stale copy.
+2. **The follow-up PR** ([#8144](https://github.com/daniel-ospina/tortoise/issues/8144)) — after
+the new guard is on `main` — removes the four keys from
+   `NON_DERIVABLE_DOC_KEYS` and flips the committed copy to the derived `approved`. The base-pinned
+   guard is now the *new* guard, which no longer demands per-row approvals, so the flip is green.
+
+Do not "resolve" the red by stamping every row with the doc's approval: that would record per-row
+owner approvals nobody gave, and the per-row field is an audit reference, not the gate.
+
 **To propose an addition**, in the same PR:
 
 1. Change the registry.
-2. `uv run python tools/surface_manifest.py cut` — folds the change into the baseline and marks
-   `approval_status: pending-owner-approval`.
+2. `uv run python tools/surface_manifest.py cut` — folds the change into the baseline. The baseline's
+top-level `approval_status` / `approval_principal` / `approval_pr` / `approval_date` are **read from**
+`docs/product/canonical-mcp-tools.md` (#4185) **at cut time** — the cut copies whatever the doc
+records right then. A re-cut resets the per-row `approval:` audit reference to `null`; it **refuses**
+(#4598) rather than blank a recorded one silently, so pass `--allow-approval-reset` to accept that drop
+deliberately (those references are optional audit records and nothing machine-validates them).
 3. `uv run python tools/surface_manifest.py render` — regenerates
    [`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
-4. Get the owner's approval and record it **per row** in `approval:` — a PR number and a principal,
-   never a bare `yes` or a date. This applies to **every** row, MCP tools and SDK methods alike; once
-   `approval_status: approved` is set, a row without a recorded approval is a red build. The
-   `exemption: true` flag is **not** an approval carve-out — it records a method deliberately outside
+4. Get the owner's approval and record it in the canonical doc: `approval_status: approved`,
+   `approvedBy`, `approved`, and `approval_pr`. **Then re-run `cut` (step 2).** The manifest is a
+   committed snapshot, so the doc's approval reaches it only when a `cut` copies it: recording the
+   approval *after* the cut leaves the committed copy stale, and a re-cut is what carries it
+   forward. `tools/surface_manifest.py check` is what catches the stale copy — not the guard,
+   which skips a manifest that makes no claim — and #8144 arms that comparison by dropping the
+   four `approval_*` keys from `NON_DERIVABLE_DOC_KEYS`. A per-row
+   `approval:` remains an optional audit reference (nothing machine-validates its format); it is
+   no longer the approval gate. The `exemption: true` flag is **not** an approval
+   carve-out — it records a method deliberately outside
    the reachable set, and the guard reds if such a method later becomes reachable.
 
 **A red `surface-guard` is the gate working, not a bug.** Do not resolve it by editing the baseline to

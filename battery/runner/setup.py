@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterable, Sequence  # noqa: F401, UP035
 
 from battery.config.corpus import Scenario
 from battery.exceptions import ConfigError
+from tortoise.live import epistemic_disjunction
 
 #: seed-manifest marker kind (seeder-owned; excluded from the A4 retrieve
 #: surface — never a retrievable memory).
@@ -430,17 +431,21 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
             })
         if op_rows:
             g.query(
-                f"UNWIND $rows AS r "  # noqa: F541
-                f"MERGE (o:Point {{id: r.id}}) "  # noqa: F541
-                f"ON CREATE SET o.is_operator = true, o.op_type = r.op_type, "  # noqa: F541
-                f"o.direction = r.direction, o.label = r.label "  # noqa: F541
-                f"WITH o, r UNWIND r.inputs AS inp "  # noqa: F541
-                f"MATCH (s) WHERE (s:Point OR s:Event) AND s.id = inp.id "  # noqa: F541
-                f"MERGE (o)-[:NAND {{idx: inp.idx}}]->(s) "  # noqa: F541
-                f"WITH DISTINCT o, r "  # noqa: F541
-                f"MATCH (src:Point {{id: r.source_id}}) "  # noqa: F541
-                f"WHERE src.status IS NULL "  # noqa: F541
-                f"SET src.status = 'live'",  # noqa: F541
+                f"UNWIND $rows AS r "
+                f"MERGE (o:Point {{id: r.id}}) "
+                f"ON CREATE SET o.is_operator = true, o.op_type = r.op_type, "
+                f"o.direction = r.direction, o.label = r.label "
+                f"WITH o, r UNWIND r.inputs AS inp "
+                # #7902/#7926 widened the write path to all four epistemic labels;
+                # this harness MERGE is a write and must admit what the product admits,
+                # or a :Subject/:Object input matches nothing and the operator lands
+                # without its NAND input edge.
+                f"MATCH (s) WHERE {epistemic_disjunction('s')} AND s.id = inp.id "
+                f"MERGE (o)-[:NAND {{idx: inp.idx}}]->(s) "
+                f"WITH DISTINCT o, r "
+                f"MATCH (src:Point {{id: r.source_id}}) "
+                f"WHERE src.status IS NULL "
+                f"SET src.status = 'live'",
                 params={"rows": op_rows},
             )
         rounds[scenario.id] = 2

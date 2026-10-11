@@ -147,7 +147,8 @@ def test_a_result_object_without_structured_content_is_not_counted():
     class _Bare:
         structured_content = None
         content: ClassVar[list[str]] = [
-            "some retrieved prose that must not be counted or emitted"]
+            "some retrieved prose that must not be counted or emitted"
+        ]
 
     assert ms._mcp_result_count(_Bare()) is None
 
@@ -169,7 +170,7 @@ def _probe(name: str, fn) -> None:
 
 
 def _drop(name: str) -> None:
-    # Cleanup must never mask the assertion.
+    # Cleanup must never mask the assertion — hence the blanket suppression.
     with contextlib.suppress(Exception):
         ms.mcp.local_provider.remove_tool(name)
 
