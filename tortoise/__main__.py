@@ -2338,6 +2338,11 @@ def _cmd_org_keys_create(args) -> int:
         })
         return 0
 
+    # #5109 NOTE: DELIBERATE show-once — `team keys create` returns the plaintext
+    # exactly here (only a hash is stored), so printing it is the only way to hand
+    # it to the user. Test-pinned (tests/test_cli_team_keys.py). The `--json` twin
+    # above returns it in the payload for the same reason. Owner-routed on #5109;
+    # do NOT "tidy" this print away — it would break key provisioning.
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
