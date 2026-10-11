@@ -480,3 +480,141 @@ def test_find_operator_exact_hit_admits_non_point_input(sdk):
     assert found["kind"] == "exact", (
         f"a non-Point input rerouted dedup into {found['kind']!r}")
     assert found["id"] == op
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6. The missed mirrors of the same widening (reviewer P2 ×2)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _graph_dirty(sdk: TortoiseSDK) -> list[str]:
+    rows = sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.ep_dirty = true RETURN n.id ORDER BY n.id",
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _minimal_payload(session_id: str):
+    """A CommitPayload with no points/operators — enough for the graph-state
+    read (`_load_commit_graph_state` derives `operators` from the GRAPH)."""
+    from tortoise.commit_schema import (
+        CommitPayload,
+        ExtractorInfo,
+        Telemetry,
+        TelemetryExtractor,
+        TelemetryModel,
+    )
+
+    return CommitPayload(
+        session_id=session_id,
+        client_commit_id=f"ccid-{session_id}",
+        captured_at="2026-01-01T00:00:00Z",
+        extractor=ExtractorInfo(
+            version="value@1.0.0", mode="byok", calibration_version="v3"),
+        telemetry=Telemetry(
+            extractor=TelemetryExtractor(version="value@1.0.0", mode="byok"),
+            model=TelemetryModel(provider="anthropic", id="claude-3-7"),
+        ),
+    )
+
+
+def test_reconcile_sees_an_operator_whose_inputs_are_non_point(sdk):
+    """The hosted commit-reconcile must use the same four-label disjunction as
+    `sdk._find_operator` and the `commit_ops` MITIGATES dedup. Pre-fix it kept a
+    hand-spelled ``(t:Point OR t:Event)``: an operator whose input is a
+    :Subject/:Object was invisible, so `reconcile_payload` re-admitted it as
+    'new' and burned the new-operator budget on every re-send."""
+    from tortoise.hosted_api import _load_commit_graph_state
+
+    sub = _node(sdk, "Subject", "sub-7902-reconcile")
+    obj = _node(sdk, "Object", "obj-7902-reconcile")
+    op = sdk.create_operator(
+        "IMPL", sub, [obj], direction="bidirectional")["id"]
+    assert op, "the operator node must exist (non-vacuity)"
+
+    state = _load_commit_graph_state(sdk, _minimal_payload("s-7902-reconcile"))
+    assert state.operators, (
+        "a non-Point input operator is invisible to reconciliation: "
+        f"{state.operators!r}")
+    assert (sub, obj, "IMPL") in state.operators, (
+        f"the widened input labels did not reconcile: {state.operators!r}")
+
+
+def test_list_batch_detail_agrees_with_list_batches_for_a_non_point_edge(sdk):
+    """`list_batches` counts direct edges label-agnostically
+    (``MATCH ()-[r:IMPL|NAND]->()``), so a non-Point direct edge is discoverable
+    there; `list_batch`'s audit detail must see the SAME edge. Pre-fix the
+    detail kept ``(a:Point)-[…]->(b:Point)`` and reported 0 for a batch the
+    summary counted — two surfaces disagreeing about one batch."""
+    sub = _node(sdk, "Subject", "sub-7902-batch")
+    obj = _node(sdk, "Object", "obj-7902-batch")
+    assert sdk.create_direct_edge(
+        "IMPL", sub, obj, batch_id="batch-7902-so")["created"] is True
+
+    detail = sdk.list_batch("batch-7902-so")
+    assert detail["counts"]["direct_edges"] == 1, (
+        "list_batch's audit detail dropped the non-Point direct edge")
+    assert [(e["from"], e["to"]) for e in detail["direct_edges"]] == [(sub, obj)]
+
+    summary = {b["batch_id"]: b for b in sdk.list_batches()}
+    assert summary["batch-7902-so"]["direct_edges"] == 1
+    assert (detail["counts"]["direct_edges"]
+            == summary["batch-7902-so"]["direct_edges"])
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. PINNED GAP — the residual split to #7927 (not a contract)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_pinned_gap__non_point_write_is_not_graph_persisted():
+    """PINNED, not silenced — a measured boundary, not desired behaviour.
+
+    The EP DIRTY MARKER is graph-persisted for ``:Point`` writers only:
+    ``_mark_dirty``'s persist + zombie-classification queries,
+    ``_hydrate_dirty_roots``, ``_sweep_dirty_roots`` and
+    ``_prune_nonexistent_dirty_roots`` all anchor ``MATCH (n:Point)``. So a
+    write whose endpoints are ALL non-``:Point`` is EP-live IN the writing
+    process (the widened EP reads see it) but EP-inert across the
+    request/process boundary, and the write-triggered local dream returns an
+    empty affected set.
+
+    Widening this lifecycle is NOT a label-predicate edit: it must move in
+    lockstep with the dream selector (``analyze._bfs_select_operators``) or a
+    persisted non-Point root is never swept — the #2422 / #1243 stale-region
+    class. That is #7927's surface (which already names
+    ``_bfs_select_operators``), extended there with the dirty-lifecycle sites.
+    DELETE THIS TEST when #7927 lands — it pins the gap so the PR cannot claim
+    a cross-request guarantee it does not have.
+    """
+    dbdir = tempfile.mkdtemp(prefix="s7902_pin_")
+    db = os.path.join(dbdir, "test.db")
+    try:
+        s1 = TortoiseSDK(db)
+        sub = _node(s1, "Subject", "sub-7902-pin")
+        obj = _node(s1, "Object", "obj-7902-pin")
+        assert s1.create_direct_edge("IMPL", sub, obj)["created"] is True
+
+        assert _graph_dirty(s1) == [], (
+            "the dirty marker reached the graph for a non-Point write — the "
+            "pinned gap is CLOSED; delete this test (#7927)")
+        assert sorted(s1._dirty_roots) == [obj, sub], (
+            "in-process mirror only")
+
+        # the write-triggered local dream selects nothing for these roots
+        d = s1.dream(mode="local")
+        assert d["affected_claims"] == []
+        assert d["iterations"] == 0
+
+        # a FRESH scope (the shape #1163's hydration exists for) sees nothing
+        s1.close()
+        s2 = TortoiseSDK(db)
+        assert s2._hydrate_dirty_roots() == set()
+        assert s2.compute_confidence()["iterations"] == 0
+
+        # CONTROL: a :Point endpoint takes the pre-existing persisted path.
+        pt = _point(s2, "ctrl-7902-pin")
+        obj2 = _node(s2, "Object", "obj-7902-pin")
+        assert s2.create_direct_edge("IMPL", pt, obj2)["created"] is True
+        assert _graph_dirty(s2) == [pt], "the :Point half must persist"
+        s2.close()
+    finally:
+        shutil.rmtree(dbdir, ignore_errors=True)

@@ -96,7 +96,16 @@ doc_status: live
 > path depends on — `_affected_factors` Batches 1/2/3, `_affected_claims`/`_live_neighbors`, the
 > `_load_cache`/`_flush_cache` node + message + back-message I/O, `_read_node`/`_write_node`,
 > `invalidate_messages`, the `projection/edges.py` operator fold, and the sdk promotion/partial-absorb
-> joins — so a newly-writable endpoint is not silently EP-inert on write or on replay. Direct edges
+> joins, so a newly-writable endpoint is not EP-inert in the writing process (the operator/direct edge
+> is visible to the EP run and to `dream`'s affected-set traversal). **Not claimed, and deliberately
+> so: the EP DIRTY MARKER is graph-persisted for `:Point` writers only.** `_mark_dirty`'s persist and
+> zombie-classification queries, `_hydrate_dirty_roots`, `_sweep_dirty_roots` and
+> `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`, so a write whose endpoints are ALL
+> non-`:Point` is EP-inert across the request/process boundary — and the write-triggered
+> `dream(mode='local')` then returns an empty affected set. That is the residual split to **#7927**
+> (the `:Point`-only epistemic surfaces outside the EP engine, which already names
+> `analyze._bfs_select_operators`), extended there with the dirty-lifecycle sites, and it is **pinned,
+> not silenced**, by `tests/test_7902_write_path_label_widening.py::test_pinned_gap__*`. Direct edges
 > therefore connect any two plain epistemic nodes — **not** Point→Point only. #7853's branch converges
 > on the same shared declaration.
 >

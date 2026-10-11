@@ -13150,9 +13150,17 @@ class TortoiseSDK:
             "ORDER BY n.id",
             params={"bid": batch_id},
         ).result_set
+        # #7902: a direct IMPL/NAND edge may connect ANY two plain epistemic
+        # nodes (:Point/:Subject/:Object/:Event). `list_batches` counts the
+        # edge label-agnostically (`MATCH ()-[r:IMPL|NAND]->()`), so a
+        # hand-spelled (a:Point)/(b:Point) here made the two surfaces
+        # disagree: the batch summary reported the edge and this audit detail
+        # reported none.
         edge_rows = proj.g.query(
-            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE r.batch_id = $bid "
+            "MATCH (a)-[r:IMPL|NAND]->(b) "
+            f"WHERE {epistemic_disjunction('a')} "
+            f"AND {epistemic_disjunction('b')} "
+            "AND r.batch_id = $bid "
             "AND coalesce(a.is_operator, false) = false "
             "AND a.op_type IS NULL "
             "AND coalesce(b.is_operator, false) = false "
