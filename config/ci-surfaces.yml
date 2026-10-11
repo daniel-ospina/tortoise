@@ -2034,6 +2034,16 @@ surfaces:
   # branch, not this one.)
   # DB-free — every driver is a fake runner.
   - test_e2e_live_reconcile_scope_parity.py
+  # #4210: the fusion-formula A/B instrument (tools/fusion_formula_ab.py) —
+  # the convex arithmetic, its drop-in parity with rrf_fusion's signature and
+  # #2952 total order, the scoped arm swap, and the measurement-only guard
+  # (the formula ruling is the OWNER's; the convex implementation must not
+  # become a product symbol). `tools/fusion_formula_ab.py` names no
+  # SOURCE_PATTERNS entry, so it selects `core` via the tools/ fallback — the
+  # `core` arm is therefore the registration that runs this guard on a change
+  # to the instrument. Hermetic: pure arithmetic + a module-attribute swap, no
+  # graph / embedder / network.
+  - test_fusion_formula_ab.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
