@@ -3080,6 +3080,12 @@ def _install_read_hook_impl(args) -> int:
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
+    - Every write is ATOMIC (#3918): a fresh same-dir temp + ``os.replace``
+      via ``hook_install._atomic_write_text``, so a crash, ENOSPC or a kill
+      mid-write cannot truncate the user's own ``settings.json`` (or the
+      cline marker), and a hard-linked or leaf-symlinked target is REPLACED
+      rather than written through. An existing file keeps its mode; the
+      cline marker is set 0o755 as part of the swap.
     - A ``--dir`` root that is not a real directory (a regular file, a
       symlink to a file, or a dangling symlink) is REFUSED before either
       half writes, so a bad root fails the whole install with NOTHING on
@@ -3087,8 +3093,22 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
+
+    # #3918: every WRITE below goes through the shipped atomic helper — a
+    # fresh same-dir temp + ``os.replace`` (the pattern #3866 gave
+    # ``capture_install._atomic_bytes`` / ``hook_install._atomic_write_text``),
+    # never ``Path.write_text``.  ``write_text`` truncates the destination in
+    # place, so a crash, an ENOSPC or a kill between the truncate and the last
+    # byte leaves the user's own ``settings.json`` — the file holding THEIR
+    # hook registrations and unrelated settings — truncated or invalid JSON.
+    # ``rename(2)`` also replaces the directory ENTRY, which closes the
+    # leaf-symlink and hardlink write-through cases in the same move (#2385
+    # item 2).  The residual there — an intermediate directory component
+    # swapped for a symlink between the guard above and the write — is NOT
+    # closed by this and needs a per-component ``openat`` walk.
+    from tortoise.hook_install import _atomic_write_text
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
         print("Installable harness seams (per-turn volunteering-memory hook "
@@ -3328,8 +3348,10 @@ def _install_read_hook_impl(args) -> int:
             print(f"Removed {target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(marker_content)
-            _os.chmod(target, 0o755)
+            # #3918: the exec bit goes on the TEMP, with the content — a
+            # post-replace ``chmod`` would let a crash ship a 0600 hook that
+            # exists but can never run.
+            _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
@@ -3474,7 +3496,9 @@ def _install_read_hook_impl(args) -> int:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
             else:
-                target.write_text(out)
+                # #3918: atomic write-back — a failed uninstall must leave the
+                # registration intact, never a truncated document.
+                _atomic_write_text(target, out)
                 print(f"Uninstalled volunteer-turn.sh from {target}")
             return 0
         # Merge: append our registration under UserPromptSubmit only when no
@@ -3553,7 +3577,7 @@ def _install_read_hook_impl(args) -> int:
             # above does not catch — and the CLI died with a traceback.  The
             # sibling read above (``existing = target.read_text(...)``) has
             # always passed utf-8.
-            target.write_text(out)
+            _atomic_write_text(target, out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
         return 0
@@ -3563,7 +3587,8 @@ def _install_read_hook_impl(args) -> int:
         print(_json.dumps(_document(registration), indent=2))
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_json.dumps(_document(registration), indent=2) + "\n")
+        _atomic_write_text(
+            target, _json.dumps(_document(registration), indent=2) + "\n")
         print(f"Installed {target}")
         if harness == "codex":
             print("Project-local codex hooks require one-time trust: run "
