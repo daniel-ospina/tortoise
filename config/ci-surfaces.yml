@@ -1455,6 +1455,14 @@ surfaces:
   # full matrix). THIS ENTRY IS LOAD-BEARING: without it classify_test_file()
   # returns None for the test and a hook-only PR would never run the guard.
   - test_claude_hook_install_probe.py
+  # #3796: the SAME seam, one step further — the install-probe beacon must be
+  # DISPATCHED before the digest, not serialized behind it, and the reaped
+  # status must still reach the #3797 observation. Its source is
+  # `tortoise/claude-hooks/session-start.sh`, an ENGINE path that matches no
+  # SOURCE_PATTERNS entry and so classifies `core` via the `tortoise/` fallback
+  # — exactly like the #3755 entry above, and (per that entry) an unregistered
+  # file is one a hook-only PR would never run.
+  - test_3796_probe_not_serialized.py
   # #3808: `tortoise install claude|pi` installs the CAPTURE seam (the hook
   # scripts + the merged settings.json timeout; the Pi extension) instead of
   # leaving it as dashboard copy-paste. Its sources are
