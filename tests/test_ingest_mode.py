@@ -82,6 +82,17 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 # per mode must not be invisible (review-gate P2-1).
 _VOLATILE_PROPS = frozenset({
     "id", "batch_id", "createdAt", "updatedAt", "ingestedAt",
+    # #3644: the `:Source` version WINDOW start — the instant the version was
+    # OBSERVED, minted per call by `create_source` on the same clock as
+    # `updatedAt` and written only through `_upsert_source`'s hash-diff gate.
+    # It is the same class of value as the three timestamps above (a per-call
+    # clock read, not a fact the caller asserted), so two ingest modes of the
+    # SAME bundle honestly carry different instants. Its PRESENCE is excluded
+    # with it, exactly as for `ingestedAt` — the window is guarded where the
+    # writers are (`tests/test_source_version_window_3644.py`: create,
+    # transition, stub, legacy replay), not by this signature, which exists to
+    # catch a mode writing a DIFFERENT node/edge/status/count.
+    "validFrom",
 })
 
 
@@ -316,6 +327,30 @@ class TestModeIsomorphism:
         assert results[1]["result"]["id"] == r_gran["ids"]["points"][0]
         assert results[1]["deduped"] is False
         assert all("deduped" in r for r in results)
+
+    def test_the_window_is_served_on_the_entity_read_surface(self):
+        """#3644 review P2b read-back: every window assertion in this file
+        reads raw Cypher, so nothing proved the `:Source` DECLARATION actually
+        serves the minted window. `get_entity` is the read path the
+        declaration feeds — a mode that failed to write `validFrom` AT ALL
+        would be invisible to `_graph_signature` (it drops volatile keys
+        entirely), so this is the one assertion that closes that hole.
+        """
+        g = _fresh_sdk()
+        try:
+            g.ingest(json.loads(json.dumps(_canonical_bundle())),
+                     granularity="bulk", promotion_policy="gated")
+            url = "https://example.com/rust-report"
+            ent = g.get_entity(url)
+            assert ent.get("validFrom"), (
+                "the minted window start is not served by the entity read "
+                "path — it is missing from get_entity()'s property bag")
+            stored = _query(g, "MATCH (n:Source {url:$u}) RETURN n.validFrom",
+                            {"u": url})[0][0]
+            assert ent["validFrom"] == stored, (
+                "the served window start differs from the stored one")
+        finally:
+            g.close()
 
 
 # ── E2E-5 assertion 3: invalid mode value ───────────────────────────

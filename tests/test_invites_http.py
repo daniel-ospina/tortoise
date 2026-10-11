@@ -99,6 +99,23 @@ def reg():
     return sdk._get_registry()
 
 
+@pytest.fixture
+def quiesced_invite_ghost_sweep(monkeypatch):
+    """#1890: neutralise the live invite-ghost sweep for tests that seed
+    ``invite-*`` placeholders with a raw ``reg.query``.
+
+    Since #1890 the terminal-state invite-ghost sweep has a live caller (the
+    boot runner and the hourly retention loop), so a test that writes ghosts
+    and then asserts on them races a background task that is entitled to
+    delete them — the same quiescing ``tests/test_export_delete.py`` does for
+    its directly seeded rows (#3472). Declared BEFORE ``client`` in a test's
+    signature so the patch lands before the lifespan arms the boot task.
+    """
+    from tortoise import hosted_api as _ha
+
+    monkeypatch.setattr(_ha, "_sweep_invite_ghosts", lambda *_a, **_k: None)
+
+
 # #1556: hold registry SDKs alive — the `reg` fixture returns
 # _get_registry() but the SDK goes out of scope; with #1475 close-on-GC
 # the server is shut down before the test uses the handle (redis.socket
@@ -1175,7 +1192,8 @@ class TestExpiredInviteGhostCleanup:
         _seed_membership(reg, "team-t", f"invite-{iid}", "member",
                          status="invited")
 
-    def test_backfill_sweep_clears_pre_existing_ghosts(self, client, reg):
+    def test_backfill_sweep_clears_pre_existing_ghosts(
+            self, quiesced_invite_ghost_sweep, client, reg):
         """#1908 (backfill): the one-time sweep deletes pre-#1880 invite-*
         Membership rows whose Invitation is consumed (accepted_at set),
         expired, or revoked — and orphaned rows with no Invitation node —
@@ -1215,7 +1233,8 @@ class TestExpiredInviteGhostCleanup:
         assert result2["ghosts"] == 0
         assert result2["deleted"] == 0
 
-    def test_backfill_sweep_dry_run_no_writes(self, client, reg):
+    def test_backfill_sweep_dry_run_no_writes(self, quiesced_invite_ghost_sweep,
+                                              client, reg):
         """#1908: --dry-run equivalent reports ghosts without deleting."""
         _seed_team_with_owner(reg, "team-t")
         self._seed_pre_1880_ghost(
@@ -1229,3 +1248,123 @@ class TestExpiredInviteGhostCleanup:
         # a real sweep then clears it
         sdk.sweep_invite_ghost_memberships()
         assert self._ghost_rows(client) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #1890 — expiry is a DERIVED terminal state (re-mint after expiry + live sweep)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExpiredInviteReMint:
+    """#1890: #1908 cleaned the ghost on every path that RUNS (an accept
+    attempt, ``cleanup_expired_invitations``, the one-off backfill script).
+    It left the mint dup-check answering "is there a live invite for this
+    email?" from the stored ``status`` — a field that only the caller-less
+    sweep ever writes to ``'expired'``. So an invite whose ``expires_at``
+    has passed still 409'd a re-invite forever, and its placeholder ghost
+    stayed in ``list_members`` until a human ran the script. Expiry is
+    DERIVED from ``expires_at``; the read paths must derive it."""
+
+    def _ghost_rows(self, client, org_id="team-t"):
+        r = client.get(f"/v1/organizations/{org_id}/members")
+        assert r.status_code == 200, r.text
+        return [m for m in r.json() if m["user_id"].startswith("invite-")]
+
+    def _mint(self, client, reg, org_id="team-t", email="bob@example.com"):
+        _seed_team_with_owner(reg, org_id)
+        r = client.post("/v1/invites",
+                        json={"org_id": org_id, "email": email})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def _expire(self, reg, iid):
+        """Advance expires_at into the past, leaving ``status`` untouched —
+        exactly what production does (nothing flips the status live)."""
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
+            params={"id": iid, "exp": "2020-01-01T00:00:00+00:00"},
+        )
+
+    def _legacy_ghost(self, reg, iid, email, **inv_props):
+        """Pre-#1880 shape: a fake placeholder row + a backing Invitation
+        node with no live cleanup path."""
+        props = ", ".join(f"{k}:'{v}'" for k, v in inv_props.items())
+        reg.query(
+            f"CREATE (i:Invitation {{id:'{iid}', org_id:'team-t', "
+            f"email:'{email}', role:'member', "
+            f"expires_at:'2099-01-01T00:00:00+00:00'"
+            + (f", {props}" if props else "") + "})",
+        )
+        _seed_membership(reg, "team-t", f"invite-{iid}", "member",
+                         status="invited")
+
+    def test_remint_after_expiry_succeeds(self, client, reg):
+        """Indicator 2: an EXPIRED invite is dead — re-inviting the same
+        email must mint, not 409 forever."""
+        inv = self._mint(client, reg)
+        self._expire(reg, inv["invite_id"])
+        r = client.post("/v1/invites",
+                        json={"org_id": "team-t", "email": "bob@example.com"})
+        assert r.status_code == 200, (
+            "an expired invite must not block a re-invite — the dup-check "
+            f"must derive expiry from expires_at, not the status stamp (got "
+            f"{r.status_code}: {r.text})")
+        assert r.json()["invite_id"] != inv["invite_id"]
+
+    def test_remint_after_expiry_sweeps_the_expired_placeholder(self, client,
+                                                                reg):
+        """Indicator 1 (live): the re-mint itself is the terminal-state
+        sweep for that email — the expired invite's placeholder must not
+        survive beside the new one."""
+        inv = self._mint(client, reg)
+        self._expire(reg, inv["invite_id"])
+        assert len(self._ghost_rows(client)) == 1
+        remint = client.post("/v1/invites",
+                             json={"org_id": "team-t",
+                                   "email": "bob@example.com"})
+        assert remint.status_code == 200, remint.text
+        rows = self._ghost_rows(client)
+        assert [m["user_id"] for m in rows] == \
+            [f"invite-{remint.json()['invite_id']}"], (
+                "the expired invite's placeholder must be swept by the "
+                f"re-mint, got {rows}")
+
+    def test_remint_sweeps_legacy_terminal_placeholders(
+            self, quiesced_invite_ghost_sweep, client, reg):
+        """Indicator 1 (legacy ghosts): placeholders left by invites that
+        reached a terminal state BEFORE #1880 shipped are swept when the
+        email is re-invited — accepted, revoked and expired alike."""
+        _seed_team_with_owner(reg, "team-t")
+        # the email's OWN expired invite (the one being re-minted)
+        reg.query(
+            "CREATE (i:Invitation {id:'inv-exp', org_id:'team-t', "
+            "email:'bob@example.com', role:'member', accepted_at:null, "
+            "status:'pending', expires_at:'2020-01-01T00:00:00+00:00'})",
+        )
+        _seed_membership(reg, "team-t", "invite-inv-exp", "member",
+                         status="invited")
+        # plus pre-#1880 ghosts for the same email: consumed and revoked
+        self._legacy_ghost(reg, "inv-consumed", "bob@example.com",
+                           accepted_at="2020-01-01T00:00:00+00:00")
+        self._legacy_ghost(reg, "inv-revoked", "bob@example.com",
+                           status="revoked")
+        assert len(self._ghost_rows(client)) == 3
+        remint = client.post("/v1/invites",
+                             json={"org_id": "team-t",
+                                   "email": "bob@example.com"})
+        assert remint.status_code == 200, remint.text
+        rows = self._ghost_rows(client)
+        assert [m["user_id"] for m in rows] == \
+            [f"invite-{remint.json()['invite_id']}"], (
+                "every terminal placeholder for the re-invited email must be "
+                f"swept, got {rows}")
+
+    def test_a_live_pending_invite_still_409s(self, client, reg):
+        """The sweep must not over-reach: a still-pending, unexpired invite
+        keeps its placeholder AND keeps the 409."""
+        inv = self._mint(client, reg)
+        r = client.post("/v1/invites",
+                        json={"org_id": "team-t", "email": "bob@example.com"})
+        assert r.status_code == 409
+        rows = self._ghost_rows(client)
+        assert [m["user_id"] for m in rows] == [f"invite-{inv['invite_id']}"]

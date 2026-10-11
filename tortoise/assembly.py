@@ -16,34 +16,69 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
   ordering/compare do NOT — measured below).
 * ``interval`` — "How many days/weeks/months/years passed between A and B"
   and the two-anchor since-until form "…had passed since X when Y".
+* ``duration-state`` — #2654: "how long had I been <state> when <event>?"
+  (the census's 7 duration-state rows MINUS the two whose morphology is not
+  the state-entry form — the combined summed span b9cfe692, which belongs
+  to #2886's aggregate lane, and the age form d01c6aa8). Single-subject:
+  the window's GRAPH end is the subject's state entry (the ObjectRegistered
+  stamp or its earliest dated row — see ``_state_entry_date``), its other
+  end the question's as-of date. The "when <event>" clause is question
+  context, never a second resolved subject.
+* ``ago-relative`` (#2652) — 'ago'-relative / implicit-time: an explicit
+  offset ("two weeks ago", "a couple of days ago"), the census COUNT form
+  ("how many weeks ago did I …"), or "most recently". The offset is
+  resolved against ``question_date`` into an as-of WINDOW by
+  :func:`resolve_relative_anchor` (deterministic, no LLM, no graph read);
+  the selector is the TIME, not an Object (so ``extract_subject_terms``
+  returns [] and the R1 both-halves gate is replaced by the
+  window-resolved gate). RE-MEASURED against the census: ago-relative
+  31/31 + recency 2/2 route (plus 1 morphologically-promoted mis-file).
 
-Never fires (R13 + R16 + the census negative set, ~68/133 + misfires):
+Never fires (R13/R16 + the residual measured negative set — RE-MEASURED
+2026-10-11 after #2652 promoted the ago/recency vocabulary and #2654 moved
+the state-entry duration-state rows into a shape; of the residual 39 rows
+only the 2 adjudicated label-noise rows fire, so the floor's
+non-adjudicated denominator is rejected 37/37 — see the floor test):
 
-* the measured census negative set — 78/133 rows across the non-fireable
-  sub-classes (76/78 never fire; the 2 fires are the ADJUDICATED label-noise
-  rows 370a8ff4 + gpt4_70e84552_abs, pinned in test_assembly_pure.py):
-  'ago'-relative, frequency/count, duration-state, relative-date-lookup,
-  nary-ordering, recency, other, pattern/recurring, offset-comparison;
-  'ago' rejects EVEN with state morphology "what is the current status of X
-  two weeks ago?" (reject-on-relative-offset);
-* duration-state — "how long …" ("how long had I been a member when …",
-  "how long did it take"), the census's 7 duration-state rows + the
-  duration-morphology rows mis-filed under other classes;
+* the residual census negatives — the measured floor denominator after
+  BOTH promotions: #2652 removed the 34 promoted rows (ago-relative 31 +
+  recency 2 + the 1 morphologically-promoted mis-file) and #2654 removed
+  the 5 state-entry duration-state rows it now fires on, leaving the 39
+  rows across frequency/count, the 2 residual duration-state rows,
+  relative-date-lookup, nary-ordering, other, pattern/recurring,
+  offset-comparison and recency/current-state. 2 fire, both pinned
+  ADJUDICATED label-noise rows (370a8ff4 + gpt4_70e84552_abs). NOTE the
+  #2165 figure (76/78) is NOT comparable: 34 of those 78 are now deliberate
+  positives of the ``ago-relative`` shape (78 − 34 − the 5 #2654
+  state-entry rows = the pinned 39-row residual);
+* duration-state residual forms — "how long did I take … combined" (a
+  summed span: #2886's aggregate lane owns it) and "how old was I when …"
+  (an age: no state entry to resolve); plus every other duration/count
+  morphology ("how long have I been working before …", "how long did it
+  take") and the duration-morphology rows mis-filed under other classes;
 * frequency/count — "how many times", "how many days did I spend", "how
   many … have passed since <one activity>" (single-anchor since);
-* relative-date-lookup — "last Saturday", "on Valentine's day";
-* nary-ordering — 3+ named options ("Mark and Sarah or Tom");
-* recency — "most recently"; pattern/recurring; offset-comparison ("how
-  many months before my anniversary");
+* relative-date-lookup — "last Saturday", "on Valentine's day" (sibling
+  #2655's CALENDAR-ANCHOR family — deliberately NOT promoted here);
+* nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
+  #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
+  latest");
+* pattern/recurring; offset-comparison ("how many months before my
+  anniversary");
+* the R13 COMPOUND pin — a relative offset inside a two-subject
+  ordering/interval template keeps rejecting (there the offset is narrative
+  anchor text, not the question's window);
 * misfire (R16) — preference/advice with two named options + compare
   syntax ("compare X and Y which should I pick");
 * single-activity / no resolvable subject.
 
 Extraction (extract_subject_terms): template splits for the two-subject
 shapes (A/B either side of the ordering "first,"-marker or the interval
-"between…and…"/"since…when…" spans), single subject for current-state.
+"between…and…"/"since…when…" spans), single subject for current-state,
+and the single PEELED state subject for duration-state (#2654).
 Subjects are returned as RAW text spans (quotes/possessives intact —
-"my cousin's wedding", "'The Hate U Give'") for the Task-3 resolver.
+"my cousin's wedding", "'The Hate U Give'") for the Task-3 resolver. For
+``ago-relative`` it returns [] (see the shape note above).
 """
 from __future__ import annotations
 
@@ -57,29 +92,105 @@ from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
-__all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
+__all__ = ["AssemblyShape", "RelativeAnchor", "classify_question",
+           "extract_subject_terms", "resolve_relative_anchor"]
 
 # public shape vocabulary (Task 6's fired branch keys on these)
 class AssemblyShape(StrEnum):
     CURRENT_STATE = "current-state"
     ORDERING = "ordering"
     INTERVAL = "interval"
+    # #2654 — the state-entry anchor variant ("how long had I been X when Y")
+    DURATION_STATE = "duration-state"
+    #: #2652 — 'ago'-relative / implicit-time: the question carries a
+    #: relative offset resolved against ``question_date`` into an as-of
+    #: WINDOW (see ``resolve_relative_anchor``). ``extract_subject_terms``
+    #: returns [] for this shape: the selector is the TIME, not an Object.
+    AGO_RELATIVE = "ago-relative"
 
 # ── guard morphology (checked first — a guard hit means None, even if a
 #    shape template would later match: R13 reject-on-relative-offset,
 #    duration/count/N-ary are NEVER two-subject shapes) ──────────────────
 
-# 'ago'-relative + explicit relative offsets (R13 hard reject)
-_RE_AGO = re.compile(
-    r"\b(ago|yesterday|tonight|tomorrow|"
+# ── relative-time: TWO vocabularies, deliberately split (#2652) ────────
+#
+# (a) PROMOTED to the AGO_RELATIVE shape — the vocabulary whose offset is
+#     resolvable against question_date:
+#       * 'how many <unit> ago' (the CENSUS COUNT form — its offset IS the
+#         answer, so the window is the open recent past, see
+#         ``resolve_relative_anchor``)
+#       * 'N days/weeks/months/years ago' + the article/fuzzy determiners
+#         ('a week ago', 'a couple of days ago')
+#       * 'most recently' (adverbial — the open as-of window)
+# (b) STILL A GUARD — vocabulary this shape does NOT own:
+#       * 'yesterday'/'tomorrow'/'last <weekday|week|month>'/holidays — the
+#         CALENDAR-ANCHOR family of sibling #2655 (census
+#         relative-date-lookup: Valentine's / last Saturday)
+#       * bare 'latest' / 'the last one' — an ORDERING INSTRUCTION
+#         ('from earliest to latest'), sibling #2653's discovery family
+#       * the ATTRIBUTIVE 'most recent' — the SAME ordering instruction
+#         spelled the other way ('from earliest to most recent'): it is
+#         deliberately NOT promoted, so it falls through to the legacy
+#         lane exactly as it did before #2652. Only the adverbial
+#         'most recently' names a time.
+#     Keeping (b) as a guard is what holds the R13 reject and the
+#     precision floor while (a) becomes a shape.
+_RE_AGO_OTHER = re.compile(
+    r"\b(yesterday|tonight|tomorrow|"
     r"last\s+(?:night|week|weekend|month|year|morning|afternoon|evening|"
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|valentine)|"
     r"this\s+(?:morning|week|month)|in\s+\d+\s+(?:days?|weeks?|months?|"
     r"years?))\b",
     re.IGNORECASE)
-# duration-state semantics (NEVER an interval): "how long" with a state
-# verb, "how many <unit> did I spend / had I been". NOT the bare "how long/
-# how much time passed between A and B" (a genuine two-anchor interval).
+# the promoted count form: 'how many <unit> ago' (no offset given)
+_RE_AGO_COUNT = re.compile(
+    r"\bhow\s+many\s+(?P<unit>days?|weeks?|months?|years?)\s+ago\b",
+    re.IGNORECASE)
+# the promoted explicit-offset form: '<count> <unit> ago'
+_RE_AGO_OFFSET = re.compile(
+    r"\b(?P<count>a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|\d+|a\s+couple\s+of|couple\s+of|a\s+few|few|"
+    r"several)\s+(?P<unit>days?|weeks?|months?|years?)\s+ago\b",
+    re.IGNORECASE)
+# the ADVERBIAL recency only. 'most recent' is NOT promoted: as an
+# attributive it is the ordering bound in 'from earliest to most recent',
+# the semantic twin of the guarded bare 'latest' (sibling #2653) — the
+# 2 census recency rows both use 'most recently'.
+_RE_MOST_RECENT = re.compile(r"\bmost\s+recently\b", re.IGNORECASE)
+# the UN-PROMOTED residue: a bare 'ago' the promoted forms above do not
+# consume (minutes/hours/centuries, 'a long time ago'). Checked only AFTER
+# the promoted vocabulary routes, so it can never eat a promoted offset.
+_RE_AGO_RESIDUAL = re.compile(r"\bago\b", re.IGNORECASE)
+# A count that is the TRAILING PART of a multi-part number, matched against
+# the text just before the count. Two spellings, one invariant ('the matched
+# count is the whole number'):
+#   * a compound NUMBER WORD — 'twenty two' / 'twenty-one' / 'twenty–one'.
+#     The separator is `\W+` — deliberately NOT an allow-list. `\W` is
+#     Unicode-aware, so SPACE, the ASCII hyphen, the whole Unicode
+#     hyphen/dash/minus family (U+2010..U+2015, U+2212) and a comma all
+#     qualify, and `\b` sees a boundary before the trailing count word for
+#     every one of them. An allow-list is what let 'twenty-one' (and U+2010
+#     / U+2011 / U+2212) slip through and anchor a 21-week question at one
+#     week. The `and` connective ('twenty and one') is the one separator
+#     that is not `\W`, so it is named explicitly.
+#   * a multi-part NUMERAL — '2.5', '2,000', '2 000', '1-2'. `_RE_AGO_OFFSET`
+#     reads `\d+`, so it matches the LAST digit run alone and the question
+#     promoted at that fragment ('2.5 weeks ago' → 5 weeks; '2,000 days
+#     ago' → 0 days, a window collapsed to question_date). `\d\W*$` catches
+#     it: a digit followed only by non-word characters up to the count.
+#     A digit followed by a WORD character is not a fragment ('2 things 3
+#     days ago' must still promote count=3, and '3rd, 4 days ago' count=4).
+_RE_COMPOUND_NUMBER = re.compile(
+    r"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|"
+    r"thousand|million)\b(?:\W+|\s+and\s+)+$"
+    r"|\d\W*$", re.IGNORECASE)
+# duration-state semantics that are STILL never a two-subject shape: "how
+# long" with a state verb ("how long have I been working before …"), "how
+# many <unit> did I spend / had I been", "how long did (I|the narrator)
+# take". NOT the bare "how long / how much time passed between A and B" (a
+# genuine two-anchor interval). #2654: the "… been <state> when <event>"
+# form is NO LONGER covered by this guard — it is the duration-state shape
+# (``_RE_DURATION_STATE``), matched BEFORE this guard in classify_question.
 _RE_DURATION = re.compile(
     r"\bhow\s+long\s+(?:had|have|did|was|were)\b|"
     r"\bhow\s+much\s+time\s+did\s+(?:i|the\s+narrator)\b|"
@@ -100,10 +211,16 @@ _RE_FREQUENCY = re.compile(
     r"have\s+passed\s+since\s+|did\s+it\s+take\s+|"
     r"(?:weeks?|months?|years?)\s+before\s+)",
     re.IGNORECASE)
-# recency / "most recently / latest" (its own knob family, not a shape)
+# recency / 'latest' / the ATTRIBUTIVE 'most recent' — the ORDERING-
+# INSTRUCTION residue ('latest' as in 'from earliest to latest'; 'most
+# recent' as in 'from earliest to most recent' or 'my most recent phone')
+# stays a guard, exactly as on main. Only the ADVERBIAL 'most recently' is
+# promoted to AGO_RELATIVE above, and `\bmost\s+recent\b` does NOT match it
+# ('recently' has no word boundary after 'recent'). The guard is checked
+# BEFORE the shape templates, so an attributive recency question can never
+# fall through and fire ORDERING/CURRENT_STATE/INTERVAL.
 _RE_RECENCY = re.compile(
-    r"\bmost\s+recently\b|\bmost\s+recent\b|\blatest\b|"
-    r"\bthe\s+last\s+one\b", re.IGNORECASE)
+    r"\bmost\s+recent\b|\blatest\b|\bthe\s+last\s+one\b", re.IGNORECASE)
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
@@ -157,6 +274,83 @@ _RE_CURRENT = re.compile(
 _RE_CURRENT_STILL = re.compile(
     r"^\s*is\s+(?P<a>.+?)\s+still\s+(?:live|active|around|in\s+use|mine)"
     r"\??\s*$", re.IGNORECASE | re.DOTALL)
+# duration-state (#2654): "how long had I been <state> when <event>?" — the
+# past-elapsed-state form that needs a state's ENTRY date and the question's
+# as-of anchor (never an interval: the two anchors are the subject's state
+# entry and the as-of date, not two named events). Deliberately NARROW —
+# high precision is the point (R13/R15/R16):
+#   * "how long (had|have|has) <pronoun> been" — the past-state auxiliary
+#     frame. "how many <unit> had I been X" (the unit-prefixed twin) is NOT
+#     admitted in v1: no census row carries that form, and widening on an
+#     unmeasured surface is what the precision floor exists to prevent.
+#   * "when <event>" is REQUIRED: it is what separates this shape from the
+#     in-scope, deliberately-rejected "how long have I been working BEFORE
+#     …" family (a single-anchor duration with no reference event).
+_RE_DURATION_STATE = re.compile(
+    r"^\s*how\s+long\s+(?:had|have|has)\s+"
+    r"(?:i|you|we|they|he|she|the\s+narrator)\s+been\s+"
+    r"(?P<state>.+?)\s+when\s+(?P<event>[^?]+?)\??\s*$",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _relative_match(question: str):
+    """Text-only relative-time match for #2652 (no question_date needed).
+
+    Returns ``(kind, match)`` where kind is ``"ago-count" | "ago-offset"
+    | "recency"`` and ``match`` is the ``re.Match`` carrying the span, else
+    None. Text-only on purpose:
+    ``classify_question`` must stay a pure function of the question, and
+    the DATE resolution (which needs question_date) lives in
+    :func:`resolve_relative_anchor`.
+
+    Ordered most-specific first — the count form ('how many <unit> ago') is
+    its own template and cannot match the offset form's determiner
+    alternation ('many' is not a determiner), so the order is about which
+    template owns the span, not about disambiguation — then the offset
+    form, then recency last.
+    """
+    if not question:
+        return None
+    for kind, rx in (("ago-count", _RE_AGO_COUNT),
+                     ("ago-offset", _RE_AGO_OFFSET),
+                     ("recency", _RE_MOST_RECENT)):
+        m = rx.search(question)
+        if m is None:
+            continue
+        if kind == "ago-offset" and _RE_COMPOUND_NUMBER.search(
+                question[:m.start("count")]):
+            # a COMPOUND number word ('twenty two weeks ago') — the
+            # determiner alternation matched only its LAST word, which
+            # would anchor the window ~20 units wrong. Not a promoted
+            # form: fall through (the bare-'ago' residue then rejects it).
+            continue
+        return kind, m
+    return None
+
+
+def _relative_guarded(question: str):
+    """The R13 boundary for the promoted vocabulary (called by
+    ``classify_question`` and ``resolve_relative_anchor``).
+
+    A relative offset inside a TWO-SUBJECT template (ordering / interval)
+    stays REJECTED: there the offset is narrative anchor text ('since I
+    bought the couch two weeks ago when I sold it'), not the question's
+    window — promoting it would hijack an interval question into a window
+    walk. N-ary lists are rejected for the same reason. Returns the
+    ``(kind, match)`` pair when the question routes to AGO_RELATIVE, else
+    None.
+    """
+    rel = _relative_match(question)
+    if rel is None:
+        return None
+    q = question
+    if _RE_OR_CHAIN.search(q):
+        return None
+    if (_RE_ORDERING.match(q) or _RE_INTERVAL_SINCE.match(q)
+            or _RE_INTERVAL_BETWEEN.match(q)
+            or _RE_INTERVAL_BETWEEN_LEAD.match(q)):
+        return None
+    return rel
 
 
 def classify_question(question: str) -> AssemblyShape | None:
@@ -164,17 +358,76 @@ def classify_question(question: str) -> AssemblyShape | None:
 
     Returns the AssemblyShape for questions the assembled branch may answer,
     else None (the caller falls through to the legacy lane byte-identically).
-    Guards run first — a duration/'ago'/frequency/N-ary/recency hit returns
-    None even when a later shape template would textually match (R13/R16).
+    Guards run first — a 'last <calendar>'/frequency/N-ary/recency/advice
+    hit returns None even when a later shape template would textually match
+    (R13/R16). The duration-state template is checked BEFORE the blanket
+    duration guard, which keeps rejecting every other duration/count
+    morphology (#2654).
+
+    #2652: the explicit relative-offset + recency vocabulary is promoted to
+    ``AGO_RELATIVE`` BEFORE the two-subject templates, except when the
+    question itself matches one of those templates (the R13 compound pin —
+    see ``_relative_guarded``), and except when it is a duration-state
+    question, where the offset is not the question's window (#2654's
+    reject-on-relative-offset is preserved — see the template branch).
     """
     if not question or not question.strip():
         return None
     q = question.strip()
-    if (_RE_AGO.search(q) or _RE_DURATION.search(q)
-            or _RE_FREQUENCY.search(q) or _RE_RECENCY.search(q)
-            or _RE_ADVICE.search(q)):
+    # R13 rejects that are NOT promotable — mutually independent "return
+    # None" clauses, so their order among themselves carries no semantics.
+    # They run FIRST: the CALENDAR-anchor vocabulary (sibling #2655's
+    # family), frequency/count, recency-as-ordering-instruction and
+    # advice/preference (#2652 deliberately REMOVED the promoted
+    # ago/recency vocabulary from this guard). The blanket duration guard
+    # is NOT here either (#2654): the duration-state template below must be
+    # reachable, and `_RE_DURATION` rejects every OTHER duration/count
+    # morphology right after it.
+    if (_RE_AGO_OTHER.search(q) or _RE_FREQUENCY.search(q)
+            or _RE_RECENCY.search(q) or _RE_ADVICE.search(q)):
         return None
+    # N-ary (3+ options) is a R13 reject for EVERY shape template that
+    # follows — including duration-state — so it stays ahead of all of
+    # them (#2654's ordering: main ran this before `_RE_DURATION_STATE`).
     if _RE_OR_CHAIN.search(q):
+        return None
+    # #2654 — duration-state ("how long had I been X when Y"): the state is
+    # a single resolved subject and the span runs from its state entry to
+    # the as-of date. Checked BEFORE the ago-relative routing so the R13
+    # reject is preserved: a relative offset kills a duration-state
+    # question too ("how long had I been X two weeks ago when Y" — there
+    # the offset is the question's window, not a state-entry anchor), and
+    # BEFORE the duration guard so the guard keeps rejecting every OTHER
+    # duration/count morphology.
+    if _RE_DURATION_STATE.match(q):
+        # R13 reject-on-relative-offset: the PROMOTED offsets (#2652) and the
+        # un-promoted bare-'ago' residue alike kill the duration-state form —
+        # there the offset is the question's as-of window, not a state-entry
+        # anchor, so firing would answer the state span out to a
+        # question_date the question does not mean.
+        if (_relative_match(q) is not None
+                or _RE_AGO_RESIDUAL.search(q)):
+            return None
+        return AssemblyShape.DURATION_STATE
+    if _RE_DURATION.search(q):
+        return None
+    if _relative_guarded(q) is not None:
+        return AssemblyShape.AGO_RELATIVE
+    if _relative_match(q) is not None:
+        # R13 COMPOUND PIN: a relative offset IS present but a two-subject
+        # template also matches — the offset is narrative anchor text there
+        # ('since I bought the couch two weeks ago when I sold it'), not the
+        # question's window. Reject (never hijack the interval/ordering
+        # shape, and never let the offset leak back in as an anchor).
+        return None
+    # #2652 residual (the #2165 R13 reject, narrowed to what #2652 did NOT
+    # promote): a BARE 'ago' the promoted vocabulary does not own — minutes/
+    # hours/centuries, 'a long time ago' — is still a past-time marker, so
+    # the question must NOT fall through to a template that reads it as
+    # current ("what is the current status of the couch two hours ago?"
+    # would otherwise fire CURRENT_STATE with the offset inside the
+    # subject). The promoted offsets were routed above; this is the residue.
+    if _RE_AGO_RESIDUAL.search(q):
         return None
     if _RE_INTERVAL_SINCE.match(q):
         return AssemblyShape.INTERVAL
@@ -231,6 +484,13 @@ def extract_subject_terms(question: str,
     * ordering: A/B either side of the marker (split on the LAST " or ").
     * interval: the "between A and B" / "since A when B" spans.
     * current-state: the single subject of "the current status of X".
+    * duration-state (#2654): the SINGLE state subject of "how long had I
+      been <state> when <event>" — the state predicate peeled by
+      ``_state_term``. The "when <event>" clause is deliberately NOT
+      returned as a second term: the window's other end is the question's
+      as-of date, so demanding a second resolution would gate the shape on
+      a subject the arithmetic never reads (an event clause is "I attended
+      the meetup", not an entity name the resolver can be held to).
 
     Returns [] when the template yields no usable span (the caller's R1
     both-halves gate then keeps the fired decision false).
@@ -242,9 +502,20 @@ def extract_subject_terms(question: str,
     if shape is None:
         return []
     q = question.strip()
+    if shape is AssemblyShape.AGO_RELATIVE:
+        # #2652: the SELECTOR is the time window resolved by
+        # ``resolve_relative_anchor`` against question_date — not an
+        # Object. There is no subject span to extract, and returning a
+        # raw activity phrase as if it were one would make the R1
+        # both-halves gate reject every ago question. [] is the honest
+        # answer; the fired gate for this shape is "anchor resolved".
+        return []
     if shape is AssemblyShape.CURRENT_STATE:
         m = _RE_CURRENT.match(q) or _RE_CURRENT_STILL.match(q)
         return [_clean(m.group("a"))] if m else []
+    if shape is AssemblyShape.DURATION_STATE:
+        m = _RE_DURATION_STATE.match(q)
+        return [_state_term(m.group("state"))] if m else []
     if shape is AssemblyShape.INTERVAL:
         m = (_RE_INTERVAL_SINCE.match(q) or _RE_INTERVAL_BETWEEN.match(q)
              or _RE_INTERVAL_BETWEEN_LEAD.match(q))
@@ -358,6 +629,13 @@ class ResolveResult:
             # never fire with ZERO candidates — an empty resolved set is an
             # unresolved subject, not a match
             return bool(self.candidates) and not self.unresolved
+        if shape is AssemblyShape.DURATION_STATE:
+            # #2654: ONE graph anchor (the state subject). The window's
+            # other end is the as-of date the caller already supplied, so
+            # this shape takes the single-subject gate — demanding a second
+            # resolved subject would gate on a span the arithmetic never
+            # reads (see extract_subject_terms).
+            return bool(self.candidates) and not self.unresolved
         # ordering/interval: every term must resolve (a partial admit would
         # silently narrow the shape to a single subject — forbidden)
         return not self.unresolved and len(
@@ -393,6 +671,47 @@ _HEAD_CUT = re.compile(
     r"sold|delivered|received|ordered|moved|chewed|repaired|painted|fixed|"
     r"replaced|started|finished|installed|came|went|that|which|who|from|"
     r"by|with|in)\b", re.IGNORECASE)
+
+# ── #2654 duration-state: the STATE span is a PREDICATED state, not a bare
+#    entity name ────────────────────────────────────────────────────────
+# "a member of 'Book Lovers Unite'", "watching stand-up comedy specials
+# regularly", "taking guitar lessons" — the Task-3 resolver's legs must
+# probe the ENTITY the state is about, so the state predicate is peeled
+# before the term reaches them. Deliberately narrow, and only at the LEAD:
+# a determiner/possessive lead is left alone (``_candidate_names`` already
+# derives the article-stripped variants), and a gerund mid-span is part of
+# the entity's own name.
+_STATE_LEAD = re.compile(
+    r"^(?:an?\s+(?:(?:active|new|long[- ]time|founding)\s+)?"
+    r"(?:member|participant|user|owner|holder)\s+of|"
+    r"participation\s+in|attendance\s+at)\s+", re.IGNORECASE)
+#: the gerund forms of the same predicate ("watching X", "using X")
+_STATE_GERUND = re.compile(
+    r"^(?:being|watching|using|taking|learning|studying|practi[cs]ing|"
+    r"training|doing|playing|building|collecting|reading|writing|growing|"
+    r"brewing|attending|following|keeping|hosting|organi[sz]ing|visiting)\s+",
+    re.IGNORECASE)
+#: a trailing MANNER/duration adverbial ("… specials regularly") — the
+#: state's cadence, never part of the entity name
+_STATE_MANNER = re.compile(
+    r"\s+(?:regularly|consistently|frequently|daily|weekly|monthly|again|"
+    r"for\s+(?:a|some|several|many)\s+(?:time|while|years?|months?|weeks?))$",
+    re.IGNORECASE)
+
+
+def _state_term(span: str) -> str:
+    """The entity term inside a duration-state's STATE span.
+
+    "a member of 'Book Lovers Unite'" -> "'Book Lovers Unite'"; "watching
+    stand-up comedy specials regularly" -> "stand-up comedy specials".
+    Returns the ``_clean``-ed span unchanged when no predicate lead matches
+    — never an empty term.
+    """
+    t = _clean(span)
+    t = _STATE_LEAD.sub("", t, count=1).strip()
+    t = _STATE_GERUND.sub("", t, count=1).strip()
+    t = _STATE_MANNER.sub("", t, count=1).strip()
+    return _clean(t) or _clean(span)
 
 
 def _candidate_names(term: str) -> list[str]:
@@ -770,7 +1089,9 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # resolved subject's OWN state row (the superseded couch's state IS the
 # answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
-# (Object status/supersededBy/supersededAt in ONE statement), dated spine
+# (Object status/supersededBy/supersededAt + createdAt — the ObjectRegistered
+# stamp #2654's duration-state entry date reads — in ONE statement), dated
+# spine
 # (aboutObject Points ∪ Event-aboutObject edges ∪ ask-lane eventId
 # join), evidence view (points with validity + EP). Per-lane date ladder
 # when → createdAt (sentinel-stripped) → eventId-joined startedAt (R2);
@@ -949,10 +1270,16 @@ def docker_walker_port(sdk) -> WalkerPort:
         # upstream, at the legs — see docker_resolver_port.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
-            "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt",
+            "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt, "
+            "o.createdAt",
             params={"ids": object_ids}).result_set
+        # #2654: ``createdAt`` is the ObjectRegistered stamp (the projection's
+        # ``coalesce($ca, $now)``) — additive, and the state-entry candidate
+        # the duration-state anchor reads (``_state_entry_date``, which takes
+        # it only as the EARLIER of {stamp, earliest dated row}).
         return [{"object_id": r[0], "name": r[1], "status": r[2],
-                 "superseded_by": r[3], "superseded_at": r[4]} for r in rows]
+                 "superseded_by": r[3], "superseded_at": r[4],
+                 "created_at": r[5]} for r in rows]
 
     def spine_rows(object_ids: list[str],
                    per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> list[dict]:
@@ -1003,9 +1330,91 @@ def docker_walker_port(sdk) -> WalkerPort:
                             "lme_session_index": r[6]})
         return out
 
+    def window_rows(lo, hi, cap=PER_ENTITY_FANOUT_CAP) -> list[dict]:
+        """#2652: the TIME-WINDOW walk — every dated Point/Event whose own
+        recorded date lands in ``[lo, hi]``, regardless of Object
+        anchoring (an 'ago' question's selector is the time, not an
+        entity).
+
+        TWO batched statements (points, events) — never N+1. The Cypher
+        predicate is a COARSE pre-filter widened by a day: the three date
+        fields are free text (a malformed ``when`` is possible, and the
+        v2 lane leaves ``when`` sparse), so the AUTHORITATIVE window test
+        is the R2 ladder + ``_norm_date`` in ``collect_window_slices``.
+        Because the predicate ORs over ``when`` and ``createdAt``, a row
+        with a junk ``when`` but a real ``createdAt`` is still fetched.
+        ORDER BY the DENSE date field (``createdAt``) DESC is only the FETCH
+        priority — it keeps the newest rows when the cap binds, which is what
+        ANY window whose answer locus is the most recent end needs (recency,
+        and the count form: both render newest-first). It is deliberately a single-property sort with
+        NO ``coalesce`` (cheaper, and one less function in an unindexed
+        full-scan query); the authoritative window filter AND the rendered
+        order both come from Python (the R2 ladder).
+        """
+        cap = bounded_fanout(cap)
+        lo_s = (lo - _timedelta(days=1)).isoformat() if lo else None
+        hi_s = (hi + _timedelta(days=1)).isoformat() if hi else None
+        out: list[dict] = []
+        pclauses = []
+        pparams: dict = {"cap": cap}
+        for fld in ("when", "createdAt"):
+            parts = []
+            if lo_s is not None:
+                parts.append(f"p.{fld} >= $lo")
+            if hi_s is not None:
+                parts.append(f"p.{fld} <= $hi")
+            if parts:
+                pclauses.append("(" + " AND ".join(parts) + ")")
+        if lo_s is not None:
+            pparams["lo"] = lo_s
+        if hi_s is not None:
+            pparams["hi"] = hi_s
+        if pclauses:
+            prow = proj.g.query(
+                "MATCH (p:Point) WHERE " + " OR ".join(pclauses)
+                + " RETURN 'point' AS kind, p.id, p.content, p.when, "
+                  "p.createdAt, p.status, p.validFrom, p.validTo, "
+                  "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
+                  "p.search_keys, p.eventId, p.lme_session_index "
+                  "ORDER BY p.createdAt DESC, p.id "
+                  "LIMIT $cap",
+                params=pparams).result_set
+            for r in prow:
+                out.append({"object_id": "", "kind": r[0], "id": r[1],
+                            "content": r[2], "when": r[3],
+                            "created_at": r[4], "status": r[5],
+                            "valid_from": r[6], "valid_to": r[7],
+                            "expired_at": r[8], "ep_alpha": r[9],
+                            "ep_beta": r[10], "quote": r[11],
+                            "search_keys": r[12], "event_id": r[13],
+                            "lme_session_index": r[14]})
+        eclauses = []
+        eparams: dict = {"cap": cap}
+        if lo_s is not None:
+            eclauses.append("e.startedAt >= $lo")
+            eparams["lo"] = lo_s
+        if hi_s is not None:
+            eclauses.append("e.startedAt <= $hi")
+            eparams["hi"] = hi_s
+        if eclauses:
+            erow = proj.g.query(
+                "MATCH (e:Event) WHERE " + " AND ".join(eclauses)
+                + " RETURN 'event' AS kind, e.eventId, e.name, "
+                  "e.startedAt, e.status, e.lme_event_id, "
+                  "e.lme_session_index "
+                  "ORDER BY e.startedAt DESC, e.eventId LIMIT $cap",
+                params=eparams).result_set
+            for r in erow:
+                out.append({"object_id": "", "kind": r[0], "id": r[1],
+                            "content": r[2], "started_at": r[3],
+                            "status": r[4], "lme_event_id": r[5],
+                            "lme_session_index": r[6]})
+        return out
+
     import types
     return types.SimpleNamespace(state_rows=state_rows,
-                                 spine_rows=spine_rows)
+                                 spine_rows=spine_rows,
+                                 window_rows=window_rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1014,7 +1423,10 @@ def docker_walker_port(sdk) -> WalkerPort:
 # UNCHANGED assemble_context/_render_block render (Task 6's byte-parity
 # invariant). CONTRACT (pinned here — Task 6 captures the byte-goldens):
 #   * state/section labels EMBED in hit content ("STATE (couch): superseded
-#     by sofa on 2026-09-01" / "STATE (bike #obj-b): live"); synthesized
+#     by sofa on 2026-09-01" / "STATE (bike #obj-b): live") and so do the
+#     #2654 duration-state anchors ("STATE ENTRY (couch): 2026-08-10" +
+#     "31 days from couch state entry (2026-08-10) to the as-of date
+#     (2026-09-10)"); synthesized
 #     rows carry NO `id` (why.enrich skips them) and lme_session_index-less
 #     -> _render_block prefixes "[session ?]".
 #   * superseded_by is DICT-shaped ({"content_snippet": name-or-snippet});
@@ -1123,6 +1535,33 @@ def _date_anchors(rows: list[dict]) -> tuple[_date | None, _date | None]:
     return (min(ds), max(ds)) if ds else (None, None)
 
 
+def _state_entry_date(slices: AssemblySlices, oid: str) -> _date | None:
+    """#2654 — the subject's STATE-ENTRY date: the ObjectRegistered stamp
+    (the Object's ``createdAt``, read into the state slice by the walker) or
+    the earliest DATED row recorded about the subject (the status-start
+    fallback) — whichever is EARLIER. None when neither is usable.
+
+    Why the earlier of the two rather than the registration stamp alone: in
+    the v2 eval lane the stamp is the INGEST clock (the extractor registers
+    entities with no ``createdAt`` prop, so the projection writes ``now``),
+    while the row dates are the session dates the evidence actually carries
+    — trusting the stamp alone would date every state to the ingest RUN and
+    answer every duration question with the run's age. Both are "when this
+    state is known to have begun"; the earlier one is the one the graph can
+    defend. The as-of window is still the caller's ``question_date`` (the
+    walker already dropped rows dated after it), so this helper cannot
+    return a future-dated entry.
+    """
+    ds: list[_date] = []
+    for sr in slices.state_rows:
+        if sr.get("object_id") == oid:
+            d = _norm_date(sr.get("created_at"))
+            if d is not None:
+                ds.append(d)
+    ds.extend(_dated_instances(_oid_rows(slices, oid)))
+    return min(ds) if ds else None
+
+
 def _state_header_hit(sr: dict, label: str,
                       successors_verified: frozenset[str],
                       *, question_date: str | None = None) -> dict:
@@ -1168,18 +1607,86 @@ def _state_header_hit(sr: dict, label: str,
             "superseded_by": sb}
 
 
+def _ago_offset_line(d: _date, qd: _date, unit: str | None) -> str:
+    """#2652 deterministic elapsed arithmetic: ``<date> — N <unit> before
+    <question_date>``. PURE INTEGER DATE MATH via ``_norm_date`` (the same
+    date source as the as-of boundary and the ordering/diff synthesis) —
+    never a fabricated date, never a model call.
+    """
+    days = (qd - d).days
+    per = {"day": 1, "week": 7}.get(unit)
+    if per:
+        if per == 1:
+            phrase = f"{days} day{'s' if days != 1 else ''}"
+        else:
+            phrase = (f"{days} days (~{days // per} "
+                      f"{unit}{'s' if days // per != 1 else ''})")
+    else:
+        phrase = f"{days} days"
+    return f"{_fmt_date(d)} — {phrase} before {_fmt_date(qd)}"
+
+
+def _synthesize_ago_hits(slices: AssemblySlices,
+                         anchor, question_date: str | None,
+                         ) -> list[dict]:
+    """#2652 AGO_RELATIVE render: ONE window header + the dated spine, each
+    dated row preceded by its own deterministic elapsed line (so the reader
+    gets the offset arithmetic the deterministic tier owns).
+
+    Returns [] when the window holds NO dated row — the caller's empty-block
+    guard then falls back to legacy byte-identically, instead of replacing a
+    working pool with a content-less window header (the #2165 P1-1 rule).
+    """
+    qd = _norm_date(question_date)
+    rows = [r for r in slices.timeline_rows
+            if isinstance(r.get("date"), _date)]
+    if not rows or qd is None:
+        return []
+    lo = anchor.window_lo
+    hi = anchor.window_hi
+    if anchor.kind == "ago-offset":
+        label = (f"WINDOW ({_fmt_date(lo)} -> {_fmt_date(hi)}): "
+                 f"{anchor.count} {anchor.unit}"
+                 f"{'s' if (anchor.count or 0) != 1 else ''} before "
+                 f"{_fmt_date(qd)}")
+    elif anchor.kind == "recency":
+        label = (f"WINDOW ({_fmt_date(lo)} -> {_fmt_date(hi)}): "
+                 f"most recent activity before {_fmt_date(qd)}")
+    else:
+        label = (f"WINDOW ({_fmt_date(lo)} -> {_fmt_date(hi)}): "
+                 f"elapsed time before {_fmt_date(qd)}")
+    hits: list[dict] = [{"content": label, "kind": "time-window"}]
+    for r in rows:
+        hits.append({"content": _ago_offset_line(r["date"], qd,
+                                                 anchor.unit),
+                     "kind": "ago-offset"})
+        hits.append({k: v for k, v in r.items()
+                     if k not in ("date", "tier")})
+    return hits
+
+
 def synthesize_hits(
     slices: AssemblySlices, *, shape: AssemblyShape,
     candidates: tuple | list = (), halves: tuple | list = (),
     successors_verified: frozenset[str] = frozenset(),
     question_date: str | None = None,
+    anchor=None,
 ) -> list[dict]:
     """Render slices -> annotated hit dicts (the assemble_context input).
 
     Deterministic: subject-major sections in candidate order, rows
     chronological within a section; state/ordering/interval lines computed
     through the SHARED _norm_date helper (never an independent date lib).
+
+    #2652: ``AGO_RELATIVE`` has NO subject sections (the selector is the
+    time window) — it renders through ``_synthesize_ago_hits`` and needs
+    ``anchor``; without it the shape renders nothing (the caller's
+    empty-block guard then falls back to legacy).
     """
+    if shape is AssemblyShape.AGO_RELATIVE:
+        if anchor is None:
+            return []
+        return _synthesize_ago_hits(slices, anchor, question_date)
     cands = list(candidates)
     order = _subject_order(slices, cands)
     # colliding names -> disambiguate every label for those names
@@ -1266,6 +1773,57 @@ def synthesize_hits(
             hits.append(_state_header_hit(
                 sr, label, successors_verified,
                 question_date=question_date))
+    elif shape is AssemblyShape.DURATION_STATE:
+        # #2654 — the state-entry anchor variant. The window's GRAPH end is
+        # the subject's state entry (ObjectRegistered/status-start date, see
+        # _state_entry_date); its other end is the question's as-of date
+        # (``question_date`` — the SAME parameter the walker's as-of window
+        # and render_context's ``Current Date:`` header use), so the span is
+        # reproducible from the rendered context alone.
+        #
+        # TWO lines, each naming the dates it used: the reader (whose TR
+        # fragment computes elapsed time from the context's date
+        # annotations) gets the entry date even when the span cannot be
+        # stated, and can never mistake the as-of span for the question's own
+        # reference-event span ("when I attended the meetup") — that event is
+        # question context, and the subject's dated rows below carry its date
+        # when the graph holds it. No usable entry (undated subject, no
+        # registration stamp) emits NO line: an anchor line without a date
+        # would be a fabricated anchor.
+        #
+        # REJECTED ALTERNATIVE (recorded, never silently skipped): anchored
+        # the far end on the resolved "when <event>" date instead of the
+        # as-of date. Rejected because that clause is a first-person
+        # PREDICATE, not an entity name ("I attended the meetup", "I
+        # rearranged my living room furniture") — resolving it needs an
+        # entity-extraction pass this module does not have, and gating the
+        # shape on it fires on NOTHING (all 5 census rows phrase the event
+        # that way). The as-of end needs no resolution, and it is the same
+        # date render_context stamps on the block (``Current Date:``), so the
+        # reader reconciles both ends from the rendered context alone.
+        qd = _norm_date(question_date)
+        for oid, name in order:
+            entry = _state_entry_date(slices, oid)
+            if entry is None:
+                continue
+            if qd is not None and entry > qd:
+                # as-of BEFORE the state entry: the state had not begun as of
+                # the question's window, so there is no window to anchor —
+                # the same as-of polarity _state_header_hit applies to a
+                # post-as-of supersession (P2-4). The row dates are already
+                # as-of-windowed by the walker; only the ObjectRegistered
+                # stamp can reach here from outside the window.
+                continue
+            label = _display_label(name, oid, name in collide)
+            hits.append({"content": f"STATE ENTRY ({label}): "
+                                    f"{_fmt_date(entry)}",
+                         "kind": "duration-state"})
+            if qd is not None:
+                hits.append({"content": f"{(qd - entry).days} days from "
+                                        f"{label} state entry "
+                                        f"({_fmt_date(entry)}) to the as-of "
+                                        f"date ({_fmt_date(qd)})",
+                             "kind": "duration-state"})
 
     # per-subject sections (subject-major). Rows are re-sorted internally on
     # (date, id) so synthesize_hits output is INDEPENDENT of the input row
@@ -1286,6 +1844,258 @@ def synthesize_hits(
                        if k not in ("date", "tier")}
             hits.append(cleaned)
     return hits
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #2652 — 'ago'-relative / implicit-time resolution: a deterministic
+# anchor+offset resolver (question_date MINUS offset → as-of window) and
+# the window walk that feeds it. Constraint 6 of #2165: NO LLM in this tier.
+#
+# The resolver is the ONLY new pure surface. The walk reuses the R2 date
+# ladder (``_tier_and_date``) and the SAME ``_norm_date`` helper as the
+# as-of boundary, so there is ONE date semantics in the module.
+#
+# WINDOW SEMANTICS (pinned — the resolution is a RANGE, never a fabricated
+# single date: a '2 weeks ago' claim is generated from a date rounded to the
+# week, so pinning one day would be a confidently wrong anchor):
+#   * exact day offset (digits, 'a'/'an' = 1) → [anchor, anchor]
+#   * fuzzy determiner (couple/few/several) → anchor ± 2 days
+#   * week  → anchor ± 3 days   (7-day window, nearest-week rounding)
+#   * month → anchor ± 15 days  (calendar month subtraction, day clamped)
+#   * year  → anchor ± 182 days (calendar year subtraction)
+#   * 'how many <unit> ago'     → NO offset is given (the count IS the
+#     answer): anchor None, window = the recent past
+#     ``[qd - _AGO_LOOKBACK_DAYS, qd]``.
+#   * 'most recently'           → anchor None, window = the recent past
+#     ``[qd - _AGO_LOOKBACK_DAYS, qd]``, rendered MOST-RECENT-FIRST.
+# ══════════════════════════════════════════════════════════════════════════
+
+import calendar as _calendar  # noqa: E402
+from datetime import timedelta as _timedelta  # noqa: E402
+
+#: How far back the offset-less forms look. The count form asks "how long
+#: ago" — an answer measured in days/weeks/months — so a bounded recent
+#: window is the deterministic envelope. 400 days covers the day/week/month
+#: phrasings with a margin; a year-unit answer beyond ~13 months falls
+#: OUTSIDE it DELIBERATELY (the envelope stays bounded, and an empty window
+#: falls back to legacy rather than widening on an unmeasured surface).
+_AGO_LOOKBACK_DAYS = 400
+
+_WORD_COUNT = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "a couple of": 2, "couple of": 2,
+    "a few": 3, "few": 3, "several": 3,
+}
+#: determiners whose count is approximate → the window widens (days only;
+#: week/month/year offsets already carry the unit's own half-span). NOT
+#: 'a'/'an': an article means exactly ONE, so "a day ago" is yesterday —
+#: there is no slack to widen, and the clamp below is what structurally
+#: keeps an as-of window from crossing question_date either way.
+_FUZZY_COUNT = frozenset({"a couple of", "couple of", "a few", "few",
+                          "several"})
+#: unit → half-span of the window that a "<count> <unit> ago" claim covers
+_UNIT_HALFSPAN = {"day": 0, "week": 3, "month": 15, "year": 182}
+_FUZZY_DAY_HALFSPAN = 2
+
+
+def _singular(unit: str) -> str:
+    u = unit.lower().strip()
+    return u[:-1] if u.endswith("s") else u
+
+
+def _sub_months(d: _date, n: int) -> _date:
+    """Calendar month subtraction with a day clamp (2026-03-31 − 1 month =
+    2026-02-28) — never a 30-day approximation."""
+    total = (d.year * 12 + (d.month - 1)) - n
+    y, m = divmod(total, 12)
+    return _date(y, m + 1, min(d.day, _calendar.monthrange(y, m + 1)[1]))
+
+
+def _sub_years(d: _date, n: int) -> _date:
+    """Calendar year subtraction with the 02-29 clamp."""
+    y = d.year - n
+    try:
+        return d.replace(year=y)
+    except ValueError:  # 02-29 → 02-28 in a non-leap year
+        return d.replace(year=y, month=2, day=28)
+
+
+@dataclass(frozen=True)
+class RelativeAnchor:
+    """#2652 resolver output: the offset resolved against question_date.
+
+    ``anchor`` is None for the offset-less forms (count / recency) — the
+    window is then the bounded recent past. ``fuzzy`` records whether the
+    count came from an approximate determiner.
+    """
+    kind: str                   # "ago-count" | "ago-offset" | "recency"
+    unit: str | None            # "day" | "week" | "month" | "year"
+    count: int | None
+    anchor: _date | None
+    window_lo: _date | None
+    window_hi: _date | None
+    fuzzy: bool = False
+    #: render newest-first (the answer locus for 'most recently' is the
+    #: most recent entry, so the surviving budget must hold it first)
+    newest_first: bool = False
+
+
+def _parse_count(raw: str) -> tuple[int, bool] | None:
+    """Determiner/digit → (count, fuzzy). None when unparseable."""
+    key = " ".join(raw.lower().split())
+    if key.isdigit():
+        return int(key), False
+    n = _WORD_COUNT.get(key)
+    if n is None:
+        return None
+    return n, key in _FUZZY_COUNT
+
+
+def resolve_relative_anchor(question: str,
+                            question_date=None) -> RelativeAnchor | None:
+    """Deterministic no-LLM 'ago'-relative resolver (#2652).
+
+    question_date MINUS the parsed offset → an as-of WINDOW (see the module
+    section header for the pinned semantics). Returns None — never raises —
+    when the question carries no promoted relative expression, when
+    question_date is absent/unparseable, or when the count is unparseable;
+    the caller then falls through to the legacy lane.
+    """
+    if not question or not isinstance(question, str):
+        return None
+    qd = _norm_date(question_date)
+    if qd is None:
+        return None
+    # The two entry points must never disagree about which questions the
+    # shape owns. ``_relative_guarded`` is only the TWO-SUBJECT half of the
+    # boundary; ``classify_question`` also refuses the calendar-anchor,
+    # frequency/count, advice and duration-state families. Gate on it, so a
+    # caller that skips the router is never handed an anchor for a question
+    # the shape does not own (a no-op on the production path, which routes
+    # through ``classify_question`` first).
+    if classify_question(question) is not AssemblyShape.AGO_RELATIVE:
+        return None
+    rel = _relative_guarded(question)
+    if rel is None:
+        return None
+    kind, m = rel
+    # the offset-less forms share the bounded recent-past envelope; the
+    # subtraction is inside a guard so the 'never raises' contract is
+    # structural rather than incidental (it currently cannot overflow only
+    # because _norm_date floors question_date above 1970)
+    try:
+        lookback_lo = qd - _timedelta(days=_AGO_LOOKBACK_DAYS)
+    except (OverflowError, ValueError):
+        return None
+    if kind == "recency":
+        return RelativeAnchor(
+            kind=kind, unit=None, count=None, anchor=None,
+            window_lo=lookback_lo, window_hi=qd,
+            newest_first=True)
+    unit = _singular(m.group("unit"))
+    if unit not in _UNIT_HALFSPAN:
+        return None
+    if kind == "ago-count":
+        # no offset given: the COUNT is the answer, so the anchor is
+        # unknown and the window is the bounded recent past. Newest-first
+        # for the same reason as recency: the answer is the elapsed time to
+        # the MOST RECENT occurrence, so the budget must hold that end of
+        # the window. The port already fetches newest-first (its cap binds
+        # on createdAt DESC), and rendering oldest-first would hand the
+        # budget exactly the rows the fetch deprioritised.
+        return RelativeAnchor(
+            kind=kind, unit=unit, count=None, anchor=None,
+            window_lo=lookback_lo, window_hi=qd,
+            newest_first=True)
+    parsed = _parse_count(m.group("count"))
+    if parsed is None:
+        return None
+    count, fuzzy = parsed
+    try:
+        if unit == "day":
+            anchor = qd - _timedelta(days=count)
+        elif unit == "week":
+            anchor = qd - _timedelta(days=7 * count)
+        elif unit == "month":
+            anchor = _sub_months(qd, count)
+        else:
+            anchor = _sub_years(qd, count)
+        half = _UNIT_HALFSPAN[unit]
+        if fuzzy and unit == "day":
+            half = _FUZZY_DAY_HALFSPAN
+        # never extend the as-of window past question_date: the question
+        # asks what was true AS OF that date, so a future row is never an
+        # answer.
+        window_lo = anchor - _timedelta(days=half)
+        window_hi = min(anchor + _timedelta(days=half), qd)
+    except (OverflowError, ValueError):
+        # an UNREPRESENTABLE offset ("99999999999999999999 days ago", or an
+        # anchor/window edge that falls outside date's 1..9999) is an
+        # unparseable one: the contract is None, never a raise. A raise
+        # here would escape _assemble_connected and surface as
+        # AskRetrievalUnavailable, defeating the legacy fall-through this
+        # shape's absent-anchor path exists for. The WINDOW arithmetic is
+        # inside the guard too — an anchor can be representable while
+        # anchor ± half still overflows ("what did I do 2025 years ago?"
+        # from a 2026 date).
+        return None
+    return RelativeAnchor(
+        kind=kind, unit=unit, count=count, anchor=anchor,
+        window_lo=window_lo, window_hi=window_hi, fuzzy=fuzzy)
+
+
+def collect_window_slices(port, anchor: RelativeAnchor, *,
+                          per_window_cap: int = PER_ENTITY_FANOUT_CAP,
+                          ) -> AssemblySlices:
+    """#2652 window walk → typed slices (the AGO_RELATIVE analogue of
+    ``collect_slices``, whose subject selector this shape does not have).
+
+    ONE batched fetch through ``port.window_rows`` (never N+1), each row
+    date-tiered by the SAME R2 ladder (``_tier_and_date``: when → createdAt
+    → startedAt, malformed values falling through) and filtered to the
+    window on the NORMALIZED date — so a row whose stored ``when`` is junk
+    but whose ``createdAt`` is real is placed by its real date, never
+    dropped. The spine is chronological (newest-first for recency). Never
+    raises: a port without the leg degrades to empty slices (the caller's
+    empty-block guard then falls back to legacy).
+    """
+    cap = bounded_fanout(per_window_cap)
+    fetch = getattr(port, "window_rows", None)
+    rows: list[dict] = []
+    if fetch is not None:
+        try:
+            rows = list(fetch(anchor.window_lo, anchor.window_hi, cap) or [])
+        except Exception:  # noqa: BLE001, RUF100 — degrade to legacy
+            rows = []
+    timeline: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        oid = str(row.get("object_id") or "")
+        row = dict(row)
+        tier, d = _tier_and_date(row)
+        row["tier"] = tier
+        row["date"] = d
+        if d is None or d < anchor.window_lo or d > anchor.window_hi:
+            # an UNDATED row cannot satisfy an elapsed-time window (admitting
+            # it would inject an undated line into a date-arithmetic answer)
+            continue
+        rid = row.get("id")
+        if rid is not None:
+            key = (oid, str(rid))
+            if key in seen:
+                continue
+            seen.add(key)
+        timeline.append(row)
+    timeline.sort(key=lambda r: (r.get("date"), r.get("id", "")),
+                  reverse=anchor.newest_first)
+    return AssemblySlices(
+        state_rows=(),
+        timeline_rows=tuple(timeline),
+        evidence_rows=tuple(r for r in timeline
+                            if r.get("kind") == "point"),
+        admission={"rows_requested": cap, "rows_admitted": len(timeline),
+                   "truncated": len(rows) >= cap})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1404,69 +2214,22 @@ def _probe_visible_successors(sdk, slices: AssemblySlices) -> frozenset[str]:
     return frozenset(verified)
 
 
-def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
-                        caps: dict | None = None) -> _AssembledBlock:
-    """The fired content pipeline (env-gated at the CALLER —
-    run_ask_lane() reads
-    TORTOISE_ASK_CONNECTED_ASSEMBLY BEFORE calling; this function assumes
-    the gate already passed and fires when the question routes).
+def _decorate_real_rows(sdk, hits: list[dict]) -> list[dict]:
+    """Decorate the REAL (id-keyed) rows of a synthesized block — the
+    single source used by BOTH fired paths (subject walk + #2652 window
+    walk), so marker/W4 parity is structural rather than re-implemented.
 
-    classify -> resolve (both-halves gate R1) -> walk (typed slices) ->
-    render (synthesize_hits) -> decorate real rows (annotate_ask_hits —
-    synthesized rows have no id and are untouched) -> explicit
-    why.enrich_items when W4 is on (R5/R17; id-less rows skipped by the
-    guard) -> assemble_context(caps). NEVER raises untyped: the
-    run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
+    1. ``annotate_ask_hits`` — additive session_date/speaker join.
+    2. D8 claim-level marker parity (P1-2): the SAME decoration source the
+       FTS path uses attaches superseded_by/supersedes to real POINT rows.
+       Synthesized no-id rows are untouched by both.
+    3. W4 why-layer enrichment when the flag is on (id-less rows skipped by
+       the enrich guard). Fail-open: a raise degrades to the block WITHOUT
+       why keys, never a partial/raw raise.
     """
-    from tortoise.retrieval import (
-        assemble_context,
-        resolve_byte_cap_from_caps,
-        resolve_item_cap_from_caps,
-        resolve_limit_from_caps,
-        resolve_token_cap_from_caps,
-    )
-    if caps is None:
-        from tortoise.retrieval import resolve_ask_retrieval_caps
-        caps = resolve_ask_retrieval_caps()
-
-    shape = classify_question(question)
-    if shape is None:
-        return _AssembledBlock(fired=False, shape=None, subjects=(),
-                               slices={}, admission={}, post_cap_lines=[])
-    terms = extract_subject_terms(question, shape)
-    if not terms:
-        return _AssembledBlock(fired=False, shape=None, subjects=(),
-                               slices={}, admission={}, post_cap_lines=[])
-    resolved = resolve_subjects(docker_resolver_port(sdk), terms, shape=shape)
-    if not resolved.both_halves_ok(shape):
-        # one half failed to resolve (or a both-subject shape lacks one) ->
-        # the R1 gate: fire NOTHING, let legacy fall through
-        return _AssembledBlock(fired=False, shape=None, subjects=(),
-                               slices={}, admission={}, post_cap_lines=[])
-    candidates = list(resolved.candidates)
-    # ALL FOUR caps resolve through the validated dict-seam resolvers — an
-    # absent/non-numeric/out-of-range entry falls back to the default exactly
-    # as the env seam does, rather than reaching assemble_context and raising
-    # (which would fail the whole ask). Sanitising only token/byte left this
-    # the last unvalidated seam of the same class (#4105 review).
-    limit = resolve_limit_from_caps(caps)
-    item_cap = resolve_item_cap_from_caps(caps)
-    slices = collect_slices(
-        docker_walker_port(sdk), candidates, shape=shape,
-        question_date=question_date,
-        per_subject_cap=limit)
-    verified = _probe_visible_successors(sdk, slices)
-    hits = synthesize_hits(slices, shape=shape, candidates=candidates,
-                           halves=terms, successors_verified=verified,
-                           question_date=question_date)
-    # decorate REAL rows (id-keyed additive session/speaker join); the
-    # synthesized no-id state/section lines ride through untouched
     import contextlib as _contextlib
     with _contextlib.suppress(Exception):
         hits = sdk.annotate_ask_hits(hits)
-    # D8 claim-level marker parity (P1-2): the SAME decoration source the
-    # FTS path uses attaches superseded_by/supersedes to real POINT rows
-    # (id-keyed additive; synthesized no-id rows untouched). Fail-open.
     with _contextlib.suppress(Exception):
         from tortoise.search_engine import fetch_point_epistemic_state
         ids = [h.get("id") for h in hits if h.get("id")]
@@ -1484,22 +2247,32 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
                     e[k] = st[k]
             out.append(e)
         hits = out
-    # W4 enrich real rows when the flag is on (id-less rows skipped by the
-    # enrich_items guard). Fail-open degrade: block WITHOUT why keys.
     with _contextlib.suppress(Exception):
         from tortoise.why import enrich_items, w4_enrichment_enabled
         if w4_enrichment_enabled():
             hits = enrich_items(sdk._get_proj(), hits)
-    # #4105 review fix: for a LEGACY caps dict (one that predates
-    # ``context_byte_cap``) the token budget and the byte ceiling come from
-    # ONE validated resolution — the byte ceiling is DERIVED from that dict's
-    # token cap when neither the dict nor ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
-    # pins one (never the 32 KiB literal, which would re-open the silent
-    # no-op on exactly this seam), and the token budget is the SAME sanitised
-    # value. Precedence is explicit dict key → byte env → derived, matching
-    # ``resolve_byte_cap_from_caps``' own contract. An absent key resolves the
-    # same env knob the env seam uses, so a caps dict with no token cap
-    # resolves like ``caps=None``.
+    return hits
+
+
+def _assemble_under_caps(hits: list[dict], *, caps: dict,
+                         question_date: str | None,
+                         ) -> tuple[list, dict]:
+    """Apply the resolved ask caps to a synthesized block (the shared tail of
+    BOTH fired paths — subject walk and #2652 window walk), so the budget
+    semantics cannot drift between them.
+
+    #4105: the token budget and the byte ceiling come from ONE validated
+    resolution (``resolve_*_from_caps``), and the non-ASCII surcharge is
+    opted in — this is the ask lane's connected path, so the bound must hold
+    on CJK/emoji pools too. Returns ``(selected_hits, cap_stats)``.
+    """
+    from tortoise.retrieval import (
+        assemble_context,
+        resolve_byte_cap_from_caps,
+        resolve_item_cap_from_caps,
+        resolve_token_cap_from_caps,
+    )
+    item_cap = resolve_item_cap_from_caps(caps)
     token_cap = resolve_token_cap_from_caps(caps)
     byte_cap = resolve_byte_cap_from_caps(caps)
     cap_stats: dict = {}
@@ -1515,6 +2288,105 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         # #2070) stays pre-#4105 byte-identical.
         nonascii_token_surcharge=True,
         stats=cap_stats)
+    return selected, cap_stats
+
+
+def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
+                        caps: dict | None = None) -> _AssembledBlock:
+    """The fired content pipeline (env-gated at the CALLER —
+    run_ask_lane() reads
+    TORTOISE_ASK_CONNECTED_ASSEMBLY BEFORE calling; this function assumes
+    the gate already passed and fires when the question routes).
+
+    classify -> resolve (both-halves gate R1) -> walk (typed slices) ->
+    render (synthesize_hits) -> decorate real rows (annotate_ask_hits —
+    synthesized rows have no id and are untouched) -> explicit
+    why.enrich_items when W4 is on (R5/R17; id-less rows skipped by the
+    guard) -> assemble_context(caps). NEVER raises untyped: the
+    run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
+    """
+    from tortoise.retrieval import (
+        resolve_limit_from_caps,
+    )
+    if caps is None:
+        from tortoise.retrieval import resolve_ask_retrieval_caps
+        caps = resolve_ask_retrieval_caps()
+
+    shape = classify_question(question)
+    if shape is None:
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    if shape is AssemblyShape.AGO_RELATIVE:
+        # #2652: the selector is the TIME WINDOW (question_date minus the
+        # parsed offset), not an Object — so the R1 both-halves gate is
+        # replaced by the window-resolved gate. An unparseable anchor /
+        # absent question_date / a window with no dated row falls through
+        # to legacy byte-identically (never an empty pool replacement).
+        anchor = resolve_relative_anchor(question, question_date)
+        if anchor is None:
+            return _AssembledBlock(fired=False, shape=None, subjects=(),
+                                   slices={}, admission={},
+                                   post_cap_lines=[])
+        limit = resolve_limit_from_caps(caps)
+        slices = collect_window_slices(docker_walker_port(sdk), anchor,
+                                       per_window_cap=limit)
+        hits = synthesize_hits(slices, shape=shape,
+                               question_date=question_date, anchor=anchor)
+        hits = _decorate_real_rows(sdk, hits)
+        selected, cap_stats = _assemble_under_caps(
+            hits, caps=caps, question_date=question_date)
+        if not selected:
+            return _AssembledBlock(fired=False, shape=None, subjects=(),
+                                   slices={}, admission={},
+                                   post_cap_lines=[])
+        return _AssembledBlock(
+            fired=True, shape=shape.value, subjects=(),
+            slices={"state_rows": [],
+                    "timeline_rows": list(slices.timeline_rows),
+                    "evidence_rows": list(slices.evidence_rows)},
+            admission=dict(slices.admission), post_cap_lines=selected,
+            cap_stats=cap_stats)
+    terms = extract_subject_terms(question, shape)
+    if not terms:
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    resolved = resolve_subjects(docker_resolver_port(sdk), terms, shape=shape)
+    if not resolved.both_halves_ok(shape):
+        # one half failed to resolve (or a both-subject shape lacks one) ->
+        # the R1 gate: fire NOTHING, let legacy fall through
+        return _AssembledBlock(fired=False, shape=None, subjects=(),
+                               slices={}, admission={}, post_cap_lines=[])
+    candidates = list(resolved.candidates)
+    # ALL FOUR caps resolve through the validated dict-seam resolvers — an
+    # absent/non-numeric/out-of-range entry falls back to the default exactly
+    # as the env seam does, rather than reaching assemble_context and raising
+    # (which would fail the whole ask). Sanitising only token/byte left this
+    # the last unvalidated seam of the same class (#4105 review).
+    limit = resolve_limit_from_caps(caps)
+    slices = collect_slices(
+        docker_walker_port(sdk), candidates, shape=shape,
+        question_date=question_date,
+        per_subject_cap=limit)
+    verified = _probe_visible_successors(sdk, slices)
+    hits = synthesize_hits(slices, shape=shape, candidates=candidates,
+                           halves=terms, successors_verified=verified,
+                           question_date=question_date)
+    # decorate REAL rows via the SHARED helper (#2652: the window path uses
+    # the same call, so marker/W4 parity is structural)
+    hits = _decorate_real_rows(sdk, hits)
+    # #4105 review fix: for a LEGACY caps dict (one that predates
+    # ``context_byte_cap``) the token budget and the byte ceiling come from
+    # ONE validated resolution — the byte ceiling is DERIVED from that dict's
+    # token cap when neither the dict nor ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
+    # pins one (never the 32 KiB literal, which would re-open the silent
+    # no-op on exactly this seam), and the token budget is the SAME sanitised
+    # value. Precedence is explicit dict key → byte env → derived, matching
+    # ``resolve_byte_cap_from_caps``' own contract. An absent key resolves the
+    # same env knob the env seam uses, so a caps dict with no token cap
+    # resolves like ``caps=None``. The budget tail is SHARED with the #2652
+    # window path (``_assemble_under_caps``).
+    selected, cap_stats = _assemble_under_caps(
+        hits, caps=caps, question_date=question_date)
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
         # (content-less subjects) — firing would replace legacy evidence

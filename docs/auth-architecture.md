@@ -95,6 +95,11 @@ the token regardless of which subdomain presented it.
   instead of calling GoTrue per request. The BFF's access token never leaves the server: it is
   minted/refreshed in-process by the Function and is never sent to the browser; the cookie
   is revocable immediately (the row is marked `revoked = 1`; nothing deletes it).
+  **The store's lifecycle is its own contract — schema and what is deliberately NOT stored, the
+  migration path with no `wrangler.toml`, the read-replication-off preconditions (the entire
+  design assumes primary-only reads; the code half is guarded by `tests/test_pages_bindings.py`),
+  the CAS predicates, the 503-not-401 failure semantics and the capacity bound — see
+  `docs/engineering/auth/d1-session-store.md` (#3522).**
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain (§1.3) — is **rejected**. It is JS-reachable from any subdomain and forfeits the
   `__Host-` prefix. One session-bearing origin is worth the extra 301. The recorded ruling is the
@@ -469,6 +474,13 @@ tool-selection policy, safety rails) lives in the agent layer, outside the
 key model. The epic kept that line: scope allowlisting stays flat and
 machine-readable; per-graph ACL *users* (C4) are defense-in-depth for graph
 mints, not a policy engine.
+
+The full authorization design — Principal / Scope / Capability, the
+security-bindings-by-resource-ID layer, provenance-derived scoping with
+explicit promotion, and the re-measured audit of everything §6 describes —
+lives in `docs/authorization-architecture.md` (#2082; design + audit, NOT
+frozen). §6 here is the **as-built** credential model; that doc is the
+**target** model plus the decision/deferral record.
 
 ### 6.4 Supabase storage parity
 

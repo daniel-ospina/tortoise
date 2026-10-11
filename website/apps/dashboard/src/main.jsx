@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -25,6 +25,10 @@ import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizard
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
+// #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
+// doors — ONE function so the Setup pill, the re-entry card and the Settings
+// Setup guide cannot drift from each other (or from the card the user read).
+import { resumeStep } from './wizardResume.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
@@ -7294,6 +7298,30 @@ function claimIntentInFlight() {
     (Array.isArray(teams)
       ? ((teams.find((t) => t.org_id === orgIdRef.current) || teams[0] || {}).org_name || '')
       : '') || ''
+  // #2005 (W9): THE resume door. Every re-entry affordance (the header Setup
+  // pill, the re-entry card's Continue-setup CTA, the Settings Setup guide's
+  // Resume setup) opens the wizard through THIS function, so the doors cannot
+  // drift: the entry step is derived once (wizardResume.js) from the per-org
+  // projection the door is rendered from. It replaces the three hardcoded
+  // `setWizardStep(0)` calls — the #2327 defect ("resume setup goes back to
+  // creating a new org again"; #2327 was closed as a duplicate of #2005 with
+  // its evidence transferred).
+  //
+  // The step is computed from the SAME `onboarding` value the Setup-guide card
+  // renders, so the landing always agrees with the N-of-4 the user just read —
+  // no second store, no persisted client step (DM-1 keeps the completed-step
+  // edges canonical).
+  //
+  // `onboardingRefreshedAtDoneRef` is reset on entry so the existing
+  // step-3 landing refresh re-reads the server projection on this visit (its
+  // once-per-landing latch, see the effect near its declaration).
+  function openResumeWizard() {
+    setWizardPaused(false)
+    onboardingRefreshedAtDoneRef.current = false
+    setWizardStep(resumeStep(onboarding, { hasOrg: welcomeHasOrg }))
+    setWelcomeMode(true)
+  }
+
   // #2328/#2912: the connect step renders one of two Codex surfaces — 'codex'
   // (CLI) or 'codexDesktop' (GUI). The surface IS the leaf harness value now,
   // so this is an identity mapping kept as the single read-point for every
@@ -8819,10 +8847,12 @@ function claimIntentInFlight() {
             atomic cluster — the CSS keeps them grouped at every width and
             never lets them scatter onto separate wrapped rows. */}
         <div className="header-cluster">
-        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
-            step 0 (skills). (The nav wraps via flex-wrap on narrow windows
-            since #1874, so Setup is no longer displaced by nav overflow.) */}
-        <button className="ghost small setup-header" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
+        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard.
+            (The nav wraps via flex-wrap on narrow windows since #1874, so
+            Setup is no longer displaced by nav overflow.)
+            #2005 (W9): the reopen DERIVES its entry step (openResumeWizard) —
+            it used to hardcode step 0, which is #2327's restart. */}
+        <button className="ghost small setup-header" onClick={openResumeWizard}>Setup</button>
         {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
             the avatar menu is the personal-account surface (identity block
             + Profile entry + workspace switch + Log out); the trigger shows
@@ -9324,7 +9354,9 @@ function claimIntentInFlight() {
                         : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
+              {/* #2005 (W9): door — the empty-state CTA drives the same state
+                  machine as every other entry point (openResumeWizard). */}
+              <button className="btn-primary" onClick={openResumeWizard}>
                 Continue setup →
               </button>
               {keyTabAffordance({ snippetKey, connectGate }) && (
@@ -9477,7 +9509,10 @@ function claimIntentInFlight() {
           <SettingsTab
             state={onboarding}
             loading={onboardingLoading}
-            onResumeSetup={() => { setWizardStep(0); setWelcomeMode(true) }}
+            // #2005 (W9): door — Settings owns the Setup-guide home; the
+            // resume button opens the wizard at the step THIS card reports as
+            // open (openResumeWizard), so the card and the door agree.
+            onResumeSetup={openResumeWizard}
             github={wizardGithub}
             githubConnected={!!(onboarding && onboarding.github_connected)}
             reposCount={reposLoaded ? reposList.length : null}

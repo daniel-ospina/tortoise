@@ -43,12 +43,14 @@ from tortoise.backup import restore
 from tortoise.consistency import (
     _ENTITY_CREATION,
     _ENTITY_CREATION_LABELS,
+    _NAME_MERGE_LABELS,
     _fold_journal_entities,
     check_consistency,
     recover_from_log,
 )
 from tortoise.log import EventLog
 from tortoise.projection import (
+    _NAME_KEYED_ENTITY_LABELS,
     _REFERENCE_FOLD_ENTITY_LABELS,
     FalkorProjection,
 )
@@ -1795,6 +1797,19 @@ class TestReferenceFoldEntityLabelSetHasOneHome:
         assert frozenset(
             label for label, _status in _ENTITY_CREATION.values()
         ) == _REFERENCE_FOLD_ENTITY_LABELS
+
+    def test_the_name_merge_label_sets_have_one_home(self):
+        """#7936 round-5 P2. The NAME-keyed label set is declared TWICE — once
+        in ``projection._NAME_KEYED_ENTITY_LABELS`` (read by
+        ``journal_epistemic_existence``'s node-table simulation) and once in
+        ``consistency._NAME_MERGE_LABELS`` (read by the reference fold's
+        state-op guard). Both models mirror the SAME graph merge keys
+        (``_upsert_object`` / ``_upsert_subject``), so drift makes one fold
+        speak about a merge key the other does not know — exactly the
+        one-classifier-accepts-what-the-other-refuses class #3585 removes.
+        FAILS IF: a graph fold starts (or stops) MERGEing a label by name and
+        only one declaration is updated."""
+        assert _NAME_KEYED_ENTITY_LABELS == _NAME_MERGE_LABELS
 
 
 # ═══════════════════════════════════════════════════════════════════════

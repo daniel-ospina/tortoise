@@ -41,6 +41,31 @@ def _extract_label_prefix(labels: list[str], prefix: str) -> str | None:
     return None
 
 
+def _webhook_item_state(item: dict, action: str) -> str:
+    """The item state a GitHub webhook payload carries.
+
+    GitHub stamps the item object (``issue``/``pull_request``) with its
+    CURRENT state on EVERY action, and the payload agrees with the action on
+    the transitions that change state (``closed`` ⇒ ``"closed"``,
+    ``reopened`` ⇒ ``"open"``). The payload is therefore authoritative.
+    Deriving the state from the action instead DISCARDS the payload's own
+    ``state``, so a NON-transition action (``labeled``, ``edited``, …) on a
+    closed item reads ``"open"`` where poll/REST/indexer read ``"closed"``:
+    one unchanged item state hashes two ways and the Source version advances —
+    a false ``stale`` on every such webhook. The action is only the fallback
+    for a payload that omits the field.
+
+    Casing and the ``MERGED`` fold are deliberately left to ``github_map``'s
+    normalisers (``_norm_issue`` lower-cases; ``_norm_pr`` folds ``MERGED``
+    onto ``closed`` and derives ``merged`` from ``merged_at``), so the webhook
+    re-introduces no casing or merged divergence of its own.
+    """
+    state = str(item.get("state") or "").strip()
+    if state:
+        return state
+    return "closed" if action == "closed" else "open"
+
+
 class GitHubConnector:
     """Poll GitHub issues/PRs via `gh` CLI + optional webhook server."""
 
@@ -162,7 +187,8 @@ class GitHubConnector:
                 "--repo", self.repo,
                 "--state", self.state,
                 "--limit", str(self.limit),
-                "--json", "number,title,state,createdAt,closedAt,url",
+                "--json", "number,title,state,createdAt,closedAt,url,"
+                          "labels,assignees",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -178,7 +204,8 @@ class GitHubConnector:
                 "--repo", self.repo,
                 "--state", self.state,
                 "--limit", str(self.limit),
-                "--json", "number,title,state,createdAt,closedAt,mergedAt,url",
+                "--json", "number,title,state,createdAt,closedAt,mergedAt,url,"
+                          "labels,assignees",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -430,34 +457,51 @@ class GitHubConnector:
         if event_type == "issues":
             issue = payload.get("issue", {})
             action = payload.get("action", "")
-            if action in ("closed", "reopened"):
-                return github_map.issue_to_event({
-                    "number": issue.get("number"),
-                    "title": issue.get("title", ""),
-                    "state": "closed" if action == "closed" else "open",
-                    "createdAt": issue.get("created_at", ""),
-                    "closedAt": issue.get("closed_at"),
-                    "html_url": issue.get("html_url", ""),
-                }, self.repo,
-                    previous_state="open" if action == "closed" else "closed")
-            return self._issue_to_event({
+            # #8019: the digest's input is the canonical item-state projection,
+            # and the entity/indexer producers supply the real label/assignee
+            # lists, so the webhook must carry them too — otherwise `_norm_issue`
+            # defaults the absent lists to `[]` and one unchanged item hashes
+            # two ways, advancing the version on a producer switch. GitHub
+            # includes both in the webhook `issue` object.
+            content = {
+                "labels": issue.get("labels"),
+                "assignees": issue.get("assignees"),
+            }
+            entry = {
                 "number": issue.get("number"),
                 "title": issue.get("title", ""),
-                "state": "closed" if action == "closed" else "open",
+                # #8019: the payload's own `state` is authoritative (see
+                # `_webhook_item_state`); the action decides only WHICH
+                # transition was minted, never what state the item is in.
+                "state": _webhook_item_state(issue, action),
                 "createdAt": issue.get("created_at", ""),
                 "closedAt": issue.get("closed_at"),
                 "html_url": issue.get("html_url", ""),
-            })
+                **content,
+            }
+            if action in ("closed", "reopened"):
+                return github_map.issue_to_event(
+                    entry, self.repo,
+                    previous_state="open" if action == "closed" else "closed")
+            return self._issue_to_event(entry)
         if event_type == "pull_request":
             pr = payload.get("pull_request", {})
             return self._pr_to_event({
                 "number": pr.get("number"),
                 "title": pr.get("title", ""),
-                "state": "closed" if payload.get("action") == "closed" else "open",
+                # #8019: as for issues, the payload's own `state` is
+                # authoritative. GitHub's PR webhook `state` is only
+                # `open`/`closed` (never `MERGED`); merged-ness rides in
+                # `merged_at`, which `_norm_pr` folds into `state`+`merged`.
+                "state": _webhook_item_state(pr, payload.get("action", "")),
                 "createdAt": pr.get("created_at", ""),
                 "closedAt": pr.get("closed_at"),
                 "mergedAt": pr.get("merged_at"),
                 "html_url": pr.get("html_url", ""),
+                # #8019: carry the PR's label/assignee lists so the webhook's
+                # digest matches the poll/REST producers' for one item state.
+                "labels": pr.get("labels"),
+                "assignees": pr.get("assignees"),
             })
         return None
 
