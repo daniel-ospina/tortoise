@@ -26,6 +26,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.hook_install import count_canonical_markers, read_hook_version
