@@ -2005,6 +2005,23 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
     return (f"{msg} Appeal: {url}" if url else msg, url)
 
 
+# #5109 — never interpolate the credential into printed output.
+#
+# This CLI is run BY AN AGENT in this fleet, so its stdout is a tool result — and
+# a tool result is persisted VERBATIM into the session transcript, the task-session
+# log and audit.jsonl. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
+# credential DISCLOSURE, not a convenience: it is the channel by which the live key
+# reached 326 files under ~/.pi (322 session records, oldest 2026-09-05).
+#
+# The printed instruction still WORKS — it resolves the value at use time from the
+# same 0600 store this CLI wrote — but the bytes on stdout carry no secret.
+_KEY_RESOLUTION_EXPR = (
+    "\"$(python3 -c 'import json,pathlib;"
+    "print(json.loads(pathlib.Path(\"~/.tortoise/credentials.json\")"
+    ".expanduser().read_text())[\"api_key\"])')\""
+)
+
+
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
@@ -2073,19 +2090,19 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
         print(f"── MCP Configuration (HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":
             print("Codex manages its own config — run:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_KEY_RESOLUTION_EXPR}")
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
         elif harness == "claude":
             print("Run this ONE command in your terminal — writes LOCAL scope to ~/.claude.json (private, never committed):")
-            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
+            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer $TORTOISE_API_KEY"')
             print()
             print("File alternative (.mcp.json) — project scope, committable; env expansion, no literal key in the file:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_KEY_RESOLUTION_EXPR}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         else:  # cursor / pi
             print("Add this to your project's MCP config (env expansion — no literal key on disk):")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_KEY_RESOLUTION_EXPR}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         print()
         print(f"→ MCP endpoint: {endpoint}")
@@ -2122,7 +2139,7 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
 
     if harness == "codex":
         print("Codex manages its own config — run:")
-        print(f"  export TORTOISE_API_KEY={api_key}")
+        print(f"  export TORTOISE_API_KEY={_KEY_RESOLUTION_EXPR}")
         cfg = _harness_mcp_config("codex", api_key, api_url)
         print(f"  {cfg['command']}")
         return 0
@@ -2149,7 +2166,7 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     # The written config references $TORTOISE_API_KEY (page #529 env form) —
     # make sure the var is set in the shell that will launch the agent.
     print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)  # noqa: F541
-    print(f"   export TORTOISE_API_KEY={api_key}", file=status)
+    print(f"   export TORTOISE_API_KEY={_KEY_RESOLUTION_EXPR}", file=status)
     target.write_text(_json.dumps(data, indent=2) + "\n")
     os.chmod(target, 0o600)
     print(f"✅ Wrote MCP config to {target}", file=status)
