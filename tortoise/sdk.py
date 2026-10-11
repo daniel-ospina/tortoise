@@ -51,6 +51,7 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
+from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
@@ -648,19 +649,27 @@ class _InMemoryEventLog:
 
 
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
-# the capture response's `props` superset — E3 writes source_turn_id /
-# search_keys / when / quote via the v2 payload point dict / the M2 folded
-# statement dict. On the v2 INGEST SEAM a create must never silently drop a
-# value they carry (the two presence normalizations — a None value, which the
-# graph does not store, and an empty/blank `search_keys` list/tuple, popped by
-# _flatten_search_keys_prop — are mirrored out of the response, so presence
-# still agrees), and a v2 dedup HIT writes NONE of these props (the session
-# CONTAINS edge is still MERGEd), so its response reports the canonical's
-# STORED props — a field the node does not hold is omitted, never echoed from
-# the payload. NOTE: the above is v2-only; the env-gated M2 lane reports these
-# keys from the folded statement dict with no read-back (no in-tree M2 caller
-# emits them today — tracked, with the residual "M2 folded statement dict"
-# claim below, in #3778). Deliberately a
+# the capture response's `props` — E3 writes source_turn_id /
+# search_keys / when / quote (plus E4's span_start/span_end) via the v2
+# payload point dict / the M2 folded statement dict. ONE contract for BOTH
+# capture lanes (#3778): the response reports what the resolved NODE STORES,
+# read back from the graph — never the payload. On the v2 INGEST SEAM a create
+# must never silently drop a value they carry (the two presence normalizations
+# — a None value, which the graph does not store, and an empty/blank
+# `search_keys` list/tuple, popped by _flatten_search_keys_prop — are mirrored
+# out of the response, so presence still agrees; a create may echo those raw
+# values because it handed them to create_point), and a v2 dedup HIT writes
+# NONE of these props (the session CONTAINS edge is still MERGEd), so its
+# response reports the canonical's STORED props via
+# `_read_capture_passthrough_props`. The env-gated M2 lane read-backs for
+# EVERY entry — create and in-capture fold alike (#3778) — because its write is
+# the shared EventAPI → projection path, which persists a SUBSET of the folded
+# dict's fields (a list `search_keys` is dropped by the projection's
+# undeclared-list policy, #2795 D2; there is no `_flatten_search_keys_prop` on
+# that door), so the payload echo could advertise a field the node does not
+# hold — the #2813 symptom — and a fold describes the canonical, not the
+# duplicate. Either way a field the node does not hold is omitted, never
+# echoed from the payload. Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
@@ -7222,8 +7231,11 @@ class TortoiseSDK:
         ``extracted`` is the [{id, kind, text, props}] list the capture
         contract reports (``kind`` reflects the stored pointKind; the M2
         conversation stage writes untyped Points, reported as "statement";
-        ``props`` is the whitelisted _CAPTURE_PASSTHROUGH_PROPS superset so
-        E3 fields pass through); ``meta`` = {"provider", "route",
+        ``props`` is the ``_CAPTURE_PASSTHROUGH_PROPS`` subset the resolved
+        NODE actually holds — read back from ``proj.g`` for every entry
+        (create and fold alike, #3778), never echoed off the folded statement
+        dict, so a field the projection did not persist is omitted and a fold
+        reports the canonical's stored values); ``meta`` = {"provider", "route",
         "failover_used", "errors", "warnings", "mode"} — P1 #1529 makes
         this branch fail closed: extraction-stage exceptions are captured as
         structured errors (never re-raised — turn points have already
@@ -7376,8 +7388,39 @@ class TortoiseSDK:
                         "MERGE (s)-[:CONTAINS]->(p)",
                         params={"sid": session_id, "pid": pid},
                     )
-                props = {k: v for k, v in p.items()
-                         if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #3778: report what the NODE holds — never the folded
+                # statement dict's payload. This lane's write is the shared
+                # EventAPI → projection path (``proj.g``, the projection handed
+                # to the EventAPI above), so the response can be read back
+                # AFTER the write instead of re-deriving write-side presence
+                # rules by hand — the #2949 asymmetry, re-minted here, in the
+                # other direction: the folded dict is built by ``fold`` from
+                # the PointAdded payload, and it carries whatever the extractor
+                # passed as top-level fields (``EventAPI.add_point(**fields)``
+                # → ``p.update(fields)``), which is a superset of what the
+                # projection persists. Two verified divergences the payload
+                # echo produced (probe, #3778):
+                #   - ``search_keys`` as a list/tuple: the capture E3 spelling.
+                #     The projection drops undeclared list props
+                #     (``_POINT_LIST_PROPS`` is empty — #2795 D2), and this
+                #     lane has no ``_flatten_search_keys_prop`` call (that is
+                #     the SDK ``create_point``/``update_point`` write side), so
+                #     the node stores NOTHING while the payload advertised the
+                #     list — the #2813 symptom verbatim;
+                #   - a fold: the duplicate is detached and the entry reports
+                #     the CANONICAL id, whose props were written by an earlier
+                #     occurrence (or an earlier capture) — the payload here is
+                #     the DUPLICATE's, so the response described values the
+                #     node never held.
+                # Same principle as the v2 seam's dedup-hit read-back (#2949):
+                # the reply describes the graph. One read-back for BOTH the
+                # create and the fold case (a create that the projection
+                # transformed or refused is the same lie), through the SAME
+                # F4-derived helper so the field list stays derived from
+                # ``_CAPTURE_PASSTHROUGH_ORDER`` — absent (not stored) fields
+                # are omitted, never fabricated, and a vanished node fails
+                # CLOSED to {} rather than echoing the payload.
+                props = self._read_capture_passthrough_props(proj, pid)
                 extracted.append({
                     "id": pid,
                     "kind": p.get("pointKind") or "statement",
@@ -10951,6 +10994,20 @@ class TortoiseSDK:
         interpolated into the query STRUCTURE (``-[:TYPE]->``) where
         parameterization is impossible; an unvalidated value is a Cypher
         injection primitive. direction is validated to outgoing/incoming.
+
+        #6101: each result carries the matched edge's ``idx`` property.
+        ``create_operator`` writes one IMPL/NAND/hasPart edge per input with
+        ``idx`` 0 on the SOURCE and ``idx >= 1`` on each TARGET (mirrored by
+        ``(input)-[:INPUT {idx}]->(operator)``). Dropping that property made a
+        returned endpoint pair unordered, so an operator read identically to
+        its own reverse. ``idx`` always names the OPERATOR-INPUT end of the
+        matched edge. On an operator's own edge that end is not the operator,
+        so ``direction="outgoing"`` (queried from the operator) reports each
+        input's position and ``direction="incoming"`` (queried from an input)
+        reports the queried point's position. The ``:INPUT`` mirror points the
+        other way, so for it those two SWAP. Edges written without an ``idx``
+        — non-operator edges, and edges predating the property — return
+        ``None``.
         """
         proj = self._get_proj()
         # #329: validate before building any Cypher
@@ -10958,15 +11015,16 @@ class TortoiseSDK:
         validate_rel_type(relationship_type)
         if direction not in ("outgoing", "incoming"):
             raise ValueError(f"Invalid direction: {direction!r}. Use 'outgoing' or 'incoming'.")
-        pat = (f"(n:Point {{id:$id}})-[:{relationship_type}]->(m:Point)"
+        pat = (f"(n:Point {{id:$id}})-[r:{relationship_type}]->(m:Point)"
                if direction == "outgoing" else
-               f"(n:Point {{id:$id}})<-[:{relationship_type}]-(m:Point)")
+               f"(n:Point {{id:$id}})<-[r:{relationship_type}]-(m:Point)")
         rows = proj.g.query(
-            f"MATCH {pat} RETURN m.id, m.content, m.pointKind",
+            f"MATCH {pat} RETURN m.id, m.content, m.pointKind, r.idx",
             params={"id": id},
         ).result_set
         return [
-            {"id": r[0], "content": r[1], "pointKind": r[2]}
+            {"id": r[0], "content": r[1], "pointKind": r[2],
+             "idx": r[3] if len(r) > 3 else None}
             for r in rows
         ]
 
@@ -15497,10 +15555,9 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking). The
-        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
-        are not mirrors, so `affected` can exceed the closure and coverage can
-        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        ranking). The `0 ≤ coverage ≤ 1` bound holds: `_window_closure` now
+        mirrors the pass's seed expansion and liveness predicates (#6597), so
+        ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
         flag: a converged pass clears the affected roots; a failed pass clears
         nothing (W4 retention — non-converged regions reselect via the window
@@ -15578,30 +15635,36 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
-        are transparent bridges — one claim-hop per BFS level; the operator
-        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
-        are bridged; operator-less direct edges via #888 W5 semantics; #780
-        draft exclusion). The window members themselves are reachable at 0
-        claim-hops (an operator-less isolated claim is its own window).
+        Mirrors ``TortoiseEP._affected_claims``'s reach so that
+        ``affected ⊆ closure`` holds and ``coverage <= 1.0`` for EVERY pass
+        (#6597). The window members themselves are reachable at 0 claim-hops
+        (an operator-less isolated claim is its own window); then, exactly as
+        ``_affected_claims`` seeds its own expansion, the plain window
+        members are expanded by ONE claim-hop (direct edges + operator
+        siblings) BEFORE the BFS loop — the closure is no longer one hop short
+        on ≥4-claim chains. Per-hop narrowing is shared: operators are
+        transparent bridges (one claim-hop per BFS level); the operator hop is
+        typed `IMPL|NAND` AND directed (#5566, only operator INPUTS bridged);
+        operator-less direct edges use #888 W5 semantics; every traversal
+        predicate is ``_live_only`` (draft AND terminal exclusion, #2422), so
+        a terminal/outdated bridge can no longer inflate the denominator.
 
-        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
-        guaranteed — do not reinstate that claim. Two gaps remain, both
-        predating #5566 and both filed (as the duplicate pair **#6597** /
-        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
-        seeds by ONE claim-hop before its loop while this starts at 0, so
-        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
-        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
-        rather than ``_live_only``, so a terminal/outdated bridge is counted
-        here but can never be reached by EP. The third asymmetry — an operator
-        window member being dropped from the seed set — was #5566's own
-        regression and is handled below.
+        One deliberate asymmetry: the SEED query keeps the draft-only filter.
+        A terminal/outdated window claim must stay a seed because
+        ``_affected_claims`` still expands its operator siblings through
+        ``_live_neighbors`` (which does not filter the seed); dropping it here
+        would make the closure miss reachable claims and re-introduce
+        ``coverage > 1.0``. The reverse — a terminal window member the pass
+        never affects — can only OVER-count, so the subset invariant holds.
 
-        Two batched queries per hop (operator-bridge + direct-edge), seeded
-        with the whole window — cheap for the scheduler's large windows
-        (2 × max_hops queries total), unlike a per-seed BFS.
+        Batched queries per hop (operator-bridge + direct-edge), seeded with
+        the whole window and one extra seed hop — cheap for the scheduler's
+        large windows (O(max_hops) queries total), unlike a per-seed BFS.
         """
         proj = self._get_proj()
+        # #6597: the SEED keeps the draft-only predicate (see docstring) —
+        # terminal window claims must remain seeds so the operator siblings
+        # `_affected_claims._live_neighbors` reaches stay in the closure.
         live = "(n.status IS NULL OR n.status <> 'draft')"
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -15610,73 +15673,104 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+
+        live_op = _live_only("op.status")
+        live_m = _live_only("m.status")
+        live_a = _live_only("a.status")
+        live_b = _live_only("b.status")
+        live_o = _live_only("o.status")
+        live_c = _live_only("c.status")
+
+        def _hop(frontier: list[str]) -> list[str]:
+            """One batched claim-hop; returns the newly-reached claim ids.
+
+            Query shape mirrors ``_affected_claims``'s per-hop batch:
+            operator-mediated bridges (operator INPUTS only, typed AND
+            directed — #5566; op_type OR is_operator legacy parity, #943)
+            plus operator-less direct IMPL|NAND edges (#888 W5). Every
+            endpoint predicate is ``_live_only`` (#2422) so the closure does
+            not count a terminal bridge EP can never reach.
+            """
+            new_frontier: list[str] = []
+            if not frontier:
+                return new_frontier
+            nbr_rows = proj.g.query(
+                "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m:Point) "
+                "WHERE n.id IN $ids AND m.id <> n.id "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                f"AND {live_op} AND {live_m} "
+                "RETURN DISTINCT n.id, m.id",
+                params={"ids": frontier},
+            ).result_set
+            for _nid, mid in nbr_rows:
+                if mid not in closure:
+                    closure.add(mid)
+                    new_frontier.append(mid)
+            dir_rows = proj.g.query(
+                "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                "WHERE a.id IN $ids AND b.id <> a.id "
+                f"AND {live_a} AND {live_b} "
+                # #3139/#3154: index-independent non-operator predicate
+                # (the `= false` form is emptied by a GRAPH.COPY'd index).
+                "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                "AND a.op_type IS NULL "
+                "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                "AND b.op_type IS NULL "
+                "RETURN DISTINCT a.id, b.id",
+                params={"ids": frontier},
+            ).result_set
+            for _aid, bid in dir_rows:
+                if bid not in closure:
+                    closure.add(bid)
+                    new_frontier.append(bid)
+            return new_frontier
+
+        # #6597: one claim-hop of SEED expansion from the plain window
+        # members, mirroring `_affected_claims`'s plain-seed branch (direct
+        # neighbors + operator siblings). Without it the closure trails the
+        # pass by a claim-hop and `coverage` exceeds 1.0 on ≥4-claim chains.
+        seed_frontier = _hop(list(closure))
         # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
         # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
         # operator reaches that operator's INPUTS, so they are part of what a
         # pass CAN reach and belong in the denominator. Without them the closure
         # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
-        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
-        # denominator bug #6597/#6598 describe, reached through the SEED rather
-        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
-        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), the
+        # denominator bug reached through the SEED rather than the hop. Mirrors
+        # `_affected_claims`'s operator-seed branch, which admits an operator
+        # seed's outgoing `IMPL|NAND` targets.
         op_input_rows = proj.g.query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
             "WHERE o.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND (o.status IS NULL OR o.status <> 'draft') "
-            "AND (c.status IS NULL OR c.status <> 'draft') "
+            f"AND {live_o} AND {live_c} "
             "RETURN DISTINCT c.id",
             params={"ids": list(window)},
         ).result_set
-        closure |= {r[0] for r in op_input_rows}
-        frontier = list(closure)
+        op_inputs: list[str] = []
+        for _r in op_input_rows:
+            if _r[0] not in closure:
+                closure.add(_r[0])
+                op_inputs.append(_r[0])
+        frontier = seed_frontier + op_inputs
+        # #6597: the pass does NOT seed EP from the raw window — `dream.py`
+        # seeds it from `_bfs_select_operators(window, max_hops)`, which
+        # already expands the window by up to `max_hops` graph hops. The pass
+        # therefore reaches the selector's max_hops hops PLUS
+        # `_affected_claims`'s own seed hop and its max_hops BFS — up to
+        # `2*max_hops + 1` claim-hops from the window. A claim-hop is never
+        # shorter than a graph hop, so expanding one seed hop + `2*max_hops`
+        # more is a provable SUPERSET of every claim the selector can hand
+        # EP. This is deliberately conservative for operator window members
+        # (whose seed hop already lands on the operator's inputs); the hard
+        # contract is `affected ⊆ closure` / `coverage <= 1.0`, not a tight
+        # denominator.
+        hop_budget = None if max_hops is None else 2 * max_hops
         hops = 0
-        while frontier and (max_hops is None or hops < max_hops):
+        while frontier and (hop_budget is None or hops < hop_budget):
             hops += 1
-            new_frontier: list[str] = []
-            if frontier:
-                # Operator-mediated bridges (op_type OR is_operator — legacy
-                # operator detection parity, #943). Never hops through drafts.
-                # #5566: typed AND directed, mirroring _affected_claims — only
-                # operator INPUTS are bridged (a structural predicate or the
-                # reverse-only mitigation `IMPL` forms no factor and would
-                # inflate the denominator, permanently under-reporting
-                # coverage).
-                nbr_rows = proj.g.query(
-                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
-                    "-[r2:IMPL|NAND]->(m:Point) "
-                    "WHERE n.id IN $ids AND m.id <> n.id "
-                    "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
-                    "AND (op.status IS NULL OR op.status <> 'draft') "
-                    "AND (m.status IS NULL OR m.status <> 'draft') "
-                    "RETURN DISTINCT n.id, m.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _nid, mid in nbr_rows:
-                    if mid not in closure:
-                        closure.add(mid)
-                        new_frontier.append(mid)
-                # Operator-less direct IMPL|NAND edges between plain Points
-                # (#888 W5). Draft endpoints never propagate (#780).
-                dir_rows = proj.g.query(
-                    "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
-                    "WHERE a.id IN $ids AND b.id <> a.id "
-                    "AND (a.status IS NULL OR a.status <> 'draft') "
-                    "AND (b.status IS NULL OR b.status <> 'draft') "
-                    # #3139/#3154: index-independent non-operator predicate
-                    # (the `= false` form is emptied by a GRAPH.COPY'd index).
-                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
-                    "AND a.op_type IS NULL "
-                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
-                    "AND b.op_type IS NULL "
-                    "RETURN DISTINCT a.id, b.id",
-                    params={"ids": frontier},
-                ).result_set
-                for _aid, bid in dir_rows:
-                    if bid not in closure:
-                        closure.add(bid)
-                        new_frontier.append(bid)
-            frontier = new_frontier
+            frontier = _hop(frontier)
         return closure
 
     def _reachable_claim_count(self) -> int:
@@ -24740,6 +24834,18 @@ class TortoiseSDK:
         counts only Events already fully linked — index_file enumerates skip
         reasons; backfill's skipped bucket had no definition until this pin —
         E2E-8's second run asserts it).
+        Accounting for a legacy Event is EXHAUSTIVE per run (issue #3593) — it
+        lands in exactly ONE category: `created` (this run created the Source;
+        the edge link also counts in `linked`), `skipped` (already fully linked
+        at probe time), or the REPAIR category `linked`-WITHOUT-`created` (the
+        Source already existed — e.g. a concurrent `index_directory` created it
+        inside this run's probe→merge window — so the conditional MERGE MATCHED
+        and only the missing edge was written; the same category the
+        crash-repair path produces). `created + skipped` is therefore NOT the
+        per-unit total: repair work is the third accounting of the same unit,
+        and the honest invariant is
+        `created + skipped + (linked when not created) == 1`
+        (pinned by tests/test_backfill_sources.py::test_e2e8_race_repair_accounting).
         Counters are HONEST in the `db` failure class: a Source-write failure
         NEVER increments `linked` (an edge that was not written is never counted),
         and a re-run REPAIRS the missing edge (`linked`) instead of skipping.
@@ -26415,6 +26521,27 @@ class TortoiseSDK:
         (``from``/``to`` are Python keywords — mapped to from_id/to_id).
 
         Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+
+        ⚠️ **A derivation ``references`` edge minted HERE carries no
+        ``sourceVersion`` anchor, and nothing will add one later.** ``references``
+        is in the allowlist above, and this method writes the edge BARE: it takes
+        no property parameter (neither do the MCP tool ``tortoise_create_edge``
+        nor ``projection.edges._EdgeHandlers.create_edge``), and ``create_source``
+        refuses a caller-supplied ``sourceVersion`` — so the anchor cannot be
+        supplied from the outside. The provenance writers
+        (``link_source_to_entity`` / ``link_source_to_event`` /
+        ``link_source_to_legacy_event``) are the only writers that stamp it, and
+        their stamp is ``ON CREATE``-only, so a bare edge created here also
+        PRE-EMPTS them: the later ``MERGE`` matches the existing edge and the
+        clause never fires. A currency read of such an edge is ``unknown``
+        (honest — never ``current``), and no writer repairs it: the only repair
+        the SDK offers is deleting the edge and re-linking through a provenance
+        writer (raw Cypher could ``SET`` the property, but that is not a repair
+        path this SDK exposes). This is the documented boundary, not an oversight:
+        option 3 of `#5213`; `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6
+        ("a pipeline guarantee, NOT a graph invariant") carries the decision, and
+        `tests/test_references_boundary_5213.py` pins this behaviour — read it
+        before re-routing this method through the anchor.
         """
         proj = self._get_proj()
         created = proj.create_edge(from_id, to_id, relation)  # validates relation

@@ -388,6 +388,90 @@ class TestTraverse:
         with pytest.raises(ValueError, match="Invalid direction"):
             sdk.traverse(p["id"], "IMPL", direction="sideways")
 
+    def test_operator_orientation_is_surfaced(self, sdk):
+        """#6101: an operator and its reverse must not read identically.
+
+        create_operator writes IMPL{idx=0} to the SOURCE and IMPL{idx>=1} to
+        each TARGET, so traverse has to hand the edge's idx back — without it
+        the two endpoints are an unordered pair and a cycle reads as its
+        reverse.
+        """
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        forward = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+        reverse = sdk.create_operator("IMPL", b["id"], [a["id"]], label="produces")
+
+        fwd = {c["id"]: c for c in sdk.traverse(forward["id"], "IMPL", direction="outgoing")}
+        assert fwd[a["id"]]["idx"] == 0  # forward's SOURCE
+        assert fwd[b["id"]]["idx"] == 1  # forward's TARGET
+
+        rev = {c["id"]: c for c in sdk.traverse(reverse["id"], "IMPL", direction="outgoing")}
+        assert rev[b["id"]]["idx"] == 0  # reverse's SOURCE
+        assert rev[a["id"]]["idx"] == 1  # reverse's TARGET
+
+        # The two reads are distinguishable ONLY by idx (same ids, same
+        # content): this is the property the issue reported as lost.
+        assert (sorted(sdk.traverse(forward["id"], "IMPL"), key=lambda c: c["id"])
+                != sorted(sdk.traverse(reverse["id"], "IMPL"), key=lambda c: c["id"]))
+
+    def test_incoming_idx_locates_the_queried_point(self, sdk):
+        """#6101: reading a point's incoming IMPL edge reports where the
+        QUERIED point sits in the operator (0 = source, >= 1 = target)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        src_side = {c["id"]: c for c in sdk.traverse(a["id"], "IMPL", direction="incoming")}
+        tgt_side = {c["id"]: c for c in sdk.traverse(b["id"], "IMPL", direction="incoming")}
+        assert src_side[op["id"]]["idx"] == 0
+        assert tgt_side[op["id"]]["idx"] == 1
+
+    def test_non_operator_edges_carry_no_idx(self, sdk):
+        """#6101: idx is None where the graph holds no operator position — the
+        key is additive, never a fabricated 0."""
+        old = _make_point(sdk, content="old")
+        new = sdk.create_point("statement", "new")
+        sdk.supersede_point(old["id"], new["id"])
+        corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
+        assert corrected and corrected[0]["idx"] is None
+        assert corrected[0]["id"] == old["id"]
+
+    def test_input_mirror_reports_the_queried_position(self, sdk):
+        """#6101: the :INPUT mirror points the other way from the operator's own
+        edge — with direction="outgoing" from an input, the RETURNED operator's
+        idx is the QUERIED node's position, not the operator's (the swap the
+        traverse docstring calls out)."""
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        out_a = sdk.traverse(a["id"], "INPUT", direction="outgoing")
+        assert len(out_a) == 1 and out_a[0]["id"] == op["id"]
+        assert out_a[0]["idx"] == 0  # a is the operator's SOURCE
+
+        in_op = {c["id"]: c for c in sdk.traverse(op["id"], "INPUT", direction="incoming")}
+        assert in_op[a["id"]]["idx"] == 0
+        assert in_op[b["id"]]["idx"] == 1
+
+    def test_navigation_surfaces_the_idx_from_a_real_graph(self, sdk):
+        """#6101: `tortoise_traverse` and `entityProfile` read `r.idx` in
+        `navigation._hop_query` — a REAL-graph test, because the navigation
+        mocks hand back pre-seeded 3-column rows and so cannot fail when the
+        `, r.idx` projection is dropped from the emitted Cypher (the recorded
+        response fields for both surfaces need a producer-side guard)."""
+        from tortoise.navigation import entityProfile, tortoise_traverse
+
+        proj = sdk._get_proj()
+        a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+
+        hops = {n["node"]["id"]: n
+                for n in tortoise_traverse(proj.db, proj.graph_name, op["id"], 2)["nodes"]}
+        assert hops[a["id"]]["idx"] == 0  # a is the operator's SOURCE
+        assert hops[b["id"]]["idx"] == 1  # b is its TARGET
+
+        profile = entityProfile(proj.db, proj.graph_name, op["id"], hops=1)
+        connected = {p["id"]: p for p in profile["connected"]["points"]}
+        assert connected[a["id"]]["_idx"] == 0
+        assert connected[b["id"]]["_idx"] == 1
+
 
 # ── verify_chain ─────────────────────────────────────────────────────
 

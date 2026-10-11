@@ -74,6 +74,10 @@ def _code_digest(code) -> str:
     hash identically (verified: 98 tools collapsed to 62 digests, and a read
     tool shared one with a destructive write tool).  `co_firstlineno` is
     excluded on purpose — a pure code move is not a served change.
+
+    This is the CODE OBJECT only, and it is the `served_from` half of a tool's recorded
+    identity. The other half — the parts of the function that live outside its code object
+    and are still caller-visible — is `_served_attributes`; a tool is frozen by BOTH cells.
     """
     import hashlib
 
@@ -86,6 +90,81 @@ def _code_digest(code) -> str:
         # a memory address and is not stable)
         h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
                  else repr(const).encode())
+    return h.hexdigest()[:16]
+
+
+def _attribute_digest(value) -> bytes:
+    """A STABLE encoding of one function attribute: a default, a kw-default, an annotation.
+
+    `repr` is the fallback, and it is stable for every value on this surface today (all 53
+    defaulted tool functions carry only `None`/`int`/`float`/`str`/`bool`, and every
+    annotation is a string under `from __future__ import annotations`). A code-bearing value
+    must be RECURSED, never repr'd: a lambda default's repr carries a memory address
+    (`<function <lambda> at 0x…>`), so repr'ing it would make the fingerprint differ between
+    two runs over an UNCHANGED tree — the same reason `_code_digest` recurses into `co_consts`
+    rather than repr'ing a nested code object.
+    """
+    if isinstance(value, types.CodeType):
+        return _code_digest(value).encode()
+    if isinstance(value, types.FunctionType):
+        # A callable default has BOTH halves too, and its code object is in NEITHER cell by
+        # itself: a `def` statement's default is evaluated in the DEFINING scope, so a lambda's
+        # code lands in the MODULE's `co_consts` — which nothing here digests. Recursing into
+        # both halves is what makes a changed lambda BODY visible; `_served_attributes` alone
+        # does not (measured: a test that only compared it stayed green on a changed body).
+        return f"{_code_digest(value.__code__)}:{_served_attributes(value)}".encode()
+    return repr(value).encode()
+
+
+def _served_attributes(fn) -> str:
+    """The parts of a SERVED function that live OUTSIDE its code object, which a caller sees.
+
+    `_code_digest` reads the code object — bytecode, names, constants. A function's
+    `__defaults__`, `__kwdefaults__` and `__annotations__` are NOT in it: they hang off the
+    function object, built by the `def` statement's `MAKE_FUNCTION` in the DEFINING module's
+    code object. All three are served behaviour — the MCP `tools/list` JSON schema publishes
+    each of them as a `type` / `default` / `anyOf` — so
+
+        def tortoise_search(q, limit=10): ...
+        def tortoise_search(q, limit=99): ...
+
+    is a different advertised surface under ONE code object. #4192 (verified on this tree: a
+    `types.FunctionType` over a served tool's `__code__` with a tampered `__defaults__`
+    replaced the handler behind `tortoise_search` while the gate stayed at exit 0).
+
+    WHY ITS OWN MANIFEST CELL, NOT FOLDED INTO `served_from` (#4192). The two halves answer two
+    questions — "which implementation" and "which declaration" — so recording them apart
+    keeps a diff readable: an edit inside a handler moves `served_from` alone, a changed
+    default or annotation moves `served_attributes` alone. The load-bearing reason is CI:
+    `tools/surface-guard.py` is PINNED TO THE BASE REF (#5132/#4606), so the run that measures
+    a PR uses the BASE ref's copy of that file and cannot know an input added here. Folding
+    these attributes into `served_from` would re-stamp all 82 rows, and the pinned guard would
+    then red on every one of them — measured on this change: 82 findings and exit 1 while the
+    tree's OWN guard was green, i.e. the required check was unsatisfiable by ANY PR. A new
+    cell leaves `served_from` byte-identical, so the pin keeps enforcing the implementation
+    half while this half is enforced by `check` (this file's derivation against the artifact)
+    at PR time and by the guard on the tree itself.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    # Positional defaults, in order: the order IS served (the schema's parameters follow the
+    # signature), so the tuple is hashed as given.
+    for value in getattr(fn, "__defaults__", None) or ():
+        h.update(b"\x00default\x00")
+        h.update(_attribute_digest(value))
+    # Keyword-only defaults, in DECLARATION order (`__kwdefaults__` is a dict, and the order
+    # the schema publishes is the signature's).
+    for key, value in (getattr(fn, "__kwdefaults__", None) or {}).items():
+        h.update(b"\x00kwdefault\x00")
+        h.update(repr(key).encode())
+        h.update(b"\x1f")
+        h.update(_attribute_digest(value))
+    for key, value in (getattr(fn, "__annotations__", None) or {}).items():
+        h.update(b"\x00annotation\x00")
+        h.update(repr(key).encode())
+        h.update(b"\x1f")
+        h.update(_attribute_digest(value))
     return h.hexdigest()[:16]
 
 
@@ -640,6 +719,10 @@ def _component_fingerprint(fn) -> str | None:
     different implementation means a different file/digest.  `co_firstlineno` is
     deliberately NOT part of the identity: a pure code move is not a served change.
 
+    The half of a served tool that is NOT a code object — its defaults and annotations —
+    is fingerprinted separately, by `_served_attributes` and the row's `served_attributes`
+    cell (#4192); `served_from` keeps this cell's exact meaning.
+
     NOT a security boundary: code running in-process can patch `__code__` too. This catches
     the accident and the casual substitution, which is what the gate is for; see the
     threat-surface note in tools/surface-guard.py.
@@ -736,11 +819,15 @@ def build_doc(commit: str | None = None) -> dict:
     from tortoise import mcp_server as _mcp_server
 
     fingerprints: dict[str, str] = {}
+    declarations: dict[str, str | None] = {}
     for _key, _tool in _mcp_server.mcp._local_provider._components.items():
         if not _key.startswith("tool:"):
             continue
-        fingerprints[getattr(_tool, "name", None) or _key.split(":", 1)[1].split("@")[0]] = (
-            _component_fingerprint(getattr(_tool, "fn", None))
+        _name = getattr(_tool, "name", None) or _key.split(":", 1)[1].split("@")[0]
+        _fn = getattr(_tool, "fn", None)
+        fingerprints[_name] = _component_fingerprint(_fn)
+        declarations[_name] = (
+            _served_attributes(_fn) if getattr(_fn, "__code__", None) is not None else None
         )
     # Derived from the SOURCE, not from `mcp._transforms` at this instant: the runtime list
     # is lifecycle-dependent (`_HTTPToolFilter` is registered only when the HTTP app is
@@ -813,6 +900,13 @@ def build_doc(commit: str | None = None) -> dict:
             {
                 "name": entry.name,
                 "served_from": fingerprints.get(entry.name),
+                # The OTHER half of a tool's served identity (#4192): a parameter default or
+                # an annotation is not in the code object, and the MCP inputSchema publishes
+                # both. Its own cell rather than part of `served_from` — the reason is in
+                # `_served_attributes` (the guard that measures this cell is pinned to the
+                # base ref, so folding it into `served_from` would re-stamp all 82 rows and
+                # no PR could satisfy the pinned guard).
+                "served_attributes": declarations.get(entry.name),
                 "family": applied,
                 "family_rank": family_rank[applied],
                 "served": "http" if entry.name in served_http else "stdio-only",

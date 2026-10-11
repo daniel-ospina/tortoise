@@ -170,6 +170,17 @@ to the others:
    `__module__`/`__qualname__`, which are writable strings a shadow implementation can simply copy
    from the tool it replaces. `co_firstlineno` is deliberately **not** part of the identity: a pure
    code move is not a change to the served implementation.
+4. **Changing a served tool's DECLARATION** — a parameter default or an annotation is not in the
+   code object (it hangs off the function, built by the `def` statement), and the MCP `inputSchema`
+   publishes it, so `served_from` cannot see `def tortoise_search(q, limit=10)` becoming `limit=99`
+   (#4192). Caught by the per-row **`served_attributes`** fingerprint, which hashes `__defaults__`,
+   `__kwdefaults__` and `__annotations__` in order. It is a **separate cell, not part of
+   `served_from`**, for one measured reason: `tools/surface-guard.py` is **pinned to the base ref**
+   in CI (#5132/#4606), so the copy that measures a PR cannot know an input added to it — folding
+   the attributes in re-stamps all 82 rows and the pinned guard then reds on every one of them,
+   making the required check unsatisfiable by any PR. A separate cell leaves `served_from`
+   byte-identical, so the pin keeps enforcing the implementation half, while the declaration half is
+   enforced by `tools/surface_manifest.py check` on a PR and by the guard on the tree itself.
 
 **Scope, stated plainly.** The gate constrains the *registration routes* — what `TOOL_REGISTRY`
 declares, what the server registers, and what the transforms do. It is **not** a security boundary
@@ -186,6 +197,14 @@ approved an expansion: a change that updates the registry **and** the baseline t
 every property and passes both. The approval is carried by the mandated rule above and by Daniel's
 review, never by a machine check. A lane that reads a green gate as "approved" will not seek
 approval — which is the one failure this section exists to prevent.
+
+**The two identity cells are measured by two copies of the tooling on a PR.** `served_from` is
+checked by the guard **pinned to the base ref** (that pin is what stops a PR stubbing the gate in
+its own commit), and `served_attributes` by `check`, which is deliberately **not** pinned because a
+pinned generator can never be fixed (#5192). Both run in the same required job, so a changed default
+or annotation still reds CI; what differs is only which copy measures it — a PR that also rewrote
+`tools/surface_manifest.py` could defeat the second half in the same commit, exactly as it could
+defeat the twelve `check` properties. The implementation half keeps the stronger guarantee.
 
 **To propose an addition**, in the same PR:
 

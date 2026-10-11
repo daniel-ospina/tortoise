@@ -3686,6 +3686,130 @@ def test_extract_session_llm_passthroughs_source_turn_id(sdk, monkeypatch):
                for p in extracted), extracted
 
 
+# #3778: the M2 lane's `props` describes the NODE, never the folded statement
+# dict. The seam's write is the shared EventAPI → projection door, so a field
+# the projection does not persist (`search_keys` as a list — no
+# `_flatten_search_keys_prop` on that door, `_POINT_LIST_PROPS` is empty) and a
+# field that belongs to a FOLDED canonical (written by an earlier occurrence)
+# are both values the node does not hold. Echoing the folded dict advertised
+# them anyway — the #2813 symptom on the M2 lane, in both directions.
+
+class _E3FieldsExtractor:
+    """Emits ONE point with the four E3 fields (plus E4 spans) passed as
+    TOP-LEVEL ``add_point(**fields)`` — the shape `_extract_session_llm`
+    reports straight off the folded statement dict."""
+    version = "m2-e3fields@0"
+
+    def run(self, transcript, source_id, api):
+        from tortoise.api import provenance
+
+        api.add_point(
+            "decision: ship serve first",
+            provenance(source_id, [0, 10], quote="q nested",
+                       extracted_by="probe@0"),
+            quote="q top", when="2026-08-01", source_turn_id="turn-7",
+            search_keys=["alpha", "beta"], span_start=0, span_end=10)
+
+
+def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
+        sdk, monkeypatch, force_sparse_tfidf):
+    """#3778 (create path): the response's ``props`` equals the resolved
+    NODE's stored props — not the folded statement dict's. The probe-verified
+    divergence: the projection persists the scalar E3/E4 fields but DROPS the
+    list-valued ``search_keys`` (the EventAPI door never calls
+    ``_flatten_search_keys_prop``), so a payload echo advertised a field the
+    node does not hold — the #2813 symptom ("the reply looked correct while
+    the node stored nothing") on the M2 lane.
+
+    MUTATION THAT REDS THIS TEST: restore the payload echo
+    (``props = {k: v for k, v in p.items() if k in
+    _CAPTURE_PASSTHROUGH_PROPS}``) — ``search_keys`` reappears in the reply."""
+    monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                        lambda: _E3FieldsExtractor())
+    proj = sdk._get_proj()
+    proj.g.query("MERGE (s:Session {id:'sess_3778'})")
+    extracted, meta = sdk._extract_session_llm(
+        CONV, "sess_3778", "2026-08-20T00:00:00+00:00")
+    assert meta["mode"] == "llm" and len(extracted) == 1, (meta, extracted)
+    entry = extracted[0]
+    quote, when, sk, tid = _read_passthrough_props(sdk, entry["id"])
+    assert (quote, when, tid) == ("q top", "2026-08-01", "turn-7")
+    # The node holds NO search_keys — list props are dropped by the projection.
+    assert sk is None
+    # The reply is exactly what the graph holds, field for field (the same
+    # read-back helper the v2 dedup-hit lane uses — one contract, both lanes).
+    assert entry["props"] == sdk._read_capture_passthrough_props(
+        proj, entry["id"]), entry["props"]
+    assert entry["props"] == {
+        "quote": "q top", "when": "2026-08-01",
+        "source_turn_id": "turn-7", "span_start": 0, "span_end": 10,
+    }, entry["props"]
+    assert "search_keys" not in entry["props"], entry["props"]
+
+
+def test_extract_session_llm_fold_reports_the_canonicals_stored_props(
+        sdk, monkeypatch, force_sparse_tfidf):
+    """#3778 (in-capture fold path): the duplicate is DETACH DELETEd and the
+    entry reports the CANONICAL id, so its ``props`` must be the canonical's
+    STORED values — the duplicate's payload (a different quote/when/
+    source_turn_id) describes a node that no longer exists.
+
+    MUTATION THAT REDS THIS TEST: restore the payload echo — the folded
+    entry advertises ``q second``/``turn-2`` (the detached duplicate's) while
+    its id names the node holding ``q first``/``turn-1``."""
+
+    class _DuplicateExtractor:
+        version = "m2-dup@0"
+
+        def run(self, transcript, source_id, api):
+            api.add_point("decision: ship serve first",
+                          {"source": source_id},
+                          quote="q first", when="2026-08-01",
+                          source_turn_id="turn-1")
+            api.add_point("decision: ship serve first",
+                          {"source": source_id},
+                          quote="q second", when="2026-08-02",
+                          source_turn_id="turn-2")
+
+    monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                        lambda: _DuplicateExtractor())
+    proj = sdk._get_proj()
+    proj.g.query("MERGE (s:Session {id:'sess_3778_fold'})")
+    extracted, meta = sdk._extract_session_llm(
+        CONV, "sess_3778_fold", "2026-08-20T00:00:00+00:00")
+    assert meta["mode"] == "llm" and len(extracted) == 2, (meta, extracted)
+    first, folded = extracted
+    assert first["id"] == folded["id"], extracted
+    assert folded["dedup"] == "content_hash_hit", folded
+    # ONE node, so both entries must describe the SAME stored state.
+    assert folded["props"] == first["props"] == {
+        "quote": "q first", "when": "2026-08-01",
+        "source_turn_id": "turn-1",
+    }, extracted
+    assert folded["props"] == sdk._read_capture_passthrough_props(
+        proj, folded["id"]), folded["props"]
+
+
+def test_extract_session_llm_in_tree_lane_advertises_nothing_unstored(
+        sdk, force_sparse_tfidf):
+    """#3778 parity pin (real in-tree M2 extractor, offline MockModel): the
+    shipped extractor emits ``quote`` NESTED in provenance and never passes
+    search_keys/source_turn_id, so every entry's ``props`` is ``{}`` because
+    the NODES hold none — the read-back must not fabricate presence, and this
+    lane's receipt is unchanged by the #3778 fix."""
+    proj = sdk._get_proj()
+    proj.g.query("MERGE (s:Session {id:'sess_3778_intree'})")
+    extracted, meta = sdk._extract_session_llm(
+        CONV, "sess_3778_intree", "2026-08-20T00:00:00+00:00")
+    assert meta["mode"] == "llm" and extracted, (meta, extracted)
+    for entry in extracted:
+        assert entry["props"] == {}, entry
+        stored = sdk._read_capture_passthrough_props(proj, entry["id"])
+        assert stored == {}, (entry["id"], stored)
+        quote, when, sk, tid = _read_passthrough_props(sdk, entry["id"])
+        assert (quote, when, sk, tid) == (None, None, None, None), entry
+
+
 # ── capture_session fail-closed assembly (both branches) ──────────────────
 
 def test_capture_session_empty_conversation_fails_closed(sdk):

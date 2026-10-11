@@ -2,21 +2,22 @@
 """2146 — drop e2e-live orphan FalkorDB graphs (companion to the Supabase cleanup).
 
 Issue: daniel-ospina/tortoise#2146. Each red-window welcome-mode provisioning
-mint seeded a FalkorDB graph `org_{org_id}` where
+mint seeded a FalkorDB graph `team_{org_id}` (the red-window convention;
+#3543/#3622 later renamed the prefix to `org_`) where
 org_id = sha256(user_id).hexdigest()[:26] (see supabase/functions/
 tenant-provision/index.ts). The Supabase side is cleaned by
 2146_e2e_live_orphan_cleanup.py; THIS script drops the graphs for the teams in
 the manifest.
 
 It resolves FALKORDB_CLOUD_URI → TORTOISE_DB_URI exactly like entrypoint.sh
-lines 89-93, and drops graphs with `select_graph(name).delete()` — the same
+lines 289-293, and drops graphs with `select_graph(name).delete()` — the same
 call the in-repo rollback paths use (tortoise/hosted_api.py — the
 mint-failure compensation calls).
-(NOTE: the production purge helper `_drop_team_graph_impl` in
-hosted_api.py branches on `hasattr(proj.db, "delete_graph")`; the pip
-falkordb cloud client exposes NO delete_graph attribute, so that branch
-log-and-skips on FalkorDB Cloud — tracked separately as daniel-ospina/
-tortoise#2163. THIS script's GRAPH.DELETE works regardless.)
+(NOTE: the production purge helper `_drop_org_graph_impl` in hosted_api.py
+called `hasattr(proj.db, "delete_graph")` until daniel-ospina/tortoise#2163
+was fixed; the probe was false on FalkorDB Cloud, so the sweep silently
+skipped every drop. It now calls `select_graph(target).delete()` on both
+lanes — the same call THIS script uses.)
 
 DRY-RUN by default. GRAPH.DELETE only runs with --execute.
 Deletes are strictly limited to graph names present in the manifest's

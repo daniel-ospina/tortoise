@@ -290,7 +290,7 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
 test('#2755: WizardPromptCard is a plain region with exactly one copy button', () => {
   // #4880: the end marker was `function wizardPromptText(` — that builder now
   // lives in wizardPrompts.js, so the slice ends at the next component instead.
-  const card = slice('function WizardPromptCard({ text, label })',
+  const card = slice('function WizardPromptCard({ text, label, onCopied })',
                      'function WizardBlock(', 'WizardPromptCard')
   assert.doesNotMatch(card, /role="button"/,
     'the container must NOT be an interactive role (nested-interactive WCAG 4.1.2)')
@@ -315,6 +315,64 @@ test('#2755: WizardPromptCard is a plain region with exactly one copy button', (
     'exactly ONE explicit copy control (the primary bottom button)')
   assert.match(card, /className="wizard-prompt-card"/,
     'the card keeps a stable hook for e2e/units')
+  // #2936: the card REPORTS a resolved write (the attribution beacon is driven
+  // from that report) — and reports nothing on the refusal branch, so a copy
+  // the user could not paste is never counted.
+  assert.match(card, /if \(onCopied\) onCopied\(\)/,
+    'the card must report a resolved copy to its surface')
+  const refusalBranch = card.slice(card.indexOf('if (!(await copyText(text)))'),
+                                   card.indexOf('setCopyFailed(false)'))
+  assert.doesNotMatch(refusalBranch, /onCopied/,
+    'a refused write must not report a copy')
+})
+
+// ── #2936: the copy-attribution beacon reached the SHIPPED wizard ──────────
+// The defect: `wizardCopy` (the only site that ever beaconed) is called solely
+// from the `LEGACY_WIZARD_ARCHIVED` render, whose flag is a hard `false` — so
+// every shipped copy button recorded nothing. The live cards report through
+// `onCopied`; these pins are the POPULATION (a 6th card that forgets it, or one
+// that calls `api()` directly and bypasses the server-vocabulary mapping, is a
+// red rather than a silently unattributed copy).
+function wizardPromptCardElements(src) {
+  const out = []
+  let i = src.indexOf('<WizardPromptCard')
+  while (i !== -1) {
+    // Walk to the element's `/>`, skipping brace expressions: the `>` of an
+    // arrow inside `{…}` must not end the element early.
+    let depth = 0
+    let j = i
+    for (; j < src.length; j++) {
+      const c = src[j]
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      else if (c === '>' && depth === 0) break
+    }
+    out.push(src.slice(i, j + 1))
+    i = src.indexOf('<WizardPromptCard', j)
+  }
+  return out
+}
+
+test('#2936: every shipped WizardPromptCard reports its copy through the one beacon emitter', () => {
+  const cards = wizardPromptCardElements(mainJsx)
+  assert.equal(cards.length, 5,
+    `the wizard renders 5 prompt cards — found ${cards.length}; a new card must be given an ` +
+    'onCopied (or it copies without any attribution, which is #2936)')
+  const sections = new Set()
+  for (const card of cards) {
+    const m = card.match(/onCopied=\{\(\) => wizardBeacon\((wizardConnectHarness), '([a-z]+)'\)\}/)
+    assert.ok(m, `every card must report its copy through wizardBeacon: ${card}`)
+    sections.add(m[2])
+  }
+  // The section vocabulary the client actually uses — a new one has to be a
+  // deliberate member of the server's enum (pinned against it in
+  // tests/test_onboarding_endpoints.py::test_cross_surface_harness_vocab_contract).
+  assert.deepEqual([...sections].sort(), ['both', 'config', 'prompt'])
+  // Exactly ONE emitter: a card that PATCHes the endpoint itself would skip the
+  // leaf→analytics mapping. (The archived render's wizardCopy goes through the
+  // same function — pinned by copyFailHonestExec.test.js.)
+  assert.equal((mainJsx.match(/method: 'PATCH', useSession: true,\n\s*body: JSON\.stringify\(\{ harness: attributed, section \}\)/g) || []).length, 1,
+    'the beacon request shape must have exactly one home (wizardBeacon)')
 })
 
 // ── #2912: the two-level harness chooser replaces the flat tab row ──────────

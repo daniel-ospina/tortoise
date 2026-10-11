@@ -40,6 +40,25 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 DASHBOARD_DIST = "dist"
 
+# Where `wrangler pages dev` must keep its local state — PINNED, not left to
+# wrangler's own state-root resolution.
+#
+# That resolution walks UP from the CWD, so a checkout nested under a directory
+# that holds a `.env`/`package.json` resolves its state THERE instead. Measured
+# 2026-10-10 on a worktree at
+# `~/eldato/tortoise/.worktrees/<n>/website/apps/dashboard`: wrangler persisted to
+# `~/eldato/.wrangler/state/v3/d1/`, so `d1_sqlite_files()` found nothing and every
+# D1-reading test died in `_d1_sqlite()` with "no D1 sqlite appeared" — a failure
+# naming neither wrangler nor the path, ~4 minutes into the run. In CI the walk
+# stops at the checkout, so this pin is a no-op there; it exists so the suite
+# reads the same database it asserts on, wherever it is run from.
+DASHBOARD_PERSIST = DASHBOARD_DIR / ".wrangler" / "state"
+
+
+def dashboard_persist_args() -> list[str]:
+    """Args pinning `pages dev` state to the dir `d1_sqlite_files()` globs."""
+    return ["--persist-to", str(DASHBOARD_PERSIST)]
+
 
 def ensure_dashboard_dist() -> None:
     """Build the dashboard so the auth suites serve production's upload root.
