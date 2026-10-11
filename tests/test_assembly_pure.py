@@ -369,6 +369,29 @@ def test_relative_date_lookup_does_not_fire(question):
     assert extract_subject_terms(question) == []
 
 
+@pytest.mark.parametrize("question", [
+    # a bare `ago` the promoted vocabulary does NOT own (hours / a long
+    # time / centuries) co-present with a holiday anchor
+    "What did I buy two hours ago at the Christmas market?",
+    "What did I do last Saturday a long time ago?",
+    "What did I do last weekend centuries ago?",
+])
+def test_relative_date_lookup_rejects_bare_ago_residue(question):
+    """#2655 merge-regression pin (P1): the pre-merge branch rejected these
+    with ``_RE_AGO.search(residual)``. #2652 split that guard into
+    ``_RE_AGO_OTHER`` / the promoted vocabulary / ``_RE_AGO_RESIDUAL``
+    (``\\bago\\b``), and the merge resolution kept only the first two — so
+    the day lookup fired on a question whose real window is the bare ``ago``
+    (``two hours``), answered by an equality-day lookup on the holiday.
+    Both parents returned ``None``; ``_date_lookup_surface`` must reject.
+
+    Mutation: drop ``or _RE_AGO_RESIDUAL.search(residual)`` from
+    ``_date_lookup_surface`` -> all three fire as RELATIVE_DATE.
+    """
+    assert classify_question(question) is not AssemblyShape.RELATIVE_DATE
+    assert classify_question(question) is None
+
+
 @pytest.mark.parametrize("question,expected", [
     # a question whose anchors are the ARGUMENTS of another shape keeps that
     # shape — the anchor branch must never take it over
@@ -1153,6 +1176,38 @@ def test_duration_state_fires(question):
     anchor shape — no longer the blanket duration rejection. It needs a
     state's ENTRY date and the as-of anchor, so it is not an interval (no
     two named events)."""
+    assert classify_question(question) is AssemblyShape.DURATION_STATE
+
+
+@pytest.mark.parametrize("question", [
+    "How long has she been working when the merger on Christmas happened?",
+    "How long has she been working when the merger on Valentine's day "
+    "happened?",
+    "How long had I been living in Berlin when the wall fell on "
+    "Christmas?",
+])
+def test_duration_state_anchor_adjunct_keeps_the_shape(question):
+    """#2655 merge-regression pin (P1): a duration-state question carrying a
+    CALENDAR-ANCHOR adjunct inside its ``when <event>`` clause is still
+    DURATION_STATE. The anchor belongs to the reference event, not to the
+    question's window, so the day-lookup branch must never preempt the shape
+    — main (#2654) routes these to DURATION_STATE. The pinned non-anchor
+    sibling (``... at the clinic when the merger happened?``,
+    ``_DURATION_STATE_FIRE``) is unchanged: this only closes the anchor
+    gap. The anchor branch preempted them to RELATIVE_DATE until
+    ``_RE_DURATION_STATE.match(question)`` was added to
+    ``_date_lookup_surface``'s competing-shape reject.
+
+    The ``has`` auxiliary is the exposed spelling: ``_RE_DURATION`` covers
+    ``had|have|did|was|were`` but not ``has``, so only ``has`` was left for
+    the anchor branch to steal. The ``had`` param pins that the fix does not
+    disturb the already-rejected spelling.
+
+    Mutation: drop ``or _RE_DURATION_STATE.match(question)`` from that reject
+    -> the ``has`` params fire as ``RELATIVE_DATE`` instead of
+    ``DURATION_STATE``.
+    """
+    assert classify_question(question) is AssemblyShape.DURATION_STATE
     assert classify_question(question) is AssemblyShape.DURATION_STATE
 
 

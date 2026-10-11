@@ -659,15 +659,21 @@ def _date_lookup_surface(question: str, residual: str, spans) -> bool:
             or _RE_CURRENT_STILL.match(question)
             or _RE_INTERVAL_SINCE.match(question)
             or _RE_INTERVAL_BETWEEN.match(question)
-            or _RE_INTERVAL_BETWEEN_LEAD.match(question)):
+            or _RE_INTERVAL_BETWEEN_LEAD.match(question)
+            or _RE_DURATION_STATE.match(question)):
         return False
-    # #2652 split the old `_RE_AGO` guard into the CALENDAR-anchor residue
-    # (`_RE_AGO_OTHER`) and the PROMOTED relative vocabulary
-    # (`_relative_match`); a non-anchor relative offset in the residual is
-    # whichever of the two owns it, so both must reject here.
+    # #2652 split the pre-merge `_RE_AGO` guard into THREE parts -- the
+    # CALENDAR-anchor residue (`_RE_AGO_OTHER`), the PROMOTED relative
+    # vocabulary (`_relative_match`), and the un-promoted bare-`ago` residue
+    # (`_RE_AGO_RESIDUAL`) -- so a non-anchor relative offset in the residual
+    # is whichever of the three owns it and ALL must reject here. (The union
+    # is exactly the old guard: `_RE_AGO` ≡ `_RE_AGO_OTHER ∪ \bago\b`, and
+    # `_relative_match` is a subset of the bare-`ago` residue -- it is named
+    # explicitly because it is the vocabulary the promoted forms route on.)
     return not (
         _RE_AGO_OTHER.search(residual)
         or _relative_match(residual) is not None
+        or _RE_AGO_RESIDUAL.search(residual)
         or _RE_DURATION.search(residual)
         or _RE_FREQUENCY.search(residual) or _RE_RECENCY.search(residual)
         or _RE_ADVICE.search(residual) or _RE_OR_CHAIN.search(residual))
