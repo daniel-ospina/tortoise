@@ -757,12 +757,19 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     "session_capture_receipt_codex": ("session_capture_receipt_codex", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_cursor": ("session_capture_receipt_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_pi": ("session_capture_receipt_pi", "2026-08-25T00:00:00Z"),
+    # #2120: OpenClaw joins the harness vocabulary, so its two derived
+    # server-owned keys need their PATCH field here — the coverage guard in
+    # test_capture_verification_keys_not_client_writable is what reds when a
+    # harness is added without them (no PATCH field ⇒ the 403 refusal for that
+    # key can never be asserted, and the key would be silently untested).
+    "session_capture_receipt_openclaw": ("session_capture_receipt_openclaw", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude": ("session_capture_last_error_claude", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-desktop": ("session_capture_last_error_claude_desktop", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-web": ("session_capture_last_error_claude_web", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_codex": ("session_capture_last_error_codex", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_cursor": ("session_capture_last_error_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_pi": ("session_capture_last_error_pi", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_openclaw": ("session_capture_last_error_openclaw", "2026-08-25T00:00:00Z"),
     "install_probe_claude": ("install_probe_claude", "2026-08-25T00:00:00Z"),
     "install_probe_pi": ("install_probe_pi", "2026-08-25T00:00:00Z"),
     # #1893: persisted source-scope keys (short repo names / {repo, branch}).

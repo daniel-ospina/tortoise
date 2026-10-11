@@ -25621,12 +25621,20 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_receipt_codex: str | None = None
     session_capture_receipt_cursor: str | None = None
     session_capture_receipt_pi: str | None = None
+    # #2120: the OpenClaw seam. A harness added to _SESSION_HARNESS_VALUES mints
+    # a receipt/last-error member of _CAPTURE_SERVER_OWNED_KEYS, so the field
+    # must exist here too: without it the key is server-owned but carries no
+    # PATCH field, and its 403 refusal cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes — it caught exactly this omission when openclaw was added).
+    session_capture_receipt_openclaw: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
     session_capture_last_error_codex: str | None = None
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
+    session_capture_last_error_openclaw: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so

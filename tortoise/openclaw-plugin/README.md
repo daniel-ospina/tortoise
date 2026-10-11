@@ -58,8 +58,8 @@ done
 ```
 
 Ingestion inherits the shared import posture rather than re-implementing it: the
-explicit-consent gate, the 2xx-only receipt, the idempotency key, and the
-#4714 spool-and-retry for a retryable refusal (402/408/425/429/5xx) all apply
+explicit-consent gate, the 2xx-only receipt, the idempotency key, and the #4714
+spool-and-retry for a retryable refusal (402/408/425/429/5xx) all apply
 unchanged. Like every sibling harness (`codex`, `pi`, `cursor`) ingestion is an
 explicit step: OpenClaw's hook cannot POST on the user's behalf without a key in
 the plugin config, so the plugin files nothing to the network itself.

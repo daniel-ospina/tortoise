@@ -4,7 +4,7 @@ Epic #2080 end-state delivery (issues #2119–#2126). For the
 **Claude-hooks-compatible family** each seam is a thin registration over the
 ONE shared per-turn reflex:
 
-```
+```text
 UserPromptSubmit hook  →  volunteer-turn.sh <harness>  →  `tortoise volunteer`
                                                           (hosted POST /v1/context
                                                            or local SDK volunteer_context
