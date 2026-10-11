@@ -6,6 +6,7 @@ unknown old-settings dirname protection, client-count via CLIENT LIST.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -950,6 +951,205 @@ def test_client_list_fails_closed_on_garbage_reply(monkeypatch, tmp_path):
         t.join(timeout=5)
         srv.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── #3629: a recorded socket path over the AF_UNIX `sun_path` cap ────
+#
+# macOS/BSD cap `sun_path` at 104 bytes INCLUDING the NUL terminator, so the
+# kernel refuses a LONGER path at BIND — but a path the reaper RECORDS can
+# still exceed it. `_classify_dir` stores `os.path.realpath(socket_path)`, and
+# the `/var` -> `/private/var` expansion adds 8 bytes to a server that bound
+# successfully under `/var` (measured on this box with a `tortoise_test_*`
+# dir: bind 98 bytes OK, recorded realpath 106). The reaper's own
+# `STALE_QUARANTINE_SUFFIX` move-in-place produces the same shape.
+#
+# The workaround (probe through a SHORT tempdir symlink to the same inode)
+# existed in `_probe_socket_any` only. The CLIENT LIST probe connected on the
+# raw recorded path, so connect() failed ENAMETOOLONG for a LIVE, IDLE
+# server: `_active_client_count` returned None ("client state unknown"), and
+# `reap()` skipped it — "CLIENT LIST probe failed, skipping (fail closed)".
+# An orphan over the cap could therefore NEVER be reaped, however dead its
+# owner records were. The #4238 selection-binding gate (`_socket_served_by`)
+# and `phase1_probe` connected on the same path and failed closed with it.
+#
+# These tests build the shape PORTABLY: bind at a SHORT name, then RENAME the
+# directory to a long one (a rename has no `sun_path` limit, so this works on
+# Linux too — the cap only applies to the socket APIs).
+
+_LONG_PATH_PAD = 90
+
+
+@contextlib.contextmanager
+def _server_over_the_sun_path_cap():
+    """Yield `(socket_path, socket_dir)` for a live CLIENT LIST responder
+    whose recorded path is LONGER than the AF_UNIX `sun_path` cap.
+
+    Asserts the setup rather than trusting it: a path within the cap would
+    make every test below pass vacuously.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_test_",
+                              dir=tempfile.gettempdir())
+    short_sock = os.path.join(tmpdir, "redis.socket")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(short_sock)
+    srv.listen(8)
+    stop = threading.Event()
+
+    def _serve():
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(4096)
+                conn.sendall(b"$0\r\n\r\n")  # empty bulk = zero clients
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    long_dir = tmpdir + "." + "q" * _LONG_PATH_PAD
+    try:
+        os.rename(tmpdir, long_dir)
+        sock_path = os.path.join(long_dir, "redis.socket")
+        assert len(sock_path.encode()) > 104, (
+            "test setup: the path must exceed the AF_UNIX sun_path cap, or "
+            f"these tests prove nothing (got {len(sock_path.encode())} bytes)")
+        yield sock_path, long_dir
+    finally:
+        stop.set()
+        srv.close()
+        shutil.rmtree(long_dir, ignore_errors=True)
+
+
+def test_connectable_path_short_path_is_yielded_unchanged(monkeypatch):
+    """#3629: a path within the cap needs NO symlink — the common case must
+    not pay a syscall, and must not depend on a writable tempdir."""
+    from tortoise.embedded_reaper import _connectable_path
+
+    def _boom(*_a, **_k):  # pragma: no cover - only fires on a regression
+        raise AssertionError("a short path must not be shortened")
+
+    monkeypatch.setattr(os, "symlink", _boom)
+    with _connectable_path("/tmp/short-3629.sock") as probe_path:
+        assert probe_path == os.path.abspath("/tmp/short-3629.sock")
+
+
+def test_client_list_probes_a_path_over_the_sun_path_cap():
+    """#3629: a live server whose recorded path exceeds the cap is reachable
+    through the short symlink — `_client_list` reports its VERIFIED zero
+    clients (`[]`), not `None` ("unknown", fail closed)."""
+    from tortoise.embedded_reaper import _active_client_count, _client_list
+    with _server_over_the_sun_path_cap() as (sock_path, _dir):
+        assert _client_list(sock_path) == [], (
+            "a live over-cap server must probe, not read as unknown (#3629)")
+        assert _active_client_count(sock_path) == 0
+
+
+def test_socket_served_by_reads_the_peer_through_the_short_symlink():
+    """#3629: the #4238 selection-binding gate is the LAST refusal before a
+    kill — it must verify through the short symlink too, not read
+    ENAMETOOLONG as 'not served by this pid'."""
+    from tortoise.embedded_reaper import _socket_served_by
+    with _server_over_the_sun_path_cap() as (sock_path, _dir):
+        assert _socket_served_by(sock_path, os.getpid()) is True
+        assert _socket_served_by(sock_path, os.getpid() + 1) is False
+
+
+def test_client_list_fails_closed_when_a_long_path_cannot_be_shortened(
+        monkeypatch):
+    """#3629 fail-closed preservation: when the short symlink cannot be made,
+    the probe stays `None`/`undetermined` — never a bogus zero-client verdict
+    that would license a kill."""
+    from tortoise.embedded_reaper import (
+        _client_list,
+        _connectable_path,
+        _probe_socket_any,
+        _socket_served_by,
+    )
+
+    def _no_symlink(*_a, **_k):
+        raise OSError("symlink unavailable")
+
+    monkeypatch.setattr(os, "symlink", _no_symlink)
+    with _server_over_the_sun_path_cap() as (sock_path, _dir):
+        with _connectable_path(sock_path) as probe_path:
+            assert probe_path is None
+        assert _client_list(sock_path) is None
+        assert _probe_socket_any(sock_path) == "undetermined"
+        assert _socket_served_by(sock_path, os.getpid()) is False
+
+
+def test_phase1_probe_reads_a_live_path_over_the_cap(monkeypatch):
+    """#3629: `phase1_probe` must keep a live over-cap server as a
+    `candidate` — an 'undetermined' verdict would strand it (a live server
+    must never stay stale_socket/undetermined, #1383)."""
+    from tortoise.embedded_reaper import phase1_probe
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: False)
+    # `_derive_real_pid` resolves the server from the LIVE process's argv/
+    # lsof — a property of the real redis-server population, not of the
+    # connect path under test here, so it is stubbed.
+    monkeypatch.setattr("tortoise.embedded_reaper._derive_real_pid",
+                        lambda _sp, _pid: os.getpid())
+    with _server_over_the_sun_path_cap() as (sock_path, _dir):
+        rec = phase1_probe({"classification": "stale_socket", "pid": None,
+                            "socket_path": sock_path})
+    assert rec["classification"] == "candidate"
+
+
+def test_reap_reaps_an_orphan_whose_socket_path_exceeds_the_cap(monkeypatch):
+    """#3629 END-TO-END REGRESSION: an orphan-CONFIRMED live candidate whose
+    recorded socket path is over the AF_UNIX cap must be KILLED.
+
+    Pre-fix it was skipped by the CLIENT LIST gate ('probe failed, skipping
+    (fail closed)'), so this class accumulated forever on the --only-safe
+    cron even though every owner record proved the server abandoned.
+    """
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    with _server_over_the_sun_path_cap() as (sock_path, sock_dir):
+        rec = {
+            "classification": "candidate", "dir_missing": False,
+            "socket_path": sock_path, "dbdir": sock_dir,
+            "pid": os.getpid(), "path_based": False, "client_count": 0,
+            # `_live` (a pass-1 record) also exercises the #4238
+            # selection-binding gate, which connects on the same path.
+            "_live": True, "settings": {}, "_orphan_confirmed": True,
+        }
+        acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()], (
+        "an orphan-confirmed server over the sun_path cap was not reaped "
+        "(#3629)")
+    assert acted
+
+
+def test_orphan_confirmation_needs_no_probe_when_all_owners_are_dead(
+        monkeypatch, tmp_path):
+    """#3629, pinned: `_mark_orphan_confirmation` must confirm a live
+    EPHEMERAL server whose `client_count is None` (the probe failed — here,
+    for the over-cap path) when every owner record is provably dead. The
+    #3599 per-server signal is checked BEFORE the CLIENT LIST fail-closed
+    branch, so the issue's second bullet is already satisfied; this test is
+    the guard that keeps it that way."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)
+    rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+    rec["path_based"] = False
+    rec["client_count"] = None  # the probe could not answer
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "an all-owners-dead server must be confirmed even when the CLIENT "
+        "LIST probe could not answer (#3629/#3599)")
 
 
 # ── _parse_min_uptime ───────────────────────────────────────────────

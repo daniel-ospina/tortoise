@@ -9,10 +9,13 @@ These tests are pure string parsing — no embedded DB, no Docker.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "skip-guard.py"
 
@@ -53,8 +56,37 @@ PASS_LINES = [
 ]
 
 
-def run_guard(log_text: str) -> subprocess.CompletedProcess:
-    """Run skip-guard.py against a temp log; returns the completed process."""
+# The lane the guard's verdict is a property of (#3592). The guard's matcher is
+# LANE-AWARE: `TORTOISE_TEST_EXPECT_URI` = "1" (a lane that PROMISED a live
+# URI), "" (a lane that DECLARED itself URI-less), or ABSENT (undeclared — the
+# pre-#3592 reason-prefix calibration). `EXPECT_URI` is the workflow's own
+# $GITHUB_ENV spelling of the SAME gate, which is what the runner's sibling
+# skip-guard step can see (workflow files cannot be pushed from an agent
+# session — no `workflow` token scope — so there is no prefixed job-env export).
+# Every subprocess helper below therefore PINS the lane instead of inheriting
+# the ambient one: the test process runs in CI's docker lane ("1") as often as
+# in a URI-less tier-2 leg, and CI's job env carries `EXPECT_URI` in BOTH
+# shapes, so leaving it in place would make an "undeclared" test declared.
+LANE_ENV_VARS = ("TORTOISE_TEST_EXPECT_URI", "EXPECT_URI")
+DOCKER_LANE = "1"       # promised the URI
+URI_LESS_LANE = ""      # declared itself URI-less
+UNDECLARED_LANE = None  # no declaration at all
+
+
+def _lane_env(lane: str | None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in LANE_ENV_VARS}
+    if lane is not None:
+        env[LANE_ENV_VARS[0]] = lane
+    return env
+
+
+def run_guard(log_text: str, lane: str | None = UNDECLARED_LANE
+              ) -> subprocess.CompletedProcess:
+    """Run skip-guard.py against a temp log; returns the completed process.
+
+    ``lane`` pins the lane declaration the guard reads (default: undeclared —
+    the historical semantics every pre-#3592 assertion was written against).
+    """
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
         f.write(log_text)
@@ -62,7 +94,7 @@ def run_guard(log_text: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             [sys.executable, str(TOOL), log_path],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=_lane_env(lane),
         )
     finally:
         Path(log_path).unlink(missing_ok=True)
@@ -72,18 +104,21 @@ def run_guard_with_manifest(
     log_path: str,
     manifest: str | None = None,
     junit: str | None = None,
+    lane: str | None = UNDECLARED_LANE,
 ) -> int:
     """Run skip-guard.py with the coverage-manifest args; returns the rc.
 
     Only the provided flags are passed; `manifest=None`/`junit=None` omit
-    the corresponding --manifest/--junitxml arg.
+    the corresponding --manifest/--junitxml arg. ``lane`` pins the lane
+    declaration (default: undeclared — see run_guard).
     """
     argv = [sys.executable, str(TOOL), log_path]
     if manifest is not None:
         argv += ["--manifest", manifest]
     if junit is not None:
         argv += ["--junitxml", junit]
-    return subprocess.run(argv, capture_output=True, text=True).returncode
+    return subprocess.run(argv, capture_output=True, text=True,
+                          env=_lane_env(lane)).returncode
 
 
 # REAL junitxml format (pytest 9.1.1, -o junit_family=xunit1 — verified).
@@ -541,6 +576,24 @@ def _load_skip_guard_module():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _undeclared_lane_for_in_process_matchers(monkeypatch):
+    """Direct (in-process) matcher calls run in an UNDECLARED lane by default.
+
+    #3592: the matchers read the lane declaration(s) when no lane is passed, so
+    the CI docker lane ("1") and a URI-less tier-2 leg ("") would give these
+    unit assertions DIFFERENT verdicts on identical input. Every in-process
+    assertion written before #3592 was calibrated against the historical
+    reason-prefix behaviour, which is exactly the undeclared arm — so removing
+    every declaration here pins each one to the semantics it was written for.
+    Lane-aware behaviour is asserted explicitly, by passing ``lane=`` (unit) or
+    the helper's ``lane`` argument (subprocess).
+    """
+    for name in LANE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    return None
+
+
 def test_legacy_matcher_exempts_same_families():
     # Cycle-7 P2-4: half a keeps the LEGACY line matcher at P2 (and P1 CI
     # uses it) — it must exempt the SAME reason families as the junitxml
@@ -602,8 +655,10 @@ def test_inconclusive_reason_needs_no_exemption(tmp_path):
     """
     module = _load_skip_guard_module()
     assert not any(
-        "INCONCLUSIVE" in prefix for prefix in module._EXEMPT_REASON_PREFIXES
-    ), "the INCONCLUSIVE family must not be added to the guard's exemption list"
+        "INCONCLUSIVE" in prefix
+        for prefix in (*module._ALWAYS_EXEMPT_PREFIXES,
+                       module._URI_GATE_REASON_PREFIX)
+    ), "the INCONCLUSIVE family must not be added to the guard's exemption lists"
     # Build the reason from the REAL emitter, so this pin is coupled to what
     # `tests/_verdict.py` actually emits — not to a hand-copied replica that
     # would keep passing if `inconclusive()` began emitting a matched token.
@@ -621,6 +676,7 @@ def test_inconclusive_reason_needs_no_exemption(tmp_path):
     reason = str(excinfo.value)
     assert reason.startswith(_verdict.INCONCLUSIVE_PREFIX)
     assert module.is_falkor_reason_violation(reason) is False
+    assert module.is_falkor_reason_violation(reason, lane=True) is False
     assert module.is_embedder_reason_violation(reason) is False
     assert module.find_violations(
         f"SKIPPED [1] tests/test_fork_safety_3845.py:430: {reason}\n"
@@ -1062,9 +1118,9 @@ def _live_uri_skip_reasons() -> list[tuple[str, int, str]]:
 def test_live_uri_skipif_reasons_are_guard_exempt():
     """#3339: no test may invent its own live-URI skip reason.
 
-    tools/skip-guard.py exempts the intentional availability-class families by
-    REASON PREFIX, so that a live test legitimately skipping in the tier-2
-    URI-less lane does not red `test (a)`.
+    On a URI-less lane the guard exempts the intentional availability-class
+    families, so that a live test legitimately skipping in the tier-2 URI-less
+    lane does not red `test (a)`.
 
     An ad-hoc skip reason mentioning TORTOISE_DB_URI ("live FalkorDB required
     (TORTOISE_DB_URI unset)" — the #3339 offender) skips in that lane AND trips
@@ -1074,7 +1130,8 @@ def test_live_uri_skipif_reasons_are_guard_exempt():
     The exemption predicate is the guard's OWN `is_falkor_reason_violation()`,
     not a re-derived startswith (code review P3): re-deriving it drops the
     embedded-prefix family and the case-insensitive handling, so the static and
-    runtime checks could disagree.
+    runtime checks could disagree. The lane is passed EXPLICITLY (#3592) so the
+    scan asserts the URI-less arm rather than whatever lane this test runs in.
     """
     scanned = _live_uri_skip_reasons()
     # Anti-vacuity: the exempt live-URI gates really do exist in this tree, so a
@@ -1084,30 +1141,285 @@ def test_live_uri_skipif_reasons_are_guard_exempt():
     offenders = [
         (path, line, reason)
         for path, line, reason in scanned
-        if _skip_guard.is_falkor_reason_violation(reason)
+        if _skip_guard.is_falkor_reason_violation(reason, lane=False)
     ]
     assert offenders == [], (
-        "live-URI skip reason(s) the #1436 guard treats as a REAL violation — "
-        "they red `test (a)` in the tier-2 URI-less lane. Use "
+        "live-URI skip reason(s) the #1436 guard treats as a REAL violation in a "
+        "URI-less lane — they red `test (a)` there. Use "
         "tests/_live_utils._skip_unless_live_uri() / LIVE_URI_SKIP_REASON:\n"
         + "\n".join(f"  {p}:{ln}: {r!r}" for p, ln, r in offenders)
     )
 
 
+def test_the_same_live_uri_reasons_ARE_violations_in_a_lane_that_promised_the_uri():
+    """#3592, the OTHER direction of the scan above — the fix's own test pair.
+
+    The whole point of #3592 is that a URI-gate reason is a CLAIM ABOUT THE
+    LANE: on a lane that promised a live TORTOISE_DB_URI, every one of these
+    reasons means the promise was broken (the module's live-availability probe
+    regressed and it is hiding behind the exempt wording — measured: 18 tests in
+    tests/test_session_reinjection.py skipping with an exempted reason while
+    `python-ci-gate` stayed green).
+
+    So the SAME scanned set must be a violation in the docker lane. Asserted on
+    the guard's own matcher, per reason, so a future edit that re-broadens the
+    exemption list reds HERE and not silently in production.
+
+    Scope is the URI-gate family the guard RECOGNISES (the prefix) — the scan
+    also finds URI-presence gates whose reasons do not start with it (the eight
+    `is_db_uri` module gates, `live engine test: set TORTOISE_DB_URI (docker
+    lane)`): those cannot fire on a lane that provides the URI at all, and the
+    module-level ones are the collection-skip class's job. Asserting them as
+    violations would pin a verdict the guard deliberately does not produce.
+    """
+    scanned = _live_uri_skip_reasons()
+    claims = [
+        (path, line, reason)
+        for path, line, reason in scanned
+        if reason.startswith(_skip_guard._URI_GATE_REASON_PREFIX)
+    ]
+    # Anti-vacuity: the URI-gate family really is present in this tree.
+    assert claims, (
+        f"walker found no reason starting with "
+        f"{_skip_guard._URI_GATE_REASON_PREFIX!r} — scan is broken")
+
+    not_violations = [
+        (path, line, reason)
+        for path, line, reason in claims
+        if not _skip_guard.is_falkor_reason_violation(reason, lane=True)
+    ]
+    assert not_violations == [], (
+        "live-URI skip reason(s) the guard still EXEMPTS on a lane that promised "
+        "TORTOISE_DB_URI — a probe regression behind this prefix is exactly the "
+        "#3592 false PASS (a green CI that ran nothing):\n"
+        + "\n".join(f"  {p}:{ln}: {r!r}" for p, ln, r in not_violations)
+    )
+
+
 def test_shared_live_uri_reason_stays_in_the_exempt_family():
-    """#3339: the shared reason string is the ONE owner — pin it to the exemption.
+    """#3339 + #3592: the shared reason string is the ONE owner — pin BOTH arms.
 
     Every other live-URI skip routes through it, so if this string were ever
-    edited outside the guard's exempt prefixes the whole tree would start
-    redding `test (a)` at once. Cheapest possible place to catch that.
+    edited outside the guard's URI-gate family the tree would change meaning at
+    once. Cheapest possible place to catch that — and since #3592 the pin is
+    two-sided: exempt where the lane is URI-less (the visible gate), a violation
+    where the lane PROMISED the URI (the contradiction).
     """
     from tests._live_utils import LIVE_URI_SKIP_REASON
 
-    assert not _skip_guard.is_falkor_reason_violation(LIVE_URI_SKIP_REASON), (
-        f"tests/_live_utils.LIVE_URI_SKIP_REASON is no longer exempt: "
-        f"{LIVE_URI_SKIP_REASON!r} — tools/skip-guard.py exempts by prefix "
-        f"{_skip_guard._EXEMPT_REASON_PREFIXES}; update BOTH together"
+    assert not _skip_guard.is_falkor_reason_violation(
+        LIVE_URI_SKIP_REASON, lane=False), (
+        f"tests/_live_utils.LIVE_URI_SKIP_REASON is no longer exempt on a "
+        f"URI-less lane: {LIVE_URI_SKIP_REASON!r} — tools/skip-guard.py keys "
+        f"the family on {_skip_guard._URI_GATE_REASON_PREFIX!r}; update BOTH "
+        f"together"
     )
+    assert _skip_guard.is_falkor_reason_violation(
+        LIVE_URI_SKIP_REASON, lane=True), (
+        "a lane that promised TORTOISE_DB_URI must NOT tolerate a skip whose "
+        "reason says the URI is required (#3592) — that is the false PASS the "
+        "guard exists to prevent"
+    )
+
+
+# ── #3592: the lane declaration decides the verdict ───────────────────────
+# The guard matched a reason STRING against a flat prefix list, so it had no
+# notion of what the lane was entitled to expect. That is simultaneously too
+# broad (a live-availability probe regression borrowing the URI-gate wording
+# skipped invisibly in the docker lane — the false PASS this issue is about)
+# and too narrow ("Live FalkorDB (Docker) not available" was unexemptable on a
+# URI-less tier-2 leg, where a probe race redded it: measured run 37350021093,
+# shard f — pytest rc=0, guard RED on 9 skips). TORTOISE_TEST_EXPECT_URI is the
+# lane's own declaration, and these tests pin all three arms plus the exact
+# #3592 regression, through BOTH the unit predicate and the tool's CLI.
+
+# tests/test_session_reinjection.py:96-99 (verbatim). Its gate is a live
+# AVAILABILITY PROBE (`_falkordb_available()` → TortoiseSDK + `RETURN 1`), not
+# the URI's presence, yet its reason borrows the URI-gate family — the borrow
+# #3592 is about. 18 tests ride on it; the two hermetic run-level gates were
+# moved out of the module by #2517/PR #3577 and are not exposed.
+_3592_PROBE_REASON = (
+    "requires TORTOISE_DB_URI (live FalkorDB FTS lane — embedded legs skip)")
+
+
+def test_3592_docker_lane_reds_a_skip_that_contradicts_its_own_uri_promise(
+        tmp_path):
+    """THE regression, end-to-end through the CLI the CI guard step runs.
+
+    The lane PROMISED TORTOISE_DB_URI (declared "1"); the module's probe
+    regressed, so all 18 of its tests skipped with an exempted-looking reason.
+    The junitxml still carries every nodeid, so the COVERAGE half of the guard
+    is satisfied — only the lane-aware reason matcher can notice, and before
+    #3592 it could not.
+    """
+    junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+        "redislite unavailable", _3592_PROBE_REASON))
+    rc = run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=DOCKER_LANE)
+    assert rc == 1, "a probe regression behind the URI-gate wording stayed green"
+    # …and the same run in the lanes that did NOT promise it stays green.
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=URI_LESS_LANE) == 0
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=UNDECLARED_LANE) == 0
+
+
+def test_3592_docker_lane_reds_it_on_the_legacy_line_matcher_too(tmp_path):
+    # Half-a/P1 CI sees only the legacy line matcher, so the lane awareness must
+    # not be a junitxml-only property (the two matchers may never disagree).
+    log = ("SKIPPED [18] tests/test_session_reinjection.py:98: "
+           f"{_3592_PROBE_REASON}\n")
+    proc = run_guard(log, lane=DOCKER_LANE)
+    assert proc.returncode == 1
+    assert "tests/test_session_reinjection.py:98" in proc.stdout
+    assert run_guard(log, lane=URI_LESS_LANE).returncode == 0
+
+
+def test_declared_uri_less_lane_exempts_the_availability_regression_family(
+        tmp_path):
+    """The comment's other direction: a URI-less lane's skips are its SHAPE.
+
+    Measured false red (run 37350021093, shard f): the tier-2 leg declares
+    itself URI-less (EXPECT_URI=""), the ephemeral docker probe did not answer
+    during module import on that shard, and the guard reddened a green pytest on
+    9 of the "Live FalkorDB (Docker) not available" skips. The lane never
+    promised the service, so it must not be held to it — while an UNDECLARED
+    lane keeps the pre-#3592 verdict (that is what keeps the carve-out job, whose
+    selection is embedded-by-design, red on a mis-assigned live file).
+    """
+    junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+        "redislite unavailable", "Live FalkorDB (Docker) not available"))
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=URI_LESS_LANE) == 0
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=UNDECLARED_LANE) == 1
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=DOCKER_LANE) == 1
+
+
+def test_design_class_families_are_exempt_in_every_lane(tmp_path):
+    # 6399 / embedded / redislite are classes NO lane can satisfy (no 6399
+    # service exists in CI; the carve-out files run embedded BY DESIGN under a
+    # URI job) — they must not become lane-conditional by accident.
+    for reason in ("Live FalkorDB server on localhost:6399 not available",
+                   "embedded FalkorDBLite unavailable",
+                   "redislite falkordb unavailable"):
+        junit = _write(tmp_path, f"junit-{reason[:8]}.xml",
+                       JUNIT_SKIPPED.replace("redislite unavailable", reason))
+        for lane in (DOCKER_LANE, URI_LESS_LANE, UNDECLARED_LANE):
+            assert run_guard_with_manifest(
+                str(tmp_path / "pytest.log"), junit=junit, lane=lane) == 0, \
+                f"{reason!r} reddened in lane {lane!r}"
+
+
+def test_uri_gate_module_collection_skip_is_a_vacancy_on_a_promised_uri_lane(
+        tmp_path):
+    """The same lane question, one layer up: a WHOLE-MODULE collection abort.
+
+    tests/test_capabilities_endpoint.py + the onboarding W3-W8 suites gate on
+    `is_db_uri(TORTOISE_DB_URI)` and abort at collection by design on a URI-less
+    leg. On a lane that DECLARED the URI, that abort means the module is a
+    vacancy (#4221's class) — the exemption must not survive the contradiction.
+    """
+    junit = _write(tmp_path, "junit.xml", _collection_skip_junit(
+        "docker-lane capabilities tests require TORTOISE_DB_URI "
+        "(tier-2 embedded legs skip)",
+        file="tests/test_capabilities_endpoint.py",
+        module="tests.test_capabilities_endpoint"))
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=DOCKER_LANE) == 1
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=URI_LESS_LANE) == 0
+    assert run_guard_with_manifest(
+        str(tmp_path / "pytest.log"), junit=junit, lane=UNDECLARED_LANE) == 0
+
+
+class TestLaneAwareReasonMatcher:
+    """Unit-level: the three arms, and the reason families they apply to."""
+
+    def test_uri_gate_family_is_decided_by_the_lane(self):
+        m = _load_skip_guard_module()
+        gate = "requires TORTOISE_DB_URI (live FalkorDB sidecar)"
+        assert m.is_falkor_reason_violation(gate, lane=True) is True
+        assert m.is_falkor_reason_violation(gate, lane=False) is False
+        assert m.is_falkor_reason_violation(gate, lane=None) is False
+
+    def test_availability_regression_family_is_decided_by_the_lane(self):
+        m = _load_skip_guard_module()
+        regression = "Live FalkorDB (Docker) not available"
+        assert m.is_falkor_reason_violation(regression, lane=True) is True
+        assert m.is_falkor_reason_violation(regression, lane=None) is True
+        assert m.is_falkor_reason_violation(regression, lane=False) is False
+
+    def test_a_non_falkordb_reason_is_never_a_falkordb_violation(self):
+        # The lane must not widen the class: the URI arm is keyed on the
+        # PREFIX, so a reason that merely MENTIONS the URI (the eight
+        # `is_db_uri` module gates, `live engine test: set TORTOISE_DB_URI
+        # (docker lane)`) is not a violation in any lane. Those are
+        # URI-PRESENCE gates, which a lane that promised the URI satisfies by
+        # construction; the module-level ones are the collection class's job.
+        m = _load_skip_guard_module()
+        for reason in ("docker-lane capabilities tests require "
+                       "TORTOISE_DB_URI (tier-2 embedded legs skip)",
+                       "live engine test: set TORTOISE_DB_URI (docker lane)"):
+            for lane in (True, False, None):
+                assert m.is_falkor_reason_violation(reason, lane=lane) is False
+
+    def test_uri_gate_claim_is_a_violation_even_without_the_falkordb_word(self):
+        # tests/test_time_aware_run_2520.py:151,167 are PROBE-gated
+        # (`_falkordb_available()`) but their reason names only the URI. The
+        # FalkorDB filter used to run first, so a docker-lane probe regression
+        # there was invisible to every class — the #3592 hole one spelling over.
+        m = _load_skip_guard_module()
+        reason = "requires TORTOISE_DB_URI (the run ingests)"
+        assert m.is_falkor_reason_violation(reason, lane=True) is True
+        assert m.is_falkor_reason_violation(reason, lane=False) is False
+        assert m.is_falkor_reason_violation(reason) is False
+
+    def test_embedder_class_is_lane_independent(self):
+        # #2573 is a different mechanism (the dense leg degrades to keyword-only)
+        # and every lane that runs the matchers provisions the model, so #3592
+        # deliberately does not touch it.
+        m = _load_skip_guard_module()
+        reason = "bge-small-en-v1.5 not cached locally"
+        for _lane in (True, False, None):
+            assert m.is_embedder_reason_violation(reason) is True
+
+    def test_lane_declaration_is_read_from_the_environment(self, monkeypatch):
+        m = _load_skip_guard_module()
+        # The helpers pin exactly the names the tool reads — a new alias must be
+        # pinned here too, or an ambient value would silently declare a lane.
+        assert (m._LANE_EXPECT_URI_ENV, *m._LANE_EXPECT_URI_ENV_ALIASES) == \
+            LANE_ENV_VARS
+        for name in LANE_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        assert m.lane_expects_live_uri() is None
+        monkeypatch.setenv(LANE_ENV_VARS[0], "1")
+        assert m.lane_expects_live_uri() is True
+        for declared_uri_less in ("", "  ", "0", "true"):
+            monkeypatch.setenv(LANE_ENV_VARS[0], declared_uri_less)
+            assert m.lane_expects_live_uri() is False, declared_uri_less
+        # …and the matcher consults it when no lane is passed.
+        monkeypatch.setenv(LANE_ENV_VARS[0], "1")
+        assert m.is_falkor_reason_violation(_3592_PROBE_REASON) is True
+        monkeypatch.setenv(LANE_ENV_VARS[0], "")
+        assert m.is_falkor_reason_violation(_3592_PROBE_REASON) is False
+
+    def test_the_workflow_alias_is_read_when_the_prefixed_name_is_absent(
+            self, monkeypatch):
+        # The runner's skip-guard step is a SIBLING of the pytest step and sees
+        # only the job env, where the same gate's value is spelled EXPECT_URI.
+        m = _load_skip_guard_module()
+        monkeypatch.delenv(LANE_ENV_VARS[0], raising=False)
+        monkeypatch.setenv(m._LANE_EXPECT_URI_ENV_ALIASES[0], "1")
+        assert m.lane_expects_live_uri() is True
+        monkeypatch.setenv(m._LANE_EXPECT_URI_ENV_ALIASES[0], "")
+        assert m.lane_expects_live_uri() is False
+        # The prefixed name WINS when both are present (it is the canonical
+        # signal the pytest step/track-b/post-merge carry).
+        monkeypatch.setenv(m._LANE_EXPECT_URI_ENV_ALIASES[0], "1")
+        monkeypatch.setenv(LANE_ENV_VARS[0], "")
+        assert m.lane_expects_live_uri() is False
 
 
 # ── #2573: the embedder-unavailable reason class ──────────────────────────
@@ -1266,13 +1578,21 @@ class TestGuardFailsOnEmbedderUnavailableSkip:
     def test_existing_falkordb_exemptions_still_live(self):
         # The embedder class must not have disturbed the FalkorDB reason-family
         # exemptions (regression guard, mirroring
-        # test_legacy_matcher_exempts_same_families).
-        for exempt in ("requires TORTOISE_DB_URI (live FalkorDB sidecar)",
-                       "Live FalkorDB server on localhost:6399 not available",
+        # test_legacy_matcher_exempts_same_families). #3592: the three
+        # DESIGN-CLASS families are exempt in EVERY lane; the URI-gate family is
+        # NOT one of them any more — it is lane-conditional, so it is asserted
+        # separately below.
+        for exempt in ("Live FalkorDB server on localhost:6399 not available",
                        "embedded FalkorDBLite unavailable",
                        "redislite falkordb unavailable"):
-            assert not _skip_guard.is_falkor_reason_violation(exempt), exempt
-            assert not _skip_guard.is_embedder_reason_violation(exempt), exempt
+            for lane in (True, False, None):
+                assert not _skip_guard.is_falkor_reason_violation(
+                    exempt, lane=lane), f"{exempt!r} in lane {lane}"
+                assert not _skip_guard.is_embedder_reason_violation(exempt), exempt
+        uri_gate = "requires TORTOISE_DB_URI (live FalkorDB sidecar)"
+        assert not _skip_guard.is_falkor_reason_violation(uri_gate, lane=False)
+        assert not _skip_guard.is_falkor_reason_violation(uri_gate)
+        assert _skip_guard.is_falkor_reason_violation(uri_gate, lane=True)
         assert _skip_guard.find_violations(
             "SKIPPED [1] tests/test_falkordb_compat.py:367: "
             "Live FalkorDB server on localhost:6399 not available\n") == []

@@ -1546,6 +1546,82 @@ def _process_global_isolation(monkeypatch):
     reset_process_globals()
 
 
+# ── #3695 / #5477: the provider gate is CODE, not a property of the box ───
+# A test whose premise is "no provider is configured" is asserting on the
+# ambient shell unless it scrubs EVERY key the routing resolvers honour — and
+# that set GROWS with the product. #1549 added VENICE_API_KEY to the extractor
+# rotation; every test that scrubbed a hand-written DEEPSEEK/OPENROUTER list
+# silently became machine-dependent, so six provider-gate tests went RED on a
+# venice-configured box (#3695; four of them re-reported as #5477) while
+# staying green in CI. The repair is deliberately NOT a longer literal: the
+# set is DERIVED from the two registries the code actually reads, so a fourth
+# provider cannot re-open the hole.
+#
+#   * ``model_adapters._PROVIDER_KEY_ENV`` — the v2 extractor/ask resolvers
+#     (this is the half that carries VENICE_API_KEY)
+#   * ``hosted_api._llm_provider_keys()`` — the hosted/SDK lane gate, itself
+#     derived from ``ingest._PROVIDERS`` + ``analyze._LLM_PROVIDERS``
+#
+# Both are production derivations, so this helper holds no key literal of its
+# own. (Cross-check: the eval-keys wrapper pin,
+# ``test_run_with_eval_keys.py::test_managed_keys_match_the_code_registries``,
+# pins the same union to tools/run-with-eval-keys.sh.)
+def provider_key_envs() -> tuple[str, ...]:
+    """Every provider API-key env var the routing/tests gates consult."""
+    from tortoise.hosted_api import _llm_provider_keys
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    return tuple(sorted(
+        set(_llm_provider_keys()) | set(_PROVIDER_KEY_ENV.values())))
+
+
+#: Selector/override env vars that re-shape the resolved route WITHOUT a key:
+#: an explicit provider names one key and fails closed on a mismatch, a mode
+#: pins a lane, an extract-model override pins the model. An ambient value in
+#: any of them is the same hazard as an ambient key (a lane shell that exports
+#: TORTOISE_SESSION_EXTRACTOR would redden these tests for a reason that is not
+#: the diff).
+_PROVIDER_ROUTING_ENVS: tuple[str, ...] = (
+    "TORTOISE_EXTRACTOR_PROVIDER",
+    "TORTOISE_ASK_PROVIDER",
+    "TORTOISE_EXTRACT_MODEL",
+    "TORTOISE_SESSION_EXTRACTOR",
+    "TORTOISE_SESSION_LLM_MOCK",
+)
+
+
+@pytest.fixture()
+def no_provider_keys(monkeypatch):
+    """#3695: make a test's provider environment hermetic and explicit.
+
+    Request it wherever the test's premise is "no provider is configured" —
+    the gate, the resolved route AND the pool shape all read this env, so a
+    test without it is asserting on the machine. A test that then needs a key
+    (or a routing override) sets it AFTER requesting this fixture; pytest
+    runs fixtures before the test body, so that is the correct order.
+
+    ⚠️ ORDERING IS LOAD-BEARING against SIBLING FIXTURES that set this same
+    env. pytest instantiates same-scope fixtures in signature order, so the
+    scrub lands where the request sits relative to them:
+
+    * ``(monkeypatch, client, no_provider_keys)`` — the hosted ``client``
+      fixtures set TORTOISE_SESSION_LLM_MOCK=1 during setup; placing this
+      fixture AFTER them scrubs that seam too, which is what a genuinely
+      keyless test wants.
+    * ``(monkeypatch, no_provider_keys, client)`` — the seam survives, for a
+      test that needs a KEYED leg before it goes keyless in the body (e.g.
+      ``test_metering_counts_a_grown_keyless_recapture``).
+
+    Match the position to the premise rather than assuming either.
+
+    Returns the scrubbed names so a pin can prove the set is complete.
+    """
+    scrubbed = (*provider_key_envs(), *_PROVIDER_ROUTING_ENVS)
+    for var in scrubbed:
+        monkeypatch.delenv(var, raising=False)
+    return scrubbed
+
+
 # ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
 # The pack-dir env leg (epic #1891 WF-2) makes the whole suite
 # ambient-env-sensitive: a developer/CI/operator machine that exports

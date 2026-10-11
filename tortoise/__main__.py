@@ -382,6 +382,67 @@ def _cmd_mine_conversation(args):
     return 0
 
 
+def _cmd_mine_docs(args):
+    """Mine a markdown docs corpus → DRAFT statement Points (#1724).
+
+    Composes the Slice-1 corpus index pass (Sources + D10-folded Document
+    Sources) with the deterministic claim pass on top; every point is written
+    ``status=draft`` and is promoted later with the existing
+    ``TortoiseSDK.promote_point`` — this verb never promotes.
+
+    ``--db`` is OPTIONAL-mandatory in the honest sense: without it the run could
+    not read the Sources it must attach claims to, so it is required. That is
+    the deliberate difference from ``mine-conversation``, whose log-only mode is
+    meaningful.
+    """
+    import sys
+
+    from tortoise.docs_miner import mine_docs
+
+    try:
+        from tortoise.config import is_db_uri, resolve_db_path
+        from tortoise.sdk import TortoiseSDK
+    except Exception as e:  # noqa: BLE001, RUF100
+        print(f"Error: Tortoise SDK unavailable ({e})", file=sys.stderr)
+        return 1
+
+    target = args.db if is_db_uri(args.db) else resolve_db_path(args.db)
+    sdk = TortoiseSDK(target)
+    try:
+        report = mine_docs(
+            sdk, args.dir,
+            corpus_name=args.corpus_name,
+            repo=args.repo,
+            about_entities=args.about or [],
+            max_claims_per_doc=args.max_claims_per_doc,
+            index_first=not args.no_index,
+        )
+    finally:
+        sdk.close()
+
+    print("=" * 60)
+    print(f"Docs mining — {report['directory']}")
+    print("=" * 60)
+    print(f"repo entity:        {report.get('repo') or '(none — no --repo and no org/repo shape)'}")
+    print(f"documents:          {report['documents']}")
+    print(f"indexed (Sources):  {report['indexed']}")
+    print(f"skipped unchanged:  {report['skipped_unchanged']}")
+    print(f"skipped non-doc:    {report['skipped_not_document']}")
+    print(f"docs mined:         {report['mined']}")
+    print(f"claims extracted:   {report['claims']}")
+    print(f"NEW Points:         {report['new_points']}")
+    print(f"existing Points:    {report['existing_points']}")
+    print(f"Objects wired:      {report['objects_wired']}")
+    if report["errors"]:
+        print(f"errors:             {len(report['errors'])} (see below)")
+        for err in report["errors"][:20]:
+            print(f"  - {err.get('file')}: {err.get('error')}")
+    print()
+    print("All Points are status=draft — review and promote with "
+          "TortoiseSDK.promote_point(point_id).")
+    return 0 if not report["errors"] else 1
+
+
 def _cmd_reconcile(args):
     """Replay unprojected EventRecorded entries from JSONL into FalkorDB."""
     import json, sys  # noqa: E401, F401, I001
@@ -3019,6 +3080,12 @@ def _install_read_hook_impl(args) -> int:
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
+    - Every write is ATOMIC (#3918): a fresh same-dir temp + ``os.replace``
+      via ``hook_install._atomic_write_text``, so a crash, ENOSPC or a kill
+      mid-write cannot truncate the user's own ``settings.json`` (or the
+      cline marker), and a hard-linked or leaf-symlinked target is REPLACED
+      rather than written through. An existing file keeps its mode; the
+      cline marker is set 0o755 as part of the swap.
     - A ``--dir`` root that is not a real directory (a regular file, a
       symlink to a file, or a dangling symlink) is REFUSED before either
       half writes, so a bad root fails the whole install with NOTHING on
@@ -3026,8 +3093,22 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
+
+    # #3918: every WRITE below goes through the shipped atomic helper — a
+    # fresh same-dir temp + ``os.replace`` (the pattern #3866 gave
+    # ``capture_install._atomic_bytes`` / ``hook_install._atomic_write_text``),
+    # never ``Path.write_text``.  ``write_text`` truncates the destination in
+    # place, so a crash, an ENOSPC or a kill between the truncate and the last
+    # byte leaves the user's own ``settings.json`` — the file holding THEIR
+    # hook registrations and unrelated settings — truncated or invalid JSON.
+    # ``rename(2)`` also replaces the directory ENTRY, which closes the
+    # leaf-symlink and hardlink write-through cases in the same move (#2385
+    # item 2).  The residual there — an intermediate directory component
+    # swapped for a symlink between the guard above and the write — is NOT
+    # closed by this and needs a per-component ``openat`` walk.
+    from tortoise.hook_install import _atomic_write_text
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
         print("Installable harness seams (per-turn volunteering-memory hook "
@@ -3267,8 +3348,10 @@ def _install_read_hook_impl(args) -> int:
             print(f"Removed {target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(marker_content)
-            _os.chmod(target, 0o755)
+            # #3918: the exec bit goes on the TEMP, with the content — a
+            # post-replace ``chmod`` would let a crash ship a 0600 hook that
+            # exists but can never run.
+            _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
@@ -3413,7 +3496,9 @@ def _install_read_hook_impl(args) -> int:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
             else:
-                target.write_text(out)
+                # #3918: atomic write-back — a failed uninstall must leave the
+                # registration intact, never a truncated document.
+                _atomic_write_text(target, out)
                 print(f"Uninstalled volunteer-turn.sh from {target}")
             return 0
         # Merge: append our registration under UserPromptSubmit only when no
@@ -3492,7 +3577,7 @@ def _install_read_hook_impl(args) -> int:
             # above does not catch — and the CLI died with a traceback.  The
             # sibling read above (``existing = target.read_text(...)``) has
             # always passed utf-8.
-            target.write_text(out)
+            _atomic_write_text(target, out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
         return 0
@@ -3502,7 +3587,8 @@ def _install_read_hook_impl(args) -> int:
         print(_json.dumps(_document(registration), indent=2))
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_json.dumps(_document(registration), indent=2) + "\n")
+        _atomic_write_text(
+            target, _json.dumps(_document(registration), indent=2) + "\n")
         print(f"Installed {target}")
         if harness == "codex":
             print("Project-local codex hooks require one-time trust: run "
@@ -8289,10 +8375,16 @@ def _cmd_doctor(args):
             from falkordb import FalkorDB
 
             from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            from tortoise.projection import _bounded_server_socket_kwargs
+            # #3065: the probe's bounds come from the product's ONE resolution
+            # point too. The 5s/10s literals it carried were the pre-#2850
+            # hardcoded values, so `doctor` ignored an operator's
+            # TORTOISE_DB_SOCKET_TIMEOUT — a diagnostic run against a wedged
+            # server parked for the literal instead of the configured bound.
             dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
                                  username=probe_user, password=probe_pass,
                                  ssl=(parsed.scheme == "rediss"),
-                                 socket_connect_timeout=5, socket_timeout=10)
+                                 **_bounded_server_socket_kwargs())
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
@@ -9924,6 +10016,34 @@ def main(argv: list[str] | None = None) -> int:
                     help="Graph to project into: FalkorDB docker:// URI or embedded path "
                          "(e.g. ~/.tortoise/tortoise.db). Omit for log-only mode "
                          "(writes mine-<source-id>.jsonl, no W-3 gate)")
+    md = sp.add_parser("mine-docs",
+                       help="Mine a markdown docs corpus → draft statement Points (#1724). "
+                            "Deterministic (no LLM, no tokens); re-mining an unchanged "
+                            "corpus reports 0 new Points. Self-hosted only — there is no "
+                            "MCP tool for this.")
+    md.add_argument("--dir", required=True,
+                    help="Absolute path of the markdown corpus (already staged by the "
+                         "GitHub docs fetcher, or any local docs directory)")
+    md.add_argument("--db", required=True,
+                    help="Graph to project into: FalkorDB docker:// URI or embedded path "
+                         "(e.g. ~/.tortoise/tortoise.db). Required — the miner attaches "
+                         "claims to the Document Sources this graph already holds")
+    md.add_argument("--corpus-name", default=None,
+                    help="Corpus name for the corpus:// Source identity "
+                         "(default: the directory's basename)")
+    md.add_argument("--repo", default=None,
+                    help="owner/name of the repo/project the docs belong to — becomes the "
+                         "aboutObject entity (externalId github:repo:owner/name). "
+                         "Default: derived from the staged path when it is "
+                         "<ingest-base>/<org>/<repo>")
+    md.add_argument("--about", action="append", default=None, metavar="ENTITY",
+                    help="Extra entity name to link claims to (repeatable)")
+    md.add_argument("--max-claims-per-doc", type=int, default=40,
+                    help="Bound on claims extracted per document (default 40). The cap "
+                         "is applied in document order, so it is stable run to run.")
+    md.add_argument("--no-index", action="store_true",
+                    help="Skip the corpus index pass (only mine Sources that already "
+                         "exist; docs without a Source are skipped with an error)")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
     sr.add_argument("--http", action="store_true",
                     help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
@@ -10455,6 +10575,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     elif args.cmd == "mine-conversation":
         return _cmd_mine_conversation(args)
+    elif args.cmd == "mine-docs":
+        return _cmd_mine_docs(args)
     elif args.cmd == "init":
         return _cmd_init(args)
     elif args.cmd == "setup":

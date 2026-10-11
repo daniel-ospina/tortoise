@@ -982,12 +982,16 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
-    # #B7 (#3674): the activation-scorecard cohort roll-up. Its `roll_up`
-    # summing logic owns part of tests/test_activation_scorecard.py; without
-    # this carve-out a cohort-script-only change selects NO surface and the
-    # suite that pins it never runs. No SOURCE_PATTERN matches this path, so it
-    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs,
-    # which is the safe outcome for a file that a metrics number depends on.
+    # #B7 (#3674, restated by #3676): the activation-scorecard cohort client.
+    # Its transport guards (https-only, no-redirect, credential hygiene) are
+    # security controls pinned by tests/test_activation_scorecard.py; without
+    # this carve-out a client-only change selects NO surface and the suite that
+    # pins them never runs. No SOURCE_PATTERN matches this path, so it lands in
+    # the unknown-path fail-closed branch -> FULL matrix + both legs, which is
+    # the safe outcome for a metrics number and for the platform's most
+    # privileged credential. (The cohort FOLD moved out of this file and into
+    # tortoise/activation_scorecard.py in #3676 — which the `core` surface
+    # already covers, so the carve-out's reason narrowed rather than vanished.)
     "tools/activation_cohort.py",
     # #3261: the pre-dispatch collision check (#3061) owns
     # tests/test_collision_preflight.py. Without this carve-out a
