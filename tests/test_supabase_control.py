@@ -3668,3 +3668,214 @@ def test_rule_event_between_passes_both_bounds_to_the_control_plane():
     assert store.rule_event_between("org-x", "point_create", after, before) is False
     conds = [c for c in seen[0] if c[0] == "created_at"]
     assert [op for _, op, _ in conds] == ["gt", "lte"], seen[0]
+
+
+# ── #4038: the keyset walk (query_all) ─────────────────────────────────────
+# The activation scorecard's stage-4 read needs a REAL count over a tenant's
+# analytics window. ``query`` could not give one: a full page is a lower bound,
+# so the read refused whenever a busy org filled one — landing `unavailable` on
+# exactly the orgs the lane exists to measure. ``query_all`` walks the window to
+# completion and certifies it. These tests pin the walk's own contract: what it
+# SENDS and what it accepts as proof that it reached the end.
+
+def _page(*ids: str) -> list[dict]:
+    return [{"id": i} for i in ids]
+
+
+class _StubResponse:
+    status_code = 200
+    content = b"[]"  # truthy: the client decodes the body rather than short-circuiting
+
+    def __init__(self, payload, content_range: str):
+        self._payload = payload
+        self.headers = {"Content-Range": content_range}
+
+    def json(self):
+        return self._payload
+
+
+class _ScriptedHttp:
+    """Serve a SCRIPTED sequence of pages, recording every request.
+
+    Deliberately NOT a PostgREST emulator. The walk's contract is what is under
+    test — what it SENDS (cursor filter, sort key, limit, count request) and
+    what it accepts as the END of the walk — and a correct emulator could never
+    produce the pages the refusal cases need (an unsorted page, a stale one, or
+    one that ignores the cursor).
+
+    ``Content-Range`` mimics PostgREST: a total only when ``Prefer:
+    count=exact`` was sent, ``*`` otherwise — so a test cannot accidentally
+    pass by reading a total the real server never volunteers.
+    """
+
+    def __init__(self, pages, *, state_total: int | None = None):
+        self.pages = list(pages)
+        self.state_total = state_total
+        self.requests: list[dict] = []
+
+    def get(self, url, params=None, headers=None, **kwargs):
+        self.requests.append({"url": url, "params": dict(params or {}),
+                              "headers": dict(headers or {})})
+        payload = self.pages.pop(0) if self.pages else []
+        said = (self.state_total
+                if (headers or {}).get("Prefer") == "count=exact"
+                and self.state_total is not None else "*")
+        span = f"0-{len(payload) - 1}" if payload else "*"
+        return _StubResponse(payload, f"{span}/{said}")
+
+
+def _walking_plane(http):
+    """A REAL ``SupabaseControlPlane`` over a scripted transport — so the params
+    under test are the ones the production client actually builds."""
+    from tortoise.supabase_control import SupabaseControlPlane
+
+    plane = SupabaseControlPlane(url="https://proj.supabase.co", service_key="svc")
+    plane._http = http
+    return plane
+
+
+class TestQueryAllKeysetWalk:
+
+    def test_walks_every_page_and_certifies_on_the_empty_one(self):
+        http = _ScriptedHttp([_page("a", "b"), _page("c"), []], state_total=3)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id", "created_at"],
+            filters=[("org_id", "eq", "o1")], page_size=2)
+        assert [r["id"] for r in rows] == ["a", "b", "c"], rows
+        assert complete is True
+        first, second, third = http.requests
+        # Page 1: the caller's filter, the cursor column as the SORT KEY (keyset
+        # paging is only sound when the cursor is the sort key), and the count.
+        assert first["params"]["org_id"] == "eq.o1", first
+        assert first["params"]["order"] == "id", first
+        assert first["params"]["limit"] == "2", first
+        assert "id" not in first["params"], "page 1 must not carry a cursor"
+        assert first["headers"]["Prefer"] == "count=exact", first
+        # The cursor is the LAST cursor VALUE SEEN, `gt`-filtered — never an
+        # offset (an offset paginates a moving window: a concurrent INSERT
+        # serves one row twice and SKIPS an original, silently).
+        assert second["params"]["id"] == "gt.b", second
+        assert third["params"]["id"] == "gt.c", third
+        # The total is a property of the FILTER, not of a cursor-filtered page,
+        # so it is asked for ONCE.
+        assert "Prefer" not in second["headers"], second
+        assert "Prefer" not in third["headers"], third
+
+    def test_a_short_page_is_not_the_end_of_the_walk(self):
+        """A page shorter than ``page_size`` is a per-request cap (PostgREST
+        ``db-max-rows``, a proxy), not the end of the data — treating it as one
+        is the fail-OPEN #5388 removed one layer down. Only an EMPTY page ends
+        the walk, so a deployment capped BELOW our page size costs requests
+        instead of a silently smaller number."""
+        http = _ScriptedHttp([_page("a"), _page("b"), _page("c"), []],
+                             state_total=3)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=1000)
+        assert [r["id"] for r in rows] == ["a", "b", "c"], rows
+        assert complete is True
+        assert len(http.requests) == 4, http.requests
+
+    def test_a_stated_total_the_walk_did_not_reach_refuses_certification(self):
+        """The server's own count may only ever DOWNGRADE: a walk that ended on
+        an empty page but saw FEWER rows than the server said are there is not
+        certified."""
+        http = _ScriptedHttp([_page("a"), _page("b"), _page("c"), []],
+                             state_total=5)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=1000)
+        assert len(rows) == 3, rows
+        assert complete is False
+
+    def test_the_page_cap_exit_cannot_certify_a_satisfied_total(self):
+        """A bounded walk is REQUIRED (its length is the caller's latency and
+        memory), so the cap exit is a real path — and it must never certify,
+        however well the stated total is satisfied so far."""
+        http = _ScriptedHttp([_page("a"), _page("b"), _page("c")],
+                             state_total=3)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=1, max_pages=2)
+        assert [r["id"] for r in rows] == ["a", "b"], rows
+        assert complete is False
+        assert len(http.requests) == 2, http.requests
+
+    def test_an_unsorted_page_cannot_certify(self):
+        """If the server ignores ``order``, the page's last row is NOT the page
+        maximum: the next cursor steps over rows that were never served, the
+        walk still ends on an empty page, and it would certify an incomplete
+        set. The rows are still returned — what is refused is the CERTIFICATE."""
+        http = _ScriptedHttp([_page("b", "a"), []], state_total=2)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=2)
+        assert [r["id"] for r in rows] == ["b", "a"], rows
+        assert complete is False
+
+    def test_a_store_that_ignores_the_cursor_stops_rather_than_spinning(self):
+        """The second page came back un-advanced, so the `gt` filter was not
+        applied. The walk must stop AT ONCE (not re-request the same page until
+        the cap) and refuse to certify; the duplicate is not republished."""
+        http = _ScriptedHttp([_page("a", "b"), _page("a", "b")], state_total=2)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=2)
+        assert len(http.requests) == 2, http.requests
+        assert [r["id"] for r in rows] == ["a", "b"], rows
+        assert complete is False
+
+    def test_a_page_with_no_usable_cursor_cannot_certify(self):
+        """A falsy id is not a cursor (`id > None` is a restart), and a
+        non-mapping element cannot carry one. Both are KEPT for a best-effort
+        caller; neither can certify the walk."""
+        http = _ScriptedHttp([[{"id": None}, {"nope": 1}]], state_total=None)
+        rows, complete = _walking_plane(http).query_all(
+            "analytics_events", select=["id"], page_size=2)
+        assert rows == [{"id": None}, {"nope": 1}], rows
+        assert complete is False
+
+    def test_select_must_carry_the_cursor(self):
+        """A walker that silently ADDED the cursor column would change the row
+        shape its caller asked for; one that continued without it could not
+        advance at all. Refuse the call instead."""
+        with pytest.raises(ValueError, match="cursor column"):
+            _walking_plane(_ScriptedHttp([])).query_all(
+                "analytics_events", select=["event_name"])
+
+    def test_a_seam_without_query_with_total_still_walks(self):
+        """A pre-#5388 seam object can still WALK (it honours the cursor filter
+        either way) — it simply cannot STATE a total, which is the documented
+        no-total case: the empty page is then the whole certificate."""
+
+        class _QueryOnly:
+            def __init__(self):
+                self.cursors: list[object] = []
+
+            def query(self, table, *, select=None, filters=None, order=None,
+                      limit=None, timeout=None):
+                last = None
+                for col, op, value in filters or []:
+                    if col == "id" and op == "gt":
+                        last = value
+                self.cursors.append(last)
+                rows = [{"id": i} for i in ("a", "b", "c")]
+                return [r for r in rows if last is None or r["id"] > last][:limit]
+
+        from tortoise.supabase_control import SupabaseControlPlane
+
+        seam = _QueryOnly()
+        rows, complete = SupabaseControlPlane.query_all(
+            seam, "analytics_events", select=["id"], page_size=2)
+        assert [r["id"] for r in rows] == ["a", "b", "c"], rows
+        assert complete is True
+        assert seam.cursors == [None, "b", "c"], seam.cursors
+
+    def test_a_non_list_response_fails_loudly(self):
+        """A store that answers with something other than a row list is a BROKEN
+        seam, not an incomplete result: raising keeps the caller's fail-closed
+        handler in charge rather than iterating a dict's keys as rows."""
+        from tortoise.supabase_control import SupabaseControlPlane
+
+        class _NotAList:
+            def query(self, table, **kwargs):
+                return {"rows": []}
+
+        with pytest.raises(RuntimeError, match="not a list of rows"):
+            SupabaseControlPlane.query_all(
+                _NotAList(), "analytics_events", select=["id"])
