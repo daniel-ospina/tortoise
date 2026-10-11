@@ -25,6 +25,7 @@ from tortoise.docs_miner import (
     CLAIM_KEY_LEN,
     EXTERNAL_ID_PREFIX,
     POINT_KIND_STATEMENT,
+    REPO_OBJECT_KIND,
     claim_key,
     derive_repo_from_corpus,
     external_id,
@@ -218,7 +219,7 @@ def corpus(tmp_path: Path, monkeypatch, force_sparse_tfidf):
     (root / "docs" / "session.md").write_text(SESSION_FILE, encoding="utf-8")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
 
-    sdk = TortoiseSDK(str(tmp_path / "docs.db"), namespace="docs-test")
+    sdk = TortoiseSDK(str(tmp_path / "docs.db"), namespace="test_docs")
     yield sdk, root, base
     sdk.close()
 
@@ -348,6 +349,60 @@ def test_no_repo_and_no_about_entities_never_fabricates_an_object(corpus):
     assert _graph(sdk).query(
         "MATCH ()-[:aboutObject]->() RETURN count(*)"
     ).result_set[0][0] == 0
+
+
+def test_entity_name_resolution_refuses_two_live_holders(corpus):
+    """#3633 route-then-refuse, on the miner's NAME arm: two LIVE Objects
+    sharing a name must REFUSE, not hand back the first one.
+
+    `_ensure_entities` resolves a name through
+    `entity_identity.resolve_entity_id`, whose multi-holder arm refuses. The
+    raw `MATCH (o:Object {name:$name}) RETURN o.id` read it replaced took
+    `rows[0]`, so a name held by two live Objects wired every claim to an
+    arbitrary one — silently, and with no way for a reader to notice.
+
+    MUTATION THAT REDS THIS: restore the raw name-keyed read.
+    """
+    from tortoise.docs_miner import _ensure_entities
+    from tortoise.entity_identity import AmbiguousEntityName
+
+    sdk, _root, _base = corpus
+    proj = sdk._get_proj()
+    for oid in ("obj-a", "obj-b"):
+        proj.g.query("MERGE (o:Object {id:$id}) "
+                     "SET o.name = $name, o.status = 'live'",
+                     params={"id": oid, "name": "Acme"})
+
+    class _NoMint:
+        def add_object(self, *a, **k):  # pragma: no cover - must not be hit
+            raise AssertionError("the refusal must precede the mint")
+
+    with pytest.raises(AmbiguousEntityName):
+        _ensure_entities(_NoMint(), proj, [{
+            "id": "obj-new", "name": "Acme",
+            "object_kind": REPO_OBJECT_KIND,
+            "externalId": "github:repo:acme/acme"}])
+
+
+def test_entity_name_resolution_returns_the_single_live_holder(corpus):
+    """…and exactly ONE live holder is still resolved — the happy path the
+    route must not break — without minting a second Object for that name."""
+    from tortoise.docs_miner import _ensure_entities
+
+    sdk, _root, _base = corpus
+    proj = sdk._get_proj()
+    proj.g.query("MERGE (o:Object {id:$id}) "
+                 "SET o.name = $name, o.status = 'live'",
+                 params={"id": "obj-only", "name": "Acme"})
+
+    class _NoMint:
+        def add_object(self, *a, **k):  # pragma: no cover - must not be hit
+            raise AssertionError("a resolved name must not mint a second node")
+
+    assert _ensure_entities(_NoMint(), proj, [{
+        "id": "obj-new", "name": "Acme",
+        "object_kind": REPO_OBJECT_KIND,
+        "externalId": "github:repo:acme/acme"}]) == ["obj-only"]
 
 
 def test_cli_verb_runs_the_pipeline_and_prints_the_zero_new_line(corpus, capsys):

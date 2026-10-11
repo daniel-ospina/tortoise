@@ -80,6 +80,8 @@ import logging
 import re
 from pathlib import Path
 
+from tortoise.entity_identity import resolve_entity_id  # #3633 route-then-refuse
+
 logger = logging.getLogger(__name__)
 
 # ── Vocabulary (pinned) ────────────────────────────────────────────────────
@@ -456,9 +458,21 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
     """Mint/merge entity Objects; return their ids (order preserved).
 
     Resolution is by the STABLE external anchor first (``externalId``) and by
-    name second — the ``session_link`` rule. Re-minting is idempotent: the
-    projection MERGEs Object by name, and the deterministic id is derived from
-    the same anchor on every run, so a second run cannot fork the node.
+    the ROUTED name resolver second — the ``session_link`` rule, resolved
+    through #3633's ``resolve_entity_id`` rather than a raw
+    ``MATCH (o:Object {name:$name})`` read. A raw read silently picks the first
+    of N same-name carriers, so a name held by two live Objects would attach
+    every claim to an arbitrary one; the resolver returns the single live id,
+    REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`) on two or
+    more, and returns ``None`` when no LIVE holder exists — which is when this
+    mints. (A terminal-only holder is a refusal, not a hit: the identity it
+    named is gone, so minting the current one is the truthful answer.)
+    ``mine_docs`` catches the refusal and records it in ``result["errors"]``,
+    so one ambiguous name cannot abort the run silently.
+
+    Re-minting is idempotent: the projection MERGEs Object by name, and the
+    deterministic id is derived from the same anchor on every run, so a second
+    run cannot fork the node.
     """
     ids: list[str] = []
     for ent in entities:
@@ -470,11 +484,9 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
         if rows:
             ids.append(rows[0][0])
             continue
-        rows = proj.g.query(
-            "MATCH (o:Object {name:$name}) RETURN o.id", params={"name": name},
-        ).result_set
-        if rows:
-            ids.append(rows[0][0])
+        resolved = resolve_entity_id(proj.g, "Object", name)
+        if resolved is not None:
+            ids.append(resolved)
             continue
         oid = ent["id"]
         api.add_object(name, ent["object_kind"], id=oid,
