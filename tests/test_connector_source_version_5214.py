@@ -485,6 +485,15 @@ def test_an_issue_title_change_advances_the_version_like_a_pr_title():
     assert _connector_content_hash(a) != _connector_content_hash(b), (
         "an issue title change is item content and must be in the digest"
     )
+    # The invariant's other half for the two LIST content fields: a label or
+    # assignee change is item content too, so the digest must move for it.
+    for field, changed in (("labels", [{"name": "feature"}]),
+                           ("assignees", [{"login": "bob"}])):
+        mutated = gm.issue_to_event(dict(issue, **{field: changed}),
+                                    "test/repo")
+        assert _connector_content_hash(mutated) != _connector_content_hash(a), (
+            f"an issue {field} change is item content and must be in the digest"
+        )
     pr = {
         "number": 7, "title": "PR title", "state": "open",
         "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
@@ -705,268 +714,305 @@ class _RecordingProj:
         self.applied.append(record)
 
 
-def test_every_github_producer_agrees_on_one_item_state(monkeypatch):
-    """★ THE DECISIVE PIN: every REAL GitHub producer that materializes ONE
-    item state must yield ONE digest, and a genuine content change a DIFFERENT
-    one.
+# ── Real wire fixtures — see tests/fixtures/github_wire/README.md ────
+#
+# The fixtures are CAPTURES of what the producers actually receive, not dicts
+# built to resemble them. A hand-built REST fixture that carries a top-level
+# `merged_at` the `GET /repos/{owner}/{repo}/issues` endpoint never returns (and
+# a `url` the producer would not prefer) encodes the SAME assumption as the bug:
+# the test then agrees with the code and cannot see a producer divergence.
+# `test_the_github_wire_fixtures_are_shape_honest` pins the load-bearing shapes
+# so a re-modelling hand-edit fails there instead of in review.
 
-    The producers are driven for real against GitHub's OWN wire shapes:
-    `poll_raw_issues` + `_issue_to_entities` (entity path), `_poll_issues`
-    (legacy poll), `_webhook_to_event` (webhook) and the indexer's own
-    `_project_issue`/`_project_pr` (REST). The gh-CLI fixtures use the
-    UPPERCASE `state` that `gh` actually returns (verified live — the casing
-    the previous rounds' lowercase fixture never caught).
+_WIRE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "fixtures", "github_wire")
 
-    Both halves of the invariant are driven for an OPEN and a CLOSED item:
-    the closed item is materialized by a NON-TRANSITION webhook action
-    (`labeled`/`edited`) whose payload carries `state: "closed"` — the case
-    an action-derived state reads as `open` and a `state`-only pin misses.
-    The MERGED PR is driven through the same producers so `_norm_pr`'s
-    `MERGED`→`closed` fold holds on the webhook path too.
+_WIRE_REPO = "daniel-ospina/tortoise"
 
-    FAILS IF any producer stops carrying a content field, re-introduces the
-    action `eventKind` into the digest, derives item state from an action
-    label, or fails to normalise state/list order — i.e. it makes producer
-    divergence impossible to land silently.
+
+def _wire(name: str):
+    """Load a captured GitHub wire-shape fixture (provenance: the dir README)."""
+    import json
+    with open(os.path.join(_WIRE_DIR, name), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _patch_gh(monkeypatch, rows: dict) -> None:
+    """Patch `subprocess.run` so the gh-CLI producers receive captured JSON.
+
+    `rows` is ``{"issue": row|None, "pr": row|None}``. The producers' own argv
+    still decides issue-vs-pr (`gh issue …` / `gh pr …`), so the seam is `gh`,
+    never the mapper.
     """
-    import json as _json
+    import json
     import subprocess as sp
-
-    from tortoise.connectors.github import GitHubConnector
-    from tortoise.indexer.github_indexer import GitHubIndexer
-
-    # ── GitHub's wire shapes for ONE issue state ──
-    ghcli_issue = {
-        "number": 42, "title": "Fix login bug", "state": "OPEN",
-        "createdAt": "2026-07-10T10:00:00Z", "closedAt": None, "url": GH_URL,
-        "labels": [{"name": "P1"}, {"name": "bug"}],
-        "assignees": [{"login": "alice"}],
-        "author": {"login": "alice"},
-    }
-    rest_issue = {
-        "number": 42, "title": "Fix login bug", "state": "open",
-        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
-        "html_url": GH_URL,
-        "labels": [{"name": "bug"}, {"name": "P1"}],
-        "assignees": [{"login": "alice"}],
-        "user": {"login": "alice"},
-    }
-    webhook_issue = {
-        "action": "opened",
-        "issue": {
-            "number": 42, "title": "Fix login bug", "state": "open",
-            "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
-            "html_url": GH_URL,
-            "labels": [{"name": "bug"}, {"name": "P1"}],
-            "assignees": [{"login": "alice"}],
-        },
-    }
-    # ── GitHub's wire shapes for ONE PR state ──
-    ghcli_pr = {
-        "number": 7, "title": "Add auth", "state": "OPEN",
-        "createdAt": "2026-07-15T08:00:00Z", "closedAt": None,
-        "mergedAt": None, "url": PR_URL,
-        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
-    }
-    rest_pr = {
-        "number": 7, "title": "Add auth", "state": "open",
-        "created_at": "2026-07-15T08:00:00Z", "closed_at": None,
-        "merged_at": None, "html_url": PR_URL,
-        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
-    }
-    webhook_pr = {
-        "action": "opened",
-        "pull_request": {
-            "number": 7, "title": "Add auth", "state": "open",
-            "created_at": "2026-07-15T08:00:00Z", "closed_at": None,
-            "merged_at": None, "html_url": PR_URL,
-            "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
-        },
-    }
-
-    # The gh-CLI producers read from this holder so the SAME test can walk
-    # more than one item state (open, then closed, then merged) without
-    # re-patching `subprocess.run`.
-    ghcli_payloads = {"issue": ghcli_issue, "pr": ghcli_pr}
 
     def fake_run(args, **kwargs):
         argv = [str(a) for a in args]
-        payload = ([ghcli_payloads["pr"]] if argv[:2] == ["gh", "pr"]
-                   else [ghcli_payloads["issue"]])
+        row = rows.get("pr") if argv[:2] == ["gh", "pr"] else rows.get("issue")
+        payload = [] if row is None else [row]
         return sp.CompletedProcess(args=args, returncode=0,
-                                   stdout=_json.dumps(payload))
+                                   stdout=json.dumps(payload))
 
     monkeypatch.setattr(sp, "run", fake_run)
-    connector = GitHubConnector(config={"repo": "test/repo"})
 
-    # ── issue producers ──
-    raw = connector.poll_raw_issues()
-    assert raw, "the entity poll must return the item"
-    entity_ev = connector._issue_to_entities(raw[0])["event"]
-    legacy_evs = connector._poll_issues()
-    webhook_ev = connector._webhook_to_event("issues", webhook_issue)
-    indexer_proj = _RecordingProj()
-    GitHubIndexer(token="t")._project_issue(None, indexer_proj, "test/repo",
-                                            rest_issue)
-    indexer_ev = next(r for r in indexer_proj.applied
-                      if r.get("type") == "EventRecorded")
 
-    issue_digests = {_connector_content_hash(e) for e in
-                     [entity_ev, *legacy_evs, webhook_ev, indexer_ev]}
-    assert len(issue_digests) == 1, (
-        f"one issue state must be one digest across every producer: "
-        f"{issue_digests!r}"
-    )
-    assert len(next(iter(issue_digests))) == 64
+def _indexer_event(kind: str, repo: str, payload: dict) -> dict:
+    """Drive the indexer's REAL `_project_issue`/`_project_pr` on a REST item."""
+    from tortoise.indexer.github_indexer import GitHubIndexer
 
-    # ── PR producers ──
-    pr_evs = connector._poll_prs()
-    webhook_pr_ev = connector._webhook_to_event("pull_request", webhook_pr)
-    pr_proj = _RecordingProj()
-    GitHubIndexer(token="t")._project_pr(pr_proj, "test/repo", rest_pr)
-    pr_indexer_ev = next(r for r in pr_proj.applied
-                         if r.get("type") == "EventRecorded")
-    pr_digests = {_connector_content_hash(e) for e in
-                  [*pr_evs, webhook_pr_ev, pr_indexer_ev]}
-    assert len(pr_digests) == 1, (
-        f"one PR state must be one digest across every producer: {pr_digests!r}"
-    )
+    proj = _RecordingProj()
+    indexer = GitHubIndexer(token="t")
+    if kind == "pr":
+        indexer._project_pr(proj, repo, payload)
+    else:
+        indexer._project_issue(None, proj, repo, payload)
+    return next(r for r in proj.applied if r.get("type") == "EventRecorded")
 
-    # ── the case an action-derived state gets WRONG: a NON-TRANSITION action
-    # on a CLOSED item. `labeled`/`edited` change no state, and GitHub's
-    # payload carries the item's REAL `state` — Octokit's captured
-    # `issues/labeled` payload and the REST issue schema both enum `state` to
-    # open/closed, independent of the action. Driving the webhook with those
-    # actions must land on the SAME digest the poll/REST/indexer observe for
-    # the closed item; reading the state off the action instead yields `open`
-    # and one unchanged item state hashes two ways. ──
-    ghcli_closed_issue = dict(ghcli_issue, state="CLOSED",
-                              closedAt="2026-07-11T00:00:00Z")
-    rest_closed_issue = dict(rest_issue, state="closed",
-                             closed_at="2026-07-11T00:00:00Z")
-    closed_issue_wire = dict(webhook_issue["issue"], state="closed",
-                             closed_at="2026-07-11T00:00:00Z")
-    ghcli_payloads["issue"] = ghcli_closed_issue
 
-    raw_closed = connector.poll_raw_issues()
-    assert raw_closed, "the entity poll must return the closed item"
-    closed_entity_ev = connector._issue_to_entities(raw_closed[0])["event"]
-    closed_legacy_evs = connector._poll_issues()
-    closed_webhook_evs = [
-        connector._webhook_to_event(
-            "issues", {"action": action, "issue": closed_issue_wire})
-        for action in ("labeled", "edited")
-    ]
-    assert all(closed_webhook_evs), (
-        "a non-transition action on a closed item still materializes an event"
-    )
-    closed_proj = _RecordingProj()
-    GitHubIndexer(token="t")._project_issue(None, closed_proj, "test/repo",
-                                            rest_closed_issue)
-    closed_indexer_ev = next(r for r in closed_proj.applied
-                             if r.get("type") == "EventRecorded")
+# The four item states, each with the gh-CLI row, the REST issues item and the
+# webhook payload for the SAME item (captured — see the fixtures README).
+_WIRE_CASES = (
+    {"label": "open issue", "kind": "issue", "event_type": "issues",
+     "ghcli": "ghcli_issue_open_8037.json",
+     "rest": "rest_issue_open_8037.json",
+     "webhook": "webhook_issues_open.json"},
+    {"label": "closed issue", "kind": "issue", "event_type": "issues",
+     "ghcli": "ghcli_issue_closed_8013.json",
+     "rest": "rest_issue_closed_8013.json",
+     "webhook": "webhook_issues_closed.json"},
+    {"label": "closed-unmerged PR", "kind": "pr",
+     "event_type": "pull_request",
+     "ghcli": "ghcli_pr_closed_unmerged_7820.json",
+     "rest": "rest_pr_closed_unmerged_7820.json",
+     "webhook": "webhook_pull_request_closed_unmerged.json"},
+    {"label": "merged PR", "kind": "pr", "event_type": "pull_request",
+     "ghcli": "ghcli_pr_merged_8007.json",
+     "rest": "rest_pr_merged_8007.json",
+     "webhook": "webhook_pull_request_merged.json"},
+)
 
-    closed_issue_digests = {_connector_content_hash(e) for e in
-                            [closed_entity_ev, *closed_legacy_evs,
-                             *closed_webhook_evs, closed_indexer_ev]}
-    assert len(closed_issue_digests) == 1, (
-        f"a NON-transition action (`labeled`/`edited`) on a CLOSED item is "
-        f"the SAME item state every producer observes: {closed_issue_digests!r}"
-    )
-    assert closed_issue_digests != issue_digests, (
-        "a closed item state must NOT hash equal to an open one"
-    )
 
-    # ── the same NON-transition case on the PR path: `labeled` on a CLOSED
-    # (unmerged) PR must agree with the poll/REST producers. ──
-    ghcli_closed_pr = dict(ghcli_pr, state="CLOSED",
-                           closedAt="2026-07-16T00:00:00Z")
-    rest_closed_pr = dict(rest_pr, state="closed",
-                          closed_at="2026-07-16T00:00:00Z")
-    ghcli_payloads["pr"] = ghcli_closed_pr
-    closed_pr_evs = connector._poll_prs()
-    closed_pr_webhook_ev = connector._webhook_to_event(
-        "pull_request",
-        {"action": "labeled",
-         "pull_request": dict(webhook_pr["pull_request"], state="closed",
-                              closed_at="2026-07-16T00:00:00Z")})
-    closed_pr_proj = _RecordingProj()
-    GitHubIndexer(token="t")._project_pr(closed_pr_proj, "test/repo",
-                                         rest_closed_pr)
-    closed_pr_indexer_ev = next(r for r in closed_pr_proj.applied
-                                if r.get("type") == "EventRecorded")
-    closed_pr_digests = {_connector_content_hash(e) for e in
-                         [*closed_pr_evs, closed_pr_webhook_ev,
-                          closed_pr_indexer_ev]}
-    assert len(closed_pr_digests) == 1, (
-        f"a NON-transition action on a CLOSED PR is the SAME item state every "
-        f"producer observes: {closed_pr_digests!r}"
-    )
-    assert closed_pr_digests != pr_digests, (
-        "a closed PR state must NOT hash equal to an open one"
-    )
+def _producer_events(connector, case: dict) -> list[dict]:
+    """Every REAL producer's EventRecorded for ONE item state."""
+    events: list[dict] = []
+    if case["kind"] == "issue":
+        raw = connector.poll_raw_issues()
+        assert raw, f"{case['label']}: the entity poll returned no item"
+        events.append(connector._issue_to_entities(raw[0])["event"])
+        events.extend(connector._poll_issues())
+    else:
+        events.extend(connector._poll_prs())
+    events.append(connector._webhook_to_event(case["event_type"],
+                                              _wire(case["webhook"])))
+    events.append(_indexer_event(case["kind"], _WIRE_REPO, _wire(case["rest"])))
+    return events
 
-    # ── a MERGED PR through the webhook: GitHub's PR webhook `state` is only
-    # `open`/`closed` (never `MERGED`) and merged-ness rides in `merged_at`,
-    # which `_norm_pr` folds into `state`+`merged`. It must land on the same
-    # digest as `gh`'s `MERGED` and REST's `closed`+`merged_at`, and must NOT
-    # collapse onto the closed-unmerged digest. ──
-    ghcli_merged_pr = dict(ghcli_closed_pr, state="MERGED",
-                           mergedAt="2026-07-16T00:00:00Z")
-    rest_merged_pr = dict(rest_closed_pr,
-                          merged_at="2026-07-16T00:00:00Z")
-    ghcli_payloads["pr"] = ghcli_merged_pr
-    merged_pr_evs = connector._poll_prs()
-    merged_pr_webhook_ev = connector._webhook_to_event(
-        "pull_request",
-        {"action": "labeled",
-         "pull_request": dict(webhook_pr["pull_request"], state="closed",
-                              closed_at="2026-07-16T00:00:00Z",
-                              merged_at="2026-07-16T00:00:00Z")})
-    merged_proj = _RecordingProj()
-    GitHubIndexer(token="t")._project_pr(merged_proj, "test/repo",
-                                         rest_merged_pr)
-    merged_indexer_ev = next(r for r in merged_proj.applied
-                             if r.get("type") == "EventRecorded")
-    merged_pr_digests = {_connector_content_hash(e) for e in
-                         [*merged_pr_evs, merged_pr_webhook_ev,
-                          merged_indexer_ev]}
-    assert len(merged_pr_digests) == 1, (
-        f"a MERGED PR is ONE item state across gh-CLI (`MERGED`), REST "
-        f"(`closed`+`merged_at`) and the webhook: {merged_pr_digests!r}"
-    )
-    assert merged_pr_digests != closed_pr_digests, (
-        "a merged PR must NOT hash equal to a closed-unmerged one"
-    )
 
-    # ── the invariant's OTHER half: a changed item state MUST move the
-    # digest. A fix that made everything hash equal would break this. ──
-    base = _connector_content_hash(entity_ev)
-    for label, changed in (
-        ("title", gm.issue_to_event(dict(rest_issue, title="Changed"),
-                                    "test/repo")),
-        ("state", gm.issue_to_event(
-            dict(rest_issue, state="closed",
-                 closed_at="2026-07-11T00:00:00Z"), "test/repo")),
-        ("label content", gm.issue_to_event(
-            dict(rest_issue, labels=[{"name": "feature"}]), "test/repo")),
-        ("assignee membership", gm.issue_to_event(
-            dict(rest_issue, assignees=[{"login": "bob"}]), "test/repo")),
-    ):
-        assert _connector_content_hash(changed) != base, (
-            f"a changed {label} is a different item state and must change "
-            f"the digest"
+def test_every_github_producer_agrees_on_one_item_state(monkeypatch):
+    """★ THE DECISIVE PIN: every REAL GitHub producer that materializes ONE
+    item state must yield ONE digest.
+
+    The producers are driven on the CAPTURED wire payloads for one item
+    (`tests/fixtures/github_wire/`): `poll_raw_issues` + `_issue_to_entities`
+    (entity path), `_poll_issues`/`_poll_prs` (legacy poll), `_webhook_to_event`
+    (webhook) and the indexer's `_project_issue`/`_project_pr` (the REST issues
+    endpoint). Each runs through its REAL code path with the bytes GitHub
+    returns for that item, so a divergence between producers cannot hide behind
+    a fixture written to match the code.
+
+    FAILS IF any producer stops carrying a content field, re-introduces the
+    action `eventKind` into the digest, reads item state off an action label, or
+    fails to normalise state/list order.
+    """
+    from tortoise.connectors.github import GitHubConnector
+
+    rows = {"issue": _wire(_WIRE_CASES[0]["ghcli"]),
+            "pr": _wire(_WIRE_CASES[2]["ghcli"])}
+    _patch_gh(monkeypatch, rows)
+    connector = GitHubConnector(config={"repo": _WIRE_REPO})
+
+    digests_by_label: dict[str, set] = {}
+    for case in _WIRE_CASES:
+        rows[case["kind"]] = _wire(case["ghcli"])
+        events = _producer_events(connector, case)
+        digests = {_connector_content_hash(ev) for ev in events}
+        observed = sorted((_connector_content_hash(ev), ev["eventId"],
+                           ev["sourceUrl"]) for ev in events)
+        assert len(digests) == 1, (
+            f"{case['label']}: one item state must be ONE digest across every "
+            f"producer, got {observed!r}"
         )
-    assert _connector_content_hash(gm.pr_to_event(
-        dict(rest_pr, labels=[{"name": "feature"}]), "test/repo")) != \
-        _connector_content_hash(pr_indexer_ev), (
-        "a changed PR label content must change the digest"
+        assert len(next(iter(digests))) == 64
+        digests_by_label[case["label"]] = digests
+
+    assert digests_by_label["open issue"] != digests_by_label["closed issue"], (
+        "an open item and a closed item are different states and must hash "
+        "differently"
     )
-    assert _connector_content_hash(gm.pr_to_event(
-        dict(rest_pr, assignees=[{"login": "bob"}]), "test/repo")) != \
-        _connector_content_hash(pr_indexer_ev), (
-        "a changed PR assignee membership must change the digest"
+    assert (digests_by_label["merged PR"]
+            != digests_by_label["closed-unmerged PR"]), (
+        "a merged PR and a closed-unmerged PR are different states and must "
+        "hash differently"
     )
+
+
+def test_rest_issues_merged_state_is_nested_and_producer_independent(monkeypatch):
+    """Finding 1: the indexer's producer is `GET /repos/{repo}/issues`, which
+    nests merged-ness under `pull_request.merged_at` and never sets a top-level
+    `merged_at`. `_norm_pr` read the top level only, so through the indexer a
+    merged PR read as an ordinary closed one: its digest diverged from the
+    poll/webhook digest for ONE item state (a false `stale` on every producer
+    alternation) and merged vs closed-unmerged hashed EQUAL (a false `current`
+    on a merged derivation).
+
+    The merged item is the captured `#8007`; the closed-unmerged shape is proved
+    by the captured `#7820`.
+
+    FAILS IF `_norm_pr` reads only the top-level `mergedAt`/`merged_at`.
+    """
+    import copy
+
+    from tortoise.connectors.github import GitHubConnector
+
+    rest_merged = _wire("rest_pr_merged_8007.json")
+    # Shape honesty: the endpoint's merged-ness is ONLY nested.
+    assert "merged_at" not in rest_merged
+    assert rest_merged["pull_request"]["merged_at"]
+    assert gm._norm_pr(rest_merged)["merged"] is True
+
+    _patch_gh(monkeypatch, {"issue": None,
+                            "pr": _wire("ghcli_pr_merged_8007.json")})
+    connector = GitHubConnector(config={"repo": _WIRE_REPO})
+    poll_ev = connector._poll_prs()[0]
+    webhook_ev = connector._webhook_to_event(
+        "pull_request", _wire("webhook_pull_request_merged.json"))
+    indexer_ev = _indexer_event("pr", _WIRE_REPO, rest_merged)
+
+    merged = {_connector_content_hash(ev)
+              for ev in (poll_ev, webhook_ev, indexer_ev)}
+    assert len(merged) == 1, (
+        "ONE merged item state must be one digest across the gh-CLI poll, the "
+        "webhook and the REST indexer: "
+        f"{sorted((_connector_content_hash(e), e['sourceUrl']) for e in (poll_ev, webhook_ev, indexer_ev))!r}"
+    )
+
+    # The invariant's OTHER half on the SAME real item: clearing the nested
+    # `merged_at` is exactly the endpoint's closed-unmerged shape (proved by the
+    # captured #7820), and it must NOT hash equal.
+    real_unmerged = _wire("rest_pr_closed_unmerged_7820.json")
+    assert ("merged_at" not in real_unmerged
+            and real_unmerged["pull_request"]["merged_at"] is None)
+    closed_variant = copy.deepcopy(rest_merged)
+    closed_variant["pull_request"]["merged_at"] = None
+    assert gm._norm_pr(closed_variant)["merged"] is False
+    assert _connector_content_hash(
+        _indexer_event("pr", _WIRE_REPO, closed_variant)) \
+        != _connector_content_hash(indexer_ev), (
+        "a merged PR must NOT hash equal to the SAME item closed-unmerged"
+    )
+
+
+def test_every_github_producer_resolves_one_canonical_source_url(monkeypatch):
+    """Finding 2: the shared normalisers preferred the REST `url` (the
+    `api.github.com` ENDPOINT) over `html_url` (the canonical human URL a
+    `:Source` keys on). The indexer and the other producers therefore resolved
+    ONE item to TWO `:Source` keys; the second is deleted and recreated with
+    `version` reset to 1, discarding the history this path exists to keep.
+
+    FAILS IF a producer's resolved `sourceUrl` is the API endpoint.
+    """
+    from tortoise.connectors.github import GitHubConnector
+    from tortoise.source_identity import normalize_source_url
+
+    _patch_gh(monkeypatch, {"issue": _wire("ghcli_issue_closed_8013.json"),
+                            "pr": None})
+    connector = GitHubConnector(config={"repo": _WIRE_REPO})
+    case = next(c for c in _WIRE_CASES if c["label"] == "closed issue")
+    events = _producer_events(connector, case)
+
+    urls = {ev["sourceUrl"] for ev in events}
+    assert len(urls) == 1, (
+        "one item must resolve to ONE source url, got "
+        f"{sorted((e['eventId'], e['sourceUrl']) for e in events)!r}"
+    )
+    canonical = _wire("rest_issue_closed_8013.json")["html_url"]
+    assert urls == {canonical}, (
+        f"expected the canonical human url, got {urls!r}"
+    )
+    assert len({normalize_source_url(u) for u in urls}) == 1
+
+    # Graph-level: every producer's materialization must land on the SAME
+    # `:Source` node, carrying the canonical url — the indexer must not mint a
+    # second node (which the sweep then deletes, resetting the version).
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        for ev in events:
+            proj.apply(ev)
+            rows = proj.g.query(
+                "MATCH (s:Source {sourceKind: 'github_issue'}) "
+                "RETURN s.url, s.version",
+            ).result_set
+            assert len(rows) == 1, (
+                f"one item must materialize ONE :Source, got {rows!r}"
+            )
+            assert rows[0][0] == canonical, (
+                "the materialized :Source must carry the canonical url, got "
+                f"{rows[0][0]!r}"
+            )
+            assert rows[0][1] == 1
+
+
+def test_the_github_wire_fixtures_are_shape_honest():
+    """The fixtures must stay CAPTURES of producer output. The first assertion
+    is the one that would have caught the original model — the REST issues item
+    has NO top-level `merged_at` — and the rest pin every shape the normalisers
+    read, so re-modelling a fixture (the hand-edit that let the bug survive)
+    fails here instead of in review.
+    """
+    # The REST issues endpoint item: a plain issue has neither merge field, and
+    # carries BOTH the API url and the canonical html_url.
+    for name in ("rest_issue_open_8037.json", "rest_issue_closed_8013.json"):
+        item = _wire(name)
+        assert "merged_at" not in item and "pull_request" not in item
+        assert item["url"].startswith("https://api.github.com/")
+        assert item["html_url"].startswith("https://github.com/")
+    # A REST PR item: merged-ness is NESTED, never top-level.
+    for name, is_merged in (("rest_pr_merged_8007.json", True),
+                            ("rest_pr_closed_unmerged_7820.json", False)):
+        item = _wire(name)
+        assert "merged_at" not in item, (
+            "the REST issues endpoint does not set a top-level merged_at"
+        )
+        assert "merged_at" in item["pull_request"]
+        assert bool(item["pull_request"]["merged_at"]) is is_merged
+        assert item["url"].startswith("https://api.github.com/")
+        assert item["html_url"].startswith("https://github.com/")
+    # The gh-CLI row carries only `url`, and it IS the canonical human url.
+    for name in ("ghcli_issue_open_8037.json", "ghcli_issue_closed_8013.json",
+                 "ghcli_pr_merged_8007.json",
+                 "ghcli_pr_closed_unmerged_7820.json"):
+        row = _wire(name)
+        assert "html_url" not in row
+        assert row["url"].startswith("https://github.com/")
+    # The webhook member shape differs from the REST issues item: a PR carries
+    # merged-ness at the TOP level; an issue carries neither merge field.
+    for name, member, is_merged in (
+        ("webhook_issues_open.json", "issue", None),
+        ("webhook_issues_closed.json", "issue", None),
+        ("webhook_pull_request_closed_unmerged.json", "pull_request", False),
+        ("webhook_pull_request_merged.json", "pull_request", True),
+    ):
+        payload = _wire(name)
+        assert payload["action"] and member in payload
+        body = payload[member]
+        if member == "pull_request":
+            assert "merged_at" in body
+            assert bool(body["merged_at"]) is is_merged
+        else:
+            assert "merged_at" not in body and "pull_request" not in body
+        assert body["url"].startswith("https://api.github.com/")
+        assert body["html_url"].startswith("https://github.com/")
 
 
 def test_uppercase_ghcli_state_normalizes_and_the_reopened_state_agrees():

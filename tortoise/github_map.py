@@ -127,7 +127,15 @@ def _norm_issue(issue: dict) -> dict:
         "created_at": str(_get("createdAt", "created_at", default="") or ""),
         "closed_at": closed_at or None,
         "updated_at": str(_get("updatedAt", "updated_at", default="") or ""),
-        "url": str(_get("url", "html_url", default="") or ""),
+        # #8019: `html_url` is the canonical human URL the `:Source` keys on,
+        # and `url` is the API endpoint. The producers disagree on which they
+        # supply (gh-CLI `--json url` IS the html URL; REST/webhook carry both),
+        # so preferring `url` minted TWO `:Source` nodes for one item — the
+        # second deleted and recreated with `version` reset to 1, throwing away
+        # the history this whole path exists to keep. Prefer `html_url`
+        # everywhere; gh-CLI falls back to its `url`, which is already the
+        # canonical form.
+        "url": str(_get("html_url", "url", default="") or ""),
         "body": str(_get("body", default="") or ""),
         "labels": label_names,
         "assignees": assignee_logins,
@@ -149,7 +157,17 @@ def _norm_pr(pr: dict) -> dict:
     except (TypeError, ValueError):
         number = 0
     closed_at = str(_get("closedAt", "closed_at", default="") or "")
-    merged_at = str(_get("mergedAt", "merged_at", default="") or "")
+    # #8019: merged-ness rides in `merged_at`, but WHERE depends on the
+    # endpoint. gh-CLI (`mergedAt`) and the pull_request webhook carry it at
+    # the TOP level; the REST issues endpoint (`GET /repos/{repo}/issues`, the
+    # indexer's producer) nests it under `pull_request.merged_at`. Reading only
+    # the top level made a merged PR look like an ordinary closed one through
+    # the indexer — a false `current` on a merged derivation, and a digest that
+    # flipped on every producer alternation (false `stale`). Resolve BOTH
+    # shapes here, the one place the producers converge.
+    _nested = pr.get("pull_request")
+    _nested_merged_at = _nested.get("merged_at") if isinstance(_nested, dict) else None
+    merged_at = str(_get("mergedAt", "merged_at", default="") or _nested_merged_at or "")
     # #8019: a PR's `state` is producer-dependent in exactly the same way an
     # issue's is — `gh pr list --json state` returns `OPEN`/`CLOSED`/`MERGED`
     # (GraphQL `PullRequestState`) while REST and the webhook return
@@ -171,7 +189,8 @@ def _norm_pr(pr: dict) -> dict:
         "merged": merged,
         "labels": _label_names(_get("labels", default=None)),
         "assignees": _assignee_logins(_get("assignees", default=None)),
-        "url": str(_get("url", "html_url", default="") or ""),
+        # #8019: same canonical-URL preference as `_norm_issue` — see there.
+        "url": str(_get("html_url", "url", default="") or ""),
     }
 
 
