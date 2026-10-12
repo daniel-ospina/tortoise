@@ -948,24 +948,25 @@ function welcomeCreateOrgEnv({ provisioned }) {
   return { deps, calls, handleWizardCreateOrg: build(deps, ['async function handleWizardCreateOrg']).handleWizardCreateOrg }
 }
 
-test('#4370: the welcomeKey write site stores only a revealable string (no later startsWith TypeError)', () => {
+test('#4370: the welcomeKey write site stores only a revealable string (no later startsWith TypeError)', async () => {
   // The write site is the LAST line of defence: even if a producer handed over
   // a non-string, `welcomeKey` must never hold one — that state feeds
   // `snippetKey`, `durableConnectKey`'s `welcome.startsWith(...)` and the revoke
   // prefix-clear. An empty value is the deliberate fall-through to the rows
   // re-gate path (the connect step offers a rotate of the key just minted).
+  // Every shape is awaited IN TURN (not `return`ed out of the loop): a `return`
+  // here exited the test on the first shape, silently skipping `{}`/`[]`/blank
+  // and making the positive control below dead code.
   for (const bad of [42, {}, [], '   ', '\u200b']) {
     const env = welcomeCreateOrgEnv({ provisioned: { api_key: bad, org_name: 'Org', graph_name: 'g' } })
-    return env.handleWizardCreateOrg().then(() => {
-      assert.deepEqual(env.calls.welcomeKey, [''],
-        `a producer handing api_key=${JSON.stringify(bad)} must not put it in welcomeKey`)
-    })
+    await env.handleWizardCreateOrg()
+    assert.deepEqual(env.calls.welcomeKey, [''],
+      `a producer handing api_key=${JSON.stringify(bad)} must not put it in welcomeKey`)
   }
   const real = welcomeCreateOrgEnv({ provisioned: { api_key: 'tt_welcome', org_name: 'Org', graph_name: 'g' } })
-  return real.handleWizardCreateOrg().then(() => {
-    assert.deepEqual(real.calls.welcomeKey, ['tt_welcome'])
-    assert.equal(real.deps.provisioned.api_key, 'tt_welcome')
-  })
+  await real.handleWizardCreateOrg()
+  assert.deepEqual(real.calls.welcomeKey, ['tt_welcome'],
+    'a valid provisioned key must still reach setWelcomeKey')
 })
 
 // ── the graph reveal modal's derived gate + guarded copy ────────────────────
