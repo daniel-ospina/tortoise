@@ -89,7 +89,13 @@ add_dir() {
   case "$1" in /*) ;; *) return 0 ;; esac
   # ⛔ Trap (3): a shim / ~/.pi directory is EPERM under launchd (macOS TCC on ~/Documents). The
   # real binary's directory is added separately, so dropping the shim does not lose the tool.
-  case "$1" in */shims|*/shims/*|*/.pi/*) return 0 ;; esac
+  # Test the PHYSICAL path (pwd -P), not the name: a PATH entry that is a SYMLINK to the shim
+  # directory matches none of the name patterns, and without this it slips through AND suppresses
+  # the real binary (the resolve-past loop keys off the same patterns). Store the LOGICAL path so
+  # the version-independent pi symlink is not pinned to a version-stamped target.
+  local _phys
+  _phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  case "$_phys" in ""|*/shims|*/shims/*|*/.pi/*) return 0 ;; esac
   case ":$DAEMON_PATH:" in *":$1:"*) ;; *) DAEMON_PATH="$DAEMON_PATH:$1" ;; esac
 }
 DAEMON_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -100,16 +106,27 @@ if [ -x "$HOME/.local/share/pi-node/current/bin/pi" ]; then
 fi
 for bin in tmux gh uv pi; do
   p="$(command -v "$bin" 2>/dev/null)" || continue
+  # ⛔ Trap (2): a shell function/alias makes `command -v` return a BARE name, and `dirname` of that
+  # is `.` — which the `cd`+`pwd` normalization below would turn into this install shell's CWD,
+  # baking the checkout the install was run from into an unattended daemon's PATH. Skip bare names
+  # BEFORE normalizing (after it, the relative form is gone and the guard in add_dir cannot see it).
+  case "$p" in /*) ;; *) continue ;; esac
   add_dir "$(cd "$(dirname "$p")" 2>/dev/null && pwd)"
 done
 # Resolve PAST a wrapper: add the first PATH entry holding a real executable of that name outside a
-# shim/.pi directory, so the shim can find it.
+# shim/.pi directory, so the shim can find it. Tested on the PHYSICAL path like add_dir(), so a
+# symlink TO a shim directory is recognised as a shim too.
 for bin in gh pi uv tmux; do
-  case "$(command -v "$bin" 2>/dev/null)" in
+  p="$(command -v "$bin" 2>/dev/null)" || continue
+  case "$p" in /*) ;; *) continue ;; esac
+  _pd="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || continue
+  case "$_pd" in
     */shims|*/shims/*|*/.pi/*)
       _oldifs="$IFS"; IFS=:
       for d in $PATH; do
-        case "$d" in ""|*/shims|*/shims/*|*/.pi/*) continue ;; esac
+        [ -n "$d" ] || continue
+        _dd="$(cd "$d" 2>/dev/null && pwd -P)" || continue
+        case "$_dd" in ""|*/shims|*/shims/*|*/.pi/*) continue ;; esac
         if [ -x "$d/$bin" ]; then add_dir "$d"; break; fi
       done
       IFS="$_oldifs" ;;
@@ -121,8 +138,12 @@ ok "daemon PATH: $DAEMON_PATH"
 # This probe catches a shim whose real binary is NOT on the PATH; it is BLIND to trap (3) — TCC
 # refuses the read only when LAUNCHD does it, not when this interactive install shell does.
 for bin in tmux uv pi; do
+  # uv is OPTIONAL (warned about above, not required): probe only a tool this install shell can
+  # already run, so the probe checks RESOLUTION and never invents a new hard dependency. A tool the
+  # shell can run but the daemon PATH cannot is still a hard install error.
+  command -v "$bin" >/dev/null 2>&1 || continue
   PATH="$DAEMON_PATH" command -v "$bin" >/dev/null 2>&1 \
-    || die "daemon PATH cannot resolve $bin: $DAEMON_PATH"
+    || die "daemon PATH cannot resolve $bin (the install shell can): $DAEMON_PATH"
 done
 PATH="$DAEMON_PATH" gh --version >/dev/null 2>&1 \
   || die "daemon PATH resolves a gh that does not RUN (a shim needs its real binary findable): $DAEMON_PATH"

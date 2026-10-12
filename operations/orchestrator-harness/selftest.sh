@@ -465,6 +465,14 @@ SH
   n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
   [ "$n" = "25" ] && rc=0 || { rc=1; echo "      sticky produced '$n'"; }
   ck "a later failure reuses the sticky last-known count (25)" $rc
+  # (b2) a sticky 0 must NOT be reused: a DRAINED queue is the dangerous case (PRs arrive, then one
+  # transient failure) and 0 drives OWN / no headroom / no merge-priority — the exact pre-fix bug.
+  printf '0\n' > "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" != "0" ] && [ -n "$n" ] && rc=0 || { rc=1; echo "      sticky-0 produced '$n'"; }
+  ck "a sticky last-known of 0 is not reused (got '$n')" $rc
+  [ "$n" = "11" ] && rc=0 || { rc=1; echo "      got '$n'"; }
+  ck "a sticky 0 falls back to 11 (BROAD)" $rc
   # (c) SUCCESS: the count is returned and persisted for the next failure
   cat > "$OC/gh" <<'SH'
 #!/bin/bash
@@ -484,6 +492,10 @@ grep -q 'SWEEP_RC' "$LOOP" && rc=0 || rc=1
 ck "the sweep listing captures its rc instead of discarding it" $rc
 grep -q 'PR listing FAILED' "$LOOP" && rc=0 || rc=1
 ck "a failed sweep listing is logged, not silently empty" $rc
+# …and the sweep loop must be fed the CAPTURED listing: a shape that logs the failure but still
+# pipes gh directly would sweep an empty list around the captured variable.
+grep -qF '${SWEEP_LIST:-}" |' "$LOOP" && rc=0 || rc=1
+ck "the sweep loop is fed the captured listing, not gh directly" $rc
 
 # ── 17) the daemon PATH never contains a shim / ~/.pi directory ──────────────────
 # macOS TCC blocks LAUNCHD from reading ~/Documents, so ~/.pi/agent/shims/gh (a symlink into
@@ -529,6 +541,15 @@ SH
   old="$(HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/prefix-add_dir.sh")"
   case "$old" in *"/shims"*) rc=0;; *) rc=1; echo "      pre-fix PATH: $old";; esac
   ck "non-vacuity: the pre-fix add_dir really admitted the shim dir" $rc
+  # A PATH entry that is a SYMLINK to the shim directory must not slip past a name-only match,
+  # and must not suppress the real binary (the resolve-past loop keys off the same test).
+  ln -s "$DP/home/.pi/agent/shims" "$DP/shims-link"
+  LINK_PATH="$DP/shims-link:$DP/realbin:/usr/bin:/bin"
+  out2="$(HOME="$DP/home" PATH="$LINK_PATH" bash "$DP/drive.sh")"
+  case "$out2" in *"/shims"*|*"/.pi/"*) rc=1; echo "      symlinked-shim daemon PATH: $out2";; *) rc=0;; esac
+  ck "a symlink TO the shim dir cannot enter the daemon PATH" $rc
+  case ":$out2:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      symlinked-shim daemon PATH: $out2";; esac
+  ck "a symlinked shim dir does not suppress the real binary's directory" $rc
 fi
 
 echo

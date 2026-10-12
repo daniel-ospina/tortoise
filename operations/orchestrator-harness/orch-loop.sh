@@ -123,17 +123,27 @@ review_slots() { # <open_prs>
 # assigns 0.
 open_pr_count() { # -> echoes the open-PR count; never 0 on failure
   local raw rc err sticky
-  raw="$(gh pr list --repo "$OR" --state open --limit 300 --json number --jq 'length' 2>"$O/state/.open-err.$$")"
-  rc=$?
-  err="$(tr '\n' ' ' < "$O/state/.open-err.$$" 2>/dev/null)"
+  # `if …; then` rather than `raw=$(…); rc=$?` so this stays correct if errexit is ever enabled —
+  # under `set -e` the bare assignment would exit the loop BEFORE rc was read, on a transient blip.
+  if raw="$(gh pr list --repo "$OR" --state open --limit 300 --json number --jq 'length' 2>"$O/state/.open-err.$$")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  err="$(tr '\n' ' ' < "$O/state/.open-err.$$" 2>/dev/null || true)"
   rm -f "$O/state/.open-err.$$"
   if [ "$rc" -ne 0 ] || ! is_num "$raw"; then
     sticky="$(cat "$O/state/last-open-n" 2>/dev/null)"
-    if is_num "$sticky"; then
+    # ⛔ A sticky 0 is NOT reused. A drained queue (last success = 0) is exactly when new PRs are
+    # most likely to have arrived before this failure, and returning 0 drives the UNSAFE direction:
+    # OWN scope, no reviewer headroom, no merge-priority gate. Reuse only a POSITIVE last-known;
+    # absent / 0 / non-numeric assumes 11 = BROAD, because resuming a drain is idempotent while
+    # opening more lanes is not. THIS is what "never 0 on failure" means.
+    if is_num "$sticky" && [ "$sticky" -gt 0 ]; then
       echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> sticky last-known=$sticky" >> "$LOG"
       echo "$sticky"
     else
-      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> first-ever failure, assuming 11 (BROAD)" >> "$LOG"
+      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming 11 (BROAD)" >> "$LOG"
       echo 11
     fi
     return 0
@@ -169,10 +179,13 @@ while true; do
   # Same rule for the sweep listing: as a pipeline into `while read` with 2>/dev/null, a FAILED
   # listing yields ZERO iterations and prints NOTHING — the sweep silently does nothing for the
   # whole cycle. Capture it, check rc, log the failure, and feed the loop from the captured text.
-  SWEEP_LIST="$(gh pr list --repo "$OR" --state open --limit 300 --json number,headRefName,isDraft \
-    --jq ".[]|select((.isDraft|not) or (.headRefName|test(\"-tm$|-cap$|^fix/\")))|$SEL|\"\(.number)\t\(.headRefName)\t\(.isDraft)\"" 2>"$O/state/.sweep-err.$$")"
-  SWEEP_RC=$?
-  SWEEP_ERR="$(tr '\n' ' ' < "$O/state/.sweep-err.$$" 2>/dev/null)"; rm -f "$O/state/.sweep-err.$$"
+  if SWEEP_LIST="$(gh pr list --repo "$OR" --state open --limit 300 --json number,headRefName,isDraft \
+    --jq ".[]|select((.isDraft|not) or (.headRefName|test(\"-tm$|-cap$|^fix/\")))|$SEL|\"\(.number)\t\(.headRefName)\t\(.isDraft)\"" 2>"$O/state/.sweep-err.$$")"; then
+    SWEEP_RC=0
+  else
+    SWEEP_RC=$?
+  fi
+  SWEEP_ERR="$(tr '\n' ' ' < "$O/state/.sweep-err.$$" 2>/dev/null || true)"; rm -f "$O/state/.sweep-err.$$"
   if [ "$SWEEP_RC" -ne 0 ]; then
     echo "[sweep] PR listing FAILED rc=$SWEEP_RC (${SWEEP_ERR:-no stderr}) — nothing swept this cycle" >> "$LOG"
   fi
