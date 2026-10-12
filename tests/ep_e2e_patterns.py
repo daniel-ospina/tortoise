@@ -252,8 +252,12 @@ def test_undercutter():
         )
     if abs(claim_after["mean"] - claim_annotated["mean"]) < 1e-6:
         issues.append(
-            f"Annotation had NO effect on claim confidence. "  # noqa: F541
-            f"GAP: annotation dimensions are archived (annotation_factor=1.0 hardcoded)"  # noqa: F541
+            "Annotation had NO effect on claim confidence. "
+            "GAP: the dimensions on the operator just annotated are not reaching "
+            "compute_operator_weight. NOTE: the read-site coalesce defaults cannot "
+            "cause this — that operator's dims are SET, so coalesce is bypassed. "
+            "Check (1) that the annotation write actually persisted on the operator, "
+            "and (2) that annotation_factor is applied rather than discarded."
         )
 
     if issues:

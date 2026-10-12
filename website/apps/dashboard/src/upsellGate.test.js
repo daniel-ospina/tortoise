@@ -205,9 +205,11 @@ function branchSpan(source, marker) {
 }
 
 test('#4639: the error banner reads the narrowed gate, not the old broad regex', () => {
-  // Anchored on the `{error && (` gate — the suspended-team banner above also
-  // carries className="error banner".
-  const start = mainJsx.indexOf('{error && (')
+  // Anchored on the banner gate — the suspended-team banner above also
+  // carries className="error banner". Since #8249 the gate also admits the
+  // active team's retained rotate refusal, hence the two-term expression; the
+  // slice below is unchanged (the first `</div>` closes the banner).
+  const start = mainJsx.indexOf('(error || rotateRefusalText) && (')
   assert.notEqual(start, -1, 'the error banner must exist')
   const banner = mainJsx.slice(start, mainJsx.indexOf('</div>', start))
   assert.doesNotMatch(mainJsx, /402\|upgrade\|quota\|limit\|checkout\|billing/,

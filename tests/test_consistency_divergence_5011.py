@@ -850,6 +850,64 @@ def test_uncarried_is_per_point_not_per_key(proj, tmp_path):
     assert "custom_extra" in named.get("b", []), r["divergent_points"]
 
 
+def test_a_flattened_list_search_keys_is_compared_not_uncarried(proj, tmp_path):
+    """#8006: `search_keys` is journalled as E3's `list[str]` and STORED as the
+    graph's space-joined string. So it is not an uncarried loss — the pre-#8006
+    classification said "the projection cannot hold this" because the list
+    policy dropped it, which after the fix is false on both halves.
+
+    (1) Fails if the faithful replay is reported diverged, or if the key is
+    still listed as an uncarried coverage gap (the check must not claim a value
+    is unheld when the writer carries it).
+    (2) Reachable: a `PointAdded` whose payload carries the E3 list spelling.
+    """
+    log_path = str(tmp_path / "flat_sk.jsonl")
+    _seed(proj, log_path, [_pt("p1", "a", search_keys=["alpha", "beta"])])
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r["divergent_points"]
+    assert "search_keys" not in r["uncarried_journal_fields"], r
+    assert "search_keys" not in r.get("one_sided_fields", {})
+
+
+def test_a_journalled_list_search_keys_the_graph_lost_is_a_divergence(
+        proj, tmp_path):
+    """#8006: the coverage the stale `uncarried` classification did NOT have.
+    While a list-valued `search_keys` was excluded from the comparison, a graph
+    that lost the value entirely was invisible to this check — exactly the
+    regression class the issue reports on the EventAPI door.
+
+    (1) The value that makes this fail is the cleared `n.search_keys`.
+    (2) Reachable: raw Cypher (nothing else writes the node without the
+    journal), which is the same shape as the pre-fix live drop.
+    """
+    log_path = str(tmp_path / "lost_sk.jsonl")
+    _seed(proj, log_path, [_pt("p1", "a", search_keys=["alpha", "beta"])])
+    proj.g.query("MATCH (n:Point {id:'p1'}) REMOVE n.search_keys")
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is False
+    named = {d["id"]: d["fields"] for d in r["divergent_points"]}
+    assert "search_keys" in named.get("p1", []), r["divergent_points"]
+
+
+def test_a_legacy_array_search_keys_is_not_a_divergence(proj, tmp_path):
+    """#8006: the comparison is over the writer's CANONICAL form, on both
+    sides. A graph that still holds the legacy ARRAY (#5444's fixup-owed state)
+    carries the same content as the flattened string, so it must not be
+    reported as a content divergence — the array state has its own detector
+    (`_array_valued_search_keys_exist`), and a repair of it must not read as an
+    unrecorded mutation of this check's baseline.
+
+    (1) Fails if the legacy array is reported diverged.
+    (2) Reachable: the pre-R2 shape, written here with raw Cypher.
+    """
+    log_path = str(tmp_path / "legacy_sk.jsonl")
+    _seed(proj, log_path, [_pt("p1", "a", search_keys=["alpha", "beta"])])
+    proj.g.query("MATCH (n:Point {id:'p1'}) SET n.search_keys = $v",
+                 params={"v": ["alpha", "beta"]})
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r["divergent_points"]
+
+
 def test_map_valued_prop_is_reported_as_uncarried_not_diverged(proj, tmp_path):
     """FalkorDB rejects a map as a node property (`_is_persistable_prop_value`),
     so the writer filters it — the projection PROVABLY cannot hold it, and a

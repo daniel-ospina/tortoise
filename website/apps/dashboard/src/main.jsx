@@ -70,14 +70,14 @@ import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, job
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, heldRowEmbeddable } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, revealablePlaintext, revealableMintPlaintext, heldRowEmbeddable } from './sessionKey.js'
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
+import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -1108,11 +1108,13 @@ function WizardBlock({ step, title, children }) {
 // (Billing plan cards, welcome plan chooser, API-keys cap notice). A missing
 // server price id renders a DISABLED Upgrade control + the honest reason; it
 // never becomes a marketing link. The caller may add the secondary
-// "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
-// Graphs-tab upgrade buttons) are out of scope here.
-function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false }) {
+// "Compare plans" link. Other CTAs keep their own controls: the header badge
+// (#4331) and the error banner (#4639's nudgeRoute gate, which is unreachable
+// without a server price id).
+// #4386: the Graphs-tab lock line reads this control too, with its own copy.
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false, label = 'Upgrade' }) {
   const reasonId = React.useId()
-  const cta = checkoutCtaFor(priceId, { anyConfigured })
+  const cta = checkoutCtaFor(priceId, { anyConfigured, label })
   if (cta.disabled) {
     // #4335 review: native `disabled` already conveys the state (a redundant
     // aria-disabled would contradict it), and the reason is visible AND tied
@@ -1388,21 +1390,47 @@ function claimIntentInFlight() {
   // #2426: the show-once card's authoritative server echo of the minted
   // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
   const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
-  // #2735: rotate's one-time replacement reveal — {plaintext, expiresAt}.
+  // #2735: rotate's one-time replacement reveal — per team since #4429, one
+  // record per team that rotated a key: {plaintext, expiresAt, warning,
+  // refusal}.
   // DELIBERATELY separate state from newKey/newKeyExpiresAt (the create
   // modal's key): opening and cancelling the create modal must never destroy
   // an unread rotate replacement whose old key is already revoked (#2392
-  // class "a click must not destroy the one-time secret"). Cleared on the
-  // reveal's own Copy & done and on logout/team switch.
-  const [rotatedKey, setRotatedKey] = React.useState(null)
-  // #4355: the rotate partial-state disclosure. `POST /v1/team/keys/{id}/rotate`
-  // creates the replacement FIRST and then CLAIM-revokes the old row; when the
+  // class "a click must not destroy the one-time secret").
+  //
+  // WHY IT IS KEYED BY TEAM, AND WHY A SWITCH NO LONGER CLEARS IT (#4429).
+  // Rotate is a DESTRUCTIVE server call: `POST /v1/team/keys/{id}/rotate` mints
+  // the replacement and revokes the displaced row in ONE operation (#4355),
+  // and its response is the ONLY delivery of the replacement's plaintext
+  // (hash-only server-side — "shown once"). A team switch across that RTT used
+  // to hit the stale-response guard and drop the plaintext, so the old key was
+  // revoked AND the replacement was unrecoverable: the user lost a working
+  // credential and got nothing. The outcome is now tagged with the team that
+  // owns it and RETAINED, and the derive block below is the single reader that
+  // scopes it — a record renders only for its own team, so retention can never
+  // put one team's plaintext under another team's header. Cleared on the
+  // record's own Copy & done (the plaintext only — `warning` is not a secret)
+  // and on logout.
+  //
+  // #4355: the `warning` half is the partial-state disclosure. When the
   // destructive leg could not be completed AND its rollback also failed, the
   // response carries `replaced_revoked:false` + a `warning` and BOTH keys are
-  // live. That is a state the user has to act on (the "what is live" surfaces
-  // and the count are now one too high), so it gets its own persistent notice
-  // rather than riding the transient `error` slot that `loadAll` overwrites.
-  const [rotateNotice, setRotateNotice] = React.useState('')
+  // live — a state the user has to act on (the "what is live" surfaces and the
+  // count are now one too high), so it gets its own persistent notice rather
+  // than riding the transient `error` slot that `loadAll` overwrites. It rides
+  // this record so a team switch cannot silently drop it either.
+  //
+  // #8249: the `refusal` half is the third disclosure — a 2xx whose body
+  // carries NO revealable plaintext. There is nothing to retain there (the
+  // secret is unrecoverable and the displaced row is already revoked), so what
+  // is retained is the MESSAGE: without it, a team switch landing on the RTT
+  // left the user told nothing at all about a rotate that destroyed their key.
+  // It is a field of its own because `warning` is a partial state (both keys
+  // live), not a lost secret — one field for both would muddle the two
+  // disclosures. As with the other two, the derive block below is the single
+  // reader and it resolves the ACTIVE team's record, so a retained refusal can
+  // never render under another team's header.
+  const [rotateOutcomes, setRotateOutcomes] = React.useState({})
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -3103,6 +3131,17 @@ function claimIntentInFlight() {
   // check out (the nudge's checkout target).
   const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
   const nodeNext = nextUpgradePlan(planOptions(), team)
+  // #4386: the Graphs-tab lock line's own upgrade target. Same derivation the
+  // Billing grid and the node nudge use — deliberately a SEPARATE call, so a
+  // future node-specific retarget cannot silently move the graphs CTA. null
+  // means the deployment sells no paid tier, and the control then renders
+  // DISABLED with the honest reason rather than a button that does nothing.
+  // `nextUpgradePlan` returns the PLAN; its id lives on the team's
+  // server-resolved map (the same lookup the node nudge does).
+  const graphUpgrade = nextUpgradePlan(planOptions(), team)
+  const graphUpgradePriceId = graphUpgrade
+    ? (team?.checkout_price_ids?.[graphUpgrade.tier] || '')
+    : ''
   // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
   // allowance" promise when no plan above the current one is purchasable
   // (top tier, or an empty catalog).
@@ -3112,7 +3151,16 @@ function claimIntentInFlight() {
   // server-resolved default (team.checkout_price_id); the Billing page and
   // welcome plan step pass a per-tier price id from team.checkout_price_ids.
   async function upgradeToPrice(priceId) {
-    if (!priceId || checkoutPending) return
+    // #4386: a missing price id is NOT a silent no-op. Every render site
+    // disables/skips the control when no checkout is possible, so this branch
+    // is a backstop — but it is the choke point the silence originated from,
+    // and it fails LOUD so "the button did nothing" cannot come back through
+    // a future call site that forgets the gate.
+    if (!priceId) {
+      setError(CHECKOUT_UNAVAILABLE_REASON)
+      return
+    }
+    if (checkoutPending) return
     setCheckoutPending(true)
     try {
       const { checkout_url } = await api('/v1/billing/checkout', {
@@ -4251,7 +4299,16 @@ function claimIntentInFlight() {
       try {
         const body = await response.json()
         if (body && body.api_key && body.org_name) {
-          return { api_key: body.api_key, org_name: body.org_name, graph_name: body.graph_name || '' }
+          // #4370: the org + its key are already COMMITTED server-side, so the
+          // envelope still resolves the org — but the plaintext leg is read
+          // through the SHARED predicate. A presence check accepted a truthy
+          // non-string (`42`, `{}`, `[]`) or a blank string, which reached
+          // `welcomeKey` verbatim: it was embedded in the connect snippet and
+          // `welcomeKey.startsWith(...)` threw `TypeError: …startsWith is not a
+          // function` in the row-truth effect and the revoke prefix-clear. An
+          // unrevealable value resolves to '' so the connect step re-gates on
+          // the durable ROWS instead of embedding a non-key.
+          return { api_key: revealablePlaintext(body.api_key), org_name: body.org_name, graph_name: body.graph_name || '' }
         }
       } catch { /* unreadable body — fall through to the error card */ }
       return null
@@ -4954,8 +5011,9 @@ function claimIntentInFlight() {
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
     setKeyModalCapNotice('')
-    setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
-    setRotateNotice('') // #4355: the rotate partial-state notice belongs to the old user's keys
+    // #4429: the rotate outcomes belong to the old user. (A team switch
+    // deliberately does NOT clear them — see `switchTeam`.)
+    setRotateOutcomes({})
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -5332,7 +5390,13 @@ function claimIntentInFlight() {
       // never on this card. In-memory only (ADR-010); a mid-wizard reload
       // loses it and the connect step re-gates via the rows.
       setWizardOrgName('')
-      setWelcomeKey(provisioned.api_key || '')
+      // #4370: the ONE write site for `welcomeKey` reads the shared predicate
+      // too — belt to `provisionInApp`'s braces, so this state can never hold a
+      // non-string even if a future producer hands one over. An empty value is
+      // the deliberate fall-through: the connect step resolves the row the
+      // provision just minted (`wizardExistingKeyAffordance`) and offers a
+      // rotate, instead of embedding a non-key in the snippet.
+      setWelcomeKey(revealablePlaintext(provisioned.api_key))
       setWelcomeOrgName(provisioned.org_name || name)
       setWelcomeGraphName(provisioned.graph_name || '')
       setWelcomeTeamReady(true)
@@ -5530,7 +5594,7 @@ function claimIntentInFlight() {
         // The remedy names the row this mint created: `keyName` is always set
         // here (unlike the create path's optional name), so pointing at "an
         // unlabeled key" would be false.
-        setWizardDurableError(`The server did not return the new key\u2019s value, so it cannot be shown. The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
+        setWizardDurableError(revealRefusalFor('new key\u2019s value') + ` The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
         await loadAll('').catch(() => {})
         return
       }
@@ -5653,8 +5717,15 @@ function claimIntentInFlight() {
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
-    setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
-    setRotateNotice('')    // #4355: a partial-state warning is about THIS team's keys — never the new team's
+    // #4429: `rotateOutcomes` is deliberately NOT cleared by a team switch —
+    // the two clears that used to sit here are gone. A rotate is destructive
+    // server-side and its response is the only delivery of the replacement's
+    // plaintext, so an outcome retained for the team we are leaving must
+    // outlive the switch: that retention IS the fix for a switch landing
+    // mid-RTT (the old key is revoked, and the secret would otherwise be
+    // destroyed with it). The outcome is team-keyed and renders only on the
+    // team that owns it (`rotateOutcomeFor`), so it cannot leak into the new
+    // team's header, and it is cleared on logout and on its own Copy & done.
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -5850,11 +5921,28 @@ function claimIntentInFlight() {
       // FIRST key one time ({graph, key, key_plaintext, revealed_once}). The
       // plaintext exists ONLY here — hash-only storage server-side — so the
       // reveal modal is the sole render, never a route (no show-key page).
-      if (b && b.key_plaintext) {
-        setRevealKey({
-          plaintext: b.key_plaintext,
-          title: b.graph && b.graph.name ? `Graph ${b.graph.name} created` : 'Graph created',
-        })
+      //
+      // Round-16/#4370: the reveal latch carries the SAME identity guard the
+      // rest of this handler applies. `switchTeam` clears `revealKey`, so a
+      // stale continuation must not re-mount the PREVIOUS team's plaintext
+      // under the new team's header (mintGraphKey already guards its latch).
+      if (b && b.key_plaintext && orgIdRef.current === _teamAtCall) {
+        // #4370: read the envelope through the SAME shared predicate as every
+        // other reveal seam. A presence check (`if (b.key_plaintext)`) accepted
+        // the truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which
+        // mounted the modal on a blank `.key-value` whose copy wrote
+        // whitespace and then dismissed — destroying the only view of a live
+        // key. The graph and its first key WERE created, so the honest outcome
+        // is a refusal naming the key the user must revoke, never a blank modal.
+        const plaintext = revealablePlaintext(b.key_plaintext)
+        if (plaintext) {
+          setRevealKey({
+            plaintext,
+            title: b.graph && b.graph.name ? `Graph ${b.graph.name} created` : 'Graph created',
+          })
+        } else {
+          setError(revealRefusalFor('graph\u2019s first key\u2019s value') + ' The graph was created — open its key panel to revoke the key and mint a new one.')
+        }
       }
       setNewGraphName('')
       await Promise.all([loadGraphs(currentOrgId), loadTeams()])
@@ -5935,8 +6023,22 @@ function claimIntentInFlight() {
         useSession: true,
         body: JSON.stringify(graphMintBody(gid, graphKeyName)),
       })
-      const plaintext = resp && (resp.key || resp.api_key)
-      if (!plaintext) throw new Error('Mint response did not include a key')
+      // #4370: the per-graph mint latches through the SAME shared predicate as
+      // every other reveal seam. `resp && (resp.key || resp.api_key)` accepted
+      // the truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which
+      // mounted the modal on a blank `.key-value` whose copy wrote whitespace
+      // and then dismissed — destroying the only view of a live key. The row IS
+      // created server-side, so REFRESH BEFORE surfacing (the list is the only
+      // place the user can find and revoke it) and use the same refusal contract
+      // as the sibling seams, not a divergent `throw` (D2).
+      const plaintext = revealableMintPlaintext(resp)
+      if (!plaintext) {
+        if (orgIdRef.current !== _teamAtCall) return
+        await refreshPanelAndCounts(gid, seq)
+        if (orgIdRef.current !== _teamAtCall) return
+        setGraphMsg(revealRefusalFor('new key\u2019s value') + ' Refresh the list and revoke the unused key you just created.')
+        return
+      }
       if (orgIdRef.current !== _teamAtCall) return
       setGraphKeyName('')
       setRevealKey({ plaintext, title: `Key for ${graphNameFor(gid) || 'graph'} created` })
@@ -6552,7 +6654,7 @@ function claimIntentInFlight() {
         // team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return null
-        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
+        setError(revealRefusalFor('new key\u2019s value') + ' Refresh the list and revoke any unlabeled key you just created.')
         return null
       }
       setNewKey(plaintext)
@@ -6630,41 +6732,107 @@ function claimIntentInFlight() {
   // the form is its exact-complement else-branch, so it stays the single gate.
   const newKeyReveal = (keyModalStage === 'done' && revealablePlaintext(newKey)) || ''
 
-  // #4342/#4359: the ONE authority for "is this a revealable plaintext?" — a
-  // non-empty, non-blank STRING. A 2xx can carry a number, an object, or
-  // padding, and every one of those is non-falsy, so a bare `!plaintext` check
-  // latched a box the user could not copy.
-  //
-  // SCOPE: this is NOT a whole-file invariant. Same-class writers outside the
-  // create/connect/rotate reveals are tracked in #4370.
-  //
-  // `trim()` alone is NOT a blankness test — it strips whitespace but not
-  // zero-width / invisible characters, so a string of only those would pass
-  // this single gateway and reproduce the reported symptom exactly: a visually
-  // blank `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set
-  // plus the DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which
-  // is in NEITHER property. Only the DECISION uses the stripped copy — the
-  // returned value is always the verbatim secret.
-  function revealablePlaintext(value) {
-    return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
+  // #4342/#4359/#4370: the reveal predicate is no longer declared here — it is
+  // `revealablePlaintext`/`revealableMintPlaintext` from `./sessionKey.js`
+  // (module scope, so the pure connect module reads the SAME guard). Every
+  // reveal/embed writer in this file reads them before it stores; see
+  // sessionKey.js for the blankness class they cover.
+
+  // #4370 (D2): ONE refusal contract for every reveal seam. The seams' REMEDIES
+  // legitimately differ (create vs rotate-already-revoked vs labeled connect
+  // mint vs the create-graph envelope), so only the prefix — the part that
+  // tells the user the value exists but cannot be shown — is shared; each seam
+  // appends its own remedy sentence. Before this, `mintGraphKey` was the one
+  // seam with divergent wording (`Mint response did not include a key`), so the
+  // "cannot be shown" contract could not be asserted across the whole set.
+  function revealRefusalFor(subject) {
+    return `The server did not return the ${subject}, so it cannot be shown.`
   }
 
-  // #4359: a mint response carries the plaintext on EITHER leg (`key` on the
-  // POST /v1/team/keys response, `api_key` on the provision envelope). The legs
-  // are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
-  // selected a truthy-but-unrevealable primary first, so `{key: {},
-  // api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
-  function revealableMintPlaintext(response) {
-    return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
+  // #4429: the rotate outcome OF THE ACTIVE TEAM — the ONE reader that scopes
+  // the retained per-team outcomes to the team that owns them. Every consumer
+  // of a rotate outcome goes through here (the reveal, its expiry, the
+  // partial-state notice) and nothing else reads `rotateOutcomes`, so a switch
+  // can retain an outcome without any surface ever rendering it under the
+  // wrong team's header.
+  function rotateOutcomeFor(outcomes, orgId) {
+    if (!outcomes || !orgId) return null
+    return outcomes[orgId] || null
   }
+
+  const rotateOutcome = rotateOutcomeFor(rotateOutcomes, currentOrgId)
 
   // #4342: the rotate replacement's key, derived ONCE for the same reason as
   // `newKeyReveal` above — the reveal renders iff this is a non-empty string,
-  // so a falsy `rotatedKey.plaintext` can never produce the empty `.key-value`
-  // box and is never handed to `navigator.clipboard.writeText`. `regenerateKey`
-  // already refuses to latch a plaintext-less mint (the old key is revoked by
-  // then); this is the render-side half of that same guard.
-  const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
+  // so a falsy `rotateOutcome.plaintext` can never produce the empty
+  // `.key-value` box and is never handed to `navigator.clipboard.writeText`.
+  // `regenerateKey` already refuses to latch a plaintext-less mint (the old key
+  // is revoked by then); this is the render-side half of that same guard.
+  const rotatedKeyReveal = (rotateOutcome && revealablePlaintext(rotateOutcome.plaintext)) || ''
+
+  // #4355/#4429: the partial-state disclosure, from the same team-scoped
+  // record — reading it through `rotateOutcome` is what keeps a retained
+  // warning from surfacing on a team whose keys it does not describe.
+  const rotateNoticeText = (rotateOutcome && rotateOutcome.warning) || ''
+
+  // #8249: the plaintext-less refusal of the ACTIVE team — the third
+  // disclosure on the same record, and the one that had no retained home. The
+  // block that produced it sat after the team-identity guard and wrote to the
+  // transient `error` slot, so a switch across the rotate RTT dropped the only
+  // notice that the rotate had destroyed a key. Reading it through the same
+  // team-scoped reader keeps a retained refusal off a team whose rows it does
+  // not describe.
+  const rotateRefusalText = (rotateOutcome && rotateOutcome.refusal) || ''
+
+  // #8249 (review P2): the error banner's ONE composed message. The retained
+  // refusal OUTRANKS the transient `error` slot: the plaintext-less path
+  // latches the refusal and then runs `await loadAll('')`, which writes its OWN
+  // failure into that slot — so without this precedence a compound failure
+  // (the rotate succeeded, the follow-up read did not) would render
+  // `Failed to fetch` and hide the one message that says the old key was
+  // revoked. That displacement is exactly what the pre-#8249 ordering avoided
+  // by writing the refusal last; latching it on the record moved the write, so
+  // the precedence has to live here. An empty refusal leaves the `error` slot
+  // authoritative (and an empty error leaves the refusal to render alone).
+  function errorBannerText(error, refusalText) {
+    return refusalText || errorMessage(error)
+  }
+
+  // #4370: the GRAPH reveal's key (the create-graph envelope + the per-graph
+  // mint), derived ONCE for the same reason as `newKeyReveal` /
+  // `rotatedKeyReveal`. Its two writers now latch through the shared predicate,
+  // and this is the render-side half of the same guard: the modal mounts iff
+  // this is a non-empty, non-blank string, so no future writer can mount it
+  // with a value the user cannot copy or with a blank `.key-value` (the #4330
+  // "square"), and the raw `revealKey.plaintext` is never handed to
+  // `navigator.clipboard.writeText`.
+  const revealKeyReveal = (revealKey && revealablePlaintext(revealKey.plaintext)) || ''
+
+  // #4370: the graph reveal's Copy. Reading the DERIVED gate — not the raw
+  // state — means the clipboard always receives exactly the value the user can
+  // see, and a falsy read returns before the clipboard is touched (`writeText`
+  // stringifies a non-string: `String(null)` is the four-character "null").
+  // The #2735 class is preserved: the reveal is dismissed only once the write
+  // has resolved, so a refused clipboard cannot destroy the only copy.
+  async function copyRevealKey() {
+    const plaintext = revealKeyReveal
+    if (!plaintext) return
+    try {
+      await navigator.clipboard.writeText(plaintext)
+      closeRevealKey()
+    } catch {
+      // Keep the shown-once key on screen and select it for a manual copy
+      // (mirrors copyNewKey / copyRotatedKey).
+      const el = document.querySelector('.modal .key-value')
+      if (el) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        const sel = window.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
+    }
+  }
 
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
@@ -6711,9 +6879,11 @@ function claimIntentInFlight() {
     // revoke), so the client no longer has a window between the two legs. What
     // it keeps is the stale-response rule below: a team switch during the RTT
     // must not land this team's reveal (or its warning) under the new team's
-    // header. The replacement is still never installed into the browser (no
-    // localStorage/teamKeysRef/apiKey write) — it is shown once via
-    // `setRotatedKey`, and the old key is revoked by the same call (#2246).
+    // header. #4429: the guard scopes what renders, it no longer DISCARDS the
+    // outcome — the latch sits before it, keyed by the owning team. The
+    // replacement is still never installed into the browser (no
+    // localStorage/teamKeysRef/apiKey write) — it is delivered once through
+    // `rotateOutcomes`, and the old key is revoked by the same call (#2246).
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -6761,59 +6931,126 @@ function claimIntentInFlight() {
         useSession: true,
         body: JSON.stringify(rbody),
       })
-      // #4342/#4355: the single call has already revoked the old key AND (when
-      // it could) revoked the displaced row — so a team switch across this RTT
-      // must not land the reveal or the partial-state notice under the new
-      // team's header. Bail after reloading the true state instead.
+      // #4429: the single call has already minted the replacement AND revoked
+      // the displaced row, so THIS response is the only delivery of the
+      // replacement's plaintext (hash-only server-side — "shown once"). The
+      // outcome is therefore latched BEFORE the team-identity guard, tagged
+      // with the team that owns it: a switch across this RTT must never discard
+      // a secret the server can no longer hand out again. Retention is safe
+      // because the derive block's `rotateOutcomeFor` is the only reader — a
+      // retained outcome renders on its own team's surface and nowhere else.
+      //
+      // The identity guard below still governs every CROSS-TEAM write: the
+      // refusal names THIS team's row, the prefix clear reads THIS team's held
+      // plaintexts, and `loadAll` refreshes THIS team's key list — none of
+      // those may land on the new team.
+      const plaintext = revealableMintPlaintext(mk)
+      if (plaintext) {
+        // #4355: the server states whether the displaced row was actually
+        // revoked. When the destructive leg could not be completed AND its
+        // rollback also failed, BOTH keys are live — the server still returns
+        // the live replacement's plaintext (the only alternative is losing a
+        // live secret) and a warning. It rides the outcome so a switch cannot
+        // drop it, and it is disclosed on the owning team's surface only.
+        const warning = (mk && mk.warning) ? String(mk.warning) : ''
+        // Functional update: a latch for ANOTHER team must not wipe an outcome
+        // retained for a third one, and a concurrent rotate on this team must
+        // not lose this latch to a stale closure.
+        setRotateOutcomes((prev) => ({
+          ...prev,
+          [_teamAtCall]: { plaintext, expiresAt: (mk && mk.expires_at) || null, warning },
+        }))
+      } else {
+        // #8249: the third outcome — a 2xx carrying NO revealable plaintext.
+        // The secret is unrecoverable by now, so there is no secret to retain;
+        // what must be retained is the DISCLOSURE. It is latched with the team
+        // whose row it names, BEFORE the identity guard below, for the same
+        // reason the plaintext is (#4429): the guard scopes WHERE an outcome
+        // renders, it must not decide WHETHER the user is told. A switch
+        // across the RTT used to stop this branch before it ran, so the user
+        // learned about the destroyed key only by noticing a revoked row and
+        // an unexplained extra one.
+        //
+        // `refusal` is its own field: the `warning` beside it is a partial
+        // state (both keys live), not a lost secret, and one field for both
+        // would muddle the two disclosures (#4355/#8249). The server contract
+        // says a `replaced_revoked:false` response also carries the live
+        // replacement's plaintext, but this branch keeps the warning rather
+        // than dropping it — a response that carried both is still one the
+        // user has to act on, and this disclosure is the one that had no
+        // retained home.
+        //
+        // #8249 (review P1): this record is ALSO the reveal's one home, and a
+        // plaintext-less rotate DELIVERS no secret. Writing `plaintext: ''`
+        // here would destroy a live, unread replacement minted by an EARLIER
+        // successful rotate on this same team — the server is hash-only and
+        // can never re-deliver it ("shown once"), so that overwrite is pure
+        // data loss. Carry the prior reveal (plaintext + expiry) and any prior
+        // partial-state warning forward; only the refusal half is new. The
+        // remedy string routes through the shared `revealRefusalFor` contract
+        // (#4370) rather than hardcoding the prefix.
+        setRotateOutcomes((prev) => {
+          const prior = prev[_teamAtCall] || {}
+          return {
+            ...prev,
+            [_teamAtCall]: {
+              plaintext: prior.plaintext || '',
+              expiresAt: prior.expiresAt || null,
+              warning: (mk && mk.warning) ? String(mk.warning) : (prior.warning || ''),
+              refusal: revealRefusalFor('replacement key\u2019s value') + ` ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`,
+            },
+          }
+        })
+      }
+      // A stale response may not write anything that renders under the new
+      // team's header (the prefix clear and the refresh below). The refusal is
+      // no longer in that list (#8249) — it is latched above, keyed by the
+      // team it names, so a switch retains it instead of dropping it.
       if (orgIdRef.current !== _teamAtCall) return
       // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
       // reveal. The secret is unrecoverable at this point AND the old key was
       // revoked by the call above, so the only honest outcome is to say so —
-      // never to latch `rotatedKey` with a falsy (or non-string, or blank)
-      // plaintext, which rendered an empty `.key-value` box whose copy wrote
-      // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
-      // and `createKey` already refuse the falsy case). The remedy is
-      // rotate-specific: create cannot lose a live credential, rotate already
-      // has.
-      const plaintext = revealableMintPlaintext(mk)
+      // never to latch a falsy (or non-string, or blank) plaintext, which
+      // rendered an empty `.key-value` box whose copy wrote the empty string
+      // (the #4330 class on the rotate surface; `mintGraphKey` and `createKey`
+      // already refuse the falsy case). The remedy is rotate-specific: create
+      // cannot lose a live credential, rotate already has.
       if (!plaintext) {
-        // Refresh FIRST, then surface the reason: `loadAll` owns the same
-        // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate succeeded, the refresh did not) would otherwise
-        // replace the one message that tells the user their old key is gone
-        // and which row to clean up. The identity guard mirrors the
-        // stale-response rule — a switch during the refresh must not carry this
-        // team's error under the new team's header.
+        // #8249: the refusal is NOT written to the `error` slot any more. That
+        // slot is not team-keyed and `loadAll` overwrites it from its own
+        // catch — so it could not hold a disclosure that has to outlive a
+        // switch, and the identity guard above used to drop the write
+        // entirely (the compound failure the old ordering worked around: the
+        // rotate succeeded, so the message is the only thing that tells the
+        // user their old key is gone). The record latched above is the one
+        // home; the banner reads it through `rotateOutcomeFor`, i.e. the
+        // active team's record only.
+        //
+        // The refresh still belongs here: the replacement row exists
+        // server-side and the displaced row is revoked, so the table has to
+        // show both. It runs only when the team is still ours — a stale
+        // response must not refresh another team's list.
         await loadAll('')
-        if (orgIdRef.current !== _teamAtCall) return
-        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
       }
-      // #4355: the server states whether the displaced row was actually
-      // revoked. When the destructive leg could not be completed AND its
-      // rollback also failed, BOTH keys are live — the server still returns
-      // the live replacement's plaintext (the only alternative is losing a
-      // live secret) and a warning. Surface it as its own persistent notice:
-      // this is a state the user has to clean up, and it is exactly what the
-      // other "what is live" surfaces now over-count by one.
-      setRotateNotice(mk && mk.warning ? String(mk.warning) : '')
       // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
       // performs. The server revoked the displaced row inside this call, so an
       // in-memory welcome/connect plaintext belonging to THAT row must not
       // outlive it — otherwise the overview "live" claim and the connect
       // snippet keep embedding a credential this rotate just killed. (The
-      // rotate replacement itself is shown once via setRotatedKey and is never
-      // installed into the browser, so nothing else needs clearing.)
+      // rotate replacement itself is delivered once through `rotateOutcomes`
+      // above and is never installed into the browser, so nothing else needs
+      // clearing.)
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
       }
       // #2246: no held install — the replacement is shown once and managed
-      // from the table like any other durable. #2735: its OWN reveal state
-      // (rotatedKey), never the create modal's newKey — the create modal's
-      // dismiss paths clear newKey, which would destroy this unread
-      // replacement (the old key is already revoked by this point).
-      setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
+      // from the table like any other durable. #2735: its OWN outcome state
+      // (`rotateOutcomes`), never the create modal's newKey — the create
+      // modal's dismiss paths clear newKey, which would destroy this unread
+      // replacement (the old key is already revoked by this point). #4429:
+      // latched above, BEFORE the identity guard — see the comment there.
       await loadAll('')
     } catch (e) {
       if (orgIdRef.current !== _teamAtCall) return // stale switch — not our state, not our error
@@ -6868,14 +7105,22 @@ function claimIntentInFlight() {
   // clipboard: the plaintext is read through the same type guard the reveal
   // gate uses, and a falsy read returns before the clipboard is touched.
   async function copyRotatedKey() {
-    const plaintext = rotatedKey ? revealablePlaintext(rotatedKey.plaintext) : ''
+    const plaintext = rotateOutcome ? revealablePlaintext(rotateOutcome.plaintext) : ''
     if (!plaintext) return
     try {
       // #2735: clear the one-time plaintext ONLY after the clipboard write
       // resolves. The old key is already revoked, so a failed write that still
       // cleared the reveal would destroy the only copy of the live replacement.
+      // #4429: clear THIS team's plaintext only, and only the plaintext — an
+      // outcome retained for another team is not this button's to destroy, and
+      // the partial-state `warning` is not a secret and must outlive the copy
+      // (it is the user's only notice that a key is still live).
       await navigator.clipboard.writeText(plaintext)
-      setRotatedKey(null)
+      setRotateOutcomes((prev) => {
+        const cur = prev[currentOrgId]
+        if (!cur) return prev
+        return { ...prev, [currentOrgId]: { ...cur, plaintext: '', expiresAt: null } }
+      })
     } catch {
       // Keep it visible + select it for a manual copy (mirrors revealKey's
       // fallback and copyNewKey's).
@@ -7008,8 +7253,8 @@ function claimIntentInFlight() {
       // prefix clear closes it. #4355 note: rotate no longer reaches here (it
       // is ONE call to /rotate, which revokes the displaced row server-side),
       // so `regenerateKey` performs this SAME prefix clear itself — the
-      // replacement is shown via setRotatedKey, and the welcome plaintext must
-      // not survive its own row's rotation.
+      // replacement is delivered through `rotateOutcomes`, and the welcome
+      // plaintext must not survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -9417,9 +9662,20 @@ function claimIntentInFlight() {
             )}
           </div>
         )}
-        {error && (
+        {/* #8249: the rotate refusal renders from the ACTIVE team's retained
+            outcome record, not from the `error` slot. The slot is not
+            team-keyed and `loadAll` owns it (it overwrites the value from its
+            own catch), so a switch landing on the rotate RTT used to drop the
+            one message that tells the user their key was destroyed; the same
+            element, the same treatment, but a source that outlives the switch
+            and is scoped to the team whose row the message names. The retained
+            refusal also OUTRANKS a live `error`: the plaintext-less path's own
+            follow-up `loadAll('')` writes into that slot, so a compound
+            failure must not replace the destroyed-key message (see
+            `errorBannerText`). */}
+        {(error || rotateRefusalText) && (
           <div className="error banner">
-            {errorMessage(error)}
+            {errorBannerText(error, rotateRefusalText)}
             {/* #4639: a genuine limit refusal offers the route that WORKS for
                 this team — checkout for a free/anon buyer, the portal for an
                 existing Stripe customer (checkout 409s on an active
@@ -9874,16 +10130,19 @@ function claimIntentInFlight() {
             {/* #4330: the SAME notice component the create-key modal renders. */}
             {capNotice && <CapNotice text={capNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
 
-            {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
-                means the replacement was created but the displaced row could not
-                be revoked AND its rollback failed — BOTH keys are live, so the
-                count is one over what the user intended and the table lists a
-                key they meant to retire. Rendered as its own persistent notice
-                (not the transient `error` slot, which `loadAll` overwrites). */}
-            {rotateNotice && (
+            {/* #4355/#4429: the rotate partial-state disclosure, read from the
+                ACTIVE team's retained rotate outcome. `replaced_revoked:false`
+                means the replacement was created but the displaced row could
+                not be revoked AND its rollback failed — BOTH keys are live, so
+                the count is one over what the user intended and the table
+                lists a key they meant to retire. Rendered as its own
+                persistent notice (not the transient `error` slot, which
+                `loadAll` overwrites). The team scope is the outcome record's:
+                a switch retains the outcome but never renders it here. */}
+            {rotateNoticeText && (
               <p className="small" role="alert" data-rotate-notice
                  style={{ margin: '0 0 1rem', color: 'var(--warn, #b45309)' }}>
-                {rotateNotice}
+                {rotateNoticeText}
               </p>
             )}
 
@@ -9892,15 +10151,16 @@ function claimIntentInFlight() {
                 `.new-key` block — but regenerateKey still set newKey/
                 newKeyExpiresAt, so a rotate minted the replacement and then
                 never showed it (the user could not configure the new key).
-                Restored inline from its OWN state (rotatedKey), so the create
-                modal's dismiss paths (which clear newKey) can never destroy
-                this already-revoked-old-key replacement. */}
+                Restored inline from its OWN outcome state (`rotateOutcomes`),
+                so the create modal's dismiss paths (which clear newKey) can
+                never destroy this already-revoked-old-key replacement, and a
+                team switch can no longer destroy it either (#4429). */}
             {rotatedKeyReveal && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
                 <code className="key-value">{rotatedKeyReveal}</code>
-                {rotatedKey.expiresAt ? (
-                  <span className="dim">expires {fmtExpiryDate(rotatedKey.expiresAt)}</span>
+                {rotateOutcome.expiresAt ? (
+                  <span className="dim">expires {fmtExpiryDate(rotateOutcome.expiresAt)}</span>
                 ) : (
                   <span className="dim">never expires</span>
                 )}
@@ -10054,7 +10314,23 @@ function claimIntentInFlight() {
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
-                    <button className="ghost" onClick={upgrade}>Upgrade to add more.</button>
+                    {/* #4386: this was a raw <button onClick={upgrade}> — an
+                        ENABLED control that silently did nothing when the
+                        server resolved no checkout price id. It also ignored a
+                        PARTIAL catalog: `upgrade()` targets the pro-default
+                        `checkout_price_id`, so a solo-only deployment left the
+                        button dead while solo was purchasable. It now renders
+                        the honest control off the NEXT purchasable plan (like
+                        the Billing grid and the node nudge): a real checkout,
+                        or a DISABLED control carrying the reason. */}
+                    <UpgradeCta
+                      priceId={graphUpgradePriceId}
+                      anyConfigured={Object.keys(team?.checkout_price_ids || {}).length > 0}
+                      onUpgrade={() => upgradeToPrice(graphUpgradePriceId)}
+                      pending={checkoutPending}
+                      className="ghost"
+                      label="Upgrade to add more."
+                    />
                     {LIMIT_CONTACT}
                   </span>
                 ) : (
@@ -10432,12 +10708,15 @@ function claimIntentInFlight() {
                 )}
               </div>
             )}
-            {revealKey && (
+            {revealKeyReveal && (
               /* C7 indicator 2: the ONE-TIME reveal modal. Mounted only from
                  a mint response (create-graph envelope or per-graph mint);
                  the plaintext exists nowhere else (hash-only storage) — no
                  show-key route ever re-renders it. Clipboard failure keeps
-                 the key visible in the modal text; dismissing clears state. */
+                 the key visible in the modal text; dismissing clears state.
+                 #4370: gated on the DERIVED non-empty string, not the truthy
+                 object — `{revealKey && …}` mounts for `'   '`/`42`/`{}` and
+                 renders a blank `.key-value`. */
               <div className="modal-backdrop"
                    onPointerDown={(e) => {
                      // Track where the press began: only a pointerdown on the
@@ -10460,31 +10739,15 @@ function claimIntentInFlight() {
                      onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
                   <h2>{revealKey.title}</h2>
                   <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
-                  <code className="key-value">{revealKey.plaintext}</code>
+                  <code className="key-value">{revealKeyReveal}</code>
                   <div className="claim-actions">
                     {/* #2392 (a11y): autoFocus the primary control on open —
                         before this the trigger behind the backdrop kept focus.
                         closeRevealKey (backdrop/Escape/Copy & done/I saved it)
-                        restores focus to that trigger. */}
-                    <button className="ghost" autoFocus onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(revealKey.plaintext)
-                        closeRevealKey()
-                      } catch {
-                        // Clipboard unavailable (e.g. non-secure context): the
-                        // key stays visible so the user can copy by hand — it is
-                        // never re-fetched or re-shown elsewhere. Select the key
-                        // text itself for a manual Ctrl/Cmd+C.
-                        const el = document.querySelector('.modal .key-value')
-                        const range = document.createRange()
-                        if (el) {
-                          range.selectNodeContents(el)
-                          const sel = window.getSelection()
-                          sel.removeAllRanges()
-                          sel.addRange(range)
-                        }
-                      }
-                    }}>Copy &amp; done</button>
+                        restores focus to that trigger.
+                        #4370: the copy is a guarded handler reading the derived
+                        gate, not an inline `writeText(revealKey.plaintext)`. */}
+                    <button className="ghost" autoFocus onClick={copyRevealKey}>Copy &amp; done</button>
                     <button className="ghost" onClick={closeRevealKey}>I saved it</button>
                   </div>
                 </div>
@@ -10520,8 +10783,26 @@ function claimIntentInFlight() {
             {/* #1875: Pro CAN invite up to capacity — the notice is only
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
+            {/* #4392: the upsell is IN-PRODUCT. It used to be a link to
+                https://tortoise.premiselabs.co/product.html#pricing — a
+                brochure, and a dead one: that host 301s product.html to '/',
+                so '#pricing' was never reached (the same finding that made
+                #4335 re-pin the compare link to '#pricing-section'). The
+                control lands on the Billing tab, which owns plan management
+                and states the truth in every state — a real checkout on the
+                Builder/Team card when the server resolved that price id, the
+                disabled control carrying the reason during a catalog outage,
+                and the portal for a PAYING Solo org (checkout 409s on an
+                active subscription, #4639). The notice names no checkout
+                target of its own on purpose: the next purchasable step up
+                from Free is Solo, which does NOT lift the member cap
+                (pricing.json max_users_per_team: free/solo 1, pro 2) — an
+                inline checkout here could sell a tier that leaves the gate
+                shut. The plan grid prints each tier's collaborator limit, so
+                the tier that actually unblocks invites is chosen on the
+                surface that can show why. */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.{LIMIT_CONTACT}</p>
+              <p className="dim small">Invites require the Builder or Team tier — <button type="button" className="ghost small" onClick={() => setTab('billing')}>Choose a plan</button>.{LIMIT_CONTACT}</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

@@ -19,7 +19,7 @@
 
 ### Out of Scope
 
-- Edge annotation dimensions (archived)
+- Edge annotation dimensions (archived — **reactivated 2026-10-11 (#6151) as a bounded weight band; still out of scope for E018, which neither reads nor writes them**)
 - Production FalkorDB testing (uses FalkorDBLite)
 - Performance benchmarking
 - Real-world source data (uses synthetic test data)

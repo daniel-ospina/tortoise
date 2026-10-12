@@ -1580,6 +1580,28 @@ class TestPointsCreateConfidenceAndAuthor:
         from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
         assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
 
+    def test_credibility_on_a_dedup_hit_calibrates_the_point(self, client):
+        # #7980: the dedup hit used to log-and-drop the authored prior, so the
+        # retry returned 200 with the point still uncalibrated — and an
+        # uncalibrated live point makes the fail-closed #344/#1157 gate refuse
+        # the whole graph for `/v1/dream`. `dedup` must be named on this
+        # surface (it defaults False here); on self-host the same exposure is
+        # the default path.
+        body = {"content": "hosted dedup-hit credibility",
+                "kind": "statement", "dedup": True}
+        first = client.post("/v1/points", json=body)
+        assert first.status_code == 200, first.text
+        pid = first.json()["id"]
+        assert not self._read_point(client, pid).get("baseline_set")
+        second = client.post("/v1/points", json={**body, "credibility": "gold"})
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == pid, "must dedup, not duplicate"
+        props = self._read_point(client, pid)
+        assert props.get("baseline_set") is True, props
+        from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
+        assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
+        assert props.get("ep_alpha") == 10.0, props
+
     def test_bad_credibility_is_rejected_not_500(self, client):
         # A ladder word the store cannot resolve must be ANSWERED with a 4xx
         # (like the sibling confidence bound), never mapped to the route's

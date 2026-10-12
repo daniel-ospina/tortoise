@@ -6821,13 +6821,48 @@ def _mask_uri_userinfo(target: str) -> str:
     closed (a continuation line may carry the userinfo while the scheme sits on
     an earlier line; an '@' may also precede the scheme, where the
     last-'@'-after-the-scheme rule never looks), and the authority cut set is
-    the same explicit ASCII set. (RESIDUAL,
-    #2987-followup: a continuation line with a NON-empty user, e.g.
-    `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
-    containing a colon) in this helper, so it is emitted — recorded on the issue
-    rather than guessed at.)
+    the same explicit ASCII set.
+
+    #5267 fail-closed: the cut set is not only whitespace, so the region the
+    predicate judges is only the fragment UP TO the first delimiter — a
+    credential in a later delimiter-bounded fragment was never examined and was
+    echoed (`rediss://u:pw@h:1 :S3nPw`, `...@host\r:S3nPw`,
+    `rediss:// :S3nPw/db`). Every fragment beyond the bounded region is now
+    judged by `_credential_tell`, in BOTH implementations, and so is a
+    scheme-less continuation line of a value that carries a scheme
+    (`user:S3nPw:6379`). The full authority predicate cannot be used there:
+    prose is full of `key: value` shapes (`error:`, `12:30:45`, `warn: bad`,
+    `C:\foo`) that must keep printing, so the tell is narrower (see
+    `_credential_tell`).
+
+    (RESIDUAL, #5267: a fragment whose credential shape is a two-field
+    `user:pw`, or a `user:pw:notaport` tail, is not credential-shaped to the
+    tell — it is lexically indistinguishable from prose (`C:\foo`,
+    `key:value`, `config:app:prod`) and failing closed on it would drop the
+    diagnostic. The AUTHORITY form of both (`rediss://user:pw`,
+    `rediss://user:pw:notaport`) still fails closed through
+    `_credential_shaped`, so the residual needs the credential to be split off
+    by a delimiter. A fragment BEFORE the scheme is not judged either (only a
+    pre-scheme '@' fails closed), so `:S3nPw rediss://host:6379` is echoed by
+    both maskers; the fragment walk covers what the bounded region leaves
+    behind on a line, not the prose prefix. Both residuals are recorded in
+    tests/test_boot_regressions.py's leak-bar test and in the #5267 thread,
+    not silently.)
     """
     from urllib.parse import urlsplit
+
+    # #2987/#5267: the authority cut set — path/query/fragment delimiters,
+    # quotes and ASCII whitespace. Spelled out (not `str.isspace()`), and used
+    # for BOTH the bounded region and the fragment walk, so the two can never
+    # diverge. entrypoint.sh's `cut=$'[/?#"\047 \t\v\f\r\n]'` is the same set.
+    _CUT_CHARS = "/?#\"' \t\n\v\f\r"
+
+    # #5267: a scheme-less line is judged as credential material only when the
+    # VALUE carries a scheme somewhere — `user:pw:6379` is a continuation of a
+    # URI value split across lines, while the same text alone (an exception
+    # message, a path) is prose.
+    _lines = target.split("\n")
+    _uri_bearing = any("://" in _line for _line in _lines)
 
     def _scheme_ok(scheme: str) -> bool:
         # RFC 3986 scheme: alpha-led, alnum/+-. thereafter. Restricted to ASCII
@@ -6853,9 +6888,58 @@ def _mask_uri_userinfo(target: str) -> str:
         implementations bound the same region on every input.
         """
         for idx, char in enumerate(rest):
-            if char in "/?#\"' \t\n\v\f\r":
+            if char in _CUT_CHARS:
                 return rest[:idx]
         return rest
+
+    def _credential_tell(fragment: str) -> bool:
+        """True if a single delimiter-bounded FRAGMENT is credential material.
+
+        #5267: the authority region stops at the first delimiter, so a fragment
+        BEYOND it (or, in a multi-line value, the whole of a continuation line)
+        has to be judged on its own. The authority predicate is the wrong tool
+        there — it fails closed on any `key: value` (`error:`, `C:\foo`,
+        `connect:`), which is exactly the prose the helper exists to print
+        unchanged. Two tells are unambiguous instead:
+
+          * a ':'-led fragment with a non-empty tail (`:S3nPw`) — the
+            empty-user form of a dropped '@host' (`_credential_shaped` fails
+            closed on it as an authority too), and a shape no prose takes;
+          * the port-retaining continuation (`user:pw:6379`) — two-or-more ':'
+            with an ALL-DIGIT last field AND at least one ASCII letter. The
+            letter requirement is what separates the credential from the prose
+            that shares its arity (a bare timestamp `12:30:45` has no letter);
+            a single-colon fragment (`error:`, `warn: bad`, `C:\foo`,
+            `connect:`) is excluded by the arity.
+
+        Mirrored by entrypoint.sh::_redact_uri's `_fragment_tell`.
+        """
+        if fragment.startswith(":"):
+            return len(fragment) > 1
+        head, sep, tail = fragment.partition(":")
+        if not sep or not head or ":" not in tail:
+            return False
+        # ASCII only, to match the shell's `[a-zA-Z]` / `[0-9]` classes.
+        if not any(c.isascii() and c.isalpha() for c in fragment):
+            return False
+        last = tail.rpartition(":")[2]
+        return last.isascii() and last.isdigit()
+
+    def _unsafe_tail(text: str) -> bool:
+        """True if any delimiter-bounded fragment of `text` is a tell.
+
+        #5267: the candidate text is everything the bounded authority region
+        does NOT cover — its remaining fragments, or a whole scheme-less
+        continuation line. A leading/embedded delimiter yields an empty
+        fragment, which is never a tell.
+        """
+        start = 0
+        for idx, char in enumerate(text):
+            if char in _CUT_CHARS:
+                if _credential_tell(text[start:idx]):
+                    return True
+                start = idx + 1
+        return _credential_tell(text[start:])
 
     def _credential_shaped(region: str) -> bool:
         """True unless a no-'@' authority is a RECOGNISED-SAFE shape.
@@ -6906,6 +6990,12 @@ def _mask_uri_userinfo(target: str) -> str:
             if (line.startswith(":")
                     and _credential_shaped(_authority_region(line))):
                 return "<uri-redacted-unrecognised-shape>"
+            # #5267: the same line as a continuation of a URI value — the
+            # credential fragment's user field is NON-empty (`user:pw:6379`),
+            # so the ':'-led rule above misses it. Only judged when the value
+            # carries a scheme (see `_uri_bearing`).
+            if _uri_bearing and _unsafe_tail(line):
+                return "<uri-redacted-unrecognised-shape>"
             return line
         out: list[str] = []
         i = 0
@@ -6940,6 +7030,12 @@ def _mask_uri_userinfo(target: str) -> str:
                 # while the shell masks it.
                 rest = line[j + 3:]
                 region = _authority_region(rest)
+                # #5267: a fragment BEYOND the bounded region is judged too,
+                # and must not be re-emitted when IT is the reason for failing
+                # closed (`rediss:// :S3nPw/db` used to keep ` :S3nPw/db`
+                # after the sentinel).
+                if _unsafe_tail(rest[len(region):]):
+                    return "<uri-redacted-unrecognised-shape>"
                 if "@" in line or _credential_shaped(region):
                     if bare:
                         out.append("<uri-redacted-unrecognised-shape>")
@@ -6985,6 +7081,12 @@ def _mask_uri_userinfo(target: str) -> str:
                 # already have printed it. A recognised-safe target (a plain
                 # host, `host:port`, bracketed IPv6) is left byte-identical.
                 region = _authority_region(authority)
+                # #5267: everything after the bounded region is fragment
+                # candidate material (`rediss://u:pw@h:1 :S3nPw`,
+                # `...@host\r:S3nPw`) — judged here, in the branch that used to
+                # echo it verbatim.
+                if _unsafe_tail(authority[len(region):]):
+                    return "<uri-redacted-unrecognised-shape>"
                 if _credential_shaped(region):
                     if bare:
                         # Bare URI (the whole line): the sentinel replaces it,
@@ -7023,8 +7125,10 @@ def _mask_uri_userinfo(target: str) -> str:
             # (`Port could not be cast to integer value as 'notaport'`), so the
             # diagnostic survives; see the PR body.
             remainder = authority[at + 1:]
+            region = _authority_region(remainder)
             if ("://" in remainder
-                    or _credential_shaped(_authority_region(remainder))):
+                    or _credential_shaped(region)
+                    or _unsafe_tail(remainder[len(region):])):
                 return "<uri-redacted-unrecognised-shape>"
             out.append(line[i:k])
             out.append(f"{scheme}://:***@{remainder}")
@@ -7038,7 +7142,7 @@ def _mask_uri_userinfo(target: str) -> str:
             return "<uri-redacted-unrecognised-shape>"
         return result
 
-    return "\n".join(_mask_line(_line) for _line in target.split("\n"))
+    return "\n".join(_mask_line(_line) for _line in _lines)
 
 
 def _index_github_child_cmd(target: str, repo_root: str,

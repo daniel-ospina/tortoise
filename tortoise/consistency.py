@@ -69,6 +69,7 @@ from .projection import (
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
     _writable_id,
+    entities,
     hard_deleted_pairs,
     journal_epistemic_existence,
     journal_first_materialization,
@@ -82,6 +83,7 @@ from .projection.entities import (
     _is_persistable_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    flatten_search_keys_prop,
     is_non_operator_payload,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
@@ -104,6 +106,12 @@ logger = logging.getLogger(__name__)
 _POINT_HANDLED: frozenset = _EntityHandlers._POINT_HANDLED
 _POINT_LIST_PROPS: frozenset = _EntityHandlers._POINT_LIST_PROPS
 _POINT_DENY: frozenset = _EntityHandlers._POINT_DENY
+# #8006: the props the SHARED Point writer normalizes from a payload LIST into
+# the graph's flat STRING (`flatten_search_keys_prop`). Read from the writer's
+# own declaration for the same reason as the three above: `_uncarried` must not
+# call such a value "the projection cannot hold this" when it now carries it,
+# and the canonical view must compare the WRITER'S form, not the payload's.
+_POINT_FLATTEN_LIST_PROPS: frozenset = entities._POINT_FLATTEN_LIST_PROPS
 
 
 # ── #5011: the projection's declared content schema ───────────────────────
@@ -431,6 +439,16 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     OWN explicit-False identity therefore outranks the descriptor, exactly as
     it does in ``projection/entities.py::_upsert_point_props``.
 
+    #8006: the ``_POINT_FLATTEN_LIST_PROPS`` keys are normalized to the graph's
+    canonical STRING form on BOTH sides, through the writer's own function. The
+    journal records E3's ``list[str]`` while the node holds the space-joined
+    string, so comparing the raw values would report a FALSE content divergence
+    on every faithfully replayed point that carries one — and the graph's
+    legacy ARRAY form (#5444, which the writer's fixup repairs) normalizes too,
+    so a legitimate repair is not reported as a divergence. Presence is still
+    compared: a journal list with NO graph value reports the key, which is the
+    coverage the pre-#8006 ``uncarried`` classification did not have.
+
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
     so the exclusion stays visible instead of becoming a silent hole.
@@ -441,6 +459,9 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         k: v for k, v in props.items()
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
+    # The writer's OWN normalization, so the checker's view of a point matches
+    # what the writer makes of it (#8006).
+    flatten_search_keys_prop(out)
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
@@ -488,6 +509,12 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
     (`_POINT_HANDLED`) or one already excluded with its own reason is not a
     "loss", and anything else that `_persist_extra_props` would drop (null,
     non-persistable value, undeclared list) is.
+
+    #8006: a list-valued `_POINT_FLATTEN_LIST_PROPS` key is NOT a loss — the
+    shared writer flattens it to the graph's string form, so the journal's list
+    is carried (in its canonical form) rather than dropped. Excluding it here
+    is what lets `_canonical_point_fields` compare it: leaving it out would have
+    made the checker blind to a future regression on that very door.
     """
     out: dict[str, dict[str, str]] = {}
     for pid, props in journal_by_id.items():
@@ -499,6 +526,10 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 continue
             if v is None:
                 found[k] = _UNCARRIED_NULL
+            elif k in _POINT_FLATTEN_LIST_PROPS:
+                # Carried in canonical form — not uncarried, whatever its
+                # payload type (a list flattens, a str is already canonical).
+                continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)
             elif not _is_persistable_prop_value(v):

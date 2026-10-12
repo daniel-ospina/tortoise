@@ -237,3 +237,45 @@ def test_search_open_incident_verifies_platform_scoped_titles():
         assert gi.search_open_incident("r", "t", "R2_DOWN") == [42, 43]
     finally:
         gi._request = orig
+
+
+def test_search_open_incident_scrubs_the_subject_like_the_filed_title():
+    """#3293 review: the adoption search must use the SAME subject transform as
+    ``AlertStore._title``.
+
+    The store scrubs an app-controlled subject before filing it into a PUBLIC
+    title, so building the search query from the RAW subject leaves the store
+    unable to find the issue it just filed on the placeholder / R2-unreachable
+    path — a duplicate issue for an incident that already has one open
+    (#2844/#3030 class this store exists to prevent).
+
+    RED pre-fix: the query and the ``incident_title_matches`` verifier both use
+    the raw subject, so the scrubbed title is rejected and this returns [].
+    """
+    import urllib.parse as _up
+
+    import tortoise.github_issue as gi
+    from tortoise.security import redact_for_publication
+
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # runtime-built
+    scrubbed = redact_for_publication(token)
+    seen: dict = {}
+
+    def _request(method, url, token_):
+        seen["url"] = url
+        return {"items": [
+            # What ``AlertStore._title`` actually filed: SCRUBBED subject.
+            {"number": 7, "title": f"[DR] STALE — {scrubbed}"},
+            # A raw-subject title is NOT what the store files — never adopt it.
+            {"number": 8, "title": f"[DR] STALE — {token}"},
+        ]}
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(gi, "_request", _request)
+    try:
+        assert gi.search_open_incident("r", "t", "STALE", token) == [7]
+        q = _up.unquote(seen["url"])
+        assert scrubbed in q
+        assert token not in q
+    finally:
+        monkeypatch.undo()

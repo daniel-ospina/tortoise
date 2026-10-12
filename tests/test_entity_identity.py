@@ -877,9 +877,12 @@ _ALLOWED_KEYED = {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
         # S3 deletes the supersession name fallback. Counts pin the duplicated
         # statements so a half-removal cannot pass.
-        'self.g.query( "MATCH (s:Subject {name:$name}) REMOVE s.embedding", params={"name": name}, )': 1,
+        # #4520: the `REMOVE s.embedding` / `REMOVE o.embedding` entries were
+        # DELETED, not replaced — both Subject/Object sites now call
+        # `tortoise/vector_write.py::clear_embedding`, whose MATCH pattern is
+        # built at runtime and passed as an argument, so this #3633 sweep cannot
+        # see it. The read is dispositioned in that module's seam.
         'self._persist_extra_props( "MATCH (n:Subject {name: $name})", {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
-        'self.g.query( "MATCH (o:Object {name:$name}) REMOVE o.embedding", params={"name": name}, )': 1,
         'self._persist_extra_props( "MATCH (n:Object {name: $name})", {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
         'result = self.g.query( "MATCH (o:Object {name:$name}) " + live, params={"name": name, **common_params})': 2,
         'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
