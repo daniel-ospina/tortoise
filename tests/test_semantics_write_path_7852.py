@@ -9,7 +9,7 @@ exists to remove.
 
 What this pins:
   * a declared `semantics` resolves the direction and records the basis
-    (`direction_basis == "label"`);
+    (`direction_basis == "semantics"`);
   * an EXPLICIT non-default `direction` outranks the semantics (`"explicit"`);
   * the historical default is UNCHANGED when no semantics is given
     (`"default"`, bidirectional for every op_type — the #7813 ruling);
@@ -70,7 +70,7 @@ def test_semantics_resolves_direction(sdk, semantics, expected):
     op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics=semantics)
     direction, basis = _stored(sdk, op["id"])
     assert direction == expected, (semantics, direction)
-    assert basis == "label", basis
+    assert basis == "semantics", basis
     assert op.get("direction") == expected
 
 
@@ -94,7 +94,7 @@ def test_absent_direction_still_derives_from_semantics(sdk):
     # absent + meaning -> the meaning resolves the direction
     op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=None,
                              semantics="addresses")
-    assert _stored(sdk, op["id"]) == ("unidirectional", "label")
+    assert _stored(sdk, op["id"]) == ("unidirectional", "semantics")
     # absent + no meaning -> canonicalize per op_type, basis `default`
     op2 = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op2["id"]) == ("unidirectional", "default")
@@ -132,7 +132,7 @@ def test_retired_semantics_resolves_to_canonical(sdk):
     resolved to its canonical replacement, then resolves the direction."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="opposes")
-    assert _stored(sdk, op["id"]) == ("bidirectional", "label")
+    assert _stored(sdk, op["id"]) == ("bidirectional", "semantics")
     warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
     assert warns and "mutuallyExclusive" in warns[0]["message"]
 
@@ -161,7 +161,7 @@ def test_neutral_semantics_on_nand_does_not_claim_op_type_default(sdk):
 
 def test_every_ruled_semantics_maps_or_is_neutral(sdk):
     """Exhaustive over the closed vocabulary: each ruled value either resolves
-    to the runtime direction its model direction records (basis `label`) or is
+    to the runtime direction its model direction records (basis `semantics`) or is
     the neutral `-` class (basis `default`). Derived FROM SEMANTICS_DIRECTIONS,
     so a vocabulary addition that is not mapped — or is mapped wrongly — fails
     here rather than passing a two-valued smoke assertion."""
@@ -174,7 +174,7 @@ def test_every_ruled_semantics_maps_or_is_neutral(sdk):
         if expected is None:
             assert got == ("bidirectional", "default"), (semantics, got)
         else:
-            assert got == (expected, "label"), (semantics, got)
+            assert got == (expected, "semantics"), (semantics, got)
 
 
 # ── the MCP surface exposes it ────────────────────────────────────────────
@@ -193,7 +193,7 @@ def test_mcp_tool_exposes_semantics(sdk, monkeypatch):
         res = mcp.tortoise_create_operator(
             "NAND", a["id"], [b["id"]], semantics="refutes")
         assert "error" not in res, res
-        assert _stored(sdk, res["id"]) == ("unidirectional", "label")
+        assert _stored(sdk, res["id"]) == ("unidirectional", "semantics")
     finally:
         _transport_mode.reset(tok_mode)
         _current_org_id.reset(tok_org)
@@ -212,7 +212,7 @@ def test_direction_basis_survives_rebuild(tmp_path):
         a, b = _point(sdk, "a"), _point(sdk, "b")
         op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="refutes")
         live = _stored(sdk, op["id"])
-        assert live == ("unidirectional", "label")
+        assert live == ("unidirectional", "semantics")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _stored(sdk, op["id"]) == live

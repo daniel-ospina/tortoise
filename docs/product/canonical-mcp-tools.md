@@ -40,7 +40,9 @@ parameter is **additive and defaulted** (`semantics=None`), so every existing
 caller keeps its behaviour; when it is supplied the direction the edge records
 follows the declared meaning (a one-way meaning records `unidirectional`, a
 mutual one `bidirectional`), and the basis the resolution used is recorded on
-the operator as **`direction_basis`** (`explicit` / `label` / `default`). An
+the operator as **`direction_basis`** (`explicit` / `semantics` / `default`) — the token
+names the layer that produced the value (`semantics` = the declared Layer-2 meaning
+resolved it), never the Layer-3 `label` predicate, which is a different input. An
 out-of-vocabulary word **warns and the write proceeds** — it never refuses
 (warn-not-block). This is **W1** of #7852's three-layer relation model, which
 the owner approved verbatim: *"w1 yes approved"* (2026-10-09), relayed into

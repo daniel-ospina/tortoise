@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.23"
+title: "Tortoise — Canonical Ontology v3.24"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-11
+updated: 2026-10-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.23
+# Tortoise — Canonical Ontology v3.24
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -154,8 +154,9 @@ doc_status: live
 > `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
 > one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
 > used is recorded on the operator as `direction_basis` — `explicit` (the caller stated a non-default
-> direction), `label` (the declared meaning resolved it; the token is the model's D3 name for
-> *the relation's declared meaning*), or `default` (nothing declared). The endpoint-kind step is a
+> direction), `semantics` (the declared Layer-2 meaning resolved it — the token names the LAYER that
+> produced the value, never the Layer-3 `label` predicate, which is a different input), or `default`
+> (nothing declared). The endpoint-kind step is a
 > separate scoped change. An out-of-vocabulary word warns and the write proceeds — never refuses —
 > and a retired word resolves to its canonical replacement. This is the chain step that had no way
 > to run, so the direction no longer always falls through to the per-op_type default. The four-value
@@ -1554,7 +1555,7 @@ and carry confidence as an edge attribute.
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
   recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
   accept `semantics` and resolve the direction from it, recording the basis on the operator as
-  `direction_basis` — `explicit` / `label` / `default` (#7852 W1). The remaining gap is the
+  `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The remaining gap is the
   four-value **storage** vocabulary: the runtime still records only `bidirectional` /
   `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
   *Transition state* note.)*

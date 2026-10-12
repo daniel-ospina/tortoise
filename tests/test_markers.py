@@ -686,6 +686,17 @@ def test_no_redirect_stems_registry_exact():
         # the addition is the pin working as designed, so the stem is DECLARED
         # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
+        # #7852 W1: the Layer-2 `semantics` write-path guard builds
+        # `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay to
+        # prove `derived = replay(journal)` for `direction_basis`. The module is
+        # embedded-only, so under a URI the hook would SKIP it (a permanently
+        # green, permanently unexecuted gate — the #4047/#4524 shape) and a
+        # redirected construction would run against the server lane instead. The
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4921/#4521 shape).
+        "test_semantics_write_path_7852",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

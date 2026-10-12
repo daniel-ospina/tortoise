@@ -10708,7 +10708,7 @@ class TortoiseSDK:
             When supplied it RESOLVES the direction (the model's chain step 2):
             a one-way meaning records ``unidirectional``, a mutual one
             ``bidirectional``. The basis actually used is recorded on the node
-            as ``direction_basis`` (``explicit`` / ``label`` / ``default``).
+            as ``direction_basis`` (``explicit`` / ``semantics`` / ``default``).
             An unknown word warns (warn-not-block, never refuses).
           - direction: "bidirectional" (default) or "unidirectional" — explicit
             flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
@@ -10792,7 +10792,7 @@ class TortoiseSDK:
         # meaning (ONTOLOGY §8): the caller states the Layer-2 `semantics`, this
         # write path resolves the direction, and `direction_basis` records which
         # step fired. Order: (1) an explicit `direction=` → 'explicit'; (2) the
-        # declared `semantics` → 'label'; (3) endpoint kinds → 'kind-pair' (a
+        # declared `semantics` → 'semantics'; (3) endpoint kinds → 'kind-pair' (a
         # SEPARATE scoped change, not implemented here); (4) the per-op_type
         # default → 'default'.
         #
@@ -10864,11 +10864,13 @@ class TortoiseSDK:
                         "semantics": semantics,
                     })
                 elif direction in (None, "bidirectional"):
-                    # Chain step 2 — basis token `label`, the issue's own D3 name
-                    # for "the relation's declared meaning"; the input actually
-                    # read here is the Layer-2 `semantics`.
+                    # Chain step 2 — basis `semantics`: the direction was resolved
+                    # from the Layer-2 meaning the caller declared, which is the
+                    # input actually read here. (Named for the layer that produced
+                    # it, not the Layer-3 `label` predicate, which is a different
+                    # input and does not touch direction.)
                     direction = derived
-                    direction_basis = "label"
+                    direction_basis = "semantics"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS

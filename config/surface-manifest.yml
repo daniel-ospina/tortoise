@@ -163,6 +163,19 @@ response_fields:
     without knowing the status vocabulary
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
     every live row keeps its "posterior"/"neutral" verdict
+- response: sdk:create_operator
+  field: direction_basis
+  emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded
+    direction came from: explicit (the caller stated a non-default direction), semantics (the declared Layer-2
+    meaning resolved it) or default (neither was declared, so the per-op_type default applied)'
+  unchanged_when_off: n/a — not flag-gated; an additive key on the returned operator properties, and every
+    pre-existing key keeps its value
+- response: tortoise_create_operator
+  field: direction_basis
+  emitted_when: 'always on the hosted path — the same basis, on the operator the tool returns (#7852 W1,
+    owner-approved "w1 yes approved" 2026-10-09)'
+  unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing
+    key keeps its value
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
