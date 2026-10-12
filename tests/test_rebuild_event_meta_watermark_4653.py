@@ -73,18 +73,23 @@ def _plant(path, payload: dict) -> None:
 
 
 def _sidecar_payload(**overrides) -> dict:
-    """A valid sidecar payload at the CURRENT version; overrides whole sections."""
-    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
+    """A valid sidecar payload at the CURRENT version; overrides whole sections.
+
+    Every section is derived from `_SNAPSHOT_SECTIONS` rather than hand-listed:
+    a hand-list goes stale the moment a section lands, and the stale copy is not
+    inert — it makes the file look like one written by a build that did not
+    capture the missing class, which fires that class's state-UNKNOWN ERROR and
+    masks whatever the test was pinning (#4641's onboarding pair was the first
+    instance; #5353's `team_meta` the second).
+    """
+    from tortoise.projection import (
+        _PREWIPE_SNAPSHOT_VERSION,
+        _SNAPSHOT_SECTIONS,
+    )
     payload = {
         "version": _PREWIPE_SNAPSHOT_VERSION,
         "created_at": "2026-01-01T00:00:00Z",
-        "synthetic_events": [],
-        "batch_snapshot": [],
-        "batch_point_links": [],
-        "session_snapshot": [],
-        "session_point_links": [],
-        "config_snapshot": [],
-        "event_meta": [],
+        **{section: [] for section in _SNAPSHOT_SECTIONS},
     }
     payload.update(overrides)
     return payload
@@ -934,8 +939,17 @@ def test_event_meta_section_and_validator_are_wired():
 
     assert "event_meta" in _SNAPSHOT_SECTIONS
     assert _SNAPSHOT_ENTRY_CHECK["event_meta"] is _validate_event_meta_entry
-    assert _PREWIPE_SNAPSHOT_VERSION == 5
-    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5}
+    # #5353: the read/write version moved on to 6 when the `team_meta` section
+    # landed (the tuple below is still the pin that matters — every version this
+    # build WROTE stays readable — and `5` stays in it, because this build wrote
+    # v5 before #5353 and a v5 rescue file is still the only record of the
+    # graph-only nodes it holds). The `== 5` this line used to carry was the
+    # #4653 section's OWN version pin: a build that adds a section without
+    # bumping would let a pre-#4653 binary accept the file, ignore the section
+    # and wipe. A later section bumps it again; that is the contract, not a
+    # regression.
+    assert _PREWIPE_SNAPSHOT_VERSION == 6
+    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6}
     # The union's return literal is hand-written per section, so pin its key
     # set against the tuple: a section added to `_SNAPSHOT_SECTIONS` and
     # forgotten in the literal would be silently dropped from the merged
@@ -1026,7 +1040,11 @@ def test_export_skipped_classes_must_be_declared():
     from tortoise import hosted_api
 
     declared: set[str] = set()
-    for block in ("preserved", "not-preserved", "unenrolled", "watermark"):
+    # `preserved-sections` is a DECLARED block too (it is where :OnboardingState
+    # and, since #5353, :TeamMeta live) — leaving it out of this walk made the
+    # reverse pin blind to exactly the classes that moved OUT of `unenrolled`.
+    for block in ("preserved", "not-preserved", "unenrolled", "watermark",
+                  "preserved-sections"):
         declared |= set(re.findall(r"`:(\w+)", _doc_block(block)))
     missing = sorted(set(hosted_api._EXPORT_SKIP_LABELS) - declared)
     assert not missing, (

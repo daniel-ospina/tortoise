@@ -55,6 +55,7 @@ from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
+    EMBEDDING_PROPERTY,
     clear_embedding,
     clear_then_set_prefix,
     set_embedding_clause,
@@ -8943,6 +8944,43 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
+        # ── #4520 residual: the DERIVED vector goes through the shared seam ──
+        # `update_point(content=…)` re-encodes the embedding (#4208) and the
+        # merge below would store it as a plain Cypher `List` — no `vecf32`,
+        # no clear. `typeof` then flips `Vectorf32` → `List` on ONE content
+        # edit, and `search_engine`'s per-row dense leg
+        # (`vec.euclideanDistance(n.embedding, …)`) raises
+        # "Type mismatch: expected Null or VectorF32 but was List" for the
+        # WHOLE `MATCH` — so one edited Point degrades the entire Point dense
+        # leg to FTS-only recall. That is the #4521 class on the LIVE path
+        # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
+        # derived vector is SERVER-owned, so it is cast and CLEARED first,
+        # exactly like `_revise_point`: `vecf32()` alone is not enough,
+        # because a small-Δ `vecf32` overwrite is silently DISCARDED on the
+        # embedded engine (#4520's own, previously-fixed defect).
+        # `preserve_on_null=False` keeps this branch's wipe-on-None semantics
+        # (the embedder was unavailable, or the content became empty —
+        # #19/#4208): a vector for different text is worse than none.
+        #
+        # ⛔ The CALLER-supplied vector is deliberately NOT routed here. It is
+        # stored VERBATIM by a recorded decision (PR #3018's TYPE CHANGE
+        # GUARD — a float64 list must not be silently narrowed through
+        # `vecf32`), and the `embedding_verbatim` marker above describes that
+        # form. Routing it through `set_embedding_clause` would narrow the
+        # caller's value, reversing that decision rather than fixing a defect;
+        # its remaining gap belongs to the #5046/#5048 reopen, not this change.
+        _embed_clear = ""
+        _embed_set = ""
+        _props_param = props
+        _embed_params: dict = {}
+        if _derived_embedding:
+            _props_param = {
+                k: v for k, v in props.items() if k != EMBEDDING_PROPERTY}
+            _embed_clear = clear_then_set_prefix("n")
+            _embed_set = ", " + set_embedding_clause(
+                "n", preserve_on_null=False)
+            _embed_params[EMBEDDING_PROPERTY] = props.get(EMBEDDING_PROPERTY)
+
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -8959,18 +8997,23 @@ class TortoiseSDK:
                 res = proj.g.query(
                     "MATCH (n:Point:Object {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now, "
-                    "n.version = coalesce(n.version, 0) + 1, n += $props "
+                    + _embed_clear
+                    + "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1, n += $props"
+                    + _embed_set + " "
                     "RETURN n",
-                    params={"id": id, "props": props, "now": now},
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
             else:
                 proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) "
-                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                    params={"id": id, "props": props, "now": now},
+                    "MATCH (n:Point:Object {id:$id}) " + _embed_clear
+                    + "SET n += $props, n.version = coalesce(n.version, 0) + 1, "
+                    "n.updatedAt = $now" + _embed_set,
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
         else:
             if 'status' in props:
@@ -8981,17 +9024,31 @@ class TortoiseSDK:
                 res = proj.g.query(
                     "MATCH (n:Point {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now, n += $props "
+                    + _embed_clear
+                    + "SET n.status = 'live', n.updatedAt = $now, n += $props"
+                    + _embed_set + " "
                     "RETURN n",
-                    params={"id": id, "props": props, "now": now},
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
             else:
-                for key, val in props.items():
+                for key, val in _props_param.items():
                     proj.g.query(
                         "MATCH (n:Point {id:$id}) SET n += $props",
                         params={"id": id, "props": {key: val}},
+                    )
+                if _derived_embedding:
+                    # The clear and the set are ONE atomic query, so a crash
+                    # between them cannot leave the node vectorless. This arm
+                    # is already per-key (not one statement), so the added
+                    # embedding write introduces no new non-atomicity.
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) " + _embed_clear
+                        + "SET " + set_embedding_clause(
+                            "n", preserve_on_null=False),
+                        params={"id": id, **_embed_params},
                     )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
@@ -18873,6 +18930,13 @@ class TortoiseSDK:
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
+        # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
+        # asked about, as ``label:key`` (``cache_projection.declared_key``).
+        # The read path passes it to the marker so a partial declaration can
+        # tell "outside the known-hot set" from "inside it and genuinely
+        # absent"; a SET read names no node and passes nothing, keeping
+        # today's set-level polarity. Default None = byte-identical.
+        _residency_key: str | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -18968,6 +19032,16 @@ class TortoiseSDK:
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
             passed by production callers.
+        _residency_key (#7953, §17.3): PRIVATE — the residency coordinate this
+            read named, as ``label:key`` (build it with
+            ``cache_projection.declared_key``, the SAME function the cache
+            projection declares hot keys with). It is handed to the
+            completeness marker (#7952) so a PARTIAL declaration can separate
+            "outside the known-hot set" (a residency miss → fetch the record)
+            from "inside it and genuinely absent" (a real in-store finding).
+            A SET read names no node and leaves this None, which is the
+            set-level polarity the marker already had — so default None is
+            byte-identical behavior.
         leg_trace (R3 #1542 D4): PRIVATE trace contract — when provided,
             appends per-leg entries (vector/fts/structural/fallback — the
             R2 #1541 shared shape {"leg", "ran", "degraded", "reason",
@@ -19162,11 +19236,11 @@ class TortoiseSDK:
                 if _residency is not None:
                     # §17.3: a `not-hot` read may not be reported as `empty` —
                     # a partial store cannot establish "nothing matched". The
-                    # truth store was NOT consulted on this path (no residency
-                    # router exists yet — #7953), so a zero-hit read of a
-                    # declared-partial store is `degraded`, never `empty`.
+                    # truth store was NOT consulted on this path (the residency
+                    # router is not wired here yet — #7970), so a zero-hit read
+                    # of a declared-partial store is `degraded`, never `empty`.
                     marker = _mark_residency(
-                        _residency, hits=len(rows))
+                        _residency, hits=len(rows), key=_residency_key)
                     status = _apply_residency(
                         status, marker, record_consulted=False)
                     read_status_out[_RESIDENCY_FIELD] = marker

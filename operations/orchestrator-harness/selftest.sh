@@ -374,6 +374,14 @@ if need "$TMP/claimlive.sh" "claim_live() is extracted from the shipped orch-loo
   ck "shipped claim_live(): the stale claim file is removed" $rc
 fi
 
+grep -qE "'docs\|test-isolation\|license-surface\|legal-e2e\|pricing-artifact'" "$LOOP" && rc=0 || rc=1
+ck "a non-review required check failure is routed to the fixer" $rc
+grep -q 'CI-red (.*fixer attempt' "$LOOP" && rc=0 || rc=1
+ck "the CI-red fixer is logged and capped like other fix loops" $rc
+grep -q 'FAILING_CHECKS=' "$HERE/fix-one.sh" && rc=0 || rc=1
+ck "the fixer is given the failing check" $rc
+grep -q 'failing.txt' "$HERE/fix-one.sh" && rc=0 || rc=1
+ck "the fixer is given the failing CI log" $rc
 # ── 15) a hung worker cannot hold a concurrency slot forever ────────────────────
 # `pi -p` has no internal timeout. A hung reviewer occupied a merge slot for 9 hours on
 # 2026-10-12 while the caps (which count SESSIONS) reported the slot as busy.
