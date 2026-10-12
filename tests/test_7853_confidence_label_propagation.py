@@ -1423,6 +1423,76 @@ def test_content_comparison_sees_a_non_point_belief_divergence(tmp_path):
         after["entity_parity_bounds"]
 
 
+def test_content_comparison_sees_a_non_point_belief_a_sharing_point_id(tmp_path):
+    """#7936 P2 (review): the non-Point belief leg must fire on the
+    DUPLICATE-ID shape too — an id carried by a ``:Point`` AND a separate
+    ``:Object``.
+
+    ``_fold_confidence_changed`` writes the belief to both carriers (its
+    four-label sweep), so a journal that registers both under one id produces
+    a graph holding ``confidence`` on each. ``_apply_one``'s Point arm used to
+    skip the companion index, so the reference fold carried no expectation for
+    the Object; ``_compare_entities`` is presence-conditional from the journal
+    side, so it skipped — and corrupting ONLY the Object's belief on a graph
+    ``rebuild_all`` had just produced stayed ``ok=True, divergence=None``, the
+    false-green class #7936 exists to remove.
+
+    Built directly (not via ``TortoiseSDK``): the journal carries no Point
+    content that needs the embedding model. Fails pre-fix on the fold
+    assertion and on every ``after`` assertion.
+    """
+    import json
+
+    from tortoise.consistency import check_consistency
+    from tortoise.projection import FalkorProjection, fold_with_entities
+
+    journal = [
+        {"type": "PointAdded",
+         "point": {"id": "X", "pointKind": "statement", "content": "p",
+                   "status": "live"}},
+        {"type": "ObjectRegistered", "id": "X", "name": "N"},
+        {"type": "ConfidenceChanged", "id": "X", "confidence": 0.5},
+    ]
+
+    # The companion index carries the NON-Point carrier's expectation even
+    # though the Point already holds the id.
+    entities = fold_with_entities(list(journal))[1]
+    assert entities == {("Object", "X"): {"confidence": 0.5}}, entities
+
+    log_path = str(tmp_path / "events.jsonl")
+    with open(log_path, "w") as fh:
+        for ev in journal:
+            fh.write(json.dumps(ev) + "\n")
+
+    proj = FalkorProjection(path=str(tmp_path / "dup-7936.db"),
+                            skip_health_check=True)
+    proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+
+    healthy = check_consistency(log_path, proj, record_state=False)
+    assert healthy["ok"] is True, healthy
+
+    # Corrupt ONLY the Object carrier; the Point keeps the journaled value, so
+    # the Point-only digest still matches and only the entity leg can see it.
+    proj.g.query("MATCH (n:Object {id:'X'}) SET n.confidence=0.01")
+    assert proj.g.query(
+        "MATCH (n:Object {id:'X'}) RETURN n.confidence").result_set == [[0.01]]
+    assert proj.g.query(
+        "MATCH (n:Point {id:'X'}) RETURN n.confidence").result_set == [[0.5]]
+
+    after = check_consistency(log_path, proj, record_state=False)
+
+    assert after["ok"] is False, after
+    assert after["divergence"] == "content", after
+    assert [m["field"] for m in after["divergent_entities"]] == ["confidence"], \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["label"] == "Object", \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["id"] == "X", \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["found"] == 0.01, \
+        after["divergent_entities"]
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 9b. #7936 — the non-Point belief FOLD, and the `rebuild_all` anchor gate
 # ═══════════════════════════════════════════════════════════════════
@@ -1470,6 +1540,51 @@ def test_fold_with_entities_holds_the_non_point_belief():
     # so it is never invented (presence-conditional).
     assert entities == {("Event", "evt"): {
         "confidence": 0.7, "posterior_alpha": 2.0}}, entities
+
+
+def test_fold_with_entities_holds_a_non_point_belief_under_a_sharing_point_id():
+    """#7936 P2 (review): the companion index must be filled even when a
+    ``:Point`` carries the SAME id.
+
+    ``_fold_confidence_changed`` sweeps all four epistemic labels and writes
+    EVERY carrier, so on the reachable duplicate-id shape
+    (``PointAdded X`` + ``ObjectRegistered X`` — pinned by
+    ``test_fold_confidence_changed_sweeps_every_label_not_just_the_first``)
+    the graph holds the belief on both the Point AND the Object. ``_apply_one``
+    took the ``if p:`` (Point) arm and never wrote the companion index, so the
+    reference fold carried no expectation for the non-Point carrier — and
+    ``_compare_entities``, presence-conditional from the journal side, skipped
+    it: a corrupted Object belief stayed a false green.
+
+    Fails pre-fix: ``entities`` was ``{}`` because the Point arm did not fold
+    the reference-fold labels.
+    """
+    from tortoise.projection import fold_with_entities
+
+    # One id, three carriers: a Point and both reference-fold labels.
+    journal = [
+        {"type": "PointAdded", "point": {"id": "X", "content": "p"}},
+        {"type": "ObjectRegistered", "id": "X", "name": "N"},
+        {"type": "SubjectAdded", "id": "X", "name": "N"},
+        {"type": "ConfidenceChanged", "id": "X", "confidence": 0.5,
+         "posterior_alpha": 2.0},
+    ]
+    points, entities = fold_with_entities(journal)
+
+    assert set(points) == {"X"}, points
+    # EVERY reference-fold label the id EXISTS under, not just the first, and
+    # not only when no Point shares the id.
+    assert entities == {
+        ("Object", "X"): {"confidence": 0.5, "posterior_alpha": 2.0},
+        ("Subject", "X"): {"confidence": 0.5, "posterior_alpha": 2.0},
+    }, entities
+
+    # Negative half: a Point-only id must NOT invent a reference-fold key.
+    point_only = fold_with_entities([
+        {"type": "PointAdded", "point": {"id": "Y", "content": "p"}},
+        {"type": "ConfidenceChanged", "id": "Y", "confidence": 0.5},
+    ])
+    assert point_only[1] == {}, point_only[1]
 
 
 def test_inmemory_rebuild_holds_a_non_point_belief_but_apply_is_bounded(

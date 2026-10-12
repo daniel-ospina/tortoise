@@ -5103,7 +5103,11 @@ def _apply_one(points: dict[str, dict], ev: dict,
     (#7936): when supplied, a ``ConfidenceChanged`` whose target is a
     journaled ``:Subject`` / ``:Object`` / ``:Event`` is FOLDED onto every
     reference-fold label the id EXISTS under at this record, through the shared
-    :func:`_apply_belief_props`. Without it the arm can only warn — the
+    :func:`_apply_belief_props`. That fold happens whether or not a ``:Point``
+    shares the id: the graph fold sweeps all four labels and writes every
+    carrier, so a Point-sharing id has to fill the index too or the comparison
+    goes blind to the non-Point carrier (#7936 P2 review). Without it the arm
+    can only warn — the
     ``{id: point}`` index has no representation for a non-Point node, which is
     the parity gap this parameter closes for the BATCH fold
     (:func:`fold_with_entities`) and for a ``rebuild``-ed ``InMemoryProjection``.
@@ -5429,6 +5433,27 @@ def _apply_one(points: dict[str, dict], ev: dict,
                     detail="reference fold: belief write matched no Point",
                 )
             _apply_belief_props(p, ev)
+            # #7936 P2 (review): the SAME id may ALSO be carried by a
+            # `:Subject`/`:Object`/`:Event`. `_fold_confidence_changed`
+            # sweeps all four epistemic labels and writes EVERY carrier, so
+            # on the duplicate-id shape (`PointAdded X` +
+            # `ObjectRegistered X`, pinned by
+            # `test_fold_confidence_changed_sweeps_every_label_not_just_the_first`)
+            # the graph holds the belief on BOTH nodes. `points` holds only the
+            # Point, so without this the companion index carries no
+            # journal-side expectation for the non-Point carrier and
+            # `_compare_entities` — presence-conditional from the journal side
+            # — skips it: a corrupted or lost non-Point belief stays a false
+            # green, the exact class #7936 exists to remove. The Point arm must
+            # therefore fold the reference-fold labels too, not only the
+            # `elif` (Point-absent) arm. `()` when the caller has no ordered
+            # boundary (the one-record incremental path), so nothing is
+            # guessed without a journal.
+            if entities is not None:
+                for _label in _reference_fold_non_point_labels(
+                        journal_existence, rid, journal_seq):
+                    _apply_belief_props(
+                        entities.setdefault((_label, rid), {}), ev)
         elif (_writable_id(rid) and _foldable_prop
                 and _reference_fold_non_point_target(
                     journal_existence, rid, journal_seq)):
