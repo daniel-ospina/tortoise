@@ -219,30 +219,16 @@ fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
-# Fails ONLY a `rev-parse` that names a local branch. That is the ONE call the
-# #8175 claim-artifact verifier makes to decide whether a named branch still
-# exists, so this stub reaches "verification could not be performed" while every
-# other git surface (main tip, first-parent, refs) stays readable. An unreadable
+# Fails ONLY `git worktree list`. That is the ONE call the #8175 claim-artifact
+# verifier makes to enumerate the worktrees a claim is measured against, so this
+# stub reaches "verification could not be performed" while every other git
+# surface (main tip, first-parent, refs) stays readable. An unreadable
 # measurement must keep the claim BLOCKING.
 GIT_STUB_WORKTREE_LIST_FAILS = r"""#!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "list" ]; then
   echo "git-stub: worktree listing unavailable" >&2
   exit 128
-fi
-exec "${REAL_GIT:?REAL_GIT unset}" "$@"
-"""
-
-GIT_STUB_NO_REF_VERIFY = r"""#!/usr/bin/env bash
-set -u
-if [ "${1:-}" = "rev-parse" ]; then
-  for a in "$@"; do
-    case "$a" in
-      refs/heads/*)
-        echo "git-stub: refusing local ref verification" >&2
-        exit 128 ;;
-    esac
-  done
 fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
@@ -4606,6 +4592,13 @@ class CollisionPreflightTest(unittest.TestCase):
             f".worktrees/{ISSUE}-notes.markdown",
             f".worktrees/{ISSUE}-bump-v0.1.3",
             f".worktrees/{ISSUE}-x status",
+            # A path DEEPER than the two directory layouts this repo uses is not
+            # a worktree either. An extension-less file inside a live worktree
+            # (`…/lane/docs/{ISSUE}-notes`) passed the last-segment checks,
+            # matched no registered entry and verified "gone" — a false CLEAN
+            # the seventh review reproduced end to end.
+            f".worktrees/lane/docs/{ISSUE}-notes",
+            f".worktrees/{ISSUE}-live/docs/{ISSUE}-notes",
         ):
             with self.subTest(token=not_an_artifact):
                 self.assertEqual(
@@ -4724,6 +4717,10 @@ class CollisionPreflightTest(unittest.TestCase):
             "re-dispatch",
             out,
         )
+        # The ledger must not call a demoted claim a HIT: it is reported as a
+        # non-blocking weak signal, so the hit count excludes it (this printed
+        # "1 hit" beside a CLEAN verdict before the count was fixed).
+        self.assertIn("0 CLEAN, 0 hit", out)
         # Named: the comment AND the dead artifact are visible in the report.
         # The BRANCH this claim also names is not measured at all — a branch name
         # is not extractable (see `claim_named_artifacts`) — and the WORKTREE
@@ -4810,19 +4807,25 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("0 commit(s) ahead", out)
 
     def test_claim_naming_one_live_and_one_gone_artifact_still_blocks(self):
-        # The load-bearing "EVERY named artifact" rule. ONE alive artifact keeps
-        # the claim BLOCKING even when another named artifact is gone. A mutation
-        # that demoted when ANY named artifact was dead would pass every other
-        # test in this block, so this pins the direction: the void state is
-        # reachable only when NOTHING the claim named is still live.
+        # The load-bearing "EVERY named artifact" rule, over the only artifact
+        # class this arm extracts. ONE LIVE WORKTREE keeps the claim BLOCKING
+        # even when another NAMED WORKTREE is gone. A mutation that demoted when
+        # ANY named artifact was dead would pass every other test in this block,
+        # so this pins the direction: the void state is reachable only when
+        # NOTHING the claim named is still live.
+        #
+        # ⛔ BOTH tokens must be WORKTREE paths. An earlier form paired the live
+        # worktree with a GONE BRANCH — and a branch name is not extractable, so
+        # the verifier saw exactly ONE artifact and the ALL-vs-ANY distinction
+        # never arose; a mutant that demoted on any dead artifact went green.
         _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.add_worktree(f".worktrees/{ISSUE}-live", branch=f"fix/{ISSUE}-live")
-        gone = f"fix/{ISSUE}-gone"  # named by the claim, never created
+        gone = f".worktrees/{ISSUE}-gone"  # named by the claim, never created
         self.gh_fixtures(
             issue=self.issue_payload(comments=[
                 ("test-agent",
-                 f"Claiming this — lane `{gone}` "
-                 f"(worktree `.worktrees/{ISSUE}-live`)."),
+                 f"Claiming this — worktrees `{gone}` and "
+                 f"`.worktrees/{ISSUE}-live`."),
             ]),
             closed_prs=[],
         )
@@ -4832,6 +4835,10 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("stale claim", out)
         self.assertIn("artifacts verified live", out)
+        # BOTH named worktrees were re-measured — the live one is what keeps the
+        # claim blocking, and the gone one is reported alongside it.
+        self.assertIn(f".worktrees/{ISSUE}-live: worktree live", out)
+        self.assertIn(f".worktrees/{ISSUE}-gone: worktree gone", out)
 
     def test_claim_naming_only_a_branch_still_blocks(self):
         # The narrowing's COST, pinned deliberately. Because a bare branch name
@@ -4858,16 +4865,27 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_claim_extraction_cap_is_fail_closed(self):
         # Past the cap a backticked token is never EXAMINED, and an unexamined
         # token could name a LIVE artifact — so a truncated read must never void
-        # the claim. Eight dead branches plus a ninth LIVE artifact is exactly
-        # the body that would otherwise demote on the eight it managed to read.
-        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-        self.add_worktree(f".worktrees/{ISSUE}-live", branch=f"fix/{ISSUE}-live")
-        dead = " ".join(f"`fix/{ISSUE}-dead{i}`" for i in range(1, 9))
+        # the claim. The tokens below are WORKTREE paths (the only class this arm
+        # extracts), so the cap on `len(worktrees)` is actually REACHED and the
+        # live artifact sits PAST it, never measured.
+        #
+        # ⛔ An earlier form prefixed the live worktree with EIGHT BRANCH tokens.
+        # Branch names are not extracted, so `len(worktrees)` never reached the
+        # cap, `unmeasured` was never set, and the run blocked only because the
+        # named worktree was live — the test proved nothing about the cap (and
+        # passed against the pre-fix tool).
+        #
+        # The live artifact is deliberately one the WORKTREE SURFACE cannot match
+        # (no issue number in its path or branch), so the CLAIM GATE is the only
+        # guard standing: a mutant that truncated fail-open (`break` without
+        # `unmeasured = True`) would demote on the eight it did read and CLEAN.
+        self.add_worktree(".worktrees/lane", branch="lane")
+        dead = " ".join(f"`.worktrees/{ISSUE}-dead{i}`" for i in range(1, 9))
         self.gh_fixtures(
             issue=self.issue_payload(comments=[
                 ("test-agent",
-                 f"Claiming this — {dead} and the live worktree "
-                 f"`.worktrees/{ISSUE}-live`."),
+                 f"Claiming this — {dead} and the live file "
+                 f"`.worktrees/lane/{ISSUE}-notes`."),
             ]),
             closed_prs=[],
         )
@@ -4875,6 +4893,7 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool(env_extra=self.jev_env())
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
+        # The claim was NOT demoted: a truncated set is UNMEASURED, not empty.
         self.assertNotIn("stale claim", out)
 
     def test_6151_regression_abandoned_claim_clears_only_when_artifacts_go(self):
@@ -4951,6 +4970,28 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("stale claim", out)
         # An unreadable listing is INCOMPLETE, never an empty answer.
         self.assertIn("INCOMPLETE", out)
+
+    def test_claim_naming_a_file_inside_a_worktree_still_blocks(self):
+        # ⛔ A FILE INSIDE A WORKTREE IS NOT THE WORKTREE. The extraction bounds
+        # the tail to the two directory layouts this repo uses
+        # (`.worktrees/<name>` / `.worktrees/<type>/<name>`), so an
+        # extension-less path under a LIVE worktree names NOTHING and the claim
+        # keeps BLOCKING. Reading it as a worktree made it match no registered
+        # entry, verify "gone", and void a claim that named no artifact — a false
+        # CLEAN, reproduced end to end against the head before this fix.
+        self.add_worktree(".worktrees/lane", branch="lane")
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this — see `.worktrees/lane/docs/{ISSUE}-notes`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
 
     # ── terminal-injection hardening (#4027 P2-J) ──────────────────────────
 

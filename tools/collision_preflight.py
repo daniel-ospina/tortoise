@@ -3506,7 +3506,7 @@ def _claim_gate_note(
         # silently folded into the CLEAN side of the ledger.
         note += (
             f"; {voids} stale claim(s) demoted to non-blocking (their named "
-            "branch/worktree is gone or not live — see WEAK SIGNALS)"
+            "worktree is gone or not live — see WEAK SIGNALS)"
         )
     if untrusted:
         if identity_unresolved:
@@ -3572,9 +3572,11 @@ def _claim_gate_note(
 # naming a terminal branch over-blocks rather than clearing.
 #
 # A named worktree must be a `.worktrees/<tail>` path whose LAST segment carries
-# this issue's number and is a SLUG (no dot). That refuses a FILE directly in
-# `.worktrees/` and a FILE inside a worktree; either would otherwise match no
-# enumerated entry, verify "gone", and demote a claim that named no artifact.
+# this issue's number and is a SLUG (no dot), and whose tail is BOUNDED to the two
+# directory layouts this repo uses (`.worktrees/<name>` or `.worktrees/<type>/
+# <name>`). That refuses a FILE with an extension and an arbitrary path INSIDE a
+# worktree (`…/docs/N-notes`); either would otherwise match no enumerated entry,
+# verify "gone", and demote a claim that named no artifact.
 #
 # ⛔ THIS IS NOT A DISMISSAL SWITCH. There is no flag, no env var and no human
 # input: every named artifact is re-measured on every run. It also applies ONLY
@@ -3618,9 +3620,10 @@ _CLAIM_FILE_EXT_RE = re.compile(r"[A-Za-z0-9_-]\.[A-Za-z0-9]{1,5}$")
 # BLOCKING, so the cost is an over-block, never a false CLEAN.
 _CLAIM_WORKTREE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CLAIM_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
-# Bound the work: a claim names a handful of artifacts, and each branch check is
-# a subprocess. A body that backticks dozens of tokens cannot buy extra git
-# calls, and the cap is fail-closed (an unexamined token is never a demotion).
+# Bound the work: a claim names a handful of artifacts, so the artifact set is
+# capped to keep the demotion decision over a BOUNDED set. The cap is fail-closed:
+# a token past it is never examined and could name live work, so a truncated read
+# marks the set unmeasured and can never void a claim.
 _CLAIM_ARTIFACT_CAP = 8
 
 
@@ -3702,9 +3705,7 @@ def _looks_like_claim_branch(token: str, issue: int) -> bool:
     # direction: an unextracted token names nothing, and a claim that names
     # nothing keeps blocking — so the cost of a false refusal is an over-block,
     # never a false CLEAN.
-    if _CLAIM_FILE_EXT_RE.search(ref.rsplit("/", 1)[-1]):
-        return False
-    return True
+    return not _CLAIM_FILE_EXT_RE.search(ref.rsplit("/", 1)[-1])
 
 
 def _artifact_shaped(token: str, issue: int) -> bool:
@@ -3749,19 +3750,21 @@ def _artifact_shaped(token: str, issue: int) -> bool:
 def claim_named_artifacts(body: str, issue: int) -> tuple[list[str], list[str], bool]:
     """(branches, worktrees, unmeasured) a claim-shaped comment names.
 
-    Extraction is SHAPE-based, never existence-based: a GONE branch is exactly
+    Extraction is SHAPE-based, never existence-based: a GONE worktree is exactly
     what must be recognised, so "does it exist?" cannot be the filter. A token
-    that is not confidently a branch or a worktree is not extracted at all, so a
-    claim that names nothing keeps blocking (fail-closed).
+    that is not confidently a worktree is not extracted at all, so a claim that
+    names nothing keeps blocking (fail-closed).
 
-    * a BRANCH is a backticked token that matches the repo's `<type>/<issue#>`
-      convention (see `_looks_like_claim_branch`);
-    * a WORKTREE is a backticked token containing `.worktrees/` and this issue's
-      number — matched against the enumerated listing by the caller.
+    ⛔ `branches` is ALWAYS EMPTY and is kept only for the retired arm's shape. A
+    branch NAME cannot be told from a file path (see the ⛔ paragraph below), so
+    a `refs/heads/x/3061-y` token, a bare `3061-y`, and a branch-only claim all
+    name NOTHING and keep BLOCKING.
 
-    A `refs/heads/x/3061-y` token IS extracted (the prefix is stripped first);
-    a bare `3061-y` with no slash is NOT, because it names nothing this arm can
-    verify by convention — and a claim that names nothing keeps blocking.
+    * a WORKTREE is a backticked token containing `.worktrees/` whose LAST
+      segment carries this issue's number and is a slug (no dot), with AT MOST
+      two segments after `.worktrees/` — the two layouts this repo uses,
+      `.worktrees/<name>` and `.worktrees/<type>/<name>`. It is matched against
+      the enumerated listing by the caller.
 
     ⛔ ONLY A WORKTREE PATH MAY DEMOTE — A BARE BRANCH NAME MAY NOT, and this is
     a deliberate narrowing after four review cycles each found a fresh false
@@ -3776,7 +3779,8 @@ def claim_named_artifacts(body: str, issue: int) -> tuple[list[str], list[str], 
     A worktree PATH is different in kind: it names a directory this tool already
     ENUMERATES, so "live" and "gone" are measured against the same listing the
     worktree surface reports, and a file path is not mistaken for one because the
-    name must be a SINGLE segment directly under `.worktrees/`.
+    tail is bounded to the two directory layouts this repo uses and the name must
+    be a slug.
 
     The branches a claim names are not lost: the branch surface independently
     enumerates local and remote branches and blocks on the issue number, so a
@@ -3798,6 +3802,15 @@ def claim_named_artifacts(body: str, issue: int) -> tuple[list[str], list[str], 
         if not token or ".worktrees/" not in token:
             continue
         tail = token.split(".worktrees/", 1)[1].strip("/")
+        # ⛔ The TAIL is BOUNDED to the two directory layouts this repo uses:
+        # `.worktrees/<name>` and `.worktrees/<type>/<name>`. Without the bound,
+        # an arbitrary path INSIDE a worktree (`.worktrees/lane/docs/{issue}-
+        # notes`) extracts, matches no registered entry, verifies "gone", and
+        # voids a claim that named no artifact — the false-CLEAN direction (a
+        # review reproduced it end to end). Refusing is fail-closed: the token
+        # names nothing, so the claim keeps BLOCKING.
+        if tail.count("/") > 1:
+            continue
         # ⛔ The WORKTREE NAME is the LAST segment, and it must (a) carry this
         # issue's number, (b) carry no FILE EXTENSION, and (c) sit in a tail with
         # no whitespace — otherwise the token names a FILE, not a worktree:
@@ -4167,7 +4180,10 @@ def scan_issue_surface(
             )
             surface.add(_comment_ref(comment, login), detail, strength)
         surface.note = _claim_gate_note(
-            len(candidates), cleaned, len(candidates) - cleaned - uncertain,
+            len(candidates), cleaned,
+            # `voids` are demoted to non-blocking, so they are NOT hits: counting
+            # them in the ledger printed "1 hit" beside a CLEAN verdict.
+            len(candidates) - cleaned - uncertain - voids,
             uncertain, len(untrusted), classifier, identity_unresolved, voids,
         )
     if not surface.hits:
