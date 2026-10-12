@@ -48,6 +48,7 @@ import os
 import re  # noqa: F401
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import NoReturn
 from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
 
 logger = logging.getLogger("tortoise.oauth")
@@ -151,8 +152,15 @@ def _retention_seconds(env_name: str, default: int) -> int:
 #
 #   unclaimed → claimed → minted    the pair was handed to the response
 #                       → burned    terminal; the code never mints again
-#   claimed   → unclaimed           a VERIFIED-CLEAN failure re-armed it
-#                                   (#2863's re-arm, now durably recorded)
+#
+# #3025 removed the `claimed → unclaimed` transition: the claim now lives inside
+# the `redeem_oauth_code` transaction, so a failure before its commit leaves the
+# code UNCLAIMED outright and a failure after it is a real outcome the reconciler
+# must resolve. There is nothing left to "re-arm" in process, and an in-process
+# re-arm was always the wrong tool against a claim whose owner might be alive.
+# A `claimed` row can still arise — the commit succeeded and the process died
+# before the delivery gate — which is why the state, the reconciler and
+# `REDEMPTION_CLAIMED` all stay.
 #
 # `burned` is written where the claim's residue is terminal: a pre-mint signal, or
 # a reconcile past the grace that ATTEMPTED to revoke a live orphan family
@@ -167,10 +175,10 @@ def _retention_seconds(env_name: str, default: int) -> int:
 # biconditional (a biconditional rejects the pre-#3027 writer, which sets
 # `used_at` alone, during the rolling deploy):
 #   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
-# The CLAIM and the RE-ARM set `used_at` and `redemption_state` in ONE statement;
-# a settle only transitions `redemption_state` on a row that is already `claimed`.
-# So the biconditional holds for everything we write, and the DB enforces the
-# direction that matters (no settled row without a claim timestamp).
+# The CLAIM sets `used_at` and `redemption_state` in ONE statement; a settle only
+# transitions `redemption_state` on a row that is already `claimed`. So the
+# biconditional holds for everything we write, and the DB enforces the direction
+# that matters (no settled row without a claim timestamp).
 REDEMPTION_UNCLAIMED = "unclaimed"
 REDEMPTION_CLAIMED = "claimed"
 REDEMPTION_MINTED = "minted"
@@ -241,32 +249,26 @@ class OAuthError(Exception):
 # extra error code; §5.2's charset admits "_".
 
 
-class OAuthMintAborted(Exception):
-    """Internal (#2863): `_issue_tokens` failed after possibly writing.
-    `recovered` is True iff an observation confirmed the mint left no live minted row
-    (and, on the rotation path, left the previous refresh token unclaimed). Never
-    escapes `oauth.py` — callers map it to a typed `OAuthError`."""
-
-    def __init__(self, recovered: bool, cause: str = ""):
-        super().__init__(cause or "token mint aborted")
-        self.recovered = recovered
-
-
 class OAuthTemporarilyUnavailable(OAuthError):
     """503 `temporarily_unavailable` — raised ONLY when retrying cannot double-issue:
 
-      * constructively, where no write was attempted at all (a pre-claim read
-        failed, or the refresh path failed before minting);
+      * constructively, where no write was attempted at all (a pre-mint read
+        failed, or a pre-claim validation read failed);
       * by observation, where a write may have landed — the grant is confirmed
-        still-usable (see `_mint_observably_clean` / `_prev_refresh_unclaimed`);
-      * where a conditional claim was observed to match ZERO rows and the
-        failure is a later classification READ (#3027 `_observe_code` returning
-        'unobservable') — nothing was written by this request, and the retry
-        re-runs the same claim CAS, which is what decides.
+        untouched (`_prev_refresh_unclaimed` / `_consume_state`);
+      * where a zero-row claim was OBSERVED and the failure is a later
+        classification READ (#3027 `_observe_code` returning 'unobservable') —
+        nothing was written by this request, and the retry re-runs the same claim
+        CAS, which is what decides.
 
-    Never on an unobserved WRITE state: a claim PATCH that RAISED may have
-    committed (`_consume_state` → 'unknown'), and that stays terminal
-    `invalid_grant`. This distinction is #2863's, not a new one.
+    Never on an unobserved WRITE state. #3025 makes this sharper rather than
+    looser: the mint RPC is one transaction, so a RAISE rolled everything back and
+    the probe confirms it — but a failure whose response was LOST after the commit
+    is indistinguishable from that, which is why the probe (not the exception) is
+    what decides whether the retryable signal is emitted.
+
+    (This distinction is #2863's, not a new one; #3025 removed the in-process
+    compensation that used to answer it, not the rule.)
     """
 
     def __init__(self, error_description: str = "Temporary control-plane failure — retry."):
@@ -277,20 +279,31 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
     """One WARNING + at most one Sentry capture for a conversion path. Must never raise.
 
     OWNER TABLE (I4 — never capture twice for one request):
-      lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
-      lane 1 loser rollback (capture=True)  → the single capture for the loser path
-                                               (nothing else captures there)
       #3027 delivery-gate loss (capture=True) → the single capture for that path
-                                               (the mint succeeded, so nothing has
+                                               (the mint committed, so nothing has
                                                captured; the handler only logs)
-      lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
-      lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
+      `_reconcile_claimed_redemption` revoke → the single capture for that path
       the three correction-#8 revokes  → each the single capture for its terminal path
                                         (family revoke / membership revoke /
                                         poisoned-scope revoke)
-      `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
+      `exchange_auth_code` pre-mint `except Exception`
                                        → this call IS the single capture for that path
+      `refresh_grant` MINT failure (`where="refresh_grant mint"`)
+                                       → this call IS the single capture for that path
+                                        (it replaces the capture `_issue_tokens` lane 2
+                                        owned before #3025; the pre-mint read handler
+                                        above is a DIFFERENT path and captures the
+                                        pre-mint failure instead — neither re-captures
+                                        the other)
       `oauth_token` boundary           → this call IS the single capture for that path
+
+    LOG-ONLY paths (deliberately NO capture, listed so the absence is not read as
+    an omission): the refused-code burn failure — a control-plane failure while
+    RECORDING an already-decided refusal must not page, and the coherent OAuth
+    error is still raised; the pre-#3025 table made the same choice for its lane 3.
+
+    #2863's `_issue_tokens` lanes are gone (#3025): the rollback/observe protocol
+    they captured for no longer exists, so neither does its capture accounting.
     """
     with contextlib.suppress(Exception):  # logging never breaks the response
         logger.warning("oauth: %s failed: %s", where, exc, exc_info=True)
@@ -1064,44 +1077,6 @@ def _consume_state(cp, code: str) -> str:
         return "unknown"
 
 
-def _restore_code(cp, code: str, expected) -> bool:
-    """CAS re-arm of the claim THIS request owns (#2863, #3027). Clears `used_at`
-    ONLY if it still holds the value this request wrote AND the claim is still
-    ours (`redemption_state='claimed'`), and only while the code is redeemable.
-
-    True iff the re-arm is confirmed observable. Any raise / empty result / None
-    expectation ⇒ False (terminal) — never a retryable signal on unobserved state.
-    The expiry filter mirrors `_consume_state`: the failure path can spend ~20 s
-    before the re-arm, so a near-TTL code must not be re-armed into a 503 whose retry
-    then returns expired `invalid_grant`.
-
-    The `redemption_state` condition is #3027's FENCE: a reconciler that took the
-    claim over (and burned it) cannot be undone by this request's late re-arm.
-    """
-    if expected is None:
-        return False
-    try:
-        rows = cp.query("oauth_codes", method="PATCH",
-                        select=["used_at", "expires_at"],
-                        filters=[("code_hash", "eq", _sha256(code)),
-                                 ("used_at", "eq", expected),
-                                 ("redemption_state", "eq", REDEMPTION_CLAIMED),
-                                 ("expires_at", "gt", _now_iso())],
-                        json_body={"used_at": None,
-                                   # #3027: clear the redemption state in the SAME
-                                   # CAS, so the durable state can never disagree
-                                   # with `used_at` (the schema constrains them to
-                                   # agree). A re-arm means "unclaimed" again.
-                                   "redemption_state": REDEMPTION_UNCLAIMED,
-                                   "redemption_id": None,
-                                   "redemption_settled_at": None,
-                                   "redemption_note": None})
-        return bool(rows)
-    except Exception as exc:
-        logger.warning("oauth: code re-arm failed: %s", exc)
-        return False
-
-
 def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bool) -> None:
     """Idempotent soft-revoke by id of every row this request may have written.
 
@@ -1109,11 +1084,15 @@ def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bo
     (real: `Prefer: return=minimal` → `[]`; fake: `select is None` → `[]`), so zero
     affected rows is the EXPECTED SUCCESS for a write that never committed — this
     function must never raise on an empty result. Each row is attempted in its own
-    try/except. `capture=True` is for lane 1 (nothing else captures on that path);
-    lane 2 passes False because it already captured the trigger (I4). At most ONE
-    capture is emitted per call: the loser path may fail on both rows (refresh +
-    access), and I4 permits exactly one Sentry event for that request — the
-    subsequent row failures are logged only.
+    try/except. At most ONE capture is emitted per call: the pair may fail on both
+    rows (refresh + access), and I4 permits exactly one Sentry event for that
+    request — the subsequent row failures are logged only.
+
+    #3025: this is now reached from exactly TWO places, both #3027's — the
+    lost-delivery settle compensation in `exchange_auth_code`, and
+    `_reconcile_claimed_redemption` revoking an orphan family. #2863's use of it
+    (unwinding a half-minted pair inside `_issue_tokens`) is gone with the window
+    it compensated for.
     """
     captured = False
     for table, row_id in minted:
@@ -1128,22 +1107,16 @@ def _rollback_minted(cp, minted: list[tuple[str, str]], now: str, *, capture: bo
                 logger.warning("oauth: mint rollback failed for %s/%s: %s", table, row_id, exc)
 
 
-def _mint_observably_clean(cp, minted: list[tuple[str, str]]) -> bool:
-    """True iff no minted row is live. Any raise → False (terminal, never fail-open)."""
-    try:
-        for table, row_id in minted:
-            rows = cp.query(table, select=["id"],
-                            filters=[("id", "eq", row_id), ("revoked_at", "is", None)])
-            if rows:
-                return False
-        return True
-    except Exception as exc:
-        logger.warning("oauth: mint observation failed: %s", exc)
-        return False
-
-
 def _prev_refresh_unclaimed(cp, prev_refresh: dict) -> bool:
-    """True iff the presented refresh token is still unrevoked. Any raise → False."""
+    """READ-ONLY: is the presented refresh token still unrevoked?
+
+    #3025: this is now the RETRYABILITY PROBE for a failed `rotate_oauth_refresh`,
+    not a compensation observation. The rotation is one transaction, so an
+    unrevoked row means the whole call rolled back and a retry is safe; a revoked
+    row means it committed and the response was lost (only a re-authorization
+    recovers). Fails CLOSED: any raise → False, because an unreadable observation
+    is not evidence that the grant is intact.
+    """
     try:
         rows = cp.query("oauth_refresh_tokens", select=["revoked_at"],
                         filters=[("id", "eq", prev_refresh["id"])])
@@ -1231,8 +1204,9 @@ def _observe_code(cp, code: str) -> dict:
     """
     try:
         rows = cp.query("oauth_codes", select=[
-            "id", "used_at", "expires_at", "redemption_state",
-            "redemption_id", "client_id", "org_id",
+            "id", "code_hash", "used_at", "expires_at", "redemption_state",
+            "redemption_id", "client_id", "user_id", "org_id", "redirect_uri",
+            "code_challenge", "code_challenge_method", "scope", "resource",
         ], filters=[("code_hash", "eq", _sha256(code))])
     except Exception as exc:
         logger.warning("oauth: code state observation failed: %s", exc)
@@ -1290,8 +1264,10 @@ def _reconcile_claimed_redemption(cp, code_row: dict) -> str:
     arbitrarily long time. Re-arming on that guess is exactly how TWO live
     families get minted for one single-use code: the late owner wakes, mints, and
     records `minted` over the re-armed row. A residue with no family is therefore
-    BURNED — fail safe; the client re-runs authorization. The common
-    verified-clean failure still re-arms, IN PROCESS, via `_restore_code`.
+    BURNED — fail safe; the client re-runs authorization. (#3025 removed the
+    in-process re-arm too: a failure before the `redeem_oauth_code` commit leaves
+    the code unclaimed outright, so there is no longer a verified-clean residue
+    inside the request to re-arm.)
 
     Ordering is load-bearing: ownership is taken with a CAS on the claim identity
     BEFORE anything is revoked. If the owner settles first, this CAS loses
@@ -1318,66 +1294,37 @@ def _reconcile_claimed_redemption(cp, code_row: dict) -> str:
     return "burned-clean"
 
 
-def _consume_code(cp, code: str) -> dict:
-    """Single-use auth-code redemption (RFC 6749 §4.1.2) with the durable
-    redemption state machine (#3027).
+def _refuse_observed_code(cp, observed: dict) -> NoReturn:
+    """Raise the terminal (or retryable) error for a code that cannot be claimed.
 
-    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL AND
-    redemption_state='unclaimed' AND expires_at > now()``) with
-    return=representation — a concurrent worker reusing the same code sees zero
-    affected rows and cannot double-issue (no SELECT-then-PATCH race, PR #1264
-    review P2). The claim records the timestamp, the state AND a fresh
-    `redemption_id` in the SAME statement, so the durable state can never be
-    half-written relative to the CAS.
+    #3025: this is the CLASSIFICATION half of what `_consume_code` did. The claim
+    itself moved into `redeem_oauth_code`, where it shares one transaction with the
+    mint; so a code that could not be claimed is now classified from a READ-ONLY
+    observation, with the same verdicts as before.
 
-    On zero rows the row is re-read READ-ONLY to classify WHY. Every verdict
-    EXCEPT `unobservable` is TERMINAL (`invalid_grant`): a minted code is a
-    replay, and a CLAIMED code is consumed by an attempt that may still be
-    running — a different request must never re-arm it (two live families) and
-    must never report it retryable (the retry can terminate, which #2863 records
-    as the untruthful signal it removed). A `claimed` observation also triggers
-    the lazy reconcile, which settles the residue for good. `unobservable` — the
-    classification READ failed — is a retryable 503 instead, because the claim
-    PATCH was OBSERVED to match zero rows (so this request wrote nothing, and the
-    retry re-runs that same CAS); see `_observe_code`.
+    Every verdict EXCEPT `unobservable` is TERMINAL (`invalid_grant`): a minted
+    code is a replay, and a CLAIMED code is consumed by an attempt that may still
+    be running — a different request must never report it retryable (the retry can
+    terminate, which #2863 records as the untruthful signal it removed) and must
+    never take the claim over in process (that is the reconciler's job, and it is
+    CAS-fenced). `unobservable` — the classification READ failed — is a retryable
+    503 instead, because nothing this request did can have written: `_observe_code`
+    is reached only from the pre-claim read, or after a claim the RPC OBSERVED as
+    zero rows.
+
+    A `claimed` observation also triggers the lazy reconcile, which settles the
+    residue for good.
     """
-    for attempt in (1, 2):
-        rows = cp.query("oauth_codes", select=[
-            "id", "code_hash", "client_id", "user_id", "org_id", "redirect_uri",
-            "code_challenge", "code_challenge_method", "scope", "resource",
-            "expires_at", "used_at", "redemption_state", "redemption_id",
-        ], method="PATCH",
-            filters=[("code_hash", "eq", _sha256(code)),
-                     ("used_at", "is", None),
-                     ("redemption_state", "eq", REDEMPTION_UNCLAIMED),
-                     ("expires_at", "gt", _now_iso())],
-            json_body={"used_at": _now_iso(),
-                       "redemption_state": REDEMPTION_CLAIMED,
-                       "redemption_id": secrets.token_urlsafe(16),
-                       "redemption_settled_at": None,
-                       "redemption_note": None})
-        if rows:
-            row = rows[0]
-            # Defence in depth: the claim filter already excludes an expired code.
-            if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
-                _settle_redemption(cp, row, REDEMPTION_BURNED, note="expired")
-                raise OAuthError(400, "invalid_grant", "Authorization code expired.")
-            return row
-        observed = _observe_code(cp, code)
-        state = observed.get("state")
-        if state == REDEMPTION_CLAIMED:
-            verdict = _reconcile_claimed_redemption(cp, observed)
-            logger.info("oauth: code already claimed (%s)", verdict)
-            raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
-        if state == "unclaimed" and attempt == 1:
-            continue                        # lost a claim race — retry exactly once
-        if state == "unobservable":
-            raise OAuthTemporarilyUnavailable(
-                "Could not determine the authorization code's state — retry.")
-        if state == "expired":
-            raise OAuthError(400, "invalid_grant", "Authorization code expired.")
+    state = observed.get("state")
+    if state == REDEMPTION_CLAIMED:
+        verdict = _reconcile_claimed_redemption(cp, observed)
+        logger.info("oauth: code already claimed (%s)", verdict)
         raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
-    # Unreachable: the loop either returns a claimed row or raises.
+    if state == "unobservable":
+        raise OAuthTemporarilyUnavailable(
+            "Could not determine the authorization code's state — retry.")
+    if state == "expired":
+        raise OAuthError(400, "invalid_grant", "Authorization code expired.")
     raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
 
 
@@ -1449,116 +1396,137 @@ def _org_row(cp, org_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
-def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
-                  scope: str, resource: str | None,
-                  prev_refresh: dict | None = None,
-                  prev_access_id: str | None = None,
-                  code_id: int | None = None) -> dict:
-    """Mint an access+refresh pair; rotate (revoke) the previous pair when
-    called from the refresh path (D5 rotation).
-
-    Mint FIRST, revoke after (PR #1264 review P3): a DB failure mid-rotation
-    leaves the new pair live instead of a dead token. The old refresh token
-    is revoked with an atomic conditional UPDATE (``WHERE revoked_at IS
-    NULL``); if a concurrent worker already claimed it, the freshly minted
-    orphan pair is rolled back so exactly one rotation wins (PR #1264 review
-    P2 — no double rotation under concurrent workers).
-    """
-    # #3128: the mint is the LAST line for a scope claim. Validating here (in
-    # addition to the authorize/consent gate) means no token row can ever carry
-    # a scope outside SCOPES_ACCEPTED — including a legacy code/refresh row
-    # written before the gate existed, or any future caller of this writer.
-    scope = validate_scope(scope)
-    access = _new_token(ACCESS_TOKEN_PREFIX)
-    refresh = _new_token(REFRESH_TOKEN_PREFIX)
-    refresh_id = secrets.token_urlsafe(16)
-    access_id = secrets.token_urlsafe(16)
-    now = _now_iso()
-    # #2863: appended BEFORE the POST, so a commit-then-lost POST still gets its
-    # rollback (the row exists even though the response never arrived).
-    minted: list[tuple[str, str]] = []
-    # #3027: the provenance link back to the authorizing code. Omitted (rather
-    # than sent as NULL) for a family with no origin code — a refresh rotation of
-    # one minted before this migration. The column and the claim's
-    # `redemption_state` filter are read unconditionally, so the migration MUST be
-    # applied before this code (the deploy's migration-drift gate is fail-closed
-    # on that ordering).
-    code_link = {"code_id": code_id} if code_id is not None else {}
-    try:
-        minted.append(("oauth_refresh_tokens", refresh_id))
-        cp.query("oauth_refresh_tokens", method="POST", json_body={
-            "id": refresh_id,
-            "token_hash": _sha256(refresh),
-            "client_id": client_id,
-            "user_id": user_id,
-            "org_id": org_id,
-            "scope": scope,
-            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
-            "revoked_at": None,
-            "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
-            "created_at": now,
-            **code_link,
-        })
-        minted.append(("oauth_access_tokens", access_id))
-        cp.query("oauth_access_tokens", method="POST", json_body={
-            "id": access_id,
-            "token_hash": _sha256(access),
-            "client_id": client_id,
-            "user_id": user_id,
-            "org_id": org_id,
-            "scope": scope,
-            "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
-            "revoked_at": None,
-            "refresh_token_id": refresh_id,
-            "created_at": now,
-            **code_link,
-        })
-        if prev_refresh is not None:
-            claimed = cp.query("oauth_refresh_tokens", method="PATCH",
-                               select=["id"],
-                               filters=[("id", "eq", prev_refresh["id"]),
-                                        ("revoked_at", "is", None)],
-                               json_body={"revoked_at": _now_iso()})
-            if not claimed:
-                # A concurrent worker already rotated this grant — roll back the
-                # orphan pair so only the winner's tokens survive (lane 1: the
-                # INTENTIONAL signal). `_rollback_minted` is contractually
-                # non-raising (per-row try/except + a raise-proof `_log_and_capture`),
-                # so this cannot spill into lane 2 and convert the pinned
-                # `invalid_grant` into an `OAuthMintAborted`.
-                _rollback_minted(cp, minted, now, capture=True)
-                raise OAuthError(400, "invalid_grant",
-                                 "Refresh token already revoked (rotated or invalidated).")
-    except OAuthError:
-        raise                                              # lane 1 — intentional signal
-    except Exception as exc:
-        # lane 2 — the SINGLE capture of the triggering exception (I4).
-        _log_and_capture(exc, where="_issue_tokens")
-        try:
-            _rollback_minted(cp, minted, now, capture=False)   # lane 2 already captured
-            recovered = _mint_observably_clean(cp, minted)
-            if recovered and prev_refresh is not None:
-                recovered = _prev_refresh_unclaimed(cp, prev_refresh)
-        except Exception as inner:                          # structural no-leak guarantee
-            logger.warning("oauth: mint compensation raised: %s", inner)
-            recovered = False
-        raise OAuthMintAborted(recovered) from exc
-    if prev_access_id:                                      # lane 3 — outside the handler
-        try:
-            cp.query("oauth_access_tokens", method="PATCH",
-                     filters=[("id", "eq", prev_access_id)],
-                     json_body={"revoked_at": now})
-        except Exception as exc:
-            logger.warning("oauth: prev-access revoke failed: %s", exc)
+def _new_pair_material() -> dict:
+    """Fresh token material for one mint. The plaintext never leaves this
+    process; only the SHA-256 digests cross the control-plane seam."""
     return {
-        "access_token": access,
+        "access": _new_token(ACCESS_TOKEN_PREFIX),
+        "refresh": _new_token(REFRESH_TOKEN_PREFIX),
+        "refresh_id": secrets.token_urlsafe(16),
+        "access_id": secrets.token_urlsafe(16),
+    }
+
+
+def _token_response(material: dict, scope: str) -> dict:
+    """The RFC 6749 §5.1 body, plus the underscore-prefixed row ids the caller
+    needs and strips before returning."""
+    return {
+        "access_token": material["access"],
         "token_type": "Bearer",
         "expires_in": ACCESS_TOKEN_TTL_S,
-        "refresh_token": refresh,
+        "refresh_token": material["refresh"],
         "scope": scope,
-        "_refresh_id": refresh_id,
-        "_access_id": access_id,
+        "_refresh_id": material["refresh_id"],
+        "_access_id": material["access_id"],
     }
+
+
+def _redeem_code_rpc(cp, *, observed: dict, code: str, scope: str,
+                     burn: bool = False) -> dict:
+    """Claim the authorization code and mint its pair, in ONE transaction (#3025).
+
+    `redeem_oauth_code` performs the single-use CAS — the same predicate
+    `_consume_code` used (PR #1264 review P2) — AND the two token INSERTs inside
+    one Postgres function, so a failure anywhere leaves ZERO new rows and an
+    unset `used_at`. #2863's in-process rollback/observe protocol compensated for
+    exactly the window the transaction removes, which is why it is gone.
+
+    `burn` selects the REFUSAL path: the caller has validated the code row and
+    refused it, so the function claims the code and records the terminal
+    `claimed → burned` outcome (#3027) in the same transaction, inserting no token
+    row. That preserves the pre-#3025 behaviour — a validation failure after the
+    claim burned the code — without the claim and the burn being two independent
+    writes.
+
+    Returns the RPC's status dict augmented with `_status`. A `not_claimable`
+    status wrote NOTHING; the caller re-reads the row READ-ONLY to classify why.
+
+    ⛔ Reached through :meth:`rpc_value`, NOT :meth:`rpc`. `rpc` sends
+    `Prefer: return=minimal`, and PostgREST does not echo a VOLATILE SECURITY
+    DEFINER function's body under it — the repo's own measured precedent
+    (`supabase_control.py::resolve_signup_token`: "in production the echo is
+    ALWAYS empty … the token path 422'd in prod while passing against the
+    fake's bare-string rpc"). A `None` here therefore means NOTHING about the
+    transaction, and must never be read as `not_claimable`.
+    """
+    material = _new_pair_material()
+    redemption_id = secrets.token_urlsafe(16)
+    res = cp.rpc_value("redeem_oauth_code", {
+        "p_code_id": observed["id"],
+        "p_code_hash": _sha256(code),
+        "p_client_id": observed["client_id"],
+        "p_user_id": observed["user_id"],
+        "p_org_id": observed["org_id"],
+        "p_scope": scope,
+        "p_redemption_id": redemption_id,
+        "p_refresh_id": material["refresh_id"],
+        "p_refresh_hash": _sha256(material["refresh"]),
+        "p_access_id": material["access_id"],
+        "p_access_hash": _sha256(material["access"]),
+        "p_now": _now_iso(),
+        "p_refresh_expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
+        "p_access_expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
+        "p_burn": burn,
+    })
+    # A non-dict envelope (None, a bare scalar, a truncated body) is classified
+    # as outcome-UNKNOWN below — never as `not_claimable`, which would positively
+    # assert that the function wrote nothing.
+    status = res.get("status") if isinstance(res, dict) else None
+    if status == "minted":
+        return {**_token_response(material, scope),
+                "_status": "minted", "_redemption_id": redemption_id}
+    if status in ("burned", "not_claimable"):
+        return {"_status": status, "_redemption_id": redemption_id}
+    # An unreadable envelope, or a status this build does not know, is NOT
+    # evidence that nothing was written — the transaction may have COMMITTED
+    # (a lost response, a contract drift). Raise, so the caller's READ-ONLY
+    # probe decides retryable vs terminal. `_issue_tokens`'s rollback protocol
+    # existed to compensate this window; the transaction removes the window,
+    # so what replaces it is this: never assert success OR failure from an
+    # absent observation.
+    raise RuntimeError(
+        "redeem_oauth_code returned an unreadable envelope "
+        f"({res!r}) — the transaction may have committed")
+
+
+def _rotate_refresh_rpc(cp, *, prev: dict) -> dict | None:
+    """Rotate the presented refresh token, in ONE transaction (#3025).
+
+    `rotate_oauth_refresh` claims the presented row (`WHERE revoked_at IS NULL`),
+    inserts the new pair, and revokes the previous family's live access rows — all
+    inside one Postgres function. A zero-row claim means a concurrent rotator won;
+    it wrote NOTHING, so the loser no longer leaves an orphan pair to unwind,
+    which is what `_issue_tokens`'s lane-1 rollback compensated for.
+
+    The new rows inherit client_id / user_id / org_id / scope / code_id from the
+    claimed row, so the family's identity and its #3027 provenance link cannot
+    drift between a rotation and its parent. Returns None when the claim lost.
+
+    ⛔ Reached through :meth:`rpc_value` for the same transport reason as
+    :func:`_redeem_code_rpc`: under `Prefer: return=minimal` the body is not
+    echoed, so a `None` must be treated as outcome-UNKNOWN (raise) rather than
+    as "the claim lost" — the loser's `None` and a lost response are different
+    facts, and only the first is safe to answer terminally.
+    """
+    material = _new_pair_material()
+    res = cp.rpc_value("rotate_oauth_refresh", {
+        "p_prev_refresh_id": prev["id"],
+        "p_refresh_id": material["refresh_id"],
+        "p_refresh_hash": _sha256(material["refresh"]),
+        "p_access_id": material["access_id"],
+        "p_access_hash": _sha256(material["access"]),
+        "p_now": _now_iso(),
+        "p_refresh_expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
+        "p_access_expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
+    })
+    if not isinstance(res, dict) or res.get("status") != "rotated":
+        if isinstance(res, dict) and res.get("status") == "not_claimable":
+            return None          # the CAS matched zero rows: it wrote NOTHING
+        raise RuntimeError(
+            "rotate_oauth_refresh returned an unreadable envelope "
+            f"({res!r}) — the rotation may have committed")
+    scope = res.get("scope") or prev.get("scope") or " ".join(SCOPES_SUPPORTED)
+    return _token_response(material, scope)
 
 
 def exchange_auth_code(cp, body: dict, base: str) -> dict:
@@ -1567,91 +1535,161 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     Validates the PKCE verifier, redirect_uri, client auth, and the RFC 8707
     resource (must map to the SAME org the code was bound to), then issues
     the access+refresh pair.
+
+    #3025: the multi-table write is ONE transaction. The code row is read and
+    validated FIRST — its identity fields (client_id, redirect_uri,
+    code_challenge, scope) are written once by `issue_auth_code` and never
+    updated, so this read-then-act carries no TOCTOU — and then a single
+    `redeem_oauth_code` RPC claims the code AND inserts both token rows. A failure
+    anywhere in that function leaves ZERO new rows and an unset `used_at`.
+
+    #2863's in-process rollback/re-arm protocol is deleted with the window it
+    compensated for. What remains is READ-ONLY classification plus #3027's
+    DELIVERY GATE, which is the one write that must still follow the commit
+    (a committed mint whose response is lost has to remain distinguishable from a
+    replay — that is what the durable state is for, and a transaction cannot fix
+    it).
     """
-    # #2863: the redemption is atomic-feel — a failure after the atomic claim
-    # either CAS-restores the code (so a retry provably works) or reports a
-    # terminal invalid_grant. Every signal is derived from an OBSERVED state;
-    # an unobservable state is never advertised as retryable.
-    consumed = False
-    attempted_consume = False
-    code_row: dict | None = None
+    code = body.get("code", "")
+    attempted = False
+    out: dict | None = None
     try:
         client = _verify_client_auth(cp, body.get("client_id"), body)   # pure read
-        attempted_consume = True
-        code_row = _consume_code(cp, body.get("code", ""))              # THE atomic gate
-        consumed = True
-        if code_row["client_id"] != client["id"]:
-            raise OAuthError(400, "invalid_grant",
-                             "Authorization code was issued to a different client.")
-        if body.get("redirect_uri") != code_row["redirect_uri"]:
-            raise OAuthError(400, "invalid_grant", "redirect_uri mismatch.")
-        if not _verify_pkce(body.get("code_verifier", ""),
-                            code_row["code_challenge"],
-                            code_row.get("code_challenge_method") or "S256"):
-            raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
+        observed = _observe_code(cp, code)
+        if observed.get("state") != REDEMPTION_UNCLAIMED:
+            _refuse_observed_code(cp, observed)
+
+        # ── validation of the code row's IMMUTABLE bound fields ──────────────
+        # Collected rather than raised one at a time so that a REFUSAL is
+        # recorded durably in the same transaction as the claim (the
+        # `redemption_note='terminal'` path) rather than being one of several
+        # independent raises.
+        #
+        # ORDER, and why it is not the pre-#3025 order: `validate_scope` used to
+        # be the LAST check, inside the now-deleted `_issue_tokens` — i.e. after
+        # client / redirect_uri / PKCE / resource / org. It is now FIRST, because
+        # the claim must be gated before any mint can be attempted and the scope
+        # is what the minted row would carry. That IS an observable precedence
+        # change on a multiply-invalid request (an unsupported stored scope now
+        # answers 400 `invalid_scope` where it used to answer the org/PKCE error
+        # that happened to be checked first), and it is accepted: both are
+        # terminal 400/403 invalid-credential answers to a request that cannot
+        # succeed, and the scope answer is the more actionable one. Pinned by
+        # `tests/test_oauth_mcp.py` TestScopeAllowList.
+        refusal: tuple[str, OAuthError] | None = None
+        try:
+            scope = validate_scope(observed.get("scope") or " ".join(SCOPES_SUPPORTED))
+        except OAuthError as exc:                      # #3128 unsupported scope
+            refusal = ("unsupported-scope", exc)
+            scope = ""
+        if refusal is None and observed["client_id"] != client["id"]:
+            refusal = ("client-mismatch", OAuthError(
+                400, "invalid_grant",
+                "Authorization code was issued to a different client."))
+        if refusal is None and body.get("redirect_uri") != observed["redirect_uri"]:
+            refusal = ("redirect-uri-mismatch",
+                       OAuthError(400, "invalid_grant", "redirect_uri mismatch."))
+        if refusal is None and not _verify_pkce(
+                body.get("code_verifier", ""),
+                observed["code_challenge"],
+                observed.get("code_challenge_method") or "S256"):
+            refusal = ("pkce", OAuthError(400, "invalid_grant",
+                                           "PKCE verification failed."))
         # RFC 8707: the resource at the token endpoint must resolve to the same
         # org the authorization code was bound to (lenient when omitted — the
         # mcp SDK always sends it, but a bare authorize→token pair is legal).
-        resource = body.get("resource")
-        if resource:
-            _, requested_org = parse_resource(base, resource)
-            if requested_org is not None and requested_org != code_row["org_id"]:
-                raise OAuthError(400, "invalid_grant",
-                                 "Resource indicator does not match the authorized team.")
-        _assert_org_usable(cp, code_row["org_id"])
-        scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
-        out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
-                            org_id=code_row["org_id"], scope=scope,
-                            resource=code_row.get("resource"),
-                            code_id=code_row.get("id"))
+        # `parse_resource`'s own 400 is COLLECTED like the rest: it is raised
+        # after the claim, so leaving it outside would make the burn depend on
+        # which helper raised — the pre-#3025 code burned every terminal signal
+        # after the claim, and the `p_burn` path must not silently carve one out.
+        if refusal is None:
+            resource = body.get("resource")
+            if resource:
+                try:
+                    _, requested_org = parse_resource(base, resource)
+                except OAuthError as exc:              # 400 invalid_resource
+                    refusal = ("invalid-resource", exc)
+                else:
+                    if (requested_org is not None
+                            and requested_org != observed["org_id"]):
+                        refusal = ("resource-mismatch", OAuthError(
+                            400, "invalid_grant",
+                            "Resource indicator does not match the authorized team."))
+        if refusal is None:
+            try:
+                _assert_org_usable(cp, observed["org_id"])
+            except OAuthError as exc:                  # 403 team missing/suspended
+                refusal = ("org-unusable", exc)
+
+        if refusal is not None:
+            # #3027: the terminal `claimed → burned` outcome is recorded in the
+            # SAME transaction as the claim, so the burn cannot outlive a claim
+            # that never committed (nor the reverse). Best-effort by CONTRACT, as
+            # the pre-#3025 `_settle_redemption` burn was: a control-plane failure
+            # while RECORDING a refusal must not turn a coherent OAuth error into
+            # a 500 — the code simply stays unclaimed and the client may retry.
+            #
+            # A RETRYABLE signal must NEVER burn (the pre-#3025 rule was
+            # `if consumed and not isinstance(exc, OAuthTemporarilyUnavailable)`).
+            # Nothing reachable inside the collection above is retryable today —
+            # `_assert_org_usable` raises only 403 and the rest are 400s — so this
+            # guard is structural rather than live: it keeps the rule true by
+            # construction instead of by inspecting every callee.
+            logger.info("oauth: code refused (%s)", refusal[0])
+            if not isinstance(refusal[1], OAuthTemporarilyUnavailable):
+                try:
+                    _redeem_code_rpc(cp, observed=observed, code=code, scope="",
+                                     burn=True)
+                except Exception as exc:
+                    logger.warning("oauth: refused-code burn failed: %s", exc)
+            raise refusal[1]
+
+        attempted = True
+        for attempt in (1, 2):
+            outcome = _redeem_code_rpc(cp, observed=observed, code=code, scope=scope)
+            if outcome.get("_status") == "minted":
+                out = outcome
+                break
+            fresh = _observe_code(cp, code)
+            if fresh.get("state") == REDEMPTION_UNCLAIMED and attempt == 1:
+                observed = fresh                # lost the claim race — retry once
+                continue
+            _refuse_observed_code(cp, fresh)
+        if out is None:            # unreachable: `_refuse_observed_code` always raises
+            _refuse_observed_code(cp, _observe_code(cp, code))
+
         # #3027: record delivery BEFORE returning the pair — and DELIVERY IS
         # GATED ON THIS CAS. The reconciler takes ownership of a stale claim with
         # the same CAS before it revokes anything, so exactly one of us can
         # settle: if we lose, a family we just minted must not be delivered
-        # (it would be revoked out from under the client) and we compensate it
-        # and report the failure instead.
-        if not _settle_redemption(cp, code_row, REDEMPTION_MINTED):
+        # (it would be revoked out from under the client) and we revoke it and
+        # report a terminal failure instead.
+        settle_row = {"id": observed["id"],
+                      "redemption_state": REDEMPTION_CLAIMED,
+                      "redemption_id": out["_redemption_id"]}
+        if not _settle_redemption(cp, settle_row, REDEMPTION_MINTED):
             minted = [("oauth_refresh_tokens", out["_refresh_id"]),
                       ("oauth_access_tokens", out["_access_id"])]
-            # capture=True is this path's SINGLE capture (I4): nothing has captured
-            # yet — `_issue_tokens` succeeded — and the handler below only logs. A
-            # failed compensation here leaves a live, never-delivered row, which
-            # must not vanish silently.
+            # capture=True is this path's SINGLE capture (I4): the mint committed,
+            # so nothing has captured yet, and a failed compensation leaves a
+            # live, never-delivered row that must not vanish silently. The outcome
+            # is TERMINAL either way — the reconciler owns the claim, so no retry
+            # of this request can be safe.
             _rollback_minted(cp, minted, _now_iso(), capture=True)
-            raise OAuthMintAborted(_mint_observably_clean(cp, minted))
-    except OAuthError as exc:
-        # #3027: an intentional terminal signal AFTER the claim burns the code
-        # durably (CAS-fenced on the claim identity, so it cannot overwrite a
-        # reconciler's decision). Without this the row would stay 'claimed' and
-        # the reconciler would later burn a live residue the client already
-        # knows failed. A retryable signal is not a terminal outcome, so
-        # `temporarily_unavailable` never burns.
-        if consumed and not isinstance(exc, OAuthTemporarilyUnavailable):
-            _settle_redemption(cp, code_row, REDEMPTION_BURNED, note="terminal")
-        raise
-    except OAuthMintAborted as exc:
-        logger.warning("oauth: auth-code mint aborted (recovered=%s)", exc.recovered)
-        if exc.recovered and _restore_code(cp, body.get("code", ""), code_row["used_at"]):
-            raise OAuthTemporarilyUnavailable() from None
-        # `recovered=False` deliberately does NOT record a terminal state: the
-        # outcome is UNKNOWN, which is precisely what #3027 exists to represent.
-        # The code stays 'claimed' for `_reconcile_claimed_redemption` to resolve
-        # against the durable `code_id` link; burning it here would hide the
-        # orphan from the one mechanism that can revoke it.
-        raise OAuthError(400, "invalid_grant",
-                         "The authorization code could not be redeemed — re-run "
-                         "authorization.") from None
-    except Exception as exc:
-        _log_and_capture(exc, where="exchange_auth_code")
-        if consumed:
-            if _restore_code(cp, body.get("code", ""), code_row["used_at"]):
-                raise OAuthTemporarilyUnavailable() from None
             raise OAuthError(400, "invalid_grant",
                              "The authorization code could not be redeemed — re-run "
-                             "authorization.") from None
-        if not attempted_consume:
+                             "authorization.")
+    except OAuthError:
+        raise
+    except Exception as exc:
+        _log_and_capture(exc, where="exchange_auth_code")
+        if not attempted:
             raise OAuthTemporarilyUnavailable() from None        # constructive-clean
-        if _consume_state(cp, body.get("code", "")) == "unconsumed":
+        # The RPC may have COMMITTED before its response was lost. A retryable
+        # signal is therefore only ever emitted on an OBSERVED-clean code: an
+        # unobserved write stays TERMINAL (its residue is `claimed`, which the
+        # reconciler resolves against the durable `code_id` link).
+        if _consume_state(cp, code) == "unconsumed":
             raise OAuthTemporarilyUnavailable() from None
         raise OAuthError(400, "invalid_grant",
                          "The authorization code could not be redeemed — re-run "
@@ -1727,10 +1765,6 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
                 _log_and_capture(exc, where="membership revoke")
             raise OAuthError(403, "invalid_grant",
                              "Membership in the team has ended — the grant was revoked.")
-        prev_access = cp.query("oauth_access_tokens",
-                               select=["id"],
-                               filters=[("refresh_token_id", "eq", row["id"]),
-                                        ("revoked_at", "is", None)])
     except OAuthError:
         raise
     except Exception as exc:
@@ -1756,24 +1790,26 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
                          "The refresh token's scope is no longer supported — "
                          "re-run authorization.") from None
     try:
-        out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
-                            org_id=row["org_id"], scope=row.get("scope")
-                            or " ".join(SCOPES_SUPPORTED), resource=resource,
-                            prev_refresh=row,
-                            prev_access_id=prev_access[0]["id"] if prev_access else None,
-                            # #3027: rotation INHERITS the family's origin code, so
-                            # a live rotated descendant is still discoverable from
-                            # the code the reconciler is resolving. A link that died
-                            # at the first rotation would make the reconciler blind
-                            # to the live family and re-arm a live grant.
-                            code_id=row.get("code_id"))
-    except OAuthMintAborted as exc:
-        logger.warning("oauth: refresh mint aborted (recovered=%s)", exc.recovered)   # I4: log-only
-        if exc.recovered:
+        out = _rotate_refresh_rpc(cp, prev=row)
+    except Exception as exc:
+        # #3025: the rotation is ONE transaction, so an error either rolled the
+        # whole call back (every write undone — the presented token is still
+        # unrevoked, so a retry simply succeeds) or committed before its response
+        # was lost (the presented token IS revoked and a live pair exists that the
+        # client never saw — terminal; only a re-authorization recovers). The probe
+        # is READ-ONLY and gates the retryable signal, so a retryable 503 is never
+        # emitted on an unobserved write.
+        _log_and_capture(exc, where="refresh_grant mint")
+        if _prev_refresh_unclaimed(cp, row):
             raise OAuthTemporarilyUnavailable() from None
         raise OAuthError(400, "invalid_grant",
                          "The refresh token could not be rotated — re-run "
                          "authorization.") from None
+    if out is None:
+        # A concurrent rotator won the CAS. Nothing was written, so there is no
+        # orphan pair to unwind — the `not_claimable` result IS the whole signal.
+        raise OAuthError(400, "invalid_grant",
+                         "Refresh token already revoked (rotated or invalidated).")
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 

@@ -70,9 +70,17 @@ def test_successful_exchange_records_minted_and_links_the_code(fault_client):
     assert cp.tables["oauth_refresh_tokens"][-1]["code_id"] == code_id
 
 
-def test_verified_clean_abort_rearms_the_durable_state(fault_client):
-    """#2863's re-arm, now durably recorded: a mint failure whose compensation is
-    observed clean returns the code to 'unclaimed', so the retry provably works."""
+def test_mid_mint_abort_leaves_the_code_unclaimed_and_retryable(fault_client):
+    """#3025's core property, pinned where #2863's re-arm used to be: a failure
+    inside the mint leaves the code UNCLAIMED — the whole transaction rolled
+    back, so nothing was ever claimed and there is nothing to re-arm.
+
+    The distinction matters: #2863 needed a re-arm because the claim PATCH had
+    already committed as its own statement and had to be undone by a second
+    write against the same failing control plane. Here `used_at IS NULL` and
+    `state='unclaimed'` are simply the pre-call row, so the retry provably works
+    and no compensating write exists to fail.
+    """
     tc, cp = fault_client
     verifier = _seed_code(cp, "rearm")
     cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
@@ -138,19 +146,27 @@ def test_rotation_inherits_the_code_link(fault_client):
 
 # ── The "committed but compensation failed" branch ──────────────────────────
 
-def test_double_fault_stays_claimed_so_the_reconciler_can_resolve_it(fault_client):
-    """access INSERT fails AND the cleanup fails → `recovered=False`. The outcome
-    is UNKNOWN, so the durable state must stay 'claimed' — burning it here would
-    hide the orphan from the only mechanism that can revoke it."""
+def test_lost_response_stays_claimed_so_the_reconciler_can_resolve_it(fault_client):
+    """The mint RPC COMMITTED and its response was lost. The outcome is UNKNOWN,
+    so the durable state must stay 'claimed' — burning it here would hide the
+    orphan family from the only mechanism that can revoke it.
+
+    #3025: this is the ONE residue the transaction cannot remove. A plain mid-mint
+    failure no longer produces it (the function rolls back, the code stays
+    unclaimed and the retry simply works), so the state is now reachable ONLY via
+    a lost response — which is exactly what #3027's reconciler exists for.
+    """
     tc, cp = fault_client
-    verifier = _seed_code(cp, "df")
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)   # rollback
-    r = _post_code(tc, cp, "df", verifier)
+    verifier = _seed_code(cp, "lostresp")
+    cp.fail_rpc("redeem_oauth_code", after_commit=True, times=1)
+    r = _post_code(tc, cp, "lostresp", verifier)
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
-    row = _code_row(cp, "df")
+    row = _code_row(cp, "lostresp")
     assert row["redemption_state"] == oauth.REDEMPTION_CLAIMED
     assert row["used_at"] is not None
+    # The pair really did commit — this IS the orphan the reconciler must resolve.
+    assert len(_live(cp, "oauth_refresh_tokens")) == 1
+    assert len(_live(cp, "oauth_access_tokens")) == 1
 
 
 def test_reconciler_revokes_an_undelivered_orphan_family_and_burns_the_code(fault_client):
@@ -256,36 +272,32 @@ def test_reconciler_never_revokes_a_family_whose_owner_settled_minted(fault_clie
     assert _live(cp, "oauth_refresh_tokens")      # the delivered family survives
 
 
-def test_restore_code_cannot_undo_a_settled_state():
-    """`_restore_code` carries the same fence: an in-process re-arm must not
-    resurrect a claim a reconciler has already burned."""
-    cp = FakeControlPlane()
-    _seed_code(cp, "c", used_at="T1", redemption_state=oauth.REDEMPTION_BURNED)
-    assert oauth._restore_code(cp, "c", "T1") is False
-    assert _code_row(cp, "c")["redemption_state"] == oauth.REDEMPTION_BURNED
-
-
 def test_a_superseded_claim_view_cannot_settle_the_current_claim(fault_client):
     """The `redemption_id` clause of the CAS is load-bearing, and this is the
     only test that exercises it.
 
     A request holding an OLD view of a claim must not settle the claim a
-    DIFFERENT request now owns. Sequence: B claims → B's claim is re-armed
-    in-process (verified-clean) → C claims the same code → B wakes with its stale
-    row. Without the `redemption_id` filter, B's stale settle would BURN C's
-    legitimate live claim (the state filter alone cannot tell them apart), and C
-    would then be compensated out of a grant it legitimately holds."""
+    DIFFERENT request now owns. Without the `redemption_id` filter, the stale
+    settle would BURN the current owner's legitimate claim (the state filter
+    alone cannot tell them apart), and the owner would then be compensated out
+    of a grant it legitimately holds.
+
+    #3025: the current claim is constructed directly. The in-process re-arm that
+    used to produce this shape is gone, but the fence it exercised is unchanged —
+    the reconciler still transitions a claim's state without owning its
+    `redemption_id`, so the two views can still diverge.
+    """
     _tc, cp = fault_client
     _seed_code(cp, "superseded")
-    view_b = oauth._consume_code(cp, "superseded")
-    assert oauth._restore_code(cp, "superseded", view_b["used_at"]) is True
-    view_c = oauth._consume_code(cp, "superseded")
-    assert view_c["redemption_id"] != view_b["redemption_id"]
-    assert oauth._settle_redemption(cp, view_b, oauth.REDEMPTION_BURNED) is False
+    stale = {"id": _code_row(cp, "superseded")["id"],
+             "redemption_state": oauth.REDEMPTION_CLAIMED,
+             "redemption_id": "stale-rid"}
+    _force_claimed(cp, "superseded", age_s=0)          # the CURRENT owner's claim
+    assert oauth._settle_redemption(cp, stale, oauth.REDEMPTION_BURNED) is False
     row = _code_row(cp, "superseded")
-    assert row["redemption_state"] == oauth.REDEMPTION_CLAIMED     # C's claim lives
-    assert row["redemption_id"] == view_c["redemption_id"]
-    assert oauth._settle_redemption(cp, view_c, oauth.REDEMPTION_MINTED) is True
+    assert row["redemption_state"] == oauth.REDEMPTION_CLAIMED     # the claim lives
+    assert row["redemption_id"] == "rid-superseded"
+    assert oauth._settle_redemption(cp, dict(row), oauth.REDEMPTION_MINTED) is True
 
 
 def test_a_lost_minted_settle_compensates_instead_of_delivering(fault_client, monkeypatch):
@@ -322,7 +334,7 @@ def test_a_lost_minted_settle_capture_events_when_compensation_fails(
         fault_client, monkeypatch):
     """The delivery-gate-loss path owns its ONE Sentry capture (I4).
 
-    Nothing has captured yet (`_issue_tokens` succeeded), and the handler only
+    Nothing has captured yet (the mint RPC committed), and the handler only
     logs — so when the compensation ALSO fails, a live never-delivered token row
     must not vanish silently. `capture=False` here is the observability hole a
     review caught; this pins the fix."""

@@ -2190,8 +2190,16 @@ def user_identity_inventory(cp, user_id: str) -> dict:
     Returns the login-method inventory: methods (provider/provider_id list),
     has_password, email_method, login_methods, keys_tier, banner.show.
     Raises RuntimeError (fail-closed) on control-plane failure.
+
+    ⛔ ``rpc_value``, not ``rpc``: the function RETURNS jsonb, and
+    ``Prefer: return=minimal`` (what ``rpc`` sends) does not echo a VOLATILE
+    SECURITY DEFINER body — ``rpc`` returns ``None`` in production, and the
+    caller then read ``None`` as the inventory. Found while fixing #3025, which
+    hit the identical shape in the OAuth mint; the same-double change that
+    models the transport reddened the three ``TestIdentitySeam`` tests that had
+    been passing only because the double echoed the body.
     """
-    return cp.rpc("user_identity_inventory", {"p_user_id": user_id})
+    return cp.rpc_value("user_identity_inventory", {"p_user_id": user_id})
 
 
 def reserve_unlink(cp, user_id: str, identity_id: str) -> dict:
@@ -2201,9 +2209,12 @@ def reserve_unlink(cp, user_id: str, identity_id: str) -> dict:
     >= 2 (the partial unique index is the two-tab backstop). Raises
     ClaimError (409) on floor violations / unknown identities; RuntimeError
     (fail-closed) on control-plane failure.
+
+    ⛔ ``rpc_value`` for the same transport reason as
+    :func:`user_identity_inventory` — the function RETURNS jsonb.
     """
     try:
-        return cp.rpc("reserve_unlink", {
+        return cp.rpc_value("reserve_unlink", {
             "p_user_id": user_id, "p_identity_id": identity_id})
     except RuntimeError as e:
         msg = str(e)

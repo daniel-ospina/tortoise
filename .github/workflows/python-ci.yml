@@ -2036,6 +2036,7 @@ jobs:
           set +e
           timeout -s INT -k 10 10m stdbuf -oL python -m pytest \
             tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor \
+            tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor \
             tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes \
             -v -rs --timeout=300 -p no:cacheprovider --maxfail=10 -rfE --durations=15 > /tmp/pytest.log 2>&1
           rc=$?
@@ -2061,7 +2062,7 @@ jobs:
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
-          if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' /tmp/pytest.log; then
+          if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_next_seq_ceiling_is_atomic_across_workers_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' /tmp/pytest.log; then
             echo "❌ live tests SKIPPED — the job would be green while testing nothing"
             rc=1
           fi

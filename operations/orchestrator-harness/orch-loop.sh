@@ -109,6 +109,60 @@ review_slots() { # <open_prs>
   if [ "${1:-0}" -gt "$MERGE_PRIORITY_AT" ]; then echo $((MAX_REVIEW + 2)); else echo "$MAX_REVIEW"; fi
 }
 
+# Count of open PRs. This one number drives THREE decisions — scope (BROAD drain vs OWN), the
+# reviewer budget (review_slots), and the merge-priority gate (mp_reason) — so a FAILED count must
+# never be readable as "the queue is empty". The pre-fix line was
+#   OPEN_N="$(gh pr list … 2>/dev/null)"; : "${OPEN_N:=0}"
+# which discarded rc AND stderr, then coerced the empty result to 0: on 2026-10-12 a single
+# `Post "https://api.github.com/graphql": net/http: TLS handshake timeout` logged
+# `[scope] open=25 -> BROAD` then `[scope] open=0 -> OWN` in one cycle while 22 PRs were open —
+# silently dropping the drain, the reviewer headroom and the merge-priority gate. A failure is now
+# a DISTINCT, LOGGED 'unknown': rc is captured on its own line, gh's stderr is kept, and the count
+# falls back to the sticky last-known value in state/last-open-n (11 on a first-ever failure ->
+# BROAD, because resuming a drain is idempotent while opening more lanes is not). It never
+# assigns 0.
+open_pr_count() { # -> echoes the open-PR count; never 0 on failure
+  local raw rc err sticky fc
+  # `if …; then` rather than `raw=$(…); rc=$?` so this stays correct if errexit is ever enabled —
+  # under `set -e` the bare assignment would exit the loop BEFORE rc was read, on a transient blip.
+  if raw="$(gh pr list --repo "$OR" --state open --limit 300 --json number --jq 'length' 2>"$O/state/.open-err.$$")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  err="$(tr '\n' ' ' < "$O/state/.open-err.$$" 2>/dev/null || true)"
+  rm -f "$O/state/.open-err.$$"
+  if [ "$rc" -ne 0 ] || ! is_num "$raw"; then
+    sticky="$(cat "$O/state/last-open-n" 2>/dev/null || true)"
+    # ⛔ A sticky 0 is NOT reused. A drained queue (last success = 0) is exactly when new PRs are
+    # most likely to have arrived before this failure, and returning 0 drives the UNSAFE direction:
+    # OWN scope, no reviewer headroom, no merge-priority gate. Reuse only a POSITIVE last-known;
+    # absent / 0 / non-numeric assumes a count ABOVE the fallback threshold, because resuming a
+    # drain is idempotent while opening more lanes is not. THIS is what "never 0 on failure" means.
+    # The fallback must exceed BOTH the merge-priority tunable AND the scope gate's threshold (a
+    # literal 10 below), so it is max(MERGE_PRIORITY_AT, 10) + 1 — keying it to the tunable alone
+    # left a below-default tunable landing in OWN, the unsafe direction, on a failed count.
+    # ⛔ Normalize to base 10 BEFORE the arithmetic: `[ … -ge … ]` parses base 10 but `$(( … ))`
+    # parses base 0, where a leading 0 is OCTAL — so a tunable of `010` passed the guard as "ten"
+    # and then evaluated as 8, returning 9 and landing in OWN again. Reject non-digits, then force
+    # base 10 with `10#`.
+    fc="${MERGE_PRIORITY_AT:-10}"
+    case "$fc" in ''|*[!0-9]*) fc=10 ;; esac
+    [ "$fc" -ge 10 ] || fc=10
+    fc=$(( 10#$fc + 1 ))
+    if is_num "$sticky" && [ "$sticky" -gt 0 ]; then
+      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> sticky last-known=$sticky" >> "$LOG"
+      echo "$sticky"
+    else
+      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming $fc (BROAD)" >> "$LOG"
+      echo "$fc"
+    fi
+    return 0
+  fi
+  printf '%s\n' "$raw" > "$O/state/last-open-n"
+  echo "$raw"
+}
+
 while true; do
   heartbeat
   reap_stale_workers
@@ -117,7 +171,8 @@ while true; do
 
   # ---- 1) merge sweep (this box's open PRs) -------------------------------
   # scope: when the repo has >10 open PRs, help drain EVERYONE's (broad); otherwise just this box's.
-  OPEN_N="$(gh pr list --repo "$OR" --state open --limit 300 --json number --jq 'length' 2>/dev/null)"; : "${OPEN_N:=0}"
+  # FAILED counts are 'unknown', never 0 — see open_pr_count() above.
+  OPEN_N="$(open_pr_count)"
   # Merge priority: a merge backlog means the box's scarce capacity belongs to review+merge, not to
   # opening more PRs. Give reviewers extra headroom above the backlog threshold (and section 2 stops
   # dispatching new lanes). Below it, run a mix. Tune with MERGE_PRIORITY_AT.
@@ -132,8 +187,20 @@ while true; do
     SEL='select(.headRefName|test("-tm$|-cap$|^fix/"))'
     echo "[scope] open=$OPEN_N -> OWN" >> "$LOG"
   fi
-  gh pr list --repo "$OR" --state open --limit 300 --json number,headRefName,isDraft \
-    --jq ".[]|select((.isDraft|not) or (.headRefName|test(\"-tm$|-cap$|^fix/\")))|$SEL|\"\(.number)\t\(.headRefName)\t\(.isDraft)\"" 2>/dev/null |
+  # Same rule for the sweep listing: as a pipeline into `while read` with 2>/dev/null, a FAILED
+  # listing yields ZERO iterations and prints NOTHING — the sweep silently does nothing for the
+  # whole cycle. Capture it, check rc, log the failure, and feed the loop from the captured text.
+  if SWEEP_LIST="$(gh pr list --repo "$OR" --state open --limit 300 --json number,headRefName,isDraft \
+    --jq ".[]|select((.isDraft|not) or (.headRefName|test(\"-tm$|-cap$|^fix/\")))|$SEL|\"\(.number)\t\(.headRefName)\t\(.isDraft)\"" 2>"$O/state/.sweep-err.$$")"; then
+    SWEEP_RC=0
+  else
+    SWEEP_RC=$?
+  fi
+  SWEEP_ERR="$(tr '\n' ' ' < "$O/state/.sweep-err.$$" 2>/dev/null || true)"; rm -f "$O/state/.sweep-err.$$"
+  if [ "$SWEEP_RC" -ne 0 ]; then
+    echo "[sweep] PR listing FAILED rc=$SWEEP_RC (${SWEEP_ERR:-no stderr}) — nothing swept this cycle" >> "$LOG"
+  fi
+  printf '%s\n' "${SWEEP_LIST:-}" |
   while IFS="$(printf '\t')" read -r PR BR DRAFT; do
     [ -z "${PR:-}" ] && continue
     # Skip anything that is not a plain integer PR / simple ref — never let API data reach a shell.

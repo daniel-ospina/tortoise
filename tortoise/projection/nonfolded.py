@@ -88,15 +88,32 @@ SHAPE_SUPERSEDE_TARGET_DELETED = "supersede-target-deleted"
 #: ``_apply_one`` already emits for a different mechanism (an unrecognized
 #: record type), so a report can tell the two apart.
 SHAPE_UNCLASSIFIED_TERMINALIZER = "unclassified-terminalizer"
+#: #5380: an ``EdgeMessageChanged op=set`` matched no edge. Exempt — a plain
+#: direct edge is legitimately absent after a replay (``DirectEdgeCreated`` is
+#: not folded by the replay engines, A10 #1048, so the EDGE is lost by a gap
+#: this record does not cause), and a hard-deleted edge is gone live too.
+#: Recorded (not merely warned) so the miss is reported by the run boundary
+#: (``assert_no_non_folded`` warns and names every exempt record) and by
+#: ``rebuild_all``'s post-replay dressed-edge report. NOT by
+#: ``check_consistency``: its journal side is ``_apply_one``-based and
+#: ``EdgeMessageChanged`` is in ``_NO_POINT_FOLD``, so that surface never
+#: calls the edge-message fold and cannot emit this shape.
+SHAPE_EDGE_MESSAGE_MISS = "edge-message-miss"
+#: #5380: an ``EdgeMessageChanged op=clear`` the fold could NOT replay — an
+#: unrecognised ``scope``, or a known scope whose ``point_ids`` are missing or
+#: unusable. The rebuilt graph therefore KEEPS the seeds the live
+#: ``invalidate_messages`` / ``invalidate_factor_messages`` REMOVEd.
+SHAPE_EDGE_MESSAGE_UNREPLAYED = "edge-message-unreplayed"
 
 #: Shapes that are genuinely exempt from the fail-the-run assertion. Each MUST
 #: carry its degraded guarantee in writing — an unnamed exemption is a green
 #: pass over an unfolded event, which is exactly what R8 exists to prevent.
 #: The shapes and their bounds below are ALSO recorded in the identity decision
 #: doc (`docs/epics/2026-09-10-2835-capability-registry/identity-decision.md`,
-#: §"Stage 0 findings — the named, bounded non-folded exemptions (#3585)") —
-#: the artifact R8 designates for them, so the ruling is findable where a later
-#: lane would otherwise read an exemption as drift.
+#: §"Stage 0 findings — the named, bounded non-folded exemptions (#3585)",
+#: including the post-Stage-0 `#5380` additions) — the artifact R8 designates
+#: for them, so the ruling is findable where a later lane would otherwise read
+#: an exemption as drift.
 #:
 #: ``delete-miss`` (recorded decision: `docs/plans/2026-09-22-unjournaled-mutation-class.md`
 #: §"Task 4" — Policy, and #4743's disposition): "already absent" IS the
@@ -144,6 +161,24 @@ EXEMPT_SHAPES: dict[str, str] = {
         "a re-creation anchor that suppressed the delete does not tag it — so a "
         "foreign-kind delete sharing the id still refuses, and the "
         "entity-parity leg still compares a re-created node's status"
+    ),
+    SHAPE_EDGE_MESSAGE_MISS: (
+        "a plain direct edge is legitimately absent after a replay — the "
+        "engines do not fold `DirectEdgeCreated` (A10 #1048), so the EDGE is "
+        "lost by a pre-existing gap this record does not cause, and a "
+        "hard-deleted edge is gone live too. DEGRADED GUARANTEE: the miss is "
+        "still REPORTED (the call site warns with src/tgt/rel; the record "
+        "names the edge), and `rebuild_all`'s post-replay dressed-edge "
+        "comparison reports the aggregate drop (#5380). Adding a fifth slot "
+        "here does not relax this: the edge-message fold owns no edge creation"
+    ),
+    SHAPE_EDGE_MESSAGE_UNREPLAYED: (
+        "a `clear` record whose scope/ids the fold cannot map to a live query "
+        "is NOT replayed. Refusing would make a recovery run un-runnable for a "
+        "journal a future producer could legitimately extend. DEGRADED "
+        "GUARANTEE: the record is still emitted (with the offending scope), "
+        "and the rebuilt graph may keep seeds the live graph dropped — "
+        "reconcile the producer before relying on the rebuilt edge state"
     ),
 }
 

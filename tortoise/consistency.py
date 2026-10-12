@@ -2218,6 +2218,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
     store would be strictly worse, so the signal is PROPAGATED for the caller
     to branch on rather than swallowed into a success-shaped result.
 
+    #5353 adds the `:TeamMeta` first-org marker on the SAME four-part shape —
+    `team_meta_gap`, `team_meta_state_unknown`, and their own additive `reason`
+    clauses — because the class is the entire `#2789` first-org guard: a marker
+    the rebuild did not carry back leaves that guard reading 0, so the next
+    provisioning call re-mints it with the control plane's name and a fresh
+    `created`. The two classes report SEPARATELY (neither aggregate absorbs the
+    other) for the same reason the three onboarding shapes do.
+
     ATOMICITY on refusal (#7929): the refusals this function can only reach
     AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
     verdict) are UNDONE before the `recovered: False` result is returned — the
@@ -2495,6 +2503,38 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "from an earlier interrupted rebuild — so this graph's "
                     "onboarding state is UNKNOWN (not confirmed absent) — "
                     "see #4641")
+        # #5353: the `:TeamMeta` first-org marker, reported separately for the
+        # same reason as the onboarding legs — its gap key is a max over three
+        # shapes (a confirmed loss, an unverified restore, a pre-preservation
+        # UNKNOWN), so a caller must read the shape it needs rather than infer
+        # it from the aggregate. A marker that did not come back leaves the
+        # `#2789` guard reading 0, which is the whole reason the class is
+        # carried.
+        team_meta_gap = int(counts.get("team_meta_gap") or 0)
+        if team_meta_gap:
+            result["team_meta_gap"] = team_meta_gap
+            if counts.get("team_meta_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the :TeamMeta post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's first-org marker "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #5353")
+            elif (counts.get("team_meta_expected")
+                  and not counts.get("team_meta_restored")):
+                result["reason"] += (
+                    "; WARNING: the pre-wipe :TeamMeta first-org marker was "
+                    "NOT restored, so the #2789 guard reads 0 and a later "
+                    "provisioning call can re-mint it with the control "
+                    "plane's name — see the rebuild ERROR log (#5353)")
+            if counts.get("team_meta_state_unknown"):
+                result["team_meta_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not carry "
+                    "a usable :TeamMeta record — it either predates marker "
+                    "preservation or inherits a state-UNKNOWN marker from an "
+                    "earlier interrupted rebuild — so whether this graph's "
+                    "first-org marker was destroyed CANNOT be determined — "
+                    "see #5353")
         return result
 
     if not files:
