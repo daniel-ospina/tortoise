@@ -2427,7 +2427,7 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
         types = _parse(types)
         if not isinstance(types, list):
             types = [types]
-    return _safe(_get_org_sdk().events_poll, after=after, types=types, limit=limit)
+    return _safe(_get_org_sdk().poll_events, after=after, types=types, limit=limit)
 
 
 
