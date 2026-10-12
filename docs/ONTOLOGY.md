@@ -149,6 +149,16 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.23 (2026-10-12 — issue #7852 W1 — the Layer-2 `semantics` reaches the write path):**
+> `create_operator` (SDK) and `tortoise_create_operator` (MCP) accept an additive, defaulted
+> `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
+> one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
+> used is recorded on the operator as `direction_basis` (`explicit` / `label` / `default`, with the
+> endpoint-kind step a separate scoped change). An out-of-vocabulary word warns and the write
+> proceeds — never refuses — and a retired word resolves to its canonical replacement. This is the
+> chain step that had no way to run, so the direction no longer always falls through to the
+> per-op_type default. The four-value **storage** vocabulary is unchanged (see *Transition state*).
+>
 > **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
 > §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
 > recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
@@ -170,7 +180,10 @@ doc_status: live
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
 > EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
-> accepted names** — the model tables state the target.
+> accepted names** — the model tables state the target. **The write path now reads the semantics**:
+> `create_operator` / `tortoise_create_operator` accept `semantics` and resolve the recorded direction
+> from it (recording the basis in `direction_basis`), mapping the model's direction onto the two values
+> the runtime stores (#7852 W1). The four-value **storage** migration remains open.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -1535,9 +1548,12 @@ and carry confidence as an edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
-  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
-  default (#7813). See the *Transition state* note.)*
+  recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
+  accept `semantics` and resolve the direction from it, recording the basis on the operator as
+  `direction_basis` — `explicit` / `label` / `default` (#7852 W1). The remaining gap is the
+  four-value **storage** vocabulary: the runtime still records only `bidirectional` /
+  `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
