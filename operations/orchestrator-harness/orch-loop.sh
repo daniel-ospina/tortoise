@@ -77,9 +77,13 @@ reap_stale_workers() {
     [ -f "$f" ] || continue
     age=$(( $(date +%s) - $(stat -f '%m' "$f" 2>/dev/null || echo "$(date +%s)") ))
     [ "$age" -gt $((STALE_MIN * 60)) ] || continue
-    pid="$(tmux list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null | head -1)"
+    pid="$(tmux list-panes -t "=$s" -F '#{pane_pid}' 2>/dev/null | head -1)"
     echo "[reap-worker] $s silent ${age}s -> killing session (pane_pid=${pid:-?})" >> "$LOG"
-    tmux kill-session -t "$s" 2>/dev/null
+    # `=name` forces an EXACT session match. Without it tmux prefix-matches, so if this session
+    # exited between the `tmux ls` snapshot above and here, `-t merge-82` would resolve to the
+    # healthy `merge-821` and kill an in-flight worker (verified: `-t zzproof-10` killed
+    # `zzproof-101`, while `-t =zzproof-10` errors instead).
+    tmux kill-session -t "=$s" 2>/dev/null
     # tmux HUPs the pane's process group; a child that ignored it (e.g. a stuck find) is killed here.
     if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null; fi
   done

@@ -395,6 +395,12 @@ if need "$TMP/reapw.sh" "reap_stale_workers() is extracted from the shipped loop
   ck "shipped reaper kills a session whose log has gone stale" $rc
   grep -q 'reap-worker' "$LOG" && rc=0 || rc=1
   ck "the reaper logs what it killed" $rc
+  # Exact-match targets: a prefix match would let the reaper kill a DIFFERENT, healthy session
+  # if the stale one exited between the snapshot and the kill.
+  grep -q 'kill-session -t "=\$s"' "$LOOP" && rc=0 || rc=1
+  ck "the reaper uses exact session targets (=name), not prefix matches" $rc
+  grep -q 'list-panes -t "=\$s"' "$LOOP" && rc=0 || rc=1
+  ck "the reaper resolves the pane pid with an exact target" $rc
   unset -f tmux kill
 fi
 # the agent invocation is wall-clock bounded, portably (macOS has no timeout/gtimeout)
