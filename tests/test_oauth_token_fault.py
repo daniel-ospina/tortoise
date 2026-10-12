@@ -811,6 +811,107 @@ def test_prev_access_revoke_failure_aborts_the_rotation_and_the_retry_succeeds(
     assert len(_live(cp, "oauth_access_tokens")) == 1     # only the new pair is live
 
 
+def test_the_retryability_probe_fails_closed_when_it_cannot_read(fault_client):
+    """The probe that decides retryable-503 vs terminal-400 is FAIL-CLOSED.
+
+    `_prev_refresh_unclaimed` is the only thing standing between a failed rotation
+    and the untruthful retry signal #2863 removed: an unrevoked row means the whole
+    transaction rolled back (a retry is safe); a row it cannot READ is NOT evidence
+    of that, so it must NOT be advertised as retryable. Pinning this arm matters
+    because the deleted `test_prev_refresh_observation_failure_is_recovered_false`
+    covered the same rule for #2863's observation and nothing replaced it: flipping
+    the `except` to a fail-open `return True` leaves every OAuth test green
+    (measured by mutation during test review).
+    """
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "rt-probe-blind")
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=False)
+    # The mint fails BEFORE dispatch (nothing ran), and then the PROBE read fails
+    # too — so the retryability of a state nobody could observe must be refused.
+    # Matched by shape, not by a hand-written select literal.
+    cp.fail_query(table="oauth_refresh_tokens", method="GET",
+                  match=lambda t, m, sel, f: m == "GET" and sel == ["revoked_at"],
+                  times=1)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+
+
+def test_a_concurrent_rotator_loser_answers_a_terminal_400_at_the_endpoint(
+        monkeypatch, fault_client):
+    """A rotation whose CAS matched zero rows must reach the boundary as a TERMINAL
+    400 — not a 500 and not a 503.
+
+    The wrapper-level race is pinned by `test_rotation_race_single_winner`, which
+    calls `_rotate_refresh_rpc` DIRECTLY — so a regression that let `None` fall
+    through `refresh_grant`'s `if out is None:` would change the user-visible answer
+    (500 → the connector retries a dead grant; 503 → it stampedes) with no test
+    noticing. This arm drives it through /oauth/token.
+    """
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "rt-loser-endpoint")
+    monkeypatch.setattr(oauth, "_rotate_refresh_rpc", lambda _cp, *, prev: None)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    # The loser's transaction wrote NOTHING: the presented row is untouched and
+    # there is no second family.
+    assert len(cp.tables["oauth_refresh_tokens"]) == 1
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+
+
+def test_a_lost_claim_race_is_retried_exactly_once(monkeypatch, fault_client):
+    """`not_claimable` while the row is STILL `unclaimed` means the claim was lost
+    to a request that has not settled — the grant is retried ONCE against the fresh
+    row rather than answered terminally.
+
+    Both halves are pinned: the retry HAPPENS (otherwise a benign race becomes a
+    spurious invalid_grant), and it happens EXACTLY once (an unbounded retry loop
+    here is a mint loop against a degraded control plane). Untested before this
+    arm — the test-review pass confirmed no test entered the `continue`.
+    """
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "lost-claim")
+    real = oauth._redeem_code_rpc
+    calls = []
+
+    def _once(inner, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return {"_status": "not_claimable", "_redemption_id": "stolen"}
+        return real(inner, **kw)
+
+    monkeypatch.setattr(oauth, "_redeem_code_rpc", _once)
+    r = _post_code(tc, cp, "lost-claim", verifier)
+    assert r.status_code == 200 and "access_token" in r.json(), r.text
+    assert len(calls) == 2, calls
+
+
+def test_a_failed_refusal_burn_is_log_only_and_still_answers_the_oauth_error(
+        monkeypatch, fault_client):
+    """A control-plane failure while RECORDING a refusal must not turn a coherent
+    OAuth error into a 500 — and, per the `_log_and_capture` owner table, is
+    log-only: it must NOT page Sentry and must not consume the request's one
+    capture budget.
+
+    The code simply stays `unclaimed`, so a corrected retry still succeeds — which
+    the second request asserts.
+    """
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception",
+                        lambda exc, **kw: calls.append(kw))
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "burn-fails")
+    cp.fail_rpc("redeem_oauth_code", after_commit=False)
+    r = _post_code(tc, cp, "burn-fails", "v" * 60)      # wrong PKCE → refusal
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    assert calls == [], calls
+    row = cp.tables["oauth_codes"][0]
+    assert row["used_at"] is None and row["redemption_state"] == "unclaimed", row
+    # The burn never landed, so the CORRECT verifier still redeems.
+    r2 = _post_code(tc, cp, "burn-fails", verifier)
+    assert r2.status_code == 200 and "access_token" in r2.json(), r2.text
+
+
 def test_the_refresh_mint_failure_path_captures_exactly_once(monkeypatch, fault_client):
     """The I4 invariant at the capture site #3025 INTRODUCES.
 

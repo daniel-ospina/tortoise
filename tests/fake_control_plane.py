@@ -520,6 +520,14 @@ class FakeControlPlane:
             filters=[("id", "eq", p["p_code_id"]),
                      ("code_hash", "eq", p["p_code_hash"]),
                      ("client_id", "eq", p["p_client_id"]),
+                     # The identity predicates are part of the REAL CAS too
+                     # (migration: `AND user_id = p_user_id AND org_id = p_org_id`).
+                     # Omitting them here was inert while the caller always passes
+                     # identity read from the same row — but a double that accepts
+                     # what production refuses is the false-green class the
+                     # `Prefer` transport model exists to close.
+                     ("user_id", "eq", p["p_user_id"]),
+                     ("org_id", "eq", p["p_org_id"]),
                      ("used_at", "is", None),
                      ("redemption_state", "eq", "unclaimed"),
                      ("expires_at", "gt", p["p_now"])],

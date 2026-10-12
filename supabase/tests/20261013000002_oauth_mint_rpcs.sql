@@ -204,42 +204,64 @@ BEGIN
 END $$;
 
 -- ============================================================================
--- SECTION 4a-2 — the identity CAS: a mismatched user_id/org_id claims NOTHING
+-- SECTION 4a-2 — THE CAS PREDICATE, arm by arm: every conjunct must REFUSE on its
+-- own, writing nothing
 -- ============================================================================
--- The identity is inserted from the caller's params, so binding it in the CAS as
--- well is what makes "the minted pair is bound to the code's own org" true by
--- construction rather than by trusting the caller to have read the same row.
--- (`rotate_oauth_refresh` derives identity from the claimed row instead; this is
--- the same invariant, stated as a predicate.)
+-- The single-use CAS is `id AND code_hash AND client_id AND user_id AND org_id
+-- AND used_at IS NULL AND redemption_state='unclaimed' AND expires_at > p_now`.
+-- A suite that exercises only ONE arm leaves the rest unpinned: measured by
+-- mutation during test review, `org_id` reddened the harness but dropping
+-- `user_id`/`client_id`/`expires_at` did not — and because the Python double
+-- re-implements these predicates independently, no Python test compensates.
+--
+-- Each arm is therefore driven separately, and each asserts the SAME three
+-- things: `not_claimable`, the code still `unclaimed` with `used_at IS NULL`,
+-- and no token row.
 DO $$
 DECLARE
   v_code_id bigint;
   v_res     jsonb;
+  v_arm     text;
+  v_expires timestamptz;
 BEGIN
-  INSERT INTO public.oauth_codes
-      (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
-       code_challenge_method, scope, expires_at)
-  VALUES ('3025-code-ident', '3025-client', '3025-user', '3025-org',
-          'https://app.example/cb', '3025-challenge', 'S256', 'mcp',
-          now() + interval '10 minutes');
-  SELECT id INTO v_code_id FROM public.oauth_codes WHERE code_hash = '3025-code-ident';
+  FOR v_arm IN SELECT unnest(ARRAY[
+        'code_hash', 'client_id', 'user_id', 'org_id', 'expired']) LOOP
+    INSERT INTO public.oauth_codes
+        (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+         code_challenge_method, scope, expires_at)
+    VALUES ('3025-cas-' || v_arm, '3025-client', '3025-user', '3025-org',
+            'https://app.example/cb', '3025-challenge', 'S256', 'mcp',
+            CASE WHEN v_arm = 'expired' THEN now() - interval '1 minute'
+                 ELSE now() + interval '10 minutes' END);
+    SELECT id INTO v_code_id
+      FROM public.oauth_codes WHERE code_hash = '3025-cas-' || v_arm;
 
-  v_res := public.redeem_oauth_code(
-      v_code_id, '3025-code-ident', '3025-client', '3025-user', '3025-OTHER-org', 'mcp',
-      '3025-redemption-ident', '3025-r-ident', '3025-rh-ident', '3025-a-ident',
-      '3025-ah-ident', now(), now() + interval '30 days',
-      now() + interval '1 hour');
+    -- Exactly ONE parameter is wrong per arm; everything else matches the row.
+    v_res := public.redeem_oauth_code(
+        v_code_id,
+        CASE WHEN v_arm = 'code_hash'  THEN '3025-wrong' ELSE '3025-cas-' || v_arm END,
+        CASE WHEN v_arm = 'client_id'  THEN '3025-other' ELSE '3025-client' END,
+        CASE WHEN v_arm = 'user_id'    THEN '3025-other' ELSE '3025-user'   END,
+        CASE WHEN v_arm = 'org_id'     THEN '3025-other' ELSE '3025-org'    END,
+        'mcp', '3025-redemption-' || v_arm, '3025-r-' || v_arm,
+        '3025-rh-' || v_arm, '3025-a-' || v_arm, '3025-ah-' || v_arm,
+        now(), now() + interval '30 days', now() + interval '1 hour');
 
-  PERFORM tests.assert(v_res->>'status' = 'not_claimable',
-      'a mismatched org must fail the identity CAS, got ' || v_res::text);
-  PERFORM tests.assert(
-    (SELECT used_at IS NULL AND redemption_state = 'unclaimed'
-       FROM public.oauth_codes WHERE id = v_code_id),
-    'a failed identity CAS must leave the code UNCLAIMED');
-  PERFORM tests.assert(
-    (SELECT count(*) FROM public.oauth_refresh_tokens
-      WHERE id IN ('3025-r-ident')) = 0,
-    'a failed identity CAS must insert NO refresh row');
+    PERFORM tests.assert(v_res->>'status' = 'not_claimable',
+        'CAS arm ' || v_arm || ' must refuse with not_claimable, got ' || v_res::text);
+    PERFORM tests.assert(
+      (SELECT used_at IS NULL AND redemption_state = 'unclaimed'
+         FROM public.oauth_codes WHERE id = v_code_id),
+      'CAS arm ' || v_arm || ' must leave the code UNCLAIMED');
+    PERFORM tests.assert(
+      (SELECT count(*) FROM public.oauth_refresh_tokens
+        WHERE id = '3025-r-' || v_arm) = 0,
+      'CAS arm ' || v_arm || ' must insert NO refresh row');
+    PERFORM tests.assert(
+      (SELECT count(*) FROM public.oauth_access_tokens
+        WHERE id = '3025-a-' || v_arm) = 0,
+      'CAS arm ' || v_arm || ' must insert NO access row');
+  END LOOP;
 END $$;
 
 -- ============================================================================
