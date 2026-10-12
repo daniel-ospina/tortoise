@@ -349,21 +349,26 @@ def test_the_printed_resolution_carries_the_config_path_it_was_given() -> None:
     takes the path; the THREADING at the call sites is the actual fix, and
     nothing pinned it — the recover test's config-path assertion is satisfied
     by the unrelated "Config saved to …" line printed beneath the resolution.
+
+    Every harness arm is exercised: `_print_mcp_configs` resolves the path in
+    FOUR places (codex, claude ×2, cursor/pi), and codex/cursor/pi are the ONLY
+    instruction printed when `init` is run without `--write-mcp-config`.
     """
     import tortoise.__main__ as main
 
     cfg = "/tmp/tt-5109-config-under-test/.tortoise"
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        main._print_mcp_configs(
-            "tt_" + "12" * 16, "https://api.premiselabs.co", "claude", cfg
+    for harness in ("claude", "codex", "cursor", "pi"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main._print_mcp_configs(
+                "tt_" + "12" * 16, "https://api.premiselabs.co", harness, cfg
+            )
+        printed = [ln for ln in out.getvalue().splitlines() if "python3 -c" in ln]
+        assert printed, f"{harness}: no resolution instruction printed"
+        assert all(cfg in ln for ln in printed), (
+            f"{harness}: the resolution must name the config path it was given — "
+            f"a hard-coded default resolves the wrong file: {printed}"
         )
-    printed = [ln for ln in out.getvalue().splitlines() if "python3 -c" in ln]
-    assert printed, "claude: no resolution instruction printed"
-    assert all(cfg in ln for ln in printed), (
-        "the resolution must name the config path it was given — a hard-coded "
-        f"default resolves the wrong file: {printed}"
-    )
 
     # `_write_mcp_config_file` threads it the same way; the codex arm is the
     # one that prints a resolution without touching the filesystem.
@@ -501,6 +506,11 @@ def test_init_prints_no_literal_key_on_any_arm(monkeypatch, tmp_path, capsys) ->
 
     arms = [
         ["init", "--api-key", sentinel, "--harness", "claude"],
+        # codex / cursor / pi WITHOUT --write-mcp-config — the arms that reach
+        # `_print_mcp_configs` rather than `_write_mcp_config_file`.
+        ["init", "--api-key", sentinel, "--harness", "codex"],
+        ["init", "--api-key", sentinel, "--harness", "cursor"],
+        ["init", "--api-key", sentinel, "--harness", "pi"],
         ["init", "--api-key", sentinel, "--harness", "codex", "--write-mcp-config", "--force"],
         ["init", "--api-key", sentinel, "--json", "--harness", "claude"],
         ["init", "--api-key", sentinel, "--json", "--harness", "codex", "--write-mcp-config", "--force"],
