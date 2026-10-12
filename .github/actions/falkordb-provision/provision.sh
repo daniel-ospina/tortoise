@@ -21,24 +21,56 @@ IMAGE="${FALKORDB_IMAGE:?}"
 LEGACY="${FALKORDB_LEGACY:-true}"
 URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
 # Health-gate bound (seconds) for the PING loop — NOT a bound on the image
-# pull, which happens inside `docker run` before the loop starts (a cold pull
-# is bounded only by the step/job `timeout-minutes`).
+# pull. The pull is resolved explicitly below, before any container starts, so
+# its only bound is the step/job `timeout-minutes`.
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
-# The two log helpers are used from the first validation below, so they are
-# defined before it.
-# Logging goes to STDERR: stdout is reserved for GitHub workflow commands (the
-# `::error::` annotation must be the first thing on its line — a `#6673 `
-# prefix would make it plain text). The port does not travel on this stream at
-# all; it goes through $PORT_FILE.
+# #7867: Docker Hub rate-limits ANONYMOUS pulls per egress IP (100 / 3600 s —
+# measured against the live token endpoint; the issue body's "6 h" is wrong),
+# and the fleet's self-hosted runners share that egress. One burst exhausted the
+# quota, after which EVERY container job in python-ci died at `docker run` —
+# before pytest ran, so the run carried no `FAILED <nodeid>` line and the merge
+# rail correctly refused it with no attributable failure identity.
+#
+# Fix direction B — the one that needs NOTHING from the owner: a first-party
+# GHCR copy, which authenticates with `GITHUB_TOKEN`, so there is no anonymous
+# Docker Hub quota to exhaust and no credential to provision (direction A would
+# need a DOCKERHUB_USERNAME/TOKEN secret). .github/workflows/mirror-images.yml
+# populates it.
+#
+# Candidate order, most-preferred first. Every tier is a PREFERENCE rather than
+# a replacement, so no single registry can darken this surface again. The
+# ordering is deliberate and was corrected once: a tier that CANNOT SERVE YET
+# must never lead, because then it fails the pull for a new reason and the matrix
+# stays dark — the fix cannot validate itself while it prefers an empty mirror.
+# GHCR is the durable sanctioned home, but on the very PR that adds the mirror it
+# is empty (a workflow_dispatch workflow is dispatchable only from the default
+# branch), so the pull-through cache leads until the mirror is populated.
+#   1. mirror.gcr.io  — Google's Docker Hub pull-through cache; NOT subject to
+#                       the anonymous Docker Hub quota, so it serves today.
+#   2. GHCR           — first-party, the durable home; authenticated when the
+#                       action's best-effort login succeeds, so an unpopulated,
+#                       private or unreachable mirror costs one failed attempt,
+#                       never a job.
+#   3. as given       — the Docker Hub upstream (today's behaviour).
 log() { printf '#6673 %s\n' "$*" >&2; }
 annotate_error() { printf '::error::%s\n' "$*"; }
 
-# Fail closed on a graph name that is not a plain identifier, BEFORE anything
-# is created: it is written verbatim into $GITHUB_ENV, which is
-# line-delimited, so a newline in the value would append ARBITRARY env vars
-# for every later step of the job. All five callers pass a literal today —
-# but this action is reusable, and this is not a property to depend on.
+GHCR_OWNER="${FALKORDB_GHCR_OWNER:-${GITHUB_REPOSITORY_OWNER:-daniel-ospina}}"
+# GHCR requires a lowercase path; the mirror workflow and the python-ci leg both
+# derive the owner dynamically, so this end must too — a hardcoded owner would
+# silently stop matching after a transfer, rename or fork (masked, because
+# mirror.gcr.io leads).
+GHCR_OWNER="$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')"
+MIRROR_HOST="${FALKORDB_MIRROR_HOST:-mirror.gcr.io}"
+
+# Fail closed on a graph name that is not a plain identifier, BEFORE anything is
+# created OR pulled: it is written verbatim into $GITHUB_ENV, which is
+# line-delimited, so a newline in the value would append ARBITRARY env vars for
+# every later step of the job. All five callers pass a literal today — but this
+# action is reusable, and this is not a property to depend on. It must also
+# precede the image resolver: refusing an invalid input must not first spend a
+# pull (Docker Hub quota) or leave docker side effects for the refusal path.
 if [ -n "$URI_GRAPH" ]; then
   case "$URI_GRAPH" in
     *[!A-Za-z0-9_-]*)
@@ -47,6 +79,65 @@ if [ -n "$URI_GRAPH" ]; then
       ;;
   esac
 fi
+
+# A reference's first path component is a REGISTRY HOST only when it contains a
+# '.' or a ':' (or is literally `localhost`) — Docker's own rule. So
+# `falkordb/falkordb-server:v4.20.6` is Docker Hub, while `mirror.gcr.io/...`
+# and `localhost:5000/...` are not. An already-qualified reference is used AS
+# GIVEN: this action must not silently rewrite a caller's explicit registry.
+image_candidates() {
+  # The slash test is load-bearing: without it a SLASHLESS Docker Hub reference
+  # such as `redis:7` has no `/`, so `${1%%/*}` is the whole string, it matches
+  # `*:*`, and the reference is misread as an already-qualified registry — the
+  # mirror tiers are then never attempted. A first component is a host only when
+  # a `/` separates it from the rest.
+  case "$1" in
+    */*) case "${1%%/*}" in
+           *.*|*:*|localhost) printf '%s' "$1"; return 0 ;;
+         esac ;;
+  esac
+  printf '%s\n%s\n%s' \
+    "$MIRROR_HOST/$1" \
+    "ghcr.io/$GHCR_OWNER/${1##*/}" \
+    "$1"
+}
+
+# Best-first image references, one per word (a reference never contains a space).
+# shellcheck disable=SC2206  # deliberate word-splitting of a reference list
+IMAGE_CANDIDATES=($(image_candidates "$IMAGE"))
+
+# Resolve ONCE, before any container starts. A warm self-hosted runner usually
+# already HAS the image, so the local check runs first across every candidate: a
+# rate-limited registry must not fail a job that needs no pull at all (that is
+# the whole defect).
+RUN_IMAGE=""
+for candidate in "${IMAGE_CANDIDATES[@]}"; do
+  if docker image inspect "$candidate" >/dev/null 2>&1; then
+    RUN_IMAGE="$candidate"
+    log "image $candidate already present locally (requested $IMAGE)"
+    break
+  fi
+done
+if [ -z "$RUN_IMAGE" ]; then
+  for candidate in "${IMAGE_CANDIDATES[@]}"; do
+    if docker pull "$candidate" >/dev/null 2>&1; then
+      RUN_IMAGE="$candidate"
+      log "pulled $candidate (requested $IMAGE)"
+      break
+    fi
+    log "pull failed for $candidate — trying the next source"
+  done
+fi
+if [ -z "$RUN_IMAGE" ]; then
+  annotate_error "could not obtain '$IMAGE' from any of: ${IMAGE_CANDIDATES[*]} — no container can start, so no test in this job can run (#7867)"
+  exit 1
+fi
+
+# log/annotate_error are defined ABOVE, before their first use: this block
+# reports through them, and defining them below it aborted the whole action
+# under `set -e` (127: command not found) on every path — no container started,
+# no port was exported, and the matrix went dark for a reason that had nothing to
+# do with any registry.
 
 # Ownership label: one value per JOB INSTANCE. The teardown step selects on
 # it, so this job can remove exactly its own containers.
@@ -120,7 +211,7 @@ start() {
   if ! docker run -d --rm --name "$name" --label "$LABEL" \
       -e REDIS_ARGS="$redis_args" \
       -p 127.0.0.1:0:6379 \
-      "$IMAGE" >/dev/null; then
+      "$RUN_IMAGE" >/dev/null; then
     # Annotated explicitly: `set -e` would otherwise abort with docker's stderr
     # as the only trace, and the contract is that every failure of this step is
     # a visible annotation.
@@ -146,8 +237,8 @@ start() {
 
   # Health gate — the `services:` health-cmd equivalent (5s x 10 retries),
   # widened to 60s for slow starts on a loaded runner. It does NOT cover the
-  # image pull, which happens inside `docker run` above (the pull is bounded by
-  # the step/job timeout-minutes only).
+  # image pull, which provision.sh resolves explicitly BEFORE this loop (the
+  # pull is bounded by the step/job timeout-minutes only).
   for i in $(seq 1 "$HEALTH_TIMEOUT"); do
     # shellcheck disable=SC2086  # $auth is a deliberate 0-or-2 word "cli args"
     if docker exec "$name" redis-cli $auth ping 2>/dev/null | grep -q PONG; then
@@ -162,7 +253,7 @@ start() {
   return 1
 }
 
-log "starting passworded service from $IMAGE (label $LABEL)"
+log "starting passworded service from $RUN_IMAGE (label $LABEL)"
 start "$NAME_PW" "--requirepass falkordb --save ''" "-a falkordb"
 PW_PORT="$(cat "$PORT_FILE")"
 echo "TORTOISE_TEST_DOCKER_PORT=$PW_PORT" >> "$GITHUB_ENV"
@@ -184,4 +275,4 @@ fi
 # dial a closed port and the availability-skip guards would red.
 trap - EXIT
 rm -f "$PORT_FILE"
-log "provisioned $IMAGE (label $LABEL) — containers stay up for this job"
+log "provisioned $RUN_IMAGE (label $LABEL) — containers stay up for this job"

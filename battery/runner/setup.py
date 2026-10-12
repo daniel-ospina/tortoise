@@ -53,6 +53,10 @@ from typing import Any, Callable, Iterable, Sequence  # noqa: F401, UP035
 from battery.config.corpus import Scenario
 from battery.exceptions import ConfigError
 from tortoise.live import epistemic_disjunction
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 #: seed-manifest marker kind (seeder-owned; excluded from the A4 retrieve
 #: surface — never a retrievable memory).
@@ -417,7 +421,12 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
             f"is_operator: false, status: 'live', createdAt: r.now, "  # noqa: F541
             f"updatedAt: r.now, content_hash: r.content_hash}}, "  # noqa: F541
             f"n += r.props "  # noqa: F541
-            f"SET n.embedding = vecf32(r.embedding)",  # noqa: F541
+            # #4520: the shared clear-then-set seam — a re-seed of the same
+            # namespace is a MERGE overwrite, which the embedded engine discards
+            # without it. `preserve_on_null=False` keeps the pre-seam
+            # `vecf32(None)` -> NULL (wipe) semantics.
+            + clear_then_set_prefix("n", "r.embedding")
+            + "SET " + set_embedding_clause("n", "r.embedding", preserve_on_null=False),
             params={"rows": point_rows},
         )
         # Query 2 — operators (MERGE nodes; guarded edge MERGE; promote

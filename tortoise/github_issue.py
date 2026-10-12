@@ -15,6 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from tortoise.security import redact_for_publication
+
 logger = logging.getLogger(__name__)
 
 _API = "https://api.github.com"
@@ -158,13 +160,21 @@ def search_open_incident(repo: str, token: str, kind: str,
     match, which is how a bug report about R2_DOWN became closable as the
     R2_DOWN incident.
     """
-    title = f"[DR] {kind}" + (f" — {org_id}" if org_id else "")
+    # #3293 review: ``AlertStore._title`` scrubs the subject before filing (it
+    # is app-controlled and the title is public), so the adoption search MUST
+    # compare against the SAME transform. Building the query from the RAW
+    # subject leaves the store unable to find the issue it just filed on the
+    # R2-unreachable / placeholder path — a duplicate issue for an incident
+    # that already has one open (#2844/#3030 class). Scrub once; use it for
+    # both the query string and the title-shape verifier.
+    subject = redact_for_publication(org_id) if org_id else org_id
+    title = f"[DR] {kind}" + (f" — {subject}" if subject else "")
     query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "{title}"'
     url = f"{_API}/search/issues?q={urllib.parse.quote(query)}"
     data = _request("GET", url, token)
     items = data.get("items", [])
     return [int(i["number"]) for i in items
-            if incident_title_matches(str(i.get("title", "")), kind, org_id)]
+            if incident_title_matches(str(i.get("title", "")), kind, subject)]
 
 
 def issue_is_open(repo: str, token: str, number: int) -> bool:

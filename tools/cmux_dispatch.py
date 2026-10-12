@@ -513,6 +513,89 @@ DEFAULT_INBOX = "~/.pi/agent/state/orchestrator-inbox.log"
 INBOX_FALLBACK_LABEL = "cmux-dispatch"
 
 
+# --- the ORCHESTRATOR's own workspace is never a dispatch target (#8177) ---- #
+#: The orchestrator runs in its OWN cmux workspace, not in a lane. A dispatch
+#: addressed to it lands in the orchestrator's own pane and is seen by no lane:
+#: measured 2026-10-11, a work order sent here had to be forwarded by hand.
+#:
+#: Documentation already existed and was IGNORED, which is the real lesson:
+#: `state/LANE-MAP-TRUTH.md` warns about this workspace, and
+#: `state/lane-registry.tsv` records it as a COMMENT — so the standard
+#: `grep -v '^#'` read every lane uses to enumerate dispatchable targets STRIPS
+#: exactly the line that says "never dispatch here". A warning the reading path
+#: discards is not a guard, so the refusal is enforced in code, here.
+#:
+#: ONE named constant, never an inline UUID at each site: a second copy is a
+#: second chance for the two to disagree.
+ORCHESTRATOR_WORKSPACE_ID = "C2C97E96-0CBC-4DFE-BC91-FEF44F09B5BD"
+
+#: The workspace NAMES the orchestrator has carried, folded for a case-insensitive
+#: match. A cmux workspace NAME is not a session: `--workspace "Packs + Extractor"`
+#: is the exact string a human reads off `cmux list-workspaces` and pastes in, so
+#: it is refused too. `Packs + Extractor` is the historical title; the second is
+#: the live custom_title after the 2026-10-11 rename. The ID above is the durable
+#: guard; the names are a best-effort net around the string form.
+ORCHESTRATOR_WORKSPACE_NAMES = frozenset(
+    {
+        "packs + extractor",
+        "orchestrator (never dispatch here)",
+    }
+)
+
+
+def orchestrator_refusal(workspace: str | None) -> str | None:
+    """The refusal message if `workspace` NAMES the orchestrator's own workspace.
+
+    Pure and side-effect free BY DESIGN: the caller runs this BEFORE any cmux
+    call, so a refused invocation writes nothing and sends nothing (fail-closed).
+    Case-insensitive on the id AND on the workspace NAME — cmux accepts either
+    form and a NAME is not a session.
+
+    This cannot see the `workspace:NN` REF form (the ref is positional; only cmux
+    can say which workspace it currently addresses). That form is closed by
+    `orchestrator_entry_refusal` at resolution time — before any write, on the
+    read every path already performs.
+    """
+    candidate = (workspace or "").strip()
+    if not candidate:
+        return None
+    folded = candidate.casefold()
+    if folded == ORCHESTRATOR_WORKSPACE_ID.casefold() or (
+        folded in ORCHESTRATOR_WORKSPACE_NAMES
+    ):
+        return _orchestrator_refusal_message(candidate)
+    return None
+
+
+def orchestrator_entry_refusal(entry: dict | None) -> str | None:
+    """The refusal message if a RESOLVED workspace entry is the orchestrator.
+
+    Closes the `workspace:NN` REF form (and a bare ref suffix) that the static
+    `orchestrator_refusal` cannot: it is evaluated AFTER the read-only
+    `cmux list-workspaces` that every path already performs, but BEFORE any write
+    or send — so a refused invocation still writes nothing and sends nothing.
+    """
+    if not entry:
+        return None
+    ident = str(entry.get("id") or "").strip()
+    if ident and ident.casefold() == ORCHESTRATOR_WORKSPACE_ID.casefold():
+        return _orchestrator_refusal_message(ident)
+    for key in ("custom_title", "title"):
+        title = str(entry.get(key) or "").strip()
+        if title and title.casefold() in ORCHESTRATOR_WORKSPACE_NAMES:
+            return _orchestrator_refusal_message(title)
+    return None
+
+
+def _orchestrator_refusal_message(target: str) -> str:
+    return (
+        f"refusing: {target} is the ORCHESTRATOR's own workspace "
+        f"(named 'Packs + Extractor') \u2014 a workspace NAME is not a session. "
+        f"Resolve the target from `cmux workspace list --json` / "
+        f"`state/LANE-MAP-TRUTH.md`, never from a name."
+    )
+
+
 def orchestrator_inbox_path() -> Path:
     """The inbox the durable fallback appends to (env-overridable for tests)."""
     return Path(os.environ.get(INBOX_ENV) or DEFAULT_INBOX).expanduser()
@@ -1368,6 +1451,19 @@ class CmuxTransportError(RuntimeError):
     """
 
 
+class OrchestratorTargetRefused(RuntimeError):
+    """A RESOLVED dispatch target is the ORCHESTRATOR's own workspace (#8177).
+
+    Raised from `Dispatcher.workspace_state` so it fires on EVERY path that
+    resolves a workspace — `send`, `wait-ready`, `verify`, `state` — for the
+    `workspace:NN` ref form that the static `orchestrator_refusal` in `main()`
+    cannot see before the workspace list is read. It is always raised BEFORE any
+    write or send, and it is deliberately NOT a `CmuxTransportError`: a transport
+    failure is retried and durably recorded, while a refusal must fail fast and
+    must never be mistaken for "cmux was unreachable".
+    """
+
+
 @dataclass
 class CmuxResult:
     rc: int
@@ -1928,7 +2024,16 @@ class Dispatcher:
                 result.err.strip()
                 or f"cmux list-workspaces --json rc={result.rc}"
             )
-        return workspace_entry(result.out, workspace)
+        entry = workspace_entry(result.out, workspace)
+        # #8177: the RESOLVED entry can be the orchestrator even when the raw
+        # argument passed `orchestrator_refusal` (e.g. `--workspace workspace:1`,
+        # the orchestrator's positional ref). Refuse it here, on the read every
+        # path already performs and BEFORE any write or send. See
+        # `OrchestratorTargetRefused` for why this is not a transport error.
+        refusal = orchestrator_entry_refusal(entry)
+        if refusal:
+            raise OrchestratorTargetRefused(refusal)
+        return entry
 
     def screen(
         self,
@@ -2728,7 +2833,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    # #8177 — FAIL CLOSED BEFORE ANY CMUX CALL, on EVERY subcommand. This is the
+    # single choke point: `send`, `wait-ready`, `verify` and `state` all carry a
+    # required `--workspace`, and all of them run through here before
+    # `args.func(args)` constructs a `Cmux` or touches a pane. A refusal therefore
+    # writes nothing and sends nothing. The static check below catches the id and
+    # the workspace NAME; the `workspace:NN` ref form is caught at resolution
+    # (`Dispatcher.workspace_state` -> `OrchestratorTargetRefused`), still before
+    # any write.
+    refusal = orchestrator_refusal(getattr(args, "workspace", None))
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
+    try:
+        return args.func(args)
+    except OrchestratorTargetRefused as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

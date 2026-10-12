@@ -791,12 +791,12 @@ def test_operator_annotated_graph_event_payload_unchanged(sup):
 
     Distinct dim values: identical values (0.5 ×4) pin only the KEY names and
     cannot detect a transposition of the four values in the emit dict — a real
-    regression for every ``events_poll`` consumer (#3689 review P2).
+    regression for every ``poll_events`` consumer (#3689 review P2).
     """
     _, _, sdk = sup
     op = _operator(sdk)
     sdk.annotate_operator(op, 0.11, 0.22, 0.33, 0.44)
-    evs = sdk.events_poll(types=["OperatorAnnotated"])["events"]
+    evs = sdk.poll_events(types=["OperatorAnnotated"])["events"]
     assert len(evs) == 1
     payload = evs[0]["payload"]
     assert payload["id"] == op

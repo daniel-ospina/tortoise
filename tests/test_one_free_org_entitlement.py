@@ -885,3 +885,69 @@ class TestRegistryLaneWebhookProvisioning:
         assert len(alt) == 1, names
         assert _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]*$", alt[0]), alt
         assert len(alt[0]) <= 64, alt
+
+
+# ── #2810: the cancel-lifecycle hole, PINNED (not silently carried) ─────────
+
+
+def _canceled_event(org_id: str, *, event_id: str = "evt_cancel_1",
+                    customer: str = "cus_new_1") -> dict:
+    return {
+        "id": event_id,
+        "type": "customer.subscription.deleted",
+        "data": {"object": {
+            "client_reference_id": org_id,
+            "customer": customer,
+            "id": "sub_1",
+            "status": "canceled",
+        }},
+    }
+
+
+class TestCancellationLifecycleKnownHole:
+    """#2810 / #2789 review — the cancel lifecycle hole, CHARACTERISED.
+
+    The counting rule (docs/scoping/2026-09-10-2789-one-free-org.md §2) is
+    "free = owner + no ACTIVE paid subscription", so
+    `customer.subscription.deleted` — which sets
+    `{"tier": "free", "subscription_status": "canceled"}` — makes a
+    previously-paid org count as free AGAIN. Sequence *create A → buy B →
+    cancel B* therefore ends with TWO free orgs for one person.
+
+    This is a KNOWN, PRE-EXISTING hole (#2789's review found it; the old
+    membership-scoped count had it too). The remedy is a PRODUCT DECISION —
+    (a) block creating while a canceled paid org exists, (b) auto-close the
+    downgraded org, or (c) count "ever-paid" orgs separately — and each of
+    those rewrites the settled rules table, so it was deliberately NOT
+    improvised in #2789/#2810.
+
+    ⚠️ THIS TEST PINS TODAY'S BEHAVIOUR ON PURPOSE. It is a characterization
+    test, not an endorsement: it makes the hole visible and forbids it from
+    changing silently in EITHER direction. When the product decision lands,
+    update this test to assert the chosen rule — do not delete it.
+    """
+
+    def test_cancel_after_buying_a_second_org_leaves_two_free_orgs(
+            self, monkeypatch, user_client):
+        tc, fake = user_client
+        import tortoise.billing as billing
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a")
+
+        # buy a second org (the #2789 paid-new-org path)
+        tid = _tid("c")
+        bought = _post_signed(tc, _checkout_event(
+            tid, org_name="Bought Org", event_id="evt_buy_then_cancel"))
+        assert bought.status_code == 200, bought.text
+
+        from tortoise.supabase_control import owned_free_org_ids
+        # paid → the allowance is intact and the paid org is not counted
+        assert owned_free_org_ids(fake, _U1) == ["team-free-a"]
+
+        canceled = _post_signed(tc, _canceled_event(tid))
+        assert canceled.status_code == 200, canceled.text
+
+        # KNOWN HOLE: the canceled org is counted as free again.
+        assert owned_free_org_ids(fake, _U1) == ["team-free-a", tid]

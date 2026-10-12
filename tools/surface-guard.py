@@ -39,8 +39,9 @@ HOW IT WORKS
     from `docs/product/canonical-mcp-tools.md`. This gate reds when a manifest that
     CLAIMS an approval disagrees with that document (a hand-edit made the copy
     lie). A manifest staged on `pending-owner-approval` with all four fields null
-    makes NO claim and is skipped on purpose — that is the pre-flip state of a
-    change that lands in two PRs (#4185; the flip is #8144). The old PER-ROW
+    makes NO claim and is skipped on purpose — a shape no committed manifest carries
+    now that the flip has landed (#4185 landed the tooling in #8026; #8144 flipped the
+    committed copy). The old PER-ROW
     `approval` requirement is GONE — it belonged to the frozen-snapshot model the
     #4282/#4185 ruling overrides. The per-row field is still carried as an audit
     record and a re-cut still refuses to blank it silently (#4598); it is no
@@ -842,12 +843,12 @@ def main(argv: list[str]) -> int:
     # --- 6. approval: READ from the canonical doc, never typed here (#4185) ------
     # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
     #
-    # The manifest's `approval_status` is still the staged `pending-owner-approval` while
-    # `docs/product/canonical-mcp-tools.md` records `approved` / `daniel-ospina` / PR 4120 —
-    # two files that disagree about one fact BY DESIGN until the flip lands (#8144). The
-    # approval is DERIVED from that document
-    # (`tools/surface_manifest.py::read_approval`), so what this section verifies is the
-    # one thing a derived field can still get wrong: a manifest that CLAIMS an approval
+    # The manifest's `approval_status` / `approval_principal` / `approval_pr` /
+    # `approval_date` are DERIVED from `docs/product/canonical-mcp-tools.md`, and the
+    # committed copy now carries that derivation (`approved` / `daniel-ospina` / PR 4120) —
+    # the staged two-PR split (#8026 landed the tooling, #8144 flipped the copy) is complete.
+    # What this section verifies is
+    # the one thing a derived field can still get wrong: a manifest that CLAIMS an approval
     # and was HAND-EDITED away from the source it is supposed to mirror.
     #
     # READ IT HERE, INDEPENDENTLY. The guard is deliberately self-contained, and the doc is
@@ -863,11 +864,11 @@ def main(argv: list[str]) -> int:
     #
     # CI's `surface-guard` pins the BASE copy of THIS file: it copies `origin/main`'s guard
     # over the PR's and runs it against the PR tree, so a change to what the guard
-    # ENFORCES cannot be green in its own PR. This change derives `approval_status` from
-    # the canonical doc, so a re-cut FLIPS the manifest to `approved` — which is why the
-    # committed copy is still staged here (#8144) — while the base copy still enforces the
-    # per-row `approval` rule, which fires on that status and demands a recorded approval
-    # on every row and every `retired:` entry that lacks one.
+    # ENFORCES cannot be green in its own PR. That pin is why the flip was split into two
+    # PRs (#8026 landed the derivation, #8144 flipped the copy): the pre-#8026 base guard
+    # still carried the per-row `approval` rule, which fires on `approved`. The rule is
+    # GONE from this copy, so the base guard no longer demands a recorded approval on
+    # every row and every `retired:` entry.
     status = doc.get("approval_status")
     if status not in ("pending-owner-approval", "approved"):
         problems.append(
@@ -886,9 +887,8 @@ def main(argv: list[str]) -> int:
         )
     # A claim is either the `approved` STATUS or any non-null copy field. A manifest on
     # `pending-owner-approval` with all four fields null is the PRE-#4185 state and is
-    # skipped on purpose (#4185 landed in two PRs: CI's required `surface-guard` pins the
-    # BASE copy, whose per-row rule fires on `approved`, so the committed manifest must
-    # stay `pending` in this PR). The moment a manifest CLAIMS an approval — status or a
+    # skipped on purpose — a shape no committed manifest carries now that the flip has
+    # landed. The moment a manifest CLAIMS an approval — status or a
     # field — it must be a faithful copy of the canonical doc, and every branch below
     # applies exactly as before. So the skip is scoped to the empty claim, never a
     # tampered one.
@@ -996,7 +996,7 @@ def main(argv: list[str]) -> int:
         approval_line = (
             f"The manifest is STAGED on approval_status={status} and makes NO claim, so "
             f"nothing was compared against {approval_doc} (which records "
-            f"{canonical['status']!r}) — the flip is a separate change (#8144)"
+            f"{canonical['status']!r})"
         )
     print(
         f"OK — the declaration matches the FROZEN baseline: "

@@ -357,11 +357,11 @@ def test_mine_preserves_point_content():
 def _set_status(sdk, pid, status):
     """Direct status write — test seam for pre-#780 paths.
 
-    On main, create_operator auto-promotes the SOURCE Point to live (#131) and
-    writes no status on the operator node; the event path defaults operator
-    nodes to live. #780's `create_operator(promote_source=False)` is not merged,
-    so fixtures that need draft operator nodes / draft endpoints write status
-    directly. Remove the seam when #780 lands.
+    create_operator auto-promotes the SOURCE Point to live (#131) and, since
+    #5089, writes the operator node's own status too ('live' on the default
+    posture, 'draft' under `promote_source=False`). Fixtures that need a
+    legacy status-less operator, or a status the door would not write, write it
+    directly here.
     """
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=$st",
@@ -584,9 +584,18 @@ class TestEpSafeCommitReviewFixes:
     """#944 code-review regression tests."""
 
     def test_null_status_operator_node_is_live_leak(self, mining_sdk):
-        """The REAL pre-#780 leak shape: operator node with NO status property
-        (create_operator writes none; projection coalesce defaults to live).
-        W-3 must flag operator_node_live — a raw 'live' SET never occurs."""
+        """The REAL pre-#780 leak shape: operator node with NO status property.
+        W-3 must flag operator_node_live — a raw 'live' SET never occurs.
+
+        #5089: the leak shape is now built EXPLICITLY (`REMOVE o.status`) rather
+        than relying on `create_operator` to produce it. The default door used
+        to leave the operator status-less; it now writes 'live' on the promoting
+        posture so that live == replay (a status-less operator was excluded from
+        the strict grounding selector while a rebuilt one satisfied it — the
+        divergence #5089 closes). The GATE's duty is
+        unchanged, and so is this test's purpose: a legacy status-less operator
+        must still be caught. Only the way the legacy shape is constructed moved.
+        """
         sdk = mining_sdk
         proj = sdk._get_proj()
         p1 = sdk.create_point("decision", "a", status="draft", batch_id="w2")
@@ -594,7 +603,10 @@ class TestEpSafeCommitReviewFixes:
         op = sdk.create_operator("NAND", p1["id"], [p2["id"]])
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, p2["id"], "draft")
-        # NOTE: no _set_status(op) — raw status stays NULL (the leak shape)
+        # #5089: build the legacy leak shape explicitly — the door no longer
+        # writes it, but the W-3 gate must still refuse it.
+        proj.g.query("MATCH (o:Point {id:$id}) REMOVE o.status",
+                     params={"id": op["id"]})
         assert sdk.get_point(op["id"]).get("status") is None
         res = EpSafeCommit(proj, "w2").run([p1["id"], p2["id"]])
         assert res["ok"] is False

@@ -27,7 +27,7 @@ not something to reconcile silently.
 | 7 | `tortoise_belief_timeline` | `tool_registry.py:393` | **no replacement** | `check_confidence` | absent |
 | 8 | `tortoise_calibrate_summary` | `tool_registry.py:441` | **no replacement** | `check_confidence` | absent |
 | 9 | `tortoise_check_structure` | `tool_registry.py:138` | **no replacement** | `graph_overview` | absent |
-| 10 | `tortoise_checkpoint` | `tool_registry.py:632` | **no replacement** | `REMOVED` | absent |
+| 10 | `tortoise_checkpoint` | `tool_registry.py:632` | **no replacement** | `mine_knowledge_from_session` | absent |
 | 11 | `tortoise_compute_confidence` | `tool_registry.py:404` | **no replacement** | `check_confidence` | absent |
 | 12 | `tortoise_create_document` | `tool_registry.py:971` | **no replacement** | `create_entity` | absent |
 | 13 | `tortoise_create_edge` | `tool_registry.py:1103` | **no replacement** | `link_entities` | absent |
@@ -41,8 +41,8 @@ not something to reconcile silently.
 | 21 | `tortoise_delete` | `tool_registry.py:1079` | **no replacement** | `delete_knowledge` | absent |
 | 22 | `tortoise_delete_entity` | `tool_registry.py:1044` | **no replacement** | `delete_knowledge` | absent |
 | 23 | `tortoise_delete_point` | `tool_registry.py:552` | **no replacement** | `delete_knowledge` | absent |
-| 24 | `tortoise_diary_read` | `tool_registry.py:652` | **no replacement** | `REMOVED` | absent |
-| 25 | `tortoise_diary_write` | `tool_registry.py:642` | **no replacement** | `REMOVED` | absent |
+| 24 | `tortoise_diary_read` | `tool_registry.py:652` | **no replacement** | `list_knowledge` | absent |
+| 25 | `tortoise_diary_write` | `tool_registry.py:642` | **no replacement** | `create_entity` | absent |
 | 26 | `tortoise_dream` | `tool_registry.py:449` | **no replacement** | `refresh_confidence` | absent |
 | 27 | `tortoise_dream_health` | `tool_registry.py:466` | **no replacement** | `graph_overview` | absent |
 | 28 | `tortoise_entity_profile` | `tool_registry.py:612` | **no replacement** | `explore_connections` | absent |
@@ -145,13 +145,13 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 
 | Destination | Count |
 |---|---|
-| `REMOVED` | 14 |
 | `graph_overview` | 13 |
+| `REMOVED` | 11 |
 | `check_confidence` | 7 |
+| `create_entity` | 7 |
 | `get_entity` | 7 |
 | `search_knowledge` | 7 |
-| `create_entity` | 6 |
-| `list_knowledge` | 5 |
+| `list_knowledge` | 6 |
 | `update_knowledge` | 4 |
 | `adjust_relationship` | 3 |
 | `delete_knowledge` | 3 |
@@ -161,11 +161,11 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 | `review_link_candidates` | 3 |
 | `link_entities` | 2 |
 | `manage_source_trust` | 2 |
+| `mine_knowledge_from_session` | 2 |
 | `supersede_knowledge` | 2 |
 | `approve_merge` | 1 |
 | `graph_set_recording` | 1 |
 | `mine_knowledge_from_directory` | 1 |
-| `mine_knowledge_from_session` | 1 |
 | `poll_events` | 1 |
 | `record_decision` | 1 |
 | `register_source` | 1 |
@@ -175,7 +175,7 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 | `write_question` | 1 |
 | **total** | **98** |
 
-98 served tools → 28 destinations: **81** absorbed into the **26** MCP targets, **1** into a builder-only SDK method (not on the MCP), **2** tenancy (SDK/REST only), **14** removed.
+98 served tools → 28 destinations: **84** absorbed into the **26** MCP targets, **1** into a builder-only SDK method (not on the MCP), **2** tenancy (SDK/REST only), **11** removed.
 
 ---
 

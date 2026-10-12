@@ -30,12 +30,13 @@
 // value it renders) fails these tests rather than passing them.
 //
 // RESIDUAL, stated so it is not mistaken for coverage: the <h1> is extracted as
-// the element itself, so a conditional wrapped AROUND the whole element (or a
-// change to its className) is outside this pin — the element would simply not be
-// found, which fails LOUD rather than passing vacuously. The announcement is
-// pinned as the statement prefix that computes its argument; a variable sourced
-// from a component-scope helper this probe does not bind throws rather than
-// passing.
+// the element itself, so this pin does NOT see a conditional wrapped AROUND the
+// whole element — the open-tag literal survives the wrapper, so the probe still
+// renders the element unconditionally and stays green. (A change to its className
+// IS seen: the element is no longer found, which fails LOUD rather than passing
+// vacuously.) The announcement is pinned as the statement prefix that computes
+// its argument; a variable sourced from a component-scope helper this probe does
+// not bind throws rather than passing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -110,7 +111,12 @@ function extractH1(source) {
 // prefix and reading what it hands the setter is what makes the announcement's
 // rendered end observable — a widened local (shape 1) is inside the prefix and
 // therefore changes the string.
-function extractAnnouncementPrefix(source) {
+// Locate the ONE effect that produces the announcement, structurally: the `{`
+// that opens its body, the offset of the `React.useEffect(` call, and the
+// matching `}` of the body. The rendered-end probe and the #3728 deps pin both
+// walk from here, so the two cannot disagree about WHICH effect owns the
+// announcement.
+function announcementEffectBlock(source) {
   const masked = maskCode(source)
   const marker = 'setWizardStepAnnounce('
   const count = masked.split(marker).length - 1
@@ -133,6 +139,19 @@ function extractAnnouncementPrefix(source) {
   assert.notEqual(effectStart, -1, 'the announcement must be produced by a React.useEffect')
   assert.match(source.slice(effectStart, open), /^React\.useEffect\([\s\S]*?\)\s*=>\s*$/,
     'the sliced block must be the useEffect arrow body that precedes the announcement call')
+  let d = 0
+  let close = -1
+  for (let i = open; i < masked.length; i++) {
+    const c = masked[i]
+    if (c === '{') d++
+    else if (c === '}') { d--; if (d === 0) { close = i; break } }
+  }
+  assert.notEqual(close, -1, 'the announcement effect body must be closed')
+  return { masked, call, open, effectStart, close }
+}
+
+function extractAnnouncementPrefix(source) {
+  const { masked, call, open } = announcementEffectBlock(source)
   // The matching close paren of the call (the template argument is masked, so its
   // braces cannot be mistaken for the call's).
   let d = 0
@@ -144,6 +163,55 @@ function extractAnnouncementPrefix(source) {
   }
   assert.notEqual(end, -1, 'the setWizardStepAnnounce call must be closed')
   return source.slice(open + 1, end + 1)
+}
+
+// ── #3728: the announcement's DEPS must cover every input that decides it ────
+// JS literals a label option may be set to inline: they are not inputs.
+const LITERALS = new Set(['true', 'false', 'null', 'undefined'])
+
+// `wizardStageLabel` is pure, so the announced stage is a function of the step
+// argument plus the identifier-valued options of the `wizardStageLabel(...)`
+// call in the effect BODY. React re-runs the effect only when a DEP changes, so
+// any of those read-but-unlisted inputs leaves the sr-only region frozen on a
+// stage the <h1> has already left — #3728's shape, where `welcomeHasOrg` was
+// declared ~5,400 lines below the effect and therefore could not legally appear
+// in its deps at all (the #2426/#2621/#2709 TDZ white-screen). Hoisting the
+// derivation ABOVE the effect (as #3428/#2937 did for `isBuildFork`) is what
+// makes the dep legal; this pin derives the required set FROM the label call, so
+// a NEW input is covered the moment it is read — unlike the frozen whole-list
+// regex it replaces (wizardConnectTripwire.test.js, #2912).
+function announcementInputsAndDeps(source) {
+  const { open, close } = announcementEffectBlock(source)
+  const body = source.slice(open + 1, close)
+  const call = body.match(/wizardStageLabel\(\s*([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}/)
+  assert.ok(call, 'the effect body must build the label through wizardStageLabel(step, {...})')
+  const inputs = [call[1]]
+  for (const pair of call[2].split(',')) {
+    const value = (pair.split(':')[1] || '').trim()
+    // A literal can never change, so it can never need a re-run (and no literal
+    // may be demanded as a dep).
+    if (LITERALS.has(value)) continue
+    if (/^[A-Za-z_$][\w$]*$/.test(value)) { inputs.push(value); continue }
+    // #3728 review (P2): anything else (a member expression, a call, an
+    // operator) is not modelled — FAIL rather than silently skip it. Skipping
+    // is how a real label input could be added without being demanded as a
+    // dep, which is exactly the frozen-announcement defect this pin exists to
+    // prevent.
+    assert.fail(`unmodelled wizardStageLabel option value: ${value} — expose the input as a bare identifier, or model it in announcementInputsAndDeps`)
+  }
+  // The deps array is the first `}, [` AFTER the effect body's close brace.
+  const depsStart = source.indexOf('}, [', close)
+  assert.notEqual(depsStart, -1, 'the announcement effect must close with a deps array')
+  const depsEnd = source.indexOf('])', depsStart)
+  assert.notEqual(depsEnd, -1, 'the announcement effect deps array must be closed')
+  const deps = source.slice(depsStart + 4, depsEnd).split(',').map((s) => s.trim()).filter(Boolean)
+  return { inputs, deps }
+}
+
+// The property: no input that decides the announcement may be absent from deps.
+function missingAnnouncementDeps(source) {
+  const { inputs, deps } = announcementInputsAndDeps(source)
+  return inputs.filter((n) => !deps.includes(n))
 }
 
 // renderToStaticMarkup escapes text; decode what the probe's own renderer emits.
@@ -313,6 +381,65 @@ test('#5820 falsifiability: a DIFFERENT option set between the two ends fails', 
   assert.equal(bad[0].announcement, `Step 4 of 4: ${NO_CONNECTION_OBSERVED}`)
 })
 
+// ── #3728: the deps pin, with its own falsifiability ────────────────────────
+// Synthetic snippets first, so the analyzer cannot rot into a no-op: it must
+// flag a read-but-unlisted label input, and must NOT demand a dep for an option
+// passed as a literal (a literal cannot change, so it can never need a re-run).
+function depsSnippet(deps) {
+  return [
+    'function App() {',
+    '  const [step, setStep] = React.useState(0)',
+    '  const welcomeHasOrg = true',
+    '  const serverHarnessConnected = false',
+    '  React.useEffect(() => {',
+    '    const label = wizardStageLabel(step, { hasOrg: welcomeHasOrg, paused: false, connected: serverHarnessConnected, buildFork: false })',
+    '    setWizardStepAnnounce(`Step ${step + 1} of 4: ${label}`)',
+    `  }, [${deps}])`,
+    '  return null',
+    '}',
+  ].join('\n')
+}
+
+test('#3728 falsifiability: a label input missing from the deps is a violation', () => {
+  assert.deepEqual(missingAnnouncementDeps(depsSnippet('step, serverHarnessConnected')), ['welcomeHasOrg'],
+    'a label input read in the body but absent from deps must be reported')
+  assert.deepEqual(missingAnnouncementDeps(depsSnippet('step, welcomeHasOrg, serverHarnessConnected')), [],
+    'literal options (paused/buildFork) must NOT be demanded as deps')
+  assert.deepEqual(announcementInputsAndDeps(depsSnippet('step')).deps, ['step'],
+    'the deps parser must read the array, not a slice of the body')
+  // #3728 review (P2): an option value that is neither a literal nor a bare
+  // identifier must FAIL LOUD rather than be silently skipped — otherwise a new
+  // label input written as an expression would be demanded as no dep at all.
+  assert.throws(
+    () => announcementInputsAndDeps(depsSnippet('step')
+      .replace('hasOrg: welcomeHasOrg', 'hasOrg: Boolean(welcomeHasOrg)')),
+    /unmodelled wizardStageLabel option value/,
+    'an expression-valued label input must be refused, not skipped')
+})
+
+test('#3728: the real file lists every announcement input as a dep', () => {
+  const { inputs, deps } = announcementInputsAndDeps(mainJsxSrc)
+  assert.deepEqual(missingAnnouncementDeps(mainJsxSrc), [],
+    `every input of the announced label must be a dep (inputs=${inputs}, deps=${deps})`)
+  // Non-vacuity: the probe must be reading the REAL label call — the five
+  // identifiers below are exactly the ones the live call passes.
+  for (const name of ['wizardStep', 'welcomeHasOrg', 'effectivelyPaused', 'serverHarnessConnected', 'isBuildFork']) {
+    assert.ok(inputs.includes(name), `${name} must be extracted as an announcement input (got ${inputs})`)
+  }
+  assert.ok(deps.includes('welcomeMode') && deps.includes('authed'),
+    `the parsed deps must be the effect's real list (got ${deps})`)
+})
+
+test('#3728 falsifiability: dropping welcomeHasOrg from the real deps goes red', () => {
+  // The shipped-before regression shape, applied to the real source: the dep is
+  // removed while the label call still reads the flag.
+  const reverted = patch(mainJsxSrc, ', isBuildFork, welcomeHasOrg])', ', isBuildFork])', 'revert the #3728 dep')
+  assert.equal(announcementInputsAndDeps(reverted).inputs.includes('welcomeHasOrg'), true,
+    'the reverted source must still read welcomeHasOrg in the label call')
+  assert.deepEqual(missingAnnouncementDeps(reverted), ['welcomeHasOrg'],
+    'the guard must go red on the exact shape #3728 shipped')
+})
+
 test('#5820: the extractors fail LOUD rather than passing vacuously', async () => {
   assert.throws(() => extractH1(mainJsxSrc.replace('<h1 className="welcome-title">', '<h1 className="wrong-title">')),
     /exactly ONE <h1 className="welcome-title">/)
@@ -324,4 +451,66 @@ test('#5820: the extractors fail LOUD rather than passing vacuously', async () =
   const unbound = patch(mainJsxSrc, ANNOUNCE_DECL,
     `${ANNOUNCE_DECL} + WIZARD_SCOPE_UNBOUND_SENTINEL`, 'unbound scope read')
   await assert.rejects(renderWizardEnds(unbound, [DISCRIMINATING]), /WIZARD_SCOPE_UNBOUND_SENTINEL/)
+})
+
+// ── #3728 review (P2): the focus guard is PINNED, not merely asserted ────────
+// The step-announcement effect re-runs when org membership lands. What keeps
+// that re-run from yanking focus is the init branch seeding
+// `lastWizardStepRef.current` — without it the FIRST post-mount re-run always
+// computes `stepChanged === true` (the ref is still -1), so a membership flip on
+// step 0 moves focus to the wizard container. This EXECUTES the extracted effect
+// body with mocked refs and reads whether `focus()` was called, so the guarantee
+// is pinned by the value it produces rather than by the presence of a line.
+//
+// RESIDUAL: this pins only the effect's own decision (it does not call
+// `focus()` on a flag-only re-run). It does not model the DOM — when a membership
+// flip replaces the org-create form, that form's auto-focused input unmounts and
+// real focus may fall to <body>. That is pre-existing, unchanged by this guard,
+// and not what this pin claims.
+async function focusCallsOverRuns(source) {
+  const { open, close } = announcementEffectBlock(source)
+  const body = source.slice(open + 1, close)
+  const [probe] = await evalExpressions([`(() => {
+    const wizardStageLabel = () => 'LABEL'
+    const setWizardStepAnnounce = () => {}
+    const wizardFocusInit = { current: false }
+    const lastWizardStepRef = { current: -1 }
+    let focusCalls = 0
+    const wizardCardRef = { current: { focus: () => { focusCalls += 1 } } }
+    const welcomeMode = true
+    const authed = true
+    const LEGACY_WIZARD_ARCHIVED = false
+    const effectivelyPaused = false
+    const serverHarnessConnected = false
+    const isBuildFork = false
+    let wizardStep = 0
+    let welcomeHasOrg = false
+    const run = () => {${body}}
+    run()                    // mount: the init run seeds the ref and returns
+    welcomeHasOrg = true     // membership lands — a flag-only dep change
+    run()
+    const afterFlagOnly = focusCalls
+    wizardStep = 1           // a GENUINE step change
+    run()
+    return { afterFlagOnly, afterStepChange: focusCalls }
+  })()`])
+  return probe.value
+}
+
+test('#3728: a flag-only re-run at step 0 does not steal focus, a step change does', async () => {
+  const r = await focusCallsOverRuns(mainJsxSrc)
+  assert.equal(r.afterFlagOnly, 0,
+    'landing org membership on step 0 must refresh the announcement WITHOUT moving focus')
+  assert.equal(r.afterStepChange, 1,
+    'a genuine step change must still move focus exactly once')
+})
+
+test('#3728 falsifiability: dropping the init-branch seed re-introduces the focus steal', async () => {
+  const unseeded = patch(mainJsxSrc,
+    '      lastWizardStepRef.current = wizardStep\n      return\n    }',
+    '      return\n    }',
+    'remove the init-branch seed')
+  const r = await focusCallsOverRuns(unseeded)
+  assert.equal(r.afterFlagOnly, 1,
+    'without the seed the first post-mount flag-only re-run would move focus (the defect)')
 })

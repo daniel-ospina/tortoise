@@ -267,6 +267,12 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         uses: ./.github/actions/falkordb-provision
         with:
+          # #7867: the BARE ref, deliberately NOT a pre-qualified mirror ref.
+          # The action's resolver (provision.sh image_candidates) already tries
+          # mirror.gcr.io before the Docker Hub upstream, and a ref that is
+          # already qualified is passed through as a SINGLE candidate — which
+          # would trade the anonymous-pull quota for a single point of failure on
+          # Google's best-effort cache. The bare ref keeps the whole chain.
           image: falkordb/falkordb-server:latest
           uri_graph: tortoise_test_matrix
       # #1474 skip path — python-ci's push run on this tree was green; only

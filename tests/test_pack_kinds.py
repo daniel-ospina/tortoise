@@ -36,7 +36,9 @@ V3_DEV = {
     "ontology": {
         "extends": "core",
         "objectKinds": ["issue", "code"],
-        "pointKinds": ["requirement"],
+        # #7848: must NOT be `requirement` — the owner ruling makes it an Object
+        # kind declared once, by product-strategy.
+        "pointKinds": ["debtItem"],
         "documentKinds": ["architectureDoc"],
     },
 }
@@ -50,7 +52,6 @@ V3_PS = {
                          "requirement", "architecture"],
         "subclassOf": {"feature": "WorkItem", "requirement": "WorkItem",
                         "architecture": "Document"},
-        "equivalentTo": {"requirement": ["dev:requirement"]},
         "pointKinds": ["jobToBeDone", "useCase", "userJourney", "valueProposition"],
         "eventKinds": ["release"],
         "documentKinds": ["competitiveAnalysis", "marketResearch"],
@@ -1118,11 +1119,13 @@ class TestPerPackLoadIsolation:
         # (V3_DEV's manifest namespace is "dev")
         assert "dev" in registry.packs
         assert len(registry.list_packs()) == 1
-        assert registry.register_kinds()["registered"] == 4  # issue, code, requirement, architectureDoc
+        assert registry.register_kinds()["registered"] == 4  # issue, code, debtItem, architectureDoc
         assert registry.expand_kind("dev:issue") == ["dev:issue"]
 
-    def test_cross_pack_error_pack_dropped_from_compile(self):
-        """A pack with unresolved cross-pack refs is excluded too."""
+    def test_unresolved_cross_pack_ref_keeps_pack_loaded(self):
+        """#2781: a namespaced ref into an ABSENT pack no longer isolates the
+        referring pack — the namespace's absence is a missing peer, not a typo,
+        and one absent pack must not take its referrers down with it."""
         d = tempfile.mkdtemp(prefix="pack_v3_iso_x_")
         _write_pack(d, "good", V3_DEV)
         _write_pack(d, "broken", {
@@ -1138,12 +1141,13 @@ class TestPerPackLoadIsolation:
         })
         registry = PackRegistry(d)
         loaded = registry.load_all()
-        assert loaded == 1
-        assert "broken" in registry.errors
-        assert "broken" not in registry.packs
-        assert any("does not resolve" in e for e in registry.errors["broken"])
-        # Registry + compile still work for the healthy pack
-        assert len(registry.list_packs()) == 1
+        assert loaded == 2
+        assert not registry.errors, registry.errors
+        assert "broken" in registry.packs
+        assert any("ghost" in e and "not loaded" in e
+                   for e in registry.unresolved_refs["broken"])
+        # Registry + compile still work for both
+        assert len(registry.list_packs()) == 2
         assert "dev:issue" in registry._all_known_kinds()
 
 
@@ -1169,7 +1173,7 @@ class TestWorkedExampleV3Fixture:
         assert not registry.errors, f"worked example must load clean: {registry.errors}"
 
         ps = registry.get_pack("product-strategy")
-        # Chain parsed and steps resolved (core workflow + equivalentTo)
+        # Chain parsed and steps resolved (core workflow + the pack's own kinds)
         assert [c["id"] for c in ps.chains] == ["productDelivery"]
         assert ps.chains[0]["steps"] == [
             "useCase", "feature", "userJourney", "workflow",
@@ -1187,8 +1191,14 @@ class TestWorkedExampleV3Fixture:
         # Activation: conversation/document activate the pack
         assert ps.is_active_for("conversation")
         assert not ps.is_active_for("github_issue")
-        # equivalence resolved: requirement ≡ dev:requirement
-        assert "dev:requirement" in registry.expand_kind("product-strategy:requirement")
+        # #7848: `requirement` is declared ONCE, by product-strategy — the
+        # fixture's cross-pack `equivalentTo` bridge is gone. The legacy
+        # `dev:requirement` spelling still rides the expansion as a READ alias
+        # for stored data (LEGACY_KIND_ALIASES); it is not a declared kind.
+        assert registry.expand_kind("product-strategy:requirement") == [
+            "product-strategy:requirement", "dev:requirement"
+        ]
+        assert "dev:requirement" not in registry._all_known_kinds()
 
 
 # ── Review fixes (PR #978): load_all idempotence + dangling-ref fixpoint ──
@@ -1221,8 +1231,22 @@ def test_load_all_reentry_is_idempotent(tmp_path):
 
 
 def test_dangling_cross_pack_ref_after_drop(tmp_path):
-    """A pack referencing a dropped pack must also be excluded (fixpoint,
-    review P2)."""
+    """#2781 REPLACES the pre-#2781 cascade this test used to pin.
+
+    It asserted the opposite outcome on purpose: `badpack` (namespaced ref to
+    the absent `ghost`) was dropped, and `dependent` was then dropped too for
+    referencing the dropped pack — a fixpoint that turned ONE absent pack into
+    a catalog-wide outage. It is exactly the shape that made dropping `pm`
+    remove `product-strategy` and `dev` from the shipped catalog.
+
+    Post-#2781 both packs load: `ghost` is a missing peer, `badpack:gadget`
+    therefore resolves, and nothing is isolated. The fixpoint below is the
+    remaining half of the old property — a pack whose reference depends on a
+    pack that ACTUALLY failed schema validation is still re-evaluated against
+    the surviving set, and a BARE reference that then resolves nowhere is still
+    fatal (a bare name carries no namespace, so it cannot be distinguished
+    from a typo).
+    """
     from tortoise import pack_registry as pr
     reg = pr.PackRegistry(tmp_path)
     bad = tmp_path / "badpack"
@@ -1240,11 +1264,38 @@ def test_dangling_cross_pack_ref_after_drop(tmp_path):
         "    - predicate: contains\n      mechanism: IMPL\n      fromKind: dependent:widget\n"
         "      toKind: badpack:gadget\n")
     n = reg.load_all()
-    # badpack fails (ghost:thing unresolvable) and is dropped; dependent's
-    # reference to badpack:gadget is then dangling -> also excluded.
-    assert n == 0, f"expected no healthy packs (badpack dropped, dependent dangling), got {n}"
-    assert "dependent" not in reg.packs
-    assert "dependent" in reg.errors
+    assert n == 2, f"both packs must survive a missing peer, got {n}: {reg.errors}"
+    assert not reg.errors
+    assert "badpack" in reg.packs and "dependent" in reg.packs
+    assert any("ghost" in e for e in reg.unresolved_refs["badpack"])
+
+
+def test_dangling_bare_ref_after_a_schema_drop_is_still_fatal(tmp_path):
+    """The fixpoint keeps its remaining job (#2781): a pack that fails SCHEMA
+    validation is dropped, and a dependent's BARE reference to it is then
+    unresolvable with no declared dependency to explain it — a typo by the only
+    evidence available, so the dependent is isolated too."""
+    from tortoise import pack_registry as pr
+    reg = pr.PackRegistry(tmp_path)
+    bad = tmp_path / "badpack"
+    bad.mkdir()
+    (bad / "manifest.yaml").write_text(
+        "namespace: badpack\nname: badpack\nversion: 0.1.0\ntier: free\n"
+        "ontology:\n  extends: core\n  objectKinds: [gadget]\n  relations:\n"
+        "    - predicate: contains\n      mechanism: NOPE\n      fromKind: badpack:gadget\n"
+        "      toKind: badpack:gadget\n")
+    dependent = tmp_path / "dependent"
+    dependent.mkdir()
+    (dependent / "manifest.yaml").write_text(yaml.safe_dump({
+        "namespace": "dependent", "name": "dependent",
+        "version": "0.1.0", "tier": "free",
+        "ontology": {"extends": "core", "objectKinds": ["widget"],
+                     "kindDefs": {"widget": {"nearMisses": ["gadget"]}}},
+    }))
+    n = reg.load_all()
+    assert n == 0, reg.errors
+    assert "badpack" in reg.errors and "dependent" in reg.errors
+    assert any("does not resolve" in e for e in reg.errors["dependent"])
 
 
 # ── Ontology vocabulary alignment (#2727 object kinds, #2726 source kinds) ──
@@ -1473,7 +1524,7 @@ class TestMilestoneCanonicalEventKind:
         resolve the legacy registry identically. They diverged once: the generic
         `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]` subtraction stayed in
         `domain_kinds` and went on dropping `meeting` after `known_kinds` had
-        been scoped to the ruling's one kind. Both now read the single
+        been scoped to the ruling's kinds. Both now read the single
         `_legacy_point_kinds()` definition.
         """
         from tortoise.domain_loader import domain_kinds, known_kinds
@@ -1511,7 +1562,8 @@ class TestMilestoneCanonicalEventKind:
         # The fix removed a regression without leaving a guard: pin the
         # RETENTION, so a future change to the subtraction cannot quietly drop
         # `meeting` again. `meeting` is a core EVENT kind, but it keeps its
-        # legacy pointKind identity — the #2767 ruling moved only `milestone`.
+        # legacy pointKind identity — the #2767 ruling moved only `milestone`
+        # (the #7848 ruling later added `requirement`).
         assert "meeting" in known_kinds("pointKind")
         assert "meeting" in known_kinds("eventKind")
 
@@ -1540,3 +1592,162 @@ class TestMilestoneCanonicalEventKind:
         registry = PackRegistry(tmp_path)
         registry.load_all()
         assert not registry.errors, registry.errors
+
+
+# ── #7848: a pack must not deform a core kind's category ───────────────────
+
+class TestPackKindDeclarations7848:
+    """`#7848` — the shipped packs declare core's vocabulary correctly.
+
+    The durable runtime guard (a pack declaring a core kind under a different
+    category, or one bare name in two categories, becomes a load error) belongs
+    with the root, **#2786**. These assertions pin the three fixed declarations
+    AND the two confirmed false positives, so a re-introduction reds the suite
+    without waiting on that guard.
+    """
+
+    @pytest.fixture
+    def shipped(self):
+        registry = PackRegistry(REPO_PACKS_DIR)
+        registry.load_all()
+        return registry
+
+    def test_shipped_packs_load_clean(self, shipped):
+        # NOT a regression test for the deformation itself: nothing on this tree
+        # turns a core kind declared under another category into a load error
+        # (that guard is the root #2786). What it does protect is the RELATION
+        # ref — leaving `toKind: dev:deployment` while removing `deployment`
+        # from `objectKinds` makes it dangling and reds this.
+        assert not shipped.errors, shipped.errors
+
+    def test_deployment_is_core_event_not_a_pack_object(self, shipped):
+        assert "deployment" in CANONICAL_EVENT_KINDS
+        for ns, pack in shipped.packs.items():
+            assert "deployment" not in pack.object_kinds, ns
+        # the dev relation that names it resolves through the core: spelling
+        rel = [r for r in shipped.get_pack("dev").relations
+               if r.get("predicate") == "deploysTo"]
+        assert rel and rel[0]["toKind"] == "core:deployment", rel
+
+    def test_requirement_is_an_object_declared_once(self, shipped):
+        # The #7848 owner ruling: ONE declaration, as an Object kind.
+        declaring = [ns for ns, p in shipped.packs.items()
+                     if "requirement" in p.object_kinds]
+        assert declaring == ["product-strategy"], declaring
+        for ns, pack in shipped.packs.items():
+            assert "requirement" not in pack.point_kinds, ns
+
+    def test_content_brief_is_a_document_only(self, shipped):
+        m = shipped.get_pack("marketing")
+        assert "contentBrief" in m.document_kinds
+        assert "contentBrief" not in m.point_kinds
+
+    def test_incident_stays_an_object(self, shipped):
+        # FALSE POSITIVE, pinned: `_BASE_KINDS`'s "Event kinds" heading is a
+        # comment over a FLAT hand-maintained set (one of the copies #2786
+        # retires), not a category claim — and ONTOLOGY §5/§9 declare `incident`
+        # an Object (`subclassOf: Problem`). Pinned so a later lane does not
+        # "fix" it toward the flat registry.
+        assert "incident" in shipped.get_pack("dev").object_kinds
+        assert "incident" not in CANONICAL_EVENT_KINDS
+
+    def test_issue_is_same_category_in_both_packs(self, shipped):
+        # FALSE POSITIVE, pinned: ONTOLOGY §7 documents exactly this — two packs
+        # may declare the SAME bare name in the SAME category, bridged by
+        # `equivalentTo` (dev:issue ≡ pm:issue). Removing one declaration would
+        # remove the reason the equivalence mechanism exists.
+        dev, pm = shipped.get_pack("dev"), shipped.get_pack("pm")
+        assert "issue" in dev.object_kinds
+        assert "issue" in pm.object_kinds
+        assert dev.kind_equivalences.get("issue") == ["pm:issue"]
+
+    def test_core_prefixed_relation_ref_resolves(self, tmp_path):
+        """The prerequisite the `deployment` fix needed: a relation may name a
+        core camelCase kind with the `core:` spelling (`core:deployment`),
+        WITHOUT the pack re-declaring it (which was the deformation)."""
+        _write_pack(str(tmp_path), "relcore", {
+            "namespace": "relcore", "name": "Rel Core", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["code"],
+                "relations": [{
+                    "predicate": "deploysTo", "mechanism": "IMPL",
+                    "semantics": "addresses",
+                    "fromKind": "relcore:code", "toKind": "core:deployment",
+                }],
+            },
+        })
+        registry = PackRegistry(str(tmp_path))
+        registry.load_all()
+        assert not registry.errors, registry.errors
+
+    def test_bogus_core_prefixed_relation_ref_is_reported(self, tmp_path):
+        """The widening is a resolve, not a blanket accept: `core:<bogus>` is
+        still an error (the `_resolve_kind_ref` contract)."""
+        _write_pack(str(tmp_path), "relcore", {
+            "namespace": "relcore", "name": "Rel Core", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["code"],
+                "relations": [{
+                    "predicate": "deploysTo", "mechanism": "IMPL",
+                    "semantics": "addresses",
+                    "fromKind": "relcore:code", "toKind": "core:notAKind",
+                }],
+            },
+        })
+        registry = PackRegistry(str(tmp_path))
+        registry.load_all()
+        assert "relcore" in registry.errors, registry.errors
+
+    def test_requirement_legacy_spelling_is_a_read_alias(self, shipped):
+        """Removing the dev↔ps `equivalentTo` bridge must not narrow READS.
+
+        `migrate_kinds` had written `pointKind: 'dev:requirement'` into stored
+        Points before the kind moved to product-strategy, and the pack can no
+        longer declare that spelling (`equivalentTo` targets must resolve), so
+        the registry carries it as a read alias instead. `known_kinds` stays
+        clean: writing the legacy spelling still warns.
+        """
+        assert "dev:requirement" in shipped.expand_kind("requirement")
+        assert "dev:requirement" in shipped.expand_kind(
+            "product-strategy:requirement")
+        # …but it is a READ alias, not a declaration.
+        assert "dev:requirement" not in shipped._all_known_kinds()
+        assert "requirement" not in shipped.get_pack("dev").point_kinds
+
+    def test_deployment_legacy_spelling_is_a_read_alias(self, shipped):
+        """Same read-alias rule for `deployment` (#7848).
+
+        `deployment` moved from dev's `objectKinds` to core's EVENT kind, and
+        the pre-PR `migrate_kinds` row had written `objectKind: 'dev:deployment'`
+        into stored Objects. Without the alias `expand_kind('deployment')` drops
+        the old spelling and those reads return a wrong-empty (#6146).
+        """
+        assert "dev:deployment" in shipped.expand_kind("deployment")
+        # …but it is a READ alias, not a declaration.
+        assert "dev:deployment" not in shipped._all_known_kinds()
+        assert "deployment" not in shipped.get_pack("dev").object_kinds
+
+    def test_requirement_stays_out_of_the_point_bucket(self):
+        """The ruling must survive the LEGACY domain manifest.
+
+        `load_manifest()` feeds `kind_values` into `register_kind()` →
+        `_BASE_KINDS`, so a `requirement` entry under `pointKind` would put the
+        retired spelling back into `known_kinds('pointKind')` once the router or
+        the orchestrator had loaded the config — a load-order-dependent write
+        verdict. `_POINT_KINDS_REMOVED` subtracts it. (The shipped config no
+        longer lists it either; this pins the guard independently of that.)
+        """
+        from tortoise import domain_loader as dl
+        dl.register_kind("requirement")  # what a legacy manifest still does
+        try:
+            assert "requirement" not in dl.known_kinds("pointKind")
+            assert "requirement" not in dl.domain_kinds(
+                "product-strategy", "pointKind")
+            # …and the Object bucket still carries it.
+            assert "requirement" in dl.known_kinds("objectKind")
+            assert "requirement" in dl.domain_kinds(
+                "product-strategy", "objectKind")
+        finally:
+            dl._BASE_KINDS.discard("requirement")

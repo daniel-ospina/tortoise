@@ -93,8 +93,11 @@ def _create_test_points(sdk):
     wf = sdk.create_point(
         "product-strategy:workflow", "Weekly analysis pipeline", enables_jtbd="JTBD-7849-1",
     )
+    # #7848: `dev:requirement` is no longer a DECLARED kind (requirement is an
+    # Object kind declared by product-strategy; the old spelling survives only
+    # as a read alias for stored Points); use a still-point dev kind here.
     req = sdk.create_point(
-        "dev:requirement", "REQ-1: Data pipeline", enabled_workflow=wf["id"],
+        "dev:technicalDebt", "REQ-1: Data pipeline", enabled_workflow=wf["id"],
     )
     feature = sdk.create_point(
         "product-strategy:feature", "Automated reporting", )
@@ -523,7 +526,7 @@ class TestMCPSurface:
         try:
             ids, op_ids = _create_test_points(sdk_obj)
 
-            # Combine kind expansion (WorkItem → dev:issue, pm:task, etc.)
+            # Combine kind expansion (WorkItem → dev:issue, pm:issue, etc.)
             # with traversal_path filter
             result = tortoise_search(
                 kind="WorkItem",

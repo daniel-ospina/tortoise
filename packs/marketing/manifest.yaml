@@ -15,9 +15,11 @@ ontology:
   subclassOf:
     content: WorkItem
   pointKinds:
-  - contentBrief
   - contentPerformance
   documentKinds:
+  # `contentBrief` is a DOCUMENT (a `:Source`), never a claim (#7848, ONTOLOGY
+  # §4.4): it was declared on both axes, which is untestable. Points *derived*
+  # from the brief link to it via `extractedFrom`.
   - contentBrief
   - contentCalendar
   - performanceReport
@@ -80,4 +82,8 @@ ontology:
     a strategy is working. Ephemeral: publishing mechanics, scheduling logistics.'
 connectors: []
 tools: []
-depends_on: []
+# #2781: bare `nearMisses` targets (`customerSegment`) belong to
+# `product-strategy` — declared so an absent pack is reported instead of
+# isolating `marketing` for a reference that is not its own defect.
+depends_on:
+- product-strategy
