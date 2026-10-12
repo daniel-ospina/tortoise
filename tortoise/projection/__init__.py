@@ -8109,6 +8109,7 @@ class FalkorProjection(
                 if _ep_edges_before_rows else 0)
         except Exception:  # noqa: BLE001, RUF100
             ep_bearing_edges_before = None
+        # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
         # event in the JSONL log. Snapshot them now so they survive the
         # wipe+replay cycle.
