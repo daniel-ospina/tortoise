@@ -23,6 +23,23 @@ export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1 AGENT_ALLOW_MAIN_EDITS=1 ELD
 export PI_MCP_SERVERS=none   # headless reviewer uses no MCP servers — saves ~25 processes/run
 export PI_SKIP_VERSION_CHECK=1 SKILL_ENFORCER_DISABLED=1 LOOP_ENFORCER_DISABLED=1 SLACK_BRIDGE_DISABLE=1 VISION_INTERCEPTOR_DISABLED=1
 cd "$REPO" || exit 1
+
+# Portable wall-clock timeout for the agent invocation. `pi -p` has no internal limit, so one hung
+# model call holds a concurrency slot forever — and the caps count SESSIONS, so a single hang
+# silently halves throughput. macOS ships no `timeout`/`gtimeout`, so implement it in bash: run the
+# agent in the background with a watchdog subshell that kills it after N seconds. The stale-worker
+# reaper in orch-loop.sh is the second line of defence.
+run_agent() { # run_agent <seconds> <logfile> <promptfile>
+  local t="$1" log="$2" prompt="$3" pid w rc
+  pi -p --provider deepseek --model deepseek-v4-flash --no-session "$(cat "$prompt")" >> "$log" 2>&1 &
+  pid=$!
+  ( sleep "$t"; kill -TERM "$pid" 2>/dev/null; sleep 15; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  w=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  kill "$w" 2>/dev/null
+  echo "[timeout] agent pid=$pid wall_limit=${t}s rc=$rc" >> "$log"
+  return "$rc"
+}
 git fetch origin "$BR" --quiet 2>/dev/null || true   # external (other-machine) branches may not be fetched locally
 
 # ── single-owner claim ────────────────────────────────────────────────────────
@@ -66,7 +83,7 @@ Your comment MUST state the outcome plainly and MUST NOT contain an unresolved a
     ISSUES <n>
 Do NOT modify code, commit, or merge.
 EOF
-pi -p --provider deepseek --model deepseek-v4-flash --no-session "$(cat "$L-reviewer.txt")" >> "$L.log" 2>&1
+run_agent "${REVIEW_TIMEOUT:-1800}" "$L.log" "$L-reviewer.txt"
 LAST="$(grep -aE '^(CLEAN|ISSUES) ' "$L.log" | tail -1 | tr -d '\r')"
 echo "[merge $PR] verdict: ${LAST:-<none>}" >> "$L.log"
 

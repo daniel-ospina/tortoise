@@ -422,17 +422,24 @@ class FakeControlPlane:
                 self._mint_org_locks[org_id] = lock
             return lock
 
-    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
-        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+    def _slot_rows(self, org_id: str, now, *,
+                   exclude_bootstrap: bool = True) -> list[dict]:
+        """#1879/#4550: the fake's ONE cap predicate — the rows
+        `public.api_key_slot_count` would count.
 
-        Mirrors `quota._count_resource("api_keys")` / the migration's
-        `public.api_key_slot_count`: non-revoked, non-expired, and (when
-        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
-        legacy row with no created_via still COUNTS.
+        Non-revoked, non-expired, and (when `exclude_bootstrap`)
+        created_via not bootstrap — NULL-TOLERANT so a legacy row with no
+        created_via still COUNTS. Mirrors
+        `quota._count_resource("api_keys")`.
+
+        ⛔ #4550: this is the ONLY place the predicate is expressed. The
+        `recover_team_key` emulation used to re-derive it inline and dropped
+        the expiry arm, so the fake faithfully reproduced the RPC's own
+        divergence — a second copy of a predicate is how one copy drifts.
         """
         from datetime import UTC, datetime
         now_dt = _as_dt(now) or datetime.now(UTC)
-        n = 0
+        rows: list[dict] = []
         for k in self.tables.get("api_keys", []):
             if k.get("org_id") != org_id or k.get("revoked_at") is not None:
                 continue
@@ -441,8 +448,19 @@ class FakeControlPlane:
                 continue
             if exclude_bootstrap and k.get("created_via") == "bootstrap":
                 continue
-            n += 1
-        return n
+            rows.append(k)
+        return rows
+
+    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
+        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+
+        Mirrors `quota._count_resource("api_keys")` / the migration's
+        `public.api_key_slot_count`: non-revoked, non-expired, and (when
+        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
+        legacy row with no created_via still COUNTS.
+        """
+        return len(self._slot_rows(org_id, now,
+                                   exclude_bootstrap=exclude_bootstrap))
 
     def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
@@ -1200,10 +1218,12 @@ class FakeControlPlane:
                     # revoke a live key. (Count-before-insert with >= cap is
                     # outcome-equivalent to the SQL's count-after-insert with
                     # > cap.)
-                    active = [k for k in key_rows
-                              if k.get("org_id") == tid
-                              and k.get("revoked_at") is None
-                              and k.get("created_via") != "bootstrap"]
+                    # #4550: the cap pool is the ONE predicate — `_slot_rows`
+                    # (non-revoked, non-expired, non-bootstrap), exactly what
+                    # the RPC's `api_key_slot_count` count and victim scan now
+                    # share. Re-deriving the predicate inline here is what let
+                    # the expiry arm go missing on this lane.
+                    active = self._slot_rows(tid, now_iso)
                     if len(active) >= cap:
                         # #1872: the victim is the LEAST-RECENTLY-USED key
                         # (never-used first), mirroring recover_team_key's

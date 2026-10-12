@@ -1122,8 +1122,10 @@ class TestPerPackLoadIsolation:
         assert registry.register_kinds()["registered"] == 4  # issue, code, debtItem, architectureDoc
         assert registry.expand_kind("dev:issue") == ["dev:issue"]
 
-    def test_cross_pack_error_pack_dropped_from_compile(self):
-        """A pack with unresolved cross-pack refs is excluded too."""
+    def test_unresolved_cross_pack_ref_keeps_pack_loaded(self):
+        """#2781: a namespaced ref into an ABSENT pack no longer isolates the
+        referring pack — the namespace's absence is a missing peer, not a typo,
+        and one absent pack must not take its referrers down with it."""
         d = tempfile.mkdtemp(prefix="pack_v3_iso_x_")
         _write_pack(d, "good", V3_DEV)
         _write_pack(d, "broken", {
@@ -1139,12 +1141,13 @@ class TestPerPackLoadIsolation:
         })
         registry = PackRegistry(d)
         loaded = registry.load_all()
-        assert loaded == 1
-        assert "broken" in registry.errors
-        assert "broken" not in registry.packs
-        assert any("does not resolve" in e for e in registry.errors["broken"])
-        # Registry + compile still work for the healthy pack
-        assert len(registry.list_packs()) == 1
+        assert loaded == 2
+        assert not registry.errors, registry.errors
+        assert "broken" in registry.packs
+        assert any("ghost" in e and "not loaded" in e
+                   for e in registry.unresolved_refs["broken"])
+        # Registry + compile still work for both
+        assert len(registry.list_packs()) == 2
         assert "dev:issue" in registry._all_known_kinds()
 
 
@@ -1228,8 +1231,22 @@ def test_load_all_reentry_is_idempotent(tmp_path):
 
 
 def test_dangling_cross_pack_ref_after_drop(tmp_path):
-    """A pack referencing a dropped pack must also be excluded (fixpoint,
-    review P2)."""
+    """#2781 REPLACES the pre-#2781 cascade this test used to pin.
+
+    It asserted the opposite outcome on purpose: `badpack` (namespaced ref to
+    the absent `ghost`) was dropped, and `dependent` was then dropped too for
+    referencing the dropped pack — a fixpoint that turned ONE absent pack into
+    a catalog-wide outage. It is exactly the shape that made dropping `pm`
+    remove `product-strategy` and `dev` from the shipped catalog.
+
+    Post-#2781 both packs load: `ghost` is a missing peer, `badpack:gadget`
+    therefore resolves, and nothing is isolated. The fixpoint below is the
+    remaining half of the old property — a pack whose reference depends on a
+    pack that ACTUALLY failed schema validation is still re-evaluated against
+    the surviving set, and a BARE reference that then resolves nowhere is still
+    fatal (a bare name carries no namespace, so it cannot be distinguished
+    from a typo).
+    """
     from tortoise import pack_registry as pr
     reg = pr.PackRegistry(tmp_path)
     bad = tmp_path / "badpack"
@@ -1247,11 +1264,38 @@ def test_dangling_cross_pack_ref_after_drop(tmp_path):
         "    - predicate: contains\n      mechanism: IMPL\n      fromKind: dependent:widget\n"
         "      toKind: badpack:gadget\n")
     n = reg.load_all()
-    # badpack fails (ghost:thing unresolvable) and is dropped; dependent's
-    # reference to badpack:gadget is then dangling -> also excluded.
-    assert n == 0, f"expected no healthy packs (badpack dropped, dependent dangling), got {n}"
-    assert "dependent" not in reg.packs
-    assert "dependent" in reg.errors
+    assert n == 2, f"both packs must survive a missing peer, got {n}: {reg.errors}"
+    assert not reg.errors
+    assert "badpack" in reg.packs and "dependent" in reg.packs
+    assert any("ghost" in e for e in reg.unresolved_refs["badpack"])
+
+
+def test_dangling_bare_ref_after_a_schema_drop_is_still_fatal(tmp_path):
+    """The fixpoint keeps its remaining job (#2781): a pack that fails SCHEMA
+    validation is dropped, and a dependent's BARE reference to it is then
+    unresolvable with no declared dependency to explain it — a typo by the only
+    evidence available, so the dependent is isolated too."""
+    from tortoise import pack_registry as pr
+    reg = pr.PackRegistry(tmp_path)
+    bad = tmp_path / "badpack"
+    bad.mkdir()
+    (bad / "manifest.yaml").write_text(
+        "namespace: badpack\nname: badpack\nversion: 0.1.0\ntier: free\n"
+        "ontology:\n  extends: core\n  objectKinds: [gadget]\n  relations:\n"
+        "    - predicate: contains\n      mechanism: NOPE\n      fromKind: badpack:gadget\n"
+        "      toKind: badpack:gadget\n")
+    dependent = tmp_path / "dependent"
+    dependent.mkdir()
+    (dependent / "manifest.yaml").write_text(yaml.safe_dump({
+        "namespace": "dependent", "name": "dependent",
+        "version": "0.1.0", "tier": "free",
+        "ontology": {"extends": "core", "objectKinds": ["widget"],
+                     "kindDefs": {"widget": {"nearMisses": ["gadget"]}}},
+    }))
+    n = reg.load_all()
+    assert n == 0, reg.errors
+    assert "badpack" in reg.errors and "dependent" in reg.errors
+    assert any("does not resolve" in e for e in reg.errors["dependent"])
 
 
 # ── Ontology vocabulary alignment (#2727 object kinds, #2726 source kinds) ──

@@ -183,6 +183,116 @@ class TestValidateManifest:
         assert "nesting too deep" in r.errors[0]
 
 
+class TestCrossPackInstall2781:
+    """#2781 — hosted install must be able to validate a manifest that
+    references ANOTHER INSTALLED PACK, and must still refuse one that references
+    a pack the tenant does not have.
+
+    The temp registry the shared validator builds used to contain exactly one
+    manifest (the one being uploaded), so EVERY cross-pack reference failed
+    install — including references to the starter catalog and to the tenant's
+    own previously-uploaded packs. It is now seeded with the packs the tenant
+    can actually reference (starter catalog + the tenant's own manifests).
+    """
+
+    HR = """namespace: tenant-hr
+name: Tenant HR
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds:
+  - jobOpening
+"""
+
+    FUND_REFS_HR = """namespace: tenant-fund
+name: Tenant Fund
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds:
+  - tranche
+  relations:
+  - predicate: addresses
+    fromKind: tenant-fund:tranche
+    toKind: tenant-hr:jobOpening
+    mechanism: IMPL
+    semantics: addresses
+"""
+
+    def test_reference_to_a_starter_pack_resolves(self):
+        """All five starter packs are installed for every tenant, so a
+        reference into one must install."""
+        from tortoise.pack_manifest_store import validate_manifest
+        yaml_text = VALID_MANIFEST + """  relations:
+  - predicate: addresses
+    fromKind: tenant-ops:contract
+    toKind: dev:issue
+    mechanism: IMPL
+    semantics: addresses
+"""
+        r = validate_manifest(yaml_text)
+        assert r.ok, r.errors
+
+    def test_reference_to_an_uninstalled_pack_is_refused_naming_it(self):
+        """Fail-closed: a reference the tenant cannot satisfy is refused, and
+        the error names the pack that is missing."""
+        from tortoise.pack_manifest_store import validate_manifest
+        yaml_text = VALID_MANIFEST + """  relations:
+  - predicate: addresses
+    fromKind: tenant-ops:contract
+    toKind: ghost:thing
+    mechanism: IMPL
+    semantics: addresses
+"""
+        r = validate_manifest(yaml_text)
+        assert not r.ok
+        assert any("ghost" in e and "not loaded" in e for e in r.errors), r.errors
+
+    def test_reference_to_an_installed_tenant_pack_resolves(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(self.FUND_REFS_HR,
+                              installed_manifests={"tenant-hr": self.HR})
+        assert r.ok, r.errors
+
+    def test_reference_to_a_tenant_pack_that_is_NOT_installed_is_refused(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(self.FUND_REFS_HR)
+        assert not r.ok
+        assert any("tenant-hr" in e for e in r.errors), r.errors
+
+    def test_depends_on_a_starter_pack_resolves(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(VALID_MANIFEST + "depends_on:\n- pm\n")
+        assert r.ok, r.errors
+
+    def test_depends_on_an_uninstalled_pack_is_refused_naming_it(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(VALID_MANIFEST + "depends_on:\n- ghost\n")
+        assert not r.ok
+        assert any("'ghost'" in e for e in r.errors), r.errors
+
+    def test_upload_pair_second_pack_referencing_the_first_201(self, client):
+        """END-TO-END (indicator 4): install the HR pack, then install the fund
+        pack that references it. Pre-#2781 the second upload was a 422 no matter
+        what was already installed."""
+        r = client.post("/v1/packs/manifests", json={"manifest_yaml": self.HR})
+        assert r.status_code == 201, r.text
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": self.FUND_REFS_HR})
+        assert r.status_code == 201, r.text
+        assert r.json()["namespace"] == "tenant-fund"
+
+    def test_upload_referencing_an_uninstalled_pack_422(self, client_b):
+        """The same upload on a tenant that does NOT have the HR pack is a
+        fail-closed 422 naming it."""
+        r = client_b.post("/v1/packs/manifests",
+                          json={"manifest_yaml": self.FUND_REFS_HR})
+        assert r.status_code == 422, r.text
+        assert "tenant-hr" in str(r.json()["detail"])
+
+
 # ── API surface ─────────────────────────────────────────────────────────────
 
 class TestUploadEndpoint:
