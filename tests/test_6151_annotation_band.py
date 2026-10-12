@@ -266,7 +266,7 @@ def test_an_uninterpretable_dimension_is_neutral_and_never_raises():
     propagation run. Before #6151 these values were unpacked but unused, so a
     malformed one was inert — reactivating them must not turn it into a crash.
     """
-    for bad in ("oops", None, object(), float("nan")):
+    for bad in ("oops", None, object(), float("nan"), 10**400):
         got = annotation_factor(bad, 0.5, 0.5, 0.5)
         assert got == 1.0, (
             f"a dimension of {bad!r} produced {got}, not the neutral 1.0 — an "
@@ -342,5 +342,62 @@ def test_the_band_is_read_from_the_graph(monkeypatch):
             f"the reading measured on the live graph gives {live_like}, not "
             "1.741101 — the archived formula took 30.7% of this operator's weight"
         )
+    finally:
+        sdk.close()
+
+
+@pytest.mark.skipif(not _LIVE_OK, reason="Live FalkorDB (Docker) not available")
+def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
+    """A value the write path admits but the reader cannot parse must NOT raise.
+
+    The store does not validate these properties, and `compute_operator_weight`
+    runs on the hot path with no handler, so a single malformed row would abort
+    the ENTIRE propagation run. Both properties are exercised here because both
+    had the same hazard: the annotation dims (fixed in #6151 when they were
+    reactivated — they were inert before, so a bad value used to be a no-op) and
+    `mitigation_strength` (pre-existing; `projection/entities.py:82` documents it
+    in-tree).
+
+    The assertion is deliberately NOT "returns neutral": the point is that the
+    call COMPLETES and stays inside the documented weight bounds, whatever the
+    store holds.
+    """
+    from tortoise.sdk import TortoiseSDK as SDK
+    from tortoise.weights import compute_operator_weight
+
+    monkeypatch.setenv("TORTOISE_DB_URI", _LIVE_URI)
+    sdk = SDK(db_path=None, namespace=f"test_ann6151_bad_{uuid.uuid4().hex[:8]}")
+    try:
+        src = sdk.create_point("statement", "source", status="live", dedup=False)
+        tgt = sdk.create_point("statement", "claim", status="live", dedup=False)
+        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        proj = sdk._get_proj()
+
+        # 1. A non-numeric annotation dimension, written through the generic
+        #    entity surface exactly as an agent could.
+        sdk.update_point(op["id"], annotator_bias="oops")
+        got = compute_operator_weight(proj, op["id"])
+        assert 0.1 <= got <= 10.0, f"malformed annotation dim gave {got}, outside [0.1, 10.0]"
+        assert got == 1.0, (
+            f"a malformed annotation dimension gave {got}, not the neutral 1.0 — "
+            "an unreadable value is not a rating"
+        )
+
+        # 2. An out-of-range dimension that passed through the same surface.
+        sdk.update_point(op["id"], annotator_bias=3.0)
+        got = compute_operator_weight(proj, op["id"])
+        assert 0.5 <= got <= 2.0, (
+            f"an out-of-range dim gave {got}, escaping the documented annotation band"
+        )
+        sdk.update_point(op["id"], annotator_bias=0.5)
+
+        # 3. A non-numeric mitigation strength: the same hazard, on the other
+        #    mechanism, reached through the documented mitigate path.
+        mit = sdk.mitigate_operator(op["id"], "some reason", strength=0.25)
+        mit_id = mit.get("id") or mit.get("mitigation_id")
+        assert mit_id, f"mitigate_operator returned no id: {mit}"
+        sdk.update_point(mit_id, mitigation_strength="oops")
+        got = compute_operator_weight(proj, op["id"])
+        assert 0.1 <= got <= 10.0, f"malformed mitigation strength gave {got}"
     finally:
         sdk.close()

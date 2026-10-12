@@ -173,10 +173,17 @@ def _annotation_term(value, *, inverted: bool) -> float:
        dimension is neutral, and a stored value that is not a number is not a
        rating. (Before #6151 these values were unpacked but unused, so a
        malformed one was inert; reactivating them must not turn it into a
-       crash.)"""
+       crash.)
+
+    ``OverflowError`` is caught alongside ``TypeError``/``ValueError`` because a
+    Python int too large for a double (``10**400``) is admitted by the write-side
+    guard ``_annotator_value_ok`` and raises at the conversion rather than
+    returning a non-number; ``NaN`` is handled explicitly because it compares
+    unequal to itself and would otherwise propagate through the mean.
+    """
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return ANNOTATION_TERM_NEUTRAL
     if v != v:  # NaN compares unequal to itself
         return ANNOTATION_TERM_NEUTRAL
@@ -262,7 +269,18 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
         params={"id": op_id},
     ).result_set
     if mit_rows:
-        present = [float(r[0]) for r in mit_rows if r[0] is not None]
+        # A stored strength is not trusted either: the generic entity surface
+        # writes it unvalidated, and `float()` on a malformed value would raise
+        # HERE — the same hot-path hazard _annotation_term exists to close, and the
+        # one `projection/entities.py:82` already documents in-tree. An unreadable
+        # strength is indistinguishable from an UNSPECIFIED one, so it degrades to
+        # the documented mid-band default rather than dropping the mitigation.
+        present = []
+        for r in mit_rows:
+            try:
+                present.append(float(r[0]))
+            except (TypeError, ValueError, OverflowError):
+                continue
         # Legacy mitigation with NO strength property → the documented
         # mid-band default (see module docstring).
         w *= mitigation_dampening_factor(max(present) if present else None)

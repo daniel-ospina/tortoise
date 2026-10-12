@@ -27,6 +27,8 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
   - **Check 5 (`impl_instead_of_nand`) is a substring classifier** at HIGH severity: flags any IMPL edge whose target contains "not ", "fail", "never", etc. — including v3.5-legal operator-less edges; a false NAND fix changes belief propagation (NAND_BASE_WEIGHT=8.0).
 - **ONTOLOGY v3.5 §8 reification rule** ("an edge carries an operator iff it needs mitigation, or is Point↔Point support/contradict") **makes the issue's "annotate every operator" premise obsolete.** Annotation dims (bias/precision/consistency/directness) are **ARCHIVED in weights.py:58-61** (`annotation_factor = 1.0` — zero engine effect, only tests read `annotator_*`). The body stats (2,056 ops / 6 annotated / 0 mitigations) are stale AND measure the wrong quantity under v3.5.
   > **UPDATE 2026-10-11 (#6151):** the archive is REVERSED — the dims are an engine consumer again, as a symmetric bounded weight band (0.5–2.0, exactly neutral when unset), by the owner's explicit ruling. The reasoning above about *scope* still holds (grading every operator is not the goal); the claim of "zero engine effect" is now false, and `weights.py` no longer hardcodes `annotation_factor = 1.0`.
+  >
+  > This reversal makes the "ARCHIVED" assertions below stale at: **this bullet**, the Verifier B list (`:65`), **Phase 2** (`:104`), and **Clarification #2** (`:134`) and its boundary-table row (`:182`). The reversal *is* the resolution of Clarification #2 — the owner's ruling supplies the human sign-off that line required — so read `:104`/`:134`/`:182` as closed by this update, not as open plan. The "Out of scope" line (`:54`) named the reactivation as excluded from #348's own scope, which remains true as a statement about #348.
 - **No enforcement surface** warns writers per the reification rule. `how-to-use-tortoise` has annotation rules but no gate; the agent-infra skill-enforcer is a static tool-call interceptor with no graph read path.
 - **Remediation cycles ran blind/ad-hoc** (bp_approach_cycle1/3/4, cost_control_cycle1-4, bp_pros_cons_cycle5 against embedded tortoise.db — "Do not run against production Docker"); no verifiable live counts; `audit_graph*.py` in graph-scripts query the removed `context` field (#49) — dead.
 
@@ -103,6 +105,8 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
 
 **Phase 2 — Decision-critical operator annotation (re-based on v3.5 §8).** Annotation is an **auditability signal, not an engine lever** (annotation_factor stays archived — reactivation is a human decision, EP change, #903 coordination). Consumer: `tortoise_get_operator` display + context reconstruction surfaces `annotator_*` dims (sdk.py:5042 mitigation-display precedent). Scope = decision-critical pointKinds (initial inventory: the 6-context families bp_approach / cost_control / bp_pros_cons, re-derived as pointKinds — verify populated at Phase 0; add/remove process defined). Re-baseline annotation coverage % as count-based totals.
 
+> **UPDATE 2026-10-11 (#6151):** "not an engine lever" is no longer true — the dims are a bounded engine lever as of #6151, by owner ruling. This **supersedes both halves of Clarification #2 below** (the reactivation is done, and the engine change it required was signed off). The annotation-coverage re-baseline above is unaffected and still worth doing.
+
 **Phase 3 — Enforcement (warn-only, reification-rule-keyed).** No fail-closed gate.
 
 - **3a (in-repo, static):** how-to-use-tortoise + AGENTS.md annotation-specific guidance; audit-tool adoption path (skill references `tortoise_audit`, named run owner — the pull mechanism that "unshipped instrument" failure mode requires).
@@ -132,6 +136,8 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
 
 1. **REST surface** — the issue's Objective says "tortoise audit is a customer-facing product feature" but no `/v1/audit` route exists (hosted_api.py audit refs are auth logging only); hosted customers have no local FalkorDB for a CLI. Recommendation: add a read-only `GET /v1/audit` RestSpec day-one (~one registry entry, reuses the shared payload) OR documented deferral with owner/date (mirroring #334 risk-acceptance convention). Default if no answer: deferral with owner/date.
 2. **Annotation-factor reactivation** (weights.py ARCHIVED) — reactivate (engine change, makes annotation behaviorally real, #903 coordination) vs keep archived with annotation as auditability signal (plan default). Engine-semantics change → human sign-off required for reactivation.
+
+   > **RESOLVED 2026-10-11 (#6151)** — the owner chose REACTIVATE (option B: symmetric band 0.5–2.0, exactly-neutral default). The "human sign-off required" this line asks for was given. The "keep archived" plan default is no longer the plan.
 3. **#334 sequencing** — #348 audit-only phases proceed on embedded/bolt baselines regardless; only Phase 4 hard-gates on #334. Confirm the embedded-baseline qualifier is acceptable as the interim measurement authority.
 4. **Decision-critical pointKind inventory** — initial scope = bp_approach / cost_control / bp_pros_cons families re-derived as pointKinds; human confirmation of the set + add/remove process.
 
@@ -179,7 +185,7 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
 | MCP (`tool_registry.py` + `mcp_server.py`) | API | Phase 1 `tortoise_audit` tool (3-edit wiring: registry + handler + GROUP_BY_NAME) + tools/list + HTTP_ALLOWED test | ✅ |
 | Hosted API (`hosted_api.py` — no /v1/audit) | API | Clarification #1 (REST day-one or documented deferral with owner/date) | ⚠️ human decision |
 | SDK write paths (`annotate_operator`/`mitigate_operator` idempotency) | API | Already exist (MCP tools live); fix-strings reference `strength=` in-range | ✅ |
-| EP engine (`weights.py` archived annotation factor) | Engine | NO changes in #348; reactivation = human decision (Clarification #2); baseline/migration runs outside #903 quiescence | ✅ |
+| EP engine (`weights.py` archived annotation factor) | Engine | ~~NO changes in #348; reactivation = human decision (Clarification #2)~~ — **SUPERSEDED 2026-10-11 (#6151): the factor is reactivated as a bounded band (owner ruling, option B); Clarification #2 is closed by that ruling.** #348 itself still makes no EP change. | ✅ |
 | Skill-enforcer (agent-infra extension, static interceptor) | External | Phase 3a in-repo nudges + adoption path; 3b cross-repo graph-read capability (contingency-flagged) | ⚠️ cross-repo dep |
 | `how-to-use-tortoise` / AGENTS.md | Tooling | Phase 3a annotation-specific guidance + `tortoise_audit` adoption reference | ✅ |
 | JSONL event log | Data store | Phase 4 SDK-call equivalents + rebuild-durability statement (per #334 convention) | ✅ |

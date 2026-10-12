@@ -501,7 +501,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.annotate_operator",
         writes=True,
         description="Annotate an operator Point with structured epistemic dimensions "
-                    "(bias, precision, consistency, directness).",
+                    "(bias, precision, consistency, directness). These MODULATE the "
+                    "operator's EP weight in a symmetric bounded band: a well-rated "
+                    "connection counts for up to TWICE an unrated one, the worst-rated "
+                    "for half. Unset is exactly neutral (1.0) and is the default — rate "
+                    "only to state a deliberate judgement. bias is INVERTED (higher "
+                    "bias = LESS weight). A rating does not require a source; use NAND "
+                    "to say a claim is false, and these to grade how much a connection "
+                    "contributes.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="annotate_operator",
@@ -1094,8 +1101,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Consolidated operator write action — action=mitigate|annotate. "
                     "mitigate: reason + strength (0-1) — creates/updates the mitigation "
-                    "Point (idempotent). annotate: bias/precision/consistency/directness "
-                    "(0-1).",
+                    "Point (idempotent); it DAMPS the connection, at most halving it. "
+                    "annotate: bias/precision/consistency/directness (0-1) — these "
+                    "MODULATE the connection's EP weight in a symmetric bounded band "
+                    "(half at worst, double at best); unset is exactly neutral and is "
+                    "the default, and bias is INVERTED (higher bias = LESS weight). "
+                    "A rating does not require a source. Use NAND to say a claim is "
+                    "false; use these to grade how much a connection contributes.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to sdk.mitigate_operator / sdk.annotate_operator; #3904)
