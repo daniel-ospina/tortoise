@@ -4875,7 +4875,7 @@ class TestQuotaFailClosed:
 class TestEventReplay:
     """GET /v1/events — tenant event/audit replay surface (#432).
 
-    The active endpoint (line 1099) delegates to sdk.events_poll() which
+    The active endpoint (line 1099) delegates to sdk.poll_events() which
     returns :GraphEvent nodes from the per-team graph namespace. Event
     format: {"events": [...], "next_cursor": "..."} where each event
     has seq, ts, type, event_id, payload.
@@ -5074,7 +5074,7 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 7
 
     def test_events_limit_default(self, client):
-        """Default limit is 100 (#432 events_poll)."""
+        """Default limit is 100 (#432 poll_events)."""
         for i in range(5):
             r = client.post("/v1/points", json={
                 "content": f"Point {i}",
@@ -5088,7 +5088,7 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 5
 
     def test_events_limit_capped_at_1000(self, client):
-        """Limit is capped at 1000 (#432 events_poll)."""
+        """Limit is capped at 1000 (#432 poll_events)."""
         r = client.get("/v1/events?limit=1000")
         assert r.status_code == 200, f"expected 200, got {r.status_code}"
 

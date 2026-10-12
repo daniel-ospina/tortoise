@@ -235,7 +235,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 | `tortoise_graph_set_recording` | Set or clear a graph's session-recording override (#2302) — the MCP twin of PATCH /v1/graphs/{graph_id} (recording), sharing the same hosted_api core so the surfaces never drift… | handler-served | agents, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_list_graphs` | List all graph names in the database. Useful for namespace discovery. | list_graphs | agents, tooling, docs | **keep** | in use — called by agents |
 | `tortoise_list_namespaces` | List installed pack namespaces. | list_namespaces | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
-| `tortoise_events_poll` | Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types: 11 registered claim types (PointAdded, OperatorAdded, PointRetracted,… | events_poll | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_events_poll` | Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types: 11 registered claim types (PointAdded, OperatorAdded, PointRetracted,… | poll_events | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_session_context` | Return 'what happened last session' — diary entries, recent Points, Events, confidence changes. | session_context | agents, tooling, docs | **keep** | in use — called by agents |
 
 ### admin — 4
@@ -368,7 +368,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.diary_write` | reached by 1 registered tool(s): tortoise_diary_write | tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.dream` | reached by 1 registered tool(s): tortoise_dream | eval-harness, tooling, skill-docs, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.dream_health_check` | reached by 1 registered tool(s): tortoise_dream_health | tooling, docs | **keep** | reached by 1 registered tool(s) |
-| `TortoiseSDK.events_poll` | reached by 1 registered tool(s): tortoise_events_poll | tooling, docs | **keep** | reached by 1 registered tool(s) |
+| `TortoiseSDK.poll_events` | reached by 1 registered tool(s): tortoise_events_poll | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.expand_relationships` | reached by 1 registered tool(s): tortoise_expand_relationships | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.file_decision` | reached by 1 registered tool(s): tortoise_file_decision | tooling, docs | **keep** | reached by 1 registered tool(s) |
 | `TortoiseSDK.file_human_approval` | reached by 1 registered tool(s): tortoise_file_human_approval | tooling, docs | **keep** | reached by 1 registered tool(s) |

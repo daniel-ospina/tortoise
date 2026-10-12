@@ -170,7 +170,11 @@ the token regardless of which subdomain presented it.
   The consent page's cookie therefore still exists in a consent-page visitor's browser, and the
   consent page itself still reads it as its credential (above). Every OTHER Tortoise surface has
   stopped accepting it. The remaining work is to migrate that page off it — **#3524**
-  (`SCOPE.md` §4 W3), deferred by `SCOPE.md` §7's ordering guard.
+  (`SCOPE.md` §4 W3), deferred by `SCOPE.md` §7's ordering guard. **The replacement is specified in
+  `docs/engineering/auth/consent-identity-bridge.md`** (child of #3501, sibling of #3522's
+  `d1-session-store.md` contract): the signed consent token's `bind` set / single-use `jti` / TTL, the four
+  session-flow properties with their CONFIRMED anchors, and the verifications for #3524's tasks 2/4/5. The
+  contract is specified; the bridge itself is not yet built, so this residual is still OPEN.
 
 ### 2.2 The auth surfaces
 
@@ -293,7 +297,8 @@ a database outage to the user as "you are signed out".
    holder has visited the consent page, XSS on ANY `premiselabs.co` subdomain
    can still READ a real Supabase session out of that cookie, and the consent
    page will still authenticate with it. Closing it fully needs the ISSUE side
-   stopped by migrating that page (**#3524**). Note this is exactly
+   stopped by migrating that page (**#3524**), whose replacement contract is
+   `docs/engineering/auth/consent-identity-bridge.md`. Note this is exactly
    the exposure §2.1's `OVERRIDES` ruling exists to prevent, surviving on the
    one surface the ruling covers that is not yet fixed.
 2. **The dashboard's post-mount `getSession()` can still refresh the token

@@ -11006,6 +11006,93 @@ class FalkorProjection(
                 "onboarding_missing_total": onboarding_missing_total,
                 "onboarding_state_unknown": onboarding_unknown}
 
+    def rebuild_from_record(self, view, *, confirm_destructive: bool = False,
+                            declare: bool = True, scope: str = "",
+                            limit: int | None = None) -> dict:
+        """The record-sourced sibling of :meth:`rebuild_all` (#7971).
+
+        ``rebuild_all`` rebuilds the cache from **the journal** (a ``log_dir``
+        of JSONL files). This rebuilds it from **the record** — Postgres's own
+        layer tables — which is what ``STORAGE-ARCHITECTURE.md`` §2.0 means by
+        *"data goes to postgres and it's loaded to hot (falkor)"*. The
+        machinery is shared (the destructive-token gate, the disposability
+        guard, the wipe, the index creation); what changes is the **SOURCE**.
+
+        Three properties, each enforced rather than promised:
+
+        * **Refuse before touching the graph.** The whole plan is built from
+          the record first (``cache_projection.record_plan``), so a record row
+          the projection cannot place raises BEFORE the wipe — a half-applied
+          projection is not reachable.
+        * **One-way.** Nothing here reads the cache to decide what to project
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for five
+          graph-only classes; this path deliberately does not — see
+          ``tortoise/cache_projection.py``).
+        * **The declaration follows the writes.** ``coverage`` is `complete`
+          **iff** every record key was materialised; ``limit`` bounds how many
+          nodes are written, and a bounded run therefore declares `partial`,
+          enumerating what it wrote. That is the seam through which the
+          completeness marker (#7952) can FIRE — it is not an eviction policy
+          (§2.0 holds the FalkorDB limit high; the trigger for partiality is
+          still §17.3's).
+
+        ``limit`` is a bound and nothing more: nodes are taken in a
+        deterministic key order, and a relation whose endpoint falls outside
+        the bound is a no-op (the same verdict the record projection's own
+        endpoint resolution gives an absent endpoint).
+        """
+        from tortoise.cache_projection import (
+            declaration_for,
+            project_records,
+            record_plan,
+            write_declaration,
+        )
+
+        nodes = tuple(view.nodes)
+        if limit is not None:
+            if limit < 0:
+                raise ValueError(f"limit must be >= 0, got {limit}")
+            nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
+            kept = {(n.label, n.key) for n in nodes}
+            relations = tuple(
+                r for r in view.relations
+                if (r.src_label, r.src_key) in kept
+                and (r.tgt_label, r.tgt_key) in kept)
+        else:
+            relations = tuple(view.relations)
+
+        plan = record_plan(nodes, relations)  # raises BEFORE any wipe
+
+        self._assert_destructive_confirmed(confirm_destructive,
+                                          "rebuild_from_record")
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild_from_record")
+        self._ensure_indexes()
+        statements = project_records(self.g, plan)
+
+        declaration = None
+        if declare:
+            materialized = plan.node_keys()
+            declaration = declaration_for(
+                view.record_keys,
+                [(label, key) for label, key in materialized],
+                scope=scope,
+            )
+            write_declaration(self.g, declaration)
+
+        return {
+            "nodes_written": len(nodes),
+            "relations_written": len(relations),
+            "statements": statements,
+            "record_nodes": len(view.nodes),
+            "record_relations": len(view.relations),
+            "coverage": declaration.coverage if declaration else None,
+            "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
+            "source": "record",
+        }
+
     def query(self, cypher: str, **params):
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
         # NO bypass attribute (#2944 removed `_skip_guard`): this path is

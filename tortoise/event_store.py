@@ -44,7 +44,7 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #   arithmetic, so a counter at INT64_MAX WRAPS to INT64_MIN on the next bump —
 #   there is no saturating step (reproduced on FalkorDB 4.20.4).
 #
-# ``first_seq`` is NOT bumped and is compared app-side in `events_poll` (never
+# ``first_seq`` is NOT bumped and is compared app-side in `poll_events` (never
 # through the index), so it may legitimately sit ABOVE ``MAX_SEQ`` — e.g.
 # ``MAX_SEQ + 1``, the floor of a log whose last write was ``MAX_SEQ`` — and is
 # bounded only by ``MAX_INT64``.
@@ -111,7 +111,7 @@ def capture_watermark(proj) -> dict | None:
     emitted an event must come back with no counter, so the next
     ``next_seq`` creates it at 1 exactly as it always did. Inventing a
     counter here would make "never emitted" indistinguishable from "emitted
-    an event with seq 0", and ``events_poll``'s ``after_seq == 0`` sentinel
+    an event with seq 0", and ``poll_events``'s ``after_seq == 0`` sentinel
     already owns the latter meaning.
 
     ``last_seq`` is the part of the watermark that has NO derivable
@@ -164,7 +164,7 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     contract (every cursor below the next write is expired). After a rebuild the
     ``:GraphEvent`` rows are NOT replayed today (#4664), so this is normally
     ``last_seq + 1``: the truthful statement that the stream was truncated,
-    which lets ``events_poll`` answer 410 instead of silently returning ``[]``
+    which lets ``poll_events`` answer 410 instead of silently returning ``[]``
     forever to a subscriber parked above the fresh counter. Note that
     ``first_seq`` is written only when it would be RAISED — i.e. when this
     write's floor is above the one already stored. It is not lowered, because a
@@ -422,7 +422,7 @@ def _refresh_first_seq(proj) -> None:
     """Update the GraphEventMeta first_seq watermark after a purge.
 
     first_seq = min surviving seq, or last_seq + 1 when the graph is empty
-    (every cursor below the next write is then expired). Lets events_poll
+    (every cursor below the next write is then expired). Lets poll_events
     return 410 even when the graph has been fully purged.
     """
     try:  # noqa: SIM105

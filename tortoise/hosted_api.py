@@ -8488,7 +8488,7 @@ async def events_poll(
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
         result = await asyncio.to_thread(
-            sdk.events_poll, after=after, types=type_list or None, limit=limit)
+            sdk.poll_events, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:

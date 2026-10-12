@@ -710,7 +710,7 @@ class TestUnshippedCapabilityClaims:
             "the 04 · Automate paragraph changed. Before updating this pin, "
             "answer: does the new copy state anything in the present tense that "
             "the product does not do? The shipped surface is the PULL path "
-            "(GET /v1/events, sdk.events_poll, tortoise_events_poll); push "
+            "(GET /v1/events, sdk.poll_events, tortoise_events_poll); push "
             "delivery is #3909 and is not shipped."
         )
 

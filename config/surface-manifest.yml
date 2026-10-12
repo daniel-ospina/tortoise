@@ -1868,12 +1868,12 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_events_poll
-  served_from: tortoise/mcp_server.py:f12291c2c470e88c
+  served_from: tortoise/mcp_server.py:7cfbbd4f9c98dc75
   served_attributes: 324350c5a3a0d9bf
   family: sessions
   family_rank: 4
   served: http
-  sdk_method: events_poll
+  sdk_method: poll_events
   group_source: mapped
   keyword: trace
   keyword_rank: 7
@@ -1882,7 +1882,7 @@ rows:
   job: 'Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types:
     11 registered claim types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated, PointPromoted,
     OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated).'
-  dependency: declares TortoiseSDK.events_poll (resolves)
+  dependency: declares TortoiseSDK.poll_events (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -3503,28 +3503,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:events_poll
-  method: events_poll
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.events_poll.
-  dependency: 'reached by 1 registered tool(s): tortoise_events_poll'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:expand_relationships
   method: expand_relationships
   family: null
@@ -4863,6 +4841,28 @@ rows:
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+- name: sdk:poll_events
+  method: poll_events
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.poll_events.
+  dependency: 'reached by 1 registered tool(s): tortoise_events_poll'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
   recommended_family: null
   proposed: false
   exemption: false
