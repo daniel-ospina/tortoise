@@ -2233,22 +2233,12 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
 
 def tortoise_annotate_operator(id: str, bias: float, precision: float,
                                 consistency: float, directness: float) -> dict:
-    """Annotate an operator Point with structured epistemic dimensions (#6151).
+    """Annotate an operator Point with structured epistemic dimensions.
 
-    These modulate the operator's EP weight in a symmetric bounded band: a
-    well-rated connection counts for up to TWICE an unrated one, the worst-rated
-    for half. Unset is exactly neutral (1.0) and is the default — rate only to
-    state a deliberate judgement, never as a side effect of writing other props.
-
-    bias: 0-1 — hidden stake beyond stated position. INVERTED: higher bias means
-        LESS weight.
+    bias: 0-1 — hidden stake beyond stated position.
     precision: 0-1 — how narrow/well-defined the relevance claim is.
     consistency: 0-1 — stability across contexts.
     directness: 0-1 — how directly source bears on target.
-
-    Averaged, never multiplied, so rating one well cannot penalise the others.
-    Use these to grade how much a connection contributes; use NAND to say a claim
-    is false.
     """
     return _safe(_get_org_sdk().annotate_operator, id, bias, precision, consistency, directness)
 

@@ -180,10 +180,20 @@ def _annotation_term(value, *, inverted: bool) -> float:
     guard ``_annotator_value_ok`` and raises at the conversion rather than
     returning a non-number; ``NaN`` is handled explicitly because it compares
     unequal to itself and would otherwise propagate through the mean.
+
+    The except clause is ``Exception``, not a fixed tuple: ``float()`` can raise
+    anything a value's own ``__float__`` chooses, and this function's whole
+    contract is that the run survives an uninterpretable value. ``BaseException``
+    (``KeyboardInterrupt``, ``SystemExit``) is deliberately NOT caught — those are
+    control flow, not a malformed rating.
     """
     try:
         v = float(value)
-    except (TypeError, ValueError, OverflowError):
+    # A bare `except Exception` is the point, not laziness: `float()` can raise
+    # anything the value's own `__float__` chooses, and the contract is that the
+    # run survives it. `BaseException` is NOT caught — `KeyboardInterrupt` and
+    # `SystemExit` are control flow, not a malformed rating.
+    except Exception:
         return ANNOTATION_TERM_NEUTRAL
     if v != v:  # NaN compares unequal to itself
         return ANNOTATION_TERM_NEUTRAL
@@ -194,17 +204,20 @@ def _annotation_term(value, *, inverted: bool) -> float:
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:
     """Compute EP factor weight w in [0.1, 10.0] from graph structure."""
     g = proj.g
+    # The coalesce default is built FROM the constant, never typed as a literal:
+    # a literal here is a drift surface (it silently becomes a different default
+    # the moment ANNOTATION_TERM_NEUTRAL moves, and the test stubs that stood in
+    # for this query had hardcoded the old identity row exactly that way). An
+    # unrated operator and one rated at the midpoint must both score exactly 1.0,
+    # which is what the owner's ruling requires of the default.
+    _n = ANNOTATION_TERM_NEUTRAL
     rows = g.query(
         "MATCH (o:Point {id:$id}) "
         "RETURN o.op_type, "
-        # The coalesce value is the NEUTRAL term, not an identity for a formula
-        # with no neutral point (see ANNOTATION_TERM_NEUTRAL): "never rated" and
-        # "rated at the midpoint" both score exactly 1.0, which is what the
-        # owner's ruling requires of the default.
-        "coalesce(o.annotator_bias, 0.5) AS bias, "
-        "coalesce(o.annotator_precision, 0.5) AS precision, "
-        "coalesce(o.annotator_consistency, 0.5) AS consistency, "
-        "coalesce(o.annotator_directness, 0.5) AS directness",
+        f"coalesce(o.annotator_bias, {_n}) AS bias, "
+        f"coalesce(o.annotator_precision, {_n}) AS precision, "
+        f"coalesce(o.annotator_consistency, {_n}) AS consistency, "
+        f"coalesce(o.annotator_directness, {_n}) AS directness",
         params={"id": op_id},
     ).result_set
     if not rows:
@@ -279,7 +292,9 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
         for r in mit_rows:
             try:
                 present.append(float(r[0]))
-            except (TypeError, ValueError, OverflowError):
+            # Same contract as `_annotation_term`: a bare `except Exception`,
+            # because the conversion can raise anything and the run must survive.
+            except Exception:
                 continue
         # Legacy mitigation with NO strength property → the documented
         # mid-band default (see module docstring).

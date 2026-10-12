@@ -276,6 +276,36 @@ def test_an_uninterpretable_dimension_is_neutral_and_never_raises():
         assert got != ANNOTATION_FACTOR_MIN
 
 
+class _RaisesOnFloat:
+    """A value whose own conversion raises — `float()` is not limited to a tuple."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __float__(self):
+        raise self._exc
+
+
+def test_a_value_whose_own_conversion_raises_cannot_abort_the_run():
+    """`except Exception`, not a fixed tuple: the contract is "never abort the run".
+
+    `float(value)` can raise anything the value's own `__float__` chooses, so a
+    narrow tuple leaves a hole in a guard whose entire purpose is that one bad
+    row cannot kill the propagation loop (`ep.py` calls `compute_operator_weight`
+    with no handler). `BaseException` is deliberately NOT caught — control flow
+    must still interrupt the run.
+    """
+    for exc in (RecursionError("deep"), MemoryError("big"), RuntimeError("odd"), Exception("plain")):
+        got = annotation_factor(_RaisesOnFloat(exc), 0.5, 0.5, 0.5)
+        assert got == 1.0, f"{type(exc).__name__} from __float__ gave {got}, not neutral 1.0"
+
+    # Control flow is NOT swallowed (this is why the catch is Exception, not BaseException).
+    with pytest.raises(KeyboardInterrupt):
+        annotation_factor(_RaisesOnFloat(KeyboardInterrupt()), 0.5, 0.5, 0.5)
+    with pytest.raises(SystemExit):
+        annotation_factor(_RaisesOnFloat(SystemExit()), 0.5, 0.5, 0.5)
+
+
 def test_an_out_of_range_dimension_cannot_escape_the_band():
     """The documented band must HOLD for stored values outside [0, 1].
 
