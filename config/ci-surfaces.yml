@@ -869,6 +869,15 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4125: the migration of pre-#4005 basename-url session Sources onto the
+  # canonical `session:<id>` identity. Registered here because the new module
+  # (`tortoise/session_source_migration.py`) matches no named surface and so
+  # falls back to `core`: without this entry a change to the migration alone
+  # would select the module's surface with the guard absent. The file also pins
+  # the four whole-journal replay hooks (`tortoise/projection/__init__.py`,
+  # `tortoise/consistency.py`, `tortoise/backup.py`), which select the full
+  # matrix on their own — the registration is what covers the module-only diff.
+  - test_4125_legacy_session_source_migration.py
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
@@ -4166,6 +4175,13 @@ durations:
   test_3982_date_only_utc.py: 0.1
   test_4041_breadcrumb_reader.py: 2.4
   test_4199_dense_scope_coverage.py: 0.6
+  # #4125: 20 tests, embedded lane. Locally measured 156s this turn, of which
+  # ONE test carries ~134s: the first `create_point` in the file pays the
+  # process-wide embedder warmup (the same shape as
+  # `test_source_currency_5581.py`'s 133s note). The file's own work is ~20s —
+  # the number below is the measured FILE duration so the shard packer sees the
+  # real wall. Refresh from the first post-merge run that includes it.
+  test_4125_legacy_session_source_migration.py: 156.0
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
