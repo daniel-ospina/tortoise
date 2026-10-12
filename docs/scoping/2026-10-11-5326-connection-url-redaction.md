@@ -20,7 +20,7 @@ mechanism) · **Filed from:** the #4911 lane (cycle-4 security review), labelled
 
 ### The framing the issue hands over, and the one thing it gets wrong
 
-#5326 defines the problem as "no anchor is both precise and complete", and it is
+\#5326 defines the problem as "no anchor is both precise and complete", and it is
 right about the mechanism: a connection URL has **no vendor prefix**, so the
 module's `anchored shapes only` rule cannot pin it. It then names two candidate
 anchors — `(a)` a loose structural prefilter plus verification, `(b)` a closed
