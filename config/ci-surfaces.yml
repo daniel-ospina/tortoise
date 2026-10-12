@@ -970,6 +970,16 @@ surfaces:
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
   - test_record_schema_placement.py
+  # #7969 (epic #7879, Interface A): the record projection — journal →
+  # Postgres, total + idempotent. Registered against `core` because BOTH
+  # inputs it reads select `core`: `tortoise/record_projection.py` matches no
+  # named SOURCE_PATTERN (the `core` fallback), and the four record migrations
+  # under `supabase/migrations/` do too. So a projection-only or
+  # migration-only change selects `core` and this guard runs with it. Its
+  # DB-level half is NOT here — it is the PGlite replay in
+  # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
+  # lives in the harness that has a Postgres, this file stays hermetic).
+  - test_record_projection.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the
