@@ -59,6 +59,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable  # noqa: UP035
 
+from tortoise.security import redact_for_publication
+
 logger = logging.getLogger(__name__)
 
 DEDUP_PREFIX = "ops/alerts/"
@@ -352,20 +354,33 @@ class AlertStore:
     def _title(self, kind: str, org_id: str, detail: dict) -> str:
         org = f" — {org_id}" if org_id else ""
         age = detail.get("age") or detail.get("age_minutes") or ""
-        return f"[DR] {kind}{org}" + (f" — last backup {age}" if age else "")
+        return redact_for_publication(
+            f"[DR] {kind}{org}" + (f" — last backup {age}" if age else ""))
 
     def _body(self, kind: str, org_id: str, detail: dict) -> str:
+        # #3293: this body is filed as a PUBLIC GitHub issue, so the app-
+        # controlled half of it — the ``detail`` dict, which callers fill from
+        # exception text (``{"error": str(e)}``) — is scrubbed AT THIS BOUNDARY
+        # rather than trusted to every caller. The bash DR drivers
+        # (``.github/scripts/registry-cron.sh``) redact for the same reason; the
+        # placement is deliberate ("the last point before publication, so a
+        # future caller cannot" publish unredacted text). The static template
+        # around the dump is not scrubbed — it is ours, not a caller's.
+        safe_detail = redact_for_publication(json.dumps(detail, indent=2))
         return (
             f"**Incident kind:** {kind}\n"
-            f"**Team:** {org_id or '(platform)'}\n"
-            f"**Detail:** ```{json.dumps(detail, indent=2)}```\n\n"
+            f"**Team:** {redact_for_publication(org_id) or '(platform)'}\n"
+            f"**Detail:** ```{safe_detail}```\n\n"
             f"Runbook: `docs/ops/registry-backup-dr.md` — triage table by kind."
         )
 
     def _telegram_text(self, kind: str, org_id: str, detail: dict, issue_number: int | None) -> str:
         org = f" ({org_id})" if org_id else ""
         issue = f" — issue #{issue_number}" if issue_number else ""
-        return f"🚨 DR alert: {kind}{org}{issue}"
+        # #3293: same boundary rule as ``_body``. No detail is carried TODAY —
+        # the scrub is here so a future caller that adds one cannot publish it
+        # unredacted through this sink.
+        return redact_for_publication(f"🚨 DR alert: {kind}{org}{issue}")
 
     # ── incident lifecycle ──────────────────────────────────────────────────
     def suppression_active(self, kind: str) -> bool:

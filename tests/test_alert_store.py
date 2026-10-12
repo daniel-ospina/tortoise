@@ -14,6 +14,7 @@ from tortoise.hosted_backup import MemoryStorage
 class _FakeChannels:
     def __init__(self):
         self.issues: dict[int, str] = {}      # number -> title
+        self.bodies: dict[int, str] = {}      # number -> filed body (#3293)
         self.closed: list[int] = []
         self.comments: list[tuple[int, str]] = []
         self.telegram: list[str] = []
@@ -31,6 +32,7 @@ class _FakeChannels:
         n = self._next
         self._next += 1
         self.issues[n] = title
+        self.bodies[n] = body
         return n
 
     def close_issue(self, number, comment=None):
@@ -1538,3 +1540,78 @@ def test_a_failed_close_does_not_report_success_or_delete_the_sentinel():
     sentinel = json.loads(storage.download("ops/alerts/STALE/team_a.json"))
     assert sentinel["issue_number"] == number
     assert sentinel["close_failures"] == 1, "the failure is recorded for the backoff"
+
+
+# ── #3293: the publication boundary ────────────────────────────────────────
+
+#: Assembled at RUNTIME — a literal token in the source trips GitHub push
+#: protection while the value under test stays byte-identical.
+_TOKEN_3293 = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+def test_filed_body_never_carries_a_credential_shaped_detail():
+    """#3293: the issue body is PUBLIC, so a caller's detail is scrubbed AT THE
+    BOUNDARY — not trusted to have been scrubbed by the caller.
+
+    Pre-fix, ``_body`` ``json.dumps``'ed the detail straight into the body, so
+    ``open_incident(kind, org, {"error": str(e)})`` (the scheduled-drill shape)
+    published whatever the exception happened to quote. RED pre-fix: the token
+    appears verbatim in ``ch.bodies``.
+    """
+    ch = _FakeChannels()
+    store = _store(ch)
+    assert store.open_incident("RESTORE_DRILL_FAILED", "global", {
+        "error_type": "RuntimeError",
+        "error": ("upload failed: https://acct.r2.cloudflarestorage.com/b/k"
+                  f"?X-Amz-Signature=deadbeefdeadbeef1234; key={_TOKEN_3293}"),
+        "source": "drill-scheduled",
+        "backup_key": "backups/team_x/default/2026-10-05T12-00-00Z/dump.enc",
+    }) is True
+    body = next(iter(ch.bodies.values()))
+    assert _TOKEN_3293 not in body
+    assert "deadbeefdeadbeef1234" not in body
+    assert "[REDACTED:github_token]" in body
+    # The scrub is a scrub, not a blanking: the triage fields survive, and the
+    # static template is untouched (only the detail half is app-controlled).
+    assert "backup_key" in body
+    assert "2026-10-05T12-00-00Z/dump.enc" in body
+    assert "drill-scheduled" in body
+    assert "**Incident kind:** RESTORE_DRILL_FAILED" in body
+    assert "docs/ops/registry-backup-dr.md" in body
+
+
+def test_title_and_telegram_text_pass_the_publication_boundary():
+    """#3293: the SAME boundary rule as the issue body, on the other two sinks.
+
+    A subject (`org_id`) is app-controlled and lands in BOTH the public issue
+    TITLE and the Telegram push, so the scrub is pinned on each. No *detail* is
+    carried by the Telegram text today — the sink is scrubbed so a future caller
+    cannot add one unredacted.
+    """
+    ch = _FakeChannels()
+    store = _store(ch)
+    assert store._title("STALE", _TOKEN_3293, {}) == \
+        "[DR] STALE — [REDACTED:github_token]"
+    assert store._telegram_text("STALE", _TOKEN_3293, {}, 7) == \
+        "🚨 DR alert: STALE ([REDACTED:github_token]) — issue #7"
+    # …and an ordinary alert is byte-identical (the scrub is not a rewriter).
+    assert store._title("STALE", "team_a", {}) == "[DR] STALE — team_a"
+    assert store._telegram_text("STALE", "team_a", {}, 1) == \
+        "🚨 DR alert: STALE (team_a) — issue #1"
+
+
+def test_body_scrub_does_not_rewrite_the_stored_sentinel_detail():
+    """The scrub is applied at SINK time, not to the dedup object.
+
+    ``state["detail"]`` is the durable R2 record the next poll re-reads; the
+    boundary must not mutate what it stores, only what it PUBLISHES (a
+    redaction that leaked back into the sentinel would silently corrupt the
+    incident's own evidence).
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    detail = {"error": f"boom {_TOKEN_3293}"}
+    store.open_incident("STALE", "team_a", detail)
+    sentinel = json.loads(storage.download("ops/alerts/STALE/team_a.json"))
+    assert sentinel["detail"] == detail

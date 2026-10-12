@@ -169,7 +169,10 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
-from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
+    redact_error,
+    redact_for_publication,
+)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
@@ -32944,7 +32947,15 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: an exception MESSAGE is app-controlled text and this
+                # detail is published verbatim into a PUBLIC issue body
+                # (``alert_store._body``). ``error_type`` is the bounded half
+                # the other operator incidents already carry
+                # (``operator_alert.alert_abuse_fault``); the message goes
+                # through the publication scrubber before it joins it.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
@@ -32953,7 +32964,12 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: see the ValueError path above — same public sink, same
+                # scrub. This is the path a STORAGE error takes, i.e. the one
+                # most likely to echo a signed URL or endpoint in its message.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
