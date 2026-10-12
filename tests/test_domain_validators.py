@@ -530,6 +530,45 @@ class TestGraphValidators:
         assert any(v["rule"] == "dangling_workflow_ref"
                    for v in res["violations"]), res["violations"]
 
+    def test_dangling_workflow_ref_query_anchors_wf_id_in_the_pattern(self):
+        """#7848 regression guard for a MEASURED failure, not a style rule.
+
+        Widening the rule to Object originally wrote the workflow lookup as a
+        bare ``OPTIONAL MATCH (w) WHERE … w.wf_id = req.enabled_workflow``.
+        FalkorDB cannot anchor that, so the leg degraded to ``|req| x |V|``:
+        on a ~3 000-node graph the shipped query exceeded the default 1000 ms
+        ``GRAPH.CONFIG TIMEOUT``, and ``run_domain_graph_validators`` SWALLOWS
+        the exception — 300 genuine dangling requirements reported as none.
+        The tiny fixtures in this file stay under the budget, so only a
+        structural assertion (the query-plan anchor, in text) can see it.
+        """
+        from tortoise.domain_validators import _dangling_workflow_ref_query
+        q = " ".join(_dangling_workflow_ref_query().split())
+        # one anchored leg per label, so the engine can seek on wf_id
+        assert ":Point {wf_id: req.enabled_workflow}" in q
+        assert ":Object {wf_id: req.enabled_workflow}" in q
+        # …and never the unanchorable bare node
+        assert "MATCH (w) WHERE" not in q
+
+    def test_wired_requirement_is_not_dangling(self, graph_sdk):
+        """The anchored two-leg lookup must not FALSE-POSITIVE: a requirement
+        whose ``enabled_workflow`` names an existing workflow is clean, whether
+        the workflow is stored as a Point (legacy) or an Object (the core
+        ``workflow`` kind), and the requirement itself is Point or Object."""
+        graph_sdk.create_point(
+            "workflow", "a real workflow", wf_id="WF-OK-405", status="live")
+        graph_sdk.create_point(
+            "dev:requirement", "wired point requirement",
+            enabled_workflow="WF-OK-405", status="live")
+        graph_sdk.create_entity(
+            "object", "wired object requirement",
+            objectKind="product-strategy:requirement",
+            enabled_workflow="WF-OK-405",
+        )
+        res = graph_sdk.validate_domain("product-strategy")
+        assert not any(v["rule"] == "dangling_workflow_ref"
+                       for v in res["violations"]), res["violations"]
+
     def test_wired_use_case_not_orphan(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)
         res = graph_sdk.validate_domain("product-strategy")
