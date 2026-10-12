@@ -32899,9 +32899,15 @@ async def backups_drill(request: Request):
             org_id=org_id, backup_key=backup_key,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
 
 
 @app.post("/v1/internal/backups/drill-scheduled")
@@ -32959,7 +32965,15 @@ async def backups_drill_scheduled(request: Request):
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        # #3293 review: the response body is echoed verbatim into a PUBLIC
+        # Actions log by the drill drivers (``registry-drill*.sh``), so the
+        # raw exception is a publication sink too — scrub it here, not only in
+        # the incident detail above. Internal-key auth gates WHO may call, not
+        # where the caller writes the response.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
         try:
             await asyncio.to_thread(
@@ -32973,7 +32987,12 @@ async def backups_drill_scheduled(request: Request):
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        # #3293 review: see the ValueError path above — same public-Actions-log
+        # sink, same boundary scrub.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).

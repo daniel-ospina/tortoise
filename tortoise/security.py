@@ -301,6 +301,13 @@ _REDACT_PATTERNS = [
     (re.compile(r"/[A-Za-z0-9_./-]+/(?:tortoise|data|tmp)[A-Za-z0-9_./-]*"), "/***"),
 ]
 
+#: The credential-bearing half of ``_REDACT_PATTERNS`` — the URI-userinfo rule.
+#: The other entries intern filesystem PATHS, which a public DR body must NOT
+#: do: ``backup_key`` is itself a path and triage depends on reading it in full
+#: (#3293 review). ``redact_for_publication(..., redact_paths=False)`` uses this
+#: subset so credential SHAPES are still scrubbed while the path is preserved.
+_REDACT_CREDENTIAL_PATTERNS = _REDACT_PATTERNS[:1]
+
 
 def _redact_message(e: BaseException) -> str:
     """Pattern-redacted ``str(e)``, WITHOUT the 200-char cap.
@@ -989,20 +996,22 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
 #     PARAMETER, which is exactly the shape a storage error echoes (a signed
 #     R2/S3 URL: ``?X-Amz-Signature=…``).
 #
-# The rule source is the two publication scrubbers that already ship — the bash
-# drivers ``.github/scripts/availability-watchdog.sh`` and
-# ``availability-liveness.sh``. Both carry the query-parameter rule, and both
-# apply it AT THE PUBLICATION BOUNDARY, "the last point before publication, so
-# a future caller cannot" publish unredacted text. ``_PUBLICATION_SHAPES`` below
-# MIRRORS their rules rather than re-inventing them.
+# The query-parameter rule mirrors the two publication scrubbers that already
+# ship — the bash drivers ``.github/scripts/availability-watchdog.sh`` and
+# ``availability-liveness.sh``. Both carry that rule, and both apply it AT THE
+# PUBLICATION BOUNDARY, "the last point before publication, so a future caller
+# cannot" publish unredacted text. ``_PUBLICATION_SHAPES`` below MIRRORS their
+# query-parameter rule rather than re-inventing it.
 #
-# ⛔ DELIBERATELY NOT COPIED FROM THEM: the ``(KEY|TOKEN|SECRET|…)[=:] value``
-# context rule. A DR incident detail LEANS on ``backup_key`` (the RTO-breach
-# incident names the artifact to restore, and a triager reads it from the issue
-# body), so a key-NAME-anchored rule would redact the one field the incident
-# exists to carry. Shape-only is the trade this boundary makes, and it is why
-# the loose ``[A-Za-z0-9+/_.=-]{20,}`` catch-all those scripts end with is not
-# here either: it would destroy every backup key in every DR body.
+# ⛔ DELIBERATELY NOT COPIED — from ``.github/scripts/registry-cron.sh`` (its
+# ``redact()``), NOT from the availability drivers: that driver's
+# ``(KEY|TOKEN|SECRET|…)[=:] value`` context rule and the loose
+# ``[A-Za-z0-9+/_.=-]{20,}`` catch-all it ends with. A DR incident detail LEANS
+# on ``backup_key`` (the RTO-breach incident names the artifact to restore, and
+# a triager reads it from the issue body), so a key-NAME-anchored rule would
+# redact the one field the incident exists to carry, and the bare catch-all
+# would destroy every backup key in every DR body. Shape-only is the trade this
+# boundary makes.
 _PUBLICATION_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     # A credential in a QUERY PARAMETER — the signed-URL / presigned-request
     # shape (``X-Amz-*`` is the S3/R2 signing family) plus the generic
@@ -1014,7 +1023,7 @@ _PUBLICATION_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     # without it a SECOND pass matches the EMPTY string after ``=`` and appends a
     # second marker (``=<redacted><redacted>``) — the function's idempotence was
     # false and this is what makes it true (pinned by
-    # ``test_redact_for_publication_is_idempotent``).
+    # ``TestRedactForPublication::test_is_idempotent``).
     (re.compile(
         r"([?&](?:token|key|secret|sig|signature|api_key|apikey|access_token"
         r"|credential|password|passwd|x-amz-signature|x-amz-credential"
@@ -1028,7 +1037,7 @@ _PUBLICATION_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
-def redact_for_publication(text: str) -> str:
+def redact_for_publication(text: str, *, redact_paths: bool = True) -> str:
     """Scrub app-controlled text before it reaches a PUBLIC sink (#3293).
 
     Applied at the publication boundary (``alert_store``'s issue body / title /
@@ -1041,7 +1050,12 @@ def redact_for_publication(text: str) -> str:
          replaced WHOLE (mutating text first could split a token into a fragment
          that no longer matches).
       2. ``_REDACT_PATTERNS`` — internals out of a message: credential-bearing
-         URI userinfo (``scheme://user:pass@host``) and filesystem paths.
+         URI userinfo (``scheme://user:pass@host``) and filesystem paths. The
+         path rules are SKIPPED when ``redact_paths=False`` — a DR incident
+         ``detail`` carries ``backup_key``, which is itself a path
+         (``backups/<team>/data/…/dump.enc``) and must survive to triage, so
+         ``alert_store._body`` passes ``redact_paths=False``. Credential SHAPES
+         (vendor tokens, URI userinfo, query params) are scrubbed either way.
       3. ``_PUBLICATION_SHAPES`` — credential-bearing query parameters and the
          Telegram bot-token shape (see the note above for what is NOT included).
 
@@ -1061,7 +1075,8 @@ def redact_for_publication(text: str) -> str:
     if not text:
         return text
     out, _counts = redact_secrets(text)
-    for pattern, repl in _REDACT_PATTERNS:
+    for pattern, repl in (_REDACT_PATTERNS if redact_paths
+                          else _REDACT_CREDENTIAL_PATTERNS):
         out = pattern.sub(repl, out)
     for pattern, repl in _PUBLICATION_SHAPES:
         out = pattern.sub(repl, out)

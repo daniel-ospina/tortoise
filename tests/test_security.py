@@ -272,11 +272,28 @@ class TestRedactForPublication:
         ``backup_key`` is the field the RTO-breach incident names so a triager
         knows which artifact to restore. The bash publication scrubbers end with
         a bare ``[A-Za-z0-9+/_.=-]{20,}`` catch-all that WOULD destroy it; this
-        table deliberately omits that rule and the key-NAME-anchored rule.
+        table deliberately omits that rule and the key-NAME-anchored rule. The
+        error-message path rules in ``_REDACT_PATTERNS`` would ALSO rewrite a
+        ``/data/`` (or ``/tmp/``) segment to ``/***`` — which is why
+        ``alert_store._body`` scrubs its detail with ``redact_paths=False``.
+        This exercises that exact composition with a path the rules CAN hit,
+        rather than a ``default`` segment that dodges them (#3293 review).
         """
-        body = ('{\n  "backup_key": "backups/team_x/default/'
+        body = ('{\n  "backup_key": "backups/team_x/data/'
                 '2026-10-05T12-00-00Z/dump.enc",\n  "org_id": "team_x"\n}')
-        assert redact_for_publication(body) == body
+        assert redact_for_publication(body, redact_paths=False) == body
+
+    def test_redact_paths_default_still_interns_filesystem_paths(self):
+        """The flag is load-bearing, not decorative.
+
+        The DEFAULT (used by the drill call site, ``_title`` and
+        ``_telegram_text``) still interns a filesystem path, so
+        ``redact_paths=False`` at the issue-body boundary is a deliberate,
+        narrow opt-out for the ``backup_key`` field rather than a silent
+        weakening of the scrubber.
+        """
+        body = '{"backup_key": "backups/team_x/data/dump.enc"}'
+        assert redact_for_publication(body) == '{"backup_key": "backups/***"}'
 
     def test_is_idempotent(self):
         once = redact_for_publication(

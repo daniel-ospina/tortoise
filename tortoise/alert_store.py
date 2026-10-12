@@ -366,7 +366,14 @@ class AlertStore:
         # placement is deliberate ("the last point before publication, so a
         # future caller cannot" publish unredacted text). The static template
         # around the dump is not scrubbed — it is ours, not a caller's.
-        safe_detail = redact_for_publication(json.dumps(detail, indent=2))
+        #
+        # ``redact_paths=False``: the detail LEANS on ``backup_key``, which is a
+        # filesystem path (``backups/<team>/data/…/dump.enc``). The default
+        # boundary's path rules would rewrite ``/team/data/…`` to ``/***`` and
+        # destroy the one field triage needs (#3293 review). Credential SHAPES
+        # are still scrubbed; only path interning is skipped.
+        safe_detail = redact_for_publication(
+            json.dumps(detail, indent=2), redact_paths=False)
         return (
             f"**Incident kind:** {kind}\n"
             f"**Team:** {redact_for_publication(org_id) or '(platform)'}\n"
@@ -876,10 +883,18 @@ class AlertStore:
                     "before the #2844 alias fix; closing all",
                     kind, len(numbers), ", ".join(f"#{n}" for n in numbers),
                 )
+            # #3293: a FOURTH publication sink in the same class as the alert
+            # push — a Telegram message (and the pending-push R2 object it is
+            # retried from). ``org_id`` is the app-controlled subject, so it
+            # must pass the SAME boundary as ``_title``/``_telegram_text``; the
+            # PR's invariant is only true if every sink is routed through it.
             self._push_with_pending(
                 states[0][0],
-                f"✅ DR resolved: {kind}" + (f" ({org_id})" if org_id else "")
-                + " — issue " + ", ".join(f"#{n}" for n in numbers),
+                redact_for_publication(
+                    f"✅ DR resolved: {kind}"
+                    + (f" ({org_id})" if org_id else "")
+                    + " — issue " + ", ".join(f"#{n}" for n in numbers)
+                ),
             )
         # delete-to-resolve across the whole alias set: a surviving spelling
         # would adopt the next recurrence (the #2796 class). Best-effort, and

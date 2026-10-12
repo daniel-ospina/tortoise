@@ -1615,3 +1615,56 @@ def test_body_scrub_does_not_rewrite_the_stored_sentinel_detail():
     store.open_incident("STALE", "team_a", detail)
     sentinel = json.loads(storage.download("ops/alerts/STALE/team_a.json"))
     assert sentinel["detail"] == detail
+
+
+def test_resolution_push_passes_the_publication_boundary():
+    """#3293 review: ``✅ DR resolved`` is a FOURTH publication sink.
+
+    ``resolve_incident_state`` built the Telegram text inline and pushed it via
+    ``_push_with_pending`` (which also writes the pending-push R2 object that
+    ``retry_pending`` replays) — same public channel, same app-controlled
+    subject, but no scrub. The PR's invariant ("the boundary is the last point
+    before publication") is only true if this sink is routed through it too.
+
+    RED pre-fix: the raw token appears verbatim in ``ch.telegram``.
+    """
+    ch = _FakeChannels()
+    store = _store(ch)
+    assert store.open_incident("STALE", _TOKEN_3293) is True
+    assert store.resolve_incident("STALE", _TOKEN_3293) is True
+    resolved = [t for t in ch.telegram if t.startswith("✅ DR resolved")]
+    assert resolved, ch.telegram
+    assert _TOKEN_3293 not in resolved[-1]
+    assert resolved[-1] == (
+        "✅ DR resolved: STALE ([REDACTED:github_token]) — issue #1"
+    )
+    # An ordinary subject is byte-identical (the scrub is not a rewriter).
+    ch2 = _FakeChannels()
+    store2 = _store(ch2)
+    store2.open_incident("STALE", "team_a")
+    store2.resolve_incident("STALE", "team_a")
+    assert "✅ DR resolved: STALE (team_a) — issue #1" in ch2.telegram
+
+
+def test_body_preserves_backup_key_but_scrubs_a_credential():
+    """#3293 review: the body scrub must not eat ``backup_key``.
+
+    ``_body`` composes the error-message path rules, and a ``backup_key``
+    carrying a ``/data/`` (or ``/tmp/``) segment would be rewritten to ``/***``
+    — destroying the one field a DR triager reads. The detail half is therefore
+    scrubbed with ``redact_paths=False`` while credential SHAPES are still
+    removed from the SAME dict.
+
+    RED pre-fix (at the PR head): the path rules run over the detail, ``key``
+    becomes ``backups/***`` and the exact-key assertions fail.
+    """
+    ch = _FakeChannels()
+    store = _store(ch)
+    key = "backups/team_x/data/2026-10-05T12-00-00Z/dump.enc"
+    body = store._body("RESTORE_DRILL_FAILED", "team_x", {
+        "error": f"upload failed; key={_TOKEN_3293}",
+        "backup_key": key,
+    })
+    assert key in body
+    assert _TOKEN_3293 not in body
+    assert "[REDACTED:github_token]" in body
