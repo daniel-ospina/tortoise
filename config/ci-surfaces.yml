@@ -565,6 +565,7 @@ surfaces:
   - test_mcp_result_count_telemetry.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
+  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). Registered on `api` like its sibling, because `tortoise/oauth.py` + `tortoise/hosted_api.py` are what it pins; it also reads `docs/` records, which no other surface selects on.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
