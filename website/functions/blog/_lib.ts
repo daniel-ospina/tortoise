@@ -298,30 +298,94 @@ const MD_ALERTS: Record<string, { slug: string; label: string }> = {
 // list can never drift from the headings it points at.
 const MD_TOC_RE = /^\\?\[\\?\[\s*toc\s*\\?\]\\?\]$/i;
 
-// ── House style (#8293 follow-up) ──────────────────────────────────────────
-// The articles already published — and the flagship draft — write their table of
-// contents as a `**Table of contents**` paragraph followed by a numbered list,
-// and their answer box as a `> **Quick answer:** …` blockquote. Recognising those
-// two shapes means an existing article gains real links and a styled answer box
-// with NO body edit.
+// ── House style (#8310; the `[[toc]]`/anchors dependency is #8291) ──────────
+// The house-style templates write a table of contents as a `**Table of contents**`
+// paragraph followed by a numbered list, and the answer box as a
+// `> **Quick answer:** …` blockquote. Recognising those two shapes means a body
+// that already carries them gains real links and a styled answer box with NO body
+// edit. (The two live articles do NOT carry them yet — verified 0 occurrences on
+// both pages; this makes the renderer ready for when their bodies are written.)
 //
 // That matters because the CMS has no revision history and no read path
 // (`tortoise#8002`): rewriting a body to introduce the `[[toc]]` / `[!ANSWER]`
 // markers would be an unrecoverable write performed blind. Recognising the shape
 // is also strictly better than a body edit — a hand-written list can DRIFT from
 // the headings it names, whereas the generated one cannot.
-const MD_HOUSE_TOC_RE = /^table of contents$/i;
-// TipTap escapes `*` as `\*`, so both spellings are accepted.
-const MD_HOUSE_ANSWER_RE = /^\s*(?:\\?\*\\?\*|__)?\s*quick answer\s*:?\s*(?:\\?\*\\?\*|__)?\s*/i;
+// The marker is the BOLDED line itself, matched on the RAW source. Matching
+// `plainText(line)` was too loose: it also equalled "Table of contents" for an
+// authored `[Table of contents](#x)` link, an image, or the tail line of a
+// wrapped paragraph — and intercepting those deletes authored content. Anchoring
+// on the bold spelling accepts TipTap's escaped `\*\*…\*\*` form too. `:?`
+// tolerates the `**Table of contents:**` spelling.
+const MD_HOUSE_TOC_RE = /^(?:\\?\*\\?\*|__)\s*table of contents\s*:?\s*(?:\\?\*\\?\*|__)$/i;
+// `> **Quick answer:** …`. The colon is REQUIRED — it is what bounds the label,
+// so `> Quick answers are hard.` / `> Quick answerable claims.` stay prose. The
+// closing bold delimiter is bound to the opening one by backreference, so the
+// colon-only spelling can never eat a body-leading `**` / `__` (`__init__`).
+const MD_HOUSE_ANSWER_RE = /^\s*((?:\\?\*\\?\*)|__)?\s*quick answer\s*(?:\1\s*)?\s*:\s*(?:\1)?\s*/i;
+
+/**
+ * Whether the body publishes at least one `##` heading. The generated nav is
+ * H2-only, so this decides whether a house-style marker has a replacement at
+ * all — without one the marker and its list must stay ordinary content rather
+ * than be deleted in exchange for nothing. Fenced code blocks are skipped,
+ * matching the main scan.
+ */
+function hasPublishedH2(lines: string[]): boolean {
+  let inFence = false;
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && /^##\s/.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Advance past the author's hand-written table-of-contents list, from its first
+ * item. Consumes the WHOLE list region — loose (blank-separated) items and
+ * indented nested items included — because the generated nav replaces all of it;
+ * stopping at the first contiguous run leaves the tail behind as a stray list.
+ * Returns the index of the first line after the region.
+ */
+function consumeTocList(lines: string[], start: number): number {
+  const isItem = (s: string): boolean => /^\s*(?:\d+\.|[-*])\s+/.test(s);
+  let i = start;
+  while (i < lines.length) {
+    if (isItem(lines[i])) {
+      i++;
+      continue;
+    }
+    if (lines[i].trim() === "") {
+      let k = i;
+      while (k < lines.length && lines[k].trim() === "") k++;
+      if (k < lines.length && isItem(lines[k])) {
+        i = k;
+        continue;
+      }
+    }
+    break;
+  }
+  return i;
+}
 
 export function renderMarkdown(markdown: string): string {
   const paragraphBuf: string[] = []; // per-render buffer (no cross-render leakage)
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
   const tocEntries: { level: number; id: string; text: string }[] = [];
-  let tocIndex = -1;
+  // Every `[[toc]]` placeholder / house-style marker position, spliced once the
+  // headings are known. A LIST, not a scalar: with two markers a scalar
+  // overwrote the first position, which then stayed `""` and its TOC vanished.
+  const tocIndices: number[] = [];
+  // The generated nav is H2-only, so a body with no H2 has nothing to put in
+  // place of a marker + list. Gating on this keeps the author's own label and
+  // list rendered as ordinary content instead of silently deleting them.
+  const hasH2 = hasPublishedH2(lines);
   // Set when a house-style TOC marker is followed by its list; the generated nav
-  // replaces that list, and the flag is consumed by the next list branch.
+  // replaces that list, and the flag is consumed by the whole list region.
   let skipListAfterToc = false;
   let i = 0;
 
@@ -344,7 +408,7 @@ export function renderMarkdown(markdown: string): string {
     // Table-of-contents placeholder (filled in once every heading is known)
     if (MD_TOC_RE.test(line.trim())) {
       flushPara(paragraphBuf);
-      tocIndex = out.length;
+      tocIndices.push(out.length);
       out.push("");
       i++;
       continue;
@@ -352,14 +416,15 @@ export function renderMarkdown(markdown: string): string {
 
     // House-style table of contents: the marker paragraph, dropped, and the
     // numbered list beneath it, replaced by the generated nav. Only fires when a
-    // list actually FOLLOWS — a stray sentence reading "Table of contents" stays
-    // an ordinary paragraph.
-    if (MD_HOUSE_TOC_RE.test(plainText(line).trim())) {
+    // list actually FOLLOWS and there is an H2 to build the nav from — a stray
+    // sentence reading "Table of contents" (or a body with no H2) stays ordinary
+    // content.
+    if (hasH2 && MD_HOUSE_TOC_RE.test(line.trim())) {
       let lookahead = i + 1;
       while (lookahead < lines.length && lines[lookahead].trim() === "") lookahead++;
       if (lookahead < lines.length && /^(\d+\.|[-*])\s+/.test(lines[lookahead])) {
         flushPara(paragraphBuf);
-        tocIndex = out.length;
+        tocIndices.push(out.length);
         out.push("");
         skipListAfterToc = true;
         i++;
@@ -444,14 +509,15 @@ export function renderMarkdown(markdown: string): string {
     // Unordered list
     if (/^[-*]\s+/.test(line)) {
       flushPara(paragraphBuf);
+      if (skipListAfterToc) {
+        skipListAfterToc = false; // the generated nav replaces this whole list
+        i = consumeTocList(lines, i);
+        continue;
+      }
       const items: string[] = [];
       while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
         items.push(lines[i].replace(/^[-*]\s+/, ""));
         i++;
-      }
-      if (skipListAfterToc) {
-        skipListAfterToc = false; // the generated nav replaces this list
-        continue;
       }
       out.push(`<ul>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ul>`);
       continue;
@@ -460,14 +526,15 @@ export function renderMarkdown(markdown: string): string {
     // Ordered list
     if (/^\d+\.\s+/.test(line)) {
       flushPara(paragraphBuf);
+      if (skipListAfterToc) {
+        skipListAfterToc = false; // the generated nav replaces this whole list
+        i = consumeTocList(lines, i);
+        continue;
+      }
       const items: string[] = [];
       while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
         items.push(lines[i].replace(/^\d+\.\s+/, ""));
         i++;
-      }
-      if (skipListAfterToc) {
-        skipListAfterToc = false; // the generated nav replaces this list
-        continue;
       }
       out.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
       continue;
@@ -509,21 +576,20 @@ export function renderMarkdown(markdown: string): string {
   }
   flushPara(paragraphBuf);
 
-  if (tocIndex !== -1) {
+  if (tocIndices.length) {
     // H2 only — the article's section structure, matching the author's intent.
-    // `splice` rather than `out[tocIndex] = …`: the guard counts a computed
-    // member assignment as an unattributable header stamp, so naming the write
-    // site keeps `_lib.ts` clean rather than requiring the guard to be widened.
+    // `splice` rather than `out[index] = …`: the guard counts a computed member
+    // assignment as an unattributable header stamp, so naming the write site
+    // keeps `_lib.ts` clean rather than requiring the guard to be widened.
     const top = tocEntries.filter((e) => e.level === 2);
-    out.splice(
-      tocIndex,
-      1,
-      top.length
-        ? `<nav class="toc" aria-label="Table of contents">` +
-          `<ol>${top.map((e) => `<li><a href="#${escapeHtml(e.id)}">${escapeHtml(e.text)}</a></li>`).join("")}</ol>` +
-          `</nav>`
-        : "",
-    );
+    const nav = top.length
+      ? `<nav class="toc" aria-label="Table of contents">` +
+        `<ol>${top.map((e) => `<li><a href="#${escapeHtml(e.id)}">${escapeHtml(e.text)}</a></li>`).join("")}</ol>` +
+        `</nav>`
+      : "";
+    // Descending: each splice removes one slot, so a later index must be spliced
+    // first or the earlier ones shift.
+    for (const index of [...tocIndices].sort((a, b) => b - a)) out.splice(index, 1, nav);
   }
 
   return out.join("\n");
