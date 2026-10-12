@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import math
 import os
@@ -1318,35 +1319,42 @@ class TestCodeExchange:
         assert len(live_access) == 1
         assert len(live_refresh) == 1
 
-    def test_consume_code_claim_via_fake(self, api_client, session_user):
-        """The atomic claim updates in place: after a successful consume the
-        row carries used_at AND the durable 'claimed' state, and a second consume
-        cannot double-issue.
+    def test_redeem_code_rpc_claim_is_single_use(self, api_client, session_user):
+        """The `redeem_oauth_code` RPC claims in place in the SAME transaction
+        that mints: after a successful call the row carries used_at AND the
+        durable 'claimed' state, a token pair exists, and a second call cannot
+        double-issue.
 
-        #3027: the second consume of a code whose first claim has no recorded
-        OUTCOME is terminal `invalid_grant` — the claim is consumed by an attempt
-        that may still be running, and a different request must neither re-arm it
-        (two live families) nor report it retryable (the retry can terminate).
-        The reconciler settles the residue; a code that MINTED is terminal too —
-        see `test_code_is_single_use` / `test_code_claim_is_atomic`."""
-        from tortoise.oauth import OAuthError, _consume_code
+        #3025: the claim and the two INSERTs are one transaction, so a second
+        call matches zero rows and reports `not_claimable` having written
+        nothing — there is no orphan pair for a rollback to clean up.
+
+        #3027: a second consume of a code whose first claim has no recorded
+        OUTCOME is terminal `invalid_grant` at the ENDPOINT — the claim is
+        consumed by an attempt that may still be running, and a different request
+        must neither re-arm it (two live families) nor report it retryable (the
+        retry can terminate). The reconciler settles the residue; a code that
+        MINTED is terminal too — see `test_code_is_single_use` /
+        `test_code_claim_is_atomic`."""
+        from tortoise.oauth import _observe_code, _redeem_code_rpc
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)
-        row = _consume_code(cp, flow["code"])
-        assert row["code_hash"] == hashlib.sha256(
-            flow["code"].encode()).hexdigest()
+        observed = _observe_code(cp, flow["code"])
+        out = _redeem_code_rpc(cp, observed=observed, code=flow["code"], scope="mcp")
+        assert out["_status"] == "minted"
         stored = cp.tables["oauth_codes"][0]
         assert stored["used_at"] is not None  # claimed in place
         assert stored["redemption_state"] == "claimed"
-        # #3027: the second consume is TERMINAL, not retryable — the retry can
-        # terminate (the first attempt may settle `minted`), and advertising it as
-        # retryable is the untruthful signal #2863 removed. A code that actually
-        # MINTED is also terminal — see `test_code_is_single_use`.
-        with pytest.raises(OAuthError) as exc:
-            _consume_code(cp, flow["code"])
-        assert exc.value.status == 400
-        assert exc.value.error == "invalid_grant"
+        # #3025: the claim and the mint are ONE transaction, so a second call
+        # returns `not_claimable` and writes nothing — there is no orphan pair to
+        # roll back, and no window in which a token row exists without a claim.
+        before = copy.deepcopy(cp.tables)
+        again = _redeem_code_rpc(cp, observed=observed, code=flow["code"], scope="mcp")
+        assert again["_status"] == "not_claimable"
+        assert cp.tables == before
+        # A code that actually MINTED is terminal at the endpoint — see
+        # `test_code_is_single_use`.
 
     def test_redirect_uri_mismatch_rejected(self, api_client, session_user):
         tc, cp = api_client
@@ -1609,10 +1617,19 @@ class TestRefreshRotation:
 
     def test_rotation_race_single_winner(self, api_client, session_user):
         """P2 + P3 (PR #1264 review): two workers that both pass the initial
-        revoked_at check race the rotation claim — the winner's pair
-        survives, the loser's orphan pair is rolled back, and the old token
-        is revoked exactly once."""
-        from tortoise.oauth import OAuthError, _issue_tokens
+        revoked_at check race the rotation claim — the winner's pair is the ONLY
+        pair, and the old token is revoked exactly once.
+
+        #3025 changed the SHAPE of this guarantee, and the assertions below are
+        written to pin the shape, not the old fix. The pre-#3025 writer claimed
+        the old row, INSERTed its pair, and — on losing the CAS — rolled the pair
+        back by revoking it. That is a compensation for a window that no longer
+        exists: `rotate_oauth_refresh` claims, inserts and revokes in ONE
+        transaction, so the loser matches zero rows and its transaction writes
+        NOTHING. There is no orphan to revoke, and the test asserts that directly
+        (`cp.tables` is byte-identical after B) rather than asserting a
+        rollback that would now be vacuous."""
+        from tortoise.oauth import _rotate_refresh_rpc
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)
@@ -1623,29 +1640,29 @@ class TestRefreshRotation:
                 if t["revoked_at"] is None][0]
         prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
-        args = dict(client_id=flow["client_id"], user_id=_U1,
-                    org_id="team-free-001", scope="mcp", resource=None)
         # worker A wins the atomic claim
-        out_a = _issue_tokens(cp, prev_refresh=prev,
-                              prev_access_id=prev_access["id"], **args)
-        # worker B races with the SAME presented token: claim fails and the
-        # orphan pair is rolled back (no second live grant)
-        with pytest.raises(OAuthError) as exc:
-            _issue_tokens(cp, prev_refresh=prev,
-                          prev_access_id=prev_access["id"], **args)
-        assert exc.value.status == 400
-        assert exc.value.error == "invalid_grant"
+        out_a = _rotate_refresh_rpc(cp, prev=prev)
+        assert out_a is not None
+        # worker B races with the SAME presented token: the claim CAS matches zero
+        # rows, so it gets None — and with #3025 the pair was never inserted, so
+        # B's transaction writes NOTHING AT ALL.
+        before = copy.deepcopy(cp.tables)
+        assert _rotate_refresh_rpc(cp, prev=prev) is None
+        assert cp.tables == before, "the loser's transaction must write nothing"
         live = [t for t in cp.tables["oauth_refresh_tokens"]
                 if t["revoked_at"] is None]
-        assert len(live) == 1
-        assert live[0]["id"] == out_a["_refresh_id"]
+        assert [t["id"] for t in live] == [out_a["_refresh_id"]]
         assert live[0]["rotated_from"] == prev["id"]
-        # B's orphan pair was rolled back (revoked), not left live
-        orphans = [t for t in cp.tables["oauth_refresh_tokens"]
-                   if t["rotated_from"] == prev["id"]
-                   and t["id"] != out_a["_refresh_id"]]
-        assert len(orphans) == 1
-        assert orphans[0]["revoked_at"] is not None
+        # The OLD token was revoked by the RPC (in the winner's transaction) —
+        # exactly once, and with no second revoke from the loser's rollback.
+        old = next(t for t in cp.tables["oauth_refresh_tokens"]
+                   if t["id"] == prev["id"])
+        assert old["revoked_at"] is not None
+        # ...and its access row too: the RPC revokes access rows by
+        # `refresh_token_id`, which is why the caller no longer SELECTs them first.
+        old_access = next(t for t in cp.tables["oauth_access_tokens"]
+                          if t["id"] == prev_access["id"])
+        assert old_access["revoked_at"] is not None
         live_access = [t for t in cp.tables["oauth_access_tokens"]
                        if t["revoked_at"] is None]
         assert [t["id"] for t in live_access] == [out_a["_access_id"]]
@@ -3171,8 +3188,10 @@ class TestScopeAllowList:
 
     The gate lives in ``tortoise.oauth.validate_scope``, called from BOTH
     request doors (``validate_authorize_params`` → GET /oauth/authorize and
-    POST /oauth/consent) and from the token writer (``_issue_tokens``). The
-    tests below pin all three, and pin that a legitimate scope still mints.
+    POST /oauth/consent) and from the token exchange (``exchange_auth_code``,
+    since #3025 moved it out of the deleted ``_issue_tokens`` and immediately
+    BEFORE the mint RPC). The tests below pin all three, and pin that a
+    legitimate scope still mints.
     """
 
     @staticmethod
@@ -3248,22 +3267,21 @@ class TestScopeAllowList:
         assert r.json()["error"] == "invalid_scope"
         assert cp.tables.get("oauth_codes", []) == []
 
-    def test_mint_refuses_out_of_allow_list_scope_and_writes_no_claim(
-            self, api_client):
-        """``_issue_tokens`` is the single writer of token rows: it refuses an
-        unadvertised scope before writing, so no token claim can ever carry
-        one — even from a caller that bypasses the request doors."""
-        from tortoise.oauth import OAuthError, _issue_tokens
-        _, cp = api_client
-        # A single unknown token AND a mixed one: the gate rejects the whole
-        # request rather than narrowing to the accepted subset.
+    def test_the_scope_gate_rejects_the_whole_request_not_a_subset(self):
+        """`validate_scope` is the allow-list gate and the last line before a
+        mint. #3025 moved its invocation out of `_issue_tokens` (which no longer
+        exists) up into `exchange_auth_code`, immediately BEFORE the mint RPC — so
+        a caller that bypasses the request doors still cannot reach the writer with
+        an unadvertised scope.
+
+        A single unknown token AND a mixed one: the gate rejects the WHOLE request
+        rather than narrowing to the accepted subset. That property is the gate's,
+        not the writer's, which is why it is asserted here directly."""
+        from tortoise.oauth import OAuthError, validate_scope
         for bad in ("admin", "mcp admin"):
             with pytest.raises(OAuthError) as exc:
-                _issue_tokens(cp, client_id="ct_3128", user_id=_U1,
-                              org_id="team-free-001", scope=bad, resource=None)
+                validate_scope(bad)
             assert exc.value.error == "invalid_scope"
-        assert cp.tables.get("oauth_access_tokens", []) == []
-        assert cp.tables.get("oauth_refresh_tokens", []) == []
 
     def test_a_legacy_code_row_cannot_mint_an_out_of_allow_list_claim(
             self, api_client, session_user):
