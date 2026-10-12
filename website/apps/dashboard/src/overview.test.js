@@ -440,12 +440,25 @@ test('#4646 (F): both effects that consume the derivation list it as a dependenc
   // effects that consume it were not — dropping `serverHarnessConnected` from
   // either dep array ships a stale screen (the poll never stops; the step-3
   // announcement keeps saying "no connection" under a heading that flipped).
+  //
+  // #3728: the announcement half used to spell the WHOLE deps list as a regex,
+  // and that frozen list WAS the buggy set — a MISSING dep cannot fail a
+  // whole-list pin, so `welcomeHasOrg` (a label input that decides the
+  // announced stage) stayed absent while this guard stayed green. Membership
+  // now, so ADDING a dep stays green and dropping a required one does not.
   const code = stripComments(mainJsxSrc)
   assert.match(code, /\[\s*wizardStep,\s*welcomeMode,\s*authed,\s*serverHarnessConnected\s*\]/,
     'the connect poll must re-run when the observed connection lands')
-  assert.match(code,
-    /wizardPaused,\s*effectivelyPaused,\s*serverHarnessConnected,\s*isBuildFork\s*\]/,
-    'the step-3 announcement must re-derive when the observed connection lands')
+  const call = code.indexOf('setWizardStepAnnounce(')
+  assert.notEqual(call, -1, 'the step-announcement effect must exist')
+  const depsStart = code.indexOf('}, [', call)
+  const depsEnd = code.indexOf('])', depsStart)
+  assert.ok(depsStart > -1 && depsEnd > depsStart, 'the step-announcement deps array must parse')
+  const deps = code.slice(depsStart + 4, depsEnd).split(',').map((s) => s.trim())
+  for (const dep of ['wizardPaused', 'effectivelyPaused', 'serverHarnessConnected', 'isBuildFork', 'welcomeHasOrg']) {
+    assert.ok(deps.includes(dep),
+      `the step-3 announcement must re-derive on ${dep} (deps=[${deps.join(', ')}])`)
+  }
 })
 
 test('#4646 (C3): overview.js BINDS the shared predicate — it must not re-declare it', () => {

@@ -1236,6 +1236,35 @@ class TestDrDrill:
         )
         assert r2.status_code == 429
 
+    def test_manual_drill_failure_response_detail_is_scrubbed(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#3293 review: the manual route has the same public-Actions-log sink
+        — ``registry-drill.sh`` echoes the response body verbatim — so its 503
+        ``detail`` must be scrubbed too.
+
+        RED (mutation): restore ``detail=f"Drill failed: {e}"`` on the manual
+        handler → both secrets appear verbatim in ``r.json()["detail"]``.
+        """
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        signed = ("https://acct.r2.cloudflarestorage.com/b/k"
+                  "?X-Amz-Signature=deadbeefdeadbeef1234")
+
+        def boom(**_kw):
+            raise RuntimeError(f"restore failed: {signed}; key={token}")
+
+        monkeypatch.setattr(ha_mod, "_drill_execute", boom)
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x",
+                  "backup_key": "backups/team_x/default/x/dump.enc"},
+        )
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert token not in detail
+        assert "deadbeefdeadbeef1234" not in detail
+        assert detail.startswith("Drill failed: restore failed: https://")
+
 
 class TestDrRebaselinePerGraph:
     """#2313 Task 5: re-baseline resolves the ACTIVE-graph seam (per-graph
@@ -1873,6 +1902,116 @@ class TestDrDrillScheduled:
                   if c[0] == "open" and c[1] == ha_mod._DRILL_FAILED_KIND]
         assert opened, fake.calls
         assert opened[-1][3].get("copy_read_bound_overrun") is True, opened[-1]
+
+    def test_failure_incident_detail_is_scrubbed_before_the_public_body(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#3293: the scheduled-drill failure detail is REDACTED at the source.
+
+        The incident detail is published verbatim into a PUBLIC GitHub issue
+        (``alert_store._body``), and this path is the one a STORAGE error takes
+        — i.e. the one most likely to quote a signed URL or a credential. The
+        handler must not hand the raw exception message in.
+
+        RED (mutation): restore ``{"error": str(e), ...}`` at either drill-
+        scheduled open site — the token below reaches ``fake.calls`` verbatim
+        and this fails.
+        """
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # runtime-built
+        signed = ("https://acct.r2.cloudflarestorage.com/b/k"
+                  "?X-Amz-Signature=deadbeefdeadbeef1234")
+
+        def boom(**_kw):
+            raise RuntimeError(f"upload failed: {signed}; R2 key={token}")
+
+        monkeypatch.setattr(ha_mod, "_scheduled_drill", boom)
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 503, r.text
+        opened = [c for c in fake.calls
+                  if c[0] == "open" and c[1] == ha_mod._DRILL_FAILED_KIND]
+        assert opened, fake.calls
+        detail = opened[-1][3]
+        assert detail["error_type"] == "RuntimeError"
+        assert token not in detail["error"]
+        assert "deadbeefdeadbeef1234" not in detail["error"]
+        assert detail["error"].startswith("upload failed: https://")
+        assert detail["source"] == "drill-scheduled"
+
+    def test_failure_incident_detail_survives_the_publication_boundary_intact(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """End-to-end through the REAL store: a scrubbed detail reaches a real
+        filed body with its triage fields (and no token) intact.
+
+        This binds the ``_body`` BOUNDARY control. The call-site scrub is bound
+        separately by ``test_failure_incident_detail_is_scrubbed_before_the_
+        public_body``. NB: reverting ONLY the call-site scrub still leaves this
+        green (``_body`` removes the token either way), so it is a boundary test,
+        not a seam test — the mutation-evidence claim was corrected per the
+        #3293 review.
+        """
+        from tortoise.alert_store import AlertStore
+
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        filed: dict[int, str] = {}
+
+        class _Ch:
+            def file_issue(self, title, body):
+                filed[len(filed) + 1] = body
+                return len(filed)
+            close_issue = staticmethod(lambda *a, **k: None)
+
+            @staticmethod
+            def search_open(kind, org_id=""):
+                return []
+            push_telegram = staticmethod(lambda text: None)
+
+        ch = _Ch()
+        store = AlertStore(
+            mem_storage, file_issue=ch.file_issue,
+            close_issue=ch.close_issue, search_open=ch.search_open,
+            push_telegram=ch.push_telegram, repo="o/r", assignee="o",
+        )
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: store)
+        monkeypatch.setattr(
+            ha_mod, "_scheduled_drill",
+            lambda **_kw: (_ for _ in ()).throw(
+                RuntimeError(f"restore failed; R2 key={token}")))
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 503, r.text
+        assert len(filed) == 1, filed
+        body = next(iter(filed.values()))
+        assert token not in body
+        assert "restore failed; R2 key=[REDACTED:github_token]" in body
+
+    def test_scheduled_failure_response_detail_is_scrubbed_for_the_actions_log(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#3293 review: the drill drivers echo the HTTP response body verbatim
+        into a PUBLIC Actions log, so the raw exception must not survive in the
+        503 ``detail`` either. Internal-key auth gates WHO may call, not where
+        the caller writes the response.
+
+        RED (mutation): restore ``detail=f"Drill failed: {e}"`` → both secrets
+        below appear verbatim in ``r.json()["detail"]``.
+        """
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        signed = ("https://acct.r2.cloudflarestorage.com/b/k"
+                  "?X-Amz-Signature=deadbeefdeadbeef1234")
+
+        def boom(**_kw):
+            raise RuntimeError(f"upload failed: {signed}; R2 key={token}")
+
+        monkeypatch.setattr(ha_mod, "_scheduled_drill", boom)
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert token not in detail
+        assert "deadbeefdeadbeef1234" not in detail
+        assert detail.startswith("Drill failed: upload failed: https://")
 
     def test_respects_shared_cooldown(self, client, dr_env, mem_storage,
                                       monkeypatch):

@@ -86,6 +86,15 @@ ALLOWED_SOURCE_NODE_PROPS = frozenset({
     "url", "id", "canonicalUrl", "urlAliases", "sourceKind", "externalId",
     # version
     "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
+    # #3644 (§4.6 window half): the CURRENT version's valid-time start,
+    # written by `_upsert_source`'s fixed clause through the same hash-diff
+    # gate as `version`/`updatedAt`. Added here DELIBERATELY, not derived —
+    # the point of this list is that a new node property cannot enter the
+    # declaration and this allowlist in the same unreviewed instant. The
+    # declaration's other new key (`previousValidTo`) is deliberately ABSENT:
+    # it is a journal fact on the `SourceVersioned` record and must never
+    # appear on the node.
+    "validFrom",
     # availability (#3998 — the third value on the record)
     "rawState", "rawStateAt",
     # the transient index-merge token (`_index_source_merge`)

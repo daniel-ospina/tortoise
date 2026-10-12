@@ -38,8 +38,23 @@ const b64url = (buf) =>
  *                 NOT be forwarded verbatim)
  *   refreshDead-> refresh_token grant returns 401 invalid_grant (the session is
  *                 genuinely dead)
+ *   providerDenied -> /authorize answers with a GoTrue-shaped provider ERROR
+ *                 instead of issuing a code. A MODE, not a boolean: `""` is
+ *                 GoTrue's OAuthError shape (`error` + `error_description`, NO
+ *                 `error_code` — a visitor denying consent at the provider) and
+ *                 any other string is emitted AS `error_code`, which is the
+ *                 HTTPError shape (`bad_oauth_state` is the #1224 case).
  */
-const FAULTS = { authUser: false, upstream: false, upstream401: false, refreshDead: false };
+const FAULTS = {
+  authUser: false,
+  upstream: false,
+  upstream401: false,
+  refreshDead: false,
+  providerDenied: null,
+};
+
+/** The description GoTrue sends alongside a denied consent. */
+const DENIED_DESCRIPTION = "User denied the request";
 
 /**
  * blog_admins membership.
@@ -137,10 +152,36 @@ const server = createServer((req, res) => {
   // PKCE challenge against the code it issues; the mock must do the same or the
   // end-to-end test would not actually exercise server-held verifier checking.
   if (url.pathname === "/auth/v1/authorize") {
-    const code = `mock-code-${++authorizeCounter}`;
     const challenge = url.searchParams.get("code_challenge");
     const redirectTo = url.searchParams.get("redirect_to");
     if (!challenge || !redirectTo) return json(res, 400, { error: "missing_param" });
+
+    // A denied / failed provider round-trip, as GoTrue actually produces it.
+    // `redirectErrors` (internal/api/external.go) writes the error onto the
+    // `redirect_to` URL in the QUERY **and** MIRRORS it into the FRAGMENT (the
+    // deprecated channel, plus `sb=`). The asymmetry is the point: a browser
+    // sends the query to our server and NEVER the fragment, so `/auth/callback`
+    // can only read the query. Reproduced exactly, or the test could pass on a
+    // channel the server is never given.
+    if (FAULTS.providerDenied !== null) {
+      const q = new URLSearchParams({
+        error: "access_denied",
+        error_description: DENIED_DESCRIPTION,
+      });
+      // OAuthError omits `error_code`; HTTPError always sets it.
+      if (FAULTS.providerDenied) q.set("error_code", FAULTS.providerDenied);
+
+      const dest = new URL(redirectTo);
+      dest.search = q.toString();
+      const hq = new URLSearchParams(q);
+      hq.set("sb", "");
+      dest.hash = hq.toString();
+
+      res.writeHead(302, { Location: dest.toString() });
+      return res.end();
+    }
+
+    const code = `mock-code-${++authorizeCounter}`;
     PKCE_CHALLENGES.set(code, challenge);
     const dest = new URL(redirectTo);
     dest.searchParams.set("code", code);
@@ -250,10 +291,15 @@ const server = createServer((req, res) => {
     }
 
     // Fault injection control. POST {"authUser":true} / {"upstream":true} /
-    // {"upstream401":true} / {"refreshDead":true}.
+    // {"upstream401":true} / {"refreshDead":true}. `providerDenied` is a MODE —
+    // null clears it, "" denies without an `error_code`, any other string is the
+    // `error_code` — so it is deliberately not in the boolean loop.
     if (url.pathname === "/__mock/fault") {
       for (const k of ["authUser", "upstream", "upstream401", "refreshDead"]) {
         if (typeof parsed[k] === "boolean") FAULTS[k] = parsed[k];
+      }
+      if ("providerDenied" in parsed) {
+        FAULTS.providerDenied = parsed.providerDenied === null ? null : String(parsed.providerDenied);
       }
       return json(res, 200, { ok: true, faults: { ...FAULTS } });
     }

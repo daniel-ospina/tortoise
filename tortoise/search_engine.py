@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
@@ -38,11 +39,16 @@ from .security import entity_label, validate_entity_type
 # `draft`); `_status_vocab_for` below is the ONE dispatcher between the two
 # families, so neither leg re-states the mapping.
 from .commit_ops import OBJECT_TERMINAL_STATUSES
+from .commit_ops import SUBJECT_TERMINAL_STATUSES  # #1423: the Subject family
 # #3359: the capture-level graph-op meter is a ContextVar, and ContextVars do
 # not cross into the ThreadPoolExecutor this module runs its retrieval legs on
 # — without binding the legs to the caller's metering context, a capture's
 # off-thread FTS/vector/structural reads are never counted.
 from .graph_ops import bind_metering_context
+# #4489: the per-leg retrieval meter. The legs note their OWN executions here
+# (trace-INDEPENDENT by design), so a read that never opted into ``leg_trace``
+# still reports which legs ran. Stdlib-only at import, so no cycle.
+from . import retrieval_metering as _retrieval_metering
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,
@@ -84,13 +90,46 @@ def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
       OBJECT vocabulary — superseded / deprecated / archived / retracted)
       and NO flag conjunct: no Object writer sets ``outdated``, so the Point
       flag would hide an Object nobody can mark.
+    * ``Subject`` -> #1423: ``commit_ops.SUBJECT_TERMINAL_STATUSES`` (the
+      terminal members of ONTOLOGY §4.2's Subject vocabulary — superseded /
+      deprecated / archived) and no flag conjunct. Before #1423 a Subject
+      fell through to the OBJECT set by ACCIDENT of the fallback below while
+      every leg's ``label in ("Point", "Object")`` gate skipped it entirely,
+      so a superseded team/role/person stayed search-visible.
+
+    The non-Point, non-Subject branch stays a fallback for a future family and
+    returns the Object vocabulary — a family added without its own arm is
+    therefore filtered with the WRONG vocabulary, which is why the two
+    families above are named explicitly rather than inherited.
+
+    #2598: ``draft`` is deliberately in NEITHER set. A draft is CURRENT, not
+    dead (``live.CURRENT_POINT_STATUS_VALUES``), so every retrieval leg — and
+    therefore ``recall_state``/``tortoise_recall``/``tortoise_search`` — RETURNS
+    a draft. Recall never hides one; what #2598 fixed is how it RENDERS: the
+    row is badged (``status`` + ``recall_ranking.draft``), carries no computed
+    belief while EP has not measured it (``confidence: null`` /
+    ``confidence_source: "uncomputed"``), and is ranked after every live row.
+    Adding ``draft`` here would silently HIDE staged material instead — the
+    opposite of what was asked for.
     """
     if label == "Point":
         return TERMINAL_EXCLUDED_STATUSES, True
+    if label == "Subject":
+        return SUBJECT_TERMINAL_STATUSES, False
     # #3301: the OBJECT family's canonical set, imported at MODULE level —
     # commit_ops imports only ``.live`` and never ``search_engine``, so this
     # edge is acyclic (a module-level import, not a defensive lazy one).
     return OBJECT_TERMINAL_STATUSES, False
+
+
+#: #1423: the canonical labels whose retrieval legs apply a terminal-status
+#: exclusion. ONE declaration, read by all four legs AND the scope probe — the
+#: per-site `("Point", "Object")` literal this replaces is the #2901 class
+#: (a hand-written subset at a call site silently omits a family), and it was
+#: exactly how `:Subject` stayed unfiltered while `_status_vocab_for` already
+#: answered correctly for it. A family added to `_status_vocab_for` must be
+#: added HERE too, or its terminal nodes stay search-visible.
+_STATUS_FILTERED_LABELS: tuple[str, ...] = ("Point", "Object", "Subject")
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -361,8 +400,24 @@ def search_provenance_enabled() -> bool:
     / ``subject`` search carries no ``source_ref``/``captured_at`` either, and
     ``to_dict`` emits no ``provenance`` block. The flag enriches the
     non-degraded POINT query path only.
+
+    #5581 extends this same block with the Point-level §4.6 currency verdict
+    and its sourced disclosure (``currency`` / ``fyi``), so every clause above
+    applies to them unchanged: the two fallback tiers carry neither, and the
+    ``if entity_type == "point":`` branch is where the extra batch read of the
+    Point's ``extractedFrom`` LINKS runs. That read is ONE query for the whole
+    hit batch, taken ONLY under the flag, so an unflagged call pays nothing and
+    its rows stay byte-identical.
     """
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
+
+
+#: #5581: the disclosure's reason tag — the ONE spelling (``SearchResult``
+#: emits it; ``tools/source_currency.sourced_fyi`` builds it). Named so a
+#: consumer can branch on WHY a fact was disclosed rather than sniffing the
+#: payload's shape, and defined HERE because the read path may not import from
+#: ``tools/`` (that tree is not in the wheel).
+FYI_REASON_SOURCE_DRIFT = "source-version-drift"
 
 
 def currency_status(remembered: str, current: str) -> str:
@@ -397,6 +452,116 @@ def currency_status(remembered: str, current: str) -> str:
     return "current" if remembered == current else "stale"
 
 
+def aggregate_currency(links: Iterable[tuple[str, str]]) -> str:
+    """#5581 — the §4.6 **Point-level** verdict, over the Point's OWN links.
+
+    ``links`` is one ``(remembered, current)`` pair per ``extractedFrom`` edge —
+    the recorded ``r.sourceVersion`` and the Source's current ``contentHash``.
+    This is the aggregate the per-link :func:`currency_status` explicitly does
+    NOT make (see its ⚠ note): ONTOLOGY §4.6 — *"the Point is **stale if any**
+    of those links is behind its source's current version, and **current only
+    when every** link is"*.
+
+    Three states, and the precedence is the whole point:
+
+    * ``stale`` — **ANY** link is behind. A verifiable change is proof the
+      Point's recorded read no longer matches its source, and one such link is
+      enough; a sibling link cannot rehabilitate it. ``stale`` therefore
+      OUTRANKS ``unknown``: the links are independent, so an unfilled pair on
+      one edge says nothing about a pair that is filled and differs on another.
+    * ``current`` — **EVERY** link is current **and there is at least one**.
+    * ``unknown`` — no link is stale and not every link is current, i.e. some
+      pair was unfillable (an absent note, or a Source with no version). This
+      is the HONEST answer, never a synonym for ``current`` — the same rule
+      :func:`currency_status` applies to one pair, lifted to the set.
+
+    ⛔ **ZERO LINKS IS ``unknown``, NOT ``current``.** Read literally, "current
+    only when every link is" is VACUOUSLY true of an empty link set, so a Point
+    with no ``extractedFrom`` link at all — the ordinary orphan write — would
+    read ``current``. That is precisely the false-current §4.6 exists to
+    prevent (it would report a Point with no recorded read as verified-fresh),
+    so the rule is refuted by the section's own intent and refused here. The
+    aggregate answers *"is the recorded read still current?"*; with no recorded
+    read there is nothing to answer and the verdict is ``unknown``.
+
+    A pure function of the pairs: currency stays a READ (§4.6 *"a read, never a
+    stored flag"*), so no backfill is needed and two readers cannot disagree
+    about the same set of pairs. The caller owns the GRAPH read that produces
+    the pairs — see ``tools/source_currency.py`` for the shared derivation used
+    by in-repo read paths.
+    """
+    pairs = list(links)
+    # ⛔ Anti-vacuity FIRST — see the docstring. Not reachable from the set
+    # comprehension below, which would answer `current` for an empty set.
+    if not pairs:
+        return "unknown"
+    verdicts = {currency_status(remembered or "", current or "")
+                for remembered, current in pairs}
+    if "stale" in verdicts:
+        return "stale"
+    if verdicts == {"current"}:
+        return "current"
+    return "unknown"
+
+
+def read_currency_links(graph, point_ids: Iterable[str]) -> dict[str, list[dict]]:
+    """#5581 — the ``(remembered, current)`` pair behind every ``extractedFrom``
+    link of every requested Point, as one query.
+
+    Returns ``{point_id: [link, ...]}`` where a link is
+    ``{"source", "recorded", "current", "currency"}``. A Point with no link is
+    ABSENT from the dict (``.get(pid, [])`` at the call site) — never present
+    with an empty list, so "this Point has no versioned provenance" and "this
+    Point was not in the batch" cannot be confused by a caller that checks
+    membership.
+
+    ONE row per EDGE, not one per Point: §4.6 aggregates over the links, and the
+    disclosure the ruling requires must name *which* source moved (*"older fact
+    from source X"*), which a collapsed single verdict cannot carry.
+
+    The two operands, and why each is read where it is:
+
+    * ``sourceVersion`` comes from the **EDGE** — the authoritative per-link
+      scalar (#5256). The Point's ``sourceVersionTransit`` node prop is the
+      replay transit, not a read.
+    * ``contentHash`` comes from the **Source node** — the version the source
+      holds NOW. It is the comparison's moving side by construction: a source
+      edit is exactly what makes a previously-current link read ``stale``.
+
+    Either operand absent (a bare edge, or a Source whose hash is ``''`` — a
+    minted stub, a connector, the capture path before materialization) leaves
+    the pair unfillable and its verdict ``unknown``, never ``current``: a
+    missing operand cannot verify anything.
+
+    Rows are sorted by ``(source, recorded)`` so two reads of an unchanged graph
+    agree. The sort is deterministic but NOT total — two edges to one Source
+    whose notes agree are engine-ordered — and nothing downstream may depend on
+    row POSITION: select a link by its source identity, never by index.
+    """
+    ids = list(point_ids)
+    if not ids:
+        return {}
+    rows = graph.query(
+        "MATCH (n:Point)-[ef:extractedFrom]->(s:Source) "
+        "WHERE n.id IN $ids "
+        "RETURN n.id, s.url, ef.sourceVersion, s.contentHash",
+        params={"ids": ids},
+    ).result_set
+    out: dict[str, list[dict]] = {}
+    for pid, url, remembered, current in rows:
+        recorded = remembered or ""
+        now = current or ""
+        out.setdefault(pid, []).append({
+            "source": url or "",
+            "recorded": recorded,
+            "current": now,
+            "currency": currency_status(recorded, now),
+        })
+    for links in out.values():
+        links.sort(key=lambda lk: (lk["source"], lk["recorded"]))
+    return out
+
+
 @dataclass
 class SearchResult:
     id: str
@@ -415,6 +580,13 @@ class SearchResult:
     source_path: str = ""  # #167: file path for agent to open/search
     # #1353 promoted epistemic state (D8) — first-class, absent when unknown:
     status: str = ""  # live / superseded / deprecated / retracted / draft
+    # #2294: the legacy flag-based dead marker. ``invalidate_point`` sets
+    # ``outdated=true`` and leaves ``status`` untouched, so a status-only
+    # terminal test cannot see it — the reader must combine the two through
+    # ``live.is_terminal_status`` (#2901: ONE declaration, imported by every
+    # reader that must skip non-current Points). Additive in ``to_dict``
+    # (emitted only when true), so live hits stay byte-identical.
+    outdated: bool = False
     superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
     supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
     # E6 (#1538) D5/D7: promoted validity-window fields — additive, emitted
@@ -445,6 +617,14 @@ class SearchResult:
     # byte-identical to pre-change output.
     source_ref: Any = None  # Point.extractedFrom — the Source/document link
     captured_at: str = ""   # Point.createdAt — when the fact entered memory
+    # #5581 (the #5038 read-path half): the Point's OWN §4.6 currency verdict —
+    # the AGGREGATE over its ``extractedFrom`` links, never one link's pair —
+    # and the links that make it ``stale``, whose sources are what the ruling
+    # requires the row to DISCLOSE ("older fact from source X"). Both ride
+    # INSIDE the provenance block and only under the same flag that fetched
+    # them, so an unflagged call stays byte-identical; empty ⇒ absent.
+    currency: str = ""  # current | stale | unknown
+    outdated_sources: list = field(default_factory=list)  # the behind links
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -473,6 +653,13 @@ class SearchResult:
         # #1353 promoted state — additive keys, emitted only when known (#1353 D8)
         if self.status:
             d["status"] = self.status
+        # #2294: the flag half of the terminal vocabulary, emitted only when
+        # set (the same additive D8 rule as ``status`` above). Without it the
+        # ``invalidate_point`` terminal state is INVISIBLE to consumers that
+        # only see the wire — e.g. the ask lane's decoration gate, which must
+        # never render a terminal hit as current.
+        if self.outdated:
+            d["outdated"] = True
         if self.superseded_by:
             d["superseded_by"] = self.superseded_by
         if self.supersedes:
@@ -498,12 +685,21 @@ class SearchResult:
         # Provenance (#3837 owner decision: source + when learned). Additive —
         # emitted only when a value is present, so an unflagged call and an
         # unflagged empty-provenance hit both stay byte-identical.
-        if self.source_ref or self.captured_at:
+        if self.source_ref or self.captured_at or self.currency:
             prov: dict[str, Any] = {}
             if self.source_ref:
                 prov["source"] = self.source_ref
             if self.captured_at:
                 prov["captured_at"] = self.captured_at
+            # #5581: the §4.6 verdict, and — only when it is ``stale`` — the
+            # SOURCED FYI the owner's ruling requires. Emitted only when the
+            # flag fetched it (``currency`` is ``""`` otherwise), so the block's
+            # pre-#5581 shape is unchanged for every unflagged caller.
+            if self.currency:
+                prov["currency"] = self.currency
+            if self.currency == "stale" and self.outdated_sources:
+                prov["fyi"] = {"reason": FYI_REASON_SOURCE_DRIFT,
+                               "sources": self.outdated_sources}
             d["provenance"] = prov
         return d
 
@@ -873,6 +1069,11 @@ def run_fts_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
+        # #4489: the ledger note is UNCONDITIONAL (unarmed → no-op), placed
+        # ahead of the opt-in trace so a default product read still records the
+        # leg. Mutation: moving it inside the ``leg_trace`` gate → the read
+        # funnel's leg count stays 0.
+        _retrieval_metering.note_leg("fts", ran=ran, degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("fts", ran=ran, degraded=degraded,
                                           reason=reason, count=count))
@@ -965,10 +1166,12 @@ def run_fts_query(
     # as quota.py's `documents` meter (documentKind IS NOT NULL) and
     # sdk.list_sources() (documentKind IS NULL). All three legs mean one
     # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
-    if label in ("Point", "Object"):
+    if label in _STATUS_FILTERED_LABELS:
         # #3301: the OBJECT family shares this leg's exclusion — before it,
         # a retracted/superseded/deprecated/archived Object was SEARCH-VISIBLE
-        # while recall_state hid it. The family rule (vocabulary + whether the
+        # while recall_state hid it. #1423 adds the SUBJECT family (same
+        # doctrine: a superseded team/role/person is a dead entity, so it is
+        # not current state). The family rule (vocabulary + whether the
         # Point ``outdated`` flag applies) lives in ``_status_vocab_for``.
         _vocab, _flag = _status_vocab_for(label)
         status_filter = ("" if excluded_statuses == ()
@@ -1131,6 +1334,10 @@ def run_vector_query(
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int, mechanism: str | None = None,
                 failure: bool = False) -> None:
+        # #4489: noted with the RAW ran/degraded the leg reports, BEFORE the
+        # opt-in trace's ``_scope_hollow`` re-labelling below — the ledger is a
+        # fact about the leg execution, not a derived declaration.
+        _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
         if leg_trace is None:
             return
         if _scope_hollow and ran and not degraded:
@@ -1222,7 +1429,7 @@ def run_vector_query(
             # read — the #4199 class via the status axis). ``_status_vocab_for``
             # is the ONE family→vocabulary dispatcher; calling it here (never
             # re-stating the mapping) is what keeps probe and leg from drifting.
-            if label in ("Point", "Object") and excluded_statuses != ():
+            if label in _STATUS_FILTERED_LABELS and excluded_statuses != ():
                 _vocab, _flag = _status_vocab_for(label)
                 _scope_where.append(_exclude_status_clause(
                     "n", excluded_statuses or _vocab,
@@ -1269,7 +1476,7 @@ def run_vector_query(
         # (documentKind NULL); the predicate lands post-YIELD, ahead of the
         # outer LIMIT, so a document query never fuses a non-document Source
         # (and vice versa). Same axis on all three legs.
-        if label in ("Point", "Object"):
+        if label in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label)
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
@@ -1442,7 +1649,7 @@ def run_vector_query(
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
         # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
         # and structural legs (documentKind IS NOT NULL ⟺ document).
-        if label in ("Point", "Object"):
+        if label in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label)
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or _vocab, include_outdated_flag=_flag)}")
@@ -1559,6 +1766,9 @@ def run_structural_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
+        # #4489: unconditional ledger note (see the fts leg's comment).
+        _retrieval_metering.note_leg("structural", ran=ran,
+                                     degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("structural", ran=ran,
                                           degraded=degraded,
@@ -1646,7 +1856,7 @@ def run_structural_query(
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
         # scan). include_terminal opts out for audit/history queries.
-        if excluded_statuses != () and label_str in ("Point", "Object"):
+        if excluded_statuses != () and label_str in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label_str)
             conditions.append(_exclude_status_clause(
                 "n", excluded_statuses or _vocab,
@@ -1975,9 +2185,15 @@ def degradation_chain(
         # #1391: the caller's exclusion applies uniformly (best-match AND
         # full-scan). Full-scan completeness callers (the #1353 supersede-
         # structure surface) opt in via excluded_statuses=() (include_terminal).
+        # #4489: the retrieval tally lives in a ContextVar too, and a NEW thread
+        # does not inherit ContextVars (CPython) — so each leg is wrapped with
+        # the retrieval binder AS WELL as the graph-ops one, or the leg half of
+        # the retrieval figure would be permanently, silently zero. Both binders
+        # are identity when their context is unarmed.
         if strategies.get("fts") and query:
             futures[executor.submit(
-                bind_metering_context(run_fts_query), graph, query,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_fts_query)), graph, query,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 keep_numeric=keep_numeric,
@@ -1998,7 +2214,8 @@ def degradation_chain(
                 # byte-identical submit kwargs).
                 _vec_kwargs["scope_kinds"] = scope_kinds
             futures[executor.submit(
-                bind_metering_context(run_vector_query), graph, query_vec,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_vector_query)), graph, query_vec,
                 limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
@@ -2007,7 +2224,8 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                bind_metering_context(run_structural_query), graph, kind,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_structural_query)), graph, kind,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 **_runner_kwargs("structural"),
@@ -2945,7 +3163,16 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  old.id, old.content, old.createdAt, "
             "  new.id, new.status, new.content, new.createdAt, "
             "  s.id, s.name, s.subjectKind, "
-            "  es.id, es.name, es.subjectKind",
+            "  es.id, es.name, es.subjectKind, "
+            # #2294: the legacy flag half of the terminal vocabulary, appended
+            # LAST so the 0-17 index mapping above is untouched. The reader
+            # that EXCLUDES on it (``_terminal_excluded``) and the reader that
+            # must MARK it (the ask lane's D8 gate / ``to_dict``) now read the
+            # same fact.
+            "  coalesce(n.outdated, false), "
+            # #1423: the Subject's own lifecycle status, appended AFTER #2294's
+            # index-18 flag so neither addition shifts the other's mapping.
+            "  s.status, es.status",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -2954,6 +3181,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             pid = row[0]
             st = out.setdefault(pid, {
                 "status": row[1] or "",
+                "outdated": bool(row[18]) if len(row) > 18 else False,
                 "superseded_by": None,
                 "supersedes": [],
                 "subject": None,
@@ -2985,12 +3213,25 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                         st["superseded_by"].get("created_at")):
                     st["superseded_by"] = cand
             # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
+            # #1423: the Subject's own `status` rides the decoration so a
+            # consumer can see that the subject has since been superseded
+            # WITHOUT the point's provenance disappearing — the ONTOLOGY
+            # §4.2/§12 doctrine is `superseded, never deleted`, and a point
+            # about a reorganized team remains a true record of that turn.
+            # Additive: the key is present on every row ("" when unset), so
+            # existing consumers reading id/name/kind are unaffected.
             s_id, s_name, s_kind = row[12], row[13], row[14]
             es_id, es_name, es_kind = row[15], row[16], row[17]
+            s_status = row[19] if len(row) > 19 else ""
+            es_status = row[20] if len(row) > 20 else ""
             if st["subject"] is None and s_id:
-                st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
+                st["subject"] = {"id": s_id, "name": s_name or "",
+                                 "kind": s_kind or "",
+                                 "status": s_status or ""}
             elif st["subject"] is None and es_id:
-                st["subject"] = {"id": es_id, "name": es_name or "", "kind": es_kind or ""}
+                st["subject"] = {"id": es_id, "name": es_name or "",
+                                 "kind": es_kind or "",
+                                 "status": es_status or ""}
     except Exception:
         logger.warning("Epistemic-state fetch failed", exc_info=True)
 

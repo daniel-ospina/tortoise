@@ -8,7 +8,7 @@ the backup boundary. ``next_seq`` then MERGEs a fresh counter at
 ``last_seq = 1`` and returns ``seq = 1`` — which the restored ``:GraphEvent``
 log already uses.
 
-Why it matters: ``seq`` is the event-log ORDERING key. ``events_poll``
+Why it matters: ``seq`` is the event-log ORDERING key. ``poll_events``
 cursors, subscription delivery, and the ``first_seq`` purge watermark all
 assume it is per-graph monotonic and unique. After a restore the first
 ``next_seq`` collides with an existing event and every later event is

@@ -376,9 +376,27 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # embedded-only in practice (the bulk-wipe guard refuses non-test graphs in
     # server mode), so its survival pins must never flip to the server lane.
     "test_rebuild_config_preservation",
+    # #7852 W1: the Layer-2 `semantics` write path resolves the direction from the
+    # declared meaning and records the basis as `direction_basis`. The fixture
+    # builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay, so
+    # the carve-out is load-bearing — a URI-set lane would redirect the
+    # construction to the server and the embedded replay would be gone. Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml; the two registries are one
+    # set in two homes (tests/test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems).
+    "test_semantics_write_path_7852",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
+    # #3644: the version-window pins construct embedded stores by db-path and
+    # assert the writer's window semantics (the transition record's
+    # `validFrom`/`previousValidTo`, legacy replay, the stub writer). A
+    # redirected construction would run against the server and certify a lane
+    # the file does not target. Registered with the ``carve_out`` list in
+    # config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality) — PR #8016 code-review
+    # ISSUE 2: the file was carve-out-labelled but absent from both.
+    "test_source_version_window_3644",
     # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
     # silent vecf32-overwrite behaviour (the server lane lands the same write),
     # so they must construct a real embedded store — a redirected construction

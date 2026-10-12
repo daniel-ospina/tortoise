@@ -11,7 +11,7 @@
 | `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
-| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (`restatus` when `status` is written — on a `:Point`-carrying node the value is first validated against `POINT_STATUS_VALUES` and the record is written against the `:Point` label so it folds, #3311; otherwise `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
+| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (`restatus` when `status` is written — on a `:Point`-carrying node the value is first validated against `POINT_STATUS_VALUES` and the record is written against the `:Point` label so it folds, #3311; otherwise `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). #1423 adds the Subject lane's producer — `commit_ops._apply_subject_supersession` (`supersede`: `status`/`supersededBy`/`supersededAt` on a `:Subject`; a Subject `status` written through the generic surface is validated against `SUBJECT_STATUS_VALUES`, ONTOLOGY §4.2, and refused otherwise). Designed on #3299; the op set was extended by #3312 (unjournaled update), #3300 (Point delete) and #1423 (Subject supersede). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
@@ -67,16 +67,26 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
-- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+- **`SourceVersioned`** (#5024, T6; the WINDOW half in #3644) — the `:Source` **version transition**. A
   re-fetched source whose `contentHash` differs is a *new version of the same
   identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
   `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
   `contentHash` (the NEW version), **`previousContentHash`** (the superseded
   one — this is what makes the prior version addressable after the single
-  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
-  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  `:Source` node has moved on), **`validFrom`** (the new version's valid-time
+  start, and the node's new window start) and **`previousValidTo`** (the prior
+  version's window close — equal to `validFrom` by construction: the same
+  instant mints both, which is §4.6's *"the journal record that opens a new
+  version closes the old one in the same act"*), plus the usual
+  `sourceKind`/`title`/`ingestedAt`/`updatedAt`/extras. There is ONE node per
+  `url`, so the prior version's window is **a journal fact**, never a second
+  node: `previousValidTo` is therefore a record-only key (`_SOURCE_HANDLED`
+  keeps it off the node).
+  The transition instant is **not** a separate key: the
   payload's own `updatedAt` (minted once by `create_source`, so the live node
-  and the record cannot disagree) is it, and the fold reads exactly that. The
+  and the record cannot disagree) is it, and the fold reads exactly that —
+  `validFrom` is the SAME minted instant, i.e. one clock read under two names,
+  not a second derivation. The
   record carries **no** recomputed ordinal — `version` is reproduced on replay
   through the same hash-diff gate the live write used, so recording it too
   would be a second derivation that can disagree. Folded by
@@ -144,6 +154,37 @@ that the payload does not name:
   opening record is emitted before any result is known and cannot carry them; a
   null `capture_ok` would otherwise read as the legacy "presumed captured"
   case at the #2335 retry gate).
+- **`SessionDeleted`** (#7951) — the `:Session` node's hard-delete carrier,
+  emitted by `hosted_api`'s `DELETE /v1/sessions/{id}`
+  (`_delete_session_sync`). JSONL-only (NOT in `_GRAPH_EVENT_TYPES`): fields
+  are `id` (the session id). The session delete is a raw `DETACH DELETE` and
+  `Session` is not a canonical entity label (`_CANONICAL_ENTITY_ID_PROPS`),
+  so no `EntityMutated` record can express the removal — that fold would fall
+  back to the id-wide canonical delete and leave the Session standing while
+  `SessionRecorded` re-materialised it. Folded idempotently by
+  `FalkorProjection._fold_session_deleted` (a 0-row `DETACH DELETE` is the
+  record's END STATE, never a fold-miss). The fold removes the session's
+  agentSession `:Source` stub (`url = session:{id}`) in the SAME step, because
+  that node has TWO journal re-creation paths the container anchor does not:
+  a later `SessionRecorded` re-creates the container, and `_link_source`
+  mints the Source from ANY `PointAdded` carrying `extractedFrom=session:{id}`
+  (which is why a post-delete write naming the session re-mints it live).
+  Only `rebuild_all` DEFERS this fold: its pass 2 re-derives edges from every
+  `PointAdded` — including ones a later record hard-deletes — so its
+  `_link_source` / `_link_session` side effects MERGE back what pass 1b
+  removed, and the deferred re-apply runs after every pass. The `apply()`-based
+  engines (`rebuild` / `recover_from_log` / `backup.restore`) fold the record
+  INLINE at its own journal seq, so a later record's own fold re-creates what
+  the delete removed. The deferred re-apply is therefore gated PER NODE on the
+  journal's own re-materialisation anchors — the last `SessionRecorded` **or**
+  `contains_session`-carrying `PointAdded` for the container, and the last
+  `extractedFrom=session:{id}` `PointAdded` / `SourceCreated` / `SourceVersioned`
+  for the Source — so the two nodes can neither drift from each other nor be
+  deleted after a later record re-created them, and the two engines reach ONE
+  verdict on the same journal (#7951 P1-a). The session's `CONTAINS` Points
+  and its `sessionCaptured` Event(s) are journaled separately as
+  `EntityMutated` op=delete records by the same delete site and by the
+  delete-during-capture sweep (`_sweep_orphaned_writes`).
 
 **Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
 four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
@@ -155,7 +196,14 @@ carries no `seq`; each engine pairs it with its journal position — the
 boundary is compared against that position), so a same-id re-creation does
 not resurrect the deleted link. On `rebuild_all` the
 sweep runs AFTER pass 2, so a `:Session` source recreated from a
-`contains_session` turn link exists before the fold.
+`contains_session` turn link exists before the fold. `SessionDeleted` is
+carried with its journal seq into a deferred list and re-applied AFTER every
+replay pass, gated on a later same-id `SessionRecorded` (a re-capture
+supersedes the delete, so its container and Source must survive): pass 2
+re-derives edges from every `PointAdded`, and its `_link_source` /
+`_link_session` side effects MERGE the deleted session's `:Source` /
+`:Session` back — undoing pass 1b's `SessionDeleted` fold for the deleted
+Points' payloads (#7951).
 
 **No down-version guarantee for new folded record types.** A binary that
 predates #3585, rebuilding a journal written by a newer one, warns that the

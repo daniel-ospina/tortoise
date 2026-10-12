@@ -182,8 +182,86 @@ def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
 _pending_telemetry: set = set()
 
 
+# ── #3675: result-bearing telemetry on ``mcp_tool_call`` ────────────────────
+# Until this, the row carried no result information at all, so ``status ==
+# "ok"`` — which means ONLY "the tool did not raise" — was the entire success
+# signal. A ``tortoise_search`` that returned 8 relevant points and one that
+# returned NOTHING were the same row. That is why the activation scorecard
+# (#3674) ships ``recall_attempted`` and refuses to ship "answered from
+# memory": it can see the ATTEMPT and not the ANSWER.
+#
+# ``result_count`` is the number of ITEMS the call returned. It is emitted when
+# the result shape makes the count KNOWABLE, and ``None`` when it does not —
+# ``None`` (or an absent key on a pre-#3675 row) and ``0`` are DIFFERENT FACTS:
+# ``0`` is "the tool ran and returned nothing", ``None`` is "this call's result
+# was not countable" (a write op returning ``{"id": ...}``, the wait-bound
+# refusal, a transport error). A consumer that reads the first as the second
+# recreates the exact ambiguity this prop exists to remove, so the two are never
+# collapsed here.
+#
+# ⚠️ NOT ``abstained``. #3675's body pairs ``result_count`` with an ``abstained``
+# flag for the ``POST /v1/ask`` abstention path (#1987) — but that path NO
+# LONGER EXISTS: ``tortoise_ask`` was made eval-only and removed from the MCP
+# surface, the SDK and REST (#3849 / #3929), and no MCP tool can abstain (the
+# reader/abstention machinery is reachable only from the eval lane). An
+# ``abstained`` prop would therefore have NO producer: it could only ever be
+# ``None`` (unreadable as "did not abstain") or a hardcoded ``False`` (a
+# fabricated fact about a call that never had the option). Neither is a
+# measurement, so the key is deliberately NOT registered. If an abstaining MCP
+# surface ever returns, register the prop together WITH its producer.
+#
+# ⚠️ COUNTS ONLY, never content. ``result_count`` is an integer, so no retrieved
+# text, point id, label or other free text can reach the analytics sink through
+# it — the PII guarantee (#501) is unaffected.
+
+#: Keys under which a tool result carries its item collection, in priority
+#: order. ``result`` is FastMCP's own ``x-fastmcp-wrap-result`` envelope for a
+#: function annotated ``-> list[...]`` — measured against the pinned FastMCP
+#: 3.4.6: every non-dict return is wrapped as ``{"result": value}``, and a
+#: function with no output schema gets no structured payload at all.
+#: ``results`` is ``tortoise_recall``'s non-subgraph envelope and ``nodes`` its
+#: subgraph one; both are on the scorecard's retrieval allowlist, so a shape
+#: that stopped being countable would blind the measurement rather than be
+#: silently miscounted.
+_MCP_RESULT_COLLECTION_KEYS = ("result", "results", "nodes")
+
+
+def _mcp_result_count(result: Any) -> int | None:
+    """Items returned by a dispatched tool call, or ``None`` when UNKNOWABLE.
+
+    Deliberately shape-driven and deliberately NOT a guess. Only a payload that
+    IS a collection, or a mapping carrying one under a known key, yields a
+    number. Everything else — a write op's ``{"id": ...}``, the wait-bound
+    refusal's ``{"error": {...}}``, a mapping whose ``results`` value is not a
+    list, a result with no structured payload — yields ``None`` and the key is
+    emitted as null. A heuristic that picked "the longest list" would produce a
+    PLAUSIBLE WRONG NUMBER, which is worse than no number: a consumer cannot
+    tell it from a right one, and the scorecard's whole contract is that a
+    count it reports is exact or refused.
+    """
+    payload = getattr(result, "structured_content", result)
+    # Defensive, per this seam's governing rule ("a telemetry bug must never
+    # mask or break the tool call itself"): the count is computed INSIDE the
+    # dispatch try block, so anything escaping here would be classified as an
+    # exec_error and RE-RAISED at the caller. The shapes above are plain
+    # isinstance/len checks on a real list, so this cannot fire today — it is
+    # the cost of a telemetry helper being allowed to sit on the hot path.
+    try:
+        if isinstance(payload, list):
+            return len(payload)
+        if isinstance(payload, dict):
+            for key in _MCP_RESULT_COLLECTION_KEYS:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return len(value)
+    except Exception:
+        return None
+    return None
+
+
 def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
-                                  latency_ms: int, error_kind: str | None) -> None:
+                                  latency_ms: int, error_kind: str | None,
+                                  result_count: int | None = None) -> None:
     """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
 
     ``status`` is one of this full set — the vocabulary is stated HERE because
@@ -206,7 +284,12 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
       (``error_kind = "transport_wait_bound"``).
 
     The first four are the #889 set; ``timeout``, ``cancelled`` and ``refused``
-    were added by #3834. The #888 research brief
+    were added by #3834. ``result_count`` (#3675) is the result-bearing prop:
+    the number of items the call returned, or ``None`` when the shape of the
+    result makes the count unknowable — see the block above, and read ``0`` and
+    ``None`` as two different facts.
+
+    The #888 research brief
     (``docs/epics/2026-08-11-888-surface-design/01-research-brief.md``) still
     lists only the original four — it is #888's artifact, not this lane's, so it
     is deliberately not edited here and this docstring is the live vocabulary.
@@ -217,9 +300,15 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
     daemon thread. Any failure is logged and swallowed — telemetry must never
     break a tool call.
     """
+    # ``result_count`` stays INSIDE this literal dict (rather than being added
+    # conditionally) on purpose: ``tests/test_telemetry_registration.py``'s
+    # structural guard resolves an emit site's prop keys from its dict literal,
+    # so a conditional add would put the new key OUTSIDE the guard that exists
+    # to catch exactly this class of silent strip.
     props = {"tool_name": _mcp_auth._sanitize_for_log(tool_name),
              "status": status,
-             "latency_ms": latency_ms, "error_kind": error_kind}
+             "latency_ms": latency_ms, "error_kind": error_kind,
+             "result_count": result_count}
 
     def _write() -> None:
         try:
@@ -759,11 +848,18 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # preview set, not on key presence in untrusted input.
         dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
     )
-    status, error_kind = "ok", None
+    status, error_kind, result_count = "ok", None, None
     t0 = _time.perf_counter()
     try:
         result = await _await_under_mcp_wait_bound(
             name, arguments, version=version, task_meta=task_meta)
+        # #3675: the items this call RETURNED. Counted here, before the status
+        # classification below, so the row carries the result of the dispatch
+        # whether that dispatch succeeded or failed: a transport-wait-bound
+        # refusal returns its own `{"error": ...}` result, which is not a
+        # collection and therefore counts as None — a refusal never reads as
+        # "returned 0 items".
+        result_count = _mcp_result_count(result)
         if getattr(result, "meta", None) and result.meta.get(_WAIT_BOUND_META_KEY):
             # #3834: the transport wait bound refused this dispatch. Its own
             # status (not exec_error) so "how often are we breaching 10 s" is
@@ -811,7 +907,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         latency_ms = int((_time.perf_counter() - t0) * 1000)
         try:
             _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
-                                          error_kind)
+                                          error_kind, result_count)
         except Exception:
             # A telemetry bug must never mask or break the tool call itself.
             _log.debug("mcp_tool_call telemetry emit failed", exc_info=True)
@@ -1332,7 +1428,37 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # the Point's journaled snapshot). A tenant setting either would forge
     # provenance and break live/replay parity. Rejected on ALL spellings, at
     # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
-    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
+    "sourceVersion", "sourceVersions", "sourceVersionTransit",
+    # #3644 / PR #8016 code-review ISSUE 1: the version's TRANSITION facts are
+    # server-minted/journalled and name a `:Source` transition — they can never
+    # be a legitimate caller prop on ANY entity, so they belong in this
+    # entity-agnostic set. They are ALSO rejected by `create_source`'s own
+    # `**props` guard and by `_update_entity`'s `_SOURCE_SERVER_MANAGED_PROPS`
+    # (both in sdk.py); this boundary entry is the fail-closed check IN FRONT of
+    # them, so the write is refused before it is attempted. The hazard the
+    # pair closes: a caller `previousValidTo` reaching the `SourceVersioned`
+    # emit's explicit `previousValidTo=` keyword through the payload splat
+    # would `TypeError`, and the swallowed exception would DROP the record while
+    # the live node moved (fail-open, live != replay).
+    #
+    # ⛔ `validFrom`/`validTo`/`valid_to` are deliberately NOT in this set.
+    # This helper is ENTITY-AGNOSTIC — it is the choke point for every MCP
+    # entity tool, including `tortoise_create_point`/`tortoise_update_point`,
+    # for which those ARE first-class caller props (§4.7 keeps the Point
+    # column caller-writable; `sdk._refuse_inverted_point_window`'s docstring
+    # states it). Listing them here refused a legitimate Point temporal write
+    # at the boundary — a regression this PR introduced (PR #8016 code-review
+    # ISSUE 1: measured `props={"validFrom": …}` → `-32003`, origin/main did
+    # not carry the keys). The `:Source` window is guarded where it belongs —
+    # on the Source routes, both fail-closed before any write:
+    #   * `sdk.create_source` rejects the window/transition keys in its
+    #     `**props` (sdk.py, before `ev` is built);
+    #   * `sdk._update_entity` rejects them on a reachable `:Source` through
+    #     `_SOURCE_SERVER_MANAGED_PROPS` (sdk.py).
+    # Both raise before the write and surface as a structured error through
+    # `_safe`, so the MCP Source routes stay closed without a denylist that
+    # also closes the Point route.
+    "previousValidTo", "previousContentHash"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -2080,17 +2206,26 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              direction: str = "bidirectional") -> dict:
+                              direction: str = "bidirectional",
+                              semantics: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+    semantics: Layer-2 meaning — the closed vocabulary ('addresses',
+      'supports', 'refutes', 'mutuallyExclusive', 'hasPart', 'related', …).
+      Supplying it RESOLVES the direction: a one-way meaning records
+      'unidirectional' (addresses / supports / refutes), a mutual one
+      'bidirectional' (hasPart / mutuallyExclusive / mutuallySupportive).
+      The basis used is recorded on the operator as 'direction_basis'. An
+      unknown word warns and the write proceeds (warn-not-block). This is the
+      write half of the three-layer relation model (#7852, owner-approved).
     direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
       direction. Default is mutual (both directions); pass 'unidirectional'
       for a directed attack (attacker's truth penalizes the target, no
-      back-pressure).
+      back-pressure). An explicitly different value outranks `semantics`.
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
@@ -2102,7 +2237,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
     return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
-                 direction=direction)
+                 direction=direction, semantics=semantics)
 
 
 def tortoise_annotate_operator(id: str, bias: float, precision: float,
@@ -2301,7 +2436,7 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
         types = _parse(types)
         if not isinstance(types, list):
             types = [types]
-    return _safe(_get_org_sdk().events_poll, after=after, types=types, limit=limit)
+    return _safe(_get_org_sdk().poll_events, after=after, types=types, limit=limit)
 
 
 
@@ -3090,8 +3225,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     promotion_policy='auto': #131 parity — a no-status connection-source
     point goes live on first edge creation (null-status sources only; an
     explicit or prior draft is never retro-promoted, #1088; retracted/
-    deprecated are never resurrected); the operator node is written without
-    a status property (live by projection — the #780 asymmetry). Deduped
+    deprecated are never resurrected); the operator node is written 'live'
+    (#5089 — it previously carried no status property, which excluded it from
+    the strict grounding selector while a rebuild produced 'live'). Deduped
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
     Idempotent-ish: points dedup by content hash + kind, sources by url,
@@ -3576,7 +3712,7 @@ _ONBOARDING_STATE_TTL = 60.0
 # #3916: the two documented decide protocols file the SAME node (the option
 # set) under two different labels, so the `decide-completed` observation must
 # accept BOTH or it reports "not decided" for a decision that WAS recorded:
-#   * `tortoise/onboarding/SKILL.md` §5 — the generic MCP-tool protocol — files
+#   * `tortoise/onboarding/SKILL.md` §6 — the generic MCP-tool protocol — files
 #     one `decision` point per option; that is also the kind
 #     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
 #     and the label the #3784 observation originally keyed on;
@@ -3680,11 +3816,20 @@ async def _org_onboarding_complete() -> bool:
 
 def _onboarding_state() -> dict:
     """Read this org's onboarding progress — the merged projection (jsonb
-    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable')."""
-    from tortoise.hosted_api import _get_onboarding_projection as _read_state
+    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable').
+
+    #2007 (W12): the selfhost placeholder org has no control plane at all —
+    its FLOW projection is read straight off the graph node (REST twin GET
+    /v1/onboarding/state self-host leg; no Supabase, no hosted_api)."""
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    if org_id == SELFHOST_ORG_ID:
+        from tortoise.mcp_auth import _get_org_sdk
+        from tortoise.onboarding import selfhost as _sh
+        return _sh.read_selfhost_state(_get_org_sdk())
+    from tortoise.hosted_api import _get_onboarding_projection as _read_state
     return _read_state(org_id)
 
 
@@ -3875,7 +4020,7 @@ def _maybe_onboarding_auto_complete(*,
       ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
       PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
       or ``option``). BOTH documented decide protocols are observed: the
-      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §5) files
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §6) files
       one ``decision`` point per option, and the ``tortoise-decide`` skill
       files each option as ``option`` — the same node under two labels
       (#3916). A plain point write (e.g. the setup prompt's ``statement``)
@@ -3905,12 +4050,22 @@ def _maybe_onboarding_auto_complete(*,
     reports a real transition to complete; that helper pops the entry itself,
     so a completion is visible immediately.
 
-    Only fires in HTTP (hosted) mode with a real org_id — stdio and
-    self-host calls are no-ops."""
+    Only fires in HTTP (hosted) mode with a real org_id — stdio is a no-op;
+    the SELFHOST placeholder org is delegated to the self-hosted twin
+    (``onboarding/selfhost.py`` — graph-only, no Supabase, #2007 W12)."""
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
-    if not org_id or org_id == SELFHOST_ORG_ID:
-        return  # stdio / self-host: no hosted onboarding state
+    if not org_id:
+        return  # stdio/operator: no onboarding state
+    if org_id == SELFHOST_ORG_ID:
+        # #2007 (W12): the self-hosted observation lane. Same rule (#3784),
+        # no control plane: a successful agent write observes
+        # harness-connected + first-points-filed, a decision-shaped write
+        # additionally observes decide-completed, and the canonical
+        # fork-aware gate decides completion (monotonic). Fail-open.
+        from tortoise.onboarding import selfhost as _sh
+        _sh.observe_selfhost_write(decision_observed=decision_observed)
+        return
     # Fast check: if the 60s cache says complete, skip.
     now = _time.time()
     cached = _onboarding_state_cache.get(org_id)
@@ -5209,8 +5364,9 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     # that will raise is the fail-open direction of the same defect).
     # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
     # every relationship type before its window guard, so an undeclared rel
-    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
-    # its `[0]` indexing is relied on by every pass below.
+    # type must win in BOTH. Own query: `succ_rows` returns ID(n) only, kept
+    # separate from the window query above because its `[0]` indexing is used
+    # by the passes below.
     win_rows = proj.g.query(
         "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
         "RETURN o.validFrom, n.validFrom, n.createdAt",
@@ -5230,11 +5386,13 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         )
     succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
                             params={"id": new_id}).result_set
-    # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
-    # scalar (the writer reads only the first successor row), so with a
-    # duplicate successor id the writer still transfers an old edge that ends
-    # at a LATER successor. `succ_count` models the writer's MATCH fan-out.
-    succ_first = succ_rows[0][0] if succ_rows else None
+    # 2b's self-edge guard mirrors the writer EXACTLY: the writer compares the
+    # structural target against EVERY successor node (#7822) — point ids are
+    # not unique, so the writer's MERGE binds every node carrying `new_id` and
+    # a scalar read protected only the server's first row, minting the phantom
+    # self-edge at the LATER successor nodes. `succ_count` models the writer's
+    # MATCH fan-out.
+    succ_internals = {r[0] for r in succ_rows}
     succ_count = max(len(succ_rows), 1)
     # Pre-existing edges at the successor: the MERGE-backed legs collapse into
     # an edge that is already there, so it is NOT net-new ("edges that would
@@ -5300,7 +5458,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             params={"old": old_id},
         ).result_set:
             handled_old_edge_ids.add(rid)
-            if succ_first is not None and t_internal == succ_first:
+            if t_internal in succ_internals:
                 dropped.append({"type": rtype, "other": tid or new_id,
                                 "reason": "far endpoint IS the successor — delete-only"})
             else:

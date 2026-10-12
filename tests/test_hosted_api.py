@@ -1580,6 +1580,28 @@ class TestPointsCreateConfidenceAndAuthor:
         from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
         assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
 
+    def test_credibility_on_a_dedup_hit_calibrates_the_point(self, client):
+        # #7980: the dedup hit used to log-and-drop the authored prior, so the
+        # retry returned 200 with the point still uncalibrated — and an
+        # uncalibrated live point makes the fail-closed #344/#1157 gate refuse
+        # the whole graph for `/v1/dream`. `dedup` must be named on this
+        # surface (it defaults False here); on self-host the same exposure is
+        # the default path.
+        body = {"content": "hosted dedup-hit credibility",
+                "kind": "statement", "dedup": True}
+        first = client.post("/v1/points", json=body)
+        assert first.status_code == 200, first.text
+        pid = first.json()["id"]
+        assert not self._read_point(client, pid).get("baseline_set")
+        second = client.post("/v1/points", json={**body, "credibility": "gold"})
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == pid, "must dedup, not duplicate"
+        props = self._read_point(client, pid)
+        assert props.get("baseline_set") is True, props
+        from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
+        assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
+        assert props.get("ep_alpha") == 10.0, props
+
     def test_bad_credibility_is_rejected_not_500(self, client):
         # A ladder word the store cannot resolve must be ANSWERED with a 4xx
         # (like the sibling confidence bound), never mapped to the route's
@@ -4853,7 +4875,7 @@ class TestQuotaFailClosed:
 class TestEventReplay:
     """GET /v1/events — tenant event/audit replay surface (#432).
 
-    The active endpoint (line 1099) delegates to sdk.events_poll() which
+    The active endpoint (line 1099) delegates to sdk.poll_events() which
     returns :GraphEvent nodes from the per-team graph namespace. Event
     format: {"events": [...], "next_cursor": "..."} where each event
     has seq, ts, type, event_id, payload.
@@ -5052,7 +5074,7 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 7
 
     def test_events_limit_default(self, client):
-        """Default limit is 100 (#432 events_poll)."""
+        """Default limit is 100 (#432 poll_events)."""
         for i in range(5):
             r = client.post("/v1/points", json={
                 "content": f"Point {i}",
@@ -5066,7 +5088,7 @@ class TestEventReplay:
         assert len(r.json()["events"]) == 5
 
     def test_events_limit_capped_at_1000(self, client):
-        """Limit is capped at 1000 (#432 events_poll)."""
+        """Limit is capped at 1000 (#432 poll_events)."""
         r = client.get("/v1/events?limit=1000")
         assert r.status_code == 200, f"expected 200, got {r.status_code}"
 
@@ -10986,6 +11008,14 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
         "Artifact exceeds the team graph size cap", "Session turn cap exceeded",
         "Too many registration attempts", "Signup is rate-limited right now",
+        # #3514: the demand surface's two THROTTLES. Each names its next step
+        # ("retry shortly", plus the `Retry-After` header), so there is no
+        # ceiling to buy out of and nothing for the human path to resolve — the
+        # same category as the two signup throttles above. The rate cap bounds
+        # RATE and the cardinality cap bounds DISTINCT KEYS; neither is a
+        # plan/quota limit, so offering an upgrade would be a false promise.
+        "demand rate cap exceeded",
+        "integration-key cardinality cap reached",
         # the seam's own body: it IS the contact path (and must not recurse)
         "Need more? Contact support@premiselabs.co.",
     )

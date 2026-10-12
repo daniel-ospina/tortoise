@@ -90,6 +90,7 @@ change — the INTERMEDIATE-component swap remains out of scope.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import logging
@@ -103,6 +104,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -115,6 +117,12 @@ PROBE_TIMEOUT = 2.0  # seconds for raw socket probes
 # unresponsive orphans (issue #1005 — the 2s timeout made serial sweeps
 # take minutes).
 PROBE_SOCKET_TIMEOUT = 0.5
+# #3629: the connect-path length above which a probe goes through a SHORT
+# tempdir symlink. macOS/BSD cap AF_UNIX `sun_path` at 104 bytes INCLUDING the
+# NUL terminator (measured: bind fails at 104, works at 103), so the kernel
+# refuses a longer path at BOTH bind and connect. A path the reaper RECORDS can
+# still exceed it — see `_connectable_path`.
+_PROBE_PATH_MAX = 100
 # #1383: bounded retry before fail-closed skip — a single load-induced
 # read/connect timeout must not strand a live orphan (indicator b). Only
 # timeout-phase failures retry; refused/missing are reliable verdicts.
@@ -1280,6 +1288,62 @@ def _socket_peer_pid(sock: socket.socket) -> int | None:
     return pid if pid > 0 else None
 
 
+@contextlib.contextmanager
+def _connectable_path(socket_path: str) -> Iterator[str | None]:
+    """Yield a name `connect()` can actually reach for `socket_path` (#3629).
+
+    macOS/BSD cap AF_UNIX `sun_path` at 104 bytes including the NUL
+    terminator, so the kernel refuses a LONGER path at bind AND connect — for
+    a server that is alive and serving. Two ordinary shapes hand the reaper
+    exactly that:
+
+      (a) `_classify_dir` records `os.path.realpath(socket_path)`, and on
+          macOS the `/var` -> `/private/var` expansion adds 8 bytes to a
+          server that bound successfully under the shorter `/var` name;
+      (b) a directory renamed after bind (the reaper's own
+          `STALE_QUARANTINE_SUFFIX` move-in-place) keeps the server listening
+          on the same inode while its CURRENT path grows past the cap.
+
+    Measured on this repo's box with a `tortoise_test_*` dir: bind path 98
+    bytes (OK), recorded realpath 106 bytes — `_active_client_count` returned
+    ``None`` (client state unknown) for a live, idle server, while
+    `_probe_socket_any` on the SAME path returned 'alive'.
+
+    A symlink created in the (short) tempdir reaches the same inode through a
+    short name, and the kernel resolves a symlink's TARGET with PATH_MAX, not
+    `sun_path` — so the connect and the RESP exchange both work. Only paths
+    over the cap take this route, so the common case costs no syscall.
+
+    Yields ``None`` when the path is over the cap and the symlink cannot be
+    made (or `socket_path` is not a usable path at all) — callers MUST fail
+    closed: an unreachable server is never proven client-free.
+    """
+    try:
+        path = os.path.abspath(socket_path)
+        over_cap = len(path.encode("utf-8", "surrogateescape")) \
+            > _PROBE_PATH_MAX
+    except (OSError, TypeError, ValueError):
+        yield None  # a non-path / unserialisable record value -> unreachable
+        return
+    if not over_cap:
+        yield path
+        return
+    link = os.path.join(_real_gettempdir(),
+                        f".rp_{os.getpid()}_{time.time_ns()}.sock")
+    try:
+        os.symlink(socket_path, link)
+    except OSError:
+        yield None  # cannot verify — fail closed
+        return
+    try:
+        yield link
+    finally:
+        try:  # noqa: SIM105
+            os.unlink(link)
+        except OSError:
+            pass
+
+
 def _socket_served_by(socket_path: str | None, pid: int | None) -> bool:
     """True only when the process accepting at `socket_path` IS `pid`.
 
@@ -1303,15 +1367,18 @@ def _socket_served_by(socket_path: str | None, pid: int | None) -> bool:
         return False
     try:
         sock.settimeout(PROBE_TIMEOUT)
-        try:
-            sock.connect(socket_path)
-        except (OSError, TypeError, ValueError):
-            # #4238 P2: a non-path `socket_path` (a crafted/erroneous record)
-            # raises TypeError/ValueError, not OSError. Refuse it here rather
-            # than let it escape into `reap()`, which has no per-record
-            # try/except and would abort the whole sweep.
-            return False
-        peer = _socket_peer_pid(sock)
+        with _connectable_path(socket_path) as probe_path:
+            if probe_path is None:
+                return False  # unreachable by ANY name -> fail closed
+            try:
+                sock.connect(probe_path)
+            except (OSError, TypeError, ValueError):
+                # #4238 P2: a non-path `socket_path` (a crafted/erroneous
+                # record) raises TypeError/ValueError, not OSError. Refuse it
+                # here rather than let it escape into `reap()`, which has no
+                # per-record try/except and would abort the whole sweep.
+                return False
+            peer = _socket_peer_pid(sock)
     finally:
         try:  # noqa: SIM105
             sock.close()
@@ -1329,22 +1396,10 @@ def _probe_socket_any(socket_path: str,
     through any path to that inode) when the path is long; direct probe
     otherwise. Fail closed ('undetermined') if the symlink cannot be made.
     """
-    path = os.path.abspath(socket_path)
-    if len(path.encode("utf-8", "surrogateescape")) <= 100:
-        return _probe_socket(path, timeout=timeout)
-    link = os.path.join(_real_gettempdir(),
-                        f".rp_{os.getpid()}_{time.time_ns()}.sock")
-    try:
-        os.symlink(socket_path, link)
-    except OSError:
-        return "undetermined"  # cannot verify — fail closed
-    try:
-        return _probe_socket(link, timeout=timeout)
-    finally:
-        try:  # noqa: SIM105
-            os.unlink(link)
-        except OSError:
-            pass
+    with _connectable_path(socket_path) as probe_path:
+        if probe_path is None:
+            return "undetermined"  # cannot verify — fail closed
+        return _probe_socket(probe_path, timeout=timeout)
 
 
 def _client_list(socket_path: str) -> list[dict] | None:
@@ -1360,29 +1415,39 @@ def _client_list(socket_path: str) -> list[dict] | None:
     timeout, malformed reply). None means "client state unknown" — callers
     MUST fail closed (skip reaping). [] means the server reported zero
     clients.
+
+    #3629: the recorded path can exceed the AF_UNIX `sun_path` cap for a LIVE
+    server (see `_connectable_path`), in which case connect() — and therefore
+    the whole probe — failed ENAMETOOLONG and every caller read a reachable,
+    idle server as "client state unknown". Probe through the short symlink
+    when that happens; fall back to `None` only when the path is unreachable
+    by ANY name.
     """
-    # Fast path: raw RESP over a plain unix socket (no subprocess spawn).
-    raw = _raw_resp_client_list(socket_path)
-    if raw is not None:
-        return raw
-    # Fallback: redis-cli (still no redislite client — see docstring).
-    try:
-        out = subprocess.run(
-            ["redis-cli", "-s", socket_path, "CLIENT", "LIST"],
-            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
-        )
-        if out.returncode == 0:
-            # rc 0 with empty stdout = zero clients (empty bulk string) —
-            # a valid verdict, don't double-probe via the raw fallback.
-            # `_stdout_text` keeps a non-text stdout OUT of the parse: rc 0
-            # is redis-cli's own success word, so a mocked/odd stdout must
-            # read as "0 clients" only when it really was empty text.
-            text = _stdout_text(out)
-            if text is not None:
-                return _parse_client_list(text)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
+    with _connectable_path(socket_path) as probe_path:
+        if probe_path is None:
+            return None  # unreachable by any name -> fail closed
+        # Fast path: raw RESP over a plain unix socket (no subprocess spawn).
+        raw = _raw_resp_client_list(probe_path)
+        if raw is not None:
+            return raw
+        # Fallback: redis-cli (still no redislite client — see docstring).
+        try:
+            out = subprocess.run(
+                ["redis-cli", "-s", probe_path, "CLIENT", "LIST"],
+                capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+            )
+            if out.returncode == 0:
+                # rc 0 with empty stdout = zero clients (empty bulk string) —
+                # a valid verdict, don't double-probe via the raw fallback.
+                # `_stdout_text` keeps a non-text stdout OUT of the parse: rc 0
+                # is redis-cli's own success word, so a mocked/odd stdout must
+                # read as "0 clients" only when it really was empty text.
+                text = _stdout_text(out)
+                if text is not None:
+                    return _parse_client_list(text)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None
 
 
 def _raw_resp_client_list(socket_path: str) -> list[dict] | None:
@@ -2228,9 +2293,11 @@ def phase1_probe(record: dict) -> dict:
     # #1383 security review (Issue 2): a connect-only verdict needs no
     # response — use the SHORT socket timeout so a hostile full-backlog
     # socket farm cannot hang the sweep (2.0s x N dirs would trip the
-    # 120s SIGALRM and abort every cron run).
-    probe = _probe_socket(record["socket_path"],
-                          timeout=PROBE_SOCKET_TIMEOUT)
+    # 120s SIGALRM and abort every cron run). #3629: `_probe_socket_any` (not
+    # bare `_probe_socket`) so a path over the AF_UNIX cap still probes
+    # instead of reading 'undetermined' for a live orphan.
+    probe = _probe_socket_any(record["socket_path"],
+                              timeout=PROBE_SOCKET_TIMEOUT)
     if probe == "dead":
         record["classification"] = "stale_socket"
     elif probe == "alive":

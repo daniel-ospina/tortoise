@@ -45,14 +45,19 @@
  * adds a `user_id` column to `auth_flows` (idempotently, the same pattern and
  * helper used to add `next`) and writes the session's user into it.
  *
- * ⚠️ HONEST LIMIT: the completion path, `/auth/callback`, does NOT read
- * `user_id`. It exchanges the code and mints a session for whatever subject
- * GoTrue returns. The D1-side user binding is therefore RECORDED, NOT ENFORCED.
- * Enforcing it — for `kind = "link"`, asserting
- * `flow.user_id === result.data.user.id` after the exchange — requires a change
- * to `auth/callback.ts`, which is owned by another workstream and is
- * deliberately NOT edited here. Until that lands, the cross-account guarantee
- * rests entirely on GoTrue's code↔user association at initiation.
+ * ⚠️ ENFORCED as of #1871: the completion path, `/auth/callback`, now READS
+ * `user_id` and, for `kind = "link"`, refuses to mint a session when the
+ * exchanged subject is not the user this flow was bound to — it redirects back
+ * to the flow's `next` with `link_mismatch=1` and the browser keeps the session
+ * it already had. The D1-side user binding is therefore RECORDED *and*
+ * ENFORCED, and it no longer rests on GoTrue's code↔user association alone.
+ *
+ * That guard is a BACKSTOP, not the primary defence: GoTrue itself refuses the
+ * cross-account case at the identity level (`internal/api/identity.go::
+ * linkIdentityToUser` answers 422 `identity_already_exists` — "Identity is
+ * already linked to another user" — before any token is issued), so the guard
+ * fires on a code that should not exist rather than on the reported flow.
+ * `user_id` is never read from the request — it is the SERVER session row.
  */
 import {
   type Env,

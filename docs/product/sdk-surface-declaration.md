@@ -40,10 +40,10 @@ declaration against three views derived by genuinely different means, in both di
 |---|---|---|
 | **AST** | `_sdk_targets()` class-body walk of `tortoise/sdk.py` | what is **defined** in the class |
 | **REFLECTION** | `dir(TortoiseSDK)` + `callable` | what is **reachable**, incl. attributes attached outside the class body |
-| **APPROVED** | `config/surface-manifest.yml` `sdk:` rows | what an **owner approved** (#3863) |
+| **FROZEN** | `config/surface-manifest.yml` `sdk:` rows | the frozen snapshot the declaration is reconciled against — a drift control, **not** the approved target (#3863/#4185) |
 
 At the render that produced this file: AST **150** · reflection **150**
-· approved **150** — all agree.
+· frozen **150** — all agree.
 
 AST and reflection are *not* the same question, and nothing reconciled them before this file.
 `tortoise/sdk.py` already attaches one attribute outside the class body
@@ -62,9 +62,11 @@ gap between the two counts — which is why both are reported.
    without human approval (the #4282 mandate): the surface is the contract every agent and
    customer integration is built on, so a change materially affects customer outcomes. Ask
    Daniel (repo `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY") before you write the code
-   or re-cut anything. Only then add the method's `sdk:` row to `config/surface-manifest.yml`
-   and set `approval` on that row to the PR number and Daniel's handle. This declaration
-   records *identity*; the manifest records *approval*. `uv run python tools/surface-guard.py`
+   or re-cut anything. Only then record the approval in `docs/product/canonical-mcp-tools.md`
+   (`approval_status` / `approvedBy` / `approved` / `approval_pr`) and add the method's `sdk:` row to
+   `config/surface-manifest.yml`. This declaration records *identity*; the approval lives in the
+   canonical doc, which a `tools/surface_manifest.py cut` copies into the manifest (#4185).
+   `uv run python tools/surface-guard.py`
    is RED until that row exists — but a green guard is a CONSISTENCY result, not consent: a
    change that updates the class and the manifest together passes it, so it cannot tell an
    approved addition from an unapproved one. Daniel's review is what carries the approval.
@@ -82,7 +84,7 @@ until the replacement it points a caller at exists.
 
 ## Related
 
-- `docs/product/mcp-sdk-surface.md` — the curated list the owner reads, and the approved
+- `docs/product/mcp-sdk-surface.md` — the curated list the owner reads, and the frozen
   baseline's human form (#3863).
 - `docs/product/bridge-table.md` — Phase 0.1: every tool and its single SDK destination.
 - `docs/product/canonical-sdk-methods.md` — all 150 methods in groups (#1521).

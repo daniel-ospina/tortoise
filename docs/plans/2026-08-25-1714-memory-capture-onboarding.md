@@ -168,12 +168,23 @@ controls pass, and every deferral is **filed** with an owner and a trigger.
 
 ## 2. Epic-level architecture (one statement; detail in the issues)
 
-**Two repositories — current state and target.** The Pi capture mechanism is **real code in an internal tooling repo**
-(`agent-infra/extensions/tortoise-capture/` plus a **second overlapping recorder**, `reflect-hook.ts`), symlinked onto dev
-machines and released outside the product, so a capture regression is invisible to the product's gates. **Target:
-product-owned** (`tortoise/pi-extension/`, mirroring `tortoise/claude-hooks/`) and tested in the product's CI, with
-`agent-infra/extensions/` left a **symlink-only dev shim**, kept permanently. #3512 owns the scaffolding and the CI port —
-a home without a gate fixes nothing.
+**Two repositories — the product half is LANDED, the agent-infra half is open (measured 2026-10-11, #3512).** The Pi capture
+mechanism was **real code in an internal tooling repo** (`agent-infra/extensions/tortoise-capture/` plus a **second
+overlapping recorder**, `reflect-hook.ts`), symlinked onto dev machines and released outside the product, so a capture
+regression was invisible to the product's gates. **Target: product-owned** (`tortoise/pi-hooks/`, mirroring
+`tortoise/claude-hooks/`) and tested in the product's CI, with `agent-infra/extensions/` left a **symlink-only dev shim**,
+kept permanently. **The product half is landed at `tortoise/pi-hooks/`** — it is the artifact
+`capture_install._install_pi` installs, it ships in the wheel (`pyproject.toml` package-data), and its guard is
+`tests/test_pi_capture_hooks.py`, selected for a `tortoise/pi-hooks/` change. (The home this section used to name,
+`pi-extension/`, **never existed** — corrected by #3512; the previous wording sent a lane to scaffold a new tree
+beside the shipped one.) **The shim is a TARGET, not current state:** agent-infra still carries **both** recorders as
+**real files with their own tests** — but only `reflect-hook.test.ts` is executed by a `ci-main.yml` step, while `tortoise-capture/index.test.ts` is wired into no workflow at all — both on the dev-farm ship-list
+(`manifest.json` → `~/.pi/agent/extensions/`), and the installer's legacy guard disables only the `tortoise-capture/`
+**directory** — so a farm machine has **two live producers** (a known class; the product-side handling of it is **#3713**'s,
+whose detector docstring already names the blind spot). The reduction to the shim, the dev-machine repoint and the **PR
+ordering** are **daniel-ospina/agent-infra#1671**; the disposition is recorded in `tortoise/pi-hooks/README.md` §Migration.
+**That cross-repo deliverable is #3512's** — the consolidation of the two recorders into ONE is #3515's, not #3512's (§8) —
+the hybrid is what defines the single recorder's shape, so consolidating first would write it twice.
 
 **One capture path, one shared primitive — REQUIRED, not current.** The `:Session` MERGE text is **not** owned in one place:
 the capture pair keeps **separately drifted** field lists (`machine_id`/`model` hosted-only) and every other writer adds a
@@ -276,7 +287,7 @@ implementing first means implementing in the wrong repo. #3513 needs the live wi
 | Issue | Owns | Depends on | Journeys |
 |---|---|---|---|
 | **#3539** | GitHub ingestion baseline (shared mapper, cursor-correct fetch+diff, partial-batch recovery, rate-limit-safe pagination, lifecycle writes, quota fairness, auto-index, connector wrappers, dedupe decision) + remote docs extraction (fetcher, staging, `/v1/index/docs`, Document-aware quota, deploy config) | — | — (acceptance in #3539) |
-| **#3512** | The Pi mechanism's home: **scaffolds `tortoise/pi-extension/`**, product-owned, two recorders consolidated into one, **its test suite ported into the product's CI** with a **dedicated node job carrying its own path trigger** and globs covering `.test.mjs`/`.test.ts` (`store-sync.test.mjs` is named in §5), the **packaging/install surface** for the new home (`pyproject.toml` package-data, wheel content, the installer/`cp` path, the **packaging gate**), plus the **agent-infra-side deliverable** — the separate repo's issue/PR reducing `agent-infra/extensions/` to the shim, the dev-machine symlink repoint, and the **PR ordering** so no window exists where capture is installed but unwired | — (S0 is a **release** gate for this lane, not an implementation gate — §3) | prerequisite for J2/J5/J8 |
+| **#3512** | The Pi mechanism's home — **landed at `tortoise/pi-hooks/`** (the artifact `capture_install._install_pi` installs, shipped in the wheel, guarded by `tests/test_pi_capture_hooks.py` under `core` with the node toolchain in that lane; the `pi-extension/` this row used to scaffold **never existed** — corrected 2026-10-11), plus the **agent-infra-side deliverable** — **daniel-ospina/agent-infra#1671**: the separate repo's PR reducing `agent-infra/extensions/` to the shim (measured: `tortoise-capture/index.ts` + `reflect-hook.ts` are **both real files** (only `reflect-hook.test.ts` has a `ci-main.yml` step; `tortoise-capture/index.test.ts` is executed by no workflow), both on the dev-farm ship-list), the dev-machine symlink repoint, and the **PR ordering** so no window exists where capture is installed but unwired. **The consolidation of the two recorders into ONE is #3515's** (the hybrid defines the recorder's shape — §8), which is what closes the `#3515 → #3512` dependency cycle | — (S0 is a **release** gate for this lane, not an implementation gate — §3) | prerequisite for J2/J5/J8 |
 | **#3515** | The capture architecture (hybrid hook + store-sync, the worker consuming `session_import.parsers`' Pi reader (its **#3551-pinned verbatim Pi fixture** is the reference)), the guards, the two-part falsifiable verification, the **monotone delivery lane** on a property named distinctly from the existing `capture_extractor` extraction lane, the **409/429-retryable** rule **per record, so one blocked record cannot head-of-line-block the rest of a spool file**, the hook's **per-turn** re-read of the recording flag **resolving the graph override too**, **fail-closed** on a turn-content mismatch, the **cursor model** — a **per-record cursor/lease** plus a **separate file-offset watermark** (never skipping a partial tail; while an interior record is blocked its cursor holds and the file offset advances past it), the **fork/clone rule** built on #3551's turn-record contract, the ops-check receipts §5 requires, the store-sync worker's **implementation language and its `tortoise store-sync` CLI entry point** (§5 pins that name), the **second JSONL substrate (`~/.tortoise/session-events/`)** its sweep drains alongside the spool, and the death-mode additions §8 hands it — the **store-sync-only** and **offline** rows in the pinned-N table, the **spool cap** as a pinned literal (after eviction the cursor **re-anchors to a record boundary**, and `delivered + N dropped (spool cap) + dead-letter == written` holds — mutation control: the retention constant), **spool write failures** (ENOSPC/EACCES, torn append ⇒ non-silent failure, no cursor advance past unwritten bytes), the **live-fork** case (parent still appending; released barrier + mutation check), and a **permanently undecodable interior record** (dead-letter, honest `N dropped`, later records still delivered, cursor advances), the **fixture rows for an unknown entry kind, an entry with no id** (**never positional-id synthesis** — that re-mints R8's defect) **and duplicate ids**, the client's decision on a **2xx carrying `capture_ok = false`** (cursor advance, receipt, consistent across both lanes), and the `~/.tortoise/session-events/` substrate's **regime, schema owner and pre-existing consumer `tools/build_window_transcript.py`** | #3512; **#3551** (the turn-record contract its fork/clone rule is built on) | J5, J7, J8 |
 | **#3516** | Provisioning + verification of capture from onboarding (claude + pi probes, symlinked install, unsupported rows honest, the **set-agreement and `codex: false` tripwire assertions in `harnesses.test.js`** — both **new** — the **harness copy constants**, and the **client-side `autoCapture` enablement** — the named config key in its named store — that makes "default-on" true for a user who has not touched `~/.pi/agent/tortoise-config.json`, written **atomically so a racing writer can never silently revert it to `false`**, with default-on enforced at **both** the server read default and the client's **off-wins-when-unset** rule, plus the **local-config substrate's failure modes** (two writers racing on that file — a read-modify-write must not clobber a sibling key or revert the capture flag — a torn write, and a malformed / empty / non-UTF8 / absent config, each with a pinned honest outcome, **never a silent capture-off**) | #3512, #3515 | J2, J5, J7, J8 |
 | **#3517** | Agent-prompt install (a setting, single state path, parity-tested, off-switch named) + the **capture-disclosure template, its single source of truth and the agent-prompt render** (its step/state accounting, so the `capture-disclosed` FLOW step is never silently consumed, §8) + the **research-brief banner** (its acceptance, the false-promise grep as its trip — **not** a #3539 merge-blocking condition) | #3512, #3515 | J3, J8 |
@@ -575,8 +586,10 @@ false-promise grep is the trip; **not** #3539's acceptance); `#3513`: the renumb
 keys keep the 200 round-trip; server-owned keys gain a rejection assertion **and** the server-side write path keeping them populated),
 `_ALLOWED_STATE_KEYS` deriving from the **union**, and the **`github_org` direction** (drop the DEFAULT-only dead keys **or** classify
 them server-owned; never union them into the client-writable set while `_github_credentials` reads the teams column); `#3553`: the
-`(toggle, receipt)` pair (the `(clicks, …)` pair is **stale**) and jsonb-then-graph convergence; `#3512`: the home + **permanently-kept
-symlink shim** + the agent-infra-side and packaging deliverables.
+`(toggle, receipt)` pair (the `(clicks, …)` pair is **stale**) and jsonb-then-graph convergence; `#3512`: the home (**landed at `tortoise/pi-hooks/`** — not
+the `pi-extension/` path these corrections used to imply) + the **permanently-kept symlink shim** (**daniel-ospina/agent-infra#1671**;
+a target, not current state — agent-infra still ships both recorders as real files) + the agent-infra-side and packaging
+deliverables (**packaging landed**), with the **recorder consolidation owned by #3515**.
 
 **Cycle log — tier High, N=4 proportional reviewers + the advisory #5, fresh context every cycle.**
 
@@ -633,7 +646,7 @@ contract in §1–§5. Every **Owner** that is an issue number has a comment on 
 | **#3552** — the off-switch role matrix (owner / non-owner member / revoked key / expired key / session-user vs key-authed) | The matrix is the issue's; a refusal leaves state untouched | **#3552** |
 | **#3553** — jsonb-then-graph partial failure, process-local `_org_lock`, and the CAS's stale-version behaviour | All the issue's; the mutation control is removal of the predicate | **#3553** |
 | **#3514** — the hung-transport case | A send that neither returns nor raises: the click request completes 2xx within a pinned budget, the record is already persisted, the timeout constant is pinned, and N such clicks are not serialized behind the hung transport | **#3514** |
-| **#3512** — the agent-infra-side deliverable | The separate repo's issue/PR reducing `agent-infra/extensions/` to the shim, the dev-machine symlink repoint, the **PR ordering** so no window exists where capture is installed but unwired, plus the **packaging/install surface** for the new home (`pyproject.toml` package-data, wheel content, the installer/`cp` path, the packaging gate) | **#3512** |
+| **#3512** — the agent-infra-side deliverable (the only residue: the product half is **landed** at `tortoise/pi-hooks/`, and the plan's `pi-extension/` never existed) | The separate repo's issue/PR reducing `agent-infra/extensions/` to the shim, the dev-machine symlink repoint, the **PR ordering** so no window exists where capture is installed but unwired — recorded as **daniel-ospina/agent-infra#1671**; plus the **packaging/install surface** for the home, which is **landed** (`pyproject.toml` package-data names `pi-hooks/tortoise-capture.ts`; the installer is `capture_install._install_pi`; the packaging gate is `tests/test_capture_install.py::test_every_capture_artifact_ships_in_the_wheel`). **The recorder consolidation is #3515's, not this issue's** — the hybrid defines the single recorder's shape, so consolidating first would write it twice; `#3515`'s `Depends on: #3512` is satisfied by the **placement decision** (made, landed, recorded), not by a merge | **#3512** |
 | A Pi session file's records are `type:"message"`, which `parse_pi = parse_codex` matches none of — a silent 0-turn parse | Real Pi-shaped parse branch, checked-in verbatim Pi fixture for #3551/#3515, fail-closed 0-turn guard | **#3551** |
 | `entity_links_attempted` / `entity_links_created` are written inline by two drifted writers (per-capture vs per-index-run), so the counter is non-monotone | Both properties in #3551's contract; one cross-path parity/monotonicity test replaces the per-path assertions; #3554 quantifies the under-count | **#3551** |
 | **#3520** — the Captured-sessions screen's own state contract (loading / fetch-error+retry / empty / `outcome_known:false`) | The screen's states are the issue's, asserted in §5 J6 | **#3520** |
@@ -690,3 +703,66 @@ Objective 1's Pi leg has two halves with different verification statuses:
   `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
   `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
   for Pi.
+
+## #3542 amendment (2026-10-11) — the codex spike is RESOLVED: codex is a hook seam, and it shipped
+
+*Appended by `#3542`; the reviewed text above is unchanged. Under this repo's plan convention an
+amendment records what is now known and leaves the reviewed text intact — but three statements
+above are **factually stale**, and they are named below so a reader of §4 / §6 does not act on
+them.*
+
+**The spike's answer, and the refuted premise.** `#3542` was filed on the premise that *"Codex has
+no session-end hook"*, taken from the research brief's matrix row (`docs/research/1714-memory-capture-onboarding.md:38`
+— *"⚠️ no first-class session-end hook documented for capture"*, tier **T2 (post-hoc; near-real-time
+poll)**). That premise is **false, and was verified false live**: Codex CLI **0.154.0** has a
+default-on hooks system whose `$CODEX_HOME/hooks.json` is the only hook source the CLI reads, with a
+`SessionEnd` event. The T2 half of the row was right about the **parse** — the session's rollout
+JSONL (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`) is what gets read — but wrong about the
+**trigger**: the trigger is T1 automatic, not a poll. So codex is a **hook seam like claude**, not a
+poller, and the hybrid in §2 gains no new leg from it.
+
+**This landed before this issue was scoped.** `#3818` (PR **#4024**, commit **`5abb22c29`**,
+2026-09-18, *"the Codex capture seam — SessionEnd install, live-verified"*) shipped the whole
+deliverable, and `#3819` (cursor) shipped the sibling spike. Every ask of `#3542` is in the tree:
+
+| `#3542` ask | Where it landed |
+|---|---|
+| the mechanism, verified | `tortoise/codex-hooks/session-end.sh` — reads the `SessionEnd` stdin JSON, detaches a worker (Codex kills a synchronous hook at a hard ~1 s budget, measured), which files the rollout via `tortoise sessions import --harness codex` → `parse_codex` (`tortoise/session_import/parsers.py:190`) on the same `/v1/sessions` contract the claude seam uses |
+| the install path | `tortoise install codex` → `capture_install._install_home_scoped` (`tortoise/capture_install.py:973`), `capture_install.codex_home` (`:821`), `capture_install.merge_codex_capture_hooks` (`:943`), `hook_install._codex_layout` (`tortoise/hook_install.py:707`). HOME-scoped `$CODEX_HOME/hooks.json`, **absolute** command |
+| honest grid exposure (status + install) | `HARNESS_CAPTURE_SEAM.codex` (`website/apps/dashboard/src/harnesses.js:89`) → `HARNESS_CAPTURE_SUPPORT.codex` **derived** true (`:98`) → `CODEX_CAPTURE_INSTALL` (`:351`) → `HARNESS_CAPTURE_INSTALL.codex` (`:590`); `HARNESS_CAPTURE_REQUIRES_OPT_IN.codex = true` (`:117`); **no** `HARNESS_CAPTURE_REASON.codex` row (`:609`) — a supported harness renders the capture step, never a reason |
+
+**The stale statements, named.** §4's `#3542` row (`:297`) and §6's `#3542` entry (`:539-541`) both
+say *"the `codex: false` row ships today"* and *"`#3542` must land before the `codex: false` row
+flips"*; §4's `#3516` row (`:281`) names *"the `codex: false` tripwire assertions in
+`harnesses.test.js`"* as new work. **There is no `codex: false` row, and there is no constant to
+flip:** `HARNESS_CAPTURE_SUPPORT.codex` is *derived from the seam map* (`harnesses.js:102`), so the trip described in §4 cannot fire
+and must not be built. The assertions that do exist pin the *derivation* and the *install copy*, not
+a literal: `harnesses.test.js:379` (*"capture support is derived from the seam"* — `HARNESS_CAPTURE_SUPPORT[h] === seamHarnesses.includes(h)`, plus the install-step leg) and `:418` (*"the Codex
+capture install copy honours $CODEX_HOME"*). §7's unresolved item 3 (no literal date on `#3542`'s gate) is moot with the
+deferral retired.
+
+**The deferral is retired, and this changes one line of `#3516`.** `#3516`'s body still carries
+*"codex has no session-end hook — it needs a spike, not a patch; that deferral is recorded
+explicitly here"*. That sentence is superseded by this amendment: `#3516`'s unsupported-row duty is
+unchanged for `claude-desktop` / `claude-web` / `chatgpt`, and its codex row is **not** its work.
+
+**What is genuinely NOT covered — recorded, not papered over.** The seam is *hook-only*: capture
+rides `SessionEnd`, so a Codex process **SIGKILLed / crashed before session end files nothing**, and
+nothing re-reads `$CODEX_HOME/sessions/**/rollout-*.jsonl` afterwards. The hybrid's store-sync
+backstop is not an option today — `#3515` (its Pi leg, `tortoise/pi-hooks/store-sync.ts`) is
+**unimplemented**, so there is no backstop for any harness to extend. A never-trusted hook fails open
+the same way (that limit *is* disclosed: `tortoise install codex` prints the trust requirement —
+`CODEX_CAPTURE_INSTALL`, and the live install smoke test confirms it).
+
+**Live follow-ups on the shipped seam — already filed, not this issue's work.** `#4025` (the *read*
+half installs to a project-local file Codex never reads), `#4062` (`hooks upgrade --harness codex
+--dir .` writes a RELATIVE command and reports success), `#5245` (`install codex --uninstall` leaves
+the HOME-scoped capture seam live without saying so).
+
+**Verified for this amendment (2026-10-11, this worktree).** `tests/test_codex_capture_hook.py` +
+`tests/test_capture_install.py` + `tests/test_hook_upgrade.py` → **350 passed**;
+`tests/test_session_import_codex.py` → **46 passed**; `node --test src/harnesses.test.js` in
+`website/apps/dashboard` → **19 passed**. Live install into an isolated `HOME`: `tortoise install
+codex` wrote `$CODEX_HOME/hooks/tortoise-session-end.sh` and merged the `SessionEnd` entry with the
+script's **absolute** path into `$CODEX_HOME/hooks.json`. The seam is CI-selected for a change to
+its own files (`config/ci-surfaces.yml:643`, `:1439`).

@@ -225,7 +225,12 @@ def build_base_graph(sdk: TortoiseSDK) -> dict:
                 # misfire (must NOT fire — preference with two options)
                 "misfire": ("compare the couch and the dog bed, which should "
                             "i keep?"),
-                # ago-relative (must NOT fire — R13)
+                # ago-relative (#2652): ROUTES to AGO_RELATIVE now, but the
+                # 'two weeks ago' window (2026-08-24..2026-08-30 from
+                # question_date 2026-09-10) is EMPTY on this fixture, so the
+                # lane falls back to legacy byte-identically — the pinned
+                # empty-window contract (tests/test_assembly_sdk.py
+                # ::test_ago_relative_empty_window_falls_back_to_legacy)
                 "ago": "what was the couch status two weeks ago?",
             }}
 

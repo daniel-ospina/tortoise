@@ -114,7 +114,7 @@ Three rules, each of which caught a real error in this document.
 | R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
 | R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
 | R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
-| R8 | `poll_events` | #8 | `events_poll` | keep |
+| R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
 
 ### WRITE
@@ -125,7 +125,7 @@ Three rules, each of which caught a real error in this document.
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable**: the URL is the node identity |
 | W4 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
-| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | keep — session-adjacent capture artifacts |
+| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one |
 | W6 | `capture_session_local` | — | `capture_session` | keep — **SDK-only name.** Writes the session into your own graph |
 | W7 | `capture_session_hosted` | — | `commit_session` | keep — **SDK-only name.** Extracts locally, validates, then POSTs to `/v1/sessions/commit`; needs a hosted endpoint and an API key |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
@@ -210,12 +210,39 @@ both. It has to split.
 journal, not knowledge capture. `capture` also now collides with
 `capture_session_local` / `capture_session_hosted`, which *do* capture sessions.
 
-**Proposed split** (owner decision):
+**Proposed split** (owner decision) — ⛔ **SUPERSEDED (owner ruling 2026-10-09, #4282). Do not action this table.**
 
 | Was | Becomes | Kind |
 |---|---|---|
 | `checkpoint`, `diary_write` | `write_journal` | write |
 | `diary_read` | `read_journal` | read |
+
+**⛔ Amendment — owner ruling 2026-10-09 (#4282).** The split above was never adopted. When the two
+owner-approved docs were reconciled, they disagreed about these three names and the owner ruled
+— *"The approval wins; the table is the defect"* — that **`canonical-mcp-tools.md` governance
+governs** (2026-10-09). That doc **absorbs** each member into the replacement that already exists
+for it, so **no `write_journal` / `read_journal` names are created** — and the three no longer
+share **one** W5 destination. Each retires to its own:
+
+| Was | Becomes instead | Authority |
+|---|---|---|
+| `diary_write` | `create_entity` (W1) | `canonical-mcp-tools.md` row 10 |
+| `checkpoint` | `mine_knowledge_from_session` (beta's name for canonical row 13 `capture_knowledge`) | `canonical-mcp-tools.md` row 13 |
+| `diary_read` | `list_knowledge` (R2) | `canonical-mcp-tools.md` "Removed entirely" |
+
+**They remain W5 members**, and that is not a contradiction: this partition is keyed by each
+method's *current* name, so a group records where a method IS, never where it GOES. The rendered
+rename table lists all three under W5, each against its own target — which is exactly the split
+the group's single action row no longer supplies. Do not read W5's membership as a shared
+destination; read the per-member rows.
+
+**OVERRIDES:** this doc's `write_journal` / `read_journal` split — the canonical menu's absorptions govern, so each journal method retires into the replacement that already exists for it rather than becoming a new name. The reconciled destinations are recorded in `docs/product/bridge-table.md` and `docs/product/beta-sdk-surface.md`; the marker and the ruling reasoning are in the `OVERRIDES:` comment in `tools/bridge_table.py`, and the plan of record is the mapping comment on #4282.
+
+What **survives** the amendment: the diagnosis below (the read/write mix and the name collision are
+real, and they are *why* the group dissolves), and the ontology flag (`wing` / `room` appears
+nowhere in `docs/ONTOLOGY.md`) — the retirement settles the **names**, not that vocabulary, so
+whether the parameters survive the absorption remains open and is recorded on **#4282**, which owns
+the replacements' parameter surface.
 
 **Also observed:** `checkpoint` and the diary methods take `wing` / `room` parameters.
 That vocabulary appears nowhere in `docs/ONTOLOGY.md`, which models graphs, namespaces and
@@ -380,7 +407,7 @@ this" is **not** by itself a strong justification, and several entries below fai
 | R5 | `status`, `taxonomy`, `list_*`, `audit`, `check_structure`, `validate_domain`, `stale_points`, `summarize_structure`, `dream_health_check`, `dream_health_state`, **`test_guard`** | `cognee.validate` | Graph structural validation — **Cognee has this**, so the claim is *"we differ in kind"*: ours is ontology-aware (`docs/ONTOLOGY.md`) where Cognee checks orphaned edges and identity mismatch generically. **`test_guard` is kept — see the note below the table.** | adequate |
 | R6 | `get_cross_lens_candidates`, `list_dedup_candidates` | `detect_contradictions` (Cognee, internal) | A **read-only** review queue for link candidates — surfaces the candidate, never auto-merges. No competitor exposes candidate review as public API. | adequate |
 | R7 | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | provenance graph (Cognee) | Cognee also has provenance, so ours must differ in kind: ours is **who decided** (Point→authoredBy→Subject→delegation) to their **where it came from**. `belief_timeline` — how a belief itself changed over time — has no analogue. | adequate / strong |
-| R8 | `events_poll`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
+| R8 | `poll_events`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
 | R9 | `get_confidence`, `calibrate_summary`, `calibration_passed` | PSL, OpenCog PLN, NARS, Knowledge Vault | Belief propagation over a graph. **Not novel as a mechanism** — PSL, PLN and NARS all do BP with evidence revision, and Knowledge Vault fused probabilistic claims at web scale. **Novel only as a shipped product surface**: no commercial graph database found that ships belief propagation (Neo4j, Neptune, ArangoDB, TigerGraph, Memgraph, FalkorDB treat confidence as an ordinary property). | **strong as product, not as method** |
 | W1 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | add (13/13) | **Core.** | — |
 | W2 | `create_source`, `complete_source` | `write_note`, `add` | A **source with a credibility tier** whose URL *is* its identity. No competitor models source trust; credibility is not a field anywhere in the survey. | **strong** |

@@ -50,6 +50,15 @@ What it installs, per harness
     ``sessionEnd`` is IDE-only: Cursor's docs state cloud agents have no
     editor-lifetime session boundary.
 
+    #2122 adds a SECOND Cursor script: ``session-start.sh`` into the same
+    ``~/.cursor/hooks/``, merged as the ``sessionStart`` registration.  That is
+    Cursor's ONE documented push seam (output contract
+    ``{"additional_context": …}`` — snake_case), and it carries the
+    cold-context digest the Claude seam injects at ``SessionStart``.  Cursor's
+    per-turn event (``beforeSubmitPrompt``) can observe/block a prompt but has
+    no injection field, so the shared per-turn reflex is NOT registered for
+    Cursor — the seam claims only what the harness documents.
+
 Idempotent by construction — this is also the upgrade path
 ----------------------------------------------------------
 Every target is compared before it is written: a script/extension whose bytes
@@ -235,6 +244,15 @@ CODEX_EVENT = "SessionEnd"
 #: cloud agents have no editor-lifetime session boundary.
 CURSOR_SCRIPT_NAME = "tortoise-session-end.sh"
 CURSOR_EVENT = "sessionEnd"
+
+#: #2122: Cursor's shipped sessionStart INJECTION hook and the event it
+#: registers.  `sessionStart` is Cursor's ONE push seam — the per-turn
+#: `beforeSubmitPrompt` event has no injection field — and its output contract
+#: is `{"additional_context": <digest>}` (snake_case).  Declared beside the
+#: capture half so the two script/event pairs a Cursor install writes cannot
+#: drift apart (#3971).
+CURSOR_SESSION_START_SCRIPT_NAME = "tortoise-session-start.sh"
+CURSOR_SESSION_START_EVENT = "sessionStart"
 
 #: Codex hook registrations live in ``$CODEX_HOME/hooks.json`` — the ONE hook
 #: source Codex CLI 0.154.0 actually reads (verified live, #3818): neither the
@@ -972,43 +990,54 @@ def merge_cursor_capture_hooks(data: dict, *, command: str,
 
 def _install_home_scoped(harness: str, home: Path, *,
                          dry_run: bool) -> InstallResult:
-    """Install a HOME-scoped capture seam described by its HarnessLayout.
+    """Install a HOME-scoped hook seam described by its HarnessLayout.
 
     ONE implementation for every HOME-scoped harness (Codex #3818, Cursor
     #3819): the layout supplies the root env var, hooks dir, registration
-    file, entry shape, and shipped script, so the two seams cannot drift.
+    file, entry shape, and shipped scripts, so the seams cannot drift.
 
     The registration file is ``<root>/hooks.json`` — the only hook source the
-    harness reads — and the shipped script is copied to ``<root>/hooks/``.
+    harness reads — and every shipped script is copied to ``<root>/hooks/``.
     The registered command is the script's ABSOLUTE path: the hook runs from
     the harness's own cwd, so a relative path would not resolve.
+
+    EVERY script in ``layout.scripts`` is installed and registered — not just
+    ``scripts[0]`` (#2122: Cursor's seam is the ``sessionEnd`` capture half
+    PLUS the ``sessionStart`` injection half, and a one-script body would ship
+    each half's registration without its script).  The reader half has always
+    iterated the tuple (``detect_install`` / ``upgrade_install``), so a
+    one-script installer was the same writer/reader asymmetry #3971 paid for.
     """
     layout = hook_install.get_layout(harness)
-    spec = layout.scripts[0]
     root = hook_install.default_root(layout, home)
     hooks_dir = layout.hooks_root(root)
-    dst = hooks_dir / spec.name
     settings_path = layout.settings_path(root)
     assert settings_path is not None  # every HOME-scoped layout declares one
 
-    src = spec.source
-    if not src.is_file():
-        return InstallResult(harness, error=(
-            f"shipped capture hook not found at {src} — this install is "
-            "incomplete (broken package?). Reinstall tortoise."))
-    payload = src.read_bytes()
+    # Resolve every payload BEFORE any check or write, so a broken package
+    # fails the whole install with nothing on disk.
+    payloads: list[tuple[hook_install.HookScriptSpec, bytes]] = []
+    for spec in layout.scripts:
+        src = spec.source
+        if not src.is_file():
+            return InstallResult(harness, error=(
+                f"shipped capture hook not found at {src} — this install is "
+                "incomplete (broken package?). Reinstall tortoise."))
+        payloads.append((spec, src.read_bytes()))
 
-    for target in (dst, settings_path):
-        escape = _symlink_escape(
-            root, target, label=f"{harness} config dir")
-        if escape:
-            return InstallResult(harness, error=f"Refusing: {escape}")
-    non_regular = _refuse_non_regular(dst)
-    if non_regular:
-        return InstallResult(harness, error=non_regular)
-    foreign = _foreign_install_refusal(dst, payload)
-    if foreign:
-        return InstallResult(harness, error=foreign)
+    for spec, payload in payloads:
+        dst = hooks_dir / spec.name
+        for target in (dst, settings_path):
+            escape = _symlink_escape(
+                root, target, label=f"{harness} config dir")
+            if escape:
+                return InstallResult(harness, error=f"Refusing: {escape}")
+        non_regular = _refuse_non_regular(dst)
+        if non_regular:
+            return InstallResult(harness, error=non_regular)
+        foreign = _foreign_install_refusal(dst, payload)
+        if foreign:
+            return InstallResult(harness, error=foreign)
 
     data, refusal = _load_settings(settings_path)
     if refusal:
@@ -1018,15 +1047,17 @@ def _install_home_scoped(harness: str, home: Path, *,
             f"Refusing: {settings_path} could not be read — refusing to touch "
             "it. Merge manually."))
     before = json.dumps(data, sort_keys=True)
-    command = hook_install._spec_command(layout, spec, root)
-    try:
-        _merge_capture_hooks(
-            data, script_name=spec.name, event=spec.event, command=command,
-            root=root, hooks_dir=layout.hooks_dir, flat=layout.flat_entry)
-    except ValueError as e:
-        return InstallResult(harness, error=(
-            f"Refusing: {settings_path} has {e} — refusing to touch it. "
-            "Merge manually."))
+    for spec, _payload in payloads:
+        command = hook_install._spec_command(layout, spec, root)
+        try:
+            _merge_capture_hooks(
+                data, script_name=spec.name, event=spec.event,
+                command=command, root=root, hooks_dir=layout.hooks_dir,
+                flat=layout.flat_entry)
+        except ValueError as e:
+            return InstallResult(harness, error=(
+                f"Refusing: {settings_path} has {e} — refusing to touch it. "
+                "Merge manually."))
 
     unwritable = _preflight_probe([hooks_dir, settings_path.parent])
     if not unwritable and not dry_run:
@@ -1035,18 +1066,23 @@ def _install_home_scoped(harness: str, home: Path, *,
         return InstallResult(harness, error=f"Refusing: {unwritable}")
 
     actions: list[str] = []
-    changed = _install_script(dst, payload, dry_run=dry_run, actions=actions)
+    changed = False
+    for spec, payload in payloads:
+        changed = _install_script(
+            hooks_dir / spec.name, payload, dry_run=dry_run,
+            actions=actions) or changed
 
     if before != json.dumps(data, sort_keys=True):
+        events = "/".join(spec.event for spec, _ in payloads)
         if dry_run:
-            actions.append(f"[dry-run] would merge the {spec.event} capture "
-                           f"hook into {settings_path}")
+            actions.append(f"[dry-run] would merge the {events} hook "
+                           f"registrations into {settings_path}")
         else:
             _atomic_bytes(settings_path,
                           (json.dumps(data, indent=2) + "\n").encode("utf-8"),
                           0o644 if not settings_path.exists()
                           else settings_path.stat().st_mode & 0o777)
-            actions.append(f"merged the {spec.event} capture hook into "
+            actions.append(f"merged the {events} hook registrations into "
                            f"{settings_path}")
         changed = True
 
@@ -1447,6 +1483,8 @@ __all__ = [
     "CURSOR_EVENT",
     "CURSOR_REGISTRATION_FILE",
     "CURSOR_SCRIPT_NAME",
+    "CURSOR_SESSION_START_EVENT",
+    "CURSOR_SESSION_START_SCRIPT_NAME",
     "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",

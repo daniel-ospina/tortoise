@@ -41,7 +41,8 @@ score the legs that are not.
 | `stored` | ≥1 transcript-turn `(:Point)` (`pointKind: 'event'`) wired `(:Session)-[:CONTAINS]->` — the transcript was actually persisted | graph-scoped, sessions |
 | `memory_produced` | ≥1 point that is NOT a transcript turn (`pointKind IS NULL OR pointKind <> 'event'`), i.e. extraction produced memory | graph-scoped, sessions |
 | `recall_attempted` | A retrieval tool call (`tortoise_search` / `tortoise_recall` / `tortoise_search_sessions`) at or after the org's `first_memory_at`. `tortoise_ask` is excluded — it is eval-only, not a product surface (#3849) | **org-wide, event count** |
-| `value_confirmed` | **Not measurable** — permanent refusal | — |
+| `recall_returned` | Of those calls, the ones whose `result_count` ≥ 1 — i.e. the retrieval **handed back** at least one item. Emitted by the MCP dispatch seam (#3675) on the narrow retrieval allowlist. A retrieval row with no `result_count` (pre-deploy) or an unreadable one refuses the stage rather than counting as “returned nothing” | **org-wide, event count** |
+| `value_confirmed` | **Not measurable** — a refusal, for a narrower reason since #3675 | — |
 
 ### Two traps this is built to avoid
 
@@ -53,8 +54,36 @@ The two non-measured states are **not** interchangeable:
 
 | State | Means | Examples |
 | --- | --- | --- |
-| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated`, `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows` |
-| `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (no instrument exists — the stage always reports this) |
+| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated` (the walk could not be certified COMPLETE — see below), `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection), `no_memory_in_default_graph_org_scope_unknown` |
+| `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (the surviving gap is whether a returned item was *used*, which no surface records) |
+
+**Stage 4's gate and its count have different scopes (#4039).** The gate is the
+org **default graph**'s `first_memory_at`; the count is the org-wide analytics
+stream (`analytics_events` carries no `graph_id`). For a multi-graph org that
+produced memory only outside the default graph, the graph-scoped absence is not
+a fact about the org, so `no_memory_produced_in_lifetime` would be a false claim
+about it. The count is of retrieval **calls**, not answers: a row is counted by
+its `tool_name` alone (`status` and `result_count` are not read), so a call that
+failed (`status` `exec_error`) or returned nothing (`result_count` 0) counts
+exactly like one that returned items. When that count is **exact and positive**
+the stage reports `unavailable` /
+`no_memory_in_default_graph_org_scope_unknown` instead. The refusal is
+deliberately **conservative**: this read cannot tell an org whose memory lives
+in another graph from a single-graph org whose only windowed recall activity
+failed or returned nothing, so such a single-graph org reads `unavailable`
+rather than `not_measurable`. The same org with an exact `0` (or a withheld
+count: a truncated page, an unplaceable or unclassifiable row) still reads
+`no_memory_produced_in_lifetime`: no org-wide call count contradicts the
+gate, and
+this read cannot enumerate the org's other graphs, so that case is
+indistinguishable from a single-graph org with no memory. Making the gate itself
+org-scoped (an org's graph list, then a lifetime memory scan per graph) would
+remove that residual; it is a new read rather than a disclosure choice — tracked
+in #8149.
+
+In the cohort roll-up this reason is attributed **per org** rather than hoisted
+as a store-level note: it is the org that is ambiguous, not the analytics store.
+The affected orgs are named in `stages.recall_attempted.orgs_unavailable`.
 
 The window guard **fails closed**: a row that is out of window, or that cannot
 be placed on the timeline at all (unparseable, naive, an unexpected type),
@@ -83,16 +112,44 @@ instant was counted, letting the funnel disagree with itself on the boundary
 instant. If you change one leg's bounds, the other must move with it.
 
 **`recall_attempted` is an ATTEMPT, not an answer.** `mcp_tool_call.status ==
-"ok"` means only that the tool did not raise. `result_count` / `abstained` are
-not in the analytics props allowlist
-(`hosted_api.py::_ALLOWED_ANALYTICS_PROPS`), so "answered from
-memory" is currently unknowable. No `activated` field and no activation rate is
-emitted anywhere, and `tools/activation_cohort.py` fails loudly if a payload
-ever grows one.
+"ok"` means only that the tool did not raise.
 
-Note the legs mix granularity: stages 1–3 are per-graph session counts, stage 4
-is an org-wide event count with no `graph_id` (`analytics_events` has none) and
-no `session_id`. This is an activation **funnel** view, not a per-session claim.
+**`recall_returned` is a RETURN, not an answer.** Since #3675 the
+`mcp_tool_call` props carry `result_count` — the number of items the call
+returned, or `null` when the result shape makes the count unknowable — so the
+attempt/answer split IS measured. It is an **upper bound** on “answered from
+memory”: it says the retrieval surface handed back candidates, never that a
+candidate was relevant, read or used.
+
+Two things make stage 5 refuse rather than report a count (the count would be a
+lower bound presented as exact): a retrieval row with **no** `result_count` at
+all (a window predating the prop's deploy — the emitter writes the key
+unconditionally, so absence means the row is older than #3675), and one whose
+`result_count` is present but not a count (`result_count_unreadable`: a call
+that failed inside `_safe`, an unrecognised recall mode, or a result shape that
+no longer matches the three measured ones). The counters
+`detail.rows_without_result_count` and `detail.rows_uncountable_result_count`
+name which fired.
+
+Stage 5 uses the **narrow** retrieval allowlist only, where stage 4 reports both.
+The wide set adds known-id reads (`tortoise_get_point` et al) whose result is a
+single object with no item collection — uncountable by construction — so folding
+them in would refuse the stage for any org that ever read a point by id.
+
+The paired `abstained` prop #3675’s body names was **not** shipped: its only
+producer was the `POST /v1/ask` abstention path, retired with `tortoise_ask`
+(#3849/#3929), so the key would have had no producer at all. No `activated`
+field and no activation rate is emitted anywhere, and
+`tools/activation_cohort.py` fails loudly if a payload ever grows one.
+
+**`value_confirmed` remains a refusal** — and a narrower one. Nothing recorded
+says whether a returned candidate was *used*, and the two historical blockers
+it used to name (#3518/#3519) are closed, as is the missing-instrument one.
+
+Note the legs mix granularity: stages 1–3 are per-graph session counts, stages
+4–5 are org-wide event counts with no `graph_id` (`analytics_events` has none)
+and no `session_id`. This is an activation **funnel** view, not a per-session
+claim.
 
 ## Querying it
 
@@ -115,16 +172,34 @@ alone reports n=1 — a dogfood read.
 **This is not a success gate.** The owner withdrew the proposed "≥5 of 10" aha
 bar and the minimum-N requirement on #3497 §7.4 (2026-09-15): *"there should eb
 no number. stop creating bureocracy and focus on shipping and iterating with
-feedback."* Beta exit is shipping-and-iterating. The tool reports a funnel over
-whatever cohort the operator names — there is no N anyone must reach, and no
-rate.
+feedback."* Beta exit is shipping-and-iterating. The surface reports a funnel
+over whatever cohort the operator names — there is no N anyone must reach, and
+no rate.
+
+`GET /v1/internal/activation/cohort` (#3676) is the served roll-up. It takes an
+**explicit** org list and returns the same six-stage shape folded across the
+named orgs.
+
+```bash
+# The operator/internal credential — NOT a tenant `tt_` key.
+export BASE=https://tortoise-y4mjjq.fly.dev
+curl -sG "$BASE/v1/internal/activation/cohort" \
+  -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+  --data-urlencode "orgs=org_alpha" --data-urlencode "orgs=org_beta" \
+  --data-urlencode "since=2026-09-16T00:00:00Z" \
+  --data-urlencode "until=2026-09-17T00:00:00Z" | jq
+```
+
+The committed client is preferred over the curl above: it refuses a plain-http
+base, never follows a redirect (CPython's redirect handler copies request
+headers, so a redirect would hand the internal key to whatever host answered),
+and never lets the credential reach an error message.
 
 ```bash
 # Run with the PROJECT interpreter via uv (this package requires Python >= 3.12;
 # the tool uses `zip(..., strict=True)`, so a system Python 3.9/3.8 fails).
 uv run python tools/activation_cohort.py \
-  --api-base https://api.premiselabs.co \
-  --org "$ORG_A=$KEY_A" --org "$ORG_B=$KEY_B" \
+  --api-base "$BASE" --org org_alpha --org org_beta \
   --since 2026-09-16T00:00:00Z --until 2026-09-17T00:00:00Z \
   --out /tmp/b7-cohort.json
 ```
@@ -134,13 +209,35 @@ and dogfood orgs are excluded by naming the cohort, not by a heuristic that
 could silently redefine the number. Output always carries `cohort_definition`
 and `dogfood_only`. A one-org run is flagged `dogfood_only: true` (the product's
 own internal-gate vs public-gate vocabulary). An org that could not be read
-makes its stage `partial` with the org named, or `unavailable` when no org
-produced a measurable value at all — never silently summed as 0, and never
-described as `not_measurable` (which means the org answered, and the answer was
-"nothing to measure").
+makes its stage `partial` with the org named (and the reason in `org_errors`),
+or `unavailable` when no org produced a measurable value at all — never
+silently summed as 0, and never described as `not_measurable` (which means the
+org answered, and the answer was "nothing to measure").
 
-A cross-tenant admin cohort endpoint is possible but needs its own
-tenant-isolation security review; it is filed separately, not smuggled here.
+## Tenancy review — the cross-tenant cohort endpoint (#3676)
+
+A cross-org read is a genuine tenant-boundary change, so the decisions below are
+recorded rather than assumed.
+
+| Question | Decision |
+| --- | --- |
+| **Auth** | The internal MACHINE plane (`FASTAPI_INTERNAL_KEY`, `_check_internal`). ADR-010 splits credentials into HUMAN (session JWT) and MACHINE (durable key/agent identity); an operator is the machine plane, and there is no admin *role* in the human plane to reuse. An org-scoped `tt_` key can never satisfy `_check_internal`, so the separation is structural (pinned by a test). |
+| **Why not a new admin secret** | `FASTAPI_INTERNAL_KEY` already gates `/v1/internal/backups/restore`, `/purge` and `/sweep` — operations that read and REWRITE every tenant's graph. A read-only count over an operator-named list adds no capability to the holder, while a second long-lived master credential would widen the blast radius of a leak and need its own rotation path. |
+| **Plane / prefix** | `GET /v1/internal/activation/cohort`. `/v1/internal/` is the documented operator/cron prefix and carries the recorded #3834 transport-wait-bound exemption (these routes "have no user and no user-patience budget to derive from"); a cohort of N orgs is exactly that class of batch job, so it inherits the ruling instead of widening it. A `/v1/admin/` prefix would have needed a new exemption decision and a new path family to secure. |
+| **Enumeration** | The list is explicit; there is no wildcard token (`all`/`any`/`every`/`*`/`%`/`-1` are refused by name), no registry lookup, and the response contains no org the caller did not name — pinned by a test that seeds an unrequested org and asserts its id appears nowhere at any depth. |
+| **Duplicates** | Refused (422), never deduped: deduping hides a copy-paste error, summing both inflates the number and its denominator. |
+| **Size** | At most 100 orgs per request — a blast-radius bound, **not** a cohort-size requirement. |
+| **Blast radius** | Each org is read independently, bounded by a 30 s per-org timeout and a concurrency of 4. An unreadable, refused, or hung org costs THAT org's cells and is NAMED in `orgs_unavailable` + `org_errors`; a partial cohort whose sum would be `0` refuses the number (`partial_zero_from_an_unreadable_cohort`) because a lower bound is not a fact. |
+| **Nonexistent org name** | The endpoint does **NOT** verify that an org exists (there is no registry lookup — see *Enumeration*). A well-formed name with no org behind it reads as an empty graph and is reported as a **measured `0`**, counted in `orgs_measured` with no `org_errors` entry — indistinguishable from an existing org with genuinely zero activity. An entirely-typo'd cohort therefore returns a confident `0`; verify the names against the org list before acting on a `0`. Adding an existence check would itself be a registry lookup, so it is a new decision rather than a silent addition (recorded in `COHORT_LIMITATIONS`). |
+| **Audit** | ONE append-only `audit_events` row per request, `operation=activation_cohort_read`, `org_id=""` (the operator plane — the non-org-scoped shape `identity_link` uses), naming every target org in `detail`. One row, not N: the action is one operator action and the actor is the operator, and `audit_events.team_id` is what RLS makes tenant-visible — N rows would present one operator action as N tenant operations and put a row in every tenant's trail for a read of a *count*. Tenant-visible notification is a product/privacy decision with its own RLS answer and is not invented here; the backup sweep reads every tenant's full graph and emits no audit rows at all. The write is FAIL-OPEN (#1529: bookkeeping must not 500 a serving path) — an abuser holds the key, so blocking the read while the sink is down would not stop them. |
+| **Attribution** | No actor is bound for a cohort read: the operator is not the tenant's actor. |
+
+`tools/activation_cohort.py` is now a thin, stdlib-only client of this endpoint
+(it previously drove the org-scoped endpoint once per org with **one tenant API
+key per org on the command line** — keys in `argv`/history, a second roll-up
+implementation, and no durable record of the read). The roll-up itself lives in
+`tortoise/activation_scorecard.roll_up_cohort`, so the org-scoped scorecard, the
+cohort endpoint and the client cannot disagree about the same org.
 
 ## Measured baseline (production, 2026-09-17)
 
@@ -201,8 +298,19 @@ straddles it. This is in the payload's `limitations` too.
 ## Known limitations
 
 Carried in the payload's `limitations` list — read it before citing a number.
-`recall_attempted` cannot distinguish an answered query from an empty one; it
-cannot be attributed to a session or a graph; the analytics read is capped at
-1000 rows (a truncated page reports `unavailable`, never a partial count);
-`value_confirmed` is not measurable; and `memory_produced` is
+`recall_attempted` cannot distinguish an answered query from an empty one on its
+own (that is what `recall_returned` adds) and neither can be attributed to a
+session or a graph; its gate is graph-scoped while its count is org-wide, which
+is refused as `no_memory_in_default_graph_org_scope_unknown` when the exact
+org-wide count contradicts the gate (see above); `recall_returned` is an upper
+bound — a returned candidate is not a used one; `value_confirmed` is not
+measurable; and `memory_produced` is
 extraction-succeeded, not memory-that-helped.
+
+The analytics read is **keyset-paged to completion** on `id` (#4038), up to
+`recall_page_cap × recall_page_limit` rows (1000 × 100) per window. A walk that
+cannot be certified COMPLETE reports `unavailable` — `analytics_page_cap_truncated`
+when the bound was reached, the store ignored `order`, or it would not advance
+past the cursor, and `analytics_store_unreachable` when it failed mid-walk —
+never a partial count. Both `recall_attempted` and `recall_returned` inherit that
+ladder, so neither can be a lower bound published as exact.

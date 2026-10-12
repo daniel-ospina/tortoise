@@ -243,6 +243,12 @@ jobs:
                          "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
+                  # #2810: the edge-function harnesses above import these stubs
+                  # (supabase-js.ts, _shared/lookup.ts). Without a path entry a
+                  # PR touching ONLY a stub would skip the job that runs them —
+                  # the stub is an input to the subject under test, and a broken
+                  # stub is exactly the change this job exists to catch.
+                  startswith("tests/edge-function-stubs/"),
                   startswith("supabase/functions/_shared/"),
               ),
               # hosted-e2e (boots uvicorn tortoise.hosted_api:app; engine

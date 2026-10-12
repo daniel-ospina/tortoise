@@ -79,6 +79,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical namespace the code under test uses.
     "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
+    # #3520: `_provision_team` seeds the registry Team node the onboarding-state
+    # writer MATCH…SETs — receipts and `last_error` live on that node, so the
+    # literal IS the canonical namespace PROD resolves. Same `prod-coupled` class
+    # as test_github_connect / test_onboarding_state_cas, and the same
+    # `_make_sdk(namespace="registry")._get_registry().query(CREATE :Team …)`
+    # construction. (Reviewer read: without this entry the new test file reds
+    # test_markers→test-slow (b)→python-ci-gate, blocking the change.)
+    "test_session_capture_status.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
@@ -137,10 +145,25 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical registry namespace IS that coupling. A test_* rename would seed
     # a different graph than the writer resolves.
     "test_embed_metering.py": {"registry": "prod-coupled"},
+    # #4489: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the registry-lane writer and reader address the dbs the SDK uses.
+    "test_retrieval_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    # #2007 W12: the selfhost lane's SDK namespace IS the literal "selfhost"
+    # (`selfhost.py:532`, `selfhost_api.py:222/233/236` construct
+    # `TortoiseSDK(namespace="selfhost")`), and the test drives that same
+    # lane end to end — a `test_*` rename would exercise a namespace prod
+    # never resolves.
+    "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #3517 parity: `_provision_org` seeds the registry Team node directly
+    # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
+    # onboarding state the surfaces under test write lives ON that node — a
+    # `MATCH ... SET`, so the seed and the resolution must be the SAME graph.
+    # A test_* rename would seed a different graph than `hosted_api` resolves.
+    "test_onboarding_session_recording_parity.py": {"registry": "prod-coupled"},
     # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
     # namespace_not_display_name seeds a `Graph` row into the registry graph and
     # then calls `_has_scoped_graphs`, whose OWN body constructs
@@ -588,6 +611,12 @@ def test_no_redirect_stems_registry_exact():
         "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
+        # #3644: the version-window pins construct embedded stores and assert
+        # the writer's window semantics; registered in all three homes
+        # (ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here) — PR
+        # #8016 code-review ISSUE 2: the file was carve-out-labelled but
+        # absent from the two registries.
+        "test_source_version_window_3644",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
         # TEST_NO_REDIRECT_STEMS (eval/graph-integrity carve-outs) — the pin
         # test drifted; aligned here so the repo-wide markers gate passes.
@@ -660,6 +689,19 @@ def test_no_redirect_stems_registry_exact():
         # the addition is the pin working as designed, so the stem is DECLARED
         # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
+        # #7852 W1: the Layer-2 `semantics` write-path guard builds
+        # `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay to
+        # prove `derived = replay(journal)` for `direction_basis`. The module
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would discard the path and connect the construction to the
+        # server, so the embedded replay this file exists to prove would never
+        # happen. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than
+        # exempted (the #4921/#4521 shape, minus their module-level marker).
+        "test_semantics_write_path_7852",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

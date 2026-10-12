@@ -325,11 +325,27 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],
+    # #7813: the live lane's read-back helper `_stored_directions(uri)` opens a
+    # `_live_utils.docker_uri(graph)` handle — the `tortoise_test_t7813_*` graph
+    # minted by the calling test — and only MATCHes `o.direction` on it (no
+    # DETACH anywhere in the file), so the shared env-URI graph is never touched.
+    "test_decide_direction_7813.py": [r"from_uri\(uri\)"],
     # #4290: declared per the new-test-file registration rule. ZERO sites by
     # construction — the finding-provenance gate opens no graph (hermetic temp
     # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
     # pins that the module really exists.
     "test_finding_provenance.py": [],
+    # #1423: the same module live-FalkorDB availability probe shape as #3301
+    # above — `_probe(candidates)` constructs, issues `RETURN 1`, and closes,
+    # over candidate URIs (the env URI plus _live_utils docker/legacy
+    # fallbacks). It can never pass graph_name= (it is precisely testing
+    # whether a candidate is reachable). SAFETY IS NOT the probe's path: it is
+    # that the file contains NO DETACH at all — every other handle in it is
+    # per-test (the `env`/`subject_graph` fixtures build embedded `tmp_path`
+    # SDKs, and the FTS/index leg is a `graph_name=test_subj1423_<hex>`
+    # projection from _WORKING_URI), so no shared-env handle is ever
+    # bulk-DETACHed.
+    "test_subject_supersession_1423.py": [r"from_uri\(uri\)"],
 }
 
 _FROM_URI_EXEMPT_FILES = {

@@ -35,6 +35,10 @@ from .file_indexer import (
     derive_session_id,
     parse_frontmatter,
 )
+from .vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +248,13 @@ def _graph_entity_keywords(content: str) -> list[str]:
         username, password = parse_uri_userinfo(uri)
         if _graph_db is None:
             from falkordb import FalkorDB
+
+            # #3065: the read/connect bounds come from the product's ONE
+            # resolution point. Constructing bare left `socket_timeout` at
+            # None (falkordb's own default, handed to redis-py explicitly), so
+            # a server-side stall parked this call in ``recv()`` forever — and
+            # the handler below made that look like "no graph entities".
+            from tortoise.projection import _bounded_server_socket_kwargs
             # #3067: forward the DECODED userinfo through the single shared
             # rule. Dropping it makes an auth-required server (the canonical
             # `docker://:pw@host:6379/tortoise` config) answer
@@ -255,7 +266,8 @@ def _graph_entity_keywords(content: str) -> list[str]:
             # follows the handle, not one call site.
             _graph_db = guarded_client(FalkorDB, host=host, port=port,
                                        username=username, password=password,
-                                       ssl=(parsed.scheme == 'rediss'))
+                                       ssl=(parsed.scheme == 'rediss'),
+                                       **_bounded_server_socket_kwargs())
         g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
         # Re-arm the outage latch: the graph is demonstrably healthy again, so
@@ -767,8 +779,9 @@ def main():
                     }
                     if exists:
                         proj.g.query(
-                            "MATCH (e:Event {eventId: $eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            "MATCH (e:Event {eventId: $eid}) "
+                            + clear_then_set_prefix("e")
+                            + "SET e += $props, " + set_embedding_clause("e"),
                             params={"eid": event_id, "props": props, "embedding": embedding}
                         )
                         print(json.dumps({"status": "updated", "eventId": event_id}))
@@ -776,7 +789,7 @@ def main():
                         props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
                         proj.g.query(
                             "CREATE (e:Event {eventId: $eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                            + set_embedding_clause("e", preserve_on_null=False),
                             params={"eid": event_id, "props": props, "embedding": embedding}
                         )
                         print(json.dumps({"status": "ingested", "eventId": event_id}))

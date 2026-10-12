@@ -14,11 +14,17 @@ Test classes:
 - Green-pins (pass at base BY CONSTRUCTION; discriminate a wrong/missing
   fix): duplicate-replay first-wins, falsy-name no-phantom-line.
 
-Subject-vs-Object deltas (#2295 plan §Delta): status rides extra-props for
-Subjects (NOT projection-owned — ``_SUBJECT_HANDLED`` lacks status), so the
-stub test asserts status PRESENT live (INVERTED from the Object suite's
-status-absent); EventAPI ``add_subject`` mints random ulids with no
-canonical override (re-id + by-design double-registration pinned).
+Subject-vs-Object deltas (#2295 plan §Delta): ``#1423`` RETIRED the status
+one — Subject ``status`` is now projection-owned exactly as the Object's is
+(``_SUBJECT_HANDLED`` gained it and ``_upsert_subject`` SEEDS it ON CREATE),
+so the stub test asserts the SAME accepted stub asymmetry the Object suite
+does (LIVE adopted stub keeps its absent status; rebuild's ON CREATE writes
+``status='live'``). Before #1423 status rode ``_persist_extra_props``, which
+applies ON MATCH — so a re-mention of a SUPERSEDED Subject reset it to
+``live`` live-side while replay kept the supersession (pinned in
+``tests/test_subject_supersession_1423.py``). EventAPI ``add_subject`` mints
+random ulids with no canonical override (re-id + by-design
+double-registration pinned).
 """
 from __future__ import annotations
 
@@ -188,10 +194,20 @@ class TestStubAdoption:
         load-bearing edit the issue body missed) so rebuild restores the
         canonical node with the journaled id + createdAt.
 
-        status is PRESENT live (INVERTED from the Object suite's status-absent
-        assert): Subject status rides _persist_extra_props on both lanes
-        (∉ _SUBJECT_HANDLED), so the adopted live node AND the rebuilt node
-        both carry status:'live'."""
+        status is ABSENT live and PRESENT after rebuild — the SAME accepted
+        stub asymmetry the Object suite pins.
+
+        #1423 NOTE (this assert was INVERTED before): ``status`` used to ride
+        ``_persist_extra_props`` (∉ ``_SUBJECT_HANDLED``), so the ON MATCH
+        extras pass stamped the adopted stub ``status='live'``. That same
+        ON MATCH write also resurrected a SUPERSEDED Subject on every
+        re-mention (live≠replay — measured, pinned in
+        ``tests/test_subject_supersession_1423.py``). Status is now seeded ON
+        CREATE and excluded from the extras lane (#1350's clause, ported), so
+        a stub that was created WITHOUT a status keeps it absent live while
+        rebuild's ON CREATE mints ``live`` from the journaled line — the
+        plan-accepted asymmetry the Object suite already documents.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t3.db"),
@@ -220,14 +236,17 @@ class TestStubAdoption:
             assert rows[0][1] == line["createdAt"], (
                 "live adopted createdAt must equal the journaled value "
                 "(delta 1 ON MATCH adoption)")
-            # status PRESENT (delta-3 inversion — Subject status rides extras)
+            # status ABSENT live (the clobber guard forbids an ON MATCH status
+            # write) — the stub was created without one (#1423).
             live_props = _subject_row(proj, "connector-person")[0][0]
-            assert live_props.get("status") == "live", live_props
+            assert "status" not in live_props, live_props
             proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _subject_row(proj, "connector-person", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
                 "rebuild must restore the canonical id, not the stub ulid")
             assert rows[0][1] == line["createdAt"], rows[0]
+            # Accepted stub asymmetry: rebuild's ON CREATE writes status='live'
+            # from the journaled line, the live stub keeps it absent.
             rebuilt_props = _subject_row(proj, "connector-person")[0][0]
             assert rebuilt_props.get("status") == "live", rebuilt_props
         finally:

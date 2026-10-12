@@ -128,17 +128,22 @@ def test_guard_red_resets(inputs):
 
 
 def test_guard_exempt_family_does_not_red(inputs):
-    """The INTENTIONAL skip families stay exempt (requires-URI, 6399,
-    embedded-unavailable) — the carve-out / live-utils skips are not
-    docker-lane regressions."""
+    """The DESIGN-CLASS skip families stay exempt (6399, embedded-unavailable).
+
+    #3592: the classifier buckets the DOCKER producer shard, where the guard's
+    matcher is evaluated as lane=True — so the reason families exempted here are
+    the ones NO lane can satisfy (no 6399 service exists in CI; the embedded
+    files run embedded BY DESIGN under a URI job). The URI-gate family is NOT
+    lane-free any more: a "requires TORTOISE_DB_URI" skip on a lane that
+    DECLARED the URI is a contradiction, which
+    test_guard_red_resets_on_a_uri_gate_skip pins.
+    """
     prev = _write(inputs["junitxml"].rsplit("/", 1)[0], "prev.json",
                   json.dumps({"runs": [], "consecutive_green": 2,
                               "canary_dropped": False}))
     junit = _write(
         inputs["junitxml"].rsplit("/", 1)[0], "junit3b.xml",
         _junit_xml(skips=[
-            ("tests/test_live_utils.py::test_y",
-             "requires TORTOISE_DB_URI (live FalkorDB sidecar)"),
             ("tests/test_smoke_embedded.py::test_smoke",
              "embedded FalkorDBLite unavailable"),
             ("tests/test_falkordb_compat.py::TestLiveServerCompat::test_z",
@@ -147,6 +152,30 @@ def test_guard_exempt_family_does_not_red(inputs):
                    inputs["divergence_log"], prev, RUN)
     assert rec["last"]["bucket"] == "green"
     assert rec["consecutive_green"] == 3
+
+
+def test_guard_red_resets_on_a_uri_gate_skip(inputs):
+    """#3592 through the classifier: the producer shard IS a docker lane.
+
+    The shard's run declares TORTOISE_TEST_EXPECT_URI=1 together with the URI,
+    so a skip whose reason claims the URI is required is the guard's
+    availability-regression class there — the streak must reset, and it must
+    reset as `guard-red` (same verdict as the guard step that gates the same
+    artifact), not as an unattributed `unexpected`.
+    """
+    prev = _write(inputs["junitxml"].rsplit("/", 1)[0], "prev.json",
+                  json.dumps({"runs": [], "consecutive_green": 4,
+                              "canary_dropped": False}))
+    junit = _write(
+        inputs["junitxml"].rsplit("/", 1)[0], "junit3c.xml",
+        _junit_xml(skips=[
+            ("tests/test_session_reinjection.py::test_x",
+             "requires TORTOISE_DB_URI (live FalkorDB FTS lane — embedded "
+             "legs skip)")]))
+    rec = classify(junit, inputs["manifest"], inputs["step_wall"],
+                   inputs["divergence_log"], prev, RUN)
+    assert rec["last"]["bucket"] == "guard-red"
+    assert rec["consecutive_green"] == 0
 
 
 def test_manifest_red_resets(inputs):

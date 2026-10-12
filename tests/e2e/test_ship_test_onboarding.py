@@ -359,7 +359,9 @@ def test_no_surface_claims_a_connection_before_the_server_observed_one(page: Pag
     _seed_ship_session(page, "u-ship-neg")
     _wire(page, role="owner", onboarding_projection=UNOBSERVED_PROJECTION)
     _walk_to_connect(page)
-    page.get_by_role("button", name="I've set it up — Continue →").click()
+    # #3232: the walk lands on the default Claude Code leaf, which now renders the
+    # restart/verify block — its advance reads "Done — Continue to dashboard".
+    page.get_by_role("button", name="Done — Continue to dashboard").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
 
     ui = read_connection_surface(page)
@@ -439,7 +441,9 @@ def test_client_never_asserts_harness_connected_on_the_wire(page: Page) -> None:
     cap = _wire(page, role="owner", key_rows=[DURABLE_ROW],
                 onboarding_projection=UNOBSERVED_PROJECTION)
     _walk_to_connect(page)
-    page.get_by_role("button", name="I've set it up — Continue →").click()
+    # #3232: same as the negative direction above — the default leaf is Claude
+    # Code, whose three-block shape advances with the "Done" label.
+    page.get_by_role("button", name="Done — Continue to dashboard").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
 
     # POSITIVE CONTROL — the capture channel was live: the fork click wrote a

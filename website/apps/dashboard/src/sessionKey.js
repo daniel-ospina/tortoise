@@ -11,6 +11,41 @@
 // — welcome plaintext, paste validation, rows-routed gate), and the rows
 // resolution helper (usableDurableRows) the session connect gate sources from.
 
+// #4342/#4359/#4370: the ONE authority for "is this a revealable plaintext?" —
+// a non-empty, non-blank STRING. A 2xx can carry a number, an object, or
+// padding, and every one of those is non-falsy, so a bare `!plaintext` check
+// latched a box the user could not copy.
+//
+// #4370 (A6): this lives at MODULE scope — not inside main.jsx's App component —
+// so the pure module that already reads held plaintext (`durableConnectKey`'s
+// `welcome.startsWith`) shares the SAME guard instead of assuming a string. It
+// is the single gateway every writer of reveal/embed key material reads before
+// it stores: createKey, wizardMintDurableKey, regenerateKey, the create-graph
+// envelope, the per-graph mint, copyNewKey, dismissKeyModal and the provisioned
+// welcome key. Moving it here is what makes the pure module total; a caller
+// that only guards its WRITERS leaves `durableConnectKey` exported and
+// throwable on a non-string.
+//
+// `trim()` alone is NOT a blankness test — it strips whitespace but not
+// zero-width / invisible characters, so a string of only those would pass this
+// single gateway and reproduce the reported symptom exactly: a visually blank
+// `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set plus the
+// DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which is in
+// NEITHER property. Only the DECISION uses the stripped copy — the returned
+// value is always the verbatim secret.
+export function revealablePlaintext(value) {
+  return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
+}
+
+// #4359: a mint response carries the plaintext on EITHER leg (`key` on the
+// POST /v1/team/keys response, `api_key` on the provision envelope). The legs
+// are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
+// selected a truthy-but-unrevealable primary first, so `{key: {},
+// api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
+export function revealableMintPlaintext(response) {
+  return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
+}
+
 // #2166 + #2426: durable product keys are the ONLY rows the API Keys page
 // shows. The dashboard's OWN access credentials — auto-minted session keys
 // (created_via 'bootstrap') — are never presented as product API keys.
@@ -43,6 +78,46 @@ export function usableDurableRows(keyRows) {
     .filter((k) => k && isManagedKey(k) && !k.expires_at && !k.revoked_at && k.enabled !== false)
     .sort((a, b) =>
       String(b.created_at || b.createdAt || '').localeCompare(String(a.created_at || a.createdAt || '')))
+}
+
+// #4371: the ROW-TRUTH rule for an in-memory plaintext — declared ONCE here.
+// It answers one question: "is the row behind a plaintext we still HOLD in
+// memory usable for EMBEDDING?" A held plaintext is only as good as its row:
+// once that row is revoked, disabled, a bootstrap session credential, or
+// carries ANY expiry, the plaintext must not back a snippet or a connect
+// command any more.
+//
+// TWO drivers ask it, and they must answer identically — #2246 (review) added
+// the question to both, #2426 added the expiring arm to both:
+//   - `durableConnectKey`'s welcome-stale tail (below), and
+//   - `main.jsx`'s row-truth invalidation effect, which clears `welcomeKey` /
+//     `wizardDurableKey` when a keys reload shows their row died.
+// Before #4371 each INLINED the predicate and only PROSE claimed they were
+// "symmetric / identical" (main.jsx said so in a comment, sessionKey.js said
+// it back) — so a future dead-row condition added to one surface (a new
+// created_via kind, `disabled_by`, a grace window) would silently
+// mis-classify a held key on the other, showing up as a wrong embed and never
+// as an error. Both now consume this one declaration; the agreement is held by
+// `heldRowTruthExec.test.js`, which drives BOTH entry points over the same
+// fixtures.
+//
+// Deliberately NOT expressed via `isManagedKey` (`… && !k.expires_at && …`):
+// isManagedKey answers a DIFFERENT question — which rows the API Keys table
+// shows — and #2426 relaxed it to bootstrap-exclusion-only, which is exactly
+// when the embed rule had to grow its own explicit `expires_at` arm. Delegating
+// here would re-couple the two, so a future table-predicate relaxation would
+// silently relax what may be embedded. `usableDurableRows` (which rows the
+// connect gate may ROUTE to) restates the same conditions a third time for the
+// same reason: routing and embedding are separate decisions. The paste tail in
+// `durableConnectKey` also walks the same conditions, but to report a DISTINCT
+// source per cause — the agreement test pins it to this rule.
+export function heldRowEmbeddable(row) {
+  if (!row) return false
+  if (row.revoked_at) return false
+  if (row.enabled === false) return false
+  if (row.created_via === 'bootstrap') return false
+  if (row.expires_at) return false
+  return true
 }
 
 // #1998 fold-in (durable connect key): the wizard connect step's universal
@@ -84,20 +159,28 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   // plaintext — post-#2246 the table actions are uniform one-click (rotate /
   // revoke / disable), so a welcomeKey whose prefix row is gone/revoked/
   // disabled must NOT win. P2: a bootstrap/expiring row is dead for embedding
-  // too (symmetric with the paste tail below — a 24h session credential, or
-  // any key with an expiry, must never back an embed); welcome keys are
-  // provisioned without expiry (created_via 'provisioned', expires_at null),
-  // so this arm is a harmless belt that keeps the predicate identical to
-  // main.jsx's row-truth effect. Check only when keyRows is a LOADED non-empty
-  // array (null/[] = not loaded yet — the pre-load welcome reveal must keep
-  // working; the provisioned row lands in the same loadAll response). When
-  // stale, set the welcome plaintext aside and proceed as if it were absent
-  // so the normal rows/paste resolution (rows-durable / none / durable /
-  // bootstrap / expiring / revoked / disabled / unknown) runs.
-  let welcome = welcomeKey
+  // too (a 24h session credential, or any key with an expiry, must never back
+  // an embed); welcome keys are provisioned without expiry (created_via
+  // 'provisioned', expires_at null), so this arm is a harmless belt. The rule
+  // itself is `heldRowEmbeddable` (#4371) — the SAME declaration main.jsx's
+  // row-truth effect consumes, so the two surfaces cannot drift.
+  // Check only when keyRows is a LOADED non-empty array (null/[] = not loaded
+  // yet — the pre-load welcome reveal must keep working; the provisioned row
+  // lands in the same loadAll response). When stale, set the welcome plaintext
+  // aside and proceed as if it were absent so the normal rows/paste resolution
+  // (rows-durable / none / durable / bootstrap / expiring / revoked / disabled
+  // / unknown) runs.
+  // #4370 (A6): read the held plaintext through the SHARED predicate. Before
+  // this, `welcome` was the raw argument, so a truthy non-string (or a blank
+  // string) survived to `welcome.startsWith(...)` below — `TypeError:
+  // …startsWith is not a function` — and a blank string WON as `source:
+  // 'welcome'`, embedding whitespace into the connect snippet. This function is
+  // exported and unit-tested, so the guard has to sit here, not only at
+  // main.jsx's writer.
+  let welcome = revealablePlaintext(welcomeKey)
   if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
     const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
-    if (!row || row.revoked_at || row.enabled === false || row.created_via === 'bootstrap' || !!row.expires_at) welcome = ''
+    if (!heldRowEmbeddable(row)) welcome = ''
   }
   if (welcome) return { key: welcome, durable: true, source: 'welcome' }
   if (!apiKey) {

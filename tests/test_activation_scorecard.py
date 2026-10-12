@@ -32,6 +32,10 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tortoise.activation_scorecard import (
+    assert_no_activation_claim,
+    roll_up_cohort,
+)
 from tortoise.hosted_api import (
     app,
     get_current_org_session_ungated,
@@ -56,13 +60,19 @@ ORG = {
 WINDOW = {"since": "2026-09-16T00:00:00Z", "until": "2026-09-17T00:00:00Z"}
 
 
-def _seed(sid: str, created_at: str, events: int, claims: int) -> None:
-    """Seed one session into the ORG's graph — the same namespace the endpoint
+def _seed(sid: str, created_at: str, events: int, claims: int,
+          org_id: str = ORG["org_id"]) -> None:
+    """Seed one session into ONE org's graph — the same namespace the endpoint
     reads (``_data_sdk(org)`` -> ``_make_sdk(namespace=org_id)``). Seeding the
     process default graph instead would write to a different graph and the
-    scorecard would legitimately report 0."""
+    scorecard would legitimately report 0.
+
+    ``org_id`` is a parameter since #3676: the cross-tenant cohort endpoint
+    reads several org namespaces in one request, so the fixture has to be able
+    to seed more than the ambient ``ORG``.
+    """
     import tortoise.hosted_api as ha
-    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
+    proj = ha._make_sdk(namespace=org_id)._get_proj()
     proj.g.query("MERGE (s:Session {id:$i}) SET s.created_at=$c",
                  params={"i": sid, "c": created_at})
     for n in range(events):
@@ -334,6 +344,185 @@ def test_recall_is_conditioned_on_lifetime_memory(client, monkeypatch):
     assert stage["state"] == "measured", body
     assert stage["value"] == 1, stage
     assert body["detail"]["recall_attempted_any"] == 2, body["detail"]
+
+
+# ── Stage 5 (#3675): recall_returned — a RETURN is not an ATTEMPT ─────────
+
+_ABSENT = object()  # "the prop was never written on this row"
+_W = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
+_MEMORY_AT = "2026-09-16T01:00:00+00:00"
+
+
+def _retrieval_row(stamp, count=None, tool="tortoise_search"):
+    """One analytics row. ``count`` defaults to an explicit ``None`` (the
+    post-#3675 "the result was not countable" shape); pass ``_ABSENT`` for a row
+    that predates the prop, where the key is not there at all."""
+    props = {"tool_name": tool}
+    if count is not _ABSENT:
+        props["result_count"] = count
+    return {"event_name": "mcp_tool_call", "created_at": stamp,
+            "properties": props}
+
+
+def test_recall_returned_counts_only_calls_that_returned_content():
+    """Stage 5 separates the attempt from the answer: a retrieval that returned
+    items and one that returned nothing are the same row for stage 4 and
+    different rows here. Everything else — a call BEFORE memory, a non-retrieval
+    tool, a zero-result retrieval — must not be counted."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [
+        _retrieval_row("2026-09-16T00:30:00+00:00", 8),   # before memory
+        _retrieval_row("2026-09-16T02:00:00+00:00", 8),   # returned content
+        _retrieval_row("2026-09-16T02:05:00+00:00", 0),   # ran, returned nothing
+        _retrieval_row("2026-09-16T02:10:00+00:00", 5,
+                       tool="tortoise_health"),           # not a retrieval tool
+    ]
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["state"] == "measured" and stage["value"] == 2, stage
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert cell["unit"] == "calls", cell
+    assert detail["recall_returned_after_memory"] == 1, detail
+    assert detail["rows_without_result_count"] == 0, detail
+
+
+def test_recall_returned_zero_is_a_measured_zero_not_a_refusal():
+    """The true-zero direction: retrievals that ran and returned NOTHING are a
+    real, exact 0 — the finding the funnel exists to report. Refusing it would
+    hide "the read side is answering nothing" behind "we could not read"""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 0),
+            _retrieval_row("2026-09-16T02:01:00+00:00", 0)]
+    _, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 0, cell
+    assert cell["reason"] is None, cell
+
+
+def test_a_retrieval_without_result_count_refuses_stage_5_never_zero():
+    """THE #3675 core rule, at the consumer. ``result_count`` is forward-only:
+    an allowlisted retrieval row written before the prop shipped cannot be read
+    either way, so counting it as "returned nothing" would manufacture a
+    confident zero from missing data. Stage 5 refuses and names the counter —
+    while stage 4, which needs no result information, stays measured 2.
+    Absence is not zero."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 8),
+            _retrieval_row("2026-09-16T02:01:00+00:00", _ABSENT)]  # key absent
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["state"] == "measured" and stage["value"] == 2, stage
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "result_count_not_recorded", cell
+    assert detail["rows_without_result_count"] == 1, detail
+    assert detail["rows_uncountable_result_count"] == 0, detail
+
+
+@pytest.mark.parametrize("unreadable", [None, "8", 8.0, True, -1])
+def test_a_present_but_unreadable_result_count_refuses_under_its_own_name(
+        unreadable):
+    """A PRESENT-but-not-a-count value is a different fact from an absent key,
+    and it gets its own reason (``result_count_unreadable``) so an operator can
+    tell a deploy-boundary window from a shape regression or a failed call.
+
+    ``True`` is the sharp one: Python says ``isinstance(True, int)``, so a naive
+    check would silently count a malformed row as one returned item."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", unreadable)]
+    _, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["reason"] == "result_count_unreadable", cell
+    assert detail["rows_without_result_count"] == 0, detail
+    assert detail["rows_uncountable_result_count"] == 1, detail
+
+
+def test_stage_5_inherits_every_stage_4_refusal():
+    """Stage 5 asks a strictly narrower question, so it must never be MORE
+    readable than stage 4. A truncated page, an out-of-window row and an org
+    with no lifetime memory all refuse BOTH stages with the SAME reason — two
+    copies of that ladder would drift."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 3)]
+
+    _, truncated = recall_stages(rows, _MEMORY_AT, memory_sessions=1,
+                                 window=_W, truncated=True)
+    assert truncated["recall_returned_cell"]["reason"] == \
+        "analytics_page_cap_truncated", truncated["recall_returned_cell"]
+
+    outside = [_retrieval_row("2026-09-15T02:00:00+00:00", 3)]
+    stage, out = recall_stages(outside, _MEMORY_AT, memory_sessions=1, window=_W)
+    assert stage["reason"] == "analytics_window_predicate_not_applied", stage
+    assert out["recall_returned_cell"]["state"] == "unavailable", out
+    assert out["recall_returned_cell"]["reason"] == stage["reason"], out
+
+    stage, nomem = recall_stages([], None, memory_sessions=0, window=_W)
+    assert stage["state"] == "not_measurable", stage
+    assert nomem["recall_returned_cell"]["state"] == "not_measurable", nomem
+    assert nomem["recall_returned_cell"]["value"] is None, nomem
+
+
+def test_recall_returned_uses_the_narrow_allowlist_only():
+    """The wide set exists as a sensitivity bound on the ATTEMPT (stage 4). Its
+    known-id reads return a single object with no item collection, so they are
+    uncountable BY SHAPE forever — folding them into stage 5 would refuse the
+    stage for any org that ever read a point by id. Stage 4 still reports both.
+    """
+    from tortoise.activation_scorecard import recall_stages
+    rows = [_retrieval_row("2026-09-16T02:00:00+00:00", 4),
+            _retrieval_row("2026-09-16T02:01:00+00:00", None,
+                           tool="tortoise_get_point")]  # wide-only, uncountable
+    stage, detail = recall_stages(rows, _MEMORY_AT, memory_sessions=1, window=_W)
+    # Stage 4's cell is the NARROW count; the wide sensitivity bound is in
+    # `detail`, and it is the wide one that sees both rows.
+    assert stage["value"] == 1, stage
+    assert detail["recall_attempted_after_memory"] == 1, detail
+    assert detail["recall_attempted_after_memory_wide"] == 2, detail
+    cell = detail["recall_returned_cell"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert "recall_returned_after_memory_wide" not in detail, detail
+
+
+def test_recall_returned_stage_rides_in_the_payload_not_in_detail(client, monkeypatch):
+    """The cell is produced by ``recall_stages`` (it shares stage 4's
+    precedence) but it is a STAGE, so it must be lifted out of ``detail`` into
+    ``stages`` by ``assemble`` — and ``detail`` must not carry the transport
+    key. The predicate travels with the number, as ``stage3_predicate``
+    already does for stage 3, so a consumer cannot read the count without its
+    definition."""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    rows = [
+        _retrieval_row("2026-09-16T02:00:00+00:00", 4),
+        _retrieval_row("2026-09-16T02:01:00+00:00", 0),
+    ]
+
+    class _CP:
+        def query(self, *a, **kw):
+            return rows
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    assert "recall_returned" in body["stages"], body["stages"]
+    cell = body["stages"]["recall_returned"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 1, cell
+    assert "recall_returned_cell" not in body["detail"], body["detail"]
+    assert "result_count" in body["detail"]["recall_returned_predicate"], body
+    assert body["detail"]["result_count_prop"] == "result_count", body["detail"]
+    # The five/six-stage granularity disclosure moved with the funnel.
+    assert body["detail"]["stage_5_granularity"] == "org_time", body["detail"]
+    # Nothing in this stage claims activation.
+    flat = _flatten_keys(body)
+    assert not [k for k in flat if "activat" in k.lower()], flat
 
 
 def test_recall_measured_zero_is_reported_as_zero(client, monkeypatch):
@@ -780,8 +969,11 @@ def test_analytics_write_path_unset_is_unavailable_never_zero(client):
 
 
 def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypatch):
-    """The read helper has no offset/Range, so a full page is a LOWER BOUND.
-    A lower bound is not a count."""
+    """A seam that CANNOT page (no ``query_all``) still gets the pre-#4038
+    single-page contract: a full page is a LOWER BOUND, and a lower bound is not
+    a count. #4038 pages the leg to completion, so this refusal is now scoped to
+    a store that offers no way to advance — dropping the fallback would let such
+    a seam silently under-report."""
     import tortoise.supabase_control as sc
     from tortoise.activation_scorecard import RECALL_PAGE_CAP
     _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=1, extracted=1)
@@ -790,6 +982,7 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
 
     class _Full:
+        # `query` only — no `query_all`, so the walk is unavailable to the read.
         def query(self, *a, **kw):
             return [{"properties": {"tool_name": "tortoise_search"},
                      "created_at": "2026-09-16T13:00:00+00:00"}] * RECALL_PAGE_CAP
@@ -800,6 +993,137 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     assert stage["value"] is None, stage
     assert stage["state"] == "unavailable", stage
     assert stage["reason"] == "analytics_page_cap_truncated", stage
+
+
+def _window_rows(n: int) -> list[dict]:
+    """``n`` in-window, allowlisted ``mcp_tool_call`` rows as the seam returns
+    them (``id`` included — it is the walk's cursor)."""
+    return [{"id": f"ev-{i:06d}", "event_name": "mcp_tool_call",
+             "created_at": "2026-09-16T13:00:00+00:00",
+             "properties": {"tool_name": "tortoise_search"}}
+            for i in range(n)]
+
+
+def test_a_busy_org_pages_to_completion_and_reports_a_measured_count(client, monkeypatch):
+    """#4038, THE regression. Every hosted MCP tool call emits a row, so an
+    actively-used org fills the 1000-row page by mid-morning; the read then
+    reported `unavailable` (`analytics_page_cap_truncated`) for being BUSY —
+    the blind spot landing on exactly the most interesting orgs. Paged to
+    completion, the same window is a MEASURED count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    n = RECALL_PAGE_CAP + 5
+    rows = _window_rows(n)
+
+    class _Paging:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_all(self, table, **kw):
+            self.calls.append(kw)
+            # Two pages, then the empty one that CERTIFIES — `complete=True`.
+            return rows, True
+
+        def query(self, table, **kw):
+            # The pre-#4038 `query` shape, kept HERE as the mutation probe: on
+            # the old single-request read this is a FULL page, so the stage
+            # reads `unavailable` — the failure #4038 names.
+            return rows[:RECALL_PAGE_CAP]
+
+    seam = _Paging()
+    monkeypatch.setattr(sc, "get_control_plane", lambda: seam)
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == n, stage
+    assert body["detail"]["recall_rows_fetched"] == n, body["detail"]
+    assert body["detail"]["recall_truncated"] is False, body["detail"]
+    # The payload states the BOUND it read under, so a reader can tell "counted"
+    # from "counted up to a limit".
+    from tortoise.activation_scorecard import RECALL_MAX_PAGES
+    assert body["detail"]["recall_page_cap"] == RECALL_PAGE_CAP, body["detail"]
+    assert body["detail"]["recall_page_limit"] == RECALL_MAX_PAGES, body["detail"]
+    # The walk is asked with the module's OWN page size and bound, and — the
+    # half that keeps the paging from quietly changing the question — with the
+    # SAME window predicate the single-page read used, cursor column included.
+    assert seam.calls and len(seam.calls) == 1, seam.calls
+    call = seam.calls[0]
+    assert call["page_size"] == RECALL_PAGE_CAP, call
+    assert call["max_pages"] == RECALL_MAX_PAGES, call
+    assert "id" in call["select"], call
+    assert ("created_at", "gte", "2026-09-16T00:00:00+00:00") in call["filters"], call
+    assert ("created_at", "lt", "2026-09-17T00:00:00+00:00") in call["filters"], call
+    assert ("org_id", "eq", ORG["org_id"]) in call["filters"], call
+
+
+def test_an_incomplete_walk_is_unavailable_never_a_lower_bound(client, monkeypatch):
+    """A walk that could not CERTIFY completion (a page cap, a server that
+    ignored `order`, a store that will not advance past the cursor) is a lower
+    bound however many rows it did return. It must read `unavailable`, exactly
+    as the pre-#4038 single full page did — the fix widens what CAN be counted,
+    it does not loosen what may be called a count."""
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import RECALL_PAGE_CAP
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    rows = _window_rows(RECALL_PAGE_CAP + 5)
+
+    class _Uncertified:
+        def query_all(self, table, **kw):
+            return rows, False
+
+        def query(self, table, **kw):
+            return rows[:RECALL_PAGE_CAP]
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _Uncertified())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_page_cap_truncated", stage
+    # The rows that WERE read are still reported for visibility — the refusal is
+    # the count, not the observation.
+    assert body["detail"]["recall_rows_fetched"] == len(rows), body["detail"]
+    assert body["detail"]["recall_truncated"] is True, body["detail"]
+    # ...and no lower bound is published under the exact-count name.
+    assert body["detail"]["recall_attempted_after_memory"] is None, body["detail"]
+
+
+def test_a_walk_that_raises_is_unavailable_not_a_partial_count(client, monkeypatch):
+    """A read FAILURE mid-walk is not an incomplete result: the seam raises, the
+    read's fail-soft guard turns it into `analytics_store_unreachable`, and no
+    prefix of the rows reaches any count. (A short page followed by an error is
+    the case the fix direction names.)"""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _DiesMidWalk:
+        def query_all(self, table, **kw):
+            raise RuntimeError("supabase down after page 1")
+
+        def query(self, table, **kw):
+            # A failure is a failure whichever seam shape the store offers: the
+            # read must not get a count out of either.
+            raise RuntimeError("supabase down after page 1")
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _DiesMidWalk())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "analytics_store_unreachable", stage
+    assert body["detail"]["recall_rows_fetched"] is None, body["detail"]
 
 
 def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeypatch):
@@ -827,9 +1151,56 @@ def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeyp
     assert stage["reason"] == "first_memory_at_missing", stage
 
 
-def test_no_memory_in_lifetime_means_recall_is_unmeasurable(client, monkeypatch):
+def test_no_memory_in_lifetime_without_org_wide_activity_is_not_measurable(
+        client, monkeypatch):
+    """The GREEN half of #4039's verification table: an org that has produced
+    no memory anywhere — and whose org-wide windowed retrieval count is an exact
+    `0`, so nothing contradicts the graph-scoped absence — stays
+    `not_measurable`/`no_memory_produced_in_lifetime`. There is nothing to
+    recall FROM and no retry changes that, so the state must not be upgraded to
+    `unavailable` merely because the gate is graph-scoped."""
     import tortoise.supabase_control as sc
     _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)  # stored, no memory
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _CP:
+        def query(self, *a, **kw):
+            return []
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
+    # `not_measurable`, NOT `unavailable`: the org has never produced memory, so
+    # there is nothing to recall FROM and no retry changes that. Asserting the
+    # state is what keeps the two vocabularies from collapsing into each other.
+    assert stage["state"] == "not_measurable", stage
+    # The exact zero IS reported: 0 org-wide retrieval calls in the window is
+    # the evidence that this absence is not merely a graph-scope artifact.
+    assert body["detail"]["recall_attempted_any"] == 0, body["detail"]
+
+
+def test_no_memory_in_lifetime_with_an_org_wide_retrieval_call_is_ambiguous(
+        client, monkeypatch):
+    """The RED half of #4039's verification table (the MUTATION this test
+    exists to fail on): a multi-graph org — memory in graph B, a retrieval call
+    in the window — must NOT read `not_measurable` as a fact about the org.
+
+    Stage 4 is GATED on the org DEFAULT graph's `first_memory_at` while it
+    COUNTS the org-wide analytics stream. Graph B is INVISIBLE to this read (the
+    endpoint opens the org namespace graph only), so the fixture models the
+    shape the surface can actually observe for that org: no default-graph
+    memory, and an EXACT, POSITIVE org-wide retrieval count. That pair is the
+    graph-scope ambiguity showing itself, and the stage must refuse —
+    `unavailable` + the scope-qualified reason — instead of asserting an
+    org-scope absence this read cannot establish. Before #4039 this fixture
+    returned `not_measurable` / `no_memory_produced_in_lifetime`.
+    """
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)  # no memory in the DEFAULT graph
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -843,11 +1214,32 @@ def test_no_memory_in_lifetime_means_recall_is_unmeasurable(client, monkeypatch)
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     stage = body["stages"]["recall_attempted"]
     assert stage["value"] is None, stage
-    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
-    # `not_measurable`, NOT `unavailable`: the org has never produced memory, so
-    # there is nothing to recall FROM and no retry changes that. Asserting the
-    # state is what keeps the two vocabularies from collapsing into each other.
-    assert stage["state"] == "not_measurable", stage
+    assert stage["state"] == "unavailable", stage
+    assert stage["reason"] == "no_memory_in_default_graph_org_scope_unknown", stage
+    # The evidence for the refusal is IN the payload, not inferred from the
+    # reason string: the exact count that contradicts the graph-scoped gate.
+    assert body["detail"]["recall_attempted_any"] == 1, body["detail"]
+    # The payload's own graph_scope field still says what the GATE read, so a
+    # consumer is not told the gate became org-wide.
+    assert body["detail"]["graph_scope"] == "org_default_graph", body["detail"]
+
+
+def test_the_graph_scope_refusal_is_disclosed_in_the_payload():
+    """#4039 asks for the ambiguity to be SURFACED, not only detected. A reason
+    string nobody can interpret is not disclosure, so the distinct reason must
+    appear in the payload's own `limitations` — with the residual stated (the
+    rows where the count is withheld or 0 still read as an org-scope absence).
+    """
+    from tortoise.activation_scorecard import (
+        GRAPH_SCOPE_UNKNOWN_REASON,
+        LIMITATIONS,
+    )
+    disclaimers = " ".join(LIMITATIONS)
+    assert GRAPH_SCOPE_UNKNOWN_REASON in disclaimers, disclaimers
+    # The gate's scope is still disclosed separately, so the refusal reason and
+    # `detail.graph_scope` cannot be read as contradicting each other.
+    assert "graph_scope" in disclaimers, disclaimers
+    assert "RESIDUAL" in disclaimers, disclaimers
 
 
 def test_unavailable_is_reserved_for_the_recoverable_failures(client, monkeypatch):
@@ -907,8 +1299,19 @@ def test_value_confirmed_is_a_refusal_and_no_activated_key_exists(client):
     assert value["state"] == "not_measurable", value
     assert value["value"] is None, value
     assert "not_measurable" in value["reason"]
-    assert "result_count" in value["reason"]
-    assert "#3518" in value["reason"]
+    # #3675 narrowed this refusal: the result-bearing instrument now EXISTS, so
+    # the string must name the surviving gap (a returned item was not observed
+    # to be USED) and must NOT keep claiming the two stale blockers it used to
+    # name — `result_count`/`abstained` (built here) and #3518/#3519 (closed).
+    # A test that kept asserting the old text would pin a false statement into
+    # the payload.
+    assert "USED" in value["reason"]
+    assert "not zero" in value["reason"]
+    assert "(result_count/abstained)" not in value["reason"]
+    assert "#3518" not in value["reason"]
+    assert "#3519" not in value["reason"]
+    # And it points at the stage that replaced the missing instrument.
+    assert "recall_returned" in value["reason"]
 
     # No key anywhere claims activation. A surface that emitted an
     # ``activated`` field would reintroduce exactly the mislabelling this lane
@@ -917,6 +1320,11 @@ def test_value_confirmed_is_a_refusal_and_no_activated_key_exists(client):
     offenders = [k for k in flat if "activat" in k.lower()]
     assert not offenders, offenders
     assert "value_confirmed" in body["stages"]
+    # The full stage set, pinned: the funnel gained stage 5 in #3675 and the
+    # refusal moved to 6. A silent rename/drop would otherwise be invisible.
+    assert list(body["stages"]) == [
+        "captured", "stored", "memory_produced", "recall_attempted",
+        "recall_returned", "value_confirmed"], list(body["stages"])
 
 
 def _flatten_keys(obj, out=None):
@@ -1066,28 +1474,64 @@ def test_analytics_props_allowlist_is_respected(monkeypatch, tmp_path):
     assert event["properties"] == {"tool_name": "t"}
 
 
-# ── Cohort roll-up (tools/activation_cohort.py) ──────────────────────────
-
-def _cohort_module():
-    import importlib.util
-    import pathlib
-    path = (pathlib.Path(__file__).resolve().parents[1]
-            / "tools" / "activation_cohort.py")
-    spec = importlib.util.spec_from_file_location("_b7_activation_cohort", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+# ── Cohort roll-up (tortoise/activation_scorecard.roll_up_cohort) ───────
+# #3676 moved the fold OUT of `tools/activation_cohort.py` and INTO the module:
+# the cross-tenant endpoint is now a caller, so there is ONE implementation of
+# the cohort number. When the script owned it, the scripted cohort and the
+# served cohort were two code paths that could silently disagree about the same
+# orgs — which is what these tests exist to prevent, in either home.
 
 
 def _payload(captured, stored, memory, recall_state="unavailable",
-             recall_value=None, value_confirmed_state="not_measurable"):
+             recall_value=None, value_confirmed_state="not_measurable",
+             returned_state="unavailable", returned_value=None):
     return {"stages": {
         "captured": {"state": "measured", "value": captured},
         "stored": {"state": "measured", "value": stored},
         "memory_produced": {"state": "measured", "value": memory},
         "recall_attempted": {"state": recall_state, "value": recall_value},
+        # #3675: the served payload carries six stages, and this fixture must
+        # mirror it — a stage the fixture omits folds to `unavailable` for every
+        # org, which would quietly make the cohort tests exercise a shape the
+        # product never returns.
+        "recall_returned": {"state": returned_state, "value": returned_value},
         "value_confirmed": {"state": value_confirmed_state, "value": None},
     }}
+
+
+def test_cohort_rolls_up_the_result_bearing_stage():
+    """#3675: `recall_returned` is a STAGE on the served payload, so the cohort
+    fold must carry it. `COHORT_STAGE_NAMES` is the roll-up's only stage list,
+    and a stage missing from it disappears from the cohort silently — the
+    per-org endpoint would report it while the operator's number did not."""
+    report = roll_up_cohort(
+        ["a", "b"],
+        [_payload(5, 5, 1, "measured", 4, returned_state="measured",
+                  returned_value=3),
+         _payload(7, 6, 1, "measured", 2, returned_state="measured",
+                  returned_value=1)])
+    cell = report["stages"]["recall_returned"]
+    assert cell["state"] == "measured", cell
+    assert cell["value"] == 4, cell
+    assert cell["orgs_unavailable"] == [], cell
+
+
+def test_cohort_calls_a_refused_result_stage_partial_not_a_zero():
+    """A pre-#3675 window (or an unreadable result) refuses the stage PER ORG.
+    That org must be NAMED as unavailable — folding it to 0 would publish a
+    lower bound as the cohort's answer, which is the failure the per-org
+    refusal exists to prevent."""
+    report = roll_up_cohort(
+        ["a", "b"],
+        [_payload(5, 5, 1, "measured", 4, returned_state="measured",
+                  returned_value=3),
+         _payload(7, 6, 1, "measured", 2,
+                  returned_state="unavailable", returned_value=None)])
+    cell = report["stages"]["recall_returned"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] == 3, cell
+    assert cell["orgs_unavailable"] == ["b"], cell
+    assert cell["orgs_measured"] == 1, cell
 
 
 def test_cohort_does_not_call_a_not_measurable_stage_a_reporting_failure():
@@ -1096,8 +1540,7 @@ def test_cohort_does_not_call_a_not_measurable_stage_a_reporting_failure():
     would assert that healthy orgs failed to report — the state inversion this
     lane exists to prevent. The cohort stage must be ``not_measurable``, with no
     org accused."""
-    mod = _cohort_module()
-    report = mod.roll_up(["a", "b"], [_payload(5, 5, 1), _payload(7, 6, 0)])
+    report = roll_up_cohort(["a", "b"], [_payload(5, 5, 1), _payload(7, 6, 0)])
     cell = report["stages"]["value_confirmed"]
     assert cell["state"] == "not_measurable", cell
     assert cell["value"] is None, cell
@@ -1111,8 +1554,7 @@ def test_cohort_partial_when_some_orgs_measured_and_others_had_nothing():
     """Mixed cohort: one org measured recall, the other has never produced
     memory (so genuinely has nothing to measure). That is `partial`, and the
     org with nothing to measure is NOT accused of failing to report."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(5, 5, 1, "measured", 4),
          _payload(7, 6, 0, "not_measurable", None)])
@@ -1126,8 +1568,7 @@ def test_cohort_partial_when_some_orgs_measured_and_others_had_nothing():
 def test_cohort_still_accuses_an_org_that_really_failed_to_report():
     """The distinction must not swing the other way: a genuinely unreadable
     org is still named, and never lets the cohort read `not_measurable`."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(5, 5, 1, "not_measurable", None), None],
         [None, "HTTP 500"])
@@ -1138,8 +1579,7 @@ def test_cohort_still_accuses_an_org_that_really_failed_to_report():
 
 
 def test_cohort_rollup_sums_measured_and_echoes_its_denominator():
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["org-a", "org-b"],
         [_payload(5, 5, 1), _payload(7, 6, 0)],
     )
@@ -1155,8 +1595,7 @@ def test_cohort_rollup_sums_measured_and_echoes_its_denominator():
 
 
 def test_cohort_rollup_refuses_to_sum_an_unreadable_org_as_zero():
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["org-a", "org-b"],
         [_payload(5, 5, 1), None],
         [None, "HTTP 500"],
@@ -1165,16 +1604,20 @@ def test_cohort_rollup_refuses_to_sum_an_unreadable_org_as_zero():
     assert cell["state"] == "partial", cell
     assert cell["value"] == 5, cell
     assert cell["orgs_unavailable"] == ["org-b"], cell
-    assert report["org_errors"] == {"org-b": "HTTP 500"}
+    assert report["org_errors"] == [{"org_id": "org-b", "reason": "HTTP 500"}]
+    # `org_errors` is a LIST of records, never a map keyed by org id: an org id
+    # is caller-supplied text and a key containing "activat" would trip the
+    # claim guard (see `roll_up_cohort`'s docstring).
+    assert isinstance(report["org_errors"], list)
+    assert not [k for k in _all_keys(report) if "activat" in k.lower()], report
 
 
 def test_cohort_rollup_does_not_invent_a_value_for_a_malformed_measured_cell():
     """A `measured` cell with no value is a malformed upstream payload. Counting
     it as 0 would invent a measurement the org never reported."""
-    mod = _cohort_module()
     payload = _payload(5, 5, 1)
     payload["stages"]["captured"] = {"state": "measured", "value": None}
-    report = mod.roll_up(["a", "b"], [payload, _payload(7, 6, 0)])
+    report = roll_up_cohort(["a", "b"], [payload, _payload(7, 6, 0)])
     cell = report["stages"]["captured"]
     assert cell["state"] == "partial", cell
     assert cell["value"] == 7, cell
@@ -1182,8 +1625,7 @@ def test_cohort_rollup_does_not_invent_a_value_for_a_malformed_measured_cell():
 
 
 def test_single_org_cohort_is_flagged_dogfood_only():
-    mod = _cohort_module()
-    assert mod.roll_up(["solo"], [_payload(1, 1, 1)])["dogfood_only"] is True
+    assert roll_up_cohort(["solo"], [_payload(1, 1, 1)])["dogfood_only"] is True
 
 
 def test_cohort_output_never_derives_an_activation_rate():
@@ -1191,8 +1633,7 @@ def test_cohort_output_never_derives_an_activation_rate():
     it would be exactly the mislabelling the scorecard exists to remove.
     Checked on KEYS, not prose — the note is allowed to name the thing it
     refuses to compute."""
-    mod = _cohort_module()
-    report = mod.roll_up(["a", "b"], [_payload(1, 1, 1, "measured", 4),
+    report = roll_up_cohort(["a", "b"], [_payload(1, 1, 1, "measured", 4),
                                         _payload(1, 1, 0, "measured", 2)])
     keys: list[str] = []
     stack = [report]
@@ -1205,20 +1646,30 @@ def test_cohort_output_never_derives_an_activation_rate():
             stack.extend(node)
     assert not [k for k in keys if "activat" in k.lower()], keys
     assert report["stages"]["recall_attempted"]["value"] == 6
-    assert mod.roll_up(["a"], [_payload(1, 1, 1, "measured", 4)])["stages"][
+    assert roll_up_cohort(["a"], [_payload(1, 1, 1, "measured", 4)])["stages"][
         "recall_attempted"]["state"] == "measured"
 
 
 def test_cohort_refuses_a_payload_that_claims_activation():
-    mod = _cohort_module()
-    with pytest.raises(SystemExit):
-        mod._assert_no_activation_claim({"stages": {"activated": {"value": 1}}})
+    """The MODULE's guard raises `ValueError` (not SystemExit): it runs inside a
+    request handler, where exiting the process would be absurd. The operator
+    CLIENT's own copy raises SystemExit (see `TestCohortGuards`)."""
+    with pytest.raises(ValueError, match="claims activation"):
+        assert_no_activation_claim({"stages": {"activated": {"value": 1}}})
+    # The guard is recursive and KEY-based — a nested claim is caught.
+    with pytest.raises(ValueError, match="claims activation"):
+        assert_no_activation_claim(
+            {"cohort_definition": {"orgs": [{"activation_rate": 0.5}]}})
+    # ...but the prose that NAMES the refusal is allowed through.
+    assert_no_activation_claim(
+        {"note": "no activation rate is derivable from this output"})
 
 
 # ── The cohort tool's guards (re-review P2-4: they had zero coverage) ───────
 
 class TestCohortGuards:
-    """`tools/activation_cohort.py` transmits full tenant API keys, so its
+    """`tools/activation_cohort.py` transmits the platform's MOST privileged
+    credential (`FASTAPI_INTERNAL_KEY`, the operator/internal plane), so its
     pre-flight guards are security controls. They behave correctly but nothing
     pinned them — a regression would have been silent."""
 
@@ -1247,15 +1698,16 @@ class TestCohortGuards:
             _assert_https(good)
 
     def test_header_illegal_key_is_refused_without_echoing_it(self):
-        from tools.activation_cohort import _validate_key
+        from tools.activation_cohort import _validate_credential
         secret = "tt_" + "A" * 40
-        _validate_key("org-1", secret)  # a real key passes
+        _validate_credential("--operator-key", secret)  # a real key passes
         for bad in (secret + "\n", secret + "\t", "with space", "ünicode",
                     "tab\there", ""):
             with pytest.raises(SystemExit) as exc:
-                _validate_key("org-1", bad)
-            # The whole point: the message names the ORG, never the key. A key
-            # that reaches `putheader` raises a ValueError embedding it whole.
+                _validate_credential("--operator-key", bad)
+            # The whole point: the message names the CREDENTIAL'S LABEL, never
+            # its value. A key that reaches `putheader` raises a ValueError
+            # embedding it whole.
             assert secret not in str(exc.value), "the key leaked into the error"
 
     def test_redirects_are_not_followed(self):
@@ -1276,7 +1728,7 @@ class TestCohortGuards:
                     if type(h).__name__ == "_RefuseRedirects"]
         assert handlers, "the refusing handler was not installed"
         req = urllib.request.Request(
-            "https://api.example/v1/activation/scorecard",
+            "https://api.example/v1/internal/activation/cohort",
             headers={"Authorization": "Bearer SECRET"})
         with pytest.raises(urllib.error.HTTPError) as exc:
             handlers[0].redirect_request(
@@ -1284,15 +1736,15 @@ class TestCohortGuards:
         assert exc.value.code == 302, exc.value
         assert "evil.example" in str(exc.value), exc.value
 
-    def test_fetch_scorecard_uses_the_refusing_opener(self):
-        """The handler being correct is not enough — `fetch_scorecard` must
+    def test_fetch_cohort_uses_the_refusing_opener(self):
+        """The handler being correct is not enough — `fetch_cohort` must
         actually route through it. Swapping it for `urlopen` would restore the
         header-copying default."""
         import inspect
 
         from tools import activation_cohort as ac
 
-        src = inspect.getsource(ac.fetch_scorecard)
+        src = inspect.getsource(ac.fetch_cohort)
         assert "_no_redirect_opener().open(" in src, src
         assert "urllib.request.urlopen(" not in src, src
 
@@ -1301,33 +1753,52 @@ class TestCohortGuards:
         denominator."""
         from tools.activation_cohort import main
         argv = ["--api-base", "https://api.example",
-                "--org", "org-a=k1", "--org", "org-a=k2"]
+                "--org", "org-a", "--org", "org-a"]
         with pytest.raises(SystemExit):
             main(argv)
+
+    def test_the_old_org_key_syntax_is_refused_with_a_reason(self):
+        """#3676 replaced `--org <org_id>=<tenant_key>` with ONE operator
+        credential. Silently reading the left half of an old command would send
+        a tenant key to the server as an org id — refuse it, and say why."""
+        from tools.activation_cohort import main
+        with pytest.raises(SystemExit) as exc:
+            main(["--api-base", "https://api.example", "--org", "org-a=tt_live"])
+        assert "operator" in str(exc.value)
+        assert "tt_live" not in str(exc.value)
 
     def test_empty_org_id_is_rejected(self):
         from tools.activation_cohort import main
         with pytest.raises(SystemExit):
-            main(["--api-base", "https://api.example", "--org", "=k1"])
+            main(["--api-base", "https://api.example", "--org", ""])
+
+    def test_a_missing_operator_credential_is_refused_before_any_request(
+            self, monkeypatch):
+        """An org-scoped `tt_` key cannot authenticate against the cohort
+        endpoint, so the tool must fail loudly rather than send nothing."""
+        from tools import activation_cohort as ac
+        monkeypatch.delenv(ac.OPERATOR_KEY_ENV, raising=False)
+        monkeypatch.setattr(ac, "_assert_https", lambda *a, **k: None)
+        with pytest.raises(SystemExit) as exc:
+            ac.main(["--api-base", "https://api.example", "--org", "org-a"])
+        assert ac.OPERATOR_KEY_ENV in str(exc.value)
 
     def test_roll_up_arity_mismatch_raises(self):
-        from tools.activation_cohort import roll_up
         # `match=` is load-bearing: `zip(..., strict=True)` ALREADY raised a bare
         # ValueError, so asserting only the type would pass with this guard
         # reverted (mutation-verified by review cycle 3).
         with pytest.raises(ValueError, match="one entry per org"):
-            roll_up(["a", "b"], [None])
+            roll_up_cohort(["a", "b"], [None])
 
     def test_duplicate_orgs_cannot_double_count(self):
         """Belt and braces: even if a caller bypasses the CLI, the
         operator-supplied list is echoed verbatim so the inflated cohort is
         visible rather than silent."""
-        from tools.activation_cohort import roll_up
         body = {"stages": {n: {"state": "measured", "value": 1, "unit": "x",
                                "reason": None} for n in (
             "captured", "stored", "memory_produced", "recall_attempted",
             "value_confirmed")}}
-        report = roll_up(["a", "a"], [body, body])
+        report = roll_up_cohort(["a", "a"], [body, body])
         assert report["cohort_definition"]["orgs"] == ["a", "a"]
         assert report["cohort_definition"]["size"] == 2
         # The tool MUST NOT invent a rate; a duplicate stays visible as size=2.
@@ -1522,8 +1993,7 @@ def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
     """A partial cohort's sum is a LOWER BOUND — the unreadable orgs are exactly
     the ones that might carry the activity. A lower bound of 0 must not be
     emitted as a confident 0."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(0, 0, 0, "measured", 0), None],
         [None, "HTTP 500"])
@@ -1537,8 +2007,7 @@ def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
 def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
     """A 0 from `not_measurable` orgs alone IS a fact (they genuinely have
     nothing), so only `unavailable` triggers the refusal."""
-    mod = _cohort_module()
-    report = mod.roll_up(
+    report = roll_up_cohort(
         ["a", "b"],
         [_payload(3, 3, 1, "measured", 0),
          _payload(0, 0, 0, "not_measurable", None)])
@@ -1548,22 +2017,67 @@ def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
     assert cell["orgs_unavailable"] == [], cell
 
 
-def test_cohort_refuses_a_payload_whose_org_id_is_not_the_org_asked_for(
+def test_cohort_attributes_the_graph_scope_refusal_to_each_org():
+    """#4039 leaves `recall_attempted`'s `unavailable` reachable with a reason
+    that is a property of ONE ORG, not of the shared store. The cohort's hoisted
+    note is a claim ABOUT THE STORE ("server-level condition rather than a
+    per-org read failure"), so writing it for this reason would introduce a NEW
+    false claim while fixing an old one.
+
+    The three things that must hold: the note is attributed per-org, the
+    affected orgs stay named in `orgs_unavailable`, and a genuine server-level
+    reason still gets the original store-level sentence (pinned by the endpoint
+    test that asserts the exact text).
+    """
+    from tortoise.activation_scorecard import (
+        GRAPH_SCOPE_UNKNOWN_REASON,
+        shared_stage_notes,
+    )
+    scoped = _payload(1, 1, 0, "unavailable")
+    scoped["stages"]["recall_attempted"]["reason"] = GRAPH_SCOPE_UNKNOWN_REASON
+    shared = _payload(1, 1, 0, "unavailable")
+    shared["stages"]["recall_attempted"]["reason"] = "analytics_store_unreachable"
+
+    notes = shared_stage_notes([scoped, shared])
+    assert len(notes) == 2, notes
+    scope_note = next(n for n in notes if GRAPH_SCOPE_UNKNOWN_REASON in n)
+    store_note = next(n for n in notes if "analytics_store_unreachable" in n)
+    assert "property of EACH named org" in scope_note, scope_note
+    assert "server-level" not in scope_note, scope_note
+    assert "orgs_unavailable" in scope_note, scope_note
+    assert "server-level condition" in store_note, store_note
+
+    # ...and the roll-up bins the org as NOT measurable-for-this-stage, naming
+    # it: an ambiguous read is not "the org answered, and there was nothing".
+    report = roll_up_cohort(["a", "b"], [scoped, _payload(1, 1, 1, "measured", 4)])
+    cell = report["stages"]["recall_attempted"]
+    assert cell["state"] == "partial", cell
+    assert cell["orgs_unavailable"] == ["a"], cell
+    assert cell["orgs_not_measurable"] == [], cell
+    assert cell["value"] == 4, cell
+
+
+def test_cohort_client_refuses_a_response_bound_to_another_org_list(
         monkeypatch, capsys):
-    """A mistyped `--org A=key_of_B` must not produce a report whose
-    `cohort_definition` names A while the summed numbers are B's."""
-    import json
-    mod = _cohort_module()
-    payload = _payload(5, 5, 1)
-    payload["org_id"] = "b"
-    monkeypatch.setattr(mod, "fetch_scorecard", lambda *a, **k: payload)
-    monkeypatch.setattr(mod, "_assert_https", lambda *a, **k: None)
-    assert mod.main(["--api-base", "https://api.example",
-                     "--org", "a=KEY"]) == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["org_errors"] == {"a": "org_id_mismatch"}, report
-    assert report["stages"]["captured"]["state"] == "unavailable", report
-    assert report["stages"]["captured"]["value"] is None, report
+    """The client binds the report to the orgs it ASKED FOR. The server echoes
+    `cohort_definition` from the request, so a mismatch means the response did
+    not come from the requested cohort (a wrong/old endpoint, or a proxy) — and
+    an operator would otherwise read a denominator that does not describe the
+    numbers beneath it. The credential must never appear in the error."""
+    from tools import activation_cohort as ac
+
+    monkeypatch.setattr(
+        ac, "fetch_cohort",
+        lambda *a, **k: {"cohort_definition": {"orgs": ["b"], "size": 1,
+                                              "source": "operator_supplied"},
+                         "stages": {}, "org_errors": {}})
+    monkeypatch.setattr(ac, "_assert_https", lambda *a, **k: None)
+    monkeypatch.setenv(ac.OPERATOR_KEY_ENV, "operator-secret")
+    with pytest.raises(SystemExit) as exc:
+        ac.main(["--api-base", "https://api.example", "--org", "a"])
+    assert "cohort_definition" in str(exc.value)
+    assert "operator-secret" not in str(exc.value)
+    assert capsys.readouterr().out == ""
 
 
 def test_an_out_of_window_analytics_row_refuses_the_recall_count(client, monkeypatch):
@@ -1637,9 +2151,13 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     """`detail.recall_attempted_any` must mean the same thing everywhere: the
     allowlisted count over the WINDOW, emitted only when it is EXACT (window
     verified, page not truncated, every row placeable/classifiable).
-    Otherwise it is withheld AND the exclusion counters name the reason. The
-    STAGE precedence is unchanged: an org with no memory stays `not_measurable`,
-    it does not become `unavailable`."""
+    Otherwise it is withheld AND the exclusion counters name the reason.
+
+    #4039 narrows the old blanket "an org with no memory stays `not_measurable`":
+    it stays `not_measurable` only while the exact count does NOT contradict the
+    graph-scoped gate (withheld, or an exact `0`). An exact POSITIVE count is
+    org-wide evidence against an org-scope absence, so that path refuses with
+    the scope-qualified reason instead. Both directions are asserted below."""
     from tortoise.activation_scorecard import recall_stages
     window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
     clean = [{"properties": {"tool_name": "tortoise_search"},
@@ -1647,23 +2165,42 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     rows = [*clean, {"properties": {"tool_name": "tortoise_recall"},
                      "created_at": "2027-01-01T00:00:00+00:00"}]
 
-    # Out-of-window row: the window failure is named, the count withheld.
+    # Out-of-window row: the window failure is named, the count withheld — so
+    # the graph-scoped gate is NOT contradicted and `not_measurable` stands.
     stage, detail = recall_stages(rows, None, memory_sessions=0, window=window)
     assert stage["state"] == "not_measurable", stage
     assert stage["reason"] == "no_memory_produced_in_lifetime", stage
     assert detail["analytics_window_out_of_range"] == 1, detail
     assert detail["recall_attempted_any"] is None, detail
 
-    # Exact read: the raw count IS reported.
-    _, ok = recall_stages(clean, None, memory_sessions=0, window=window)
+    # Exact read: the raw count IS reported — and a positive one is the
+    # evidence that turns the stage into the scope-qualified refusal.
+    stage_pos, ok = recall_stages(clean, None, memory_sessions=0, window=window)
     assert ok["recall_attempted_any"] == 1, ok
+    assert stage_pos["state"] == "unavailable", stage_pos
+    assert stage_pos["reason"] == "no_memory_in_default_graph_org_scope_unknown", stage_pos
 
-    # Unplaceable rows: withheld, and the COUNTER names why.
+    # An exact 0 contradicts nothing: no org-wide activity, so the org-scope
+    # absence is unsupported rather than contradicted — `not_measurable`.
+    stage_zero, zero = recall_stages(
+        [{"properties": {"tool_name": "tortoise_health"},
+          "created_at": "2026-09-16T13:00:00+00:00"}],
+        None, memory_sessions=0, window=window)
+    assert zero["recall_attempted_any"] == 0, zero
+    assert stage_zero["state"] == "not_measurable", stage_zero
+    assert stage_zero["reason"] == "no_memory_produced_in_lifetime", stage_zero
+
+    # Unplaceable rows: withheld, and the COUNTER names why — the gate is not
+    # contradicted by an unreadable row, so the state stays `not_measurable`
+    # (the disclosed RESIDUAL: a multi-graph org is indistinguishable from a
+    # single-graph one here; see the module's LIMITATIONS).
     bad_stamp = [{"properties": {"tool_name": "tortoise_search"},
                   "created_at": "not-a-timestamp"}]
-    _, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
+    withheld, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
     assert s1["recall_attempted_any"] is None, s1
     assert s1["unparseable_analytic_rows"] == 1, s1
+    assert withheld["state"] == "not_measurable", withheld
+    assert withheld["reason"] == "no_memory_produced_in_lifetime", withheld
     _, s2 = recall_stages([42, *clean], None, memory_sessions=0, window=window)
     assert s2["recall_attempted_any"] is None, s2
     assert s2["unclassifiable_analytic_rows"] == 1, s2
@@ -1727,3 +2264,493 @@ def test_the_graph_read_is_dispatched_off_the_shared_default_executor(client,
     resp = client.get("/v1/activation/scorecard", params=WINDOW)
     assert resp.status_code == 200, resp.text
     assert calls == [ha._SCORECARD_EXECUTOR], calls
+
+
+# ══ #3676: the cross-tenant cohort endpoint ═══════════════════════════════════
+# `GET /v1/internal/activation/cohort` — operator-only, EXPLICIT org list. These
+# are the tenancy review's executable half: the credential, the enumeration
+# refusal, the per-org blast radius, the no-activation-claim rule and the audit
+# decision are each pinned, because each fails SILENTLY if it regresses.
+
+COHORT_PATH = "/v1/internal/activation/cohort"
+_INTERNAL_KEY = "test-internal-cohort-secret"
+INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+COHORT_ORGS = ["org-cohort-a", "org-cohort-b"]
+
+
+@pytest.fixture
+def internal_key(monkeypatch):
+    """The cohort endpoint's operator credential. `_check_internal` reads it at
+    CALL time (#880), so setting it inside the test is enough."""
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    return dict(INTERNAL_HEADERS)
+
+
+def _cohort(client, headers, orgs=None, window=None, **kwargs):
+    params = [("orgs", o) for o in (COHORT_ORGS if orgs is None else orgs)]
+    for key, value in (window if window is not None else WINDOW).items():
+        params.append((key, value))
+    return client.get(COHORT_PATH, params=params, headers=headers, **kwargs)
+
+
+def _all_keys(payload) -> list[str]:
+    keys: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            keys.extend(str(k) for k in node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return keys
+
+
+def _all_strings(payload) -> list[str]:
+    out: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            out.append(node)
+    return out
+
+
+# ── The credential (acceptance criterion 1) ────────────────────────────────
+
+def test_cohort_requires_the_internal_operator_credential(client, monkeypatch):
+    """An org-scoped `tt_` key — every tenant's credential — must NOT open this
+    surface. `_check_internal` compares against `FASTAPI_INTERNAL_KEY`, a value
+    an org key cannot obtain, so the separation is structural rather than a
+    scope check."""
+    monkeypatch.delenv("FASTAPI_INTERNAL_KEY", raising=False)
+    # Unconfigured server: fail closed (503), never "no key needed".
+    assert _cohort(client, {}).status_code == 503
+
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    # No credential at all.
+    assert _cohort(client, {}).status_code == 401
+    # A well-formed ORG key (`tt_`, the tenant plane).
+    org_key = {"Authorization": "Bearer tt_" + "A" * 40}
+    assert _cohort(client, org_key).status_code == 401
+    # A wrong internal key.
+    assert _cohort(client, {"Authorization": "Bearer nope"}).status_code == 401
+    # The right one.
+    assert _cohort(client, INTERNAL_HEADERS).status_code == 200
+
+
+def test_cohort_a_near_miss_credential_is_refused(client, internal_key):
+    """Prefix/suffix near-misses must not authenticate — the comparison is on
+    the FULL bearer value (`hmac.compare_digest`), not a prefix test."""
+    for bad in (_INTERNAL_KEY[:-1], _INTERNAL_KEY + "x", _INTERNAL_KEY.upper()):
+        resp = _cohort(client, {"Authorization": f"Bearer {bad}"})
+        assert resp.status_code == 401, (bad, resp.text)
+
+
+# ── Enumeration refusal (acceptance criterion 2) ────────────────────────────
+
+def test_cohort_refuses_wildcard_tokens(client, internal_key):
+    """A wildcard is how an explicit list silently becomes "every tenant on the
+    platform" — refused by NAME, case-insensitively, and the message says so."""
+    for token in ("all", "ALL", "any", "every", "*", "%", "-1"):
+        resp = _cohort(client, internal_key, orgs=[token])
+        assert resp.status_code == 422, (token, resp.text)
+        assert "wildcard" in resp.text, (token, resp.text)
+
+
+def test_cohort_refuses_an_empty_org_list(client, internal_key):
+    """No list, and no "default to everything": an absent cohort is not a
+    cohort."""
+    assert client.get(COHORT_PATH, params=WINDOW,
+                      headers=internal_key).status_code == 422
+    assert _cohort(client, internal_key, orgs=[]).status_code == 422
+
+
+def test_cohort_refuses_a_malformed_org_id(client, internal_key):
+    """The id becomes a graph namespace, so the accepted shape is the same one
+    the provisioning path validates. `")/"`-style input must never reach the
+    namespace seam as an opaque connect error."""
+    for bad in ("org a", "../etc", "a/b", "-leading", "x" * 65, "org;drop"):
+        resp = _cohort(client, internal_key, orgs=[bad])
+        assert resp.status_code == 422, (bad, resp.text)
+
+
+def test_cohort_refuses_a_duplicate_org(client, internal_key):
+    """Refused rather than deduped: a copy-paste duplicate silently inflates
+    the cohort number AND its denominator."""
+    resp = _cohort(client, internal_key, orgs=["org-cohort-a", "org-cohort-a"])
+    assert resp.status_code == 422, resp.text
+    assert "more than once" in resp.text, resp.text
+
+
+def test_cohort_org_cap_is_a_blast_radius_bound():
+    """The cap is enforced at the boundary and is an OPERATIONAL limit, not a
+    cohort-size requirement (the owner withdrew the minimum-N bar). Asserted
+    against the validator so the boundary costs no I/O."""
+    from tortoise.activation_scorecard import MAX_COHORT_ORGS
+    from tortoise.hosted_api import _validate_cohort_orgs
+
+    at_cap = [f"org-{n:03d}" for n in range(MAX_COHORT_ORGS)]
+    assert _validate_cohort_orgs(at_cap, MAX_COHORT_ORGS) == at_cap
+    with pytest.raises(Exception) as exc:
+        _validate_cohort_orgs([*at_cap, "org-one-too-many"], MAX_COHORT_ORGS)
+    assert "at most" in str(getattr(exc.value, "detail", exc.value))
+
+
+def test_cohort_never_returns_an_org_the_caller_did_not_name(client, internal_key):
+    """The endpoint is not a registry probe: a seeded org that was NOT asked
+    for appears nowhere in the response, at any depth."""
+    _seed("s-unasked", "2026-09-16T10:00:00+00:00", 2, 1,
+          org_id="org-cohort-unasked")
+    _seed("s-asked", "2026-09-16T10:00:00+00:00", 1, 0,
+          org_id="org-cohort-a")
+    body = _cohort(client, internal_key, orgs=["org-cohort-a"]).json()
+    assert body["cohort_definition"]["orgs"] == ["org-cohort-a"]
+    assert not [s for s in _all_strings(body) if "unasked" in s], body
+
+
+# ── The fold, end to end ────────────────────────────────────────────────────
+
+def test_cohort_rolls_up_the_named_orgs_and_echoes_its_denominator(
+        client, internal_key):
+    _seed("c-a", "2026-09-16T10:00:00+00:00", 2, 1, org_id="org-cohort-a")
+    _seed("c-b", "2026-09-16T11:00:00+00:00", 1, 0, org_id="org-cohort-b")
+    body = _cohort(client, internal_key).json()
+
+    assert body["surface"] == "activation_cohort"
+    assert body["cohort_definition"] == {
+        "orgs": COHORT_ORGS, "size": 2, "source": "operator_supplied"}
+    assert body["dogfood_only"] is False
+    assert body["window"] == {"since": "2026-09-16T00:00:00+00:00",
+                              "until": "2026-09-17T00:00:00+00:00"}
+    assert body["org_errors"] == []
+    # The shared analytics stage is unmeasured here (no SUPABASE_URL in the test
+    # env), so the cause is hoisted ONCE at the cohort level instead of being
+    # repeated as a per-org failure.
+    assert body["notes"] == [
+        "recall_attempted is unavailable for 2 org(s): "
+        "analytics_write_path_unconfigured — this stage reads ONE shared "
+        "analytics store, so it is a server-level condition rather than a "
+        "per-org read failure"], body["notes"]
+    assert body["stages"]["captured"] == {
+        "state": "measured", "value": 2, "reason": None,
+        "orgs_measured": 2, "orgs_unavailable": [], "orgs_not_measurable": []}
+    assert body["stages"]["stored"]["value"] == 2, body["stages"]
+    assert body["stages"]["memory_produced"]["value"] == 1, body["stages"]
+    # `value_confirmed` is a refusal for every org, so the cohort state is
+    # `not_measurable` — that is the HEALTHY answer, not a failure.
+    assert body["stages"]["value_confirmed"]["state"] == "not_measurable"
+    assert body["stages"]["value_confirmed"]["value"] is None
+
+
+def test_cohort_payload_never_claims_activation(client, internal_key):
+    """Acceptance criterion 5: no `activated` field and no rate, at any depth.
+    `assert_no_activation_claim` in the module makes this a RUNTIME refusal on
+    the endpoint too, not only a test."""
+    _seed("c-a2", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    body = _cohort(client, internal_key).json()
+    keys = _all_keys(body)
+    assert not [k for k in keys if "activat" in k.lower()], keys
+    assert not [k for k in keys if k.lower() in ("rate", "ratio",
+                                                "conversion")], keys
+
+
+def test_cohort_single_org_is_flagged_dogfood_only(client, internal_key):
+    _seed("c-solo", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    body = _cohort(client, internal_key, orgs=["org-cohort-a"]).json()
+    assert body["dogfood_only"] is True
+    assert body["cohort_definition"]["size"] == 1
+
+
+def test_cohort_window_is_validated_once_and_echoed(client, internal_key):
+    """One window for the whole cohort — validated once, so every per-org read
+    sees the same interval and the boundary instant is treated identically."""
+    resp = _cohort(client, internal_key,
+                   window={"since": "2026-09-16T00:00:00",
+                           "until": "2026-09-17T00:00:00Z"})
+    assert resp.status_code == 422, resp.text
+    for bad in ({"since": "2026-09-17T00:00:00Z", "until": "2026-09-16T00:00:00Z"},
+                {"since": "2026-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z"}):
+        assert _cohort(client, internal_key, window=bad).status_code == 422
+
+
+def test_cohort_agrees_with_the_org_scoped_endpoint_for_the_same_org(
+        client, internal_key):
+    """ONE code path (#3676): the cohort's per-org number must equal what that
+    org reads through `GET /v1/activation/scorecard`. A second implementation
+    would let the two surfaces quietly disagree about the same org."""
+    _seed("c-agree", "2026-09-16T10:00:00+00:00", 3, 2)
+    scoped = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    body = _cohort(client, internal_key, orgs=[ORG["org_id"]]).json()
+    for name in ("captured", "stored", "memory_produced", "recall_attempted",
+                 "value_confirmed"):
+        cohort_cell, scoped_cell = body["stages"][name], scoped["stages"][name]
+        # The per-org VERDICT must be identical. The cohort cell additionally
+        # carries the roll-up's own bookkeeping (`orgs_measured` / the two
+        # org-name lists) and does not repeat `unit` — that difference is the
+        # fold's, and it is asserted so it stays deliberate.
+        assert (cohort_cell["state"], cohort_cell["value"]) == (
+            scoped_cell["state"], scoped_cell["value"]), name
+        assert set(cohort_cell) - set(scoped_cell) == {
+            "orgs_measured", "orgs_unavailable", "orgs_not_measurable"}, name
+    # The REASON differs exactly where the read does: stages 1-3 are read per
+    # org and keep the org's own reason, while stage 4's is the roll-up's
+    # umbrella reason — its cause is server-level and is hoisted once into
+    # `notes` instead of being repeated for every org.
+    for name in ("captured", "stored", "memory_produced"):
+        assert body["stages"][name]["reason"] == scoped["stages"][name]["reason"]
+    assert body["stages"]["recall_attempted"]["reason"] == "no_org_measurable"
+    assert any("analytics_write_path_unconfigured" in n for n in body["notes"]), \
+        body["notes"]
+
+
+# ── Blast radius (acceptance criterion 3) ───────────────────────────────────
+
+def test_cohort_an_unreadable_org_is_named_and_never_summed_as_zero(
+        client, internal_key, monkeypatch):
+    """org-b's graph is unreachable while org-a's reads fine. org-a's number
+    must stand, org-b must be NAMED, and the cohort must never present the
+    unreadable org as a 0."""
+    import tortoise.hosted_api as ha
+    _seed("c-ok", "2026-09-16T10:00:00+00:00", 2, 1, org_id="org-cohort-a")
+    real = ha._data_sdk
+
+    def _sdk(org):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("graph unreachable")
+        return real(org)
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] == 1, cell          # org-a's 1, NOT 0 and NOT 2
+    assert cell["orgs_unavailable"] == ["org-cohort-b"], cell
+    assert cell["orgs_measured"] == 1, cell
+    # The error map explains the roll-up's own verdict rather than leaving a
+    # bare name the operator has to re-read the org to explain.
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_graph_unavailable"}], body
+    # A partial cohort with a non-zero sum keeps its value; the lower-bound
+    # refusal only fires at 0 (a 0 it never established).
+    assert body["stages"]["memory_produced"]["value"] == 1, body["stages"]
+
+
+def test_cohort_names_an_org_whose_read_raised(client, internal_key, monkeypatch):
+    """A per-org read that RAISES (a bug, or a shape the fold does not absorb)
+    must cost that org's cells only. The exception class is reported; the
+    exception MESSAGE never is (it can carry a DSN/host/credential)."""
+    import tortoise.hosted_api as ha
+    _seed("c-raise", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    real = ha._scorecard_for_org
+
+    async def _one(org, since_iso, until_iso, log):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("postgres://user:pw@host/db")
+        return await real(org, since_iso, until_iso, log)
+
+    monkeypatch.setattr(ha, "_scorecard_for_org", _one)
+    body = _cohort(client, internal_key).json()
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_read_failed:RuntimeError"}], body
+    assert body["stages"]["captured"]["value"] == 1, body["stages"]
+    assert not [s for s in _all_strings(body) if "postgres://" in s], body
+
+
+def _canned_cell(state, value, reason=None):
+    return {"state": state, "value": value, "reason": reason}
+
+
+def _canned_payload(captured: int) -> dict:
+    """A well-formed per-org scorecard payload, for tests whose subject is the
+    BLAST RADIUS rather than the read (so they cost no graph/store latency)."""
+    return {
+        "stages": {
+            "captured": _canned_cell("measured", captured),
+            "stored": _canned_cell("measured", captured),
+            "memory_produced": _canned_cell("measured", captured),
+            "recall_attempted": _canned_cell(
+                "unavailable", None, "analytics_store_unreachable"),
+            "value_confirmed": _canned_cell("not_measurable", None),
+        },
+        "integrity": [],
+    }
+
+
+def test_cohort_a_hung_org_read_becomes_a_named_unavailable(client, internal_key,
+                                                           monkeypatch):
+    """A HANG is the blast radius that matters most: without the per-org bound
+    one dead org would hold the whole cohort. The hung org is named, and the
+    healthy org still reports."""
+    import asyncio
+
+    import tortoise.hosted_api as ha
+    monkeypatch.setattr(ha, "_COHORT_PER_ORG_TIMEOUT_S", 1.0)
+
+    async def _one(org, since_iso, until_iso, log):
+        if org["org_id"] == "org-cohort-b":
+            await asyncio.sleep(60)
+        return _canned_payload(1)
+
+    monkeypatch.setattr(ha, "_scorecard_for_org", _one)
+    body = _cohort(client, internal_key).json()
+    assert body["org_errors"] == [
+        {"org_id": "org-cohort-b", "reason": "org_read_timeout"}], body
+    assert body["stages"]["captured"]["value"] == 1, body["stages"]
+    assert body["stages"]["captured"]["orgs_unavailable"] == ["org-cohort-b"]
+
+
+def test_cohort_a_partial_zero_from_an_unreadable_org_is_refused(
+        client, internal_key, monkeypatch):
+    """The sharpest edge: org-a genuinely measured 0 captured sessions and
+    org-b could not be read. `0` there would be a LOWER BOUND presented as a
+    fact — the exact misreading this lane exists to remove."""
+    import tortoise.hosted_api as ha
+    real = ha._data_sdk
+
+    def _sdk(org):
+        if org["org_id"] == "org-cohort-b":
+            raise RuntimeError("graph unreachable")
+        return real(org)
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "partial_zero_from_an_unreadable_cohort", cell
+
+
+def test_cohort_every_org_unreadable_reads_unavailable_not_not_measurable(
+        client, internal_key, monkeypatch):
+    """If nothing could be read, the cohort is `unavailable` — never
+    `not_measurable`, which would claim the orgs answered "nothing to measure".
+    That distinction is the state inversion the lane exists to prevent."""
+    import tortoise.hosted_api as ha
+
+    def _sdk(org):
+        raise RuntimeError("graph unreachable")
+
+    monkeypatch.setattr(ha, "_data_sdk", _sdk)
+    body = _cohort(client, internal_key).json()
+    cell = body["stages"]["captured"]
+    assert cell["state"] == "unavailable", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "no_org_measurable", cell
+    assert sorted(cell["orgs_unavailable"]) == sorted(COHORT_ORGS), cell
+
+
+# ── The audit decision ──────────────────────────────────────────────────────
+
+def test_cohort_audits_once_on_the_operator_plane(client, internal_key,
+                                                 monkeypatch):
+    """A cross-tenant read is recorded: ONE append-only `audit_events` row per
+    request, with `org_id=""` (the operator plane — the non-org-scoped shape
+    `identity_link` already uses), naming every target org in `detail`."""
+    import tortoise.hosted_api as ha
+    seen: list[dict] = []
+
+    async def _audit(request, org_id, operation, **kwargs):
+        seen.append({"org_id": org_id, "operation": operation, **kwargs})
+
+    monkeypatch.setattr(ha, "_async_audit", _audit)
+    _seed("c-audit", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    resp = _cohort(client, internal_key)
+    assert resp.status_code == 200, resp.text
+
+    assert len(seen) == 1, seen
+    row = seen[0]
+    assert row["org_id"] == "", row
+    assert row["operation"] == "activation_cohort_read", row
+    assert row["resource_type"] == "activation_cohort", row
+    assert row["detail"]["orgs"] == COHORT_ORGS, row
+    assert row["detail"]["window"] == {"since": "2026-09-16T00:00:00+00:00",
+                                      "until": "2026-09-17T00:00:00+00:00"}, row
+
+
+def test_cohort_a_failing_audit_sink_does_not_fail_the_read(
+        client, internal_key, monkeypatch):
+    """Fail-OPEN on the audit write (#1529's ruling: bookkeeping must not 500 a
+    serving path). Blocking the read would not stop an abuser either — an
+    abuser holds the key."""
+    import tortoise.hosted_api as ha
+
+    async def _boom(*a, **k):
+        raise RuntimeError("audit sink down")
+
+    monkeypatch.setattr(ha, "_async_audit", _boom)
+    _seed("c-audit2", "2026-09-16T10:00:00+00:00", 1, 1, org_id="org-cohort-a")
+    resp = _cohort(client, internal_key)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["stages"]["captured"]["value"] == 1, resp.text
+
+
+# ── The operator client ────────────────────────────────────────────────────
+
+def test_operator_client_sends_one_authenticated_request(monkeypatch, capsys):
+    """The thin client: ONE GET to the operator endpoint, bearer credential,
+    every org as a repeated `orgs=` parameter — and it echoes the server's
+    payload unchanged (the roll-up is the server's, not the client's)."""
+    import json
+
+    from tools import activation_cohort as ac
+    captured: dict = {}
+    payload = {"cohort_definition": {"orgs": COHORT_ORGS, "size": 2,
+                                     "source": "operator_supplied"},
+               "dogfood_only": False, "stages": {}, "org_errors": {},
+               "window": {"since": "s", "until": "u"}}
+
+    def _fetch(api_base, key, orgs, since, until, timeout):
+        captured.update(api_base=api_base, key=key, orgs=orgs, since=since,
+                        until=until, timeout=timeout)
+        return payload
+
+    monkeypatch.setattr(ac, "fetch_cohort", _fetch)
+    monkeypatch.delenv(ac.OPERATOR_KEY_ENV, raising=False)
+    assert ac.main(["--api-base", "https://api.example",
+                    "--org", "org-cohort-a", "--org", "org-cohort-b",
+                    "--operator-key", "operator-secret",
+                    "--since", "2026-09-16T00:00:00Z",
+                    "--until", "2026-09-17T00:00:00Z"]) == 0
+    assert captured == {"api_base": "https://api.example",
+                        "key": "operator-secret",
+                        "orgs": COHORT_ORGS,
+                        "since": "2026-09-16T00:00:00Z",
+                        "until": "2026-09-17T00:00:00Z",
+                        "timeout": 900.0}, captured
+    out = capsys.readouterr().out
+    assert json.loads(out) == payload
+    assert "operator-secret" not in out
+    assert ac.COHORT_PATH == COHORT_PATH
+    # The client's path must be a route the server actually registers — a
+    # renamed route would otherwise leave the committed client pointing at a
+    # 404, and only an operator would find out.
+    assert COHORT_PATH in {r.path for r in app.routes}, [
+        r.path for r in app.routes if "cohort" in r.path]
+
+
+def test_operator_client_prefers_flag_over_env_and_writes_out(
+        monkeypatch, tmp_path):
+    """`--operator-key` wins over the env (so a rotation can be tested without
+    exporting a secret into the shell), and `--out` writes the payload."""
+    import json
+
+    from tools import activation_cohort as ac
+    payload = {"cohort_definition": {"orgs": ["org-cohort-a"], "size": 1,
+                                     "source": "operator_supplied"},
+               "dogfood_only": True, "stages": {}, "org_errors": {}}
+    seen: dict = {}
+    monkeypatch.setattr(ac, "fetch_cohort",
+                        lambda api_base, key, orgs, since, until, timeout: (
+                            seen.update(key=key) or payload))
+    monkeypatch.setenv(ac.OPERATOR_KEY_ENV, "from-env")
+    out = tmp_path / "cohort.json"
+    ac.main(["--api-base", "https://api.example", "--org", "org-cohort-a",
+             "--operator-key", "from-flag", "--out", str(out)])
+    assert seen["key"] == "from-flag"
+    assert json.loads(out.read_text()) == payload

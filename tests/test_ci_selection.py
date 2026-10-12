@@ -823,6 +823,61 @@ def test_pi_hooks_change_selects_the_capture_guard():
     assert "test_pi_capture_hooks.py" in r["test_files"]
 
 
+def test_token_ts_change_selects_the_consent_bridge_guard():
+    """#3524: the guard's `token.ts` half must be selected by a `token.ts` diff.
+
+    `test_oauth_consent_bridge.py`'s task-3 assertion reads
+    `website/apps/dashboard/functions/_shared/auth/token.ts`. That path matches
+    the `onboarding` SOURCE_PATTERN `website/apps/dashboard/functions/`, NOT
+    `api` — so an `api`-only registration (which covers the file's
+    `tortoise/oauth.py` + `tortoise/hosted_api.py` subjects) left the token.ts
+    guard unrun exactly when token.ts moved: a token.ts regression shipped green
+    while the guard that exists to catch it stayed asleep. This asserts the
+    SELECTION, not the registration, so it reds on the pre-fix manifest.
+    """
+    r = _sel(["website/apps/dashboard/functions/_shared/auth/token.ts"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["onboarding"], (
+        f"token.ts selects {r['surfaces']} — the consent bridge's token.ts guard "
+        "is only reachable through the surface that path matches"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
+        "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
+    """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
+
+    `test_oauth_consent_bridge.py` also pins `docs/engineering/auth/consent-identity-bridge.md`
+    (the spec) and `docs/ops/auth-email-flows.md` (the redirect-allowlist record).
+    `docs/` is in NON_PYTHON_PREFIXES and matches (now) the `onboarding`
+    SOURCE_PATTERNS entries added with this fix, so a docs-only edit to either
+    record selects the surface that runs the guard. Before those entries a
+    docs-only edit selected `surfaces=[]` and the guard never saw the record it
+    guards — the same silent-drop class the token.ts half (#3524) fixes.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = (
+        "docs/engineering/auth/consent-identity-bridge.md",
+        "docs/ops/auth-email-flows.md",
+    )
+    for changed in subjects:
+        assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "onboarding" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_oauth_consent_bridge.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_oauth_consent_bridge.py, so its record guard cannot fire "
+            "on the change it pins (#3524)"
+        )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -932,10 +987,13 @@ def test_unrelated_tools_change_still_tier1():
 
 
 def test_activation_cohort_change_does_not_drop_to_tier1():
-    # #B7 (#3674): tools/activation_cohort.py owns part of
-    # tests/test_activation_scorecard.py (its roll_up cohort-summing logic).
-    # Without the TOOL_CARVEOUTS entry the flat "tools/" prefix swallows it ->
-    # tier-1 smoke only, and the suite that pins the cohort number never runs.
+    # #B7 (#3674, restated by #3676): tools/activation_cohort.py's transport
+    # guards (https-only, no-redirect, credential hygiene) are pinned by
+    # tests/test_activation_scorecard.py. Without the TOOL_CARVEOUTS entry the
+    # flat "tools/" prefix swallows it -> tier-1 smoke only, and the suite that
+    # pins those controls never runs. (The cohort FOLD moved into
+    # tortoise/activation_scorecard.py in #3676 — the `core` surface covers
+    # that file, so the carve-out's reason narrowed rather than vanished.)
     r = _sel(["tools/activation_cohort.py"])
     assert r["surfaces"], r
     assert set(r["test_files"]) != _tier1(), r
@@ -1032,6 +1090,40 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_supabase_control_change_selects_the_org_purge_rpc_guard():
+    # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
+    # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
+    # so a supabase_control.py-only change matches `api`, REPLACES the `core`
+    # fallback in select(), and the `core`-only registration is never reached.
+    # Before the guard was dual-registered under `api`, this diff selected
+    # ['api'] and never ran test_7968_org_purge_rpc.py (the
+    # #2938/#3154/#4367 silent-drop class). Mutation check: deleting the `api`
+    # arm fails the second assert.
+    r = _sel(["tortoise/supabase_control.py"])
+    assert r["full"] is False, r
+    assert "test_7968_org_purge_rpc.py" in r["test_files"], r
+
+
+def test_record_schema_pin_runs_on_migration_or_doc_change():
+    # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
+    # the record migrations against the placement table in
+    # `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`.
+    # Both paths are under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match
+    # no SOURCE_PATTERNS row, so before the CORE_ALSO entries a change to either
+    # side ALONE selected NO surface: the pin's own claim ("editing either side
+    # alone turns the test red") was untestable in CI, and the edit landed with
+    # the pin never running. Mutation check: removing either CORE_ALSO entry
+    # fails the corresponding arm below (surfaces == []).
+    for changed in (
+        "supabase/migrations/20261012000003_record_epistemic.sql",
+        "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
+
+
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
     # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
     # config from ANY directory on the path to a linted file, and a more specific
@@ -1118,6 +1210,23 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_source_currency_tool_change_selects_core_not_tier1():
+    # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
+    # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated
+    # reporting of both on the search row. Without the CORE_ALSO entry the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a helper-only
+    # change selected NO surface and fell back to tier-1 smoke: the cases
+    # pinning that an EMPTY link set reads `unknown` rather than the vacuously
+    # `current` a literal §4.6 reading produces would not have run on the PR
+    # that edits the aggregation. Same silent-drop class as #5084/#6138/#4174
+    # above.
+    r = _sel(["tools/source_currency.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_source_currency_5581.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
 
 
 def test_test_lane_tool_change_selects_core_not_tier1():
@@ -3110,6 +3219,85 @@ def test_xdist_is_admitted_only_in_the_d3_shape():
     assert _re.search(r"^\s*XDIST_WORKERS=0\s*$", script, _re.M), (
         f"{job_name}/{step_name}: the worker count must DEFAULT to xdist's "
         "serial mode (`0`) and be raised only inside the D3 guard")
+
+
+# The tool whose lane declaration the CI jobs must make visible to the
+# skip-guard STEP (a sibling of the pytest step, so it sees only the job env).
+_SKIP_GUARD_PATH = Path(__file__).resolve().parents[1] / "tools" / "skip-guard.py"
+
+
+def test_skip_guard_can_see_the_lane_signal():
+    """#3592: the skip-guard's reason matcher is LANE-AWARE, and the lane signal
+    must REACH the tool in every docker lane it gates.
+
+    The signal used to be set in exactly ONE place — the pytest run step's
+    `env:` — while the skip-guard is a LATER SIBLING step, which receives only
+    the JOB env. The job env carries the "Compute docker URI" step's own
+    `$GITHUB_ENV` spelling (`EXPECT_URI`), so the tool reads BOTH names
+    (tools/skip-guard.py::_LANE_EXPECT_URI_ENV_ALIASES) — THIS TEST IS THE
+    COUPLING: a rename of that `$GITHUB_ENV` line must red here, never silently
+    revert the guard to the UNDECLARED arm, which is the #3592 false PASS (a
+    module whose live-availability probe regressed skips behind "requires
+    TORTOISE_DB_URI" and `python-ci-gate` stays green while the file ran
+    nothing).
+
+    Conversely the tier-2 legs need their EMPTY value visible, because that is
+    how they declare themselves URI-less — without it a probe race reddens a
+    green pytest (measured: run 37350021093, shard f, `EXPECT_URI: ` empty and
+    the guard RED on 9 "Live FalkorDB (Docker) not available" skips).
+
+    The carve-out job (test-carve-out) deliberately declares NOTHING: its
+    selection is embedded-by-design, so the undeclared arm — which keeps the
+    pre-#3592 verdicts — is what reds a live file mis-assigned into that lane.
+    """
+    import importlib.util
+
+    wf = _load_python_ci()
+    spec = importlib.util.spec_from_file_location(
+        "_skip_guard_lane_names", str(_SKIP_GUARD_PATH))
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._LANE_EXPECT_URI_ENV_ALIASES, (
+        "the guard must read a name a SIBLING step can see (the job env)")
+    for job_name in ("test", "test-slow"):
+        steps = wf["jobs"][job_name]["steps"]
+        compute = next(s for s in steps
+                       if "Compute docker URI" in s.get("name", ""))
+        script = compute["run"]
+        # The prefixed name is mapped onto the pytest step (the canonical E2E-6
+        # signal; the iff is asserted by test_expect_uri_gated_iff_uri), while
+        # every alias the TOOL reads must be a name this job actually exports to
+        # $GITHUB_ENV — otherwise the guard cannot see the lane at all.
+        for name in mod._LANE_EXPECT_URI_ENV_ALIASES:
+            export = f'echo "{name}=$EXPECT_URI" >> "$GITHUB_ENV"'
+            assert export in script, (
+                f"{job_name}: {name!r} is read by tools/skip-guard.py but this "
+                "job does not export it to $GITHUB_ENV — the sibling "
+                "skip-guard step would read an UNDECLARED lane (#3592)")
+            assert export in script.split("fi", 1)[1], (
+                f"{job_name}: the {name!r} export must sit AFTER the gate so "
+                "BOTH shapes are visible (the empty tier-2 declaration too)")
+        guard = next(s for s in steps
+                     if s.get("name", "").startswith("Skip-fail guard"))
+        assert "--manifest-only" not in guard["run"], (
+            f"{job_name}: --manifest-only turns the lane-aware reason matcher "
+            "OFF, so the lane export above would assert nothing")
+        assert "TORTOISE_TEST_EXPECT_URI" not in guard.get("env", {}), (
+            f"{job_name}: the guard step must INHERIT the lane from the job "
+            "env, not re-declare it (a second spelling is a second source of "
+            "truth)")
+
+
+def test_canary_classifier_is_pinned_to_the_docker_lane():
+    """#3592: the classifier buckets the DOCKER producer shard, so it must pass
+    its lane EXPLICITLY rather than inherit the canary-streak job's environment
+    (which declares no URI expectation — the undeclared arm would bucket a
+    docker-lane availability regression as unattributed instead of guard-red)."""
+    tool = (Path(__file__).resolve().parents[1] / "tools"
+            / "testdb_canary_classify.py").read_text()
+    assert "is_falkor_reason_violation(reason, lane=True)" in tool, (
+        "tools/testdb_canary_classify.py must pin the docker lane it classifies")
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():

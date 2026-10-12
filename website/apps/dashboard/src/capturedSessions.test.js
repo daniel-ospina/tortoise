@@ -11,7 +11,16 @@ import {
   turnRoleClass,
   kindBadgeClass,
   DELETE_CONFIRM,
+  SESSION_EXTRACTION_STATES,
+  SESSION_EXTRACTION_STATUS_LABEL,
+  SESSION_EXTRACTION_UNKNOWN_LABEL,
+  sessionExtractionLabelFor,
+  sessionExtractionOutcomeKnown,
+  sessionExtractionStatusFor,
 } from './capturedSessions.js'
+// #3520: the INSTALL axis, read from its own module — this file asserts the two
+// axes are SEPARATE (the extraction work must not have grown the install set).
+import { CAPTURE_STATES } from './captureStatus.js'
 
 test('removeSession drops the deleted id and never mutates the input', () => {
   const rows = [
@@ -29,13 +38,16 @@ test('removeSession drops the deleted id and never mutates the input', () => {
 })
 
 test('sessionRowMeta reports counts with safe defaults', () => {
+  // #3520: the three extraction fields ride the same row meta (null on a
+  // payload that predates the field — nothing is fabricated).
+  const noExtraction = { extractionStatus: null, extractionOutcomeKnown: null, extractionLabel: null }
   assert.deepEqual(sessionRowMeta({ id: 's1', turns: 3, extracted: 2 }),
-    { turns: 3, extracted: 2, id: 's1', actor: '', machineId: '', model: '' })
+    { turns: 3, extracted: 2, id: 's1', actor: '', machineId: '', model: '', ...noExtraction })
   // missing counts → 0 (W4 honest states never fabricate)
-  assert.deepEqual(sessionRowMeta({ id: 's2' }), { turns: 0, extracted: 0, id: 's2', actor: '', machineId: '', model: '' })
+  assert.deepEqual(sessionRowMeta({ id: 's2' }), { turns: 0, extracted: 0, id: 's2', actor: '', machineId: '', model: '', ...noExtraction })
   // non-numeric counts → 0 (a malformed row must not render "undefined turns")
-  assert.deepEqual(sessionRowMeta({ id: 's3', turns: 'x' }), { turns: 0, extracted: 0, id: 's3', actor: '', machineId: '', model: '' })
-  assert.deepEqual(sessionRowMeta(null), { turns: 0, extracted: 0, id: '', actor: '', machineId: '', model: '' })
+  assert.deepEqual(sessionRowMeta({ id: 's3', turns: 'x' }), { turns: 0, extracted: 0, id: 's3', actor: '', machineId: '', model: '', ...noExtraction })
+  assert.deepEqual(sessionRowMeta(null), { turns: 0, extracted: 0, id: '', actor: '', machineId: '', model: '', ...noExtraction })
 })
 
 test('sessionRowMeta normalizes the #2600 actor field', () => {
@@ -155,4 +167,103 @@ test('kindBadgeClass maps extracted kinds to badge classes', () => {
 test('DELETE_CONFIRM is present and mentions the permanent removal', () => {
   assert.ok(DELETE_CONFIRM.includes('Delete this captured session'))
   assert.ok(DELETE_CONFIRM.includes('permanently'))
+})
+
+// ── #3520: the session-scoped EXTRACTION status ─────────────────────────────
+// The second status axis. `captureStatus.test.js` owns the per-HARNESS install
+// axis (off / install-pending / waiting / active); this is the per-SESSION
+// extraction axis, and the two are asserted separately ON PURPOSE — a fifth
+// install member, or a fourth extraction member, would be the conflation this
+// pair of tests exists to refuse.
+
+test('test_extraction_state_set_agreement — install stays 4, extraction is exactly 3', () => {
+  // The INSTALL set is the existing one, UNCHANGED. Asserted here as well as in
+  // captureStatus.test.js because "the extraction axis did not grow the install
+  // axis" is this issue's contract, not a coincidence of that file's edit.
+  assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
+  // The EXTRACTION set is exactly three members — the set the server response
+  // must be drawn from. A fourth member (e.g. `stored-outcome-unrecorded`) is
+  // REFUSED: the qualifier below carries that state.
+  assert.deepEqual(SESSION_EXTRACTION_STATES,
+    ['stored', 'stored-and-processed', 'stored-extraction-failed'])
+  assert.equal(new Set(SESSION_EXTRACTION_STATES).size, 3, 'no duplicate members')
+  // Every member has a label — a member without a word would render undefined.
+  for (const state of SESSION_EXTRACTION_STATES) {
+    assert.equal(typeof SESSION_EXTRACTION_STATUS_LABEL[state], 'string', state)
+    assert.ok(SESSION_EXTRACTION_STATUS_LABEL[state].length > 0, state)
+  }
+  // set-equality BOTH ways: a label for a state outside the set is a fourth
+  // member wearing a different name.
+  assert.deepEqual(Object.keys(SESSION_EXTRACTION_STATUS_LABEL).sort(),
+    [...SESSION_EXTRACTION_STATES].sort())
+  // The qualifier is BESIDE the set, never a member of it.
+  assert.ok(!SESSION_EXTRACTION_STATES.includes(SESSION_EXTRACTION_UNKNOWN_LABEL))
+})
+
+test('test_sessions_consumer_handles_new_status_column', () => {
+  // The consumer reads the APPENDED column without any change to how it reads
+  // the pre-existing ones, and a list row / detail payload carrying exactly the
+  // shape `GET /v1/sessions` now serves derives an honest label.
+  const processed = { id: 's1', turns: 4, extracted: 3,
+    extraction: { status: 'stored-and-processed', extractor: 'v2', outcome_known: true } }
+  const failed = { ...processed, id: 's2',
+    extraction: { status: 'stored-extraction-failed', extractor: 'v2', outcome_known: true } }
+  const storeOnly = { ...processed, id: 's3',
+    extraction: { status: 'stored', extractor: 'none', outcome_known: true } }
+
+  // {status, extractor, outcome_known} is the ONLY fixture shape these helpers
+  // read: every other key is ignored, so a further appended column cannot break
+  // this consumer (nor can the ORDER of the columns).
+  const scrambled = { id: 's4', extraction: { outcome_known: true, extractor: 'm2', status: 'stored-and-processed' }, extra: 1 }
+  assert.equal(sessionExtractionLabelFor(scrambled),
+    SESSION_EXTRACTION_STATUS_LABEL['stored-and-processed'])
+
+  assert.equal(sessionRowMeta(processed).extractionLabel, 'stored and processed')
+  assert.equal(sessionRowMeta(processed).extractionStatus, 'stored-and-processed')
+  assert.equal(sessionRowMeta(processed).extractionOutcomeKnown, true)
+  assert.equal(sessionRowMeta(failed).extractionLabel, 'stored, extraction failed')
+  // store-only (#3892 keyless / #4258 extraction off): STORED, and KNOWN not to
+  // have been processed — never reported as a failure that never happened.
+  assert.equal(sessionRowMeta(storeOnly).extractionLabel, 'stored, not extracted')
+
+  // The DETAIL payload carries the same object and goes through the same
+  // derivation, so an expanded row cannot disagree with the row that opened it.
+  assert.equal(transcriptModel(failed).extractionLabel, 'stored, extraction failed')
+  assert.equal(transcriptModel(failed).extractionStatus, 'stored-extraction-failed')
+  assert.equal(transcriptModel({ id: 's9' }).extractionLabel, null,
+    'a pre-#3520 payload says nothing rather than fabricating a status')
+})
+
+test('test_commit_created_session_renders_honestly — an UNKNOWN outcome is not `stored`', () => {
+  // A commit-created / budget-hold / demo-seeded / longmem-ingest session was
+  // written by a driver that records NO extraction outcome: `capture_ok` is
+  // NULL. The server reports `status: stored` with `outcome_known: false`, and
+  // this consumer must NOT present that as `stored, not extracted` — the
+  // qualifier REPLACES the status word.
+  const unknown = { id: 's1', turns: 2, extracted: 0,
+    extraction: { status: 'stored', extractor: null, outcome_known: false } }
+  assert.equal(sessionExtractionOutcomeKnown(unknown), false)
+  assert.equal(sessionExtractionStatusFor(unknown), 'stored')
+  assert.equal(sessionExtractionLabelFor(unknown), SESSION_EXTRACTION_UNKNOWN_LABEL)
+  assert.notEqual(sessionExtractionLabelFor(unknown),
+    SESSION_EXTRACTION_STATUS_LABEL['stored'])
+  // the row meta and the detail model agree — one derivation, no second opinion
+  assert.equal(sessionRowMeta(unknown).extractionLabel, 'outcome not recorded')
+  assert.equal(transcriptModel(unknown).extractionLabel, 'outcome not recorded')
+  assert.doesNotMatch(sessionRowMeta(unknown).extractionLabel, /not extracted/,
+    'an unknown outcome must never read as "not extracted"')
+
+  // `outcome_known` ABSENT is not the same fact as `outcome_known: false` —
+  // the qualifier is only spoken when the server spoke it.
+  assert.equal(sessionExtractionOutcomeKnown({ extraction: { status: 'stored' } }), null)
+  assert.equal(sessionExtractionLabelFor({ extraction: { status: 'stored' } }),
+    SESSION_EXTRACTION_STATUS_LABEL['stored'])
+
+  // A member outside the vocabulary (a server that grew a fourth state without
+  // this consumer) renders NOTHING, never a fabricated word.
+  assert.equal(sessionExtractionStatusFor({ extraction: { status: 'stored-outcome-unrecorded' } }), null)
+  assert.equal(sessionExtractionLabelFor({ extraction: { status: 'stored-outcome-unrecorded' } }), null)
+  assert.equal(sessionExtractionLabelFor({ extraction: null }), null)
+  assert.equal(sessionExtractionLabelFor({}), null)
+  assert.equal(sessionExtractionLabelFor(null), null)
 })

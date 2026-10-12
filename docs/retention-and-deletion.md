@@ -19,6 +19,8 @@ related:
     note: "Team-account soft delete → grace → hard purge."
   - issue: 3925
     note: "Owner ruling: account memory is the ACCOUNT's property — a person's erasure deletes the identity layer and severs the analytics linkage, and never reaches into the account's memory. The account-side PII filter / selective delete is DEFERRED (not prioritised); this document carries the boundary so a well-meaning adjacent change cannot quietly reverse it."
+  - issue: 8032
+    note: "Auth-session-store GC grace registered 2026-10-12: the D1 `sessions` table keeps a dead row for a grace past its own `expires_at` before deleting it. An implementation window for an internal credential store — registered here because this document is where a window may be stated, but it is NOT one of the deletion promise's windows and changes no customer-facing wording."
 ---
 
 # Retention and Deletion — the one promise
@@ -53,6 +55,13 @@ The horizon is **path-dependent**, and the difference matters:
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Session recording** — the recording itself | **no expiry** — retained until deleted by a member of the organization (**owner ruling 2026-10-08**); a snapshot taken before the deletion retains it until it ages out on the ≈28-day cycle, so deletion is complete in the live service immediately and in backups within four weeks | `tortoise/hosted_api.py` `delete_session` |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
+| **Auth session store** — an expired row in the D1 `sessions` table (the opaque handle + its refresh token) | deleted **24 hours after its own `expires_at`**; a **revoked** row is never deleted early, so it survives the session's whole declared life (400 days, `SESSION_MAX_AGE_S`) | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` |
+
+The **auth session store** row is the store's own garbage collection, not a promise
+window: it bounds how long a dead handle (and the credential it carries) stays readable
+in D1. It says nothing about user content, and no customer copy states it — the store's
+declared lifetime is a session's `expires_at` (400 days) plus this grace, and revocation
+does not shorten it. See `docs/engineering/auth/d1-session-store.md` §5a.
 
 > **Restore window ≠ retention window.** R1 forbids retaining user **content**
 > for any length. The 7 days are an **undo** offer, never a claim that we keep
@@ -90,6 +99,7 @@ this document:
 | `tortoise/retention.py` `RESTORE_WINDOW_DAYS` / `RESTORE_WINDOW_HOURS` | **Sole authority for the restore window** |
 | `tortoise/backup_config.py` `retention_hourly` / `retention_daily` / `retention_weekly` | **Sole authority for the backup-hold counts** (a different concept from the restore window) |
 | `tortoise/backup_config.py` `LOCK_DAYS_MAX` | the bucket-lock bound; must stay strictly below the restore window (`RESTORE_WINDOW_DAYS - 1`) |
+| `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` | **Sole authority for the D1 auth-session-store grace** — how long a `sessions` row is kept past its own `expires_at` before `sweepExpiredSessions` deletes it (#8032). Not a deletion-promise window; see the table above. |
 
 Everything else is a **derived alias**, never independently set:
 

@@ -77,6 +77,10 @@ from tortoise.fork_slot import (
     is_fork_refusal,
     recover_fork_slot,
 )
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -552,7 +556,7 @@ def _read_event_meta(g) -> dict:
     ``event_store.next_seq``, and ``first_seq`` is the purge cursor floor.
     A restore that drops it rebuilds the ``:GraphEvent`` log and leaves
     ``next_seq`` to MERGE a fresh counter at 1 — colliding with the restored
-    ``seq`` 1 and under-counting every later event (``events_poll`` cursors
+    ``seq`` 1 and under-counting every later event (``poll_events`` cursors
     and subscribers depend on the ordering key).
 
     Returns ``{}`` for a graph with no counter node (never emitted an event),
@@ -584,7 +588,7 @@ def _restore_event_meta(g, event_meta) -> None:
     counter must be carried EXPLICITLY (``dump["event_meta"]``) and written
     back here — otherwise ``next_seq`` MERGEs a fresh counter at 1 and
     collides with the restored ``seq`` 1, after which every event is
-    under-counted by the restored event count (``events_poll`` cursor
+    under-counted by the restored event count (``poll_events`` cursor
     ordering, subscription delivery and the ``first_seq`` purge watermark all
     assume ``seq`` is per-graph monotonic and unique).
 
@@ -798,7 +802,8 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
         chunk = embed_rows[i:i + _EMBED_BATCH]
         g.query(
             f"UNWIND $rows AS r MATCH (n {{{_DUMP_ID_PROP}:r.id}}) "
-            "SET n.embedding = vecf32(r.v)",
+            + clear_then_set_prefix("n", "r.v")
+            + "SET " + set_embedding_clause("n", "r.v"),
             params={"rows": chunk},
         )
 

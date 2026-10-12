@@ -48,9 +48,18 @@ from __future__ import annotations
 # and a circular import makes the reverse direction impossible.)
 # ══════════════════════════════════════════════════════════════════════════
 
+#: The staged (not-yet-published) status, as ONE literal. A draft is CURRENT
+#: (not-yet-published, not dead) but EP-INERT: every factor-extraction call site
+#: excludes it via ``_live_only``, so EP never measures a draft and no posterior
+#: is ever computed for one. Read surfaces that must RENDER a draft (label it,
+#: demote it below live, refuse to show a belief number) import THIS rather than
+#: re-spelling ``'draft'`` at the call site (#2598) — the same "one literal, no
+#: per-surface re-declaration" rule ``TERMINAL_EXCLUDED_STATUSES`` above is under.
+DRAFT_STATUS = "draft"
+
 #: The non-terminal members of the Point vocabulary — a Point in one of these
 #: is CURRENT (draft is not-yet-published, not dead).
-CURRENT_POINT_STATUS_VALUES = frozenset({"draft", "live"})
+CURRENT_POINT_STATUS_VALUES = frozenset({DRAFT_STATUS, "live"})
 
 #: The vocabulary's terminal members (ontology §5: retracted/superseded are
 #: terminal; ``outdated`` is the legacy supersede/invalidate status;
@@ -190,12 +199,72 @@ def _alive_flag(clause: str) -> str:
     return f"(CASE WHEN {_terminal_expression(clause)} THEN false ELSE true END)"
 
 
+def is_draft_status(status) -> bool:
+    """True when ``status`` is the staged (not-yet-published) status.
+
+    The Python twin of the ``'{DRAFT_STATUS}'`` literal ``_live_only``
+    excludes: a reader that must LABEL or DEMOTE a draft (rather than drop it)
+    calls this instead of comparing against a re-spelled string.
+    """
+    return (status or "") == DRAFT_STATUS
+
+
 def is_terminal_status(status, outdated: bool = False) -> bool:
     """Python mirror of the Cypher terminal predicate (status in the
     terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
     is LIVE (the entity write path defaults ``coalesce($st, n.status,
     'live')``) — mirrors ``_terminal_excluded``'s NULL handling."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+
+
+#: The ONE statement that reads a Point id's lifecycle fan-out. It is run by
+#: the write-side guard (``TortoiseSDK._assert_lifecycle_guard``), by the
+#: hosted commit-receiver pre-check (``hosted_api._terminal_state`` — which
+#: must stay in LOCKSTEP with the guard, #3366), and by the promotion-time
+#: temporal-target probe. Kept here, next to the terminal vocabulary it feeds,
+#: so a second copy cannot drift (#7822).
+LIFECYCLE_FANOUT_QUERY = (
+    "MATCH (n:Point {id:$id}) "
+    "RETURN n.is_operator, n.status, coalesce(n.outdated, false)"
+)
+
+
+def classify_lifecycle_fanout(rows) -> tuple:
+    """Classify EVERY node an id's ``LIFECYCLE_FANOUT_QUERY`` MATCH returned.
+
+    Point ids are NOT unique (the duplicate fan-out is a tested,
+    graph-reachable shape: ``create_point(..., id=X)`` twice) and every
+    lifecycle writer's stamp is a bare ``MATCH (n:Point {id:$id}) SET …`` that
+    binds EVERY matching node. A verdict read off ``rows[0]`` is therefore
+    server-row-order dependent (#7822): on an id carrying one dead and one live
+    node the same call passed or refused depending on which the server happened
+    to return first. The scan is over the WHOLE fan-out:
+
+      - any ``is_operator`` node → ``"operator"`` (outranks terminal, matching
+        the pre-#7822 single-row precedence)
+      - else any terminal node → ``"terminal"``
+      - else every node is a non-terminal statement point → ``"ok"``
+      - no rows at all → ``"absent"``
+
+    Returns ``(kind, status, outdated)``. ``status``/``outdated`` are the
+    offending node's state for ``"operator"``/``"terminal"`` and the
+    representative live state for ``"ok"``. The representative is picked by a
+    STABLE key (status text, then flag), never by position: these values reach
+    error messages and the MCP preview's ``status.from``, and server row order
+    is not a contract.
+    """
+    rows = [(bool(is_op), status, bool(outdated))
+            for is_op, status, outdated in rows]
+    if not rows:
+        return ("absent", None, False)
+    rows.sort(key=lambda r: (str(r[1] or ""), r[2]))
+    for _is_op, status, outdated in rows:
+        if _is_op:
+            return ("operator", status, outdated)
+    for _is_op, status, outdated in rows:
+        if is_terminal_status(status, outdated):
+            return ("terminal", status, outdated)
+    return ("ok", rows[0][1], rows[0][2])
 
 
 def _live_only(clause: str, include_draft: bool = False) -> str:
@@ -213,4 +282,63 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
     terminal = _terminal_excluded(clause)
     if include_draft:
         return terminal
-    return f"(({clause} IS NULL OR {clause} <> 'draft') AND {terminal})"
+    return (f"(({clause} IS NULL OR {clause} <> '{DRAFT_STATUS}') "
+            f"AND {terminal})")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #7853 — THE canonical epistemic-label set. Confidence (EP) propagates
+# across :Point, :Subject, :Object and :Event (owner ruling, #7813/#7853).
+# ONE declaration, imported by every reader that must admit an epistemic
+# node — do NOT spell the four labels inline at a call site (the codebase
+# already drifted into two notions of "epistemic label" before this landed).
+#
+# Two shapes, because FalkorDB does NOT accept pattern-position label
+# disjunction (`MATCH (a:Point|Event)-…` → ResponseError, measured on
+# FalkorDB 6.0.1 and on the embedded engine):
+#
+#   * TRAVERSAL positions (the node is reached from an anchored operand):
+#     drop the node's own label and add ``epistemic_disjunction(alias)`` to
+#     the WHERE clause. No index is lost — the traversal is anchored
+#     elsewhere (the operator, or the other endpoint).
+#
+#   * ID-ANCHORED positions (``{id:$x}`` / ``WHERE n.id IN $ids``): keep a
+#     label on the node and iterate ``epistemic_label_queries`` ONCE PER
+#     LABEL. Dropping the label is the obvious widening and is a straight
+#     regression: the indexes are per-(label, property), so a bare
+#     ``MATCH (n {id:$id})`` has NO index anchor and full-scans on every EP
+#     read (#7853 owner measurement). Point/Subject/Object each carry an
+#     ``id`` RANGE index; Event carries one on ``eventId`` only, so an
+#     Event addressed by ``id`` is unindexed today under EITHER shape.
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The four labels on which confidence propagates (#7813 ruling). Ordered
+#: Point-first: the Point query is the hot path and stays the first, indexed
+#: lookup in every id-anchored sweep.
+EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+
+
+def epistemic_disjunction(alias: str) -> str:
+    """WHERE fragment: ``alias`` holds one of the epistemic labels.
+
+    For TRAVERSAL positions only (the node is reached from an anchored
+    operand). FalkorDB rejects pattern-position label disjunction, so the
+    disjunction has to be a predicate. Example:
+
+        MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c)
+        WHERE {epistemic_disjunction('c')}
+    """
+    return "(" + " OR ".join(
+        f"{alias}:{label}" for label in EPISTEMIC_LABELS) + ")"
+
+
+def epistemic_label_queries(template: str) -> list[str]:
+    """Expand an ID-ANCHORED query template once per epistemic label.
+
+    ``template`` must contain the literal token ``{label}`` in the node
+    pattern's label position; only that token is substituted (the rest of
+    the Cypher — including ``{id:$id}`` property maps — is untouched, which
+    is why this uses ``str.replace`` and not ``str.format``). Keep the label
+    on an id-anchored node so the per-(label, property) range index is used.
+    """
+    return [template.replace("{label}", label) for label in EPISTEMIC_LABELS]

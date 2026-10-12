@@ -5,6 +5,8 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.live import epistemic_disjunction
+
 # #5048: the ONE home for the two mitigation predicates, shared with
 # `_upsert_point_props` in this package (imported before this module by
 # `projection/__init__.py`): the identity rule, and the separate requirement
@@ -252,6 +254,22 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
     'aboutSource', 'aboutAction',
 })
+
+
+# Every structural predicate a WRITER accepts — the union of the three
+# structural write surfaces this module owns:
+#   * create_edge            -> `_VALID_EDGE_PREDICATES`
+#   * create_about_edge      -> the about* set, whose keys are
+#                               `STRUCTURAL_REL_LABELS` (it accepts `aboutPoint`,
+#                               which the generic create_edge set misses #391)
+#   * TortoiseSDK.ingest     -> `_VALID_EDGE_PREDICATES`, plus an explicit
+#                               `extractedFrom` exemption (sdk.py)
+# Consumers that ask "can the runtime write this predicate?" (the #2766
+# write-path verdict) read THIS set, not one of the three subsets, so a
+# predicate added to any single writer moves the answer with it.
+STRUCTURAL_WRITE_PREDICATES = frozenset(
+    _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+)
 
 
 def about_document_target_reason(label: str | None,
@@ -559,9 +577,11 @@ class _EdgeHandlers:
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source endpoints referenced by short IDs (#6713).
-        Operator endpoints may be Point OR Event nodes (A1b #1272) — the
-        existence checks and edge MERGEs match both (#1919 fold-parity: live
-        create_operator writes the same typed + INPUT edges this replay does)."""
+        Operator endpoints may carry any of the four epistemic labels
+        :Point/:Subject/:Object/:Event (#7902, owner ruling #7813) — the
+        existence checks and edge MERGEs match all four
+        (#7902 fold-parity: live create_operator writes the same typed +
+        INPUT edges this replay does)."""
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r4): a truthy non-dict operator value must
@@ -574,6 +594,13 @@ class _EdgeHandlers:
                      "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
         import logging as _logging
         _log = _logging.getLogger(__name__)
+        # #7902: the operator endpoint may carry any of :Point/:Subject/
+        # :Object/:Event (owner ruling #7813). The fold is the SHARED
+        # live+replay writer, so its existence probes and edge MERGEs must
+        # admit the same labels the live ``create_operator`` writer does —
+        # otherwise a non-Point input is skipped (long id) or phantom-stubbed
+        # (short id) on replay, diverging live from rebuilt.
+        _epi_s = epistemic_disjunction("s")
         for idx, src in enumerate(op.get("inputs") or []):
             # #331 (review r4): non-string inputs members are malformed —
             # skip (len()/Cypher param would raise).
@@ -599,7 +626,7 @@ class _EdgeHandlers:
                     )
                     continue
                 exists = self.g.query(
-                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "MATCH (s) WHERE " + _epi_s + " "
                     "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src}
                 ).result_set[0][0]
@@ -627,14 +654,14 @@ class _EdgeHandlers:
                 # A source that doesn't resolve would silently match nothing
                 # in the MERGE below; warn instead of dropping the input.
                 exists = self.g.query(
-                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "MATCH (s) WHERE " + _epi_s + " "
                     "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src},
                 ).result_set[0][0]
                 if not exists:
                     _log.warning(
                         "input source %r (id length %d >= 20) does not "
-                        "resolve to an existing Point or Event — INPUT edge "
+                        "resolve to an existing epistemic node — INPUT edge "
                         "skipped",
                         src, len(src),
                     )
@@ -643,7 +670,7 @@ class _EdgeHandlers:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(
                     f"MATCH (o:Point {{id:$oid}}), (s) "
-                    f"WHERE (s:Point OR s:Event) AND s.id = $sid "
+                    f"WHERE {_epi_s} AND s.id = $sid "
                     f"MERGE (o)-[:{rel_type} {{idx:$idx}}]->(s) "
                     f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
@@ -676,7 +703,8 @@ class _EdgeHandlers:
                 # (``EventAPI.add_point(**fields)``), so descriptor-alone minted
                 # the edge for a payload that was never a mitigation, while a
                 # present-but-malformed strength is either dropped by the writer
-                # or poisons every weight read. ``is False`` also excludes the
+                # or ignored at read time (#6151: the read degrades an unusable
+                # strength to the fallback rather than raising). ``is False`` also excludes the
                 # SDK's generic operator (``is_operator: true``) and
                 # ``rebuild_all``'s #548 graph-only synthesis, whose
                 # ``op_type``-bearing node may carry no flag.
@@ -706,7 +734,7 @@ class _EdgeHandlers:
                         and has_usable_mitigation_strength(p)):
                     self.g.query(
                         "MATCH (o:Point {id:$oid}), (s) "
-                        "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                        "WHERE " + _epi_s + " AND s.id = $sid "
                         "MERGE (s)-[:mitigated_by]->(o)",
                         params={"oid": p["id"], "sid": src},
                     )
@@ -714,7 +742,7 @@ class _EdgeHandlers:
                 # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
                     "MATCH (o:Point {id:$oid}), (s) "
-                    "WHERE (s:Point OR s:Event) AND s.id = $sid "
+                    "WHERE " + _epi_s + " AND s.id = $sid "
                     "MERGE (s)-[:INPUT {idx:$idx}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
@@ -895,6 +923,19 @@ class _EdgeHandlers:
         versions = source_versions or {}
         for raw_ref in refs:
             if not raw_ref:
+                continue
+            # #7951 R2-P2: a `session:<id>` edge whose ORIGINATING record
+            # precedes a later `SessionDeleted` belongs to the incarnation the
+            # delete `DETACH DELETE`d. Live, that delete severed the edge, and
+            # a later record re-materialising a FRESH Source does not restore
+            # it. Pass 2 re-derives from every `PointAdded`, so the gate lives
+            # here: skip both the mint and the edge for a pre-delete ref.
+            # `_replay_session_deleted_seq` is set only for the duration of
+            # `rebuild_all`'s pass 2, so live/`rebuild()` are untouched.
+            _replay_del = self._replay_session_deleted_seq
+            if (_replay_del is not None and isinstance(raw_ref, str)
+                    and raw_ref.startswith("session:")
+                    and _replay_del.get(raw_ref[8:], -1) > self._replay_seq):
                 continue
             # #2489: Source stub creation routed through the SHARED resolver helper
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic

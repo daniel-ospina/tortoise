@@ -301,8 +301,13 @@ Recorded so they are not silently dropped. None is required for beta:
 - **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the
   **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`
   parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**
-  today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire
-  undecided; a surface decision).
+  today. **Post-beta** and **unlisted**, and **settled to retire**: per the owner's ruling on
+  **#4667** (2026-10-09), each name retires in the same release that lands its replacement —
+  `diary_write` into `create_entity`, `checkpoint` into `capture_knowledge`, and `diary_read`
+  into `list_knowledge` — so no retirement signpost ever names a replacement that does not exist
+  yet. Until then they stay **callable and unlisted**. Reconciling `tools/bridge_table.py` against
+  the approved menu above was done under **#4282**: it now maps all three to their absorptions,
+  not to `REMOVED`, so the migration reads a table that agrees with this one.
 
 ## Discarded — and why
 

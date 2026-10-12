@@ -172,6 +172,10 @@ CASES: tuple[tuple[str, str, str], ...] = (
      _synth("-----", "begin rsa private key-----") + "\nMIIEowIBAAKCAQEA\n"
      + _synth("-----", "end rsa private key-----")),
     ("bearer", "bearer_token", "Authorization: Bearer " + _fill(32)),
+    # #5326: the password-bearing connection URL — the shape a pasted `.env`
+    # line holds. Assembled at runtime like every other row (see `_synth`).
+    ("connection_url", "connection_url",
+     _synth("postgres://admin:", "s3cr3t", "db-pass@db.internal:5432/prod")),
 )
 
 
@@ -1130,16 +1134,23 @@ def test_anchored_shapes_do_not_redact_prose():
         # Measured false positive of an earlier revision: at a 20-char body
         # floor the generic `sk-` rule matched this scikit-learn abbreviation.
         "Run the sk-learn-pipeline-version-2 experiment after the rerun.",
-        # The production false-positive class that got the (now removed)
-        # `connection_url` rule its first rewrite: 167 nodes of this shape in the
-        # live graph, every one this repo's own documented dev URI.
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+        # The URL-SHAPE fixture table stays spared, and the reason is the
+        # MODULE, not a list: every entry is missing a host (`https://user:pass@`)
+        # or a password (`https://:443`, `https://@`), so none is a
+        # password-bearing URL. This is the 9-match half of the original
+        # measurement.
         "'https://@','https://:443','https://host?','https://user:pass@'",
-        # A password-bearing connection URL is NOT covered — the rule was removed
-        # because no anchor made it both precise AND complete (see
-        # tortoise/security.py and the issue). Pinned as a DECISION, so turning
-        # this red is a deliberate change to that decision, not a surprise.
-        "postgres://admin:s3cr3tpassword@db.internal:5432/prod",
+        # ⛔ REMOVED FROM THIS LIST BY #5326, ON PURPOSE — these two ARE
+        # password-bearing connection URLs and are now redacted:
+        #   docker://:falkordb@localhost:6379/tortoise_test_matrix
+        #     (the 167-match half of the original measurement: a real password
+        #      field holding the FalkorDB image's public default, which used to
+        #      be in this list because the OLD rule's class was "any URL with an
+        #      `@`" — it required no password and anchored no scheme)
+        #   postgres://admin:s3cr3tpassword@db.internal:5432/prod
+        #     (pinned as a DECISION by #4911, deliberately reversed here)
+        # Both are pinned as POSITIVE cases, with the measured cost and the
+        # rejected alternative, in tests/test_connection_url_redaction_5326.py.
     ]
     for text in prose:
         assert redact_secrets(text) == (text, {}), text
@@ -1244,6 +1255,15 @@ def test_every_rule_scans_linearly_on_adversarial_input():
         REQUIRED ``PRIVATE KEY-----`` suffix: unbounded it consumed the tail and
         backtracked for the suffix at every start (0.018 s @11k → 1.276 s @44k
         → 5.752 s @88k). Bounded at 40 characters it is linear.
+      * ``connection_url`` (#5326) — four families, because that rule has
+        THREE class runs in front of required delimiters rather than one, and
+        its password class is the table's only LAZY one: a candidate whose
+        userinfo never closes (``postgres://`` + a long run, no ``:``), one
+        whose password run is all ``@`` (the lazy expansion and the host retry),
+        one whose host run is long with no ``@`` (the host class backtracks for
+        the boundary), and a dense ``://`` run with no scheme at all. Its first
+        three sizes are smaller because the families are far denser per
+        character than the other two (the ``@`` family is ~1 s/MB).
 
     Scaling, not just a wall-clock threshold: a generous absolute bound alone
     cannot certify linearity (and did not — the reverted `jwt` rule passed the
@@ -1251,10 +1271,19 @@ def test_every_rule_scans_linearly_on_adversarial_input():
     """
     import time
 
+    #: ``(name, build, units)`` — per-family unit count, because the families
+    #: differ by ~30x in characters per unit (see the docstring).
     families = (
-        ("shipped eyJ", lambda n: ("eyJ" + "A" * 10) * n),
-        ("glued _eyJ", lambda n: ("_eyJ" + "A" * 50 + "_") * n),
-        ("PEM label, no suffix", lambda n: "-----BEGIN " * n),
+        ("shipped eyJ", lambda n: ("eyJ" + "A" * 10) * n, 20_000),
+        ("glued _eyJ", lambda n: ("_eyJ" + "A" * 50 + "_") * n, 20_000),
+        ("PEM label, no suffix", lambda n: "-----BEGIN " * n, 20_000),
+        ("url: no userinfo colon",
+         lambda n: ("postgres://" + "A" * 600 + " ") * n, 4_000),
+        ("url: password run all @",
+         lambda n: ("postgres://u:" + "@" * 200 + " ") * n, 4_000),
+        ("url: host run, no @",
+         lambda n: ("postgres://u:p@" + "A" * 600 + " ") * n, 4_000),
+        ("url: dense ://", lambda n: "://" * n, 100_000),
     )
     def scan(name: str, build, n: int) -> float:
         text = build(n)
@@ -1268,9 +1297,9 @@ def test_every_rule_scans_linearly_on_adversarial_input():
         assert redacted == text, f"{name}: text was modified"
         return elapsed
 
-    for name, build in families:
-        one = scan(name, build, 20_000)
-        two = scan(name, build, 40_000)
+    for name, build, units in families:
+        one = scan(name, build, units)
+        two = scan(name, build, units * 2)
         assert two < max(one * 3.0, 1.0), (
             f"{name}: scan does not scale linearly — {one:.3f}s for 20k units "
             f"→ {two:.3f}s for 2x input (a rule is re-scanning the tail from "

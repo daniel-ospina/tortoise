@@ -123,6 +123,69 @@ class TestA4Graph:
         assert len(mems) >= 1  # seeded claims retrievable
         a.close()
 
+    def test_store_integrity_does_not_refuse_the_embedded_store(self, scenarios, tmp_path):
+        """#4520: the store-integrity probe checks the PRODUCT write path.
+
+        The real a4 lane runs on an embedded store, and the clear-then-set seam
+        makes that store land a small-Δ overwrite — so the probe must NOT refuse
+        it. A raw-engine probe would deterministically skip the treatment arm.
+        """
+        a = A4TortoiseArm(db_path=str(tmp_path / "a4-integrity.db"))
+        a.require_store_integrity = True
+        try:
+            a.setup_scenarios([scenarios[0]])  # must not raise
+        finally:
+            a.close()
+
+    def test_store_integrity_refusal_propagates(self, scenarios, tmp_path,
+                                                monkeypatch):
+        """#4520: a REFUSING store probe must propagate out of setup_scenarios.
+
+        The companion test above asserts only the ABSENCE of an exception, so
+        it is green whether or not the probe is invoked at all. This test pins
+        the INVOCATION: ``require_vector_overwrite_integrity`` is monkeypatched
+        to raise, and ``setup_scenarios`` must let that escape.
+
+        Mutation: deleting (or ``pass``-ing) the
+        ``require_vector_overwrite_integrity(sdk._get_proj().g)`` call at
+        ``battery/arms/a4_tortoise.py:173`` makes this fail — nothing raises,
+        so ``pytest.raises`` is unsatisfied. That is the exact mutation the
+        review used to prove the wiring was untested.
+        """
+        from battery.runner.retrieval_preflight import VectorOverwriteDiscarded
+
+        def _refuse(graph):
+            raise VectorOverwriteDiscarded(
+                "store silently discards a small-Δ vector overwrite")
+
+        # a4 imports the probe from the module at CALL time, so patching the
+        # module attribute is what the arm resolves.
+        monkeypatch.setattr(
+            "battery.runner.retrieval_preflight."
+            "require_vector_overwrite_integrity", _refuse)
+
+        class _FakeSDK:
+            def __init__(self, **kw):
+                pass
+
+            def _get_proj(self):
+                class _Proj:
+                    g = object()
+                return _Proj()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+        a = A4TortoiseArm(db_path=str(tmp_path / "a4-refuse.db"))
+        a.require_store_integrity = True
+        try:
+            with pytest.raises(VectorOverwriteDiscarded):
+                a.setup_scenarios([scenarios[0]], seed_lane=False)
+        finally:
+            a.close()
+
     def test_record_wires_evidence(self, scenarios, tmp_path):
         a = A4TortoiseArm(db_path=str(tmp_path / "a4b.db"))
         a.setup_scenarios([scenarios[0]])

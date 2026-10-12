@@ -30,6 +30,7 @@ from tests._embedded import _wipe_or
 from tests._github_mock import MockGitHubTransport, gh_issue, gh_pr
 from tortoise import github_map
 from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+from tortoise.log import EventLog
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +85,49 @@ def test_fetch_pins_sort_updated_desc(sdk):
     assert params[0]["sort"] == "updated"
     assert params[0]["direction"] == "desc"
     assert params[0]["state"] == "all"
+
+
+# ── Liveness progress beats (#3539 §D) ───────────────────────────
+
+def test_index_repo_beats_progress_during_walk(sdk):
+    """#3539 §D: ``index_repo`` beats ``on_progress`` DURING the walk.
+
+    The caller's single-flight claim is kept alive by REAL progress, so the
+    walk must beat (a) on every completed GitHub API call — the network-yield
+    boundary, where a long paginated fetch spends its time — and (b) every
+    ``_PROGRESS_EVERY_ITEMS`` processed items, because the projection loop is
+    synchronous and would otherwise go silent for a whole repo.
+    """
+    from tortoise.indexer.github_indexer import _PROGRESS_EVERY_ITEMS
+    n = _PROGRESS_EVERY_ITEMS * 2 + 1
+    t = MockGitHubTransport(issues=[gh_issue(i) for i in range(1, n + 1)],
+                            page_size=_PROGRESS_EVERY_ITEMS)
+    beats: list[int] = []
+    stats = _run(_indexer(t), sdk, on_progress=lambda: beats.append(1))
+    assert stats["processed"] == n
+    pages = len(t.issue_query_params())
+    assert pages >= 3, "the walk must paginate — per-page beats are the point"
+    # ≥ one beat per completed API call + one per _PROGRESS_EVERY_ITEMS items
+    assert len(beats) >= pages + n // _PROGRESS_EVERY_ITEMS, (
+        "the walk must beat per API call AND every _PROGRESS_EVERY_ITEMS "
+        f"items (saw {len(beats)} beats over {pages} pages / {n} items)")
+
+
+def test_index_repo_beats_across_retry_backoff(sdk):
+    """#3539 §D: a bounded retry/backoff wait is a LIVE run waiting.
+
+    The beat after each backoff keeps the claim from going stale across a
+    long ``Retry-After``, so a rate-limited-but-healthy walk is never
+    presumed dead and duplicated."""
+    t = MockGitHubTransport(issues=[gh_issue(1)], failures=[(500, 1)])
+    beats: list[int] = []
+    stats = _run(_indexer(t), sdk, on_progress=lambda: beats.append(1))
+    assert stats["processed"] == 1
+    # the injected 500 forces one backoff sleep — WITHOUT its beat the run
+    # records only the one successful response (1 beat), so a long
+    # rate-limited wait could go stale mid-run.
+    assert len(beats) >= 2, (
+        "a retry backoff must beat — a waiting run is not a dead run")
 
 
 # ── Phase 2: object-only writes (#1844) ──────────────────────────
@@ -757,6 +801,190 @@ def test_within_second_order_independent_advance(sdk):
         "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 250
 
 
+# ── #1990: DIFF-mode boundary invariant (probe oscillation) ──────────
+
+def test_diff_probe_on_dense_boundary_repo_does_not_restamp_truncated(sdk):
+    """#1990: the post-drain steady state on a DENSE-BOUNDARY repo (the
+    pre-boundary second holds more items than the cap — production: 1425 >
+    500) must poll without re-stamping `truncated`, without regressing the
+    cursor, and without re-walking the full stream.
+
+    Shape (scaled down from the production 1425@S + 460@S1 to keep the test
+    cheap — the property that matters is pre-boundary second > cap while the
+    NEWEST second's block still fits the cap): 100 items at S, 30 newer at
+    S1, cap 40, page_size 10.
+
+    Pre-#1990 the DIFF window `[U−1s, ∞)` re-probed the S block with
+    `_inside_cursor(drain=False)` (which skips only `== U and number <= N`),
+    consumed the whole cap, minted `{S, 40, truncated}` — a cursor REGRESSED
+    to the older second — and walked all 13 pages: the verified lossless-but-
+    churning cycle (production: {S+1,1885} → {S,500,t} → {S,1000,t} →
+    {S,1425} → {S+1,1885} → …, `truncated` re-stamped on 2 of every 4 polls
+    with every poll re-walking the stream). Post-#1990 the probe skips the
+    pre-boundary second wholesale and the walk stops as soon as the stream
+    descends below the boundary second (everything below it is provably
+    indexed — the boundary invariant)."""
+    S = "2026-08-18T02:49:35Z"
+    S1 = "2026-08-18T02:49:36Z"
+    issues = [gh_issue(n, updated_at=S1) for n in range(101, 131)]   # 30
+    issues += [gh_issue(n, updated_at=S) for n in range(1, 101)]    # 100
+    t = MockGitHubTransport(issues=issues, page_size=10)
+    # the drain: 10@S cap-cut → 50 → 90 → clean 100@S → the DIFF run that
+    # advances to the newest second
+    stats = _run(_indexer(t), sdk, cap=40)
+    assert stats["cursor"] == {"updated_at": S, "number": 10,
+                              "truncated": True}
+    for expected in (50, 90):
+        stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+        assert stats["cursor"] == {"updated_at": S, "number": expected,
+                                   "truncated": True}
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    assert stats["cursor"] == {"updated_at": S, "number": 100}  # drained
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    assert stats["cursor"] == {"updated_at": S1, "number": 130}, \
+        "precondition: the DIFF run advanced to the newest second"
+    # the steady-state poll
+    n_before = len(t.issue_query_params())
+    probe = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=40)
+    pages = len(t.issue_query_params()) - n_before
+    assert probe["processed"] == 0, \
+        "the pre-boundary S block must be skipped wholesale (0 cap spent)"
+    assert probe["cursor"] == {"updated_at": S1, "number": 130}, \
+        "the boundary must NOT regress to S and `truncated` must NOT be " \
+        "re-stamped (pre-#1990: {S, 40, truncated})"
+    assert probe["events_minted"] == 0, "exact-once: the probe mints nothing"
+    assert probe["issues_beyond_window"] == 0, \
+        "a caught-up repo report must not claim a deferred backlog"
+    # fetch bound: the walk stops on the page that first carries the
+    # descending second (30 boundary-second items / page_size 10 → 4 pages),
+    # NOT at the stream end (pre-#1990: all 13 pages)
+    assert pages == 4, f"the DIFF walk must stop at the boundary (got {pages})"
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 130
+
+
+def test_diff_after_drain_cursor_does_not_pingpong_into_drain(sdk):
+    """#1990: a DRAIN completion mints the clean cursor at the newest second
+    it PROCESSED, which can be OLDER than the previous boundary — the next
+    DIFF run therefore legitimately re-probes everything newer (idempotently,
+    up to the cap). That probe must end CLEAN.
+
+    Shape: 600 items over 12 seconds (50/sec), cap 500 = exactly 10 seconds,
+    so the drain's deferred backlog (#501..#600) lives at T10/T11 while the
+    cap cut sits at T9. Pre-#1990 the probe's cap fell exactly at the T9
+    block's last item and was treated as a truncation → `{T9, 500,
+    truncated}` → the next DRAIN re-processed the T10/T11 backlog and minted
+    `{T10, 550}` again: the DIFF↔DRAIN ping-pong repeated FOREVER on this
+    shape, re-walking the full stream and re-stamping `truncated` on every
+    poll. Post-#1990 the cut is clean (the readable region ends after the T9
+    block), so the cursor stabilises at the newest second."""
+    from datetime import datetime, timedelta
+    base = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
+    issues = []
+    for i in range(600):
+        second = base - timedelta(seconds=i // 50)  # 12 distinct seconds
+        issues.append(gh_issue(
+            i + 1,
+            updated_at=second.isoformat().replace("+00:00", "Z")))
+    t = MockGitHubTransport(issues=issues, page_size=100)  # 6 pages
+    stats = _run(_indexer(t), sdk, cap=500)
+    assert stats["cursor"] == {"updated_at": "2026-07-19T11:59:51Z",
+                              "number": 500, "truncated": True}
+    # the DRAIN run drains the deferred backlog and mints a CLEAN cursor at
+    # the newest second it processed (T10) — one second OLDER than the cut
+    stats = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert stats["processed"] == 100
+    assert stats["cursor"] == {"updated_at": "2026-07-19T11:59:50Z",
+                               "number": 550}, \
+        "precondition: the drain is clean but the boundary sits at T10"
+    # poll 1 (DIFF): the legitimately-readable newer window (T0..T9) is
+    # re-probed idempotently (500 probes = the whole cap) — and the cap cut
+    # landing at the T9 block's last item must NOT be a truncation
+    probe = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert probe["processed"] == 500
+    assert probe["events_minted"] == 0, "exact-once — all probes idempotent"
+    assert probe["cursor"] == {"updated_at": "2026-07-19T12:00:00Z",
+                               "number": 50}, \
+        "the probe must end CLEAN at the newest second (pre-#1990: " \
+        "{T9, 500, truncated} → the next DRAIN ping-pongs back to T10)"
+    # polls 2-3: stable — 0 processed, no truncated, cursor unchanged
+    for poll in range(2):
+        probe = _run(_indexer(t), sdk, cursor=probe["cursor"], cap=500)
+        assert probe["processed"] == 0, f"poll {poll + 2} must be a no-op"
+        assert probe["cursor"] == {"updated_at": "2026-07-19T12:00:00Z",
+                                   "number": 50}
+        assert probe["events_minted"] == 0
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 600
+
+
+def test_diff_probe_does_not_steal_cap_from_new_items(sdk):
+    """#1990: the probe must not spend the cap on the pre-boundary second
+    and thereby starve the NEW items the poll exists to pick up.
+
+    Fixture: cursor `{S, 100}` (clean — everything OLDER than S is already
+    indexed, so the invariant holds), 3 new items at S+1, 300 already-
+    indexed items at S−1s, cap 10. Pre-#1990 the walk processed the 3 new
+    items AND 7 items from the S−1s probe (10 total), then minted
+    `{S−1s, 206, truncated}` — the boundary regressed to the OLDER second
+    and the cap was spent on items that were already indexed. Post-#1990
+    only the 3 new items are processed and the boundary advances to S+1."""
+    S = "2026-08-18T02:49:35Z"
+    S1 = "2026-08-18T02:49:36Z"
+    S_old = "2026-08-18T02:49:34Z"
+    issues = [gh_issue(n, updated_at=S1) for n in range(501, 504)]   # new
+    issues += [gh_issue(n, updated_at=S) for n in range(1, 101)]    # indexed
+    issues += [gh_issue(n, updated_at=S_old) for n in range(200, 500)]
+    t = MockGitHubTransport(issues=issues, page_size=100)
+    stats = _run(_indexer(t), sdk, cap=5000)  # index everything first
+    assert stats["processed"] == 403
+    probe = _run(_indexer(t), sdk, cursor={"updated_at": S, "number": 100},
+                 cap=10)
+    assert probe["processed"] == 3, \
+        "only the S+1 items are readable — the S−1s probe must not consume " \
+        "the cap (pre-#1990: 3 new + 7 probes = 10)"
+    assert probe["cursor"] == {"updated_at": S1, "number": 503}, \
+        "the boundary advances to the new items (pre-#1990 it REGRESSED " \
+        "to {S−1s, 206, truncated})"
+    # the next poll is a no-op: nothing readable remains
+    after = _run(_indexer(t), sdk, cursor=probe["cursor"], cap=10)
+    assert after["processed"] == 0
+    assert after["events_minted"] == 0
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 403
+
+
+def test_diff_exact_cap_at_boundary_block_mints_clean(sdk):
+    """#1990: the #1989 round-2 "exact cap at the final block is not a
+    truncation" exemption must also hold when the final READABLE block is
+    closed by the stream descending below the boundary second (not just at
+    a natural walk end).
+
+    Fixture: cursor `{S, 100}` clean, S holds 600 items (so exactly 500 are
+    processable = the cap) and a 10-item block sits at S−1s (already
+    indexed — invariant-consistent). Pre-#1990 the cap fell on the block's
+    last item and stamped `truncated`, forcing a wasted DRAIN re-walk plus a
+    false `gap_audit_required`; post-#1990 the mint is clean {S, 600}."""
+    S = "2026-08-18T02:49:35Z"
+    S_old = "2026-08-18T02:49:34Z"
+    issues = [gh_issue(n, updated_at=S) for n in range(1, 601)]
+    issues += [gh_issue(n, updated_at=S_old) for n in range(701, 711)]
+    t = MockGitHubTransport(issues=issues, page_size=100)
+    _run(_indexer(t), sdk, cap=5000)  # index everything (invariant holds)
+    stats = _run(_indexer(t), sdk, cursor={"updated_at": S, "number": 100},
+                 cap=500)
+    assert stats["processed"] == 500
+    assert stats["cursor"] == {"updated_at": S, "number": 600}, \
+        "the exact-cap cut on the last readable block is NOT a truncation"
+    assert stats["cleared_truncated"] is False
+    # the next poll is a no-op DIFF probe (0 processed, no re-walk heal)
+    after = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
+    assert after["processed"] == 0
+    assert after["cleared_truncated"] is False
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 610
+
+
 # ── P1-4 (PR #1792): DRAIN-mode backlog drain ────────────────────────
 
 def test_drain_mode_drains_backlog_across_runs(sdk):
@@ -821,7 +1049,7 @@ def test_all_projection_failure_keeps_truncated(sdk):
         page_size=100)
     indexer = _indexer(t)
 
-    def _boom(sdk, proj, repo, issue):
+    def _boom(sdk, proj, repo, issue, **kw):
         raise ValueError("projection failure (test)")
     indexer._project_issue = _boom
 
@@ -1103,3 +1331,460 @@ def test_resolve_repos_404_raises_without_fallback(sdk):
     finally:
         loop.run_until_complete(indexer._close())
         loop.close()
+
+
+# ── #7951: the HIDDEN ``proj.apply`` door — indexer writes must journal ──────
+#
+# The sizing measurement on #7951 found a class the ``.query(``-based metric
+# cannot see: this indexer wrote Object/Subject/Event nodes through
+# ``proj.apply(...)`` — the projection's REPLAY fold — with ZERO journal calls.
+# ``proj.apply`` is what ``rebuild_all``/``recover_from_log`` drive once per
+# journal record, so the write left no truth carrier and a replay LOST every
+# node the indexer wrote.
+#
+# RED before the fix (this test only, on origin/main):
+#   AssertionError: the indexer's Object write did not reach the journal — a
+#   replay of the journal LOST it (hidden proj.apply door, #7951)
+#   assert 0 == 1
+#   … while the journal was literally ``[]``.
+#
+# GREEN after: the write goes through ``TortoiseSDK._apply_and_journal`` — the
+# live twin of the replay fold (apply, then journal the same record) — and a
+# POLL RE-RUN does not grow the journal (the first-registration gate
+# ``_create_entity`` uses).
+
+_JDOOR_OID = "github-issue-acme/repo1-1"
+_JDOOR_EID = "github-issue-acme/repo1-1-created"
+_JDOOR_SID = "github-user:user1"
+
+
+def _jdoor_sdk(tmp_path):
+    """A real embedded SDK whose JSONL truth journal is configured."""
+    from tortoise.sdk import TortoiseSDK
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "hidden-door.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    return sdk, events
+
+
+def _jdoor_one(proj, cypher: str, **params):
+    rows = proj.g.query(cypher, params=params or None).result_set
+    return rows[0][0] if rows else 0
+
+
+def _jdoor_object_count(proj, oid: str) -> int:
+    return _jdoor_one(proj, "MATCH (o:Object {id:$id}) RETURN count(o)", id=oid)
+
+
+def _jdoor_event_count(proj, eid: str) -> int:
+    return _jdoor_one(proj, "MATCH (e:Event {eventId:$id}) RETURN count(e)", id=eid)
+
+
+def _jdoor_journal(events) -> list[dict]:
+    return EventLog(str(events / "events.jsonl")).read_all()
+
+
+def _jdoor_event_state(proj, eid: str) -> tuple:
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:$id}) RETURN e.eventKind, e.endedAt",
+        params={"id": eid}).result_set
+    return (None, None) if not rows else (rows[0][0], rows[0][1])
+
+
+def _jdoor_count(records, type_: str) -> int:
+    return sum(1 for e in records if e.get("type") == type_)
+
+
+def test_7951_indexer_writes_reach_journal_and_survive_replay(tmp_path):
+    """DELIVERABLE — a write through the hidden door lands in the journal and
+    survives ``rebuild_all`` (``derived = replay(journal)`` holds again)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+
+        # (1) the door wrote the live graph …
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1
+        assert _jdoor_event_count(proj, _JDOOR_EID) == 1
+        assert _jdoor_one(proj, "MATCH (s:Subject {id:$id}) RETURN count(s)",
+                          id=_JDOOR_SID) == 1
+
+        # (2) … and the journal now carries the record of it (the fix).
+        journal = _jdoor_journal(events)
+        assert _jdoor_count(journal, "ObjectRegistered") == 1, (
+            "the indexer's Object write did not reach the journal — a replay "
+            "of the journal would LOSE it (hidden proj.apply door, #7951)"
+        )
+        assert _jdoor_count(journal, "SubjectAdded") == 1
+        assert _jdoor_count(journal, "EventRecorded") == 1
+
+        # (3) replay reproduces every door-written node + its folded kind.
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the indexer's Object write did not survive replay (#7951)")
+        assert _jdoor_event_count(proj, _JDOOR_EID) == 1, (
+            "the indexer's Event write did not survive replay (#7951)")
+        assert _jdoor_one(proj, "MATCH (s:Subject {id:$id}) RETURN count(s)",
+                          id=_JDOOR_SID) == 1, (
+            "the indexer's Subject write did not survive replay (#7951)")
+        assert _jdoor_one(
+            proj, "MATCH (e:Event {eventId:$id}) RETURN e.eventKind",
+            id=_JDOOR_EID) == "github.issue.open"
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_poll_rerun_does_not_grow_the_journal(tmp_path):
+    """The first-registration gate: a re-run of an already-indexed issue
+    refreshes the live graph without appending the journal again."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        first = _jdoor_journal(events)
+        counts = {t: _jdoor_count(first, t)
+                  for t in ("ObjectRegistered", "SubjectAdded", "EventRecorded")}
+
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        second = _jdoor_journal(events)
+        for type_, n in counts.items():
+            assert _jdoor_count(second, type_) == n, (
+                f"a poll re-run appended a duplicate {type_} (#7951: the "
+                f"journal must not grow once per run)")
+        assert _jdoor_object_count(sdk._get_proj(), _JDOOR_OID) == 1
+    finally:
+        sdk.close()
+
+
+def test_7951_intra_run_shared_subject_is_journaled_once(tmp_path):
+    """R2 coverage gap: the ``journal_ids`` threading is LOAD-BEARING.
+
+    Two issues in ONE ``index_repo`` run that share a Subject read the journal
+    ONCE at run start (``_journal_registered_entities``); the per-issue
+    registration gate must then see the subject the FIRST issue just journaled
+    via the run-scoped set. Without the ``journal_ids.add(...)`` in lockstep,
+    the second issue re-appends an identical ``SubjectAdded`` — a journal that
+    grows once per issue instead of once per subject. No committed test
+    covered the intra-run case before."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        a, b = gh_issue(1), gh_issue(2)
+        a["user"] = {"login": "shared-user"}
+        b["user"] = {"login": "shared-user"}
+        _run(_indexer(MockGitHubTransport(issues=[a, b])), sdk)
+
+        sid = "github-user:shared-user"
+        records = _jdoor_journal(events)
+        n = sum(1 for e in records
+                if e.get("type") == "SubjectAdded" and e.get("id") == sid)
+        assert n == 1, (
+            f"a Subject shared by two issues in ONE run was journaled {n} "
+            "times — `journal_ids` is not threaded in lockstep, so the "
+            "journal grows once per issue (#7951 R2)")
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_pr_event_reaches_the_journal(tmp_path):
+    """The PR arm of the same door: a genuinely-minted PR Event is journaled;
+    a re-run that merely refreshes it is not."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        pr = gh_pr(7)
+        _run(_indexer(MockGitHubTransport(issues=[pr])), sdk)
+        pid = "github-pr-acme/repo1-7"
+        assert _jdoor_event_count(sdk._get_proj(), pid) == 1
+        journal = _jdoor_journal(events)
+        assert any(e.get("type") == "EventRecorded"
+                   and e.get("eventId") == pid for e in journal), (
+            "the PR Event write bypassed the journal (#7951)")
+        n = _jdoor_count(journal, "EventRecorded")
+        _run(_indexer(MockGitHubTransport(issues=[pr])), sdk)  # refresh only
+        assert _jdoor_count(_jdoor_journal(events), "EventRecorded") == n
+        assert _jdoor_event_count(sdk._get_proj(), pid) == 1
+    finally:
+        sdk.close()
+
+
+def test_7951_sdk_create_entity_survives_replay(tmp_path):
+    """CONTROL — the replay machinery preserves an SDK-door write, so a red
+    delivery test is the DOOR and not a ``rebuild_all`` artifact."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        sdk.create_entity("object", "control-object",
+                          objectKind="core:strategy", is_episodic=False)
+        assert _jdoor_one(proj,
+                          "MATCH (o:Object {name:$n}) RETURN count(o)",
+                          n="control-object") == 1
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_one(proj,
+                          "MATCH (o:Object {name:$n}) RETURN count(o)",
+                          n="control-object") == 1, (
+            "the control write through the SDK door did not survive replay — "
+            "rebuild_all itself is broken here, not the hidden door"
+        )
+    finally:
+        sdk.close()
+
+
+# ── P1-b (review): the door skipped `_create_entity`'s `createdAt` synthesis
+# `_create_entity` synthesises `event["createdAt"] = now_iso()` on the
+# journaling path BEFORE apply (`sdk.py`, the #2194/#2295 block) exactly to
+# close the #2164-P4 "a replay stamps rebuild time" class. `_apply_and_journal`
+# journaled the record with NO `createdAt`, so a journaled Subject (and Object)
+# carried no create instant and a replay re-stamped rebuild time. The payload
+# KEY rule was shared (`_journal_record_payload`); the value-SYNTHESIS rule was
+# not — which falsified commit 2's "the two live doors cannot drift" claim.
+#
+# RED before the fix:
+#   AssertionError: the journaled SubjectAdded carries no createdAt — a replay
+#   would stamp rebuild time (#2164-P4 class, #7951 P1-b)  [rec.get('createdAt')
+#   is None]
+#   and live != replayed after rebuild_all.
+
+_SUBJ_CREATED_AT = (
+    "MATCH (s:Subject {id:$id}) RETURN s.createdAt")
+
+
+def test_7951_indexer_journals_createdAt_and_replay_does_not_restamp(tmp_path):
+    """The indexer's Subject write must carry the SAME create instant into the
+    journal and the graph, and a replay must reproduce it (not rebuild time)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+        live = _jdoor_one(proj, _SUBJ_CREATED_AT, id=_JDOOR_SID)
+        assert live, (
+            "the live Subject has no createdAt — the probe below would be "
+            "vacuous (#7951 P1-b)")
+
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "SubjectAdded"]
+        assert len(records) == 1, f"expected one SubjectAdded, got {records!r}"
+        assert records[0].get("createdAt") == live, (
+            "the journaled SubjectAdded carries no createdAt (or a different "
+            "one) — `_apply_and_journal` skipped `_create_entity`'s synthesis, "
+            "so a replay would stamp rebuild time instead of the live create "
+            "time (#2164-P4 class, #7951 P1-b)")
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        replayed = _jdoor_one(proj, _SUBJ_CREATED_AT, id=_JDOOR_SID)
+        assert replayed == live, (
+            f"replay RE-STAMPED the Subject's createdAt: live={live!r} "
+            f"replayed={replayed!r} (#7951 P1-b)")
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_journals_createdAt_for_the_object_too(tmp_path):
+    """The Object arm of the same rule (both are `_create_entity`-synthesised)."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+        proj = sdk._get_proj()
+        live = _jdoor_one(proj,
+                          "MATCH (o:Object {id:$id}) RETURN o.createdAt",
+                          id=_JDOOR_OID)
+        assert live
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "ObjectRegistered"]
+        assert len(records) == 1
+        assert records[0].get("createdAt") == live, (
+            "the journaled ObjectRegistered carries no createdAt (#7951 P1-b)")
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_one(
+            proj, "MATCH (o:Object {id:$id}) RETURN o.createdAt",
+            id=_JDOOR_OID) == live, "replay re-stamped the Object createdAt"
+    finally:
+        sdk.close()
+
+
+def test_7951_indexer_journals_createdAt_for_events(tmp_path):
+    """The Event arm — `_apply_and_journal` journals EventRecorded records,
+    which the producer also mints without a `createdAt`; the door must stamp
+    one so every record it journals carries its create instant uniformly."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        _run(_indexer(MockGitHubTransport(issues=[gh_pr(7)])), sdk)
+        pid = "github-pr-acme/repo1-7"
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "EventRecorded"
+                   and e.get("eventId") == pid]
+        assert len(records) == 1, f"expected one EventRecorded, got {records!r}"
+        assert records[0].get("createdAt"), (
+            "the journaled EventRecorded carries no createdAt — "
+            "`_apply_and_journal` skipped the door's synthesis (#7951 P1-b)")
+    finally:
+        sdk.close()
+
+
+# ── P2-a (review): a pre-fix node in the GRAPH is never backfilled
+# `_entity_registered` probed the LIVE node only, so an Object/Subject a
+# PRE-#7951 binary wrote straight through `proj.apply` (graph, no journal)
+# read as "registered" on every later poll and `journal=False` for ever —
+# `derived = replay(journal)` stayed false for it. Reproduced by writing the
+# Object through the pre-fix door and then running a real poll.
+#
+# ── P2-b (review): the probe is fail-CLOSED
+# Id-only with no `try/except`, while `_create_entity`'s probe fails OPEN. A
+# transient probe error aborted `_project_issue` (caught by `index_repo`),
+# skipping an ENTIRE issue's projection — a failure mode that was impossible
+# before the door landed.
+
+def test_7951_prefix_object_in_graph_is_backfilled_to_the_journal(tmp_path):
+    """A node the pre-fix binary wrote (graph only) must be journaled by the
+    next poll — journal=False for ever is the P2-a defect."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        obj = github_map.issue_to_object(gh_issue(1), "acme/repo1")
+        proj.apply(obj)  # the PRE-FIX door: live graph, no journal append
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+
+        _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        records = _jdoor_journal(events)
+        assert any(e.get("type") == "ObjectRegistered"
+                   and e.get("id") == _JDOOR_OID for e in records), (
+            "a node the PRE-FIX binary wrote (graph only) was never backfilled "
+            "into the journal — `derived = replay(journal)` stays false for it "
+            "on every later poll (#7951 P2-a)")
+        # and the backfilled record now reproduces the node on replay
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the backfilled ObjectRegistered did not reproduce the node on "
+            "rebuild_all (#7951 P2-a)")
+    finally:
+        sdk.close()
+
+
+def test_7951_prefix_event_in_graph_is_backfilled_to_the_journal(tmp_path):
+    """R2: the EVENT arm of the pre-fix backfill.
+
+    ``_entity_registered`` backfills an Object/Subject a pre-#7951 binary wrote
+    straight through ``proj.apply`` (graph, no journal), but the creation mint
+    gate probed ``_event_exists`` — the LIVE GRAPH only. So an Event the same
+    binary wrote read as "already minted" and stayed ``journal=False`` for
+    ever: the journal gained ObjectRegistered + SubjectAdded but NO
+    EventRecorded, and ``rebuild_all`` yielded event count 0."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
+                                       previous_state=None)
+        eid = ev["eventId"]
+        proj.apply(ev)  # the PRE-FIX door: live graph, no journal append
+        assert _jdoor_event_count(proj, eid) == 1
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+
+        stats = _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        records = _jdoor_journal(events)
+        assert any(e.get("type") == "EventRecorded" and e.get("eventId") == eid
+                   for e in records), (
+            "an Event the PRE-FIX binary wrote (graph only) was never "
+            "backfilled into the journal — `derived = replay(journal)` stays "
+            "false for it on every later poll; the creation mint gate probed "
+            "the GRAPH only (#7951 R2)")
+        # `_event_exists` still feeds `events_minted` (a GENUINE graph mint
+        # only) — the journal backfill must not inflate it.
+        assert stats["events_minted"] == 0, (
+            "the Event arm's journal backfill inflated `events_minted` — that "
+            "counter is a graph-mint count, not a journal-append count "
+            "(#7951 R2)")
+        # and the backfilled record reproduces the node on replay
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_event_count(proj, eid) == 1, (
+            "the backfilled EventRecorded did not reproduce the Event on "
+            "rebuild_all (#7951 R2)")
+    finally:
+        sdk.close()
+
+
+def test_7951_frozen_created_backfill_replays_the_live_state(tmp_path):
+    """P2-1: the backfilled ``-created`` record must carry the FROZEN node's
+    ``eventKind``/``endedAt``, not the freshly-computed current state.
+
+    ``_frozen_created_payload`` is load-bearing exactly here: on the backfill
+    path the node is frozen at first observation while ``created`` is rebuilt
+    from the issue state NOW, so journaling ``created`` verbatim makes replay
+    reproduce the CURRENT state and diverge from the live node. The existing
+    ``test_created_event_frozen_across_close_reopen`` never enters this path
+    (it drives the plain walk, which re-folds nothing), so before this test
+    the committed suite stayed green with the helper reduced to
+    ``return dict(created)``."""
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        # A pre-#7951 binary: the -created Event folded directly (graph only,
+        # no journal append) while the issue was OPEN.
+        ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
+                                       previous_state=None)
+        assert ev["eventKind"] == "github.issue.open" and ev["endedAt"] is None
+        proj.apply(ev)
+        assert _jdoor_journal(events) == [], "premise: the journal is empty"
+        live_before = _jdoor_event_state(proj, _JDOOR_EID)
+
+        # Poll a CLOSED issue: `created` is rebuilt from the CLOSED state, so
+        # the naive backfill would journal the closed kind + an endedAt.
+        _run(_indexer(MockGitHubTransport(issues=[
+            gh_issue(1, state="closed", closed_at="2026-07-20T08:00:00Z",
+                     updated_at="2026-07-20T08:00:00Z")])), sdk)
+
+        # The live node stays frozen at first observation …
+        live_now = _jdoor_event_state(proj, _JDOOR_EID)
+        assert live_now == live_before == ("github.issue.open", None), (
+            f"the -created node was re-folded from the current closed state: "
+            f"{live_now} (#7951 P2-1)")
+
+        records = [e for e in _jdoor_journal(events)
+                   if e.get("type") == "EventRecorded"
+                   and e.get("eventId") == _JDOOR_EID]
+        assert len(records) == 1, f"expected one backfilled record: {records!r}"
+        assert (records[0].get("eventKind"),
+                records[0].get("endedAt")) == live_now, (
+            "the backfilled EventRecorded carries the CURRENT (closed) state, "
+            "not the frozen live node's — a replay would reproduce a node the "
+            "live graph does not hold (#7951 P2-1)")
+
+        # … and the replay reproduces the SAME node (live == replay).
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _jdoor_event_state(proj, _JDOOR_EID) == live_now, (
+            "rebuild_all did not reproduce the live -created node — the "
+            "frozen-creation invariant is broken on the backfill path "
+            "(#7951 P2-1)")
+    finally:
+        sdk.close()
+
+
+def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
+    """A transient failure of the existence probe must not abort the issue's
+    projection — it fails OPEN, exactly like `_create_entity`'s probe."""
+    from tortoise.projection import _GuardedGraph
+
+    sdk, events = _jdoor_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        real_query = _GuardedGraph.query
+
+        def flaky_query(self, q, params=None, **kw):
+            if ("RETURN n.id" in q and "{id:$id}" in q
+                    and (":Object " in q or ":Subject " in q)):
+                raise RuntimeError("transient probe failure (test)")
+            return real_query(self, q, params=params, **kw)
+
+        monkeypatch.setattr(_GuardedGraph, "query", flaky_query)
+        stats = _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
+
+        assert not stats["errors"], (
+            f"a transient probe error aborted the issue's projection: "
+            f"{stats['errors']} (#7951 P2-b)")
+        assert _jdoor_object_count(proj, _JDOOR_OID) == 1, (
+            "the probe failure skipped the Object write entirely (#7951 P2-b)")
+        assert any(e.get("type") == "ObjectRegistered"
+                   for e in _jdoor_journal(events)), (
+            "the fail-open path did not journal the Object (#7951 P2-b)")
+    finally:
+        sdk.close()

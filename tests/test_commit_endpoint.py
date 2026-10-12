@@ -22,6 +22,10 @@ DE2E suite legs owned by this slice:
           no graph-side counts, no judge_summary)
 - PL4     metering (write_ops +1 per non-duplicate; held bills 0 →
           write_ops_billed:0; nodes_written net-new)
+- #4704   the PL3 remainder: a FAILED write's retry re-enters the write
+          phase (L1 does not replay a `partial` record), and must neither
+          re-apply the Session counters nor re-count the payload it already
+          declared
 - R-13    dedicated 300/min/key commit bucket, exempt from the 100/min key
           bucket
 """
@@ -130,6 +134,20 @@ def _commit_record(cid: str):
         params={"cid": cid},
     ).result_set
     return rows[0] if rows else None
+
+
+def _commit_record_declared(cid: str):
+    """``value_nodes_declared`` on the :CommitRecord (#4704), or None.
+
+    Kept out of ``_commit_record`` on purpose: that helper's 4-tuple is
+    unpacked by existing tests.
+    """
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "RETURN r.value_nodes_declared",
+        params={"cid": cid},
+    ).result_set
+    return rows[0][0] if rows else None
 
 
 def _session_counter(session_id: str, field: str):
@@ -1631,6 +1649,104 @@ class TestReplayIdempotency:
         r = _commit(client, raw2)
         assert r.status_code == 200 and r.json()["duplicate"] is False
         assert _session_counter("s1", "value_nodes_created") == before
+
+
+class TestFailedWriteRetry4704:
+    """#4704 — the SEQUENTIAL twin of the #3718 double-apply bug.
+
+    Both requests carry the SAME ``client_commit_id`` but they do NOT overlap:
+    the first FAILS mid-write and returns the fail-closed 500 whose contract
+    is "retry with the same client_commit_id" (its Session counters have
+    already landed — they are step 1 of the write phase); the second arrives
+    after the winner released, sees a ``partial`` record, which L1 does not
+    replay, and re-runs the write phase. Unguarded that phase re-applied
+    ``value_nodes_created += net_new`` and ``commit_count +1`` for ONE logical
+    payload, and `value_nodes_created` is the budget numerator
+    (`adjudicate_budget`'s ``prior_created``) — so the session's spend was
+    inflated for every LATER commit. The retry's own adjudication was
+    inflated too: ``reconcile`` sees only the REMAINDER, and adding it to a
+    prior that already contained the whole payload is what the WARN assertion
+    below pins.
+
+    Mutation proof: drop the ``:CommitRecord`` guard from step 1 of
+    ``_execute_commit_writes`` and the counters read 24 / 2 (not 15 / 1);
+    keep the guard but adjudicate the retry on ``reconcile.net_new`` and the
+    response's ``warn`` is True where the clean attempt warned nothing.
+    """
+
+    _SESSION = "s-4704"
+    _PRIOR = 6
+    # _raw_payload(8) = 8 new points + the new ("Alpha", "Project") entity
+    _NET_NEW = 9
+
+    def _fail_the_first_point_write(self, monkeypatch) -> dict:
+        """Make the FIRST payload point write raise — i.e. fail the phase
+        AFTER step 1 (the counters) landed, which is the whole window this
+        bug needs. Every later call delegates to the real writer."""
+        real = TortoiseSDK.create_point
+        calls = {"n": 0}
+
+        def _boom_once(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated transient graph error")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(TortoiseSDK, "create_point", _boom_once)
+        return calls
+
+    def test_failed_write_retry_applies_the_counters_once(self, client,
+                                                          monkeypatch):
+        _inject_session_state(self._SESSION, value_nodes_created=self._PRIOR)
+        raw = _finalize(_raw_payload(8, session_id=self._SESSION))
+        calls = self._fail_the_first_point_write(monkeypatch)
+
+        first = client.post("/v1/sessions/commit", json=raw)
+        assert first.status_code == 500, first.text
+        assert calls["n"] == 1
+        # the counters landed BEFORE the failure; the record stays `partial`
+        assert _session_counter(self._SESSION, "value_nodes_created") == (
+            self._PRIOR + self._NET_NEW)
+        assert _session_counter(self._SESSION, "commit_count") == 1
+        rec = _commit_record(raw["client_commit_id"])
+        assert rec is not None and rec[0] == "partial"
+        assert _commit_record_declared(raw["client_commit_id"]) == self._NET_NEW
+
+        second = client.post("/v1/sessions/commit", json=raw)
+        assert second.status_code == 200, (
+            f"the retry must complete the payload: got {second.status_code} "
+            f"{second.text}")
+        body = second.json()
+        assert body["duplicate"] is False and body["held"] == []
+        assert body["nodes_created"] == self._NET_NEW
+        # the retry's own adjudication is the clean attempt's (prior 6 + 9 =
+        # 15): no WARN. Re-counting the remainder (15 + 9 = 24) warns here.
+        assert body["warn"] is False, body
+
+        # ONE logical payload ⇒ the counters moved ONCE
+        assert _session_counter(self._SESSION, "value_nodes_created") == (
+            self._PRIOR + self._NET_NEW)
+        assert _session_counter(self._SESSION, "commit_count") == 1
+
+        # ...and the retry really did write the remainder
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (p:Point {session_id:$sid}) RETURN count(p)",
+            params={"sid": self._SESSION}).result_set
+        assert rows[0][0] == 8
+
+        # one logical payload ⇒ one write-op, its net-new metered once
+        assert _metering_rows() == (1, self._NET_NEW)
+        rec = _commit_record(raw["client_commit_id"])
+        assert rec is not None and rec[0] == "fully_written" and rec[1] == 1
+        assert rec[3] is False  # budget_warn — the clean verdict, not the retry's
+
+        # the fix must not disturb L1: a further replay is still a duplicate
+        third = client.post("/v1/sessions/commit", json=raw)
+        assert third.status_code == 200 and third.json()["duplicate"] is True
+        assert _session_counter(self._SESSION, "value_nodes_created") == (
+            self._PRIOR + self._NET_NEW)
+        assert _session_counter(self._SESSION, "commit_count") == 1
+        assert _metering_rows() == (1, self._NET_NEW)
 
 
 class TestE5PointSupersessions:

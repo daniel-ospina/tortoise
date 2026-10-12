@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.22"
+title: "Tortoise — Canonical Ontology v3.24"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-10
+updated: 2026-10-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.22
+# Tortoise — Canonical Ontology v3.24
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,97 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.23 (2026-10-10 — issues #7813 + #7853 — confidence propagates across all four epistemic labels):**
+>
+> - §5/§8: the point↔object and point↔event kind overlap is stated as the model,
+>   not compatibility residue. The #7813 owner ruling is that **confidence (EP)
+>   propagates across `:Point`, `:Subject`, `:Object` and `:Event`**. §5 now names
+>   **both** overlapping event kinds (`decision` **and** `humanApproval`), and §8's
+>   reification rule and its table row are widened from `Point↔Point` to the four
+>   labels. The operator node itself stays `:Point {is_operator:true}`; only its
+>   children/targets may carry any of the four labels.
+> - §2/§3.1: the epistemic-target enumerations are widened to the four labels.
+>   §2's Epistemic-layer row (BOTH its Entity and "How it works" cells) and the
+>   Structural-vs-Epistemic table + Principle, and §3.1's heading and its
+>   `IMPL`/`NAND` From→To cells.
+> - §3.8: the `op: IMPL/NAND` row is widened to the four labels in BOTH its
+>   From→To cell and its Meaning cell (the pre-#7813 Meaning said Point→Event was
+>   **write-only in v1 with no EP propagation** — under #7813 an Event target is
+>   epistemic and propagates). The departure is marked `OVERRIDES` at §8.
+> - Spec-only markers accompany each declaration of `:Subject`/`:Object` operator
+>   endpoints: the write path admits `:Point`/`:Event` only until #7902 lands, so
+>   the model must not read as a live end-to-end shape.
+>
+> **Changelog v3.23 (2026-10-10 — issue #3644 — the §4.6 *Versioning* WINDOW half is implemented on `:Source`):**
+> §4.6 declared the Source version window and `#5024` landed the *version-anchor*
+> half (a hash transition journals a `SourceVersioned` record naming
+> `previousContentHash`). The window half was *declared, never written*: no
+> writer set `validFrom`/`validTo`/`expiredAt`, so *"the journal record that
+> opens a new version closes the old one in the same act"* was an intention, not
+> a recorded act. **Implemented now, exactly as §4.6 words it:** `create_source`
+> mints the window instant **once**, on the same clock as `updatedAt`;
+> `_upsert_source` writes the node's `validFrom` through the same hash-diff gate
+> as `version`/`updatedAt` (create, stub completion, real transition — never a
+> no-op re-check, never a hash-less write); and the `SourceVersioned` record
+> carries **both** window facts — `validFrom` (the new version's open, the node's
+> window start) and `previousValidTo` (the prior version's close), the **same
+> instant by construction**, so the chain is exactly contiguous. **`previousValidTo`
+> is record-only**: one node per `url`, the node holding the CURRENT version whose
+> window is open (absent `validTo` IS the open end — Cypher cannot write NULL), so
+> a prior version's close can only be a journal fact. An absent `validFrom` is an
+> **open start** and is never synthesized at replay time (`$vf` is the recorded
+> instant, never `coalesce($vf, $now)`), so every legacy journal line replays
+> byte-identically to the source it was written from. §4.7's Source column moves
+> `validFrom`/`validTo` ❌ → ⚠️ (§4.6 field table `❌` → `⚠️`), with the two
+> different reasons stated in the † footnote. **Also not claimed, and deliberately
+> so:** the invariant holds on the `create_source`/`_upsert_source` path only —
+> `_upsert_document` and `_materialize_session_source` are further `:Source`
+> `contentHash` writers that do **not** move the window, so a stamped source can
+> be left with a present-but-stale start; extending the gate to them needs a
+> minted instant that is also replayable (a separate clock/mint decision), is
+> tracked on **#3644**, and is **pinned, not silenced**, by
+> `tests/test_source_version_window_3644.py::test_pinned_gap__*`. **Not claimed, and deliberately so:**
+> the node's `validTo`/`expiredAt` need a `:Source` REMOVAL path — that field's
+> meaning is **#3590** S2's decision — and a caller-asserted valid-time start
+> needs the inversion guards the Point window needed (#3980/#4021/#5358/#5360);
+> `Subject`/`Object` windows remain ❌ (§4.2/§4.3).
+>
+> **Changelog v3.23 (2026-10-11 — issue #1423 — Subject status is projection-owned, and supersession reaches the Subject family):**
+> §4.2's `status` cell recorded a **capability gap** ("projection-owned status is planned, NOT yet
+> implemented on Subject", #2295) and the Subject family had no supersession path at all:
+> `commit_ops.apply_supersessions` refused a record whose successor was a `:Subject` (the #1370
+> warn-and-skip), so a replaced team/role/person stayed `live` and search-visible forever. Both are
+> now built. `_upsert_subject` **seeds** `status` ON CREATE and `status` ∈ `_SUBJECT_HANDLED`, so the
+> Object's #1350/#2194 clobber guard applies to Subjects too; the supersession write goes through the
+> generic entity surface (`EntityMutated op="supersede"`, journaled with `status`/`supersededBy`/
+> `supersededAt`), which the ONE `SET n += $state` arm replays in all four engines; and
+> `commit_ops.SUBJECT_TERMINAL_STATUSES` excludes terminal Subjects from the four retrieval legs by
+> default. §4.2's `status` row moves ⚠️ → ✅ and gains `supersededBy`/`supersededAt`. **No model
+> change** — the Subject lifecycle vocabulary and the `superseded, never deleted` doctrine are
+> unchanged; this is the declaration catching up to the build. (The Subject `validFrom`/`validTo`
+> WINDOW is a separate row and stays ❌ — #1423 does not touch it.)
+>
+> **Changelog v3.22 (2026-10-10 — issue #7902 — the operator-endpoint WRITE path admits the four epistemic labels):**
+> The owner ruling #7813 makes confidence propagate across :Point/:Subject/:Object/:Event. (#7853's
+> read-widening branch is unmerged; on `main` the EP reads and the WRITE path are still Point/Event.)
+> #7902 widens `create_operator`, `create_direct_edge` and the operator-dedup id sweep to the four
+> labels (one declaration, `tortoise/live.py::EPISTEMIC_LABELS`), and widens the EP reads the write
+> path depends on — `_affected_factors` Batches 1/2/3, `_affected_claims`/`_live_neighbors`, the
+> `_load_cache`/`_flush_cache` node + message + back-message I/O, `_read_node`/`_write_node`,
+> `invalidate_messages`, the `projection/edges.py` operator fold, and the sdk promotion/partial-absorb
+> joins, so a newly-writable endpoint is not EP-inert in the writing process (the operator/direct edge
+> is visible to the EP run and to `dream`'s affected-set traversal). **Not claimed, and deliberately
+> so: the EP DIRTY MARKER is graph-persisted for `:Point` writers only.** `_mark_dirty`'s persist and
+> zombie-classification queries, `_hydrate_dirty_roots`, `_sweep_dirty_roots` and
+> `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`, so a write whose endpoints are ALL
+> non-`:Point` is EP-inert across the request/process boundary — and the write-triggered
+> `dream(mode='local')` then returns an empty affected set. That is the residual split to **#7927**
+> (the `:Point`-only epistemic surfaces outside the EP engine, which already names
+> `analyze._bfs_select_operators`), extended there with the dirty-lifecycle sites, and it is **pinned,
+> not silenced**, by `tests/test_7902_write_path_label_widening.py::test_pinned_gap__*`. Direct edges
+> therefore connect any two plain epistemic nodes — **not** Point→Point only. #7853's branch converges
+> on the same shared declaration.
 >
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
@@ -58,6 +149,30 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.24 (2026-10-12 — issue #7852 W1 — the Layer-2 `semantics` reaches the write path):**
+> `create_operator` (SDK) and `tortoise_create_operator` (MCP) accept an additive, defaulted
+> `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
+> one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
+> used is recorded on the operator as `direction_basis` — `explicit` (the caller stated a non-default
+> direction), `semantics` (the declared Layer-2 meaning resolved it — the token names the LAYER that
+> produced the value, never the Layer-3 `label` predicate, which is a different input), or `default`
+> (nothing declared). The endpoint-kind step is a
+> separate scoped change. An out-of-vocabulary word warns and the write proceeds — never refuses —
+> and a retired word resolves to its canonical replacement. This is the chain step that had no way
+> to run, so the direction no longer always falls through to the per-op_type default. The four-value
+> **storage** vocabulary is unchanged (see *Transition state*): the model's `-` maps to no runtime
+> value, and `<-` is deliberately left unmapped rather than recorded as the opposite (`unidirectional`
+> is source→target only).
+>
+> **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
+> §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
+> recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
+> against it, warning with the valid alternatives when a value is out of vocabulary, retired or
+> missing (warn-not-block, W2). A relation declaration may carry **`nearMisses`**, mirroring
+> `kindDefs`, resolved across loaded packs. The both-ways names state their direction
+> (`mutuallySupportive`, `mutuallyExclusive`); the one-way names keep theirs (`addresses`, `supports`,
+> `refutes`).
+>
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
@@ -70,7 +185,10 @@ doc_status: live
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
 > EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
-> accepted names** — the model tables state the target.
+> accepted names** — the model tables state the target. **The write path now reads the semantics**:
+> `create_operator` / `tortoise_create_operator` accept `semantics` and resolve the recorded direction
+> from it (recording the basis in `direction_basis`), mapping the model's direction onto the two values
+> the runtime stores (#7852 W1). The four-value **storage** migration remains open.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -313,9 +431,13 @@ doc_status: live
 >   `:Source` keyed `url`. `#5024` **landed** — a content-changing re-fetch now
 >   journals a `SourceVersioned` record naming the superseded `contentHash`, a
 >   no-op re-fetch journals nothing, and a replay reproduces the node (the
->   per-field split is in `docs/durability-posture.md` → R2). Still open: the
+>   per-field split is in `docs/durability-posture.md` → R2). ~~Still open: the
 >   version **window** `validFrom`/`validTo`/`expiredAt`, which no writer sets
->   (**#3644**); and `#5038` (the version model).
+>   (**#3644**)~~ — **since v3.23 the `:Source` window half is implemented**
+>   (`validFrom` on the node; `validFrom` + `previousValidTo` on the
+>   `SourceVersioned` record), and what stays open is the node's
+>   `validTo`/`expiredAt` (**#3590** S2, the removal-field decision); and
+>   `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 >
@@ -572,7 +694,7 @@ Each layer answers a different question. All four are live mechanisms.
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
 | **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (ownedBy, memberOf, hasPart) via plain edges. |
-| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence), and the epistemic targets `:Subject`/`:Object`/`:Event` (§5 — objects ARE in the epistemic layer) | Operators connect epistemic targets (`:Point`, `:Subject`, `:Object`, `:Event`) — ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands; the write path admits `:Point`/`:Event` only (the read/EP path already admits all four). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators propagate EP under the #7813 ruling — confidence crosses all four labels, so an Event target is epistemic (§8 OVERRIDES); decision semantics remain on the Event timeline, and decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
 
@@ -607,20 +729,22 @@ Each layer answers a different question. All four are live mechanisms.
 | Edge | Type | Confidence | Example |
 |------|------|-----------|---------|
 | performs / produces / uses / authoredBy / ownedBy / memberOf / managedBy | **Structural** (plain) | None (factual) | (:Subject "Daniel")-[performs]->(:Event), (:Object "Customer Profile")-[ownedBy]->(:Subject "Daniel") |
-| Event→Point, Point→Event, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — the latter write-only in v1 (argumentation annotation; no EP propagation; the decision stays an Event, never a first-class Point) |
+| Any of `:Point`/`:Subject`/`:Object`/`:Event` ↔ same (e.g. Event↔Point, Point↔Point) | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — both propagate EP under #7813 (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES) |
 
-**Principle:** Operators connect only epistemic targets (Event→Point, Point→Event, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
+**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. ⚠️ The `:Subject`/`:Object` operator endpoints are **spec-only until #7902** — the write path admits `:Point`/`:Event` only. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
 
 ---
 
 ## §3. Edge Topology
 
-### §3.1 Point ↔ Point (Epistemic — Operators)
+### §3.1 Epistemic ↔ Epistemic (Operators — `:Point`/`:Subject`/`:Object`/`:Event`)
+
+⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only.
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `IMPL` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is recorded on the write. |
-| `NAND` | Point → Point | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction is recorded on the write. |
+| `IMPL` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is recorded on the write. |
+| `NAND` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). `mutuallyExclusive` records `<->` ("A and B can't both be true"); `refutes` records `->` (the directed attack — attacker's truth penalizes the target, no back-pressure — #753). Direction is recorded on the write. |
 | `hasPart` | Point → Point | `<->` (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
 | `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4765) / `invalidate_point` (sdk.py:4654). |
 
@@ -634,7 +758,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code does not read the semantics — `create_direct_edge` and the ingest path key off `op_type`, while `create_operator` still takes its `bidirectional` default (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` now accept `semantics` and resolve the direction from it, recording the basis as `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path still key off `op_type` (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -727,7 +851,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `produces` | **any → Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531). Event→artifact is the encouraged pattern |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point, Point → Event | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
+| `op: IMPL/NAND` | `:Point`/`:Subject`/`:Object`/`:Event` → same | recorded per write — `->`, `<-`, `<->` or `-` | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event propagates EP under #7813 (an Event target is epistemic — §8 OVERRIDES). ⚠️ `:Subject`/`:Object` endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -912,7 +1036,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `foaf:name` / `schema:name` | ⚠️ | Human-readable name |
 | `subjectKind` | string | ✅ | `dcterms:type` | ✅ | organization, team, role, legalPerson, naturalPerson, other |
-| `status` | string | — | `pav:status` | ⚠️ | Lifecycle: draft, live, superseded, deprecated, archived — **projection-owned status is planned, NOT yet implemented on Subject**; SDK-created subjects currently carry `status: "live"` via the extra-props path (`_persist_extra_props` — `status` ∉ `_SUBJECT_HANDLED`, #2295): `_upsert_subject` itself writes only `id`/`subjectKind`/`createdAt`/`embedding` |
+| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, superseded, deprecated, archived. **Projection-owned since #1423** — the Subject twin of the Object status cache (§11: the journal is the reconstruction source, the property is a cache). `_upsert_subject` SEEDS it ON CREATE (`status=coalesce($st,'live')`) and `status` ∈ `_SUBJECT_HANDLED`, so `_persist_extra_props` never rewrites it on MATCH — the #1350/#2194 clobber guard ported to Subject (before #1423 `status` rode the extras lane, which applies ON MATCH, so a **re-mention of a superseded team/role/person reset it to `live` live-side while replay kept the supersession** — the #2193 live≠replay class, pinned by `tests/test_subject_supersession_1423.py`). Supersession folds through the generic entity surface: `commit_ops.apply_supersessions` writes `status`/`supersededBy`/`supersededAt` and journals `EntityMutated op="supersede"`, which the ONE `SET n += $state` arm replays in all four engines. **Write side (review P1)**: `create_entity`/`update_entity` validate a Subject `status` against `commit_ops.SUBJECT_STATUS_VALUES` (this §4.2 lifecycle) and raise for anything else, so an undeclared value (e.g. `dead`) can neither be stored nor leak. Read side: `commit_ops.SUBJECT_TERMINAL_STATUSES` (superseded / deprecated / archived / retracted — `retracted` is not among the §4.2 declared verbs and the write guard REFUSES it, but the read set is the NET for a state a legacy/pre-fix SDK or a raw producer may already have stored, on the Object family's own precedent (#2977), where a read vocabulary kept `retracted` with no in-tree writer) excludes terminal Subjects from the four retrieval legs by default |
+| `supersededBy` / `supersededAt` | string / ISO8601 | — | — | ✅ | #1423: successor NAME (stored verbatim) and the fold instant, written together with `status='superseded'` by the subject supersession lane. Carried in the journaled `EntityMutated` `state` map, so a wipe+rebuild restores the ORIGINAL instant rather than a rebuild-time one — the #2164-P4 drift class the Object twin still exhibits (`_fold_object_superseded` falls back to `now` on the live path while replay reads the journaled `ts`). Absent on non-superseded Subjects |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the Subject held in the world (declared §4.7, #3642; not yet written by `_upsert_subject`) |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Subject stopped being current (declared §4.7, #3642) |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2295) |
@@ -1000,8 +1125,8 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
-| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
-| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ⚠️ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). **`validFrom` is written since #3644**: `_upsert_source` sets it to the version's OBSERVATION instant (the same instant `create_source` mints for `updatedAt`, one clock read, carried on the record) through the same hash-diff gate as `version`/`updatedAt` — a create, a stub completion, or a real transition, never a no-op re-check. A version has no content-side date of its own (a version *is* "the content as read at an instant"), which is why the observation instant is definitional here and not the borrowed write clock §4.1/#3654 forbids for a Point; a caller-asserted start (a known publication date) is a separate additive input, deliberately not accepted yet. Coverage is the `create_source`/`_upsert_source` path only — a stub minted by `_link_source` writes none, and **absent means an open/unbounded start** (the replay never stamps one: `$vf` is recorded, never `coalesce($vf, $now)`). **Two further `:Source` writers move the version anchor without moving the window** — `_upsert_document` (the `DocumentCreated` fold) and `_materialize_session_source` (the capture path) — so a source this path stamped can be left with a **present-but-stale** start (tracked on **#3644**, pinned by `test_pinned_gap__*`). **`validTo` is written as a JOURNAL fact, not a node property**: the node holds the CURRENT version, whose window is open (absent IS the open end — Cypher cannot write NULL), so the prior version's close lives on the `SourceVersioned` record as `previousValidTo`, equal to that record's `validFrom` by construction (§4.6's "closes the old one in the same act"). A `:Source` REMOVAL sets the node's `validTo`; no such path exists yet (#3590 S2). A prior version's window is a journal record — see *Versioning* |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642). Still unwritten: no `:Source` removal path exists, and the removal field's meaning is exactly the decision **#3590** S2 owns (the same one that leaves Point's `expiredAt` unable to distinguish *replaced* from *withdrawn*). A version transition does NOT set it — `validTo`/`previousValidTo` is the window fact |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
 | `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 (v3.15) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
@@ -1033,11 +1158,13 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 
 **Stale is a read, and `stale` is not `wrong`.** A **Point** is **stale** when its recorded `sourceVersion` differs from its source's current `contentHash` — a **derived predicate**, not a stored status, so nothing can drift. A stale entity **was true of the content that was read** and **remains standing**: supersession is **deferred until the replacement exists**, and when re-inference produces the successor the stale entity is superseded through `CORRECTS`. **Superseded, never deleted** — the previous belief stays queryable alongside the new one. This is the deliberate policy: **a stale belief is strictly better than no belief**, because immediate removal would leave the graph asserting nothing about a subject it previously had a position on.
 
+**A version's window is opened and the prior one closed in the same act (`#3644`).** The version's valid-time start is the instant it was **observed** — `create_source` mints it once, on the same clock as `updatedAt`, and `_upsert_source` writes it only through the hash-diff gate, so a no-op re-check moves neither the node nor the journal. The `SourceVersioned` record carries **both** window facts: `validFrom` (the new version's open, the node's window start) and `previousValidTo` (the prior version's close). The two are the **same instant by construction** — one minted clock under two names, which is what *"closes the previous version's window and records the new one"* means — so the window chain is exactly contiguous rather than "contiguous modulo a fallback". The window is **half-open, `[validFrom, validTo)`**: `previousValidTo == validFrom` therefore places the shared instant in exactly one version — the new one — rather than in both. A `:Source` reader must **not** reuse the Point lane's closed predicate (`_covers`: `validFrom <= t <= validTo`), which would double-cover that instant; no `:Source` reader exists yet, so this is the contract the first one must implement. `previousValidTo` is a **record-only** key: there is one node per `url`, the node holds the current version, and its window is **open** (absent `validTo` is the open end), so the prior version's close can only live in the journal. An absent `validFrom` is an **open start** and is never synthesized at replay time — a legacy record (or a `_link_source` stub, which writes no window) replays to a source with no window, exactly as it was written. **The invariant holds on the `create_source`/`_upsert_source` path only.** Two other `:Source` writers move the version anchor (`contentHash`/`version`) without moving the window, so a source this path stamped can be left with a **present-but-stale** start: `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`) and `_materialize_session_source` (the session-capture path, which rewrites `contentHash` without advancing `version` and is replayed by nothing). Extending the gate to them needs a minted instant that is **also replayable** — a clock/mint decision this change does not take — and is tracked on **#3644**; the gap is pinned (never silenced) by `tests/test_source_version_window_3644.py::test_pinned_gap__*`.
+
 **Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
 
 **`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
 
-**Implementation status (`#5024`, 2026-09-24).** The *version-anchor* half of this section is now implemented: a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. **The window half is still a declared gap:** the record names the superseded *version* but does not close a `validTo`/open a `validFrom`, because no writer sets those fields on the node at all (**#3644**). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
+**Implementation status (`#5024`, 2026-09-24; window half `#3644`, 2026-10-10).** Both halves are now implemented. The *version-anchor* half (#5024): a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. The *window* half (#3644): the same record now carries the version window — `validFrom` (the new version's open, written to the node through the same hash-diff gate) and `previousValidTo` (the prior version's close, a record-only fact) — so closing the prior window is a **recorded act**, and a rebuild reproduces the node's window; the prior window is recoverable from the journal alone. **What remains open** (and is deliberately not claimed): the node's `validTo`/`expiredAt`, which need a `:Source` **removal** path — the field's meaning is **#3590** S2's decision; and a caller-asserted valid-time start (a known publication date), which needs the inversion guards the Point window needed (#3980, #4021, #5358, #5360). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
 
 ### §4.7 Temporal Model (canonical)
 
@@ -1090,13 +1217,13 @@ declared, not built (implementation is tracked separately):
 
 | Slot | Point | Subject | Object | Event | Source |
 |------|-------|---------|--------|-------|--------|
-| valid start | `validFrom` ⚠️ | `validFrom` ❌ | `validFrom` ❌ | `startedAt` ✅ (alias) | `validFrom` ❌ |
-| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | `endedAt` ✅ (alias) | `validTo` ❌ |
+| valid start | `validFrom` ⚠️ | `validFrom` ❌ | `validFrom` ❌ | `startedAt` ✅ (alias) | `validFrom` ⚠️ † |
+| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | `endedAt` ✅ (alias) | `validTo` ⚠️ † |
 | txn start | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ✅ | `capturedAt` ⚠️ | `ingestedAt` ✅ |
-| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
+| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ † |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** A content-changing re-fetch is no longer a silent in-place mutation: since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, and since `#3644` that record also carries the **version window** (`validFrom` + `previousValidTo`, the same minted instant) while the node's `validFrom` is written through the same hash-diff gate — so a replay reproduces the node's window and the prior window is recoverable from the journal alone. Both Source window rows are **⚠️, not ✅, for two different reasons**: the valid **start** is written on the `create_source`/`_upsert_source` path only (a `_link_source` stub mints none, and absent ⇒ open/unbounded start; `_upsert_document` and `_materialize_session_source` move the version anchor **without** the window, so a stamped source can carry a present-but-stale start — **#3644**, pinned by `test_pinned_gap__*`), and the valid **end** is a **record-only** fact — the node holds the CURRENT version, whose window is open (absent = open end), so the prior version's `validTo` lives on the record as `previousValidTo` and a node `validTo` would need a `:Source` **removal** path that does not exist yet (**#3590** S2, which also owns `expiredAt`).
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths only; an undated session (mining W-4) stamps no `validFrom` at all
@@ -1158,6 +1285,20 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
 >
+> **The point↔object and point↔event kind overlap is CORRECT, not compatibility
+> residue (#7813 owner ruling, implemented by #7853).** Four kinds sit in BOTH
+> the point and object sets — `goal`, `plan`, `strategy`, `target` — and
+> `decision` and `humanApproval` sit in both the point and event sets. Under
+> the ruling this is the
+> model: **confidence (EP) propagates across `:Point`, `:Subject`, `:Object` and
+> `:Event`**, so a belief written as an Object or Event is genuinely epistemic
+> and must propagate. Do NOT "clean up" the overlap as legacy — it is the
+> layer split being unwound (objects ARE in the epistemic layer). The
+> *operator* node itself stays `:Point {is_operator:true}`; only its children
+> and targets may be any of the four labels. The departure from the pre-#7813
+> "write-only" rule is marked at §8 (`OVERRIDES`). ⚠️ `:Subject`/`:Object`
+> operator endpoints are spec-only until #7902 lands — the write path admits
+> `:Point`/`:Event` only (the read/EP path already admits all four, §3.1).
 >
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
@@ -1308,7 +1449,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 | Status | Kind | Write path | Transitions to | Notes |
 |--------|------|------------|----------------|-------|
 | `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point`, the capture/extraction writers | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
-| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
+| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source, and writes the operator node's own `status='live'` — `'draft'` when the source is not promoted, #5089), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
 | `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
@@ -1375,13 +1516,20 @@ optional free data). It carries an operator **only when it needs one**.
 ### Reification rule — when an edge gets an operator
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
-support/contradict between Points and/or Events (Point↔Point, Event→Point,
-Point→Event).** All other edges stay plain and carry confidence as an
-edge attribute.
+support/contradict between epistemic nodes (any of `:Point`, `:Subject`,
+`:Object`, `:Event` — see §5 on the point↔object/point↔event overlap; #7813/#7853).**
+The operator node itself is always a `:Point {is_operator:true}`; its
+children/targets may carry any of the four labels. All other edges stay plain
+and carry confidence as an edge attribute.
+
+> **OVERRIDES:** the pre-#7813 "Point→Event operators are write-only in v1, no
+> EP propagation" rule — #7813 rules that confidence propagates across
+> `:Point`/`:Subject`/`:Object`/`:Event`, so an Event target is epistemic and
+> propagates.
 
 | Edge | Operator? | Confidence |
 |---|---|---|
-| Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
+| Support / contradict (IMPL/NAND) between epistemic nodes (:Point/:Subject/:Object/:Event) | **Yes** | EP over the IMPL/NAND edge |
 | Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
 | Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
 | `related` — the neutral association edge (§3.9) | **No** — plain edge | **none** — evidence-free by construction; no belief path may read it |
@@ -1397,16 +1545,20 @@ edge attribute.
   closed by **#5566** (the affected-set traversal is now `IMPL`/`NAND`-filtered **and**
   directed, so only operator inputs are admitted).
 
-- **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
-  (no operator); EP propagates over it the same way.
+- **Operator-less propagation:** an IMPL/NAND edge may be direct between any two plain epistemic
+  nodes (`:Point`/`:Subject`/`:Object`/`:Event` — #7902; no operator); EP propagates over it the
+  same way.
 - **Direction:** four values, **recorded on the write**: `->` (source → target), `<-` (target →
   source), `<->` (both ways), `-` (none). Lives on the operator node when present, else on the
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
-  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
-  default (#7813). See the *Transition state* note.)*
+  recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
+  accept `semantics` and resolve the direction from it, recording the basis on the operator as
+  `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The remaining gap is the
+  four-value **storage** vocabulary: the runtime still records only `bidirectional` /
+  `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1425,21 +1577,46 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Layer | Where | What |
 |-------|-------|------|
 | **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
-| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
-### Semantic Types
+### The semantics vocabulary (Layer 2)
 
-| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
-|------|-----------|------------|-------------------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
-| supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Both ways for a mutual restatement; one way for a directed attack | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
+**Core is canonical, and a pack aligns to it.** The vocabulary is closed: a declaration outside it
+is a typo, not a new meaning, and validation warns, naming the valid alternatives. The value is chosen
+by the **co-variance test** — *does the relationship make the two ends' confidence move together?* —
+and the answer is the direction the relation records.
 
-> **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
+| Semantics | Mechanism | Direction | Meaning |
+|-----------|-----------|-----------|---------|
+| `addresses` | IMPL | `->` | Aimed at / applies to — scope. A one-way link carries weak confidence: a pull request existing that addresses a bug is weak evidence the bug is real. |
+| `supports` | IMPL | `->` | Positive evidence, one way |
+| `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
+| `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
+| `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
+| `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
+| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** `produces` is the encouraged Layer-3 predicate for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
+| `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
+| `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
+| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning |
+
+**Same semantics + different predicates is correct.** `fixes`, `implements` and `deploysTo` all
+carry `addresses`; the **predicate** (Layer 3) keeps them distinct. Semantics is a **meaning**
+vocabulary, not a shape flag — `addresses` and `supports` are different meanings that share a
+direction and are not merged into one word.
+
+> **Direction is recorded on the write — four values: `->`, `<-`, `<->`, `-`.** It comes from the
+> connection's semantics and the recorded value is authoritative. `-` means the connection exists and
+> **no confidence transfers along it**, so direction and confidence-transfer are one axis.
+> *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state*
+> note in the changelog.)*
+
+A relation declaration may also carry **`nearMisses`** — the sibling predicates or semantics it is
+confused with, mirroring `kindDefs`. Each target resolves to a declared predicate or a semantics
+value.
 
 ### Pack Relation Declarations
 
@@ -1450,6 +1627,7 @@ relations:
     semantics: hasPart
     fromKind: dev:epic
     toKind: dev:issue
+    nearMisses: [related]
 ```
 
 ---
@@ -1565,8 +1743,9 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
-code does not read the semantics — it resolves by `op_type`, or takes `create_operator`'s default
-(#7813). See the *Transition state* note.)*
+code reads the semantics on the operator write path — `create_operator` / `tortoise_create_operator`
+resolve it and record `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path
+still resolve by `op_type` (#7813). See the *Transition state* note.)*
 
 ---
 

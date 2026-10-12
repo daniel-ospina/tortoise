@@ -49,6 +49,11 @@ from __future__ import annotations
 SESSION_READ_FIELDS: tuple[str, ...] = (
     "id", "created_at", "turns", "extracted",
     "actor_user_id", "harness", "machine_id", "model",
+    # #3520: the per-session EXTRACTION status object. APPENDED at the END by
+    # the rule this module documents — `list_sessions` builds its wire dicts
+    # from POSITIONAL columns, so a column inserted anywhere earlier silently
+    # re-binds `r[0..3]` to the wrong values.
+    "extraction",
 )
 
 #: What `GET /v1/sessions` serves per session: the shared projection plus
@@ -56,7 +61,98 @@ SESSION_READ_FIELDS: tuple[str, ...] = (
 SESSION_LIST_FIELDS: tuple[str, ...] = (
     "id", "created_at", "turns", "extracted",
     "actor_user_id", "harness", "actor_display", "machine_id", "model",
+    "extraction",
 )
+
+#: #3520: the session-scoped EXTRACTION-status vocabulary — the members any
+#: value of ``extraction["status"]`` must be drawn from.
+#:
+#: Deliberately SEPARATE from the per-harness INSTALL vocabulary (`off` /
+#: `install-pending` / `waiting` / `active`, which lives dashboard-side in
+#: `captureStatus.js::CAPTURE_STATES` and is UNCHANGED — still exactly four
+#: members). The two axes measure different things: install is per harness
+#: (a probe + a receipt), extraction is per session (what happened to THIS
+#: session's memory). Conflating them would leave the aggregate undefined
+#: whenever some sessions processed and some did not, so an install pill
+#: stays `active` beside a `stored-extraction-failed` session and there is no
+#: harness-level rollup of this axis.
+#:
+#: THREE members, deliberately — a fourth (`stored-outcome-unrecorded`) was
+#: considered and REFUSED: the pinned set's set-agreement test is worth more
+#: than a member, and the "stored, outcome unrecorded" state is carried by the
+#: `outcome_known` qualifier BESIDE the set, not inside it.
+SESSION_EXTRACTION_STATES: tuple[str, ...] = (
+    "stored",
+    "stored-and-processed",
+    "stored-extraction-failed",
+)
+
+#: #3892 / #4258: the extractor lanes that mean "no extraction was ATTEMPTED".
+#: A keyless capture (`none`) and the team's extraction off-switch
+#: (`disabled`) both record `capture_ok=False` on the Session — but nothing
+#: FAILED, so reporting them as `stored-extraction-failed` would be a NEW
+#: false positive of exactly the class #3520 exists to remove. They are
+#: "stored, and known not to have been processed" — the honest reading of the
+#: `stored` member with `outcome_known` true. The lane names are the same two
+#: `_CAPTURE_EXTRACTOR_LANES_RETRYABLE` carries (hosted_api), declared here so
+#: this module stays dependency-free.
+SESSION_STORE_ONLY_LANES: tuple[str, ...] = ("none", "disabled")
+
+
+def session_extraction_status(
+    capture_ok: bool | None, capture_extractor: str | None,
+) -> dict:
+    """The server-resolved per-session extraction status (#3520).
+
+    ONE place derives this, and every read surface calls it — the hosted
+    ``GET /v1/sessions`` and ``GET /v1/sessions/{id}`` plus the SDK's
+    ``get_session`` — so no consumer re-implements the mapping and no two
+    surfaces can disagree about one session.
+
+    ``status`` is ALWAYS a member of ``SESSION_EXTRACTION_STATES``; the
+    qualifier rides BESIDE it:
+
+    * ``capture_ok is True``  -> ``stored-and-processed``;
+    * ``capture_ok is False`` and the recorded lane RAN extraction
+      (``v2`` / ``m2``) -> ``stored-extraction-failed``;
+    * ``capture_ok is False`` on a store-only lane (extraction never
+      attempted, by the #3892 keyless ruling or the #4258 team toggle) ->
+      ``stored``;
+    * ``capture_ok is None`` -> ``stored`` with ``outcome_known False``.
+
+    ``outcome_known`` is the pinned qualifier: ``capture_ok IS NOT NULL``.
+    It is what carries the "stored, outcome UNRECORDED" case — a
+    commit-created / budget-hold / demo-seeded / longmem-ingest session was
+    written by a driver that never records an extraction outcome, so a naive
+    ``stored`` would read as "was not processed" for a session that may well
+    have been. A consumer must therefore read the PAIR: (status, qualifier).
+    The dashboard's label table (`capturedSessions.js`) renders the False
+    qualifier as its own honest state rather than the bare `stored` word.
+
+    ``extractor`` is the lane that ran, verbatim as recorded — ``v2`` / ``m2``
+    for a real attempt, ``none`` / ``disabled`` for a store-only write, and
+    ``None`` when the record predates the lane property. It is returned BESIDE
+    the status because the status alone cannot say WHY a session was not
+    processed; the pair is what a reader needs.
+    """
+    outcome_known = capture_ok is not None
+    if capture_ok is True:
+        status = "stored-and-processed"
+    elif capture_ok is False:
+        status = ("stored" if capture_extractor in SESSION_STORE_ONLY_LANES
+                  else "stored-extraction-failed")
+    else:
+        status = "stored"
+    # The binding, not a comment: a member added here without the declaration
+    # (or the reverse) fails at the derivation every read surface calls.
+    assert status in SESSION_EXTRACTION_STATES, (
+        f"extraction status {status!r} is outside the declared vocabulary "
+        f"{SESSION_EXTRACTION_STATES}")
+    return {
+        "status": status,
+        "extractor": capture_extractor,
+        "outcome_known": outcome_known,
+    }
 
 #: What `GET /v1/sessions/{id}` serves: the list projection plus the detail-only
 #: fields (the turn/point lists and the session source).
@@ -70,6 +166,10 @@ SESSION_DETAIL_FIELDS: tuple[str, ...] = (
 # The three lists are one declaration in three shapes, not three opinions. These
 # binds fail loudly at import if a future edit lets them diverge — the drift
 # class this module exists to make unrepresentable.
+assert len(SESSION_EXTRACTION_STATES) == len(set(SESSION_EXTRACTION_STATES)) == 3, (
+    "the extraction vocabulary is exactly THREE members (#3520) — a fourth "
+    "member carries no meaning the `outcome_known` qualifier does not, and the "
+    "per-harness INSTALL set is a different axis, never a place to put this one")
 assert set(SESSION_LIST_FIELDS) == set(SESSION_READ_FIELDS) | {"actor_display"}, (
     f"list projection drifted: {sorted(SESSION_LIST_FIELDS)} vs "
     f"{sorted(set(SESSION_READ_FIELDS) | {'actor_display'})}")

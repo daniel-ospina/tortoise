@@ -134,6 +134,11 @@ def test_capture_session_subject_resolves_via_eventid_fallback(sdk):
     assert hit is not None, "captured Point must appear in the full scan"
     assert hit.get("subject") == {
         "id": subj["id"], "name": "Epistemic Team", "kind": "team",
+        # #1423: the decoration now carries the Subject's own lifecycle status
+        # (`_upsert_subject` seeds it ON CREATE, so a freshly created Subject is
+        # `live`). "superseded, never deleted": a point about a since-replaced
+        # team keeps its provenance and reports the status alongside it.
+        "status": "live",
     }, "promoted subject must resolve via the eventId-property fallback"
 
 
