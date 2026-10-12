@@ -2039,6 +2039,11 @@ surfaces:
   - test_time_aware_eval_2520.py  # #2520: the eval-lane reorder placement + census (C6, docker-lane)
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
   - test_retrieval.py
+  # #7209: DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
+  # `tortoise/sdk.py`). `tortoise/exceptions.py` is a SHARED_MODULE consumed by
+  # every surface, so the fail-loud guard's exception type must run wherever the
+  # leaf changes — a named-surface match REPLACES the `core` fallback otherwise.
+  - test_7209_write_landing.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
@@ -2650,6 +2655,14 @@ surfaces:
   sdk:
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #7209: `create_point` must never report success for a write that did not
+  # land — the write-landing guard (`WriteNotLandedError`) and the bounded
+  # retry on the create's FOLLOW-UP writes (TAGGED / extractedFrom). Owns the
+  # SDK write path (`tortoise/sdk.py`, a SHARED_MODULE, so this file is
+  # selected on any sdk change and dual-registered under `core` for an
+  # exceptions.py-only diff). Docker-lane leg (a live URI when configured,
+  # embedded otherwise).
+  - test_7209_write_landing.py
   # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
   # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
   # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must
