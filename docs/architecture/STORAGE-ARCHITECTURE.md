@@ -1591,7 +1591,7 @@ For the record, since two members of the design rest on it:
 
 **Not a fifth status term, and not the sufficiency router.** The three route names are a *directive about where to look*, deliberately disjoint from `available | empty | degraded | unconfigured` — a test pins the disjointness. The router DECIDES; it never fetches the record and never walks a tier. `#7970` performs the fetch, and §12.4's router owns the depth decision.
 
-**Verified:** `tests/test_residency_router.py` — 25 tests, with the mutation proofs recorded (collapse the two events · route a down cache as no-evidence · report a partial miss as an absence · drop the coordinate at the reader · mint a route as a status term). Design and boundaries: `docs/epics/2026-10-10-7879-postgres-record/07-residency-router.md`.
+**Verified:** `tests/test_residency_router.py` — 30 tests, with the mutation proofs recorded (collapse the two events · route a down cache as no-evidence · report a partial miss as an absence · drop the coordinate at the reader · mint a route as a status term · report an unassessed marker as `resident` · carry an unvalidated marker on the decision type). Design and boundaries: `docs/epics/2026-10-10-7879-postgres-record/07-residency-router.md`.
 
 ### 17.4 A two-store cost model — the existing tables price ONE store
 
