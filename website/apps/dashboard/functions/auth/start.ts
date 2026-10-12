@@ -26,10 +26,12 @@ import {
   buildCookie,
   ensureAuthFlowIndexes,
   ensureColumn,
+  ensurePendingTable,
   json,
   redirect,
   safeNext,
   sweepExpiredFlows,
+  sweepExpiredPending,
 } from "../_shared/auth/session";
 import { bytesToB64url } from "../_shared/auth/jwt";
 
@@ -87,6 +89,13 @@ export async function ensureFlowTable(db: D1Database) {
   // runtime-created table never got the migration's index. Created here, with
   // the table (see `ensureAuthFlowIndexes`).
   await ensureAuthFlowIndexes(db);
+  // #8032: this route now sweeps expired `email_flow_pending` rows too, so the
+  // table (and its `expires_at` index) must exist before the sweep runs —
+  // otherwise every probe would log a "no such table" failure until the first
+  // email link was ever clicked, and a sweep that only ever fails is
+  // indistinguishable from one that cannot run. `/auth/confirm` calls the same
+  // bootstrap, so there is one copy of the DDL, not two.
+  await ensurePendingTable(db);
 }
 
 /**
@@ -145,6 +154,15 @@ export const onRequestGet: PagesFunction<FlowEnv> = async ({ request, env }) => 
   // route to secure. It stops when the writing stops. The row above has already
   // landed, and never has `expires_at < now`, so it cannot be swept.
   await sweepExpiredFlows(env.SESSIONS);
+
+  // #8032: the sibling table, and the one whose expired rows hold a live
+  // refresh token. Swept from THIS route rather than from `/auth/confirm` (the
+  // route that writes it) for the reason the paragraph above gives, read the
+  // other way: a sweep that ran only when an email link was next opened would
+  // leave the LAST abandoned link's credential in the store indefinitely, and
+  // this route is the one path a schedule already drives. Same bound, same
+  // index, no new route and no new schedule.
+  await sweepExpiredPending(env.SESSIONS);
 
   const redirectTo = env.AUTH_CALLBACK_URL ?? `${url.origin}/auth/callback`;
   const authorize = new URL(`${env.SUPABASE_URL}/auth/v1/authorize`);

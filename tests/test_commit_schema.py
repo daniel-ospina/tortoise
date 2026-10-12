@@ -310,8 +310,9 @@ class TestLayer1Semantic:
     def test_pack_point_kinds_accepted(self):
         # closed vocab compiled from PackRegistry at RUNTIME: bare pack kind
         # + namespaced + core event kind. dev:bug moved to OBJECT kinds with
-        # the problem family (0.3.0) — use a still-point dev kind here.
-        assert _valid(points=[_point(0, pointKind="requirement")])
+        # the problem family (0.3.0), and #7848 moved `requirement` to an
+        # Object kind too — use a still-point dev kind here.
+        assert _valid(points=[_point(0, pointKind="technicalDebt")])
         assert _valid(points=[_point(0, pointKind="dev:technicalDebt")])
         assert _valid(points=[_point(0, pointKind="event")])
 

@@ -31,9 +31,12 @@
 #   - Value fields (committed/released amounts, valuation) need a declared
 #     property surface: #2818, behind #2782. Until then the amount is not
 #     declared here.
-#   - Declared relations have no runtime write path today (only the core
-#     structural allowlist is writable): #2766. The `semantics:` field carries the
-#     writable-predicate mapping wherever one exists.
+#   - Declared relations' DECLARATION binds a runtime write path only when the
+#     relation is a core structural predicate or declares a `mechanism`: #2766.
+#     The `semantics:` field carries the writable-predicate mapping wherever one
+#     exists. (#2766 verdict: `create_edge` is strict, but `create_operator` is
+#     warn-not-block — it accepts any label; a missing `mechanism` leaves the
+#     `op_type` undeclared, it does not make the writer refuse.)
 #   - `fundingAgreement` subclasses the core `agreement` kind and is declared so
 #     below. It was previously declared as `Object` because the subclassOf gate
 #     was believed to reject lowercase canonical parents; `agreement` has been an

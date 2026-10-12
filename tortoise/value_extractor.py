@@ -330,8 +330,8 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
         # Section mapping for DECLARED kinds: eventKinds → events,
         # object/documentKinds → objects (setdefault so a kind declared in
         # BOTH keeps the first non-point section; pointKinds are excluded
-        # per FIX A — a point+document kind like marketing:contentBrief
-        # lands in objects via its document declaration).
+        # per FIX A — a document kind like marketing:contentBrief lands in
+        # objects via its document declaration).
         declared: dict[str, str] = {}
         for k in (pack.event_kinds or []):
             declared.setdefault(k, "events")

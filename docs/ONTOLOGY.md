@@ -149,6 +149,15 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
+> §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
+> recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
+> against it, warning with the valid alternatives when a value is out of vocabulary, retired or
+> missing (warn-not-block, W2). A relation declaration may carry **`nearMisses`**, mirroring
+> `kindDefs`, resolved across loaded packs. The both-ways names state their direction
+> (`mutuallySupportive`, `mutuallyExclusive`); the one-way names keep theirs (`addresses`, `supports`,
+> `refutes`).
+>
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
@@ -1547,21 +1556,46 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Layer | Where | What |
 |-------|-------|------|
 | **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
-| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
-### Semantic Types
+### The semantics vocabulary (Layer 2)
 
-| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
-|------|-----------|------------|-------------------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
-| supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Both ways for a mutual restatement; one way for a directed attack | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
+**Core is canonical, and a pack aligns to it.** The vocabulary is closed: a declaration outside it
+is a typo, not a new meaning, and validation warns, naming the valid alternatives. The value is chosen
+by the **co-variance test** — *does the relationship make the two ends' confidence move together?* —
+and the answer is the direction the relation records.
 
-> **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
+| Semantics | Mechanism | Direction | Meaning |
+|-----------|-----------|-----------|---------|
+| `addresses` | IMPL | `->` | Aimed at / applies to — scope. A one-way link carries weak confidence: a pull request existing that addresses a bug is weak evidence the bug is real. |
+| `supports` | IMPL | `->` | Positive evidence, one way |
+| `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
+| `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
+| `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
+| `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
+| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** `produces` is the encouraged Layer-3 predicate for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
+| `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
+| `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
+| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning |
+
+**Same semantics + different predicates is correct.** `fixes`, `implements` and `deploysTo` all
+carry `addresses`; the **predicate** (Layer 3) keeps them distinct. Semantics is a **meaning**
+vocabulary, not a shape flag — `addresses` and `supports` are different meanings that share a
+direction and are not merged into one word.
+
+> **Direction is recorded on the write — four values: `->`, `<-`, `<->`, `-`.** It comes from the
+> connection's semantics and the recorded value is authoritative. `-` means the connection exists and
+> **no confidence transfers along it**, so direction and confidence-transfer are one axis.
+> *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state*
+> note in the changelog.)*
+
+A relation declaration may also carry **`nearMisses`** — the sibling predicates or semantics it is
+confused with, mirroring `kindDefs`. Each target resolves to a declared predicate or a semantics
+value.
 
 ### Pack Relation Declarations
 
@@ -1572,6 +1606,7 @@ relations:
     semantics: hasPart
     fromKind: dev:epic
     toKind: dev:issue
+    nearMisses: [related]
 ```
 
 ---

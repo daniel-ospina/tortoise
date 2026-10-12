@@ -13,7 +13,16 @@ from __future__ import annotations
 
 import types
 
-from tortoise.weights import compute_operator_weight
+from tortoise.weights import ANNOTATION_TERM_NEUTRAL, compute_operator_weight
+
+# The row the real SQL COALESCES to for an operator carrying no annotation. Built
+# from the module's own neutral constant, never from a literal: a literal here is
+# the query's default restated, so it silently drifts when the query changes. When
+# #6151 moved the coalesce defaults from the identity `(0.0, 1.0, 1.0, 1.0)` to the
+# neutral 0.5, this stub kept returning the OLD row — which the new formula reads
+# as a PERFECT rating (factor 2.0), since it had been neutral only under the
+# hardcoded factor. That broke every weight assertion in this file at once.
+_UNANNOTATED = (ANNOTATION_TERM_NEUTRAL,) * 4
 
 
 def _make_proj(op_type: str = "IMPL", input_ops: int = 0,
@@ -23,7 +32,7 @@ def _make_proj(op_type: str = "IMPL", input_ops: int = 0,
     class _G:
         def query(self, cypher, params=None):
             if "RETURN o.op_type" in cypher:
-                rows = [(op_type, 0.0, 1.0, 1.0, 1.0)]
+                rows = [(op_type, *_UNANNOTATED)]
             elif "RETURN count(p)" in cypher:
                 rows = [(input_ops,)]
             elif "abs(coalesce" in cypher:

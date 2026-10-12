@@ -17,16 +17,13 @@ ontology:
     - feature
     - customerSegment
     - market
-    - requirement        # NEW — chain step 5; equivalent to dev:requirement
+    - requirement        # chain step 5; declared ONCE, as an Object kind (#7848)
     - architecture       # NEW — chain step 6; the design/structural artifact
 
   subclassOf:
     feature: WorkItem
     requirement: WorkItem
     architecture: Document
-
-  equivalentTo:
-    requirement: [dev:requirement]
 
   pointKinds:
     - jobToBeDone
@@ -63,7 +60,7 @@ ontology:
       description: "A reusable procedural sequence (core kind; chain step 4)"
       nearMisses: [userJourney]
     requirement:
-      description: "A stated need a feature must satisfy (≡ dev:requirement)"
+      description: "A stated need a feature must satisfy"
       nearMisses: [useCase, feature]
     architecture:
       description: "The design and structural decisions for how a solution is built"

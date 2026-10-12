@@ -65,10 +65,10 @@ from tests.test_commit_schema import _finalize, _point, _raw_payload
 DEV = "dev"
 MARKETING = "marketing"
 
-#: A real kindDef'd kind per pack, so the asserts are about NAMESPACES and not
-#: about a declare-vs-kindDef distinction.
-DEV_POINT = "dev:requirement"
-MARKETING_POINT = "marketing:contentBrief"
+#: A real point kind per pack, so the asserts are about NAMESPACES and not about
+#: a declare-vs-kindDef distinction.
+DEV_POINT = "dev:technicalDebt"
+MARKETING_POINT = "marketing:contentPerformance"
 MARKETING_OBJECT = "marketing:campaign"
 
 #: The #1935 tenant fixture shape (declared objectKind, no kindDef) — the
@@ -314,7 +314,7 @@ class TestCompileVocabGating:
         """Indicator 3 at the write gate.
 
         FAIL-ON: the default vocab stops carrying pack kinds.
-        REACHABLE: `marketing:contentBrief` is a real declared pointKind.
+        REACHABLE: `marketing:contentPerformance` is a real declared pointKind.
         """
         assert MARKETING_POINT in compile_vocab().point_kinds
 
@@ -322,8 +322,8 @@ class TestCompileVocabGating:
         """Indicator 2 at the seam.
 
         FAIL-ON: the point-kinds leg is not filtered.
-        REACHABLE: the marketing pack really declares contentBrief; the dev
-        vocabulary really does not.
+        REACHABLE: the marketing pack really declares contentPerformance; the
+        dev vocabulary really does not.
         """
         vocab = compile_vocab(installed_namespaces={DEV})
         assert DEV_POINT in vocab.point_kinds
@@ -372,9 +372,9 @@ class TestLayer1WriteGate:
         defect the issue exists to kill (here inverted: a dev-only graph
         minting marketing kinds).
         REACHABLE: the payload's point really carries
-        ``marketing:contentBrief``, and that string is really absent from the
-        dev-scoped vocab — so the rejection is caused by the gate, not by an
-        unrelated shape error (the positive control below proves it).
+        ``marketing:contentPerformance``, and that string is really absent from
+        the dev-scoped vocab — so the rejection is caused by the gate, not by
+        an unrelated shape error (the positive control below proves it).
         """
         vocab = compile_vocab(installed_namespaces={DEV})
         result, _payload = self._check(MARKETING_POINT, vocab)
@@ -387,7 +387,7 @@ class TestLayer1WriteGate:
 
         Without this, a rejection could come from anything. FAIL-ON: the gate
         is too wide (rejects an installed kind), or the payload is invalid for
-        an unrelated reason. REACHABLE: `dev:requirement` is a real declared
+        an unrelated reason. REACHABLE: `dev:technicalDebt` is a real declared
         dev pointKind and the payload is the shared valid fixture.
         """
         vocab = compile_vocab(installed_namespaces={DEV})
@@ -590,14 +590,14 @@ class TestGraphInstalledNamespaces:
         The 422 hazard is directional: a kind the PROMPT offers and the write
         gate then REJECTS is an extraction the graph cannot store. A
         namespace-prefix comparison cannot see it (mutation-verified: dropping
-        ``dev:requirement`` from the gate's point leg left a prefix-only
+        ``dev:technicalDebt`` from the gate's point leg left a prefix-only
         version of this test green), so the POINT leg — the one whose value
         the payload's ``pointKind`` is checked against — is pinned BY KIND.
 
         FAIL-ON: any ``pointKinds`` entry the pack manifest declares is
         missing from the prompt, or from the write gate's point leg.
-        REACHABLE: the dev manifest declares three pointKinds
-        (requirement/risk/technicalDebt), all of which the ungated compile
+        REACHABLE: the dev manifest declares two pointKinds
+        (risk/technicalDebt), all of which the ungated compile
         really carries — so both sides have rows, and dropping any one of
         them from the gate reds this test.
 
