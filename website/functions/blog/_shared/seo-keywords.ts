@@ -50,7 +50,15 @@ export function normalizeForMatch(s: string): string {
 /** True when `text` already carries `keyword` (word-boundary, case-insensitive). */
 export function containsKeyword(text: string, keyword: string): boolean {
   if (!keyword) return true;
-  return normalizeForMatch(text).includes(normalizeForMatch(keyword));
+  const needle = normalizeForMatch(keyword);
+  // A keyword that normalises to nothing (punctuation only) carries no term.
+  if (!needle) return true;
+  // WORD-BOUNDARY, not substring (#8293). Normalisation maps every
+  // non-alphanumeric run to a single space, and `needle` is therefore
+  // [a-z0-9 ] only — no regex metacharacters — so matching on `\b` is exact:
+  // "agent memory" matches "agent-memory systems", but NOT "agents memory"
+  // or "xagent memory". The claim is "verbatim", so the check must be too.
+  return new RegExp(`\\b${needle}\\b`).test(normalizeForMatch(text));
 }
 
 /**
@@ -84,6 +92,11 @@ export function ensureKeyword(text: string, keyword: string | null, max: number)
   const room = max - 2; // for ": " plus an ellipsis-free cut
   const cut = candidate.slice(0, room);
   const atWord = cut.slice(0, cut.lastIndexOf(" "));
-  const trimmed = (atWord.length >= keyword.length ? atWord : cut).replace(/[\s:,-]+$/, "");
+  // The strip class includes `|` (#8293): the brand suffix (" | Tortoise") that
+  // `constraints.metaTitle` appends is introduced by `|`, so a cut that lands
+  // inside the suffix used to survive as a dangling " |" — a broken title the
+  // caller then stored verbatim. Every separator the code itself can emit is
+  // stripped, not just the ones the old class happened to list.
+  const trimmed = (atWord.length >= keyword.length ? atWord : cut).replace(/[\s:,|\-]+$/, "");
   return containsKeyword(trimmed, keyword) ? trimmed : keyword;
 }

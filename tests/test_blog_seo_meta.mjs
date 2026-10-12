@@ -17,6 +17,7 @@ import {
   ensureKeyword,
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
+import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 
 let failures = 0;
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -68,6 +69,13 @@ console.log("containsKeyword — a substring is not a word");
   assert(containsKeyword("agent-memory systems", "agent memory"), "punctuation is normalised");
   assert(!containsKeyword("management systems", "agent memory"), "'management' does not match 'agent memory'");
   assert(!containsKeyword("agents memory", "agent memory"), "a plural does not match the singular phrase");
+  // #8293 review: the old implementation was `normalized.includes(normalized)`,
+  // so every one of these three was TRUE — the endpoint reported
+  // `keyword_ok: true` for a title that did not carry the keyword as a term.
+  assert(!containsKeyword("xagent memory", "agent memory"), "a prefixed word is not a match ('xagent')");
+  assert(!containsKeyword("hybrid searches", "hybrid search"), "an inflected word is not a match ('searches' ≠ 'search')");
+  assert(!containsKeyword("paragraph rag", "graph rag"), "'graph rag' inside 'paragraph rag' is not a word match");
+  assert(containsKeyword("knowledge graph rag", "graph rag"), "a real word-boundary match still holds");
   assert(containsKeyword("anything", ""), "an empty keyword is trivially present");
   assertEq(normalizeForMatch("Agent Memory: A Guide!"), "agent memory a guide", "normalisation is lowercase + alnum");
 }
@@ -91,8 +99,18 @@ console.log("ensureKeyword — the primary keyword is guaranteed, within the lim
   // length contract's job (seo-constraints.ts), and the real call site always
   // passes already-constrained text. Asserting the budget on an over-limit input
   // would be asserting a contract this function deliberately does not hold.
-  const inputs = ["", "short", "x".repeat(200), "A long descriptive title about graphs and vectors and memory drift", "agent"]
-    .filter((t) => t.length <= 60);
+  const inputs = [
+    "",
+    "short",
+    "x".repeat(200),
+    "A long descriptive title about graphs and vectors and memory drift",
+    "agent",
+    // #8293 review: within the 60 budget, but long enough that a multi-word
+    // keyword + ": " exceeds it — so the sweep actually ENTERS the truncation /
+    // word-boundary branch instead of taking the `candidate.length <= max`
+    // early return on every combination.
+    "memory systems in production and the long tail of drift",
+  ].filter((t) => t.length <= 60);
   let bad = 0;
   for (const k of kws) {
     for (const max of [60, 155]) {
@@ -111,9 +129,25 @@ console.log("ensureKeyword — the primary keyword is guaranteed, within the lim
   assertEq(ensureKeyword("short", long, 60), long, "an over-long keyword is returned whole, not truncated");
   assertEq(ensureKeyword("short", null, 60), "short", "a null primary leaves the text untouched");
 
-  // No stray separator when the text after the keyword was cut.
+  // No stray separator when the text after the keyword was cut. The class now
+  // includes `|` — the separator the brand suffix itself introduces (#8293).
   const cut = ensureKeyword("x".repeat(300), kw, 155);
-  assert(!/[\s:,\-]$/.test(cut), "the repair never ends on a dangling separator");
+  assert(!/[\s:,|\-]$/.test(cut), "the repair never ends on a dangling separator");
+
+  // The truncation lands INSIDE the brand suffix for a front-loaded title: the
+  // half-suffix must not survive. This is the exact shape the handler produced,
+  // and the old strip class left a bare " |" behind.
+  const dangling = ensureKeyword("Agent Memory in 2026 | Tortoise", "long-term memory for ai agents", 60);
+  assert(!dangling.endsWith("|"), `no dangling '|' survives the cut (got ${JSON.stringify(dangling)})`);
+  assert(!/[\s:,|\-]$/.test(dangling), "the strip class covers '|', the brand-suffix separator");
+  assert(containsKeyword(dangling, "long-term memory for ai agents"), "the dangling-case repair still carries the keyword");
+
+  // The second `enforce` the handler performs must be a no-op on the brand
+  // suffix: `metaTitle` is idempotent (#8293 review). Pre-fix, the second call
+  // returned "… | Tortoise | Tortoise".
+  const once = constraints.metaTitle("A short generated title");
+  assertEq(once, "A short generated title | Tortoise", "metaTitle appends the brand suffix once");
+  assertEq(constraints.metaTitle(once), once, "metaTitle is idempotent under a second enforce");
 }
 
 // ── The limiter the generator now shares (#8293 part a) ───────────────────
@@ -130,6 +164,92 @@ console.log("rateLimited — burst and daily ceilings, isolated per caller");
   rateLimited("agent:c", dayLimit);
   rateLimited("agent:c", dayLimit);
   assertEq(rateLimited("agent:c", dayLimit), true, "the daily ceiling holds independently of the burst window");
+}
+
+// ── The endpoint's enforce → repair → enforce composition (#8293 review) ──
+// The composition is where the doubled suffix and the dangling separator
+// actually shipped, so it is driven for real: the exported `onRequestPost` runs
+// with a stubbed `fetch` for both the agent-key lookup and OpenRouter. A check
+// that exercised only the shared modules (as this harness used to) cannot see
+// the handler's own second `constraints.enforce` pass.
+console.log("generate-seo handler — one brand suffix, no dangling separator, no silent 200");
+{
+  const { onRequestPost } = await import("../website/functions/blog/api/generate-seo.ts");
+
+  const drive = async (metaTitle, metaDescription) => {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes("/rest/v1/blog_agent_keys")) {
+        return Response.json([{ agent_name: "pipeline", active: true }]);
+      }
+      if (u.includes("openrouter.ai")) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                slug: "a-slug",
+                excerpt: "A concrete excerpt that earns the click.",
+                tags: ["agent-memory"],
+                meta_title: metaTitle,
+                meta_description: metaDescription,
+              }),
+            },
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        });
+      }
+      return Response.json({});
+    };
+    const request = new Request("https://tortoise.premiselabs.co/blog/api/generate-seo", {
+      method: "POST",
+      headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "A title", body: "Sentence. ".repeat(40), tags: ["agent-memory"] }),
+    });
+    const res = await onRequestPost({
+      request,
+      env: {
+        SUPABASE_URL: "https://db.test",
+        SUPABASE_SERVICE_ROLE_KEY: "svc",
+        OPENROUTER_API_KEY: "or",
+      },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  // The happy path the new prompt asks for — the model's title already carries
+  // the primary keyword, so the repair is a no-op and the SECOND enforce runs on
+  // an already-suffixed value. Pre-fix this returned the suffix twice.
+  const happy = await drive(
+    "Long-Term Memory for AI Agents in 2026",
+    "Long-term memory for ai agents that remembers why it believes.",
+  );
+  assertEq(happy.status, 200, "an in-budget generated title returns 200");
+  const suffixCount = (happy.body.meta_title.match(/\| Tortoise/g) || []).length;
+  assertEq(suffixCount, 1, `the brand suffix is appended once, not twice (got ${JSON.stringify(happy.body.meta_title)})`);
+  assertEq(happy.body.keyword_ok, true, "keyword_ok is true when the keyword is genuinely present");
+
+  // The repair's truncation can land inside the brand suffix; the fragment must
+  // not survive as a dangling " |".
+  const dangling = await drive(
+    "Agent Memory in 2026",
+    "How agent memory works and why long-term memory for ai agents matters.",
+  );
+  assertEq(dangling.status, 200, "the dangling case still returns 200");
+  assert(
+    !dangling.body.meta_title.endsWith("|"),
+    `no dangling '|' survives (got ${JSON.stringify(dangling.body.meta_title)})`,
+  );
+  assertEq(
+    (dangling.body.meta_title.match(/\| Tortoise/g) || []).length <= 1,
+    true,
+    `no doubled suffix in the dangling case (got ${JSON.stringify(dangling.body.meta_title)})`,
+  );
+
+  // A failed generation must stay a failure: the repair must not invent a
+  // keyword-only title and turn the pre-existing 502 into a 200.
+  const incomplete = await drive("", "");
+  assertEq(incomplete.status, 502, "empty meta fields still answer 502 generation_incomplete");
+  assertEq(incomplete.body.error, "generation_incomplete", "the incompleteness error is named");
 }
 
 console.log("");

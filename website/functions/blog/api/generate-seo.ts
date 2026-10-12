@@ -253,11 +253,21 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // checked. Repair deterministically, then re-enforce so the repair itself
   // cannot exceed the field limits — the repair and the length contract are two
   // different jobs and both must hold.
+  //
+  // An EMPTY field is not repaired (#8293 review): `ensureKeyword("", primary,
+  // max)` returns the bare keyword, which would turn a failed generation into a
+  // 200 carrying a keyword-only title — the `generation_incomplete` 502 below
+  // would stop firing for the meta fields. The repair exists to make a
+  // *generated* title carry the keyword, not to invent one from nothing.
   const repaired = constraints.enforce(
     {
       ...enforced,
-      meta_title: ensureKeyword(enforced.meta_title ?? "", primary, META_TITLE_MAX),
-      meta_description: ensureKeyword(enforced.meta_description ?? "", primary, META_DESCRIPTION_MAX),
+      meta_title: enforced.meta_title
+        ? ensureKeyword(enforced.meta_title, primary, META_TITLE_MAX)
+        : "",
+      meta_description: enforced.meta_description
+        ? ensureKeyword(enforced.meta_description, primary, META_DESCRIPTION_MAX)
+        : "",
     },
     title,
   );
