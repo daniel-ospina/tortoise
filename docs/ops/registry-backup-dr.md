@@ -683,14 +683,12 @@ for `file_alert`/`resolve_global` to own.
   | Field | Meaning |
   |---|---|
   | `total` | number of DROPS since process start |
-  | `sites` | that total split by drop site (`<where>|<subject>`, both code literals) |
+  | `sites` | that total split by drop site (`<where>\|<subject>`, both code literals) |
   | `markers` | distinct bounded key-fingerprints RETAINED |
   | `marker_cap` | the cap they fold into (`hosted_api._TELEMETRY_DROP_MAX_MARKERS`); `markers > marker_cap` means at least one folded into the shared overflow entry, i.e. the count is a floor |
 
-  ```bash
-  curl -s -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
-    -m 20 $API/v1/internal/backups/status | jq .telemetry
-  ```
+      curl -s -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+        -m 20 $API/v1/internal/backups/status | jq .telemetry
 
   ⛔ **The block never carries the dropped key NAMES.** They are
   caller-supplied (the PATCH front door derives them from a request body), so
@@ -699,11 +697,15 @@ for `file_alert`/`resolve_global` to own.
   are legible**, once per `(site, fingerprint)` per process; read the app log
   for the key names and this block for whether/how much is dropping.
 
-  The same counter is also published on `monitoring.metrics()` as
-  `telemetry_drops` — the surface the hosted app actually serves, since it has
-  no `/metrics` route (the MCP `tortoise_health` tool and
-  `monitoring.serve_health` both render it; `tortoise_telemetry_drops_total` is
-  the Prometheus series wherever a scrape exists).
+  The same drops are also published through a second counter,
+  `monitoring.metrics()["telemetry_drops"]` (backed by
+  `monitoring.TELEMETRY_DROP_COUNT` — a distinct object from the
+  `hosted_api._TELEMETRY_DROP_COUNTS` above, but counting the same events; the
+  monitoring leg is best-effort, so a metrics failure can only undercount it).
+  That is the surface the hosted app actually serves, since it has no `/metrics`
+  route (the MCP `tortoise_health` tool and `monitoring.serve_health` both
+  render it; `tortoise_telemetry_drops_total` is the Prometheus series wherever
+  a scrape exists).
 
   **Residual (accepted, stated):** every leg of this counter is per-process —
   it resets on deploy/restart, and there is no durable (AlertStore/R2) record.
