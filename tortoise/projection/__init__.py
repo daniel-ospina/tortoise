@@ -539,10 +539,18 @@ def _is_bulk_wipe(cypher: str) -> bool:
     backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
     a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
     """
+    # Fast path: the overwhelming majority of statements are reads. A DETACH
+    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
+    # statement is not a wipe and the scan below is skipped entirely — the
+    # read path pays no more than it did before #3037.
+    up_raw = cypher.upper()
+    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+        return False
     # The DELETE keyword is read from the masked text (a CALL subquery's
-    # DELETE is still a DELETE); the TARGETING constructs are read from the
-    # text with CALL subqueries blanked, so a brace or WHERE clause that lives
-    # inside a read-subquery cannot exempt a wipe that sits outside it.
+    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
+    # a comment is not a DELETE at all); the TARGETING constructs are read from
+    # the text with CALL subqueries blanked, so a brace or WHERE clause that
+    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
     masked = _mask_cypher_text(cypher)
     up = masked.upper()
     if "DETACH" not in up or "DELETE" not in up:
