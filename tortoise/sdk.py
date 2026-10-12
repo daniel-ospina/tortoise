@@ -68,6 +68,8 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
+from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
@@ -9069,22 +9071,30 @@ class TortoiseSDK:
         ``ValueError`` for a missing point (unless ``missing_ok``, used by
         ``invalidate_point``'s retry-friendly contract — then returns
         ``None``), an operator node, or an already-terminal claim.
+
+        #7822: the verdict is over EVERY node carrying the id, not ``row[0]``.
+        The writer's stamp MATCHes and writes EVERY node with that id (point
+        ids are not unique), so a first-row-only read made the terminal /
+        operator verdict depend on server row order: a live sibling returned
+        first let the operation re-terminalize an already-dead claim and
+        transfer its edges — exactly what #2498 exists to forbid. The scan is
+        the shared ``live.classify_lifecycle_fanout`` (the hosted commit
+        pre-check runs the same statement and the same classifier, so the two
+        cannot disagree).
         """
-        row = self._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) "
-            "RETURN n.is_operator, n.status, coalesce(n.outdated, false)",
-            params={"id": point_id},
+        rows = self._get_proj().g.query(
+            LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
         ).result_set
-        if not row:
+        kind, status, outdated = classify_lifecycle_fanout(rows)
+        if kind == "absent":
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
-        is_op, status, outdated = bool(row[0][0]), row[0][1], bool(row[0][2])
-        if is_op:
+        if kind == "operator":
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
                 f"statement points")
-        if is_terminal_status(status, outdated):
+        if kind == "terminal":
             marker = ("outdated" if outdated
                       and status not in TERMINAL_EXCLUDED_STATUSES
                       else (status or "live"))
@@ -9700,17 +9710,30 @@ class TortoiseSDK:
         # never the FalkorDB internal ID (internal ids die at rebuild).
         from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
-        # Successor internal node id — runtime-only (never journaled). The 2b
+        # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
-        # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
-        # it the MERGE below mints a phantom (new)-[:rel]->(new) self-edge when
-        # old's edge terminates at the successor (cycle-26 class — e.g. old
-        # X-[:aboutPoint]->Y live, supersede(X->Y)).
+        # EVERY successor node (mirror 2a-DIRECT's tid==new_id guard at ~4407):
+        # without it the MERGE below mints a phantom (new)-[:rel]->(new)
+        # self-edge when old's edge terminates at a successor (cycle-26 class —
+        # e.g. old X-[:aboutPoint]->Y live, supersede(X->Y)).
+        #
+        # #7822: the whole fan-out, not ``succ_rows[0][0]``. Point ids are not
+        # unique, so the successor is not one node: the MERGE below binds EVERY
+        # node carrying ``new_id`` and a first-row-only scalar protected only
+        # the row the server happened to return first, minting the phantom at
+        # the LATER successor nodes — the verdict was server-row-order
+        # dependent.
         succ_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN ID(n)",
             params={"id": new_id},
         ).result_set
-        succ_internal = succ_rows[0][0] if succ_rows else None
+        succ_internals = {row[0] for row in succ_rows}
+        # #7822: the delete-only descriptor keys its replay delete-leg on the
+        # LOGICAL successor id and the replay deletes EVERY (old)-[rel]->(t)
+        # edge, so ONE descriptor per rel covers every successor node the
+        # fan-out matched. Emitting one per matching node would journal N
+        # identical descriptors for the same operation.
+        emitted_self_deletes: set = set()
         for rel in structural_rels:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
@@ -9725,8 +9748,7 @@ class TortoiseSDK:
                 # replay key (name / coalesce(title,name) / url) at emission.
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
-                if (succ_internal is not None
-                        and target_graph_id == succ_internal):
+                if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
                     # transfer would MERGE the phantom (new)-[:rel]->(new)). For
@@ -9738,7 +9760,8 @@ class TortoiseSDK:
                     # Non-derivable rels emit NOTHING (never snapshot-recreated;
                     # a delete_only descriptor would journal a permanent no-op
                     # delete-leg for a family this fix does not own).
-                    if derivable:
+                    if derivable and rel not in emitted_self_deletes:
+                        emitted_self_deletes.add(rel)
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:self",
@@ -10077,12 +10100,17 @@ class TortoiseSDK:
         if (point.get("temporal_candidate")
                 and point.get("temporal_reviewed") == "merge"):
             for tgt in temporal_targets:
-                trow = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": tgt},
+                # #7822: the SAME fan-out statement the lifecycle guard runs,
+                # classified over EVERY node carrying the target id. The
+                # pre-#7822 probe read ``trow[0]``: on a duplicate target id
+                # a live sibling returned first let this path NAND-wire (or
+                # hand to ``supersede_point``) a target the guard refuses on
+                # its terminal sibling — and the verdict depended on server
+                # row order. A target is live only when NO sibling is dead.
+                trows = proj.g.query(
+                    LIFECYCLE_FANOUT_QUERY, params={"id": tgt},
                 ).result_set
-                if not trow:
+                if not trows:
                     # MISSING node (stale target) — distinct from an unset
                     # status node, which is live by the canonical read model
                     # (#1080 round-2 review: missing targets crashed the
@@ -10091,16 +10119,17 @@ class TortoiseSDK:
                         "promote_point: temporal target %s for %s no longer "
                         "exists — skipping the wire", tgt, point_id)
                     continue
-                tstatus = trow[0][0] or "live"
-                # #2498: the SHARED terminal predicate — a flag-outdated
-                # target is terminal too, so it must not be NAND-wired or
-                # (temporal_replacement) sent to supersede_point.
-                if not is_terminal_status(tstatus, bool(trow[0][1])):
+                dead = sorted(
+                    ((r[1], bool(r[2])) for r in trows
+                     if is_terminal_status(r[1], bool(r[2]))),
+                    key=lambda s: (str(s[0] or ""), s[1]))
+                if not dead:
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
-                        "skipping the wire", tgt, point_id, tstatus)
+                        "skipping the wire", tgt, point_id,
+                        dead[0][0] or "live")
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:

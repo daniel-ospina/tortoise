@@ -14970,19 +14970,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # INVERTED window still 422s — that is a correctable payload
             # error (the client fixes the window and retries), not a wedge,
             # and the two are deliberately not conflated.
+            from .live import LIFECYCLE_FANOUT_QUERY as _FANOUT_QUERY
+            from .live import classify_lifecycle_fanout as _classify_fanout
             from .live import is_terminal_status as _is_terminal_status
 
             def _terminal_state(point_id: str) -> tuple | None:
                 """The terminal state of ``point_id``, or ``None``.
 
-                The query is deliberately the SAME STATEMENT
-                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
-                same three projected columns in the same order, same
-                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                The query is the SHARED ``live.LIFECYCLE_FANOUT_QUERY`` — the
+                same statement ``sdk._assert_lifecycle_guard`` runs — and the
+                verdict is the same ``live.classify_lifecycle_fanout`` scan,
+                so the two cannot disagree (#7822). A differently-shaped or
                 first-row-only probe could select a DIFFERENT node than the
                 write's own guard: point ids are not unique and row order is
                 server-dependent, and that divergence would either resurrect
-                this bug or silently drop a legitimate supersede.
+                this bug or silently drop a legitimate supersede. Since #7822
+                the guard refuses when ANY node carrying the id is terminal,
+                so this pre-check must report terminal on the same condition —
+                otherwise the mixed duplicate id would 500-wedge again, which
+                is exactly what #3366 exists to prevent.
 
                 ``None`` means "not terminal, or not a statement point": an
                 ``is_operator`` prior is corruption, not a benign replay, so
@@ -14991,13 +14997,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 missing-point path is unchanged.
                 """
                 rows = sdk._get_proj().g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "RETURN n.is_operator, n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": point_id}).result_set
-                if not rows or bool(rows[0][0]):
-                    return None
-                return (rows[0][1], bool(rows[0][2]))
+                    _FANOUT_QUERY, params={"id": point_id}).result_set
+                kind, status, outdated = _classify_fanout(rows)
+                if kind == "terminal":
+                    return (status, outdated)
+                return None
 
             # #3366: the pre-check's mechanism is documented ONCE, on
             # ``_terminal_state`` above — including the LOCKSTEP requirement
