@@ -1,11 +1,9 @@
 # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
 #
-# The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by
-# `tools/surface_manifest.py::read_approval`; the committed copy is still
-# `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,
-# whose per-row `approval` rule fires on `approved`. A follow-up PR (#8144) flips it
-# once the new guard is on main; do not hand-edit the four values — re-cut (the cut
-# copies the doc).
+# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by
+# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.
+# Do not hand-edit the four values: `check` compares them against the document, so a
+# hand-edit that disagrees reds the lint. Edit the document, then re-cut.
 #
 # `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and
 # `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a
@@ -27,10 +25,10 @@ cut_at_commit: 4d11a7b40f8c1dbb5d099acc4b54e09324af5452
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
-approval_status: pending-owner-approval
-approval_principal: null
-approval_pr: null
-approval_date: null
+approval_status: approved
+approval_principal: daniel-ospina
+approval_pr: '4120'
+approval_date: '2026-09-18'
 # Response FIELDS are outside the frozen surface — the freeze is on tools and
 # endpoints — but each one is recorded here so this manifest stays the single
 # source of truth for what we tell agents we return. A field that is off by

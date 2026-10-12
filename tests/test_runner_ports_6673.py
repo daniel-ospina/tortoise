@@ -546,6 +546,16 @@ def test_action_inputs_are_declared():
 STUB_DOCKER = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$DOCKER_CALLS"
 case "$1" in
+  image) exit "${FAKE_IMAGE_RC:-0}" ;;
+  pull)  if [ -n "${FAKE_PULL_ONLY_LAST:-}" ]; then
+           # The pattern list is written IN SOURCE on purpose: bash does not
+           # re-parse a `|` that arrives via a variable expansion, so a pattern
+           # injected through the environment silently matches nothing.
+           case "$2" in
+             mirror.gcr.io/*|ghcr.io/*) echo "Error response from daemon: pull access denied" >&2; exit 1 ;;
+           esac
+         fi
+         exit "${FAKE_PULL_RC:-0}" ;;
   run)  if [ "${FAKE_RUN:-ok}" = "fail" ]; then
           echo "Error response from daemon: pull access denied" >&2; exit 125
         fi
@@ -563,7 +573,11 @@ exit 0
 def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
                    uri_graph: str = "tortoise_test_matrix",
                    ping: str = "PONG", health_timeout: str = "1",
-                   fake_run: str = "ok", fake_port: str = ""
+                   fake_run: str = "ok", fake_port: str = "",
+                   fake_image_rc: str = "0", fake_pull_rc: str = "0",
+                   fake_pull_only_last: str = "",
+                   image: str = "falkordb/falkordb-server:v4.20.6",
+                   repo_owner: str = ""
                    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -583,12 +597,16 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
         "GITHUB_RUN_ID": run_id,
         "GITHUB_JOB": "test",
         "GITHUB_RUN_ATTEMPT": "1",
-        "FALKORDB_IMAGE": "falkordb/falkordb-server:v4.20.6",
+        "FALKORDB_IMAGE": image,
+        "GITHUB_REPOSITORY_OWNER": repo_owner,
         "FALKORDB_LEGACY": legacy,
         "FALKORDB_URI_GRAPH": uri_graph,
         "FAKE_PING": ping,
         "FAKE_RUN": fake_run,
         "FAKE_PORT": fake_port,
+        "FAKE_IMAGE_RC": fake_image_rc,
+        "FAKE_PULL_RC": fake_pull_rc,
+        "FAKE_PULL_ONLY_LAST": fake_pull_only_last,
         "FALKORDB_HEALTH_TIMEOUT": health_timeout,
     }
     proc = subprocess.run(
@@ -613,6 +631,74 @@ def test_provision_exports_exactly_the_assigned_ports(tmp_path):
             "tortoise_test_matrix") in lines, lines
     assert len([ln for ln in lines if ln.startswith("TORTOISE_CI_FALKORDB_LABEL=")]) == 1
     assert proc.stderr, "the progress log belongs on stderr"
+
+
+def test_resolver_tries_mirror_then_ghcr_then_docker_hub_last(tmp_path):
+    """#7867: a cold runner must resolve through mirror.gcr.io -> GHCR -> the
+    Docker Hub reference AS GIVEN. The upstream tier is the point: the job must
+    degrade to today's behaviour rather than fail closed on a missing mirror."""
+    proc, genv, calls = _run_provision(
+        tmp_path, fake_image_rc="1",
+        fake_pull_only_last="1",
+    )
+    assert proc.returncode == 0, proc.stderr
+    pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
+    assert len(pulls) == 3, pulls
+    assert pulls[0] == "pull mirror.gcr.io/falkordb/falkordb-server:v4.20.6", pulls
+    assert pulls[1] == "pull ghcr.io/daniel-ospina/falkordb-server:v4.20.6", pulls
+    assert pulls[2] == "pull falkordb/falkordb-server:v4.20.6", pulls
+    assert "pulled falkordb/falkordb-server:v4.20.6" in proc.stderr
+    assert "TORTOISE_TEST_DOCKER_PORT=32768" in genv.read_text().splitlines()
+
+
+def test_warm_image_short_circuits_every_pull(tmp_path):
+    """The whole defect is a quota on PULLS: a runner that already has the image
+    (across ANY candidate) must not touch the network at all."""
+    proc, _genv, calls = _run_provision(tmp_path)  # FAKE_IMAGE_RC defaults to warm
+    assert proc.returncode == 0, proc.stderr
+    invoked = calls.read_text()
+    assert "pull" not in invoked, invoked
+    assert "already present locally" in proc.stderr
+
+
+def test_resolver_fails_closed_and_attributably_when_every_tier_is_dark(tmp_path):
+    """Full exhaustion must name what it tried on stdout as a workflow command and
+    start NO container — an un-attributable failure is exactly what #7867 is about."""
+    proc, _genv, calls = _run_provision(tmp_path, fake_image_rc="1", fake_pull_rc="1")
+    assert proc.returncode == 1, proc.stdout
+    assert proc.stdout.startswith("::error::"), proc.stdout
+    assert "could not obtain" in proc.stdout
+    assert "mirror.gcr.io/falkordb/falkordb-server:v4.20.6" in proc.stdout
+    invoked = calls.read_text()
+    assert not [ln for ln in invoked.splitlines() if ln.startswith("run ")], invoked
+
+
+def test_slashless_reference_still_resolves_through_every_tier(tmp_path):
+    """Docker's own rule treats a first path component as a registry host only
+    when a `/` separates it, so `redis:7` is Docker Hub `redis`, tag `7`.
+    Without the slash test the reference is misread as already-qualified and the
+    mirror tiers are skipped — which is what mutating that guard produces."""
+    proc, _genv, calls = _run_provision(
+        tmp_path, image="redis:7", fake_image_rc="1", fake_pull_only_last="1",
+    )
+    assert proc.returncode == 0, proc.stderr
+    pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
+    assert len(pulls) == 3, pulls
+    assert pulls[0] == "pull mirror.gcr.io/redis:7", pulls
+    assert pulls[1] == "pull ghcr.io/daniel-ospina/redis:7", pulls
+    assert pulls[2] == "pull redis:7", pulls
+
+
+def test_ghcr_candidate_derives_a_lowercased_owner(tmp_path):
+    """The mirror pushes under `github.repository_owner` and this resolver derives
+    its own path: if the two diverge the durable GHCR home silently never serves.
+    GHCR also rejects an uppercase path, so the derivation must lowercase."""
+    proc, _genv, calls = _run_provision(
+        tmp_path, repo_owner="Some-Org", fake_image_rc="1", fake_pull_only_last="1",
+    )
+    assert proc.returncode == 0, proc.stderr
+    pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
+    assert pulls[1] == "pull ghcr.io/some-org/falkordb-server:v4.20.6", pulls
 
 
 def test_provision_omits_the_legacy_port_and_uri_when_not_asked(tmp_path):

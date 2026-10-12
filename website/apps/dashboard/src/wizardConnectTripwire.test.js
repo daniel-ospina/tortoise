@@ -1725,7 +1725,11 @@ test('#3783: the API Keys table names the auto-provisioned key instead of render
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.match(src, /\{keyDisplayName\(k\) \? keyDisplayName\(k\) : <span className="dim">—<\/span>\}/,
     'the keys table resolves a display name before falling back to the dash')
-  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
+  // #4371: the name list is OPEN (`[^}]*keyDisplayName[^}]*`) — the pin's
+  // claim is "the display-name helper is imported from the pure module", and a
+  // later legitimate import from the same module (e.g. the row-truth rule) must
+  // not turn it red. The specifier and the name are both still required.
+  assert.match(src, /import \{[^}]*\bkeyDisplayName\b[^}]*\} from '\.\/sessionKey\.js'/,
     'the display-name helper is imported from the pure module')
 })
 

@@ -868,6 +868,11 @@ surfaces:
   - test_battery_token_relock.py
   - test_battery_validation_real.py
   - test_battery_write_channel.py
+  # #4520: DUAL-REGISTERED with `core` (and `sdk`) for the same reason as
+  # #3065's bounded-socket guard: the store-integrity probe and the seam it
+  # exercises live in `battery/runner/retrieval_preflight.py` and the writers
+  # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
+  - test_vector_write_seam_4520.py
   core:
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
@@ -1213,6 +1218,7 @@ surfaces:
   - test_bounded_raw_clients_3065.py
   - test_boot_regressions.py
   - test_collision_preflight.py
+  - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
   # #4290: the finding-provenance gate — a finding must name the tree it was
   # measured against, and a stale measurement fails (ancestry, not equality).
@@ -2557,6 +2563,11 @@ surfaces:
   sdk:
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
+  # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
+  # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must
+  # run the seam/probe test.
+  - test_vector_write_seam_4520.py
   # #7856: the goal-STATE axis — the closed, validated `goalState` vocabulary
   # (the objective map's achievement state, separate from `status`) and the
   # born-live default for goal-kind Points (a target-only draft goal is

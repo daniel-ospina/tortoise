@@ -33,6 +33,10 @@ sys.path.insert(0, _REPO_ROOT)
 from tools.ask_spotcheck import _seed_memory  # noqa: E402
 from tortoise.embeddings import compute_embeddings  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.vector_write import (  # noqa: E402  # #4520: the ONE write seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 FIXTURE = os.path.join(_REPO_ROOT, "tests", "fixtures",
                        "ask_spotcheck_composition.json")
@@ -71,8 +75,15 @@ def _attach_dense_vectors(sdk) -> dict:
     for pid, vec in zip(ids, vecs, strict=True):
         if vec is None:
             continue
+        # #4520: route through the shared clear-then-set seam. Today this
+        # writes onto nodes the seeder left `embed=False` (a first write, not
+        # an overwrite), so the bare form happens to land — but a re-run of
+        # this diagnostic against an already-dense store, or a future seeder
+        # defaulting to `embed=True`, would silently keep the PREVIOUS vector
+        # on the embedded engine. The seam makes the write land either way.
         sdk._get_proj().g.query(
-            "MATCH (p:Point {id:$id}) SET p.embedding = vecf32($e)",
+            "MATCH (p:Point {id:$id}) " + clear_then_set_prefix("p", "$e")
+            + "SET " + set_embedding_clause("p", "$e"),
             params={"id": pid, "e": vec})
         written += 1
     return {"turn_points": len(ids), "vectors_written": written}

@@ -3,8 +3,11 @@
 // The defect: when the server resolved no checkout price id, the three
 // dashboard billing CTAs in #4335's scope silently rendered a marketing link
 // ("See pricing"). A buyer was routed to a brochure instead of being told
-// checkout was unavailable. (Two further live CTAs no-op silently — #4386 —
-// and the header tier badge is #4331; neither is this change's scope.)
+// checkout was unavailable. (The header tier badge is #4331; the error-banner
+// arm of the pair #4386 was filed for turned out to be ALREADY gated —
+// #4639's `nudgeRoute` returns 'checkout' only with a server price id, pinned
+// in upsellGate.test.js — so #4386's live site was the Graphs-tab lock line,
+// tested at the bottom of this file.)
 //
 // These import and RUN checkoutCtaFor (./billingCta.js), so a behaviour-
 // identical reformat cannot flip them. The "must not be a link" property is
@@ -22,6 +25,7 @@ import {
   checkoutCtaFor,
   nextUpgradeTier,
 } from './billingCta.js'
+import { nextUpgradePlan } from './nodeUsage.js'
 import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -148,4 +152,95 @@ test('#4335 (wiring backstop): the fallbacks render the disabled CTA, never "See
     'the $0 plan card must not render the outage CTA')
   assert.match(code, />Compare plans<\/a>/,
     'the secondary pricing link must be explicitly labelled "Compare plans"')
+})
+
+// ── #4386: the Graphs-tab lock line's CTA ────────────────────────────────
+// Re-measured on this branch: of the two sites #4386 lists, the error-banner
+// arm is already safe (#4639 gates it on `nudgeRoute(team) === 'checkout'`,
+// which is unreachable without `team.checkout_price_id` — pinned in
+// upsellGate.test.js), so the LIVE dead click was the Graphs-tab lock line:
+// `<button className="ghost" onClick={upgrade}>` — enabled, and wired to
+// `upgradeToPrice(team.checkout_price_id)` whose `if (!priceId) return` made
+// it do nothing, silently.
+const PLANS = [
+  { tier: 'free' }, { tier: 'solo' }, { tier: 'pro' }, { tier: 'team' },
+]
+
+test('#4386: a caller-supplied label is honoured in BOTH states (never a link)', () => {
+  const enabled = checkoutCtaFor('price_200proMM', { label: 'Upgrade to add more.' })
+  assert.equal(enabled.label, 'Upgrade to add more.')
+  assert.equal(enabled.disabled, false)
+  assert.equal(enabled.reason, '')
+  assert.equal(enabled.href, null)
+  const disabled = checkoutCtaFor('', { label: 'Upgrade to add more.' })
+  assert.equal(disabled.label, 'Upgrade to add more.',
+    'the DISABLED control must say what the enabled one would have said')
+  assert.equal(disabled.disabled, true)
+  assert.equal(disabled.reason, CHECKOUT_UNAVAILABLE_REASON)
+  assert.equal(disabled.href, null, 'unavailable is still NOT a marketing link')
+  // The default is untouched, so every pre-#4386 site is behaviour-identical.
+  assert.equal(checkoutCtaFor('price_x').label, 'Upgrade')
+  assert.equal(checkoutCtaFor('').label, 'Upgrade')
+})
+
+test('#4386: a free/anon team on a PARTIAL catalog gets a real checkout, not a dead click', () => {
+  // The second half of the defect: a solo-only deployment (a supported partial
+  // catalog, #2789) resolves NO pro-default price id, so the old target — the
+  // pro default — had nothing to sell while solo WAS purchasable.
+  const team = { tier: 'free', checkout_price_ids: { solo: 'price_solo' } }
+  assert.equal(team.checkout_price_id, undefined)
+  assert.equal(checkoutCtaFor(team.checkout_price_id).disabled, true,
+    'the old pro-default target is a control with no checkout behind it')
+  const target = nextUpgradePlan(PLANS, team)
+  assert.equal(target.tier, 'solo', 'the next purchasable plan is solo, not the pro default')
+  const priceId = team.checkout_price_ids[target.tier]
+  const cta = checkoutCtaFor(priceId)
+  assert.equal(cta.disabled, false, 'the next purchasable plan IS a real checkout')
+  assert.equal(cta.priceId, 'price_solo')
+  // anon is the internal free tier and must behave identically.
+  assert.equal(
+    nextUpgradePlan(PLANS, { tier: 'anon', checkout_price_ids: { solo: 'price_solo' } }).tier,
+    'solo')
+})
+
+test('#4386: no purchasable tier at all → the DISABLED control with the outage reason', () => {
+  const team = { tier: 'free', checkout_price_ids: {} }
+  assert.equal(nextUpgradePlan(PLANS, team), null)
+  const cta = checkoutCtaFor(team.checkout_price_id || '', {
+    anyConfigured: Object.keys(team.checkout_price_ids).length > 0,
+    label: 'Upgrade to add more.',
+  })
+  assert.equal(cta.disabled, true)
+  assert.equal(cta.reason, CHECKOUT_UNAVAILABLE_REASON)
+})
+
+test('#4386 (wiring backstop): the lock line renders the honest control, and the choke point fails loud', () => {
+  const code = stripComments(readFileSync(join(here, 'main.jsx'), 'utf8'))
+  const start = code.indexOf('🔒 Your plan includes')
+  assert.notEqual(start, -1, 'the Graphs lock line must exist')
+  const end = code.indexOf('{LIMIT_CONTACT}', start)
+  assert.notEqual(end, -1, 'the lock line must keep its contact route')
+  const region = code.slice(start, end)
+  assert.match(region, /<UpgradeCta/, 'the lock-line CTA must render through UpgradeCta')
+  assert.doesNotMatch(region, /onClick=\{upgrade\}/,
+    'the raw upgrade() handler (the silent no-op) must be gone')
+  assert.doesNotMatch(region, /<button/,
+    'the lock-line CTA must be the shared control, never a hand-rolled button')
+  assert.match(region, /label="Upgrade to add more\."/, 'the lock line keeps its copy')
+  assert.match(region, /anyConfigured=\{Object\.keys\(team\?\.checkout_price_ids \|\| \{\}\)\.length > 0\}/,
+    'the outage-vs-not-offered reason must come from the server catalog')
+  // The target is the next PURCHASABLE plan — a derivation, not a raw id.
+  assert.match(code, /const graphUpgrade = nextUpgradePlan\(planOptions\(\), team\)/,
+    'the lock line must derive its target from the next purchasable plan')
+  assert.match(code, /const graphUpgradePriceId = graphUpgrade/,
+    'the plan must be resolved to a server price id before it reaches the control')
+  // The choke point: a missing price id fails LOUD instead of returning
+  // silently (the class-wide backstop — a future site that forgets the gate).
+  const at = code.indexOf('async function upgradeToPrice(priceId) {')
+  assert.notEqual(at, -1, 'upgradeToPrice must exist')
+  const head = code.slice(at, code.indexOf('setCheckoutPending(true)', at))
+  assert.match(head, /if \(!priceId\) \{/, 'a missing price id must not fall through silently')
+  assert.match(head, /setError\(CHECKOUT_UNAVAILABLE_REASON\)/,
+    'the would-be no-op must surface the honest reason')
+  assert.match(head, /if \(checkoutPending\) return/, 'the double-click guard must survive')
 })

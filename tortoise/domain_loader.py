@@ -42,11 +42,20 @@ from .pack_registry import (
 
 log = logging.getLogger(__name__)
 
-# Base known kinds (ONTOLOGY §12).
+# Base known kinds (ONTOLOGY §5).
+#
+# NOTE (#7848): the flat registry carries names a pack may declare on ANOTHER
+# axis (`workflow`/`issue` are objectKinds, `incident` an object kind).
+# `known_kinds('pointKind')` folds the whole set into the point bucket, so each
+# of those is a pre-existing cross-axis overlap (`milestone` is NOT one — #2767
+# subtracts it via `_POINT_KINDS_REMOVED`). Reconciling the rest is #2786's
+# cross-layer work; `requirement` is NOT left in that overlap: the #7848 owner
+# ruling makes it an Object kind, so it is removed here or the write gate would
+# keep accepting a point spelling the ruling retired.
 _BASE_KINDS: set[str] = {
     "statement", "decision", "vision", "strategy",
     "plan", "goal", "target", "observation", "hypothesis",
-    "jobToBeDone", "useCase", "userJourney", "workflow", "requirement", "issue",
+    "jobToBeDone", "useCase", "userJourney", "workflow", "issue",
     # Event kinds
     "session", "meeting", "milestone", "incident",
     # #531: human approval — event kind + decision point kind (approval pattern)
@@ -197,20 +206,29 @@ def _check_bucket(bucket: str) -> None:
 # kind — a milestone is *reached* at a moment. It is therefore removed from the
 # legacy flat point registry.
 #
-# This is the ONLY name the ruling moved, and it is defined ONCE here because two
-# call sites depend on it (`known_kinds` and `domain_kinds`) and they must not
-# diverge. The generic form, `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]`,
+# #7848 (owner ruling, 2026-10-10): `requirement` is an OBJECT kind, declared once
+# by product-strategy. It is removed here too, which is what makes the point
+# bucket's verdict load-order independent: a LEGACY domain manifest may still
+# list it in `kind_values`, and `load_manifest` feeds those straight into
+# `register_kind` → `_BASE_KINDS`, so without this subtraction the write gate
+# would accept (or warn on) a point spelling the ruling retired once the router
+# or the orchestrator had loaded the manifest.
+#
+# These are the ONLY names an owner ruling moved, and they are defined ONCE here
+# because two call sites depend on them (`known_kinds` and `domain_kinds`) and
+# they must not diverge. The generic form, `_BASE_KINDS - _CORE_KINDS_BY_BUCKET["eventKind"]`,
 # does NOT merely drop `milestone`: measured, it also removes `meeting` (both names
 # sit in _BASE_KINDS and in CANONICAL_EVENT_KINDS). That is a hard-block behaviour
-# change on the hosted write path — `known_kinds("pointKind")` is the validator at
-# hosted_api.py:6575, so `CreatePointRequest(kind="meeting")` would start raising.
+# change on the hosted write path — `known_kinds("pointKind")` is the validator
+# `hosted_api.py::valid_kind`, so `CreatePointRequest(kind="meeting")` would
+# start raising.
 # The `meeting` removal was never ruled on by #2767 and needs its own issue; it
 # must not ride in on this one.
-_POINT_KINDS_REMOVED = frozenset({"milestone"})
+_POINT_KINDS_REMOVED = frozenset({"milestone", "requirement"})
 
 
 def _legacy_point_kinds() -> set[str]:
-    """The legacy flat registry, minus the kinds the #2767 ruling moved.
+    """The legacy flat registry, minus the kinds an owner ruling moved.
 
     ONE definition for both consumers — `known_kinds('pointKind')` (the hosted
     write validator) and `domain_kinds(...'pointKind')` (the extractor prompt).
@@ -226,8 +244,8 @@ def known_kinds(bucket: str | None = None) -> set[str]:
     No arg (legacy): base + registered + every loaded pack's kinds (bare
     names) — the compiled pack vocabulary, flat.
     With a bucket: kinds for that bucket only (canonical core + pack kinds;
-    pointKind also includes the legacy base registry, minus the core EVENT kinds
-    the #2767 ruling moved, so existing document-domain warnings don't change).
+    pointKind also includes the legacy base registry, minus the names an owner
+    ruling moved, so existing document-domain warnings don't change).
     """
     if bucket is None:
         pack_kinds: set[str] = set()
@@ -289,12 +307,13 @@ def domain_kinds(domain: str, bucket: str) -> list[str]:
             result.append(k)
             seen.add(k)
     if bucket == "pointKind":
-        # Legacy flat registry (workflow/requirement/issue/...) — kept so the
-        # old document-domain vocabulary stays visible to the prompt, minus the
-        # one kind the #2767 ruling moved. Deliberately the SAME set as
+        # Legacy flat registry (workflow/issue/...) — kept so the old
+        # document-domain vocabulary stays visible to the prompt, minus the
+        # kinds an owner ruling moved. Deliberately the SAME set as
         # known_kinds(), from the one definition: these two paths diverged once
         # (this loop kept the generic subtraction and went on dropping
         # `meeting` after known_kinds had been scoped).
+        # `requirement` is NOT here: #7848 ruled it an Object kind.
         for k in sorted(_legacy_point_kinds()):
             if k not in seen:
                 result.append(k)

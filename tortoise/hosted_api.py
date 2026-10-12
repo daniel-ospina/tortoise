@@ -14511,17 +14511,64 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
     # non-episodic quota/budget discriminator). ──
+    #
+    # #4704 — THESE THREE ARE APPLIED EXACTLY ONCE PER LOGICAL PAYLOAD, and
+    # the guard is the :CommitRecord, inside THIS statement (never a
+    # read-then-write). They are the ONLY non-idempotent writes in the phase
+    # (every later step is MERGE-keyed), and the phase is RE-RUN BY DESIGN: a
+    # failure at a later step surfaces as the fail-closed 500 whose contract
+    # is "retry with the same client_commit_id", and L1 does not replay a
+    # `partial` record — so the retry re-enters HERE. Unguarded, that applied
+    # `commit_count +1` and `value_nodes_created + net_new` a second time for
+    # one payload, and `value_nodes_created` is the budget numerator
+    # `adjudicate_budget` reads as `prior_created`: the session's remaining
+    # budget was understated for every LATER commit, so a payload the true
+    # spend would have written is HELD at the >25 band instead, and once that
+    # inflated numerator crosses 50 the client's re-submission of it 402s.
+    #
+    # `r.value_nodes_declared` IS the stamp: NULL ⇒ this payload has not
+    # declared its value-node contribution on the Session yet; an int ⇒ it
+    # has, and that int is what it declared. The stamp and the arithmetic are
+    # one statement, so they cannot half-apply (a crash leaves both or
+    # neither). `write_ops_billed` is the SAME shape for the billing half
+    # (PL4: "billed exactly once"); this is that contract for the counter
+    # half. The numerator itself stays on the Session (§4.1 division of
+    # labour) — the record only remembers what IT declared, which is what
+    # stops a retry from declaring again (`plan_commit` reads the stamp back
+    # to adjudicate the retry against the payload's TOTAL, not the remainder).
+    #
+    # `collect(r)` collapses the record match to ONE row: a plain join would
+    # evaluate the guard once PER row and apply the counters once per duplicate
+    # record. With NO record at all (the direct callers of this helper — the
+    # supersession/binding/span tests) `recs` is `[null]`, `pending` is true (a
+    # null property IS NULL) and the counters apply exactly as before: nothing
+    # is stamped, because exactly-once needs a logical-payload identity and a
+    # caller with no record has none. `IS NULL` — not truthiness — is the test,
+    # so a merge-only payload's `0` is a real declaration and still guards
+    # `commit_count`/`draft_count`. The FOREACH is a LATER clause than the SET,
+    # so `pending` reads the pre-statement stamp.
     drafts = sum(1 for pr in reconcile.points
                  if pr.action in ("new", "supersede")
                  and pr.point.status == "draft")
     proj.g.query(
+        "OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "WITH collect(r) AS recs "
+        "WITH recs, all(x IN recs WHERE x.value_nodes_declared IS NULL) "
+        "     AS pending "
         "MERGE (s:Session {id:$sid}) "
         "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
-        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
-        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
-        "    s.updated_at=$now",
-        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + "
+        "        (CASE WHEN pending THEN $created ELSE 0 END), "
+        "    s.draft_count = coalesce(s.draft_count, 0) + "
+        "        (CASE WHEN pending THEN $drafts ELSE 0 END), "
+        "    s.commit_count = coalesce(s.commit_count, 0) + "
+        "        (CASE WHEN pending THEN 1 ELSE 0 END), "
+        "    s.updated_at=$now "
+        "FOREACH (x IN [y IN recs WHERE y IS NOT NULL AND "
+        "               y.value_nodes_declared IS NULL] | "
+        "         SET x.value_nodes_declared = $created)",
+        params={"cid": payload.client_commit_id, "sid": session_id,
+                "now": now, "created": reconcile.net_new,
                 "drafts": drafts},
     )
 
@@ -19145,10 +19192,41 @@ async def invite_info(token: str):
     def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
         reg = sdk._get_registry()
+        # #4588: the expiry predicate is part of the QUERY, not only the
+        # caller's post-check, because THIS route is unauthenticated and the
+        # per-row cost is a full PBKDF2 (100k iterations, `hash_api_key`).
+        # Without the prune, every expired-but-not-yet-swept ``Invitation``
+        # node was materialised and hashed for ANY attacker-supplied token —
+        # an amplification the caller drives at will. The bound is now the
+        # number of LIVE invites. Nothing but accept, revoke, the admin
+        # ``expire_invite`` and the clock sweep writes a terminal ``status``
+        # (#1890), so an invite that expires by the clock alone sat at
+        # 'pending' — scanned on every request — until a sweep ran.
+        #
+        # Stored form: both writers (``invite_to_org`` above and
+        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
+        # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
+        # STRING — so the comparison is the same lexicographic ISO compare the
+        # sibling registry predicates use (the #1890 dup-check below,
+        # ``list_pending_invites_for_me``, ``_get_current_org``'s API-key
+        # lanes). Legacy nodes have no ``expires_at`` prop → NULL → the
+        # ``IS NULL`` arm keeps them (Never-expires), never silently dropped.
+        #
+        # No indexed ``lookup_hash`` equality is available on this lane: the
+        # registry stores only ``token_hash`` in the salted ``salt:hash``
+        # PBKDF2 form, so the per-row verify is unavoidable and the expiry
+        # prune is the ceiling. A ``LIMIT``/cap was considered and REJECTED —
+        # it would silently stop resolving valid invites past the cap, turning
+        # an amplification into a correctness failure on the accept path.
+        # The caller's post-match expiry check below stays as the authority
+        # (defence in depth): the predicate only prunes, it never decides.
+        now_iso = datetime.now(UTC).isoformat()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN i.id, i.org_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
+            params={"now": now_iso},
         ).result_set
         for iid, tid, role, ie, exp, th in rows:  # noqa: B007
             if _verify(token, th):

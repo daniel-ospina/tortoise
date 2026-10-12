@@ -1,0 +1,91 @@
+name: mirror-images
+
+# #7867: python-ci pulls its container images from Docker Hub, where ANONYMOUS
+# pulls are limited to 100 / 3600 s per egress IP — and every self-hosted runner
+# in this fleet shares one egress. Exhausting that quota killed every container
+# job in python-ci at the same moment, before pytest ran, so no run carried a
+# `FAILED <nodeid>` line and the merge rail correctly refused it with no
+# attributable failure identity: a whole-fleet merge blocker presenting as a
+# per-PR red, on a checkout whose tests were green all along.
+#
+# Fix direction B (needs nothing from the owner): keep a first-party copy of
+# those images in GHCR, which authenticates with `GITHUB_TOKEN`. There is no
+# anonymous quota to exhaust and no credential to provision — direction A would
+# need a Docker Hub account, a token, and a repository secret.
+#
+# provision.sh treats every registry as a FALLBACK (mirror.gcr.io -> GHCR -> the
+# Docker Hub reference as given, leading with the pull-through cache because GHCR
+# is empty until this workflow has run at least once), so this mirror being empty
+# or late degrades the fix — it never breaks the build. The workflow-lint leg of
+# python-ci.yml is deliberately NOT a consumer: it is pinned to a hosted label
+# and pulls its actionlint image literally, so it never shared the fleet's quota.
+# Being a `workflow_dispatch` job, this file is only dispatchable once it is on
+# the default branch, which is why the fallbacks matter: they keep CI working
+# between the merge and the first mirror run.
+#
+# The job runs on a GITHUB-HOSTED runner on purpose: a hosted runner has its own
+# egress IP, so these pulls cannot spend the quota the self-hosted fleet shares —
+# running it on the fleet would spend the very quota it exists to stop spending.
+# It removes the fleet's anonymous Docker Hub traffic for the pinned references;
+# the Docker Hub upstream stays as the final fallback, deliberately.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    # A version-pinned hosted label: on this repo `ubuntu-latest` also matches
+    # the self-hosted ARM64 pool (finding-provenance.yml), and this job's whole
+    # point is to burn a FRESH egress IP rather than the fleet's shared one.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # `target` is the name the pull sites derive from the source reference:
+        # they take the LAST path component, so `falkordb/falkordb-server:v4.20.6`
+        # resolves to `ghcr.io/<owner>/falkordb-server:v4.20.6`. Renaming a target
+        # here therefore requires the same change in provision.sh's
+        # image_candidates() — one name, two places, and no test can see the join.
+        include:
+          - source: falkordb/falkordb-server:v4.20.6
+            target: falkordb-server
+          - source: falkordb/falkordb-server:latest
+            target: falkordb-server
+          - source: rhysd/actionlint:1.7.12
+            target: actionlint
+            # Reserved: consumed only if the workflow-lint leg ever moves onto
+            # the resolver. Today it pulls this reference literally.
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror ${{ matrix.source }}
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ghcr.io/${{ github.repository_owner }}/${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # GHCR requires a lowercase repository path; a GitHub owner usually is
+          # already, but an org with capitals would otherwise fail here.
+          tag="${SOURCE##*:}"
+          target="$(printf '%s:%s' "$TARGET" "$tag" | tr '[:upper:]' '[:lower:]')"
+          # Always pull and push: an unchanged digest re-pushes to a no-op, and
+          # `latest` has to be free to move. Three anonymous pulls a day is far
+          # inside Docker Hub's 100/3600 s even when nothing is cached.
+          # Copy the MANIFEST LIST, not one platform. Upstream is multi-arch and
+          # this fleet is arm64 (`orbctl run -m pi-runner uname -m` -> aarch64),
+          # so an amd64-only mirror would be strictly worse than the tiers it
+          # exists to prefer — and provision.sh commits to a candidate once the
+          # PULL succeeds, so a platform the host cannot run would be a dead end
+          # rather than a fallback.
+          docker buildx imagetools create -t "$target" "$SOURCE"
+          printf 'mirrored %s -> %s\n' "$SOURCE" "$target" >> "$GITHUB_STEP_SUMMARY"

@@ -14,10 +14,19 @@ handler (#953, slice 5b) drives both together.
 
 :CommitRecord fields (plan §4.1): client_commit_id (UNIQUE, MERGE key),
 session_id, commit_id (= client_commit_id), status fully_written|held|
-partial, written_at, write_ops_billed. Division of labor: the record carries
-per-commit adjudication state + billing; Session counters carry the budget
-numerator (value_nodes_held lives on the Session, NOT on the record — no
-held_point_ids[] on :CommitRecord).
+partial, written_at, write_ops_billed, value_nodes_declared. Division of
+labor: the record carries per-commit adjudication state + billing; Session
+counters carry the budget numerator (value_nodes_held lives on the Session,
+NOT on the record — no held_point_ids[] on :CommitRecord).
+
+``value_nodes_declared`` (#4704) is the record's OWN declaration, not a
+second numerator: the write phase applies the payload's net-new to
+``Session.value_nodes_created`` exactly once and stamps the amount here in
+the SAME statement, so a retry of a partially-written payload neither
+re-applies it nor re-counts a remainder that its own declaration already
+covers (`plan_commit`). It is the counter-half twin of
+``write_ops_billed`` (PL4: one logical payload billed exactly once).
+NULL = not declared yet.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -41,13 +50,14 @@ ON CREATE SET r.session_id = $sid,
               r._acquire_ts = $acquire
 RETURN r._acquire_ts AS acquire_ts, r.status AS status,
        r.session_id AS sid, r.write_ops_billed AS wob,
-       r.written_at AS ts
+       r.written_at AS ts, r.value_nodes_declared AS vnd
 """
 
 _GET_CYPHER = """
 MATCH (r:CommitRecord {client_commit_id: $cid})
 RETURN r.session_id AS sid, r.status AS status,
-       r.write_ops_billed AS wob, r.written_at AS ts
+       r.write_ops_billed AS wob, r.written_at AS ts,
+       r.value_nodes_declared AS vnd
 LIMIT 1
 """
 
@@ -55,7 +65,8 @@ _UPDATE_CYPHER = """
 MATCH (r:CommitRecord {client_commit_id: $cid})
 SET r.status = $status
 RETURN r.session_id AS sid, r.status AS status,
-       r.write_ops_billed AS wob, r.written_at AS ts
+       r.write_ops_billed AS wob, r.written_at AS ts,
+       r.value_nodes_declared AS vnd
 """
 
 
@@ -79,13 +90,14 @@ class CommitRecordStore:
         ).result_set
         if not rows:
             return None
-        sid, status, wob, ts = rows[0]
+        sid, status, wob, ts, vnd = rows[0]
         return CommitRecordState(
             client_commit_id=client_commit_id,
             session_id=sid or "",
             status=status,
             write_ops_billed=wob or 0,
             written_at=ts,
+            value_nodes_declared=vnd,
         )
 
     # ── Atomic serialization point ────────────────────────────────────
@@ -126,7 +138,7 @@ class CommitRecordStore:
                 "acquire": acquire_ns,
             },
         ).result_set
-        acquire_ts, rec_status, sid, wob, written_at = rows[0]
+        acquire_ts, rec_status, sid, wob, written_at, vnd = rows[0]
         created = (acquire_ts == acquire_ns)
         return (
             CommitRecordState(
@@ -135,6 +147,7 @@ class CommitRecordStore:
                 status=rec_status,
                 write_ops_billed=wob or 0,
                 written_at=written_at,
+                value_nodes_declared=vnd,
             ),
             created,
         )
@@ -159,11 +172,12 @@ class CommitRecordStore:
         ).result_set
         if not rows:
             return None
-        sid, rec_status, wob, ts = rows[0]
+        sid, rec_status, wob, ts, vnd = rows[0]
         return CommitRecordState(
             client_commit_id=client_commit_id,
             session_id=sid or "",
             status=rec_status,
             write_ops_billed=wob or 0,
             written_at=ts,
+            value_nodes_declared=vnd,
         )
