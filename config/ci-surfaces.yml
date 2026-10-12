@@ -67,6 +67,13 @@ surfaces:
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
+  # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
+  # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
+  # SOURCE_PATTERNS["api"] entry — so a supabase_control.py-only change matches
+  # `api`, REPLACES the `core` fallback in select(), and would never run the
+  # `core`-only registration. Without this `api` arm the guard is skipped on the
+  # exact change it exists to guard (the #2938/#3154/#4367 silent-drop class).
+  - test_7968_org_purge_rpc.py
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
   # single arm covers every file the change touches: `hosted_api.py` and
   # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
@@ -178,6 +185,14 @@ surfaces:
   # guard written for it. The `core` half is the primary arm — it pins
   # tortoise/read_status.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_read_status.py
+  # #7952 (§17.2): the COMPLETENESS MARKER — the `residency` field on the
+  # shipped GET /v1/search response (`not-hot` never stands in for an empty
+  # result). Registered here for the same reason as the row above: the route
+  # that serves the field lives in tortoise/hosted_api.py, an EXACT `api`
+  # SOURCE_PATTERN match, so without this arm a hosted_api.py-only change would
+  # run no guard for the field it emits. The `core` arm (below) is the primary
+  # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_residency_marker.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -775,6 +790,19 @@ surfaces:
   # — they fall through to `core` — so without that arm a webhook_delivery-only
   # change would run no guard at all.
   - test_webhook_delivery.py
+  # #3520: the per-session EXTRACTION status (`{status, extractor,
+  # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
+  # agreement on the 2xx path, and the appended-at-the-END column positions.
+  # DUAL-REGISTERED with `core` because the two files it pins select DIFFERENT
+  # arms and a named-surface match REPLACES the `core` fallback: the handlers
+  # live in `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERNS match), so
+  # an api-only PR runs this file only if it is registered HERE; the vocabulary
+  # and the derivation live in `tortoise/session_projection.py`, which matches
+  # no named pattern and so falls through to `core`. This entry alone would
+  # leave the declaration unguarded on a session_projection-only change; the
+  # `core` entry alone would never run on the handler change that can reorder
+  # the positional columns. (The #2938/#3154 dual-registration convention.)
+  - test_session_capture_status.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -867,10 +895,16 @@ surfaces:
   - test_battery_token_relock.py
   - test_battery_validation_real.py
   - test_battery_write_channel.py
+  # #4520: DUAL-REGISTERED with `core` (and `sdk`) for the same reason as
+  # #3065's bounded-socket guard: the store-integrity probe and the seam it
+  # exercises live in `battery/runner/retrieval_preflight.py` and the writers
+  # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
+  - test_vector_write_seam_4520.py
   core:
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
+  - test_5089_operator_status_parity.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_7767_restore_rollback.py
@@ -947,6 +981,17 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_record_schema_placement.py
+  # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
+  # must route the organizations delete through the `purge_org_record` RPC
+  # (migration 20261012000005), which sets app.record_journal_purge so the
+  # organizations -> graphs -> journal_event cascade can pass the append-only
+  # trigger. Hermetic (FakeControlPlane), so `core` is a correct home — but the
+  # earlier claim here that a `tortoise/supabase_control.py`-only change "falls
+  # through to core" was FALSE: that file IS a `SOURCE_PATTERNS["api"]` entry, so
+  # the change selects `api` and this `core` arm never runs. The file is now
+  # DUAL-REGISTERED (see the `api` arm above).
+  - test_7968_org_purge_rpc.py
   # #2886: the wiring seam's hermetic adapter guard
   # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
   # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,
@@ -1211,6 +1256,7 @@ surfaces:
   - test_bounded_raw_clients_3065.py
   - test_boot_regressions.py
   - test_collision_preflight.py
+  - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
   # #4290: the finding-provenance gate — a finding must name the tree it was
   # measured against, and a stale measurement fails (ancestry, not equality).
@@ -2063,6 +2109,16 @@ surfaces:
   - test_sparse.py
   - test_status_projection.py
   - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
+  # #7952 (§17.2 / §17.3): the completeness marker (`not-hot`, never an empty
+  # result) and the second divergence surface (Postgres truth ↔ FalkorDB cache,
+  # divergence as a NUMBER). `core` is the primary arm: neither
+  # tortoise/residency.py nor tortoise/reconciliation.py matches a
+  # SOURCE_PATTERN, so a change to either alone falls through to `core`, and a
+  # zero-hit read of a declared-partial store must be shown to be `degraded` and
+  # not `empty` on the read path that changes here. The marker's own file is
+  # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
+  - test_residency_marker.py
+  - test_reconciliation.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
@@ -2275,6 +2331,48 @@ surfaces:
   # engine's contract tests on that diff. Dual-registered under `api` (above)
   # for `tortoise/hosted_api.py`, which is an exact `api` match.
   - test_webhook_delivery.py
+  # #3520: the `core` half of the dual registration documented at the `api`
+  # entry — `tortoise/session_projection.py` (the extraction vocabulary and
+  # `session_extraction_status`, the ONE derivation every read surface calls)
+  # matches no SOURCE_PATTERNS entry, so a declaration-only change selects
+  # `core` via the `tortoise/` fallback.
+  - test_session_capture_status.py
+  # #6151: the weight mechanisms live in `tortoise/weights.py`, which matches no
+  # SOURCE_PATTERNS entry — so a weights.py change selects `core` via the
+  # `tortoise/` fallback and, until now, ran NONE of the three tests that guard
+  # those mechanisms. A regression in either band shipped with green CI while its
+  # guard sat unrun in the `ep` list (only `test_weights.py` ran, because it is
+  # also in the always-selected `tier1` set, which the selection always unions in).
+  # Registered here for the same reason as the entry above; each keeps its `ep`
+  # membership too. Deliberately NOT solved by adding `tortoise/weights.py` to
+  # `ep`'s SOURCE_PATTERNS: a SOURCE_PATTERNS match REPLACES the `core` fallback,
+  # so that would narrow a weights.py change from 456 selected files to the 81
+  # that an ep-only change selects (the 64-entry `ep` list plus tier1) — a
+  # coverage LOSS of ~375 files, traded for three tests.
+  - test_weights_mitigation.py
+  - test_3815_mitigation_moves_weight.py
+  - test_6151_annotation_band.py
+  # #7846: a graph-key `DUMP`/`RESTORE` of a VECTOR-INDEXED graph. The issue
+  # (P0) reports the restore permanently wedging the whole instance; measured
+  # 2026-10-12 it does not reproduce on any pullable image, but the two in-repo
+  # acceptance criteria do — the restore must be BOUNDED (the instance still
+  # answers `PING`) and the vector index must NOT be silently dropped
+  # (docs/evidence/7846-indexed-graph-restore/). The file pins no product
+  # module: it asserts an ENGINE contract the eviction/backup design depends on
+  # (`STORAGE-ARCHITECTURE.md` §2.1 — the graph is the only eviction unit), so
+  # it belongs to the `core` fallback rather than to a surface that would only
+  # select it when some unrelated source file changed. It runs on the docker
+  # lane only (the vector index needs the engine's vector-index API); URI-less
+  # runs skip visibly with the URI-gate reason, so the tier-2 embedded leg
+  # excludes it and the `core` fallback surface carries it on the docker lane.
+  - test_indexed_graph_key_restore_7846.py
+  # #7846 review (P2): a HERMETIC guard for the restore test itself — no server,
+  # so it runs on every `core` selection. It pins two things a reviewer caught:
+  # the docstring's "WHAT WAS MEASURED" table must match the committed evidence
+  # it cites (`docs/evidence/7846-indexed-graph-restore/README.md` §2), and the
+  # restore assertion bound must stay BELOW the client socket timeout so
+  # "overran its bound" and "the socket timed out" remain distinguishable.
+  - test_7846_restore_doc_and_bounds.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
@@ -2361,6 +2459,11 @@ surfaces:
   # #3815: a mitigation must MOVE the resolved EP weight (w_eff = w*(1-strength)),
   # not merely exist — asserts the weight the propagation path actually consumes.
   - test_3815_mitigation_moves_weight.py
+  # #6151: the four operator rating dimensions (bias/precision/consistency/
+  # directness) must MOVE the resolved weight — symmetrically about an EXACTLY
+  # neutral default — so an unrated operator is untouched. Asserts the weight the
+  # reader actually consumes, which the pure arithmetic alone cannot observe.
+  - test_6151_annotation_band.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py
@@ -2555,6 +2658,11 @@ surfaces:
   sdk:
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
+  # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
+  # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must
+  # run the seam/probe test.
+  - test_vector_write_seam_4520.py
   # #7856: the goal-STATE axis — the closed, validated `goalState` vocabulary
   # (the objective map's achievement state, separate from `status`) and the
   # born-live default for goal-kind Points (a target-only draft goal is
@@ -3273,6 +3381,7 @@ durations:
   test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
   test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
+  test_session_capture_status.py: 2.0  # #3520: same #3400 flat default — a file that never ran cannot appear in a junit artifact, so this is NOT a measurement. Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
@@ -3957,6 +4066,7 @@ durations:
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.2
   test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
+  test_6151_annotation_band.py: 20.0  # unmeasured — #6151: local 3-run max on this host (8.97/11.20/10.03s pytest, 13.7/15.8/15.2s wall, the whole 13-test file against a private FalkorDB probe; only the three graph-reading tests take the docker lane, the other 10 are pure assertions over the module's own neutral value). 20.0 errs high, the conservative side for a shard-balance veto, without inflating the slow leg. Refresh from the first CI junit that includes it.
   test_3817_tags_rebuild_durability.py: 30.0  # unmeasured — #3817: carried at the weight of its sibling rebuild-cycle file (test_5048_mitigated_by_replay.py = 30.0, the same shape: real rebuild cycles over a projection); the local embedded-lane run (160s/7 tests) is dominated by the ONCE-per-session embedder warm-up (~150s, paid by whichever file runs first) and is not a per-file cost. Refresh from the first CI junit that includes it.
   test_5048_mitigated_by_replay.py: 30.0  # unmeasured — #5048: local private-lane readings on this host (17.5s/24.8s/26.5s/29.7s across the review rounds, 10 tests each driving real FalkorDB rebuild cycles); 30.0 is their max. Refresh from the first CI junit that includes it. Registered here rather than in `slow_files` deliberately: ~30s is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives, and the value errs high (the conservative side for a shard-balance veto) without inflating the slow leg.
   test_build_cohorts_2517.py: 0.1

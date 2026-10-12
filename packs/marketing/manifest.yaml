@@ -15,9 +15,11 @@ ontology:
   subclassOf:
     content: WorkItem
   pointKinds:
-  - contentBrief
   - contentPerformance
   documentKinds:
+  # `contentBrief` is a DOCUMENT (a `:Source`), never a claim (#7848, ONTOLOGY
+  # §4.4): it was declared on both axes, which is untestable. Points *derived*
+  # from the brief link to it via `extractedFrom`.
   - contentBrief
   - contentCalendar
   - performanceReport

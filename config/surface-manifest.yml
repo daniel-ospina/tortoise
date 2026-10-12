@@ -1,11 +1,9 @@
 # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
 #
-# The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by
-# `tools/surface_manifest.py::read_approval`; the committed copy is still
-# `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,
-# whose per-row `approval` rule fires on `approved`. A follow-up PR (#8144) flips it
-# once the new guard is on main; do not hand-edit the four values — re-cut (the cut
-# copies the doc).
+# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by
+# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.
+# Do not hand-edit the four values: `check` compares them against the document, so a
+# hand-edit that disagrees reds the lint. Edit the document, then re-cut.
 #
 # `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and
 # `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a
@@ -27,10 +25,10 @@ cut_at_commit: 4d11a7b40f8c1dbb5d099acc4b54e09324af5452
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
-approval_status: pending-owner-approval
-approval_principal: null
-approval_pr: null
-approval_date: null
+approval_status: approved
+approval_principal: daniel-ospina
+approval_pr: '4120'
+approval_date: '2026-09-18'
 # Response FIELDS are outside the frozen surface — the freeze is on tools and
 # endpoints — but each one is recorded here so this manifest stays the single
 # source of truth for what we tell agents we return. A field that is off by
@@ -45,6 +43,10 @@ response_fields:
   field: status
   emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
+- response: tortoise_search
+  field: residency
+  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_RESIDENCY is truthy (1/true/yes/on; unset or 0 means off) AND the consulted scope''s known-hot set could be read (a store that is DOWN leaves the key absent but emits status degraded — even when TORTOISE_READ_STATUS is off — so the impairment is still carried) — one of hot|not-hot. Its OWN field, never a fifth term of the recorded status vocabulary (tortoise/status_vocabulary.py forbids one; tortoise/residency.py is the marker''s ONE home, #7952 §17.2). `not-hot` means the read falls outside the KNOWN-HOT SET because the cache is partial by design — the same answer a real absence gives, which is why it is a marker and not an empty result; under it `status` is never `empty` (§17.3; the truth fetch is #7953, not built)'
+  unchanged_when_off: 'yes — results, count and status stay byte-identical and the key is absent'
 # #2294: the OTHER half of the terminal vocabulary. ``status`` alone cannot
 # express ``invalidate_point``'s terminal state — that writer sets
 # ``outdated=true`` and leaves ``status`` untouched (``supersede_point`` is the
@@ -120,6 +122,17 @@ response_fields:
   field: _idx
   emitted_when: 'always, on every connected node — the traversed edge''s idx (underscore-prefixed like the sibling _relationship key, #6101)'
   unchanged_when_off: 'n/a — not flag-gated; additive key on each connected node, present (null where the edge carries no idx), and the categorised lists are unchanged'
+# #3520: the per-session EXTRACTION status. Recorded on the SDK/tool side because
+# the shared projection is ONE declaration (tortoise/session_projection.py): the
+# key rides `TortoiseSDK.get_session` (and therefore `tortoise_get_session`) as
+# well as the hosted `GET /v1/sessions` + `GET /v1/sessions/{id}` it mirrors, and
+# NO method or tool is added — the freeze is on tools and endpoints, and this is an
+# additive key on an existing read. Announced for the same reason every other
+# response-field addition is: it is what we now tell agents we return.
+- response: tortoise_get_session
+  field: extraction
+  emitted_when: 'always on the durable :Session arm — the server-resolved extraction status object {status, extractor, outcome_known}. status is one of the three declared members (stored | stored-and-processed | stored-extraction-failed), from tortoise/session_projection.py::SESSION_EXTRACTION_STATES, derived in ONE place (session_extraction_status); extractor names the lane that ran (v2/m2, or none/disabled for a store-only capture — extraction never attempted — or null when the record predates the property); outcome_known is the qualifier BESIDE the set (capture_ok IS NOT NULL) that carries stored-with-an-UNRECORDED-outcome, so it is never read as not-processed (#3520)'
+  unchanged_when_off: 'n/a — not flag-gated; an additive key APPENDED at the END of the projection, so every pre-existing key keeps its value, the turn/point lists and `source` are untouched, and a consumer reading the projection positionally does not shift'
 # #2598 (the draft-honesty half; the ingest-default half needs a registry +
 # baseline re-cut, so it is NOT here): a DRAFT row's belief rendering on the
 # state recall. Two entries because the change is two things — an ADDITIVE key
@@ -1191,7 +1204,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:212e8c7865fe39e7
+  served_from: tortoise/mcp_server.py:6c29f64c0b80b4f3
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2

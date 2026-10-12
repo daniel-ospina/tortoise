@@ -49,7 +49,6 @@ domains:
         - jobToBeDone
         - userJourney
         - workflow
-        - requirement
         - policy
         - concept
         - issue
@@ -66,8 +65,10 @@ domains:
       - workflows
       - requirements
     cypher_template: >-
-      MATCH (p:Point)
-      WHERE p.pointKind IN ['useCase', 'jobToBeDone', 'userJourney', 'workflow', 'requirement', 'policy', 'concept', 'issue']
+      MATCH (p)
+      WHERE (p:Point OR p:Object)
+        AND (p.pointKind IN ['useCase', 'jobToBeDone', 'userJourney', 'workflow', 'requirement', 'policy', 'concept', 'issue']
+             OR p.objectKind IN ['requirement', 'product-strategy:requirement'])
       RETURN p ORDER BY p.createdAt DESC LIMIT 50
     relationship_types:
       - composedOf

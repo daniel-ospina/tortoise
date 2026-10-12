@@ -7,6 +7,74 @@
 // {deleted: true, cleaned_receipts}) drives the row removal. All functions
 // here are deterministic derivations the JSX consumes — no DOM, no fetch.
 
+// ── #3520: the session-scoped EXTRACTION vocabulary ──────────────────────
+//
+// The SECOND of the two status axes, and deliberately not the first one. The
+// per-HARNESS INSTALL axis (`off` / `install-pending` / `waiting` / `active`)
+// lives in captureStatus.js and is UNCHANGED at four members: it answers "is
+// capture installed for this harness?", which is a different question from
+// "what happened to THIS session's memory?". Conflating them would leave the
+// install word undefined whenever some sessions processed and some did not, so
+// an install pill stays `active` beside a `stored-extraction-failed` session
+// and there is no harness-level rollup of this axis anywhere.
+//
+// The members are the SERVER's vocabulary (the value of `extraction.status` on
+// GET /v1/sessions and GET /v1/sessions/{id}; declared server-side in
+// tortoise/session_projection.py::SESSION_EXTRACTION_STATES and derived in ONE
+// place, `session_extraction_status`). EXACTLY THREE — a fourth member for
+// "stored, outcome unrecorded" was considered and refused; that state is the
+// `outcome_known` QUALIFIER's job, which rides BESIDE the set.
+export const SESSION_EXTRACTION_STATES = Object.freeze([
+  'stored', 'stored-and-processed', 'stored-extraction-failed',
+])
+
+// The rendered words. Plain, like the install labels: the STATE carries the
+// claim, the word does not editorialise about who caused it.
+export const SESSION_EXTRACTION_STATUS_LABEL = Object.freeze({
+  'stored': 'stored, not extracted',
+  'stored-and-processed': 'stored and processed',
+  'stored-extraction-failed': 'stored, extraction failed',
+})
+
+// The QUALIFIER's own word — rendered INSTEAD of the status, never beside it.
+// A commit-created, budget-hold, demo-seeded or longmem-ingest session carries
+// `capture_ok = NULL`: it was written by a driver that records no extraction
+// outcome, so `stored, not extracted` would be a FALSE NEGATIVE (a session
+// that may well have been processed, reported as not processed).
+export const SESSION_EXTRACTION_UNKNOWN_LABEL = 'outcome not recorded'
+
+// The raw state member a row carries, or null when the payload predates #3520
+// (or names a member outside the vocabulary — a server that grew a fourth
+// state must render nothing here rather than a fabricated word).
+export function sessionExtractionStatusFor(session) {
+  const e = (session || {}).extraction
+  if (!e || typeof e !== 'object') return null
+  const status = String(e.status || '')
+  return SESSION_EXTRACTION_STATES.includes(status) ? status : null
+}
+
+// True/False when the server recorded an outcome; null when the payload is
+// pre-#3520 and carries no qualifier at all. Never coerced: `outcome_known`
+// absent is NOT the same fact as `outcome_known: false`.
+export function sessionExtractionOutcomeKnown(session) {
+  const e = (session || {}).extraction
+  if (!e || typeof e !== 'object') return null
+  return typeof e.outcome_known === 'boolean' ? e.outcome_known : null
+}
+
+// The label a row renders for its extraction status, or null when there is
+// nothing honest to say (a pre-#3520 payload). AN UNKNOWN OUTCOME IS NOT
+// `stored` (R10): the qualifier REPLACES the status word, so a reader can never
+// mistake "nobody recorded what happened" for "it was not processed".
+export function sessionExtractionLabelFor(session) {
+  const status = sessionExtractionStatusFor(session)
+  if (status === null) return null
+  if (sessionExtractionOutcomeKnown(session) === false) {
+    return SESSION_EXTRACTION_UNKNOWN_LABEL
+  }
+  return SESSION_EXTRACTION_STATUS_LABEL[status]
+}
+
 // Row list after a successful delete: drop the session whose id the server
 // confirmed deleted (immutable — returns a NEW array, never mutates state).
 export function removeSession(sessions, sessionId) {
@@ -31,6 +99,14 @@ export function sessionRowMeta(session) {
     actor: (s.actor_display || '').trim() || (s.actor_user_id || ''),
     machineId: (s.machine_id || '').trim() || '',
     model: (s.model || '').trim() || '',
+    // #3520: the honest per-session extraction status. `extractionStatus` is
+    // the server's state member (null on a pre-#3520 payload or an unknown
+    // member), `extractionOutcomeKnown` the qualifier BESIDE it, and
+    // `extractionLabel` the word the row renders — null when there is nothing
+    // honest to say, never a fabricated `stored`.
+    extractionStatus: sessionExtractionStatusFor(s),
+    extractionOutcomeKnown: sessionExtractionOutcomeKnown(s),
+    extractionLabel: sessionExtractionLabelFor(s),
   }
 }
 
@@ -59,6 +135,12 @@ export function transcriptModel(detail) {
     actor: (d.actor_display || '').trim() || (d.actor_user_id || ''),
     machineId: (d.machine_id || '').trim() || '',
     model: (d.model || '').trim() || '',
+    // #3520: the SAME extraction-status derivation as the list row — the
+    // detail payload carries the same object, and the transcript panel must
+    // not disagree with the row that opened it (list and detail agree).
+    extractionStatus: sessionExtractionStatusFor(d),
+    extractionOutcomeKnown: sessionExtractionOutcomeKnown(d),
+    extractionLabel: sessionExtractionLabelFor(d),
   }
 }
 

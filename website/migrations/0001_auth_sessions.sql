@@ -10,8 +10,11 @@
 --  token-cache columns, and the per-route flow-table bootstraps in `auth/start.ts` /
 --  `auth/confirm.ts` for `auth_flows` / `email_flow_pending` — so a fresh local database is
 --  self-establishing. Those bootstraps also create `idx_auth_flows_expires`
---  (`ensureAuthFlowIndexes`), because a database established by the runtime alone never
---  receives the index below, and `sweepExpiredFlows` (#3647) depends on it for cost.)
+--  (`ensureAuthFlowIndexes`) and — since #8032 — `idx_sessions_expires`
+--  (`ensureSchema`) and `email_flow_pending`'s `idx_email_flow_pending_expires`
+--  (`ensurePendingTable`), because a database established by the runtime alone never
+--  receives the indexes below, and the expiry sweeps (#3647, #8032) depend on them
+--  for cost.)
 
 CREATE TABLE IF NOT EXISTS sessions (
   handle        TEXT PRIMARY KEY,
@@ -39,6 +42,13 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- user_id. Without this index that is a table scan on every recovery.
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+-- #8032: `expires_at` is the predicate `sweepExpiredSessions` deletes through.
+-- Without this index that sweep is a full scan of the LARGEST table in this
+-- store, on the sign-in path — which is why the sweep and the index ship
+-- together (`ensureSchema` creates this one where the table is created, for a
+-- database the runtime bootstraps alone established).
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
 -- Pre-auth flows: the PKCE verifier must live server-side, and the flow row is
 -- what `__Host-authflow` is BOUND to. The binding is the class-8 mitigation — a
 -- cookie that merely exists proves nothing.
@@ -63,3 +73,27 @@ CREATE TABLE IF NOT EXISTS auth_flows (
 -- Expired flows are dead weight and a replay surface; recovery deletes rows,
 -- so this index keeps that cheap.
 CREATE INDEX IF NOT EXISTS idx_auth_flows_expires ON auth_flows(expires_at);
+
+-- The third table in this database: a VERIFIED email link held server-side
+-- until the user confirms on the interstitial (`/auth/confirm`). Its own table
+-- (not `auth_flows`) because the credential it carries — the refresh token —
+-- must never be exposed to, or controllable by, a flow-start request.
+--
+-- Declared here for the same reason every other table is: the runtime bootstrap
+-- in `auth/confirm.ts` / `auth/start.ts` (`ensurePendingTable`) is what actually
+-- creates it in production, so the two must agree. It is written by
+-- `/auth/confirm` and its expired rows are swept by `/auth/start` (#8032).
+CREATE TABLE IF NOT EXISTS email_flow_pending (
+  flow_id       TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL,
+  user_id       TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  email         TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL
+);
+
+-- #8032: the predicate `sweepExpiredPending` deletes through, created with the
+-- table for the same reason as `idx_auth_flows_expires` above.
+CREATE INDEX IF NOT EXISTS idx_email_flow_pending_expires
+  ON email_flow_pending(expires_at);

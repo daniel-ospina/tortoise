@@ -550,9 +550,27 @@ test('#2912: the step announcement re-renders when the paused state is resolved'
   // dep in its own right, because effectivelyPaused only tracks the projection
   // while wizardPaused is true — a non-skipping user's late connection would
   // otherwise leave the announcement (and the <h1>) disagreeing.
-  assert.match(stripBlockAndWholeLineComments(mainJsx),
-    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork\]\)/,
-    'effectivelyPaused AND serverHarnessConnected AND isBuildFork must be in the step-announcement deps')
+  //
+  // #3728: this assertion used to freeze the WHOLE deps list as a literal
+  // regex — and that is how the omission of `welcomeHasOrg` (a label input,
+  // so a dep its re-run depends on) survived review: the frozen list WAS the
+  // buggy set, and a MISSING dep cannot fail a whole-list pin. It now checks
+  // membership of the label inputs instead, so ADDING a dep stays green while
+  // dropping one that decides the announced stage does not. (The derived
+  // version of this check — the dep set read out of the label call itself —
+  // lives in wizardRenderedEnds.test.js, #3728.)
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const call = src.indexOf('setWizardStepAnnounce(')
+  assert.notEqual(call, -1, 'the step-announcement effect must exist')
+  const depsStart = src.indexOf('}, [', call)
+  const depsEnd = src.indexOf('])', depsStart)
+  assert.notEqual(depsStart, -1, 'the step-announcement deps array must exist')
+  assert.notEqual(depsEnd, -1, 'the step-announcement deps array must be closed')
+  const deps = src.slice(depsStart + 4, depsEnd).split(',').map((s) => s.trim())
+  for (const dep of ['wizardStep', 'effectivelyPaused', 'serverHarnessConnected', 'isBuildFork', 'welcomeHasOrg']) {
+    assert.ok(deps.includes(dep),
+      `${dep} must be in the step-announcement deps (got [${deps.join(', ')}])`)
+  }
 })
 
 // ── #3428 / #2937 (lane B3): the wizard cannot falsely claim connected ────
@@ -1707,8 +1725,16 @@ test('#3783: the API Keys table names the auto-provisioned key instead of render
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.match(src, /\{keyDisplayName\(k\) \? keyDisplayName\(k\) : <span className="dim">—<\/span>\}/,
     'the keys table resolves a display name before falling back to the dash')
-  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
+  // #4371: the name list is OPEN (`[^}]*keyDisplayName[^}]*`) — the pin's
+  // claim is "the display-name helper is imported from the pure module", and a
+  // later legitimate import from the same module (e.g. the row-truth rule) must
+  // not turn it red. The specifier and the name are both still required.
+  assert.match(src, /import \{[^}]*\bkeyDisplayName\b[^}]*\} from '\.\/sessionKey\.js'/,
     'the display-name helper is imported from the pure module')
+  // #4370 (A6): the revealable-plaintext predicate must come from its
+  // module-scope home in the pure module too, not a `main.jsx`-local copy.
+  assert.match(src, /import \{[^}]*\brevealablePlaintext\b[^}]*\} from '\.\/sessionKey\.js'/,
+    'the revealable-plaintext predicate is imported from the pure module')
 })
 
 // ── #4353: the wizard's at-cap remedy must be ACHIEVABLE ──────────────────

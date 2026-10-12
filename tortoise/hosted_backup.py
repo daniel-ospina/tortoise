@@ -77,6 +77,10 @@ from tortoise.fork_slot import (
     is_fork_refusal,
     recover_fork_slot,
 )
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -798,7 +802,8 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
         chunk = embed_rows[i:i + _EMBED_BATCH]
         g.query(
             f"UNWIND $rows AS r MATCH (n {{{_DUMP_ID_PROP}:r.id}}) "
-            "SET n.embedding = vecf32(r.v)",
+            + clear_then_set_prefix("n", "r.v")
+            + "SET " + set_embedding_clause("n", "r.v"),
             params={"rows": chunk},
         )
 

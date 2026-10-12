@@ -119,7 +119,7 @@ function notRecordedVariant(fnText) {
 }
 
 // ── the sandbox ─────────────────────────────────────────────────────────────
-const DEP_NAMES = ['api', 'orgIdRef', 'setKeys', 'setKeysLoaded', 'setKeysLoadError', 'setSessions', 'setError']
+const DEP_NAMES = ['api', 'orgIdRef', 'setKeys', 'setKeysLoaded', 'setKeysLoadError', 'setSessions', 'setSessionsLoaded', 'setError']
 
 function build(fnText, deps) {
   const body = `${fnText}\nreturn loadAll`
@@ -135,6 +135,10 @@ function environment({ rejectKeys = false } = {}) {
     loadedCalls: [],
     loadErrorCalls: [],
     sessionCalls: [],
+    // #3520: `loadAll` also records whether a sessions read has LANDED (the
+    // Captured-sessions card's fetch-error arm reads it). The sandbox provides
+    // the real setter, so the assertions below observe resolved arguments.
+    sessionsLoadedCalls: [],
     errorCalls: [],
     orgIdRef: { current: 'org-A' },
   }
@@ -150,6 +154,7 @@ function environment({ rejectKeys = false } = {}) {
   env.setKeysLoaded = (v) => { env.loadedCalls.push(v) }
   env.setKeysLoadError = (v) => { env.loadErrorCalls.push(v) }
   env.setSessions = (v) => { env.sessionCalls.push(v) }
+  env.setSessionsLoaded = (v) => { env.sessionsLoadedCalls.push(v) }
   env.setError = (v) => { env.errorCalls.push(v) }
   return env
 }

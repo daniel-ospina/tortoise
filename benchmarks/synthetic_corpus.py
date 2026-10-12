@@ -35,6 +35,13 @@ from typing import Any
 # disagree; all 4 #1349 candidates are 384-dim.
 from tortoise.embeddings import EMBEDDING_DIM
 
+# #4520: the ONE clear-then-set vector seam. A re-seed with a different
+# `--seed`/`--corpus-variant`/`--probe-model` writes DIFFERENT vectors for the
+# SAME point ids (ids are seed-independent), so this is an OVERWRITE — on the
+# embedded engine a bare `SET n.embedding = vecf32(row.embedding)` is silently
+# discarded and the eval's dense arm then measures the PREVIOUS corpus.
+from tortoise.vector_write import clear_then_set_prefix, set_embedding_clause
+
 KIND_WEIGHTS: list[tuple[str, float]] = [
     ("claim", 0.35),
     ("decision", 0.20),
@@ -187,19 +194,20 @@ def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
     for start in range(0, len(points), batch_size):
         batch = points[start : start + batch_size]
         rows = graph.query(
-            """
-            UNWIND $batch AS row
-            MERGE (n:Point {id: row.id})
-            SET n.content = row.content, n.pointKind = row.pointKind,
-                n.is_operator = row.is_operator, n.status = row.status,
-                n.createdAt = timestamp(), n.updatedAt = timestamp()
-            SET n.embedding = vecf32(row.embedding)
-            SET n.posterior_alpha = row.posterior_alpha
-            SET n.posterior_beta = row.posterior_beta
-            SET n.confidence = CASE WHEN row.confidence IS NOT NULL
-                                    THEN row.confidence ELSE n.confidence END
-            RETURN count(n) AS created
-            """,
+            "UNWIND $batch AS row "
+            "MERGE (n:Point {id: row.id}) "
+            + clear_then_set_prefix("n", "row.embedding")
+            + "SET n.content = row.content, n.pointKind = row.pointKind, "
+            "n.is_operator = row.is_operator, n.status = row.status, "
+            "n.createdAt = timestamp(), n.updatedAt = timestamp() "
+            "SET "
+            + set_embedding_clause("n", "row.embedding", preserve_on_null=False)
+            + " "
+            "SET n.posterior_alpha = row.posterior_alpha "
+            "SET n.posterior_beta = row.posterior_beta "
+            "SET n.confidence = CASE WHEN row.confidence IS NOT NULL "
+            "THEN row.confidence ELSE n.confidence END "
+            "RETURN count(n) AS created",
             params={"batch": [
                 {k: v for k, v in p.items() if k != "embedding"}
                 | {"embedding": p["embedding"]}

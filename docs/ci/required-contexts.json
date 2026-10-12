@@ -262,6 +262,12 @@
         "migration-unique-prefix"
       ]
     ],
+    "mirror": [
+      [
+        "mirror-images.yml",
+        "mirror"
+      ]
+    ],
     "monitor": [
       [
         "tenant-provision-monitor.yml",
@@ -485,7 +491,7 @@
       ]
     ]
   },
-  "gate_digest": "807e986d892bc979a0a75be04ecdf8d25950b22f404da64cbc8d7f7c09d6541b",
+  "gate_digest": "b8ddf2989c45356af8046b5bc0d587c8f1ebef44ad168612c55f651848b20254",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -509,5 +515,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-09T00:59:47Z"
+  "verified_at": "2026-10-11T21:50:54Z"
 }

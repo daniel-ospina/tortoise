@@ -5612,7 +5612,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         k = str(p.get("pointKind", ""))
         # points: the master's "points" section ONLY (full + bare forms) —
         # the point write gate repairs EVERYTHING else to statement, so the
-        # report must flag pack point kinds WITH kindDefs (dev:requirement,
+        # report must flag pack point kinds WITH kindDefs (dev:technicalDebt,
         # product-strategy:useCase/...) that master_kind_forms would
         # otherwise accept (FIX P — the report agrees with the gate).
         if k and k.lower() != UNCLASSIFIED and \

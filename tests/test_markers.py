@@ -79,6 +79,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical namespace the code under test uses.
     "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
+    # #3520: `_provision_team` seeds the registry Team node the onboarding-state
+    # writer MATCH…SETs — receipts and `last_error` live on that node, so the
+    # literal IS the canonical namespace PROD resolves. Same `prod-coupled` class
+    # as test_github_connect / test_onboarding_state_cas, and the same
+    # `_make_sdk(namespace="registry")._get_registry().query(CREATE :Team …)`
+    # construction. (Reviewer read: without this entry the new test file reds
+    # test_markers→test-slow (b)→python-ci-gate, blocking the change.)
+    "test_session_capture_status.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`

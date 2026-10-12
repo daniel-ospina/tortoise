@@ -1035,6 +1035,40 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_supabase_control_change_selects_the_org_purge_rpc_guard():
+    # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
+    # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
+    # so a supabase_control.py-only change matches `api`, REPLACES the `core`
+    # fallback in select(), and the `core`-only registration is never reached.
+    # Before the guard was dual-registered under `api`, this diff selected
+    # ['api'] and never ran test_7968_org_purge_rpc.py (the
+    # #2938/#3154/#4367 silent-drop class). Mutation check: deleting the `api`
+    # arm fails the second assert.
+    r = _sel(["tortoise/supabase_control.py"])
+    assert r["full"] is False, r
+    assert "test_7968_org_purge_rpc.py" in r["test_files"], r
+
+
+def test_record_schema_pin_runs_on_migration_or_doc_change():
+    # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
+    # the record migrations against the placement table in
+    # `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`.
+    # Both paths are under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match
+    # no SOURCE_PATTERNS row, so before the CORE_ALSO entries a change to either
+    # side ALONE selected NO surface: the pin's own claim ("editing either side
+    # alone turns the test red") was untestable in CI, and the edit landed with
+    # the pin never running. Mutation check: removing either CORE_ALSO entry
+    # fails the corresponding arm below (surfaces == []).
+    for changed in (
+        "supabase/migrations/20261012000003_record_epistemic.sql",
+        "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
+
+
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
     # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
     # config from ANY directory on the path to a linted file, and a more specific

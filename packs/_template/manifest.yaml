@@ -122,11 +122,15 @@ ontology:
   hierarchies: []
 
   # New predicates (edges between entities)
-  # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, cardinality? }
+  # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, nearMisses?, cardinality? }
   #   - predicate: domain verb — "addresses", "competesWith", "implements"
   #   - fromKind/toKind: prefixed pack kinds — "myapp:concept" or core PascalCase kinds
   #   - mechanism: IMPL (A supports B) or NAND (A contradicts B)
-  #   - semantics: optional — "hasPart", "addresses", "opposes" (defaults to predicate)
+  #   - semantics: optional — the Layer-2 MEANING, from the closed core vocabulary
+  #     (ONTOLOGY §8): "hasPart", "addresses", "supports", "mutuallySupportive",
+  #     "mutuallyExclusive", "refutes", "causes", "dependsOn", "transacts", "related",
+  #     "ownedBy", "managedBy"
+  #   - nearMisses: optional — sibling predicates/semantics this relation is confused with
   #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
   # Old format (compat): { predicate, from, to, cardinality? }
   #   - from/to: entity types — "Object", "Subject"

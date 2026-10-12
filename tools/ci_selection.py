@@ -854,7 +854,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # that edits the aggregation. Same #1349/#3332/#3616 silent-drop
              # class as tools/test_lane.py above. Pinned by
              # tests/test_ci_selection.py::test_source_currency_tool_change_selects_core_not_tier1.
-             "tools/source_currency.py")
+             "tools/source_currency.py",
+             # #7968 / PR #8179 review P2: the schema <-> placement-TABLE pin
+             # (`tests/test_record_schema_placement.py`, registered `core`) reads
+             # the record migrations AND
+             # docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md.
+             # BOTH paths sit under NON_PYTHON_PREFIXES (`supabase/`, `docs/`)
+             # and match no SOURCE_PATTERNS row, so a migration-only or
+             # placement-doc-only change selected NO surface — the pin's own
+             # header claim ("editing either side alone turns the test red") was
+             # untestable in CI and the edit landed with the pin never running.
+             # CORE_ALSO keeps both paths and selects `core`, so the pin runs on
+             # the change it exists to catch (the #1349/#3332/#3616 silent-drop
+             # class). Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/2026101200000",
+             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

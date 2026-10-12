@@ -30,9 +30,43 @@ export const SESSION_MAX_AGE_S = 400 * 24 * 60 * 60; // 400 days
 export const FLOW_MAX_AGE_S = 30 * 60; // 30 minutes
 
 /**
+ * How long past its own `expires_at` a `sessions` row survives (#8032).
+ *
+ * WHY A GRACE AT ALL — on `auth_flows`, `expires_at` encoded the row's entire
+ * usable life, so a sweep could key on `expires_at < now` and delete nothing a
+ * live flow needed. On `sessions` it does not: two readers deliberately look at
+ * a row AFTER its TTL has passed, and both would become unreachable the moment
+ * a sweep deleted it.
+ *
+ *   - `/api/session` and `/api/profile` answer `session_expired` — a DISTINCT
+ *     401 from `not_signed_in` — and revoke the row, which is what keeps "the
+ *     session timed out" observable rather than indistinguishable from a handle
+ *     that was never issued;
+ *   - a request already in flight when the TTL passed still holds the row it
+ *     read (the same narrow race `auth_flows` accepts).
+ *
+ * The grace is also what upstream does — Supabase Auth: *"sessions are
+ * progressively deleted from the database 24 hours after they expire, which
+ * prevents you from causing a high load on your project by accident and allows
+ * you some freedom to undo changes without adversely affecting all users."*
+ * (read 2026-10-12) — so the D1 store's collection stays legible to anyone who
+ * knows the vendor behaviour, and a mis-shipped short TTL gets a rollback window
+ * instead of deleting live users' sessions irreversibly.
+ *
+ * WHY NOT LONGER — after that window the row is a dead handle carrying a
+ * `refresh_token`, and nothing in this store reads it: `getSession` filters
+ * `revoked = 0`, `/api/session`, `/api/profile` and `/auth/update-password`
+ * refuse it on `expires_at`, and the CAS in `revokeSession` can only win on a
+ * live row. Keeping it longer is retention with no reader.
+ *
+ * The window itself is stated once, in `docs/retention-and-deletion.md`.
+ */
+export const SESSION_SWEEP_GRACE_S = 24 * 60 * 60; // 24 hours
+
+/**
  * Rows one opportunistic sweep may remove (#3647).
  *
- * The sweep runs on the flow-start path, so its cost must be bounded
+ * The sweep runs on a user-facing request path, so its cost must be bounded
  * INDEPENDENTLY of how far behind the backlog has fallen: `LIMIT` caps the work
  * per call and the next call takes the next slice. Without a cap, the first
  * call after a long un-swept period would try to drain the entire backlog
@@ -40,6 +74,11 @@ export const FLOW_MAX_AGE_S = 30 * 60; // 30 minutes
  *
  * Steady state is far below this — a 30-minute expiry against a 5-minute probe
  * is ~150 rows — so the cap is reached only while draining an existing backlog.
+ *
+ * The name is historical (#3647 was the first sweep). The bound is shared by
+ * every sweep in this module — `sweepExpiredSessions` and
+ * `sweepExpiredPending` (#8032) as well as `sweepExpiredFlows` — because it is a
+ * property of the REQUEST PATH that runs a sweep, not of any one table.
  */
 export const FLOW_SWEEP_LIMIT = 500;
 
@@ -109,6 +148,45 @@ export async function ensureAuthFlowIndexes(db: D1Database): Promise<void> {
 }
 
 /**
+ * The `email_flow_pending` bootstrap — the third table in this database.
+ *
+ * Lives HERE, with `ensureSchema` and `ensureAuthFlowIndexes`, rather than in
+ * the route that first needed it: it has two consumers now (`/auth/confirm`,
+ * which writes the row, and `/auth/start`, which sweeps expired ones — #8032),
+ * and the shared module is the seam that keeps them from duplicating DDL that
+ * must be identical. `ensureAuthFlowIndexes` is the same shape.
+ *
+ * A pending email-flow confirmation: the outcome of a VERIFIED `token_hash`,
+ * held server-side until the user confirms on the interstitial. Its own table
+ * (not `auth_flows`) because the credential it carries — the refresh token —
+ * must never be exposed to, or controllable by, a flow-start request.
+ *
+ * `kind` is the GoTrue `type` the link arrived with, and it is what makes
+ * recovery-only behaviour (F15 bulk revoke, the reset panel) apply to recovery
+ * and NOT to an ordinary confirmation or magic link.
+ *
+ * The index is created where the table is (see `sweepExpiredPending`):
+ * `CREATE TABLE IF NOT EXISTS` cannot add one to a table that already exists,
+ * and a runtime-created database would otherwise never receive it.
+ */
+export async function ensurePendingTable(db: D1Database): Promise<void> {
+  await db.exec(
+    "CREATE TABLE IF NOT EXISTS email_flow_pending (" +
+      "flow_id TEXT PRIMARY KEY, " +
+      "kind TEXT NOT NULL, " +
+      "user_id TEXT NOT NULL, " +
+      "refresh_token TEXT NOT NULL, " +
+      "email TEXT, " +
+      "created_at INTEGER NOT NULL, " +
+      "expires_at INTEGER NOT NULL);",
+  );
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_email_flow_pending_expires " +
+      "ON email_flow_pending(expires_at);",
+  );
+}
+
+/**
  * Delete expired `auth_flows` rows — the garbage collection this table never had (#3647).
  *
  * WHY THIS EXISTS. Every deletion of a flow row was coupled to the flow
@@ -148,6 +226,101 @@ export async function sweepExpiredFlows(db: D1Database, now = Date.now()): Promi
     return res.meta?.changes ?? 0;
   } catch (e) {
     console.error("auth_flows sweep failed", e);
+    return 0;
+  }
+}
+
+/**
+ * Delete `sessions` rows that are past their own life — the second table of the
+ * #3647 class, and the one the issue behind it (#8032) called a policy
+ * question rather than a port.
+ *
+ * WHY THIS EXISTS. Nothing ever deleted a `sessions` row. Sign-out and F15
+ * "sign out everywhere" are `UPDATE sessions SET revoked = 1` (`revokeSession`,
+ * `revokeAllForUser`), and `DELETE FROM sessions` appeared nowhere: every row
+ * ever minted was kept forever — revoked or not — in the largest table in this
+ * store, and (with `email_flow_pending`) one of the two carrying no `expires_at`
+ * index. A row is not dead weight only: it carries a `refresh_token`, and our
+ * copy of a credential should not outlive the session that owned it by an
+ * unbounded margin.
+ *
+ * WHY IT IS SAFE. The predicate is `expires_at`, NEVER `revoked`: a revoked row
+ * survives exactly as long as the session it revoked would have lived, so
+ * revocation stays observable (the CAS in `revokeSession` is only meaningful on
+ * a live row) and abuse forensics keep the whole declared window. No live
+ * session can be collected: `SESSION_SWEEP_GRACE_S` is measured from the row's
+ * own expiry, not from now, and the row `createSession` just inserted has
+ * `expires_at = now + SESSION_MAX_AGE_S`, so it is never its own victim.
+ *
+ * WHY IT NEVER THROWS — the same argument as `sweepExpiredFlows`: this is
+ * housekeeping on the sign-in path, so propagating a failure would turn a
+ * collection problem into a 503 on sign-in, breaking the user-visible path in
+ * order to report a non-fault. It is LOGGED rather than swallowed silently.
+ */
+export async function sweepExpiredSessions(db: D1Database, now = Date.now()): Promise<number> {
+  try {
+    const res = await db
+      .prepare(
+        "DELETE FROM sessions WHERE handle IN (" +
+          "SELECT handle FROM sessions WHERE expires_at < ?1 ORDER BY expires_at LIMIT ?2)",
+      )
+      .bind(now - SESSION_SWEEP_GRACE_S * 1000, FLOW_SWEEP_LIMIT)
+      .run();
+    return res.meta?.changes ?? 0;
+  } catch (e) {
+    console.error("sessions sweep failed", e);
+    return 0;
+  }
+}
+
+/**
+ * Delete expired `email_flow_pending` rows (#8032) — the third and last table
+ * of the #3647 class, and the one where the leak is a live credential rather
+ * than a dead record.
+ *
+ * WHY THIS EXISTS. A pending record is written when a VERIFIED email link is
+ * held for the user's explicit confirmation, and its ONLY deletion was on
+ * CONSUMPTION (`/auth/confirm` POST). A user who lands on the interstitial and
+ * closes the tab reaches no other deletion, so the row stayed forever. That
+ * matters more here than on `auth_flows`: the row's payload is the flow's
+ * `refresh_token` — a usable credential — and `RECOVERY_MAX_AGE_S` bounds
+ * replay of the RECORD, not the token it carries (the table's own comment says
+ * the credential "must never be exposed to, or controllable by, a flow-start
+ * request"). An expired row therefore held a usable credential for an
+ * unbounded time.
+ *
+ * WHY IT IS SAFE, WITH NO GRACE. `expires_at` already encodes this record's
+ * entire usable life: `/auth/confirm` POST — the only reader — refuses a row
+ * with `expires_at <= Date.now()`, and nothing else reads the table — so,
+ * exactly as with `auth_flows`, the sweep cannot delete a record a live flow
+ * still needs.
+ * Unlike `sessions`, no reader deliberately looks at a row past its TTL, so
+ * there is no reason to keep one: the credential's life in our store ends at the
+ * expiry plus at most one sweep interval.
+ *
+ * WHERE IT RUNS. From `/auth/start`, beside `sweepExpiredFlows` — not from
+ * `/auth/confirm`, the route that writes the row. `/auth/start` is the one path
+ * a schedule already drives (the #3628 probe, every 5 minutes), and the whole
+ * point of this sweep is to bound how long an ABANDONED interstitial's
+ * credential survives: sweeping only on the next `/auth/confirm` would leave
+ * the last abandoned link's row in place until someone opened another email
+ * link. No new route and no new schedule.
+ *
+ * WHY IT NEVER THROWS — as above.
+ */
+export async function sweepExpiredPending(db: D1Database, now = Date.now()): Promise<number> {
+  try {
+    const res = await db
+      .prepare(
+        "DELETE FROM email_flow_pending WHERE flow_id IN (" +
+          "SELECT flow_id FROM email_flow_pending WHERE expires_at < ?1 " +
+          "ORDER BY expires_at LIMIT ?2)",
+      )
+      .bind(now, FLOW_SWEEP_LIMIT)
+      .run();
+    return res.meta?.changes ?? 0;
+  } catch (e) {
+    console.error("email_flow_pending sweep failed", e);
     return 0;
   }
 }
@@ -233,6 +406,17 @@ export async function createSession(
     )
     .bind(handle, userId, refreshToken, now, now + ttlSeconds * 1000)
     .run();
+
+  // #8032: expired rows accumulated because deletion was only ever a `revoked`
+  // FLAG, never a delete — so every row ever minted stayed, revoked or not.
+  // Swept HERE, in the function every session-minting route calls (callback,
+  // confirm, password, api-key, signup), rather than from those five routes:
+  // collection is then coupled to the writer at the narrowest shared waist, a
+  // sixth route inherits it for free, and the five call sites cannot drift.
+  // The row above has already landed and is 400 days from expiry, so it cannot
+  // be its own victim.
+  await sweepExpiredSessions(db, now);
+
   return handle;
 }
 
@@ -295,6 +479,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   );
   // F15 bulk revoke is a per-user scan; without this index it is a table scan.
   await db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);");
+  // #8032: `sweepExpiredSessions`' range predicate. Created here WITH the table
+  // because a database established by the runtime bootstraps alone never
+  // receives the migration's copy — and without the index the sweep's DELETE
+  // degrades to a full scan of the largest table in this store.
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);");
 }
 
 export function json(

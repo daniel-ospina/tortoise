@@ -123,6 +123,10 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("invitations", "otp_expires_at"),
     ("invitations", "otp_sent_at"),
     ("invitations", "otp_verified_at"),
+    # #7968 the record: the journal's own append-only envelope (the event
+    # stream layer). recorded_at is the row's write clock, not an ontology
+    # property — the ontology instants ride the payload verbatim.
+    ("journal_event", "recorded_at"),
     ("link_intents", "consumed_at"),
     ("link_intents", "created_at"),
     ("link_intents", "expires_at"),
@@ -132,6 +136,9 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("metering_records", "updated_at"),
     ("metering_unmetered_increments", "first_observed_at"),
     ("metering_unmetered_increments", "last_observed_at"),
+    # #7968 the record: the (label, key) identity registry — one row per node in
+    # every layer. key_property is generated from node_label (W1's contract).
+    ("node_identity", "created_at"),
     ("oauth_access_tokens", "created_at"),
     ("oauth_access_tokens", "expires_at"),
     ("oauth_access_tokens", "revoked_at"),
@@ -415,17 +422,24 @@ class FakeControlPlane:
                 self._mint_org_locks[org_id] = lock
             return lock
 
-    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
-        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+    def _slot_rows(self, org_id: str, now, *,
+                   exclude_bootstrap: bool = True) -> list[dict]:
+        """#1879/#4550: the fake's ONE cap predicate — the rows
+        `public.api_key_slot_count` would count.
 
-        Mirrors `quota._count_resource("api_keys")` / the migration's
-        `public.api_key_slot_count`: non-revoked, non-expired, and (when
-        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
-        legacy row with no created_via still COUNTS.
+        Non-revoked, non-expired, and (when `exclude_bootstrap`)
+        created_via not bootstrap — NULL-TOLERANT so a legacy row with no
+        created_via still COUNTS. Mirrors
+        `quota._count_resource("api_keys")`.
+
+        ⛔ #4550: this is the ONLY place the predicate is expressed. The
+        `recover_team_key` emulation used to re-derive it inline and dropped
+        the expiry arm, so the fake faithfully reproduced the RPC's own
+        divergence — a second copy of a predicate is how one copy drifts.
         """
         from datetime import UTC, datetime
         now_dt = _as_dt(now) or datetime.now(UTC)
-        n = 0
+        rows: list[dict] = []
         for k in self.tables.get("api_keys", []):
             if k.get("org_id") != org_id or k.get("revoked_at") is not None:
                 continue
@@ -434,8 +448,19 @@ class FakeControlPlane:
                 continue
             if exclude_bootstrap and k.get("created_via") == "bootstrap":
                 continue
-            n += 1
-        return n
+            rows.append(k)
+        return rows
+
+    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
+        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+
+        Mirrors `quota._count_resource("api_keys")` / the migration's
+        `public.api_key_slot_count`: non-revoked, non-expired, and (when
+        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
+        legacy row with no created_via still COUNTS.
+        """
+        return len(self._slot_rows(org_id, now,
+                                   exclude_bootstrap=exclude_bootstrap))
 
     def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
@@ -1193,10 +1218,12 @@ class FakeControlPlane:
                     # revoke a live key. (Count-before-insert with >= cap is
                     # outcome-equivalent to the SQL's count-after-insert with
                     # > cap.)
-                    active = [k for k in key_rows
-                              if k.get("org_id") == tid
-                              and k.get("revoked_at") is None
-                              and k.get("created_via") != "bootstrap"]
+                    # #4550: the cap pool is the ONE predicate — `_slot_rows`
+                    # (non-revoked, non-expired, non-bootstrap), exactly what
+                    # the RPC's `api_key_slot_count` count and victim scan now
+                    # share. Re-deriving the predicate inline here is what let
+                    # the expiry arm go missing on this lane.
+                    active = self._slot_rows(tid, now_iso)
                     if len(active) >= cap:
                         # #1872: the victim is the LEAST-RECENTLY-USED key
                         # (never-used first), mirroring recover_team_key's
@@ -1274,6 +1301,23 @@ class FakeControlPlane:
                         raise RuntimeError(
                             "duplicate key value violates unique constraint "
                             "\"uq_member_identity_active\"")
+        if fn == "purge_org_record":
+            # #7968 / PR #8179 P2: the SECURITY DEFINER org-erasure RPC
+            # (migration 20261012000005). It sets
+            # `app.record_journal_purge='on'` transaction-locally so the
+            # organizations -> graphs -> journal_event cascade may pass the
+            # append-only trigger, then hard-deletes the org row. The fake
+            # models the OBSERVABLE effect (the org row is gone) — the GUC
+            # and the cascade are the real DB's, exercised by the PGlite
+            # suite. Returning None for this fn silently would let
+            # `purge_org_control_plane` leave the org row behind and hide the
+            # defect the RPC fixes.
+            oid = (body or {}).get("p_org_id")
+            self.tables["organizations"] = [
+                t for t in self.tables.get("organizations", [])
+                if t.get("id") != oid
+            ]
+            return None
         if fn != "provision_team":
             return None
         return self._provision_team_emulation(body or {})

@@ -14,7 +14,11 @@ description: >-
   ephemeral port cannot collide, so N runners can run services jobs at once.
 inputs:
   image:
-    description: FalkorDB server image (each caller keeps its own pin).
+    description: >-
+      FalkorDB server image (each caller keeps its own pin). A Docker Hub
+      reference is resolved by provision.sh through the pull-through mirror
+      first, falling back to the upstream tag (#7867: anonymous Docker Hub
+      pulls are rate-limited per egress IP, which the fleet's runners share).
     required: false
     default: falkordb/falkordb-server:v4.20.6
   legacy:
@@ -24,8 +28,9 @@ inputs:
   health_timeout:
     description: >-
       Seconds to wait for each container's PING after it is started. This does
-      NOT bound the image pull (that happens inside `docker run`, before the
-      loop) — a cold pull is bounded only by the step/job timeout-minutes.
+      NOT bound the image pull (that is resolved before any container starts,
+      in provision.sh) — a cold pull is bounded only by the step/job
+      timeout-minutes.
     required: false
     default: "60"
   uri_graph:
@@ -39,6 +44,20 @@ inputs:
 runs:
   using: composite
   steps:
+    # #7867: the image chain (see provision.sh image_candidates) tries
+    # mirror.gcr.io, then GHCR, then the Docker Hub reference as given, falling
+    # through on any failure — so no unpopulated, unreachable or rate-limited
+    # registry can fail this job. The login below is best-effort (composite steps
+    # do support continue-on-error) and exists so the GHCR tier can serve even
+    # when the package is not public; provision.sh does not depend on it.
+    - name: Log in to GHCR (best effort)
+      continue-on-error: true
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
     - name: Start FalkorDB services on ephemeral host ports (#6673)
       shell: bash
       env:

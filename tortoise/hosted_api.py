@@ -169,11 +169,15 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
-from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
+    redact_error,
+    redact_for_publication,
+)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
     SESSION_LIST_FIELDS,
+    session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
 from tortoise.supabase_control import _service_key  # #3677
 
@@ -6702,8 +6706,10 @@ class CreatePointRequest(BaseModel):
     # and never make it EP-able through this surface. Forwarded to
     # ``create_point``'s ``credibility=`` and consumed into the
     # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
-    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
-    # with a logged warning (the existing point keeps its own baseline).
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` applies it
+    # to the existing point IF that point carries no baseline yet, and keeps
+    # the baseline it already has otherwise (with a logged warning) — never a
+    # silent drop either way (#7980).
     credibility: str | int | float | None = None
 
     @field_validator("kind")
@@ -8780,11 +8786,33 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
     not be reached is never served as a clean empty result. Unset/``0`` leaves
     this response byte-identical.
+
+    #7952 (§17.2): the COMPLETENESS MARKER rides its OWN field, ``residency``
+    (``hot`` / ``not-hot``), and is NOT a fifth status term — a residency
+    verdict is a directive about WHERE TO LOOK, not a status of the read. When
+    ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
+    PARTIAL, a read that falls outside the known-hot set returns
+    ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
+    from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
-    status_out: dict | None = {} if _read_status_enabled() else None
+    # The sink is the READ PATH's carrier for both fields; each field is
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
+    _status_on = _read_status_enabled()
+    _residency_on = _residency_enabled()
+    status_out: dict | None = {} if (_status_on or _residency_on) else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -8813,9 +8841,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         out.append(props)
     response = {"results": out, "count": len(out)}
     if status_out is not None:
-        # The SDK sets this on every return path; a missing term is a bug, not
-        # a reason to emit null under a vocabulary of exactly four terms.
-        response["status"] = status_out["status"]
+        # The SDK sets `status` on every return path; a missing term is a bug,
+        # not a reason to emit null under a vocabulary of exactly four terms.
+        # #7952: `residency` is present only when the known-hot set could be
+        # READ and a verdict was reached, so an unassessable read (a store that
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
+        if _residency_on and "residency" in status_out:
+            response["residency"] = status_out["residency"]
     return response
 
 
@@ -10515,12 +10554,14 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
-    # recovery lanes' EXPIRY exclusion diverges (the Supabase
-    # recover_team_key RPC still counts expired-but-unrevoked rows while
-    # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
-    # can revoke a LIVE key as collateral for expired rows that no longer
-    # occupy a slot); the RPC never 402s.
+    # recovery lanes' EXPIRY exclusion USED to diverge (the Supabase
+    # recover_team_key RPC counted expired-but-unrevoked rows while its
+    # registry twin excluded them, so the RPC's over-cap branch could
+    # revoke a LIVE key as collateral for rows that no longer occupy a
+    # slot) — closed as of #4550: 20261012000006_recover_team_key_expiry
+    # puts the RPC's count on public.api_key_slot_count (the ONE SQL
+    # declaration of this predicate) and gives its revoke-target scan the
+    # same expiry arm. No cap lane omits the expiry axis any more.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         KeyCapRefusal,
@@ -13604,7 +13645,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             _update_onboarding_state(org["org_id"], _echo=False, **{
                 receipt_key: now,
             })
-            _record_capture_last_error(org["org_id"], capture_harness, None)
+            # #3520: the `session_capture_last_error_<harness>` clear used to sit
+            # HERE, before `_capture_ok` was known — which is exactly how an
+            # extraction failure cleared its own error. It now rides the outcome,
+            # above. The receipt write itself is unchanged: a stored session IS
+            # a receipt-worthy capture, and the extraction status is the surface
+            # that says what happened to its memory.
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception(
@@ -13659,7 +13705,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
         _sweep_orphaned_writes()
-        _record_capture_last_error(org["org_id"], capture_harness, None)
+        # #3520: the unconditional clear that used to sit HERE is gone as well.
+        # The per-harness `last_error` is written ONCE, from the capture
+        # outcome, above — clearing it here as well would be a second writer of
+        # one fact (the drift this issue removes). The sweep above still runs:
+        # the writes THIS capture landed have to be removed whether or not an
+        # outcome is recorded.
 
     # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
     # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
@@ -13879,6 +13930,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
+    # #3520 (§C): ONE fact, ONE place. The per-harness `last_error` and the
+    # per-session extraction status the read endpoints serve are written from
+    # THIS outcome, so one surface can no longer read "processed" while the
+    # other reads "no error". Before this, the receipt block below cleared
+    # `session_capture_last_error_<harness>` unconditionally on any 2xx — and an
+    # extraction failure RETURNS 200 (the turns really were stored, so a non-2xx
+    # would hide the partial write) — so a capture that extracted nothing
+    # cleared its own failure and the dashboard showed a clean pill.
+    #
+    # The clear STILL happens on every other 2xx (a store-only capture, a
+    # replay, a clean success): "only when extraction succeeded" is the
+    # failure-side rule, and neither a keyless capture (#3892 — STORED, only
+    # extraction skipped, never a fault) nor a replay performed an attempt that
+    # could have failed. Only a GENUINE attempt that did not fully succeed sets
+    # a detail.
+    _attempted_extraction = (
+        not store_only and (not session_existed or retry_failed_capture))
+    try:
+        _record_capture_last_error(
+            org["org_id"], capture_harness,
+            _capture_outcome_last_error(extraction_errors, skipped)
+            if (not _capture_ok and _attempted_extraction) else None)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "capture last-error state write failed (non-fatal)")
+        extraction_warnings.append(
+            "capture last-error state write failed (non-fatal)")
     # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
     # its real outcome + lane, exactly as before. A KEYLESS attempt records
     # capture_ok=False + lane "none" (no extraction lane ran) — recording
@@ -14072,12 +14151,51 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # as ``_capture_receipt_key`` / ``_capture_last_error_key``.
 
 
+# ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
+def _capture_outcome_last_error(extraction_errors: list, skipped: int) -> str:
+    """#3520: the descriptive per-harness `last_error` for a GENUINE attempt
+    whose extraction did not fully succeed.
+
+    Called from exactly ONE site — the 2xx handler, from the SAME variables that
+    derive the session's extraction status — so the two surfaces report one
+    fact. The text names the FIRST error verbatim (an operator reading the
+    dashboard gets the provider's own words, not a category) and counts the
+    rest, plus the post-write-verification shortfall when that is the cause.
+
+    `skipped` is the fail-soft enrichment case (a point the graph did not
+    return after the write). It is reported as a shortfall rather than an
+    error because nothing raised — but it is NOT "ok": a capture that claims
+    to have processed a point it cannot find is the false positive this issue
+    exists to remove.
+    """
+    parts: list[str] = []
+    if extraction_errors:
+        first = str(extraction_errors[0])
+        rest = len(extraction_errors) - 1
+        parts.append(first if rest <= 0 else f"{first} (+{rest} more)")
+    if skipped:
+        parts.append(
+            f"{skipped} extracted point(s) missing from the graph post-write")
+    detail = "; ".join(parts) or "extraction did not complete"
+    return f"session stored, extraction failed — {detail}"
+
+
 def _record_capture_last_error(org_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
     Called on every non-2xx (set) EXCEPT the #3060 capacity 429 and the #3129
     in-flight 409 — server conditions, not org capture failures — and every
-    2xx (cleared)."""
+    2xx (cleared).
+
+    #3520: the 2xx half is no longer unconditional. It is called ONCE per
+    capture request, from the handler's single outcome point, with a detail
+    ONLY for a genuine extraction attempt that did not fully succeed
+    (``_capture_outcome_last_error``) and ``None`` everywhere else — a clean
+    success, a replay, or a store-only capture (#3892/#4258: nothing ran, so
+    nothing failed). The clear-on-2xx site in the receipt block is gone; two
+    writers of one fact is how a status surface came to read "processed" for a
+    capture that had just cleared its own failure.
+    """
     key = _capture_last_error_key(harness)
     if key is None:
         return
@@ -14501,17 +14619,64 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
     # non-episodic quota/budget discriminator). ──
+    #
+    # #4704 — THESE THREE ARE APPLIED EXACTLY ONCE PER LOGICAL PAYLOAD, and
+    # the guard is the :CommitRecord, inside THIS statement (never a
+    # read-then-write). They are the ONLY non-idempotent writes in the phase
+    # (every later step is MERGE-keyed), and the phase is RE-RUN BY DESIGN: a
+    # failure at a later step surfaces as the fail-closed 500 whose contract
+    # is "retry with the same client_commit_id", and L1 does not replay a
+    # `partial` record — so the retry re-enters HERE. Unguarded, that applied
+    # `commit_count +1` and `value_nodes_created + net_new` a second time for
+    # one payload, and `value_nodes_created` is the budget numerator
+    # `adjudicate_budget` reads as `prior_created`: the session's remaining
+    # budget was understated for every LATER commit, so a payload the true
+    # spend would have written is HELD at the >25 band instead, and once that
+    # inflated numerator crosses 50 the client's re-submission of it 402s.
+    #
+    # `r.value_nodes_declared` IS the stamp: NULL ⇒ this payload has not
+    # declared its value-node contribution on the Session yet; an int ⇒ it
+    # has, and that int is what it declared. The stamp and the arithmetic are
+    # one statement, so they cannot half-apply (a crash leaves both or
+    # neither). `write_ops_billed` is the SAME shape for the billing half
+    # (PL4: "billed exactly once"); this is that contract for the counter
+    # half. The numerator itself stays on the Session (§4.1 division of
+    # labour) — the record only remembers what IT declared, which is what
+    # stops a retry from declaring again (`plan_commit` reads the stamp back
+    # to adjudicate the retry against the payload's TOTAL, not the remainder).
+    #
+    # `collect(r)` collapses the record match to ONE row: a plain join would
+    # evaluate the guard once PER row and apply the counters once per duplicate
+    # record. With NO record at all (the direct callers of this helper — the
+    # supersession/binding/span tests) `recs` is `[null]`, `pending` is true (a
+    # null property IS NULL) and the counters apply exactly as before: nothing
+    # is stamped, because exactly-once needs a logical-payload identity and a
+    # caller with no record has none. `IS NULL` — not truthiness — is the test,
+    # so a merge-only payload's `0` is a real declaration and still guards
+    # `commit_count`/`draft_count`. The FOREACH is a LATER clause than the SET,
+    # so `pending` reads the pre-statement stamp.
     drafts = sum(1 for pr in reconcile.points
                  if pr.action in ("new", "supersede")
                  and pr.point.status == "draft")
     proj.g.query(
+        "OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "WITH collect(r) AS recs "
+        "WITH recs, all(x IN recs WHERE x.value_nodes_declared IS NULL) "
+        "     AS pending "
         "MERGE (s:Session {id:$sid}) "
         "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
-        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
-        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
-        "    s.updated_at=$now",
-        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + "
+        "        (CASE WHEN pending THEN $created ELSE 0 END), "
+        "    s.draft_count = coalesce(s.draft_count, 0) + "
+        "        (CASE WHEN pending THEN $drafts ELSE 0 END), "
+        "    s.commit_count = coalesce(s.commit_count, 0) + "
+        "        (CASE WHEN pending THEN 1 ELSE 0 END), "
+        "    s.updated_at=$now "
+        "FOREACH (x IN [y IN recs WHERE y IS NOT NULL AND "
+        "               y.value_nodes_declared IS NULL] | "
+        "         SET x.value_nodes_declared = $created)",
+        params={"cid": payload.client_commit_id, "sid": session_id,
+                "now": now, "created": reconcile.net_new,
                 "drafts": drafts},
     )
 
@@ -15462,6 +15627,15 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     returns an empty list, never a 500 (a 500 also strips the CORS headers
     and surfaces as a misleading 'CORS blocked' to the browser).
 
+    #3520: each row carries the server-resolved per-session EXTRACTION status
+    (`extraction`: `{status, extractor, outcome_known}`), so the dashboard can
+    tell "stored" from "stored AND processed" — including the
+    extraction-failed-but-HTTP-200 capture, which writes a receipt and a
+    Session while extracting nothing. It is the SAME pair the detail endpoint
+    and the SDK read serve, derived in ONE place
+    (tortoise/session_projection.py::session_extraction_status) and APPENDED at
+    the END of the projection so no positional consumer shifts.
+
     #2600: ?actor_user_id=<uuid> optional filter (GET has no body) — the
     filter EXCLUDES null-actor (legacy) rows by construction (a MATCH-level
     WHERE on a property a legacy Session does not have can never match).
@@ -15515,7 +15689,13 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
             "s.actor_user_id, s.harness, "
-            "s.machine_id, s.model "
+            "s.machine_id, s.model, "
+            # #3520: the extraction-status pair APPENDED at the END — never
+            # inserted or reordered. The handler builds its dicts from these
+            # POSITIONAL columns (r[0..3] is the id/created/turns/extracted
+            # count), so a column placed anywhere earlier would silently
+            # re-bind every one of them. r[8]/r[9] are new; nothing above moves.
+            "s.capture_ok, s.capture_extractor "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -15567,6 +15747,11 @@ def _session_row_dict(r, members_by_id: dict) -> dict:
         # fields, null when absent (legacy / hook-less sessions).
         "machine_id": r[6],
         "model": r[7],
+        # #3520: the server-resolved per-session EXTRACTION status. LAST key in
+        # the projection, matching the LAST columns in the RETURN above — the
+        # positional contract is `r[8]`/`r[9]`, and #5498's binding assert just
+        # below keeps the wire dict and the shared declaration from drifting.
+        "extraction": session_extraction_status(r[8], r[9]),
     }
     assert set(d) == set(SESSION_LIST_FIELDS), (
         f"session projection drifted: wire={sorted(d)} "
@@ -15644,7 +15829,11 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         lambda: proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
             "s.turn_count, s.actor_user_id, s.harness, "
-            "s.machine_id, s.model",
+            "s.machine_id, s.model, "
+            # #3520: APPENDED at the END — the existing sess[0..6] mapping is
+            # unchanged (sess[7]/sess[8] are the new pair), and the detail
+            # endpoint must serve the SAME extraction status the list does.
+            "s.capture_ok, s.capture_extractor",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -15751,6 +15940,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         # fields, null when absent.
         "machine_id": sess[5],
         "model": sess[6],
+        # #3520: the per-session extraction status — appended at the END of the
+        # detail projection too, so the wire key set is the shared declaration
+        # plus the detail-only fields (the #5498 binding assert below).
+        "extraction": session_extraction_status(sess[7], sess[8]),
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
@@ -19107,10 +19300,41 @@ async def invite_info(token: str):
     def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
         reg = sdk._get_registry()
+        # #4588: the expiry predicate is part of the QUERY, not only the
+        # caller's post-check, because THIS route is unauthenticated and the
+        # per-row cost is a full PBKDF2 (100k iterations, `hash_api_key`).
+        # Without the prune, every expired-but-not-yet-swept ``Invitation``
+        # node was materialised and hashed for ANY attacker-supplied token —
+        # an amplification the caller drives at will. The bound is now the
+        # number of LIVE invites. Nothing but accept, revoke, the admin
+        # ``expire_invite`` and the clock sweep writes a terminal ``status``
+        # (#1890), so an invite that expires by the clock alone sat at
+        # 'pending' — scanned on every request — until a sweep ran.
+        #
+        # Stored form: both writers (``invite_to_org`` above and
+        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
+        # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
+        # STRING — so the comparison is the same lexicographic ISO compare the
+        # sibling registry predicates use (the #1890 dup-check below,
+        # ``list_pending_invites_for_me``, ``_get_current_org``'s API-key
+        # lanes). Legacy nodes have no ``expires_at`` prop → NULL → the
+        # ``IS NULL`` arm keeps them (Never-expires), never silently dropped.
+        #
+        # No indexed ``lookup_hash`` equality is available on this lane: the
+        # registry stores only ``token_hash`` in the salted ``salt:hash``
+        # PBKDF2 form, so the per-row verify is unavoidable and the expiry
+        # prune is the ceiling. A ``LIMIT``/cap was considered and REJECTED —
+        # it would silently stop resolving valid invites past the cap, turning
+        # an amplification into a correctness failure on the accept path.
+        # The caller's post-match expiry check below stays as the authority
+        # (defence in depth): the predicate only prunes, it never decides.
+        now_iso = datetime.now(UTC).isoformat()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN i.id, i.org_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
+            params={"now": now_iso},
         ).result_set
         for iid, tid, role, ie, exp, th in rows:  # noqa: B007
             if _verify(token, th):
@@ -33090,9 +33314,15 @@ async def backups_drill(request: Request):
             org_id=org_id, backup_key=backup_key,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
 
 
 @app.post("/v1/internal/backups/drill-scheduled")
@@ -33138,20 +33368,46 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: an exception MESSAGE is app-controlled text and this
+                # detail is published verbatim into a PUBLIC issue body
+                # (``alert_store._body``). ``error_type`` is the bounded half
+                # the other operator incidents already carry
+                # (``operator_alert.alert_abuse_fault``); the message goes
+                # through the publication scrubber before it joins it.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        # #3293 review: the response body is echoed verbatim into a PUBLIC
+        # Actions log by the drill drivers (``registry-drill*.sh``), so the
+        # raw exception is a publication sink too — scrub it here, not only in
+        # the incident detail above. Internal-key auth gates WHO may call, not
+        # where the caller writes the response.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: see the ValueError path above — same public sink, same
+                # scrub. This is the path a STORAGE error takes, i.e. the one
+                # most likely to echo a signed URL or endpoint in its message.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        # #3293 review: see the ValueError path above — same public-Actions-log
+        # sink, same boundary scrub.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).

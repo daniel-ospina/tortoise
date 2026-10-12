@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eldato.orchestrator-loop</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__O__/orch-loop.sh</string>
+  </array>
+
+  <!-- RunAtLoad: start on login. KeepAlive: relaunch if the controller exits.
+       The loop is idempotent — .orch.lock makes a second instance exit immediately. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__O__/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>__O__/logs/launchd.err</string>
+
+  <!-- launchd gives no shell env: PATH must include brew (tmux, gh, uv, pi) and the
+       per-box constants must be explicit here, since nothing sources a profile. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+
+    <!-- target -->
+    <key>OR</key>
+    <string>__OR__</string>
+    <key>REPO</key>
+    <string>__REPO__</string>
+    <key>O</key>
+    <string>__O__</string>
+
+    <!-- concurrency limits; the swap gate, not MAX_LANES, is what throttles an 8 GB box
+         (README section 4). Do not raise MAX_LANES without checking swap headroom. -->
+    <key>MAX_LOAD</key>
+    <string>__MAX_LOAD__</string>
+    <key>MAX_LANES</key>
+    <string>__MAX_LANES__</string>
+    <key>MAX_REVIEW</key>
+    <string>__MAX_REVIEW__</string>
+    <key>MERGE_PRIORITY_AT</key>
+    <string>__MERGE_PRIORITY_AT__</string>
+    <key>MAX_FIX</key>
+    <string>__MAX_FIX__</string>
+    <key>MAX_FIX_TRIES</key>
+    <string>__MAX_FIX_TRIES__</string>
+    <key>MIN_SWAP_FREE</key>
+    <string>__MIN_SWAP_FREE__</string>
+    <key>BATCH</key>
+    <string>__BATCH__</string>
+    <key>CYC</key>
+    <string>__CYC__</string>
+  </dict>
+</dict>
+</plist>

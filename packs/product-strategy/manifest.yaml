@@ -21,9 +21,6 @@ ontology:
     requirement: WorkItem
     architecture: Document
     customerProblem: Problem
-  equivalentTo:
-    requirement:
-    - dev:requirement
   pointKinds:
   - jobToBeDone
   - useCase
@@ -118,7 +115,7 @@ ontology:
       nearMisses:
       - userJourney
     requirement:
-      description: A stated need a feature must satisfy (≡ dev:requirement)
+      description: A stated need a feature must satisfy
       nearMisses:
       - useCase
       - feature

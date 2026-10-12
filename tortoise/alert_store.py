@@ -59,6 +59,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable  # noqa: UP035
 
+from tortoise.security import redact_for_publication
+
 logger = logging.getLogger(__name__)
 
 DEDUP_PREFIX = "ops/alerts/"
@@ -352,20 +354,40 @@ class AlertStore:
     def _title(self, kind: str, org_id: str, detail: dict) -> str:
         org = f" — {org_id}" if org_id else ""
         age = detail.get("age") or detail.get("age_minutes") or ""
-        return f"[DR] {kind}{org}" + (f" — last backup {age}" if age else "")
+        return redact_for_publication(
+            f"[DR] {kind}{org}" + (f" — last backup {age}" if age else ""))
 
     def _body(self, kind: str, org_id: str, detail: dict) -> str:
+        # #3293: this body is filed as a PUBLIC GitHub issue, so the app-
+        # controlled half of it — the ``detail`` dict, which callers fill from
+        # exception text (``{"error": str(e)}``) — is scrubbed AT THIS BOUNDARY
+        # rather than trusted to every caller. The bash DR drivers
+        # (``.github/scripts/registry-cron.sh``) redact for the same reason; the
+        # placement is deliberate ("the last point before publication, so a
+        # future caller cannot" publish unredacted text). The static template
+        # around the dump is not scrubbed — it is ours, not a caller's.
+        #
+        # ``redact_paths=False``: the detail LEANS on ``backup_key``, which is a
+        # filesystem path (``backups/<team>/data/…/dump.enc``). The default
+        # boundary's path rules would rewrite ``/team/data/…`` to ``/***`` and
+        # destroy the one field triage needs (#3293 review). Credential SHAPES
+        # are still scrubbed; only path interning is skipped.
+        safe_detail = redact_for_publication(
+            json.dumps(detail, indent=2), redact_paths=False)
         return (
             f"**Incident kind:** {kind}\n"
-            f"**Team:** {org_id or '(platform)'}\n"
-            f"**Detail:** ```{json.dumps(detail, indent=2)}```\n\n"
+            f"**Team:** {redact_for_publication(org_id) or '(platform)'}\n"
+            f"**Detail:** ```{safe_detail}```\n\n"
             f"Runbook: `docs/ops/registry-backup-dr.md` — triage table by kind."
         )
 
     def _telegram_text(self, kind: str, org_id: str, detail: dict, issue_number: int | None) -> str:
         org = f" ({org_id})" if org_id else ""
         issue = f" — issue #{issue_number}" if issue_number else ""
-        return f"🚨 DR alert: {kind}{org}{issue}"
+        # #3293: same boundary rule as ``_body``. No detail is carried TODAY —
+        # the scrub is here so a future caller that adds one cannot publish it
+        # unredacted through this sink.
+        return redact_for_publication(f"🚨 DR alert: {kind}{org}{issue}")
 
     # ── incident lifecycle ──────────────────────────────────────────────────
     def suppression_active(self, kind: str) -> bool:
@@ -861,10 +883,18 @@ class AlertStore:
                     "before the #2844 alias fix; closing all",
                     kind, len(numbers), ", ".join(f"#{n}" for n in numbers),
                 )
+            # #3293: a FOURTH publication sink in the same class as the alert
+            # push — a Telegram message (and the pending-push R2 object it is
+            # retried from). ``org_id`` is the app-controlled subject, so it
+            # must pass the SAME boundary as ``_title``/``_telegram_text``; the
+            # PR's invariant is only true if every sink is routed through it.
             self._push_with_pending(
                 states[0][0],
-                f"✅ DR resolved: {kind}" + (f" ({org_id})" if org_id else "")
-                + " — issue " + ", ".join(f"#{n}" for n in numbers),
+                redact_for_publication(
+                    f"✅ DR resolved: {kind}"
+                    + (f" ({org_id})" if org_id else "")
+                    + " — issue " + ", ".join(f"#{n}" for n in numbers)
+                ),
             )
         # delete-to-resolve across the whole alias set: a surviving spelling
         # would adopt the next recurrence (the #2796 class). Best-effort, and
