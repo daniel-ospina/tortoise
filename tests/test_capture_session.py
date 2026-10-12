@@ -6187,6 +6187,109 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     assert "hosted mode" in result["error"], result
 
 
+# ── #4288: the per-org capture_extract setting on the AGENT-FACING surface ───
+# #4258 landed the setting on the hosted REST route + the dashboard. #4288
+# tracks the MCP/SDK surface. The WRITE half (a tool parameter or a state-PATCH
+# tool) is owner-gated — a frozen-baseline re-cut, per #4288 and the #4282
+# mandate — so it is NOT implemented here and NOT asserted. What these two
+# tests pin is the non-gated half that was previously UNPROVEN: the MCP capture
+# tool already HONOURS the setting (OFF = store, never refuse), and the setting
+# is already READABLE through the existing agent-facing onboarding tool.
+
+def test_session_capture_tool_honours_capture_extract_off_4288(tmp_path, monkeypatch):
+    """#4288: with the per-org setting OFF (#4258, owner ruling on #3892), a
+    capture through the MCP tool still STORES the session and its turns — never
+    a refusal — and skips extraction, reporting that under its OWN
+    ``extraction-disabled`` mode.
+
+    WHY THIS IS NOT REDUNDANT WITH #4258's TESTS: those drive the REST route
+    (``client.post("/v1/sessions")``) only. The MCP tool is a SEPARATE served
+    surface — its own slot reservation, offload hand-off and receipt plumbing —
+    and it is the surface agents actually capture through. An MCP-lane
+    regression that extracted anyway would silently contradict the user's
+    explicit opt-out on the path they use, and no existing test would catch it.
+
+    The provider IS configured (the mock seam), so the user setting is the ONLY
+    reason extraction is skipped — this is the guard against routing the OFF
+    state through the keyless ``no-provider`` reason.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.mcp_server import tortoise_session_capture
+
+    org = "team-4288-mcp"
+    sid = "s-4288-extract-off"
+    marker = "captureextractoffmcpzzq"
+    with _mcp_team_context(tmp_path, monkeypatch, org_id=org):
+        assert ha_mod._llm_provider_available() is True
+        ha_mod._update_onboarding_state(org, capture_extract=False)
+
+        result = tortoise_session_capture(
+            conversation=[{"role": "user", "content": (
+                f"we decided the {marker} session stores but does not extract")}],
+            harness="pi", session_id=sid)
+
+        # (1) never refused; the receipt is truthful under its OWN mode — not
+        # folded into "llm" (a false claim) or "no-provider" (a false reason).
+        assert not result.get("error"), result
+        assert result["extraction_mode"] == "extraction-disabled", result
+        assert result["extracted"] == 0, result
+        assert result["turns"] == 1, result
+        warnings = " ".join(result["warnings"])
+        assert "capture_extract" in warnings, warnings
+        assert "STORED" in warnings, warnings
+
+        # (2) the capture LANDED: the Session and its turn Point exist …
+        proj = ha_mod._make_sdk(namespace=org)._get_proj()
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+            params={"sid": sid}).result_set[0][0] == 1
+        # … and NO extracted (non-episodic) point was minted.
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.is_episodic IS NULL OR p.is_episodic = false RETURN count(p)",
+            params={"sid": sid}).result_set[0][0] == 0
+
+        # (3) the durable lane separates the USER setting ("disabled") from the
+        # transient keyless reason ("none", #4258), so a later re-capture with
+        # the setting back ON re-attempts extraction (#2335 TRUE retry).
+        row = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+            params={"sid": sid}).result_set[0]
+        assert row[0] is False and row[1] == "disabled", row
+
+        # (4) the MCP surface wrote its own per-harness receipt — the
+        # agent-facing evidence the dashboard row reads.
+        st = ha_mod._get_onboarding_state(org)
+        assert st.get("session_capture_receipt_pi"), st
+
+
+def test_onboarding_state_tool_reads_capture_extract_4288(tmp_path, monkeypatch):
+    """#4288, READ half: the setting is ALREADY readable on the agent-facing
+    surface — ``tortoise_onboarding_state`` (the ``onboarding`` family, bound to
+    GET /v1/onboarding/state) returns ``capture_extract`` for the org.
+
+    This pins the half of #4288's outcome that needs NO frozen-baseline re-cut:
+    an agent can already discover whether this org's captures will be extracted,
+    before it decides how to report a capture's outcome. The WRITE half (a
+    parameter on the capture tool, or a state-PATCH tool) is the owner-gated
+    remainder tracked on #4288.
+
+    Polarity (#4258): an older stored state with the key ABSENT must read ON,
+    never OFF — so the first read happens on a team whose stored state is ``{}``.
+    """
+    from tortoise.mcp_server import tortoise_onboarding_state
+
+    with _mcp_team_context(tmp_path, monkeypatch, org_id="team-4288-read",
+                           seed_recording=False) as org:
+        # a team provisioned BEFORE the setting existed (stored state ``{}``)
+        default_state = tortoise_onboarding_state()
+        assert default_state.get("capture_extract") is True, default_state
+
+        _ha._update_onboarding_state(org, capture_extract=False)
+        off_state = tortoise_onboarding_state()
+        assert off_state.get("capture_extract") is False, off_state
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # #2600 (Phase 1, Task 2) — Session.actor_user_id stamp (MCP-lane + SDK
 # mirror). The capture tool calls the impl DIRECTLY in-thread (no HTTP
