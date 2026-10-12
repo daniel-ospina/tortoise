@@ -358,6 +358,19 @@ SOURCE_PATTERNS = {
                    "website/functions/blog/_shared/meta-contract.ts",
                    "website/functions/blog/_shared/seo-constraints.ts",
                    "website/functions/blog/_shared/seo-keywords.ts",
+                   # #8293: the keyword split moved the DATA to `keywords.ts` and
+                   # the shared agent-key check + limiter to `agent-auth.ts`.
+                   # `agent-auth.ts` is now the single copy of a security
+                   # primitive that `posts/[[path]].ts` executes and that
+                   # `test_blog_agent_delete_guard.py` drives; `keywords.ts` is
+                   # the file a keyword-research pass edits. Without these
+                   # entries a lone edit to either selects NO surface
+                   # (surfaces=[], full=False) and the guard never runs on the
+                   # change it exists to catch — the #1349/#3332 silent-drop
+                   # class the sibling entries above close. Named as individual
+                   # files, not a glob: `select()` matches with `startswith`.
+                   "website/functions/blog/_shared/agent-auth.ts",
+                   "website/functions/blog/_shared/keywords.ts",
                    "website/functions/blog/_shared/slug.ts",
                    "website/functions/contact/submit.ts",
                    "website/website_architecture.md",
