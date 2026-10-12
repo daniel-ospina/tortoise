@@ -70,7 +70,7 @@ import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, job
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, heldRowEmbeddable } from './sessionKey.js'
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
@@ -7044,10 +7044,14 @@ function claimIntentInFlight() {
   // deleted classifyHeldKey drop hook owned this invariant pre-#2246 (the
   // held slot was cleared when its row died); with no held slot these state
   // strings are the only key material left, so the keys-table reload is the
-  // row-truth source. Guard: keys null/[] = not loaded yet — do nothing, so
-  // the pre-load welcome reveal is never cleared (the provisioned row IS in
-  // the loadAll response after finishWelcomeLoads). Deps [keys] only: a
-  // clear changes welcomeKey/wizardDurableKey, never keys, so no loop.
+  // row-truth source. #4371: the RULE is not declared here — the effect
+  // resolves the row and hands it to `heldRowEmbeddable` (sessionKey.js), the
+  // ONE declaration `durableConnectKey`'s welcome-stale tail also consumes
+  // (the two used to inline the same predicate, held together by prose only).
+  // Guard: keys null/[] = not loaded yet — do nothing, so the pre-load welcome
+  // reveal is never cleared (the provisioned row IS in the loadAll response
+  // after finishWelcomeLoads). Deps [keys] only: a clear changes
+  // welcomeKey/wizardDurableKey, never keys, so no loop.
   React.useEffect(() => {
     if (!keys || keys.length === 0) return
     const rowFor = (plaintext) => {
@@ -7057,14 +7061,12 @@ function claimIntentInFlight() {
     for (const [plaintext, clear] of [[welcomeKey, setWelcomeKey], [wizardDurableKey, setWizardDurableKey]]) {
       if (!plaintext) continue
       const r = rowFor(plaintext)
-      // #2246 (review, P2): a bootstrap/expiring row is dead for embedding
-      // too — symmetric with durableConnectKey's paste tail (sessionKey.js,
-      // identical predicate): a 24h session credential (or any expiring
-      // row) must never back an embed, so a plaintext whose row later
-      // resolves to one is invalidated like any revoked/disabled row.
-      // First-timer welcome keys are provisioned (created_via
-      // 'provisioned'), so this never fires on the legit reveal.
-      if (!r || r.revoked_at || r.enabled === false || r.created_via === 'bootstrap' || !!r.expires_at) clear('')
+      // A bootstrap/expiring row is dead for embedding too — a 24h session
+      // credential (or any expiring row) must never back an embed, so a
+      // plaintext whose row later resolves to one is invalidated like any
+      // revoked/disabled row. First-timer welcome keys are provisioned
+      // (created_via 'provisioned'), so this never fires on the legit reveal.
+      if (!heldRowEmbeddable(r)) clear('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys])

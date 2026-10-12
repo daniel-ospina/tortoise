@@ -45,6 +45,46 @@ export function usableDurableRows(keyRows) {
       String(b.created_at || b.createdAt || '').localeCompare(String(a.created_at || a.createdAt || '')))
 }
 
+// #4371: the ROW-TRUTH rule for an in-memory plaintext — declared ONCE here.
+// It answers one question: "is the row behind a plaintext we still HOLD in
+// memory usable for EMBEDDING?" A held plaintext is only as good as its row:
+// once that row is revoked, disabled, a bootstrap session credential, or
+// carries ANY expiry, the plaintext must not back a snippet or a connect
+// command any more.
+//
+// TWO drivers ask it, and they must answer identically — #2246 (review) added
+// the question to both, #2426 added the expiring arm to both:
+//   - `durableConnectKey`'s welcome-stale tail (below), and
+//   - `main.jsx`'s row-truth invalidation effect, which clears `welcomeKey` /
+//     `wizardDurableKey` when a keys reload shows their row died.
+// Before #4371 each INLINED the predicate and only PROSE claimed they were
+// "symmetric / identical" (main.jsx said so in a comment, sessionKey.js said
+// it back) — so a future dead-row condition added to one surface (a new
+// created_via kind, `disabled_by`, a grace window) would silently
+// mis-classify a held key on the other, showing up as a wrong embed and never
+// as an error. Both now consume this one declaration; the agreement is held by
+// `heldRowTruthExec.test.js`, which drives BOTH entry points over the same
+// fixtures.
+//
+// Deliberately NOT expressed via `isManagedKey` (`… && !k.expires_at && …`):
+// isManagedKey answers a DIFFERENT question — which rows the API Keys table
+// shows — and #2426 relaxed it to bootstrap-exclusion-only, which is exactly
+// when the embed rule had to grow its own explicit `expires_at` arm. Delegating
+// here would re-couple the two, so a future table-predicate relaxation would
+// silently relax what may be embedded. `usableDurableRows` (which rows the
+// connect gate may ROUTE to) restates the same conditions a third time for the
+// same reason: routing and embedding are separate decisions. The paste tail in
+// `durableConnectKey` also walks the same conditions, but to report a DISTINCT
+// source per cause — the agreement test pins it to this rule.
+export function heldRowEmbeddable(row) {
+  if (!row) return false
+  if (row.revoked_at) return false
+  if (row.enabled === false) return false
+  if (row.created_via === 'bootstrap') return false
+  if (row.expires_at) return false
+  return true
+}
+
 // #1998 fold-in (durable connect key): the wizard connect step's universal
 // command embeds an API key the user's agent will authenticate with. It must
 // be a DURABLE key — a 24h bootstrap session credential (created_via
@@ -84,20 +124,21 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   // plaintext — post-#2246 the table actions are uniform one-click (rotate /
   // revoke / disable), so a welcomeKey whose prefix row is gone/revoked/
   // disabled must NOT win. P2: a bootstrap/expiring row is dead for embedding
-  // too (symmetric with the paste tail below — a 24h session credential, or
-  // any key with an expiry, must never back an embed); welcome keys are
-  // provisioned without expiry (created_via 'provisioned', expires_at null),
-  // so this arm is a harmless belt that keeps the predicate identical to
-  // main.jsx's row-truth effect. Check only when keyRows is a LOADED non-empty
-  // array (null/[] = not loaded yet — the pre-load welcome reveal must keep
-  // working; the provisioned row lands in the same loadAll response). When
-  // stale, set the welcome plaintext aside and proceed as if it were absent
-  // so the normal rows/paste resolution (rows-durable / none / durable /
-  // bootstrap / expiring / revoked / disabled / unknown) runs.
+  // too (a 24h session credential, or any key with an expiry, must never back
+  // an embed); welcome keys are provisioned without expiry (created_via
+  // 'provisioned', expires_at null), so this arm is a harmless belt. The rule
+  // itself is `heldRowEmbeddable` (#4371) — the SAME declaration main.jsx's
+  // row-truth effect consumes, so the two surfaces cannot drift.
+  // Check only when keyRows is a LOADED non-empty array (null/[] = not loaded
+  // yet — the pre-load welcome reveal must keep working; the provisioned row
+  // lands in the same loadAll response). When stale, set the welcome plaintext
+  // aside and proceed as if it were absent so the normal rows/paste resolution
+  // (rows-durable / none / durable / bootstrap / expiring / revoked / disabled
+  // / unknown) runs.
   let welcome = welcomeKey
   if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
     const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
-    if (!row || row.revoked_at || row.enabled === false || row.created_via === 'bootstrap' || !!row.expires_at) welcome = ''
+    if (!heldRowEmbeddable(row)) welcome = ''
   }
   if (welcome) return { key: welcome, durable: true, source: 'welcome' }
   if (!apiKey) {
