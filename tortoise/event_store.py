@@ -176,8 +176,11 @@ def next_seq(proj) -> int:
             f"0 <= last_seq < {MAX_SEQ}; the next seq it would hand out is "
             f"undeliverable — above {MAX_SEQ} the `seq` range index no longer "
             f"compares exactly (double precision), and a negative counter can "
-            f"never satisfy `seq > cursor`. Refusing to mint it (#5379): repair "
-            f"the counter (e.g. `reestablish_watermark`) before emitting")
+            f"never satisfy `seq > cursor`. Refusing to mint it (#5379): the "
+            f"counter must be repaired BY HAND before emitting — this allocator "
+            f"only ever raises `last_seq`, and `reestablish_watermark` REFUSES "
+            f"an out-of-domain counter instead of lowering it, so neither can "
+            f"repair this state")
     return int(seq)
 
 
@@ -518,15 +521,26 @@ def _refresh_first_seq(proj) -> None:
     overflow is detected by the wrap itself (`m.last_seq + 1 < 0`), NOT by a
     comparison against an INT64_MAX bound — FalkorDB 4.20.x mis-evaluates those
     (see `next_seq`) — and the floor is saturated at ``MAX_INT64``, the top of
-    the domain and legitimately ABOVE ``MAX_SEQ`` (§ ``MAX_SEQ``); a floor below
-    the domain is raised to 0.
+    the domain and legitimately ABOVE ``MAX_SEQ`` (§ ``MAX_SEQ``).
+
+    A counter ALREADY below the domain saturates the same way, and the reason is
+    the 410 contract itself: ``next_seq`` REFUSES such a counter, so its next
+    write is unreachable, and every accepted cursor (every cursor is `>= 1`;
+    `after_seq == 0` is the "from the start" sentinel that SKIPS the guard) is
+    genuinely expired. Raising the floor to ``0`` — as an earlier draft did —
+    left `poll_events`' `after_seq < first_seq` test unable to fire for ANY
+    reachable cursor (`1 < 0` is false), so a subscriber parked above the
+    truncated stream still read `[]` forever with no 410: the exact #4653 harm
+    this change exists to remove, just reached through the already-negative
+    branch instead of the wrap branch. Saturation makes both out-of-domain
+    inputs produce a floor above every cursor, so both answer 410.
     """
     try:  # noqa: SIM105
         proj.g.query(
             "MATCH (m:GraphEventMeta) "
             "OPTIONAL MATCH (e:GraphEvent) "
             "WITH m, min(e.seq) AS mn, "
-            "CASE WHEN m.last_seq < 0 THEN 0 "
+            "CASE WHEN m.last_seq < 0 THEN $max_int64 "
             "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
             "ELSE m.last_seq + 1 END AS nxt "
             "WITH m, coalesce(mn, nxt) AS floor "

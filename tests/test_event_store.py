@@ -308,10 +308,21 @@ def _counter(proj):
 
 
 def _set_counter(proj, last_seq, first_seq=1):
-    """Seed the allocator directly — the shape a live/restored counter has."""
+    """Seed the allocator directly — the shape a live/restored counter has.
+
+    The seed is ASSERTED immediately: the embedded engine silently drops some
+    extreme overwrites (a negative target onto a property holding INT64_MAX),
+    so an ignored setup write must fail as a SETUP error here rather than
+    surface later as a confusing assertion about the code under test.
+    """
     proj.g.query(
         "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
         params={"last": last_seq, "first": first_seq})
+    seeded = _counter(proj)
+    assert seeded is not None and seeded[0] == last_seq, (
+        f"the counter seed did not land: asked for last_seq={last_seq!r}, the "
+        f"engine holds {seeded!r} — a seed the engine silently ignores is a "
+        f"setup failure, not a result")
 
 
 def _deliver_all(proj, page=1, max_pages=50):
@@ -443,12 +454,22 @@ def test_every_allocated_seq_survives_the_indexed_delivery_walk(
 def test_seq_range_index_skips_an_exact_int_above_2_pow_53(sdk_factory, tmp_path):
     """The ENGINE behaviour ``MAX_SEQ`` exists for — a tripwire, not our code.
 
-    FalkorDB's `seq` RANGE index compares in double precision, so `seq > 2**53`
-    SKIPS a row at `2**53 + 1` (it rounds to `2**53`) that the same query
-    returns with no index on the property. This is why the ceiling is ``2**53 -
-    1`` rather than "whenever an int64 runs out". A failure here means the
-    engine's comparison was FIXED: re-derive whether ``MAX_SEQ`` is still
-    needed instead of "fixing" this test.
+    ``MAX_SEQ`` rests on numeric range comparison being done in DOUBLE
+    PRECISION: `2**53 + 1` is not representable as a double (it rounds to
+    `2**53`), so a comparison against `2**53` cannot see that row. That is why
+    the ceiling is ``2**53 - 1`` rather than "whenever an int64 runs out".
+
+    The premise is pinned in the form that is INDEPENDENT of the planner and of
+    the engine build: the comparison is forced to doubles explicitly
+    (``toFloat(e.seq) > $after`` with a float bound) instead of relying on the
+    engine choosing its `seq` RANGE index for an int-vs-int predicate. The
+    int-vs-int form is engine- and platform-dependent — some bundled/embedded
+    builds compare int64 exactly and return the row at `2**53 + 1` while the
+    production image drops it — so a red there would misdirect a maintainer to
+    "revisit MAX_SEQ" for what is an environment artefact (#5379 review). What
+    this DOES catch is the premise itself becoming false: an engine whose
+    numeric comparison is exact would return the row even as a double, and then
+    ``MAX_SEQ`` should be re-derived.
     """
     from tortoise.event_store import MAX_SEQ
 
@@ -456,17 +477,24 @@ def test_seq_range_index_skips_an_exact_int_above_2_pow_53(sdk_factory, tmp_path
     proj = sdk._get_proj()
     base = 2 ** 53
     assert base > MAX_SEQ, "the ceiling must sit below the first lossy seq"
+    # Engine-independent part of the premise: 2**53 + 1 is not a double.
+    assert float(base + 1) == float(base), (
+        "2**53 + 1 must not be representable as a double")
     for seq in (base, base + 1, base + 2):
         proj.g.query("CREATE (:GraphEvent {seq:$s, event_id:$e})",
                      params={"s": seq, "e": f"ev-{seq}"})
-    got = [e["seq"] for e in event_store.read_after(proj, base)]
+    got = [r[0] for r in proj.g.query(
+        "MATCH (e:GraphEvent) WHERE toFloat(e.seq) > $after "
+        "RETURN e.seq ORDER BY e.seq ASC",
+        params={"after": float(base)}).result_set]
     assert got == [base + 2], (
-        f"the seq range index no longer drops the row at 2**53 + 1 (got {got}) "
-        f"— if the engine compares exactly now, revisit MAX_SEQ")
+        f"the engine's double-precision range comparison no longer drops the "
+        f"row at 2**53 + 1 (got {got}) — re-derive whether MAX_SEQ is still "
+        f"needed")
 
 
-def test_refresh_first_seq_never_wraps_the_empty_log_floor(sdk_factory, tmp_path):
-    """#5379: an out-of-domain counter must not wrap the purge floor.
+def test_refresh_first_seq_saturates_a_counter_at_int64_max(sdk_factory, tmp_path):
+    """#5379: the INT64_MAX (wrapped) counter must not wrap the purge floor.
 
     FAILING VALUE: `_refresh_first_seq` computed `m.last_seq + 1` in the graph,
     so a counter at INT64_MAX (what an exhausted allocator looks like on disk)
@@ -474,8 +502,13 @@ def test_refresh_first_seq_never_wraps_the_empty_log_floor(sdk_factory, tmp_path
     `after_seq < first_seq` guard can then never fire — no accepted cursor is
     below a negative floor — so a subscriber parked above a truncated stream
     read `[]` forever instead of getting the truthful 410.
+
+    Each out-of-domain counter gets its OWN fresh graph: the embedded engine
+    silently DROPS a negative overwrite of a property holding INT64_MAX (the
+    seed would not land), and an ignored setup write must not surface as a
+    confusing assertion about `_refresh_first_seq`.
     """
-    from tortoise.event_store import MAX_INT64, MAX_SEQ, _refresh_first_seq
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
 
     sdk = sdk_factory(tmp_path)
     proj = sdk._get_proj()
@@ -485,13 +518,65 @@ def test_refresh_first_seq_never_wraps_the_empty_log_floor(sdk_factory, tmp_path
         "the empty-log floor saturates at the top of the first_seq domain "
         "(MAX_INT64) — never a wrapped negative")
 
+
+def test_refresh_first_seq_saturates_a_negative_counter(sdk_factory, tmp_path):
+    """#5379: a counter below the domain saturates the floor, never 0.
+
+    A floor of 0 cannot fire `poll_events`' expiry guard at all — every
+    reachable cursor is `>= 1` (`after_seq == 0` is the "from the start"
+    sentinel that SKIPS the check), so `1 < 0` is false and the subscriber
+    parked above the truncated stream reads `[]` forever with no 410. The
+    allocator REFUSES a negative counter, so its next write is unreachable and
+    EVERY reachable cursor is genuinely expired: the floor saturates above the
+    whole cursor range, exactly as the wrap branch does.
+    """
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
     _set_counter(proj, -(2 ** 63))
     _refresh_first_seq(proj)
-    assert _counter(proj) == (-(2 ** 63), 0), (
-        "a counter below the domain raises the floor to 0, never below it")
+    assert _counter(proj) == (-(2 ** 63), MAX_INT64), (
+        "a counter below the domain saturates the floor above every reachable "
+        "cursor — a floor of 0 would leave the 410 guard unable to fire")
 
-    # The normal contract is unchanged, including a floor ABOVE MAX_SEQ: the
-    # last legal write leaves a floor of MAX_SEQ + 1 (MAX_SEQ's own docstring).
+
+def test_negative_counter_floor_still_expires_a_cursor(sdk_factory, tmp_path):
+    """#5379 review: the saturated negative-counter floor answers 410.
+
+    Pins the DELIVERY contract, not just the number: a subscriber whose cursor
+    sits above the truncated stream must get `cursor expired` (410) rather than
+    `[]` forever — the #4653 harm the change exists to remove. FAILING VALUE
+    on a floor of 0: `poll_events` returns `{"events": []}` where the 410 is
+    required.
+    """
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _set_counter(proj, -(2 ** 63))
+    _refresh_first_seq(proj)
+    assert _counter(proj) == (-(2 ** 63), MAX_INT64), "seed must land"
+
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.poll_events(after=sdk._encode_cursor(5))
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.poll_events(after=sdk._encode_cursor(2 ** 60))
+    # The `after=None` sentinel stays exempt (it reads from the start).
+    assert sdk.poll_events()["events"] == []
+
+
+def test_refresh_first_seq_keeps_a_floor_above_max_seq(sdk_factory, tmp_path):
+    """#5379: the normal contract is unchanged, including above MAX_SEQ.
+
+    The last legal write leaves a floor of `MAX_SEQ + 1` — `first_seq` is
+    legitimately ABOVE `MAX_SEQ` (MAX_SEQ's own docstring) and is bounded only
+    by `MAX_INT64`.
+    """
+    from tortoise.event_store import MAX_SEQ, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
     _set_counter(proj, MAX_SEQ)
     _refresh_first_seq(proj)
     assert _counter(proj) == (MAX_SEQ, MAX_SEQ + 1)
@@ -531,9 +616,11 @@ def test_next_seq_ceiling_is_atomic_across_workers_live_falkor():
     second writes `MAX_SEQ + 1` — the first undeliverable seq, and the exact
     race this ceiling exists to remove. Starts 8 workers at `MAX_SEQ - 3` and
     asserts exactly 3 DISTINCT grants, 5 refusals, and a counter that never
-    left the domain. Skips visibly without a live FalkorDB (CI's
-    test-concurrency-falkor job provides the URI) — the embedded redislite
-    client is not multi-connection-safe (see sdk_factory).
+    left the domain. Runs in CI's `test-concurrency-falkor` job, which
+    provisions the live URI and selects this nodeid explicitly (see
+    `.github/workflows/python-ci.yml`) — skips visibly everywhere else, since
+    the embedded redislite client is not multi-connection-safe (see
+    sdk_factory).
     """
     import os  # noqa: I001
     import threading
