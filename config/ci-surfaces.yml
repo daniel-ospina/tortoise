@@ -1520,6 +1520,7 @@ surfaces:
   - test_3817_tags_rebuild_durability.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
+  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a plain List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg); the caller-supplied branch stays verbatim (PR #3018) — embedded_only + carve_out
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -3252,6 +3253,13 @@ carve_out:
 # hook, a permanently green and permanently unexecuted gate on main (the #4047
 # shape).
 - test_4521_revise_point_embedding.py
+# #4520 residual: the module is module-level `embedded_only` — the plain-list
+# embedding write and its clear-then-set fix are embedded-engine specific, so
+# without this registration a full URI-set selection would collect it and SKIP
+# every case via the marker hook, a permanently green and permanently
+# unexecuted gate on main (the same #4047 shape as the #4521/#4524 entries
+# above).
+- test_update_point_derived_embedding_4520.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and

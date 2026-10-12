@@ -689,6 +689,18 @@ def test_no_redirect_stems_registry_exact():
         # the addition is the pin working as designed, so the stem is DECLARED
         # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
+        # #4520 residual: the module-level `embedded_only` plain-list embedding
+        # guard asserts the EMBEDDED engine's stored type (`Vectorf32` -> `List`
+        # on a bare `+=` embedding write) and the clear-then-set seam that fixes
+        # it, so it reads `typeof()` back off a real embedded store. Under a URI
+        # the hook SKIPS the whole module (it never runs); a redirected
+        # construction would run against the server lane, which lands the same
+        # plain-list write, so the assertion would certify nothing. The third leg
+        # of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS already carried the stem — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4521/#4921 shape).
+        "test_update_point_derived_embedding_4520",
         # #7852 W1: the Layer-2 `semantics` write-path guard builds
         # `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay to
         # prove `derived = replay(journal)` for `direction_basis`. The module

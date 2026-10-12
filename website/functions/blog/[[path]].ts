@@ -12,6 +12,7 @@ import {
   type Env, fetchPublishedPosts, fetchPostBySlug, renderMarkdown,
   headHtml, htmlPage, navHtml, formatDate, shareBarHtml, validCoverUrl,
   ok, notFound, upstreamError, SITE_URL, escapeHtml, SLUG_RE,
+  articleJsonLd,
 } from "./_lib.ts";
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
@@ -128,27 +129,9 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
     url,
     image: post.cover_image_url,
     type: "article",
-    jsonLd: [
-      {
-        "@context": "https://schema.org",
-        "@type": "BlogPosting",
-        headline: post.title,
-        description,
-        url,
-        image: post.cover_image_url ?? undefined,
-        author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
-        datePublished: post.published_at,
-        dateModified: post.updated_at,
-      },
-      {
-        "@context": "https://schema.org",
-        "@type": "BreadcrumbList",
-        itemListElement: [
-          { "@type": "ListItem", position: 1, name: "Blog", item: `${SITE_URL}/blog` },
-          { "@type": "ListItem", position: 2, name: post.title, item: url },
-        ],
-      },
-    ],
+    // BlogPosting + BreadcrumbList, plus FAQPage when the body has an FAQ
+    // section — see articleJsonLd (pure, so the wiring is unit-tested).
+    jsonLd: articleJsonLd(post, url),
   });
 
   const tags = post.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join(" ");
