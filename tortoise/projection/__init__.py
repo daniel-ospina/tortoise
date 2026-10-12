@@ -9247,9 +9247,14 @@ class FalkorProjection(
         # #5380: EP edge-message write-backs / invalidations, DEFERRED to a
         # trailing sweep that runs AFTER pass-2b. Inline pass-1b folding
         # cannot work here: pass-1a hoists every Point/Operator creation (so
-        # an OPERATOR edge exists by pass-1b), but a plain DIRECT edge is
-        # created by ``DirectEdgeCreated`` — whose replay is deliberately
-        # deferred to pass-2b (A10 #1048) — so an inline fold would miss it.
+        # an OPERATOR edge exists by pass-1b), but pass-2b re-creates a
+        # TRANSFERRED direct edge from its ``DirectEdgeRepoint`` descriptor
+        # (A10 #1048), so an edge that only exists by pass-2b would be missed
+        # inline. (``DirectEdgeCreated`` — plain direct-edge BASE creation —
+        # is folded by NEITHER engine: it is JSONL-only and its replay stays
+        # deferred (A10 #1048), so those edges are lost on rebuild by that
+        # pre-existing gap. That loss is the ``EXEMPT_SHAPES`` rationale for
+        # an edge-message MISS, not a reason to defer this sweep.)
         # The sweep runs after EVERY edge-creating pass, so the edge set is
         # final; records are buffered WITH their journal seq and replayed in
         # journal order, which is what makes a ``clear`` followed by a
@@ -11329,8 +11334,11 @@ class FalkorProjection(
                 # gone live too, so a refusal here would block recovery of a
                 # journal whose edge loss this fold does not cause. Exempt in
                 # ``nonfolded.EXEMPT_SHAPES``; the record is what makes the
-                # miss visible to `check_consistency`'s report rather than
-                # only to a log grep.
+                # miss visible at the run boundary
+                # (``assert_no_non_folded`` names every exempt record) and in
+                # this rebuild's post-replay dressed-edge report — NOT to
+                # ``check_consistency``, whose ``_apply_one``-based journal
+                # side never calls the edge-message fold.
                 record_non_folded(
                     SHAPE_EDGE_MESSAGE_MISS,
                     event_id=_em_ev.get("event_id"),

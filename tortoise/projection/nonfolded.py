@@ -92,8 +92,12 @@ SHAPE_UNCLASSIFIED_TERMINALIZER = "unclassified-terminalizer"
 #: direct edge is legitimately absent after a replay (``DirectEdgeCreated`` is
 #: not folded by the replay engines, A10 #1048, so the EDGE is lost by a gap
 #: this record does not cause), and a hard-deleted edge is gone live too.
-#: Recorded (not merely warned) so the miss is reported by the run boundary and
-#: by ``check_consistency``.
+#: Recorded (not merely warned) so the miss is reported by the run boundary
+#: (``assert_no_non_folded`` warns and names every exempt record) and by
+#: ``rebuild_all``'s post-replay dressed-edge report. NOT by
+#: ``check_consistency``: its journal side is ``_apply_one``-based and
+#: ``EdgeMessageChanged`` is in ``_NO_POINT_FOLD``, so that surface never
+#: calls the edge-message fold and cannot emit this shape.
 SHAPE_EDGE_MESSAGE_MISS = "edge-message-miss"
 #: #5380: an ``EdgeMessageChanged op=clear`` the fold could NOT replay — an
 #: unrecognised ``scope``, or a known scope whose ``point_ids`` are missing or
