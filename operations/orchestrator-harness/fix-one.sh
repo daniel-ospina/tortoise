@@ -52,11 +52,30 @@ echo "[fix $PR] start $(date) worktree=$WT branch=$BR" > "$L.log"
   echo "[fix $PR] materialised worktree=$WT" >> "$L.log"
 }
 
+# Capture the FAILING REQUIRED CHECK and its log. The fixer is also dispatched for CI failures
+# that are not a reviewer finding (docs lint, a committed conflict marker, legal-e2e,
+# test-isolation, license-surface, pricing-artifact). Without this it would read only the review
+# comment — which for such a PR may not exist at all — and fix blind.
+: > "$L-failing.txt"
+FAILING_CHECKS="$(gh pr checks "$PR" --repo "$OR" --json name,state 2>/dev/null | python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
+print(' '.join(c['name'] for c in d if c.get('state') in ('FAILURE','ERROR','CANCELLED','TIMED_OUT')))
+" 2>/dev/null)"
+for c in $FAILING_CHECKS; do
+  echo "=== failing required check: $c ===" >> "$L-failing.txt"
+  RID="$(gh pr checks "$PR" --repo "$OR" --json name,link --jq ".[]|select(.name==\"$c\")|.link" 2>/dev/null | sed -nE 's#.*/runs/([0-9]+).*#\1#p' | head -1)"
+  if [ -n "${RID:-}" ]; then gh run view "$RID" --repo "$OR" --log-failed 2>/dev/null | tail -80 >> "$L-failing.txt"; fi
+done
+
 # capture the reviewer's findings (the latest code-review comment on the PR)
 gh pr view "$PR" --repo "$OR" --comments > "$L-comments.txt" 2>&1
 
 cat > "$L-fixer.txt" <<EOF
-You are a FIX agent for branch \`$BR\` (PR #$PR in $OR). A fresh-context reviewer found real issues; the full review is the LAST comment in this file: $L-comments.txt — read it in full (find every "### N. Px" / "[P0|P1|P2]" section and its "Fix:" line).
+You are a FIX agent for branch \`$BR\` (PR #$PR in $OR). A fresh-context reviewer found real issues; the full review is the LAST comment in this file: $L-comments.txt — read it in full
+
+If $L-failing.txt is non-empty, REQUIRED CI CHECKS ARE ALSO FAILING and their failing logs are in that file — read it and fix the cause as well. That is not a reviewer finding: it is the build. A committed conflict marker (<<<<<<< / >>>>>>>) anywhere is one such cause and must be resolved, not deleted wholesale. (find every "### N. Px" / "[P0|P1|P2]" section and its "Fix:" line).
 
 Work ONLY in this worktree: \`$WT\` (its cwd). NEVER touch the repo's main checkout. You are already on \`$BR\`.
     cd $WT && git status -sb && git log --oneline -3

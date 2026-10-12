@@ -539,7 +539,8 @@ def _cmd_init(args):
                         print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                         return 1
                     rc = _write_mcp_config_file(args.api_key, existing_api_url, harness, mcp_force,
-                                                status_to_stderr=json_mode)
+                                                status_to_stderr=json_mode,
+                                                config_path=config_path)
                     if rc != 0:
                         if json_mode:
                             _emit_json({"status": "error", "error": "mcp_config",
@@ -554,7 +555,7 @@ def _cmd_init(args):
                         "api_url": existing_api_url,
                         "mcp": {
                             "endpoint": f"{existing_api_url}/mcp/",
-                            "auth_header": f"Bearer {args.api_key}",
+                            "auth_header": "Bearer ${TORTOISE_API_KEY}",
                             "configs": {
                                 "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, existing_api_url)},
                                 "codex": _harness_mcp_config("codex", args.api_key, existing_api_url),
@@ -702,7 +703,7 @@ def _cmd_init(args):
                 "api_url": base_url,
                 "mcp": {
                     "endpoint": f"{base_url}/mcp/",
-                    "auth_header": f"Bearer {args.api_key}",
+                    "auth_header": "Bearer ${TORTOISE_API_KEY}",
                     "configs": {
                         "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, base_url)},
                         "codex": _harness_mcp_config("codex", args.api_key, base_url),
@@ -723,14 +724,15 @@ def _cmd_init(args):
                     print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                     return 1
                 return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
-                                              status_to_stderr=json_mode)
+                                              status_to_stderr=json_mode,
+                                              config_path=config_path)
             return 0
 
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
         print(f"Config saved to {config_path}")
         print("⚠️  .tortoise contains a plaintext API key — do NOT commit this file.")
         print()
-        _print_mcp_configs(args.api_key, base_url, harness)
+        _print_mcp_configs(args.api_key, base_url, harness, config_path)
         print()
         print("── Onboarding instructions ──")
         print("Give these instructions to your agent to complete setup — they are a")
@@ -747,7 +749,8 @@ def _cmd_init(args):
                 print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                 return 1
             return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
-                                          status_to_stderr=json_mode)
+                                          status_to_stderr=json_mode,
+                                          config_path=config_path)
         return 0
 
     print("Tortoise init — resolving DB target…")
@@ -1263,11 +1266,22 @@ def _cmd_recover(args) -> int:
         os.replace(tmp_path, config_path)
     except OSError as e:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was recovered but could
+        # not be persisted, so it exists nowhere else; no resolution expression
+        # can replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
-    print(f"   API key: {data['key']}")
-    print(f"   Config saved to {config_path} (shown once — store it)")
+    # #5109: the key was just PERSISTED to config_path (0600) above, so a
+    # resolution expression resolves it — print the resolution, never the
+    # value (stdout is the machine-read channel; the harness captures stderr in
+    # the same tool result, so this is a routing choice, not containment; see
+    # the module note on #5109). (`recover` mints a NEW key per invocation, but
+    # that is not what makes the resolution valid; the persistence is.)
+    print(f"   API key: {_key_resolution_expr(config_path)}")
+    print(f"   Config saved to {config_path} (0600 — key stays on disk)")
     print(f"   Recovery token kept: {token[:14]}…")
     return 0
 
@@ -1761,9 +1775,16 @@ def _cmd_signup(args) -> int:
         # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was minted but could NOT
+        # be persisted, so it exists nowhere else; no resolution expression can
+        # replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
         orphan_token = config.get("signup_token")
         if orphan_token:
+            # #5109 NOTE: DELIBERATE show-once — same orphan contract as the
+            # key above; STDERR only.
             print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)
@@ -1821,11 +1842,16 @@ def _cmd_signup(args) -> int:
                   "a signup token; you cannot use `tortoise recover` for this "
                   "team. The API key above is your only access — store it safely.",
                   file=sys.stderr)
+    # #5109 NOTE: this success branch still echoes the value it just persisted
+    # to config_path. Retained deliberately (the "shown once" contract, #1709)
+    # and raised as an owner decision on #5109 rather than reversed in flight.
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
         # back into this org if the key is lost). Shown once, like the key.
+        # #5109 NOTE: DELIBERATE — the recovery token is echoed under the same
+        # "shown once" contract as the key above (#1709).
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
@@ -1838,6 +1864,9 @@ def _cmd_signup(args) -> int:
         print("🔐 Claim your team (optional but recommended):")
         print(f"   1. Open {dashboard}")
         print(f"   2. Sign in with GitHub or Google")  # noqa: F541
+        # #5109 NOTE: DELIBERATE — this echoes a key already persisted above,
+        # but the dashboard claim flow needs the value in hand. Raised as an
+        # owner decision on #5109 rather than reversed in flight.
         print(f"   3. Paste this key when prompted:")  # noqa: F541
         print(f"      {data['key']}")
         print("   Your verified identity attaches to THIS team — same key,"
@@ -2066,6 +2095,40 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
     return (f"{msg} Appeal: {url}" if url else msg, url)
 
 
+# #5109 — never interpolate the credential into printed output.
+#
+# This CLI is run BY AN AGENT in this fleet, so what it prints is a tool result —
+# and a tool result is persisted VERBATIM into the session transcript and the
+# task-session log. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
+# credential DISCLOSURE, not a convenience: every captured copy of that output keeps
+# the key. It is one channel into those stores, not the only one — harness-side
+# capture of the same bytes is the other.
+#
+# The printed instruction still WORKS — it resolves the value at use time from the
+# very file this CLI wrote, passed in rather than hard-coded: `init --api-key` saves
+# to `<cwd>/.tortoise` while the global store is `~/.tortoise/credentials.json`, so a
+# hard-coded path would silently export nothing. The bytes on stdout carry no secret.
+def _key_resolution_expr(config_path=None) -> str:
+    """Shell text that resolves the key AT USE TIME from ``config_path``.
+
+    Returns the EXPRESSION, never the key itself. See the #5109 note above for
+    why the value must never be interpolated into printed output.
+
+    Both operands are ``shlex.quote``-d, so a config path containing a quote,
+    ``$``, a backtick or a space cannot break the shell line or make it read the
+    wrong file (the path is embedded in a shell command; a Python ``repr`` is not
+    a shell quoting).
+    """
+    import shlex
+
+    target = str(config_path) if config_path is not None else "~/.tortoise/credentials.json"
+    prog = (
+        "import json,sys,pathlib;"
+        "print(json.loads(pathlib.Path(sys.argv[1]).expanduser().read_text())['api_key'])"
+    )
+    return '"$(python3 -c ' + shlex.quote(prog) + " " + shlex.quote(target) + ')"'
+
+
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
@@ -2120,7 +2183,8 @@ def _harness_label(harness: str) -> str:
     return {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "pi": "Pi"}.get(harness, harness)
 
 
-def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
+def _print_mcp_configs(api_key: str, api_url: str, harness: str | None,
+                       config_path=None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
@@ -2134,19 +2198,20 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
         print(f"── MCP Configuration (HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":
             print("Codex manages its own config — run:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
         elif harness == "claude":
-            print("Run this ONE command in your terminal — writes LOCAL scope to ~/.claude.json (private, never committed):")
-            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
+            print("Run these TWO commands in your terminal — the export, then the registration (writes LOCAL scope to ~/.claude.json; private, never committed):")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
+            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer $TORTOISE_API_KEY"')
             print()
             print("File alternative (.mcp.json) — project scope, committable; env expansion, no literal key in the file:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         else:  # cursor / pi
             print("Add this to your project's MCP config (env expansion — no literal key on disk):")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         print()
         print(f"→ MCP endpoint: {endpoint}")
@@ -2165,7 +2230,8 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
 
 
 def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool,
-                           status_to_stderr: bool = False) -> int:
+                           status_to_stderr: bool = False,
+                           config_path=None) -> int:
     """Write/merge .mcp.json for file-based harnesses (claude/cursor/pi).
 
     Codex is command-based (#497) — prints the registration command instead.
@@ -2181,11 +2247,18 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     import os
     from pathlib import Path
 
+    status = sys.stderr if status_to_stderr else sys.stdout
+
     if harness == "codex":
-        print("Codex manages its own config — run:")
-        print(f"  export TORTOISE_API_KEY={api_key}")
+        # These three lines are STATUS, not payload: they must follow the same
+        # routing as the lines at the end of this function. Emitting them to
+        # stdout unconditionally put text after the JSON object for
+        # `--harness codex --json`, so `json.loads(stdout)` raised
+        # "Extra data" — the purity the docstring above promises.
+        print("Codex manages its own config — run:", file=status)
+        print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}", file=status)
         cfg = _harness_mcp_config("codex", api_key, api_url)
-        print(f"  {cfg['command']}")
+        print(f"  {cfg['command']}", file=status)
         return 0
 
     target = Path.cwd() / ".mcp.json"
@@ -2206,11 +2279,10 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
         servers["tortoise"] = entry
     else:
         data = {"mcpServers": {"tortoise": entry}}
-    status = sys.stderr if status_to_stderr else sys.stdout
     # The written config references $TORTOISE_API_KEY (page #529 env form) —
     # make sure the var is set in the shell that will launch the agent.
     print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)  # noqa: F541
-    print(f"   export TORTOISE_API_KEY={api_key}", file=status)
+    print(f"   export TORTOISE_API_KEY={_key_resolution_expr(config_path)}", file=status)
     target.write_text(_json.dumps(data, indent=2) + "\n")
     os.chmod(target, 0o600)
     print(f"✅ Wrote MCP config to {target}", file=status)
@@ -2350,6 +2422,11 @@ def _cmd_org_keys_create(args) -> int:
         })
         return 0
 
+    # #5109 NOTE: DELIBERATE show-once — `team keys create` returns the plaintext
+    # exactly here (only a hash is stored), so printing it is the only way to hand
+    # it to the user. Test-pinned (tests/test_cli_team_keys.py). The `--json` twin
+    # above returns it in the payload for the same reason. Do NOT "tidy" this print
+    # away — it would break key provisioning.
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
@@ -10037,6 +10114,9 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
+    # #5109 NOTE: DELIBERATE show-once — the plaintext is returned exactly here
+    # and exists nowhere else (only a hash is stored), so printing it is the
+    # only way to hand it to the user. Do NOT "tidy" it away.
     key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
