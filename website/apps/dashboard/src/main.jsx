@@ -10520,8 +10520,26 @@ function claimIntentInFlight() {
             {/* #1875: Pro CAN invite up to capacity — the notice is only
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
+            {/* #4392: the upsell is IN-PRODUCT. It used to be a link to
+                https://tortoise.premiselabs.co/product.html#pricing — a
+                brochure, and a dead one: that host 301s product.html to '/',
+                so '#pricing' was never reached (the same finding that made
+                #4335 re-pin the compare link to '#pricing-section'). The
+                control lands on the Billing tab, which owns plan management
+                and states the truth in every state — a real checkout on the
+                Builder/Team card when the server resolved that price id, the
+                disabled control carrying the reason during a catalog outage,
+                and the portal for a PAYING Solo org (checkout 409s on an
+                active subscription, #4639). The notice names no checkout
+                target of its own on purpose: the next purchasable step up
+                from Free is Solo, which does NOT lift the member cap
+                (pricing.json max_users_per_team: free/solo 1, pro 2) — an
+                inline checkout here could sell a tier that leaves the gate
+                shut. The plan grid prints each tier's collaborator limit, so
+                the tier that actually unblocks invites is chosen on the
+                surface that can show why. */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.{LIMIT_CONTACT}</p>
+              <p className="dim small">Invites require the Builder or Team tier — <button type="button" className="ghost small" onClick={() => setTab('billing')}>Choose a plan</button>.{LIMIT_CONTACT}</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
