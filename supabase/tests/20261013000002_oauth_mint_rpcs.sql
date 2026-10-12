@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 20261012000007 (issue #3025)
+-- SQL-level verification for migration 20261013000002 (issue #3025)
 -- The OAuth mint is ONE transaction: `redeem_oauth_code` and
 -- `rotate_oauth_refresh`.
 --

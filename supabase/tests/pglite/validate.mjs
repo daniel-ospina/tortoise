@@ -392,7 +392,7 @@ const suites = [
   // `used_at`. NOTE: this list is EXPLICIT, not a glob — a suite file that is not
   // named here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
-  '20261012000007_oauth_mint_rpcs.sql',  // #3025
+  '20261013000002_oauth_mint_rpcs.sql',  // #3025
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

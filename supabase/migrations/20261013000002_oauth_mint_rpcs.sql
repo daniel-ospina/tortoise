@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261012000007: the OAuth token mint is ONE transaction (#3025)
+-- Migration 20261013000002: the OAuth token mint is ONE transaction (#3025)
 -- ----------------------------------------------------------------------------
 -- 0016 gave the OAuth writer a sequence of PostgREST calls, and every
 -- `cp.query` is its own HTTP request = its own transaction

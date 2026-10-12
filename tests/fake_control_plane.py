@@ -513,7 +513,7 @@ class FakeControlPlane:
             raise
 
     def _rpc_redeem_oauth_code(self, p: dict) -> dict:
-        """Mirrors `public.redeem_oauth_code` (migration 20261012000007)."""
+        """Mirrors `public.redeem_oauth_code` (migration 20261013000002)."""
         claimed = self.query(
             "oauth_codes", method="PATCH",
             select=["id", "used_at", "redemption_state", "redemption_id"],
@@ -556,7 +556,7 @@ class FakeControlPlane:
         return {"status": "minted"}
 
     def _rpc_rotate_oauth_refresh(self, p: dict) -> dict:
-        """Mirrors `public.rotate_oauth_refresh` (migration 20261012000007)."""
+        """Mirrors `public.rotate_oauth_refresh` (migration 20261013000002)."""
         claimed = self.query(
             "oauth_refresh_tokens", method="PATCH",
             select=["id", "client_id", "user_id", "org_id", "scope", "code_id"],
