@@ -210,7 +210,7 @@ ck "selftest.sh does not point install.sh at the repo's parent" $rc
 grep -qF 'REPO="$HERE/../.."' "$HERE/selftest.sh" && rc=0 || rc=1
 ck "selftest.sh passes the repo root to install.sh" $rc
 [ -e "$HERE/../../.git" ] && rc=0 || rc=1
-ck "the repo-root path selftest.sh uses resolves to a git checkout" $rc
+ck "the repo-root path selftest.sh uses resolves to a git working tree" $rc
 
 # ── 7) in-script defaults agree with install.sh's defaults ───────────────────────
 # A limit documented in README §4 and rendered by install.sh must not be silently different in
@@ -429,6 +429,106 @@ SH
   ran=0; grep -q 'wall_limit=' "$TMP/ra.log" 2>/dev/null && ran=1
   if [ "$ran" = "1" ] && [ "${1:-0}" -ge 1 ] && [ "${1:-99}" -lt 30 ] && [ "${2:-0}" -ne 0 ]; then rc=0; else rc=1; fi
   ck "shipped run_agent() kills a hung agent at the wall limit (elapsed=${1:-?}s rc=${2:-?} ran=$ran)" $rc
+fi
+
+# ── 16) a FAILED open-PR count is never read as zero ─────────────────────────────
+# The pre-fix line was OPEN_N="$(gh pr list … 2>/dev/null)"; : "${OPEN_N:=0}" — rc and stderr
+# were discarded and the empty result was coerced to 0, so one transient `TLS handshake timeout`
+# turned a 25-open-PR queue into `open=0 -> OWN`, dropping the BROAD drain, the reviewer headroom
+# and the merge-priority gate at once. Drive the SHIPPED function (extracted, not re-implemented)
+# with a stubbed gh, and pin the failure path, the sticky fallback and the success write.
+sed -n '/^open_pr_count() {/,/^}/p' "$LOOP" > "$TMP/opencount.sh"
+if need "$TMP/opencount.sh" "open_pr_count() is extracted from the shipped orch-loop.sh"; then
+  OC="$TMP/opencount"; mkdir -p "$OC/state"
+  { echo 'set -u'; grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/opencount.sh"; echo 'open_pr_count'; } > "$OC/drive.sh"
+  # Driver must be non-vacuous: it parses and really defines the shipped function.
+  bash -n "$OC/drive.sh" && rc=0 || rc=1
+  ck "the open-PR-count driver parses" $rc
+  # (a) gh FAILS: TLS handshake timeout on stderr, empty stdout, rc 1
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+echo 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout' >&2
+exit 1
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; LOG="$OC/log"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" != "0" ] && [ -n "$n" ] && rc=0 || { rc=1; echo "      failed gh produced '$n'"; }
+  ck "a failed open-PR count is NOT zero (got '$n')" $rc
+  [ "$n" = "11" ] && rc=0 || { rc=1; echo "      got '$n'"; }
+  ck "a first-ever failure assumes 11 (BROAD, resumes the drain)" $rc
+  grep -q 'open=UNKNOWN rc=1' "$LOG" && rc=0 || { rc=1; echo "      log: $(cat "$LOG")"; }
+  ck "a failed open-PR count logs an UNKNOWN diagnostic naming the rc" $rc
+  grep -q 'TLS handshake timeout' "$LOG" && rc=0 || { rc=1; echo "      log: $(cat "$LOG")"; }
+  ck "the diagnostic keeps gh's stderr instead of discarding it" $rc
+  # (b) sticky: a later failure reuses the last good count, never resets to 0
+  printf '25\n' > "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "25" ] && rc=0 || { rc=1; echo "      sticky produced '$n'"; }
+  ck "a later failure reuses the sticky last-known count (25)" $rc
+  # (c) SUCCESS: the count is returned and persisted for the next failure
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+printf '25\n'
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "25" ] && rc=0 || { rc=1; echo "      success produced '$n'"; }
+  ck "a successful open-PR count returns the count" $rc
+  [ "$(cat "$OC/state/last-open-n" 2>/dev/null)" = "25" ] && rc=0 || rc=1
+  ck "a successful open-PR count is persisted to last-open-n" $rc
+fi
+# The sweep listing must be captured and rc-checked too: piped straight into `while read` with
+# 2>/dev/null, a failed listing is ZERO iterations and no output — a sweep that silently does
+# nothing for the whole cycle. These pin the fix's shape; (a) above pins its behavioural sibling.
+grep -q 'SWEEP_RC' "$LOOP" && rc=0 || rc=1
+ck "the sweep listing captures its rc instead of discarding it" $rc
+grep -q 'PR listing FAILED' "$LOOP" && rc=0 || rc=1
+ck "a failed sweep listing is logged, not silently empty" $rc
+
+# ── 17) the daemon PATH never contains a shim / ~/.pi directory ──────────────────
+# macOS TCC blocks LAUNCHD from reading ~/Documents, so ~/.pi/agent/shims/gh (a symlink into
+# ~/Documents) is EPERM under the daemon ("Operation not permitted") even though it runs fine in
+# this interactive shell — which is why the install.sh probe-by-execution reports a FALSE GREEN.
+# The guard is the exclusion in add_dir(), so DRIVE THE SHIPPED PATH CODE (extracted, not
+# re-implemented): put a shim FIRST on the driving PATH, render DAEMON_PATH, and assert no shim/
+# ~/.pi directory survives while the real binary's directory is kept. A pre-fix add_dir fixture
+# proves the scenario is real and that dropping the exclusion would fail this check.
+awk '/^add_dir\(\) \{/{f=1} f{ if (/^ok "daemon PATH:/) exit; print }' "$INST" > "$TMP/daemonpath.sh"
+if need "$TMP/daemonpath.sh" "the daemon-PATH block is extracted from the shipped install.sh"; then
+  DP="$TMP/dp"; mkdir -p "$DP/home/.pi/agent/shims" "$DP/realbin"
+  # the shim lives under a ~/.pi/.../shims path (exactly the shape TCC refuses); the REAL binary
+  # lives in a plain directory that matches none of the excluded patterns.
+  printf '#!/bin/bash\nprintf "gh 9.9.9 (shim)\\n"\n' > "$DP/home/.pi/agent/shims/gh"
+  printf '#!/bin/bash\nprintf "gh 9.9.9 (real)\\n"\n' > "$DP/realbin/gh"
+  chmod +x "$DP/home/.pi/agent/shims/gh" "$DP/realbin/gh"
+  DRIVE_PATH="$DP/home/.pi/agent/shims:$DP/realbin:/usr/bin:/bin"
+  pre="$(HOME="$DP/home" PATH="$DRIVE_PATH" command -v gh)"
+  [ "$pre" = "$DP/home/.pi/agent/shims/gh" ] && rc=0 || { rc=1; echo "      'gh' resolved to '$pre'"; }
+  ck "non-vacuity: 'gh' on the driving PATH resolves through the shim" $rc
+  { echo 'set -u'; cat "$TMP/daemonpath.sh"; echo 'printf "%s\\n" "$DAEMON_PATH"'; } > "$DP/drive.sh"
+  bash -n "$DP/drive.sh" && rc=0 || rc=1
+  ck "the daemon-PATH driver parses" $rc
+  out="$(HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/drive.sh")"
+  case "$out" in *"/shims"*|*"/.pi/"*) rc=1; echo "      daemon PATH: $out";; *) rc=0;; esac
+  ck "the daemon PATH contains no */shims or */.pi/* directory" $rc
+  case ":$out:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      daemon PATH: $out";; esac
+  ck "the daemon PATH keeps the real binary's directory (the shim is dropped, not the tool)" $rc
+  res="$(PATH="$out" command -v gh)"
+  [ "$res" = "$DP/realbin/gh" ] && rc=0 || { rc=1; echo "      under the daemon PATH gh resolved to '$res'"; }
+  ck "under the daemon PATH, gh resolves to the real binary" $rc
+  # Non-vacuity: the PRE-FIX add_dir (no exclusion) does bake the shim dir into the PATH.
+  cat > "$DP/prefix-add_dir.sh" <<'SH'
+add_dir() {
+  case "$1" in /*) ;; *) return 0 ;; esac
+  case ":$DAEMON_PATH:" in *":$1:"*) ;; *) DAEMON_PATH="$DAEMON_PATH:$1" ;; esac
+}
+DAEMON_PATH="/usr/bin:/bin"
+p="$(command -v gh)"; add_dir "$(cd "$(dirname "$p")" && pwd)"
+printf '%s\n' "$DAEMON_PATH"
+SH
+  old="$(HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/prefix-add_dir.sh")"
+  case "$old" in *"/shims"*) rc=0;; *) rc=1; echo "      pre-fix PATH: $old";; esac
+  ck "non-vacuity: the pre-fix add_dir really admitted the shim dir" $rc
 fi
 
 echo

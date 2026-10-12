@@ -56,6 +56,77 @@ done
 command -v uv >/dev/null 2>&1 && ok "uv" || warn "uv not found — lane.sh needs it to sync each worktree"
 gh auth status >/dev/null 2>&1 && ok "gh authenticated" || die "gh is not authenticated"
 
+# ── the daemon's PATH ────────────────────────────────────────────────────────────
+# ⛔ launchd gives a process NO shell environment, so every binary the daemon shells out to must be
+# findable on the PATH baked into the plist. The original version hardcoded three brew dirs, which
+# was correct only because gh/uv/pi happened to be brew-installed on the box it was built on.
+# On a box where they live under the user's own prefix the loop does NOT fail loudly — it reads an
+# EMPTY QUEUE: `OPEN_N="$(gh pr list ... 2>/dev/null)"` yields "" and `${OPEN_N:=0}` turns that
+# into 0, so the sweep logs `[scope] open=0 -> OWN` while the queue is full and the loop idles.
+# Measured 2026-10-12 on a second box: 25 open PRs invisible; `pi` missing would also have broken
+# every lane spawn and `uv` every worktree sync. Resolve the real directories instead of assuming.
+# Three traps here, and ALL fail silently at runtime rather than loudly at install time:
+#  (1) `command -v` can return a WRAPPER, not the tool. Where `gh` is the pi agent shim
+#      (~/.pi/agent/shims/gh), the resolved directory is the SHIM's — and the shim locates the real
+#      gh by scanning PATH minus its own directory, finds nothing, and exits 127. The loop then
+#      reads an empty queue and logs `[scope] open=0 -> OWN`. A shimmed tool therefore needs the
+#      directory of its REAL binary on the PATH too.
+#  (2) `command -v` can return a NON-ABSOLUTE name (a shell function/alias), and `dirname` of that
+#      is `.` — baking the current directory into an unattended daemon's PATH.
+#  (3) ⛔ A shim directory must NEVER be baked into the daemon PATH at all — under launchd the shim
+#      can be UNEXECUTABLE. ~/.pi/agent/shims/gh is a symlink INTO ~/Documents, and macOS TCC
+#      (Transparency, Consent & Control) blocks launchd from reading ~/Documents, so the daemon
+#      gets `bash: ~/.pi/agent/shims/gh: Operation not permitted` — EPERM (a TCC denial on the
+#      symlink's TARGET), NOT a missing file or permission bit. The install shell is interactive
+#      and CAN read ~/Documents, so the probe-by-execution below SUCCEEDS and install reports OK:
+#      a FALSE GREEN for exactly the silent failure this block exists to prevent (the daemon later
+#      reads an empty queue and idles at open=0). No install-time probe can see the EPERM, so the
+#      exclusion below — not a stronger probe — is the guard. add_dir() therefore refuses every
+#      `*/shims`, `*/shims/*` and `*/.pi/*` directory while the "resolve PAST a wrapper" loop keeps
+#      adding the REAL binary's directory, so the tool is still findable. Do not "simplify" this
+#      exclusion away: it is invisible to every check that runs before launchd does.
+add_dir() {
+  case "$1" in /*) ;; *) return 0 ;; esac
+  # ⛔ Trap (3): a shim / ~/.pi directory is EPERM under launchd (macOS TCC on ~/Documents). The
+  # real binary's directory is added separately, so dropping the shim does not lose the tool.
+  case "$1" in */shims|*/shims/*|*/.pi/*) return 0 ;; esac
+  case ":$DAEMON_PATH:" in *":$1:"*) ;; *) DAEMON_PATH="$DAEMON_PATH:$1" ;; esac
+}
+DAEMON_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Prefer the version-independent pi symlink: a resolved version-stamped pi-node directory is pinned
+# to today's version, and a pi upgrade would leave the daemon on a stale (or missing) one.
+if [ -x "$HOME/.local/share/pi-node/current/bin/pi" ]; then
+  command -v pi >/dev/null 2>&1 && add_dir "$HOME/.local/share/pi-node/current/bin"
+fi
+for bin in tmux gh uv pi; do
+  p="$(command -v "$bin" 2>/dev/null)" || continue
+  add_dir "$(cd "$(dirname "$p")" 2>/dev/null && pwd)"
+done
+# Resolve PAST a wrapper: add the first PATH entry holding a real executable of that name outside a
+# shim/.pi directory, so the shim can find it.
+for bin in gh pi uv tmux; do
+  case "$(command -v "$bin" 2>/dev/null)" in
+    */shims|*/shims/*|*/.pi/*)
+      _oldifs="$IFS"; IFS=:
+      for d in $PATH; do
+        case "$d" in ""|*/shims|*/shims/*|*/.pi/*) continue ;; esac
+        if [ -x "$d/$bin" ]; then add_dir "$d"; break; fi
+      done
+      IFS="$_oldifs" ;;
+  esac
+done
+ok "daemon PATH: $DAEMON_PATH"
+# ⛔ PROBE BY EXECUTION — printing the PATH proves nothing, and every failure mode above is silent
+# at runtime. If a tool cannot RUN under the PATH about to be baked in, that is an INSTALL error.
+# This probe catches a shim whose real binary is NOT on the PATH; it is BLIND to trap (3) — TCC
+# refuses the read only when LAUNCHD does it, not when this interactive install shell does.
+for bin in tmux uv pi; do
+  PATH="$DAEMON_PATH" command -v "$bin" >/dev/null 2>&1 \
+    || die "daemon PATH cannot resolve $bin: $DAEMON_PATH"
+done
+PATH="$DAEMON_PATH" gh --version >/dev/null 2>&1 \
+  || die "daemon PATH resolves a gh that does not RUN (a shim needs its real binary findable): $DAEMON_PATH"
+
 # ── the merge authority ──────────────────────────────────────────────────────────
 # The harness can review and record, but it cannot MERGE without the gate key.
 # IMPORTANT: only the key FILE reaches the daemon. launchd inherits no shell environment, and
@@ -119,6 +190,7 @@ sed \
   -e "s|__REPO__|$(esc "$REPO")|g" \
   -e "s|__OR__|$(esc "$OR")|g" \
   -e "s|__HOME__|$(esc "$HOME")|g" \
+  -e "s|__PATH__|$(esc "$DAEMON_PATH")|g" \
   -e "s|__MAX_LOAD__|$MAX_LOAD|g" \
   -e "s|__MAX_LANES__|$MAX_LANES|g" \
   -e "s|__MAX_REVIEW__|$MAX_REVIEW|g" \
