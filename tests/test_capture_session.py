@@ -3847,11 +3847,18 @@ def test_extract_session_llm_passthroughs_source_turn_id(sdk, monkeypatch):
 
 # #3778: the M2 lane's `props` describes the NODE, never the folded statement
 # dict. The seam's write is the shared EventAPI → projection door, so a field
-# the projection does not persist (`search_keys` as a list — no
-# `_flatten_search_keys_prop` on that door, `_POINT_LIST_PROPS` is empty) and a
-# field that belongs to a FOLDED canonical (written by an earlier occurrence)
-# are both values the node does not hold. Echoing the folded dict advertised
-# them anyway — the #2813 symptom on the M2 lane, in both directions.
+# that belongs to a FOLDED canonical (written by an earlier occurrence) is a
+# value the node does not hold. Echoing the folded dict advertised it anyway —
+# the #2813 symptom on the M2 lane, in both directions.
+#
+# #8006 UPDATE: `search_keys` no longer belongs in that "does not hold" class.
+# The shared projection writer now applies the R2 D3 flatten rule on the
+# payload (`projection/entities.py::flatten_search_keys_prop`, called from
+# `_upsert_point_props`), so this door stores the space-joined STRING exactly
+# as `create_point` does. The divergence the test below still guards is
+# REPRESENTATION: the payload says `["alpha", "beta"]`, the node says
+# `"alpha beta"`, so a payload echo advertises the list — the same #2813
+# symptom, one layer down.
 
 class _E3FieldsExtractor:
     """Emits ONE point with the four E3 fields (plus E4 spans) passed as
@@ -3874,15 +3881,20 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
         sdk, monkeypatch, force_sparse_tfidf):
     """#3778 (create path): the response's ``props`` equals the resolved
     NODE's stored props — not the folded statement dict's. The probe-verified
-    divergence: the projection persists the scalar E3/E4 fields but DROPS the
-    list-valued ``search_keys`` (the EventAPI door never calls
-    ``_flatten_search_keys_prop``), so a payload echo advertised a field the
-    node does not hold — the #2813 symptom ("the reply looked correct while
+    divergence: a payload echo advertised a field whose STORED form differs
+    from the payload's — the #2813 symptom ("the reply looked correct while
     the node stored nothing") on the M2 lane.
+
+    #8006 UPDATE: the E3 ``search_keys`` list IS now stored on this door — the
+    shared projection writer flattens it to the graph's space-joined string
+    (``flatten_search_keys_prop``). So the pinned divergence for that field is
+    REPRESENTATION, not presence: the payload says ``["alpha", "beta"]`` and
+    the node says ``"alpha beta"``. A payload echo would advertise the LIST.
 
     MUTATION THAT REDS THIS TEST: restore the payload echo
     (``props = {k: v for k, v in p.items() if k in
-    _CAPTURE_PASSTHROUGH_PROPS}``) — ``search_keys`` reappears in the reply."""
+    _CAPTURE_PASSTHROUGH_PROPS}``) — ``search_keys`` reappears in the reply as
+    ``["alpha", "beta"]`` instead of the stored ``"alpha beta"``."""
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _E3FieldsExtractor())
     proj = sdk._get_proj()
@@ -3893,8 +3905,8 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
     entry = extracted[0]
     quote, when, sk, tid = _read_passthrough_props(sdk, entry["id"])
     assert (quote, when, tid) == ("q top", "2026-08-01", "turn-7")
-    # The node holds NO search_keys — list props are dropped by the projection.
-    assert sk is None
+    # #8006: the node HOLDS search_keys, in its canonical flattened form.
+    assert sk == "alpha beta"
     # The reply is exactly what the graph holds, field for field (the same
     # read-back helper the v2 dedup-hit lane uses — one contract, both lanes).
     assert entry["props"] == sdk._read_capture_passthrough_props(
@@ -3902,8 +3914,10 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
     assert entry["props"] == {
         "quote": "q top", "when": "2026-08-01",
         "source_turn_id": "turn-7", "span_start": 0, "span_end": 10,
+        "search_keys": "alpha beta",
     }, entry["props"]
-    assert "search_keys" not in entry["props"], entry["props"]
+    # …and NOT the payload's list spelling (the representation trap above).
+    assert entry["props"]["search_keys"] != ["alpha", "beta"], entry["props"]
 
 
 def test_extract_session_llm_fold_reports_the_canonicals_stored_props(

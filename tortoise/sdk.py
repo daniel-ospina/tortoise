@@ -94,6 +94,16 @@ from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
 )
+# #8006: the `search_keys` flatten rule has ONE home — the projection module that
+# owns the Point prop contract (`_POINT_DECLARED_PROPS` / `_POINT_LIST_PROPS` /
+# `_upsert_point_props`). The SDK write doors below call it under their
+# historical private name, so the three write doors and the replay share ONE
+# implementation instead of two that can drift — which is exactly what #8006
+# was: the SDK doors flattened, the shared projection writer did not, so
+# `EventAPI.add_point` stored NOTHING.
+from .projection.entities import (
+    flatten_search_keys_prop as _flatten_search_keys_prop,
+)
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
@@ -2989,32 +2999,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     return props
 
 
-def _flatten_search_keys_prop(props: dict) -> None:
-    """R2 (#1541) D3: search_keys must be a FLAT space-joined STRING in the
-    graph — FalkorDB's fulltext index (``db.idx.fulltext.createNodeIndex``)
-    does NOT index array-valued properties (verified on server v4.16.7: a
-    list-valued search_keys never matches, the flat string does). E3's
-    canonical payload keeps the list (commit_schema pins ``list[str]`` and
-    E3's persistence tests assert the list at the node); the GRAPH value is
-    flattened here — a cross-lane deviation the R2 plan pre-authorized with
-    an owner flag (plan D3: "R2 normalizes at index time via ' '.join(...) in
-    the projection"). The FTS index then matches unqualified query tokens
-    against content ∪ search_keys — the issue's "question ∪ search_keys"
-    query expansion, at the index level.
-
-    No-op for str values, None, and absent keys (absent search_keys → no
-    prop written, the pre-E3 shape). An empty list drops the prop (E3's
-    ``or None`` convention).
-    """
-    sk = props.get("search_keys")
-    if sk is None:
-        return
-    if isinstance(sk, (list, tuple)):
-        flat = " ".join(str(s).strip() for s in sk if str(s).strip())
-        if flat:
-            props["search_keys"] = flat
-        else:
-            props.pop("search_keys", None)
+# R2 (#1541) D3: `_flatten_search_keys_prop` used to be DEFINED here. It now
+# lives with the Point prop contract it serves — `tortoise/projection/
+# entities.py::flatten_search_keys_prop`, imported at the top of this module —
+# because the SHARED projection writer (`_upsert_point_props`) is the door every
+# write reaches and it needs the same rule (#8006). `create_point`,
+# `update_point` and `update_entity` still call it here, under this name.
 
 
 def _coerce_props(props: dict) -> dict:
