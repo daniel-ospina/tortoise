@@ -369,6 +369,26 @@ def test_team_meta_section_carries_at_most_one_marker():
         "and to exactly one entry")
 
 
+def test_team_meta_collapse_tie_break_is_deterministic():
+    """A tie on `created` is broken by the property map, not graph order.
+
+    FAILING VALUE (pre-fix): with two markers sharing a `created`, the key
+    `(0, created)` made `min()` return whichever the graph listed first, so the
+    survivor was graph-answer-order dependent — the docstring claimed
+    REPRODUCIBLE while the *input* order was arbitrary. The key now carries the
+    marker's full property map, so both input orders yield the SAME survivor.
+    """
+    from tortoise.projection import _team_meta_marker
+
+    a = {"name": "Acme", "created": "2026-01-01T00:00:00+00:00"}
+    b = {"name": "Beta", "created": "2026-01-01T00:00:00+00:00"}
+    assert _team_meta_marker([a, b]) == _team_meta_marker([b, a]), (
+        "a tie on `created` must not depend on the capture order — the "
+        "secondary key is what makes the collapse reproducible")
+    assert _team_meta_marker([a, b]) == a, (
+        "the property-map tie-break keeps the lexicographically first marker")
+
+
 def test_team_meta_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 
@@ -616,19 +636,32 @@ def test_2789_guard_short_circuits_on_the_rebuilt_marker_count(monkeypatch):
 def test_rebuild_all_honours_a_carried_team_meta_unknown_flag(tmp_path, caplog):
     """The carried flag must LOAD, and must keep reporting the UNKNOWN.
 
-    FAILING VALUE: a file carrying `team_meta_unknown: True` is accepted by the
-    loader and the flag is carried to the reporting leg — the rebuild completes
-    (no RuntimeError from the unknown-section refusal) and reports
-    `team_meta_state_unknown: True`. `team_meta_unknown` is a METADATA key, not
-    a section: without that registration the LOADER would REFUSE the file as
-    carrying a foreign section, which would make a second interruption of an
-    already-interrupted rebuild unrecoverable — the worst possible failure for
-    the artifact whose whole job is recovery.
+    FAILING VALUE: a **v6** file — this build's own current format, so BOTH
+    cheaper gates are satisfied and cannot supply the signal
+    (`leftover_version < 6` is False, and `"team_meta" not in leftover` is
+    False because the section is present-but-empty) — carrying
+    `team_meta_unknown: True` is accepted by the loader and the flag is carried
+    to the reporting leg: the rebuild completes (no RuntimeError from the
+    unknown-section refusal) and reports `team_meta_state_unknown: True`. This
+    is the SECOND interruption of an already-interrupted rebuild; without the
+    inherited-flag clause the retry reports a clean rebuild while the marker's
+    fate is unknown. `team_meta_unknown` is a METADATA key, not a section:
+    without that registration the LOADER would REFUSE the file as carrying a
+    foreign section, which would make a second interruption unrecoverable — the
+    worst possible failure for the artifact whose whole job is recovery.
+
+    MUTATION-PROVEN: deleting the inherited-flag clause from the state-UNKNOWN
+    predicate (`bool((leftover or {}).get("team_meta_unknown"))`) leaves this
+    test RED; a v5 version-gate fixture would stay green, because only the
+    version gate fired. The version gate has its own pin,
+    `test_rebuild_all_reports_a_pre_5353_sidecar_as_state_unknown`.
     """
     sdk, events = _mk_sdk(tmp_path)
     payload = _sidecar_payload(
-        version=5, batch_snapshot=[{"id": "b1"}], team_meta_unknown=True)
-    payload.pop("team_meta")
+        batch_snapshot=[{"id": "b1"}], team_meta_unknown=True)
+    assert payload["version"] == 6 and payload["team_meta"] == [], (
+        "the fixture must plant the CURRENT version with a present-but-empty "
+        "section, so only the inherited flag can produce the UNKNOWN")
     _plant(Path(_sidecar_path(events)), payload)
 
     with caplog.at_level(logging.ERROR):

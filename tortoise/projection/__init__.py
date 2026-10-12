@@ -1397,17 +1397,22 @@ def _capture_team_meta(proj) -> list[dict]:
     return [r[0] for r in rows] if rows else []
 
 
-def _team_meta_order(entry: dict) -> tuple[int, str]:
+def _team_meta_order(entry: dict) -> tuple:
     """Sort key choosing WHICH captured marker the section carries.
 
-    `(0, created)` for a marker carrying a string `created` — the shape every
-    writer produces — and `(1, "")` for a degenerate one, so a real mint always
-    beats a property-less hand-plant. Ties (two markers with the same `created`)
-    fall back to the capture order, which is why this is a key rather than a
-    comparison: `sorted`/`min` is stable, so the outcome is REPRODUCIBLE.
+    `(0, created, props)` for a marker carrying a string `created` — the shape
+    every writer produces — and `(1, "")` for a degenerate one, so a real mint
+    always beats a property-less hand-plant. A tie on `created` is broken by the
+    marker's full property map (`props`), so the outcome is REPRODUCIBLE even
+    though the capture itself answers in whatever order the graph returns: a
+    stable `min` preserves that arbitrary *input* order, so the secondary key is
+    what actually makes the choice deterministic (review I2).
     """
     created = entry.get("created")
-    return (0, created) if isinstance(created, str) else (1, "")
+    if isinstance(created, str):
+        props = tuple(sorted((k, repr(v)) for k, v in entry.items()))
+        return (0, created, props)
+    return (1, "")
 
 
 def _team_meta_marker(entries) -> dict | None:
@@ -7015,6 +7020,25 @@ class FalkorProjection(
                             "(#4641). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
+                    elif result.get("team_meta_gap"):
+                        # #5353: the sibling of the onboarding leg above. A
+                        # `:TeamMeta` marker that did not come back makes the
+                        # `#2789` first-org guard read 0, so a later
+                        # provisioning call can re-mint it with the control
+                        # plane's name. The clean "auto-recovered" line drops
+                        # `reason`, so without this leg the operator sees a
+                        # success shape over the one signal the class exists
+                        # for.
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT its :TeamMeta first-org marker "
+                            "is NOT confirmed intact — the #2789 first-org "
+                            "guard may read 0 and a later provisioning call "
+                            "can re-mint it with the control plane's name; "
+                            "see the rebuild ERROR log (#5353). Recovery "
+                            "reason: %s",
+                            events_dir, result.get("log_points"),
+                            result.get("reason"))
                     else:
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -7035,10 +7059,12 @@ class FalkorProjection(
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
 
-        A completed recovery with an onboarding gap is NOT a reason to refuse
-        to open the store (it is usable, and refusing would be strictly worse)
-        — but it must not pass unmentioned either, since this is the caller for
-        the unresponsive-graph path where no other surface reports it (#4641).
+        A completed recovery with an onboarding gap — or a `:TeamMeta`
+        first-org marker gap (#5353), the same producer-signal shape — is NOT a
+        reason to refuse to open the store (it is usable, and refusing would be
+        strictly worse) — but neither must pass unmentioned, since this is the
+        caller for the unresponsive-graph path where no other surface reports
+        it (#4641/#5353).
 
         #7929: a DECLINED recovery that had already replayed is rolled back to
         the empty state this call found (see `recover_from_log`'s ATOMICITY
@@ -7060,6 +7086,18 @@ class FalkorProjection(
                 "is NOT confirmed intact — re-run onboarding for the "
                 "affected org(s) and see the rebuild ERROR log (#4641). "
                 "Recovery reason: %s",
+                result.get("reason"))
+        if result.get("team_meta_gap"):
+            # #5353: the marker's own consumer on this caller. Its absence from
+            # this path is the same log-only defect the onboarding leg above
+            # was added to close: the marker IS the `#2789` first-org guard, so
+            # a gap here reads as a provisioned graph on the next call.
+            logger.warning(
+                "recovery completed but the rebuilt graph's :TeamMeta "
+                "first-org marker is NOT confirmed intact — the #2789 "
+                "first-org guard may read 0 and a later provisioning call "
+                "can re-mint it with the control plane's name; see the "
+                "rebuild ERROR log (#5353). Recovery reason: %s",
                 result.get("reason"))
 
     @classmethod

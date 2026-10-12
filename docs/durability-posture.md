@@ -99,9 +99,10 @@ accept the file and wipe over a class it cannot see. The reserved numbers are
 `:Session` pair #3947 added to v1 without a bump), `2` = `1` +
 `config_snapshot` (#2814),
 `3` **contested** (#5327 claims it for `event_meta` and #5241 for
-`graph_identity`), and `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
+`graph_identity`), `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
 (#4641) — a **distinct** integer taken *because* `3` is contested, deliberately
-carrying neither sibling's section. Two rules follow. **The constant may only
+carrying neither sibling's section — `5` = `4` + `event_meta` (#4653), and
+`6` = `5` + `team_meta` (#5353). Two rules follow. **The constant may only
 increase**, and a payload shape that is not a superset of the previous one
 takes a **new integer** — reusing a number for a disjoint payload is the
 failure the gate exists to prevent, and a build that reuses one reopens the
@@ -324,8 +325,8 @@ replacing a graph with a full wipe+replay.
 *(none)* — every class this section has ever named now has a declared vehicle
 above: the onboarding state machine in **#4641** (the `onboarding_snapshot` /
 `onboarding_step_links` sections), the event-log high-water mark in **#4653**
-(the `event_meta` section), and the last entry — the first-org marker, filed by
-#4641 as "its own design step" — in **#5353** (the `team_meta` section). The
+(the `event_meta` section), and the last entry — the first-org marker, filed
+by #4641 as "its own design step" — in **#5353** (the `team_meta` section). The
 block is kept, empty, as the declared home for the next known loss that has no
 carrier yet: a class belongs here only while it has NO vehicle, and an entry
 here is itself the claim that the rebuild destroys it — which is exactly what
@@ -524,8 +525,10 @@ gate in `tests/test_durability_posture.py` fails the build if a
   completeness gate. For a class nobody enrolled, `rebuild_all` captures
   nothing and refuses nothing: the byte-identical unconditional wipe (which
   #2814 does **not** change, by owner decision — the surface belongs to PR
-  #2996) destroys it exactly as before. The live instance is the
-  `unenrolled` list above (#5353).
+  #2996) destroys it exactly as before. The `unenrolled` list above is
+  currently **empty** — every class it has ever named now has a declared
+  vehicle — but it stays as the declared home for the next known loss that
+  has no carrier.
 - **#4641 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar keeps the leftover `onboarding_snapshot`
   node map and the leftover `onboarding_step_links` pairs, so a mutation made

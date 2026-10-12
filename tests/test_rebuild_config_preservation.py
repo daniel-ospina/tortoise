@@ -2229,6 +2229,107 @@ def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
         f"{[r.getMessage() for r in caplog.records]}")
 
 
+# ── #5353: the `:TeamMeta` gap has the same producer → consumer contract ─────
+
+
+def _team_meta_only_gap_sidecar() -> dict:
+    """A rescue file whose `:TeamMeta` record is UNKNOWN and nothing else is.
+
+    Version 5 (pre-#5353) with no `team_meta` key at all: onboarding landed at
+    v4 and its sections are present, so the ONLY gap this file produces is the
+    first-org marker's — a team_meta-ONLY gap, the shape the projection
+    consumers had no branch for.
+    """
+    payload = _sidecar_payload(version=5, batch_snapshot=[{"id": "b1"}])
+    payload.pop("team_meta")
+    return payload
+
+
+def test_team_meta_gap_is_visible_to_recover_from_log(graph):
+    """The automatic-recovery ENTRY POINT must not return a clean success for
+    the marker either (#5353).
+
+    The pending sidecar is retired after the replay (#4305), so the
+    `team_meta_gap` key plus the appended `reason` clause are the only record
+    `consistency.recover_from_log` can hand its caller. `recovered` stays True
+    (the rebuild DID complete), exactly as the onboarding leg does. Without
+    this block the new keys are set nowhere and a team_meta-only gap is
+    swallowed at the recovery entry point.
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    rec = recover_from_log(str(events), sdk._get_proj())
+
+    assert rec["recovered"] is True, "the rebuild itself did complete"
+    assert rec.get("team_meta_gap") == 1, (
+        "a missing/unconfirmable first-org marker must be machine-visible to "
+        "the auto-recovery caller")
+    assert rec.get("team_meta_state_unknown") is True, (
+        "a pre-preservation sidecar cannot say whether a marker was destroyed")
+    assert ":TeamMeta" in rec["reason"]
+
+
+def test_auto_health_recover_warns_on_the_team_meta_gap(graph, caplog,
+                                                        monkeypatch):
+    """The embedded auto-recovery consumer of `team_meta_gap` acts on it.
+
+    `_auto_health_recover` (the probe-OK lost-graph path) logged only its clean
+    "auto-recovered" line when the onboarding gap was absent, so a
+    team_meta-only gap had a producer and no consumer — the same log-only defect
+    #4641 fixed for onboarding (#5353).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+    proj = sdk._get_proj()
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    # Assert the CALLER's own message, not a bare `:TeamMeta` substring:
+    # `rebuild_all` already logs an ERROR naming the class on this path, so a
+    # looser match would pass with the consumer removed (mutation-verified).
+    assert any("auto-recovered empty embedded DB" in r.getMessage()
+               and ":TeamMeta first-org marker" in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the auto-recovery consumer discarded the marker gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_team_meta_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
+    """A producer signal with no consumer is the same log-only defect (#5353).
+
+    `_recover_or_raise` is the real caller on the unresponsive-graph path; it
+    must warn on a team_meta gap and must NOT raise for it — the store is
+    usable, and the marker is re-provisionable, so refusing to open would be
+    strictly worse.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        sdk._get_proj()._recover_or_raise(str(events))  # must not raise
+
+    assert any("recovery completed but the rebuilt graph's :TeamMeta "
+               "first-org marker" in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the recovery caller discarded the marker gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
 # ── #4641 review round 6: the fixes it produced ─────────────────────────────
 
 
