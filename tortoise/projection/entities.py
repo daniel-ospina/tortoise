@@ -29,6 +29,7 @@ from tortoise.live import (
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
 # ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
 from tortoise.projection.nonfolded import (
+    SHAPE_EDGE_MESSAGE_UNREPLAYED,
     classify_terminalizer_miss,
     record_non_folded,
 )
@@ -323,9 +324,14 @@ def _belief_prop_value_ok(key: str, value) -> bool:
 
 
 #: #5380: the four edge-resident EP message slots, paired by the direction
-#: each pair is written by. Read by the edge-message fold below; the producer
-#: side reads ``TortoiseEP.EDGE_MESSAGE_SLOTS`` — a test pins the two equal
-#: (``tests/test_4503_edge_relationship_accounting.py``).
+#: each pair is written by. Read by the edge-message fold below. The producer
+#: constant ``TortoiseEP.EDGE_MESSAGE_SLOTS`` lives in ``tortoise/ep.py``,
+#: which this module cannot import (import cycle), and the census tool has a
+#: third copy in ``tools/edge_census.py`` — so this tuple and those two are
+#: pinned equal by ``tests/test_4503_edge_relationship_accounting.py``. That
+#: pin is the ONLY thing that reds when a fifth slot is added to one copy and
+#: not the others: the emit-site assertion compares the journaled RECORDS to
+#: ``EP_EDGE_SLOTS``, never to this fold's tuple.
 EDGE_MESSAGE_PROPS: tuple = ("msg_alpha", "msg_beta",
                              "back_msg_alpha", "back_msg_beta")
 
@@ -2972,6 +2978,13 @@ class _EntityHandlers:
         ``DirectEdgeCreated`` replay is deferred and unimplemented, so the
         EDGE itself is lost, which the callers report and the fold cannot
         change), and a hard-deleted edge is gone live too.
+
+        #5380 R8: a miss is still a non-folded event and is RECORDED, never
+        silently dropped. The ``set`` miss is recorded by its two callers
+        (they own ``seq``); a ``clear`` the fold cannot map to a live query is
+        recorded here, at the fall-through. Both shapes are EXEMPT
+        (``edge-message-miss`` / ``edge-message-unreplayed``) with their
+        degraded guarantees written down in ``nonfolded.EXEMPT_SHAPES``.
         """
         from tortoise.projection import _writable_id
         op = ev.get("op")
@@ -3020,11 +3033,40 @@ class _EntityHandlers:
                     "       r.back_msg_alpha, r.back_msg_beta "
                     "RETURN count(r)").result_set
                 return int(rows[0][0]) if rows else 0
-            point_ids = ev.get("point_ids")
-            if not isinstance(point_ids, list):
+            # #5380 (R8): an unrecognised ``scope``, or a known scope with no
+            # usable ``point_ids``, falls through every arm below and would
+            # otherwise return 0 INDISTINGUISHABLY from a legitimate empty
+            # drop — a silent no-op that resurrects the seeds the live graph
+            # dropped (#1242/#330). Recorded (and exempt) rather than refused:
+            # a future producer's fourth scope must not make a recovery run
+            # un-runnable. The `set` arm's callers record their own miss.
+            if scope not in ("touching", "operator-neighbourhood"):
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_UNREPLAYED,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged",
+                    op=op, detail=f"unrecognised clear scope {scope!r}",
+                )
+                logger.warning(
+                    "EdgeMessageChanged: unrecognised clear scope %r — the "
+                    "invalidation was NOT replayed (#5380)", scope)
                 return 0
-            ids = [p for p in point_ids if _writable_id(p)]
+            point_ids = ev.get("point_ids")
+            ids = ([p for p in point_ids if _writable_id(p)]
+                   if isinstance(point_ids, list) else [])
             if not ids:
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_UNREPLAYED,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged",
+                    op=op,
+                    detail=(f"clear scope {scope!r} carries no usable "
+                            "point_ids"),
+                )
+                logger.warning(
+                    "EdgeMessageChanged: clear scope %r carries no usable "
+                    "point_ids — the invalidation was NOT replayed (#5380)",
+                    scope)
                 return 0
             if scope == "touching":
                 rows = self.g.query(

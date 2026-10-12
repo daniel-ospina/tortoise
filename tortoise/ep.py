@@ -293,7 +293,7 @@ class TortoiseEP:
                     # discipline, above).
                     for _oid, _cid, _a, _b in result.result_set:
                         self._emit_edge_message(
-                            _oid, _cid, rel, ("msg_alpha", "msg_beta"),
+                            _oid, _cid, rel, self.EDGE_MESSAGE_FWD_SLOTS,
                             (_a, _b))
 
         if getattr(self, "_back_cache", None):
@@ -322,7 +322,7 @@ class TortoiseEP:
                         for _s, _t, _a, _b in _res.result_set:
                             self._emit_edge_message(
                                 _s, _t, rel,
-                                ("back_msg_alpha", "back_msg_beta"), (_a, _b))
+                                self.EDGE_MESSAGE_BACK_SLOTS, (_a, _b))
         return True
 
     def _clear_caches(self) -> None:
@@ -332,10 +332,17 @@ class TortoiseEP:
                 delattr(self, _attr)
 
     # ── #5380: edge-message durability journaling ────────────────
-    # The four edge-resident EP message slots, paired by direction. ONE tuple
-    # so the emit sites, the projection fold and the tests cannot drift.
-    EDGE_MESSAGE_SLOTS: tuple = ("msg_alpha", "msg_beta",
-                                 "back_msg_alpha", "back_msg_beta")
+    # The four edge-resident EP message slots, paired by direction. The emit
+    # sites below pass the two PAIR constants — never a literal — and
+    # `tests/test_4503_edge_relationship_accounting.py` pins the flat
+    # `EDGE_MESSAGE_SLOTS` equal to the projection fold's
+    # `projection.entities.EDGE_MESSAGE_PROPS` and to
+    # `tools.edge_census.EP_EDGE_SLOTS`, so a fifth slot added to one copy of
+    # the vocabulary reds that pin instead of drifting silently.
+    EDGE_MESSAGE_FWD_SLOTS: tuple = ("msg_alpha", "msg_beta")
+    EDGE_MESSAGE_BACK_SLOTS: tuple = ("back_msg_alpha", "back_msg_beta")
+    EDGE_MESSAGE_SLOTS: tuple = (EDGE_MESSAGE_FWD_SLOTS
+                                 + EDGE_MESSAGE_BACK_SLOTS)
 
     def _emit_edge_message(self, src: str, tgt: str, rel: str,
                            keys: tuple, values: tuple) -> None:
@@ -356,7 +363,7 @@ class TortoiseEP:
             return
         self._emit("EdgeMessageChanged", op="set",
                    id=f"{src}->{tgt}:{rel}", src=src, tgt=tgt, rel=rel,
-                   **dict(zip(keys, values)))
+                   **dict(zip(keys, values, strict=True)))
 
     def _emit_edge_message_clear(self, scope: str,
                                  point_ids: list | None = None) -> None:
@@ -367,8 +374,11 @@ class TortoiseEP:
         to journal per-edge records would turn a documented-cheap full drop
         into an O(#edges) result-set materialization on a hot write path
         (``create_point`` with a baseline reaches the full-graph drop).
-        ``scope`` names the live query the replay fold re-runs; the record is
-        emitted only when the statement actually dropped something.
+        ``scope`` names the live query the replay fold re-runs; a record is
+        emitted whenever the live statement MATCHED at least one edge. Its
+        ``RETURN count`` is the matched-edge count, NOT the number of edges
+        that actually carried message state — a topology change that merely
+        touches a bare edge still emits a record.
 
         Without this leg the fold would RESURRECT seeds the live graph had
         dropped — the #330 live/replay parity break, arriving the moment the
@@ -468,7 +478,7 @@ class TortoiseEP:
         # committed nothing.
         if result.result_set:
             self._emit_edge_message(op_id, claim_id, rel_type,
-                                    ("msg_alpha", "msg_beta"),
+                                    self.EDGE_MESSAGE_FWD_SLOTS,
                                     (msg_alpha, msg_beta))
 
     # ── Operator-less direct-edge back-messages (#888 W5) ──────────
@@ -517,7 +527,7 @@ class TortoiseEP:
             if _res.result_set:
                 self._emit_edge_message(
                     src_id, tgt_id, rel_type,
-                    ("back_msg_alpha", "back_msg_beta"),
+                    self.EDGE_MESSAGE_BACK_SLOTS,
                     (msg_alpha, msg_beta))
 
     # ── Natural parameter helpers ─────────────────────────────────

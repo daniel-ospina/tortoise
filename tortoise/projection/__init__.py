@@ -47,6 +47,7 @@ from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
 )
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
+    SHAPE_EDGE_MESSAGE_MISS,
     SHAPE_POINT_BELIEF_MISS,
     SHAPE_STATE_OP_MISS,
     SHAPE_UNIMPLEMENTED_OP,
@@ -7525,15 +7526,24 @@ class FalkorProjection(
             # INLINE here — this engine feeds an in-order journal to
             # ``apply()`` one record at a time, so the target edge exists by
             # the time its message record arrives (the operator edge is
-            # PRECEDENT). A ``set`` miss is WARNED, never refused: a plain
-            # direct edge is legitimately absent (A10 #1048 —
+            # PRECEDENT). A ``set`` miss is RECORDED and warned, never
+            # refused: a plain direct edge is legitimately absent (A10 #1048 —
             # ``DirectEdgeCreated`` is not folded by this engine at all, so
             # the EDGE is lost and refusing here would block recovery of a
             # journal whose loss this fold does not cause), and a
-            # hard-deleted edge is gone live too. ``rebuild_all``'s deferred
-            # sweep carries the same disposition.
+            # hard-deleted edge is gone live too. The shape is EXEMPT in
+            # ``nonfolded.EXEMPT_SHAPES`` with its degraded guarantee written
+            # down; ``rebuild_all``'s deferred sweep carries the same
+            # disposition.
             if (self._fold_edge_message_changed(ev) == 0
                     and ev.get("op") == "set"):
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=journal_seq,
+                    id=ev.get("id"), op=ev.get("op"),
+                    detail="apply: edge-message write matched no edge",
+                )
                 logger.warning(
                     "apply: EdgeMessageChanged matched no edge "
                     "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
@@ -11312,17 +11322,67 @@ class FalkorProjection(
             _em_ev = self._norm(_em_ev)
             if self._fold_edge_message_changed(_em_ev) == 0 \
                     and _em_ev.get("op") == "set":
-                # Warned, never refused — see ``_fold_edge_message_changed``:
-                # a plain direct edge is legitimately absent (A10 #1048), and
-                # a hard-deleted edge is gone live too, so a refusal here
-                # would block recovery of a journal whose edge loss this fold
-                # does not cause.
+                # RECORDED and warned, never refused — see
+                # ``_fold_edge_message_changed``: a plain direct edge is
+                # legitimately absent (A10 #1048), and a hard-deleted edge is
+                # gone live too, so a refusal here would block recovery of a
+                # journal whose edge loss this fold does not cause. Exempt in
+                # ``nonfolded.EXEMPT_SHAPES``; the record is what makes the
+                # miss visible to `check_consistency`'s report rather than
+                # only to a log grep.
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=_em_ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=_em_seq,
+                    id=_em_ev.get("id"), op=_em_ev.get("op"),
+                    detail="rebuild: edge-message write matched no edge",
+                )
                 logger.warning(
                     "rebuild: EdgeMessageChanged matched no edge "
                     "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
                     "re-created by any journaled event (#5380)",
                     _em_ev.get("event_id"), _em_ev.get("src"),
                     _em_ev.get("tgt"), _em_ev.get("rel"))
+        # #5380 indicator 4 (the MIXED case): the report below is gated on
+        # ``not _edge_msg_journaled`` — zero records or nothing. Once a
+        # #5380-era journal has recorded even ONE edge message that flag stays
+        # False forever, so the aggregate report can never fire again —
+        # INCLUDING for the pre-#5380 dressed edges still resident in the graph
+        # that the journal never mentions. Those lose their message state
+        # across the wipe+replay with no report: the realistic migration case
+        # (old dressed edges + a post-upgrade journal), and precisely the
+        # "looks restored" outcome the pre-wipe capture exists to prevent.
+        # Compare the post-replay population against that capture instead, so
+        # the drop is reported whenever it actually happened, whatever the
+        # journal holds. The per-record ``miss`` warning above covers only a
+        # `set` whose OWN edge is missing — never an edge the journal does not
+        # mention at all.
+        if ep_bearing_edges_before:
+            try:
+                _ep_edges_after_rows = self.g.query(
+                    "MATCH ()-[r:IMPL|NAND]->() "
+                    "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+                    "   OR r.back_msg_alpha IS NOT NULL "
+                    "   OR r.back_msg_beta IS NOT NULL "
+                    "RETURN count(r)").result_set
+                ep_bearing_edges_after = (
+                    int(_ep_edges_after_rows[0][0])
+                    if _ep_edges_after_rows else 0)
+            except Exception:  # noqa: BLE001, RUF100
+                ep_bearing_edges_after = None
+            if (ep_bearing_edges_after is not None
+                    and ep_bearing_edges_after < ep_bearing_edges_before):
+                logger.warning(
+                    "rebuild: the pre-wipe graph carried %d edge(s) with EP "
+                    "message state but the rebuilt graph holds only %d — %d "
+                    "dressed edge(s) were NOT restored (#5380). A pre-#5380 "
+                    "journal carries no EdgeMessageChanged record for them, "
+                    "and this report is deliberately NOT gated on that: it "
+                    "fires whenever the state actually dropped, including the "
+                    "mixed case (an upgraded journal plus older dressed "
+                    "edges).",
+                    ep_bearing_edges_before, ep_bearing_edges_after,
+                    ep_bearing_edges_before - ep_bearing_edges_after)
         if not _edge_msg_journaled and ep_bearing_edges_before:
             # #5380 indicator 4 — the pre-fix journal. The rebuild has ALREADY
             # dropped the state by this point (there is no record to fold), so

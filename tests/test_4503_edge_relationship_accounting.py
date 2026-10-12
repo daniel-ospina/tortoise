@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import subprocess
 from typing import Any
@@ -231,7 +232,44 @@ def test_cap_count_is_invariant_to_edge_state_growth(sdk):
             f"this pin must be updated rather than deleted.")
 
 
-# ── (b) the EP edge flush journals nothing ─────────────────────────────────
+# ── (b) the EP edge flush journals the edge slots (#5380) ──────────────────
+
+def test_edge_message_slot_tuples_are_pinned_equal():
+    """#5380: the producer, the projection fold and the census tool MUST agree
+    on the four edge-resident message slots.
+
+    Three independent declarations exist — ``TortoiseEP.EDGE_MESSAGE_SLOTS``
+    (``tortoise/ep.py``), ``EDGE_MESSAGE_PROPS`` (``tortoise/projection/
+    entities.py``, which cannot import ``ep``) and ``EP_EDGE_SLOTS``
+    (``tools/edge_census.py``). The emit-site test above compares the journaled
+    RECORDS to ``EP_EDGE_SLOTS``, so it cannot see a slot dropped from the
+    FOLD's tuple. This pin is the anti-drift guard the producer comment claims.
+    Non-vacuous: dropping a slot from any of the three (or adding a fifth to
+    one only) reds this test, and nothing else in the suite would notice.
+    """
+    from tortoise.projection.entities import EDGE_MESSAGE_PROPS
+
+    # The pairing the emit sites use must reconstruct the flat tuple exactly —
+    # this is what makes "the emit sites consume the constant" true rather
+    # than aspirational.
+    assert TortoiseEP.EDGE_MESSAGE_SLOTS == (
+        TortoiseEP.EDGE_MESSAGE_FWD_SLOTS
+        + TortoiseEP.EDGE_MESSAGE_BACK_SLOTS)
+    # Cardinality + set equality together, so a duplicated string cannot hide
+    # behind a set comparison that a 3-element tuple would satisfy.
+    for name, other in (("EDGE_MESSAGE_PROPS", EDGE_MESSAGE_PROPS),
+                        ("EP_EDGE_SLOTS", EP_EDGE_SLOTS)):
+        assert len(TortoiseEP.EDGE_MESSAGE_SLOTS) == 4, (
+            f"the producer slot tuple has "
+            f"{len(TortoiseEP.EDGE_MESSAGE_SLOTS)} elements, not 4")
+        assert (frozenset(TortoiseEP.EDGE_MESSAGE_SLOTS)
+                == frozenset(other)), (
+            f"slot drift: TortoiseEP.EDGE_MESSAGE_SLOTS="
+            f"{TortoiseEP.EDGE_MESSAGE_SLOTS} != {name}={tuple(other)} — the "
+            f"producer and the consumer of the edge-message vocabulary have "
+            f"diverged, so a slot written on one side is invisible on the "
+            f"other (#5380)")
+
 
 def test_ep_edge_flush_journals_the_edge_slots(journaled_sdk):
     """#5380 INVERTED this pin. It used to assert that no record carried an
@@ -416,6 +454,141 @@ def test_rebuild_all_keeps_edge_messages_and_node_belief(
         f"the edge-level belief state, so the graph comes back half restored "
         f"(the node posteriors above DID survive) and the next EP run "
         f"warm-starts from a different state than the graph it replaced")
+
+
+# ── (c2) the `clear` leg survives a JSONL wipe+rebuild (#5380) ─────────────
+# The `set` leg is pinned above. The `clear` leg is the ANTI-DIVERGENCE half:
+# without it the fold RESURRECTS seeds the live graph dropped (#1242's
+# stale-seed class / the #330 parity break). No test referenced it before this
+# one — neutering `_emit_edge_message_clear` left the whole file green.
+
+def test_rebuild_all_does_not_resurrect_cleared_edge_messages(journaled_sdk):
+    """A full-scope live invalidation must be replayed, not undone."""
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)
+
+    proj = sdk._get_proj()
+    dressed = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert dressed > 0, "precondition: EP wrote no edge message state"
+
+    dropped = sdk._get_ep().invalidate_messages(None)
+    assert dropped > 0, "precondition: the live clear matched no edge"
+    live_after = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert live_after == 0, (
+        "the live clear did not drop the edge message state, so the rebuild "
+        "assertion below would be vacuous")
+
+    records = [json.loads(line) for line in (events / "events.jsonl")
+               .read_text().splitlines() if line.strip()]
+    clears = [r for r in records if r.get("type") == "EdgeMessageChanged"
+              and r.get("op") == "clear"]
+    assert clears, (
+        "#5380 regression: the live invalidation journaled NO clear record — "
+        "a rebuild resurrects the seeds the live graph just dropped (#330)")
+    assert any(r.get("scope") == "all" for r in clears), clears
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    resurrected = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert resurrected == 0, (
+        f"#5380 regression: the rebuild RESURRECTED message state on "
+        f"{resurrected} edge(s) the live graph had cleared — the `clear` leg "
+        f"is not replayed, so live and replay diverge (#330)")
+
+
+def test_rebuild_replays_touching_and_neighbourhood_clears(journaled_sdk):
+    """The other two scopes: ``touching`` and ``operator-neighbourhood``.
+
+    ``invalidate_factor_messages`` is the #2422 ghost-vote leg — a claim's
+    influence reaches its neighbours' SIBLING edges, which ``touching`` does
+    not cover. Both must replay or the rebuilt graph keeps ghost seeds.
+    """
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)
+
+    proj = sdk._get_proj()
+    mid = ids[1]
+    assert sdk._get_ep().invalidate_messages([mid]) > 0, \
+        "precondition: the `touching` clear matched no edge"
+    assert sdk._get_ep().invalidate_factor_messages([mid]) > 0, \
+        "precondition: the `operator-neighbourhood` clear matched no edge"
+
+    records = [json.loads(line) for line in (events / "events.jsonl")
+               .read_text().splitlines() if line.strip()]
+    scopes = {r.get("scope") for r in records
+              if r.get("type") == "EdgeMessageChanged"
+              and r.get("op") == "clear"}
+    assert {"touching", "operator-neighbourhood"} <= scopes, (
+        f"#5380 regression: the non-`all` clear scopes were not journaled: "
+        f"{scopes}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    resurrected = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert resurrected == 0, (
+        f"#5380 regression: the rebuild resurrected message state on "
+        f"{resurrected} edge(s) cleared through `touching` / "
+        f"`operator-neighbourhood` (#330/#2422)")
+
+
+# ── (c3) the mixed pre-fix-journal case is REPORTED (#5380) ────────────────
+
+def test_rebuild_reports_drop_for_a_post_upgrade_journal(
+        journaled_sdk, caplog):
+    """A #5380-era journal PLUS older dressed edges must still report the drop.
+
+    The aggregate report used to be gated on "the journal holds NO
+    ``EdgeMessageChanged`` record" — zero records or nothing. Once ANY edge
+    message is journaled that flag stays False forever, so the report could
+    never fire again, including for the pre-#5380 dressed edges the journal
+    never mentions. This test builds exactly that mixed state: an operator
+    edge the journal recreates AND a raw direct edge it does not, then asserts
+    the post-replay comparison names the loss. Pre-fix: no such warning.
+    """
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)   # journals EdgeMessageChanged
+
+    proj = sdk._get_proj()
+    # A dressed edge the journal NEVER records: raw Cypher, no create_operator,
+    # and DirectEdgeCreated is not folded by the replay (A10 #1048), so it is
+    # lost by the wipe+replay. This is the "older dressed edge" half.
+    extra = _claims(sdk, 1)[0]
+    _direct_impl_edge(sdk, ids[0], extra)
+    proj.g.query(
+        "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
+        "SET r.msg_alpha=0.5, r.msg_beta=0.5",
+        params={"a": ids[0], "b": extra})
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("were NOT restored" in m and "EP" in m
+               for m in messages), (
+        "#5380 regression: a mixed post-upgrade journal reported NO loss. The "
+        "aggregate report is gated on 'the journal holds NO EdgeMessageChanged "
+        "record', so it silently disables itself the moment one edge message "
+        f"is journaled — the realistic migration case: {messages}")
 
 
 # ── the census tool's own arithmetic (the re-runnable receipt) ─────────────
