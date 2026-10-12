@@ -156,6 +156,20 @@ response_fields:
   field: recall_ranking.confidence_source
   emitted_when: 'the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured" without knowing the status vocabulary'
   unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence; every live row keeps its "posterior"/"neutral" verdict'
+# #8171: the write-time provenance advisory. Deliberately NOT inside a tool's
+# handler — it is emitted in the SDK layer (`TortoiseSDK._provenance_advisory`,
+# called by `create_entity` and `create_document`), so the D2 carve-out holds:
+# no tool is added and no SDK method is added. Recorded here for the same reason
+# as every other response-field addition — nothing inspects response bodies at
+# runtime, so this entry is the only record of what we now tell agents we return.
+- response: tortoise_create_entity
+  field: advisories
+  emitted_when: 'the write landed with no provenance this door can MATERIALIZE — {advisories: [{code, node_id, message, advisory}]}, advisory-only (never a block, never a refusal, never a change to what was stored). Two codes: `no_source` (nothing declared, and no materializable session source) and `extracted_from_inert` (an extractedFrom WAS declared but the type is not one this door wires). Sourcedness is whether the door MATERIALIZES the ref, not the mere presence of the field: only type=document mints a :Source, so subject/object/event declaring extractedFrom are correctly advised (#8171)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response stays byte-identical'
+- response: tortoise_create_document
+  field: advisories
+  emitted_when: 'the same condition on the alias door — this door always materializes a declared extractedFrom as a :Source (D10), so only the `no_source` code can fire here; the payload comes from the shared `_provenance_advisory` (#8171)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a sourced document write, so that response stays byte-identical'
 counts:
   tools: 82
   sdk_public_methods: 150

@@ -56,14 +56,14 @@ something derivable from today's code.
 | 3 | `tortoise_approve_merge` | `tool_registry.py:370` | `approve_merge` | no | `approve_merge` |
 | 4 | `tortoise_assess_source` | `tool_registry.py:1003` | `assess_source` | no | `manage_source_trust` |
 | 5 | `tortoise_audit` | `tool_registry.py:171` | `audit` | yes | `graph_overview` |
-| 6 | `tortoise_backfill_v25` | `tool_registry.py:1147` | `backfill_v25` | no | `REMOVED` |
+| 6 | `tortoise_backfill_v25` | `tool_registry.py:1152` | `backfill_v25` | no | `REMOVED` |
 | 7 | `tortoise_belief_timeline` | `tool_registry.py:393` | `belief_timeline` | yes | `check_confidence` |
 | 8 | `tortoise_calibrate_summary` | `tool_registry.py:441` | `calibrate_summary` | yes | `check_confidence` |
 | 9 | `tortoise_check_structure` | `tool_registry.py:138` | `check_structure` | yes | `graph_overview` |
 | 10 | `tortoise_checkpoint` | `tool_registry.py:632` | `checkpoint` | no | `mine_knowledge_from_session` |
 | 11 | `tortoise_compute_confidence` | `tool_registry.py:404` | `compute_confidence` | yes | `check_confidence` |
 | 12 | `tortoise_create_document` | `tool_registry.py:971` | `create_document` | no | `create_entity` |
-| 13 | `tortoise_create_edge` | `tool_registry.py:1103` | `create_edge` | no | `link_entities` |
+| 13 | `tortoise_create_edge` | `tool_registry.py:1108` | `create_edge` | no | `link_entities` |
 | 14 | `tortoise_create_entity` | `tool_registry.py:1055` | `create_entity` | no | `create_entity` |
 | 15 | `tortoise_create_event` | `tool_registry.py:910` | `create_event` | no | `create_entity` |
 | 16 | `tortoise_create_object` | `tool_registry.py:901` | `create_object` | no | `create_entity` |
@@ -71,7 +71,7 @@ something derivable from today's code.
 | 18 | `tortoise_create_point` | `tool_registry.py:103` | `create_point` | no | `create_entity` |
 | 19 | `tortoise_create_source` | `tool_registry.py:980` | `create_source` | no | `register_source` |
 | 20 | `tortoise_create_subject` | `tool_registry.py:892` | `create_subject` | no | `create_entity` |
-| 21 | `tortoise_delete` | `tool_registry.py:1079` | `delete` | no | `delete_knowledge` |
+| 21 | `tortoise_delete` | `tool_registry.py:1084` | `delete` | no | `delete_knowledge` |
 | 22 | `tortoise_delete_entity` | `tool_registry.py:1044` | `delete_entity` | no | `delete_knowledge` |
 | 23 | `tortoise_delete_point` | `tool_registry.py:552` | `delete_point_wrapped` | no | `delete_knowledge` |
 | 24 | `tortoise_diary_read` | `tool_registry.py:652` | `diary_read` | yes | `list_knowledge` |
@@ -84,11 +84,11 @@ something derivable from today's code.
 | 31 | `tortoise_file_decision` | `tool_registry.py:529` | `file_decision` | no | `write_question` |
 | 32 | `tortoise_file_human_approval` | `tool_registry.py:539` | `file_human_approval` | no | `record_decision` |
 | 33 | `tortoise_find_cross_lens_candidates` | `tool_registry.py:852` | `get_cross_lens_candidates` | yes | `review_link_candidates` |
-| 34 | `tortoise_get` | `tool_registry.py:1136` | **none declared** | yes | `get_entity` |
+| 34 | `tortoise_get` | `tool_registry.py:1141` | **none declared** | yes | `get_entity` |
 | 35 | `tortoise_get_confidence` | `tool_registry.py:433` | `get_confidence` | yes | `check_confidence` |
 | 36 | `tortoise_get_entity` | `tool_registry.py:1024` | `get_entity` | yes | `get_entity` |
 | 37 | `tortoise_get_events` | `tool_registry.py:919` | `get_events` | yes | `get_entity` |
-| 38 | `tortoise_get_governance` | `tool_registry.py:1116` | `get_owned_entities` | yes | `get_entity` |
+| 38 | `tortoise_get_governance` | `tool_registry.py:1121` | `get_owned_entities` | yes | `get_entity` |
 | 39 | `tortoise_get_operator` | `tool_registry.py:509` | `get_point` | yes | `get_entity` |
 | 40 | `tortoise_get_point` | `tool_registry.py:279` | `get_point` | yes | `get_entity` |
 | 41 | `tortoise_get_session` | `tool_registry.py:927` | `get_session` | yes | `get_entity` |
@@ -112,16 +112,16 @@ something derivable from today's code.
 | 59 | `tortoise_list_topics` | `tool_registry.py:805` | `list_topics` | yes | `list_knowledge` |
 | 60 | `tortoise_mine_conversations` | `tool_registry.py:347` | `mine_corpus` | no | `mine_knowledge_from_directory` |
 | 61 | `tortoise_mitigate_operator` | `tool_registry.py:518` | `mitigate_operator` | no | `adjust_relationship` |
-| 62 | `tortoise_onboarding_demo_create` | `tool_registry.py:1158` | **none declared** | no | `REMOVED` |
-| 63 | `tortoise_onboarding_github_connect` | `tool_registry.py:1201` | **none declared** | no | `REMOVED` |
-| 64 | `tortoise_onboarding_github_index` | `tool_registry.py:1211` | **none declared** | no | `REMOVED` |
-| 65 | `tortoise_onboarding_github_status` | `tool_registry.py:1221` | **none declared** | yes | `REMOVED` |
-| 66 | `tortoise_onboarding_seed` | `tool_registry.py:1177` | **none declared** | no | `REMOVED` |
-| 67 | `tortoise_onboarding_session_recording` | `tool_registry.py:1191` | **none declared** | no | `REMOVED` |
-| 68 | `tortoise_onboarding_state` | `tool_registry.py:1168` | **none declared** | yes | `REMOVED` |
-| 69 | `tortoise_operator_action` | `tool_registry.py:1091` | **none declared** | no | `adjust_relationship` |
+| 62 | `tortoise_onboarding_demo_create` | `tool_registry.py:1163` | **none declared** | no | `REMOVED` |
+| 63 | `tortoise_onboarding_github_connect` | `tool_registry.py:1206` | **none declared** | no | `REMOVED` |
+| 64 | `tortoise_onboarding_github_index` | `tool_registry.py:1216` | **none declared** | no | `REMOVED` |
+| 65 | `tortoise_onboarding_github_status` | `tool_registry.py:1226` | **none declared** | yes | `REMOVED` |
+| 66 | `tortoise_onboarding_seed` | `tool_registry.py:1182` | **none declared** | no | `REMOVED` |
+| 67 | `tortoise_onboarding_session_recording` | `tool_registry.py:1196` | **none declared** | no | `REMOVED` |
+| 68 | `tortoise_onboarding_state` | `tool_registry.py:1173` | **none declared** | yes | `REMOVED` |
+| 69 | `tortoise_operator_action` | `tool_registry.py:1096` | **none declared** | no | `adjust_relationship` |
 | 70 | `tortoise_org_create` | `tool_registry.py:880` | `org_create` | no | `tenancy:create_memory_graph` |
-| 71 | `tortoise_overview` | `tool_registry.py:1125` | **none declared** | yes | `graph_overview` |
+| 71 | `tortoise_overview` | `tool_registry.py:1130` | **none declared** | yes | `graph_overview` |
 | 72 | `tortoise_pack_install` | `tool_registry.py:244` | **none declared** | no | `REMOVED` |
 | 73 | `tortoise_packs_list` | `tool_registry.py:233` | **none declared** | yes | `REMOVED` |
 | 74 | `tortoise_paginated_query` | `tool_registry.py:129` | `paginated_query` | yes | `search_knowledge` |
@@ -145,7 +145,7 @@ something derivable from today's code.
 | 92 | `tortoise_supersede` | `tool_registry.py:573` | `supersede` | no | `supersede_knowledge` |
 | 93 | `tortoise_taxonomy` | `tool_registry.py:796` | `taxonomy` | yes | `graph_overview` |
 | 94 | `tortoise_traverse` | `tool_registry.py:622` | **none declared** | yes | `explore_connections` |
-| 95 | `tortoise_update` | `tool_registry.py:1067` | `update` | no | `update_knowledge` |
+| 95 | `tortoise_update` | `tool_registry.py:1072` | `update` | no | `update_knowledge` |
 | 96 | `tortoise_update_entity` | `tool_registry.py:1035` | `update_entity` | no | `update_knowledge` |
 | 97 | `tortoise_update_point` | `tool_registry.py:479` | `update_point` | no | `update_knowledge` |
 | 98 | `tortoise_validate_domain` | `tool_registry.py:146` | `validate_domain` | yes | `graph_overview` |

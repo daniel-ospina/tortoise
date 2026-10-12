@@ -1590,6 +1590,25 @@ def test_recorded_response_field_is_rendered_in_the_list():
         assert f"`{rf['field']}`" in text
 
 
+def test_the_8171_advisory_field_is_recorded_on_both_create_doors():
+    """#8171's new response key must be RECORDED, not left to the reviewing half.
+
+    `check` anchors every entry that IS recorded, but it cannot see a field that was
+    never recorded at all — nothing inspects response bodies at runtime (CONTRIBUTING.md,
+    "Be precise about the half the machine cannot check"). So `create_entity` and
+    `create_document` both gained an `advisories` key, and the omission was caught only by
+    a human review of this PR. Pin the record so the next addition of the key cannot ship
+    unrecorded. Fails on the pre-#8171-record manifest (no `advisories` row), so it is not
+    vacuous.
+    """
+    recorded = {(rf["response"], rf["field"]) for rf in _manifest()["response_fields"]}
+    for response in ("tortoise_create_entity", "tortoise_create_document"):
+        assert (response, "advisories") in recorded, (
+            f"the `advisories` field {response} returns is not recorded in "
+            "config/surface-manifest.yml::response_fields"
+        )
+
+
 # --- ROUND-2 REVIEW FINDINGS: fail-open content paths, closed with mutations ---------
 # Four fresh-context reviewers ran on this change. Their P1s were both real: (1) a
 # DUPLICATE row name silently dropped content from the drift comparison AND from the D2
