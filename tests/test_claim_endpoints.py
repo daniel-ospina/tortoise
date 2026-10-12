@@ -981,3 +981,222 @@ class TestClaimBodySweepCap:
                      "content-type": "application/json"})
         assert r.status_code == 400
         assert "api_key" in r.json()["detail"]
+
+
+# ── #2810: the claim lane consults the ONE free-org entitlement chokepoint ──
+
+
+def _seed_owned_free_org(fake, org_id: str, user_id: str,
+                         *, tier: str = "free",
+                         status: str | None = None,
+                         role: str = "owner") -> None:
+    """Seed an org + an active membership row for *user_id*."""
+    from tests.test_supabase_control import FREE_TEAM, _membership_row
+    fake.seed("organizations", [dict(FREE_TEAM, id=org_id, name=org_id,
+                                     tier=tier, subscription_status=status)])
+    fake.seed("org_memberships", [_membership_row(user_id=user_id,
+                                                   org_id=org_id, role=role)])
+
+
+def _is_still_anon(fake, org_id: str) -> bool:
+    return any(
+        str(r.get("org_id")) == org_id and r.get("role") == "owner"
+        and r.get("status") == "active" and r.get("user_id") is None
+        for r in fake.tables.get("org_memberships", []))
+
+
+class TestClaimFreeOrgEntitlement:
+    """#2810: `/v1/claim` binds an anon org to the caller as its OWNER, so it
+    must consult the same ownership-based entitlement every create-org lane
+    consults — otherwise one person can end up owning N free orgs by minting N
+    anon orgs (`/v1/agent/signup`) and claiming each in turn."""
+
+    def test_capped_owner_cannot_claim_a_second_free_org(self, client, fake,
+                                                         monkeypatch):
+        """The hole: an owner of one free org claims an anon org → 402, the
+        anon org is left unclaimed and the owned set is unchanged."""
+        _seed_owned_free_org(fake, "team-free-a", _U_A)
+        key, anon_org = _provision_anon(client, fake)
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 402, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "one_free_org_limit"
+        assert detail["org_id"] == "team-free-a"
+        # Non-consuming: the anon org is still claimable by a first-time user,
+        # and no second owner row was written for the capped user.
+        assert _is_still_anon(fake, anon_org)
+        assert not any(
+            str(row.get("org_id")) == anon_org and row.get("user_id") == _U_A
+            for row in fake.tables.get("org_memberships", []))
+
+    def test_claim_twice_by_one_user_yields_one_owned_free_org(self, client,
+                                                               fake,
+                                                               monkeypatch):
+        """The cross-lane invariant on the claim lane: N anon orgs minted,
+        all claimed by ONE user → at most one owned free org."""
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        first_key, first_org = _provision_anon(client, fake)
+        r1 = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": first_key},
+        )
+        assert r1.status_code == 200, r1.text
+        second_key, _second_org = _provision_anon(client, fake)
+        r2 = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": second_key},
+        )
+        assert r2.status_code == 402, r2.text
+        assert r2.json()["detail"]["org_id"] == first_org
+        from tortoise.supabase_control import owned_free_org_ids
+        assert owned_free_org_ids(fake, _U_A) == [first_org]
+
+    def test_collaborator_on_a_free_org_can_still_claim(self, client, fake,
+                                                        monkeypatch):
+        """The #2789 motivating regression, now pinned on the claim lane: a
+        mere COLLABORATOR owns nothing, so the claim still succeeds."""
+        _seed_owned_free_org(fake, "team-free-a", _U_A, role="member")
+        key, _ = _provision_anon(client, fake)
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_paid_owner_can_still_claim(self, client, fake, monkeypatch):
+        """Rules table: an owned org WITH an active paid subscription is not a
+        free org, so it does not consume the allowance."""
+        _seed_owned_free_org(fake, "team-paid-a", _U_A, tier="pro",
+                             status="active")
+        key, _ = _provision_anon(client, fake)
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_already_claimed_409_precedes_the_402(self, client, fake,
+                                                  monkeypatch):
+        """Ordering pin (parity with the create lanes' 429 → 409 → 402): a
+        capped user presenting a key for an org someone else already claimed
+        gets 409, not 402."""
+        _seed_owned_free_org(fake, "team-free-a", _U_A)
+        key, anon_org = _provision_anon(client, fake)
+        # Another user claimed it first.
+        _seed_owned_free_org(fake, anon_org, _U_B)
+        # ...and the anon anchor is gone.
+        fake.tables["org_memberships"] = [
+            row for row in fake.tables["org_memberships"]
+            if not (str(row.get("org_id")) == anon_org
+                    and row.get("user_id") is None)]
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 409, r.text
+
+    def test_claim_email_refuses_a_pre_existing_owner(self, client, fake,
+                                                      monkeypatch):
+        """`/v1/claim/email` is invariant-preserving because it creates a
+        BRAND-NEW auth user (an existing email is a 409 at the admin-create
+        step), and a brand-new user owns nothing. That safety rests on an
+        external API's behaviour, so the chokepoint is applied here too: if
+        admin-create ever returns an EXISTING user, the claim must be refused.
+        """
+        _seed_owned_free_org(fake, "team-free-a", _U_A)
+        key, anon_org = _provision_anon(client, fake)
+
+        def _existing_user(email, password):
+            return 200, {"id": _U_A, "email": email}
+
+        monkeypatch.setattr(ha_mod, "_supabase_admin_create_user",
+                            _existing_user)
+        r = client.post("/v1/claim/email", json={
+            "api_key": key,
+            "email": "new@example.com",
+            "password": "password123",
+        })
+        assert r.status_code == 402, r.text
+        assert r.json()["detail"]["code"] == "one_free_org_limit"
+        assert _is_still_anon(fake, anon_org)
+        assert "claim_membership" not in [fn for fn, _ in fake.rpc_calls]
+
+    def test_claim_email_fresh_user_still_succeeds(self, client, fake,
+                                                   monkeypatch):
+        """The normal path is untouched: a freshly created user claims and
+        owns exactly one free org."""
+        key, anon_org = _provision_anon(client, fake)
+
+        def _fresh_user(email, password):
+            return 201, {"id": _U_A, "email": email}
+
+        monkeypatch.setattr(ha_mod, "_supabase_admin_create_user",
+                            _fresh_user)
+        r = client.post("/v1/claim/email", json={
+            "api_key": key,
+            "email": "new@example.com",
+            "password": "password123",
+        })
+        assert r.status_code == 200, r.text
+        from tortoise.supabase_control import owned_free_org_ids
+        assert owned_free_org_ids(fake, _U_A) == [anon_org]
+
+    def test_concurrent_claims_by_one_user_yield_one_free_org(
+            self, client, fake, monkeypatch):
+        """The gate read (`_owned_free_org_ids`) and the `claim_membership`
+        write are read-then-write (#1954), so the claim lane holds the same
+        per-user `_org_create_lock` the create lanes hold. Without it two
+        concurrent claims of two DIFFERENT anon orgs could each read "owns
+        nothing" and both commit — re-opening the hole through concurrency.
+        Verified as a REPRODUCER, not merely an outcome guard: with the
+        `_org_create_lock` removed from the claim lane this test fails (both
+        claims 200, two owned orgs). Mutation-verified 2026-10-13."""
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        key_a, _org_a = _provision_anon(client, fake)
+        key_b, _org_b = _provision_anon(client, fake)
+        import asyncio
+
+        import httpx
+
+        from tortoise.hosted_api import app as _app
+
+        async def _burst():
+            transport = httpx.ASGITransport(app=_app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await asyncio.gather(
+                    ac.post("/v1/claim",
+                            headers={"Authorization": "Bearer abc.def.ghi"},
+                            json={"api_key": key_a}),
+                    ac.post("/v1/claim",
+                            headers={"Authorization": "Bearer abc.def.ghi"},
+                            json={"api_key": key_b}),
+                )
+
+        r1, r2 = asyncio.run(_burst())
+        assert sorted((r1.status_code, r2.status_code)) == [200, 402], (
+            r1.text, r2.text)
+        denied = r1 if r1.status_code == 402 else r2
+        assert denied.json()["detail"]["code"] == "one_free_org_limit"
+        from tortoise.supabase_control import owned_free_org_ids
+        owned = owned_free_org_ids(fake, _U_A)
+        assert len(owned) == 1, owned

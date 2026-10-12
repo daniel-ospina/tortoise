@@ -2761,11 +2761,21 @@ def purge_org_control_plane(cp, org_id: str) -> None:
     ``_purge_registry_org``. Only called once the soft-delete grace
     window has elapsed. Raises on failure (fail-closed) — the purge sweep
     logs and skips, never crashes.
+
+    The orgs row goes through the SECURITY DEFINER RPC
+    ``purge_org_record`` (migration 20261012000005), NOT a raw table
+    DELETE: the organizations -> graphs -> journal_event cascade fires
+    the append-only trigger on every journal row, and the trigger
+    refuses unless ``app.record_journal_purge='on'`` — a GUC a PostgREST
+    table DELETE cannot set. The RPC sets it transaction-locally and then
+    deletes the row (review of PR #8179 P2: without this, the erasure
+    would fail closed once the journal is populated and the org would
+    never be purged).
     """
     cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("invitations", method="DELETE", filters=[("org_id", "eq", org_id)])
-    cp.query("organizations", method="DELETE", filters=[("id", "eq", org_id)])
+    cp.rpc("purge_org_record", {"p_org_id": org_id})
 
 
 # ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────

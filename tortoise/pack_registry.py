@@ -12,6 +12,7 @@ Design:
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import logging
 import os
 from pathlib import Path
@@ -130,6 +131,24 @@ CORE_KINDS = (
     | CANONICAL_DOCUMENT_KINDS | CANONICAL_ACTION_KINDS | CORE_ENTITY_TYPES
 )
 
+# Kinds that persist in STORED graphs but are no longer DECLARED by any pack, so
+# they cannot ride `equivalentTo` (whose targets must resolve to a declared
+# kind). Read paths still expand through them, so a query keeps finding
+# pre-migration data — `migrate_kinds` is an opt-in normaliser, never a
+# precondition for a read (#6146).
+# #7848 moved two kind declarations:
+#   * `requirement` — dev pointKind → product-strategy objectKind, so the old
+#     `dev:requirement` spelling lives on stored Points;
+#   * `deployment`  — dev objectKind → core EVENT kind, so `dev:deployment`
+#     lives on stored Objects (and the relation names `core:deployment`).
+# A legacy spelling is a READ-ONLY alias: it is deliberately NOT in
+# `known_kinds`, so writing it still warns.
+LEGACY_KIND_ALIASES: dict[str, tuple[str, ...]] = {
+    "requirement": ("dev:requirement",),
+    "product-strategy:requirement": ("dev:requirement",),
+    "deployment": ("dev:deployment",),
+}
+
 # kindDefs value keys (R6 §3.1/§3.5)
 VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
@@ -212,6 +231,167 @@ def registered_source_types() -> frozenset[str]:
 # advertising a chain edge the engine cannot build.
 # (#4626 / #2766 / #5322)
 CORE_PREDICATES = frozenset({"IMPL", "NAND"})
+
+# ── Layer 2 — the semantics vocabulary (ONTOLOGY §8, #7852) ──────────────
+# A relation has three layers: `mechanism` (how it acts — IMPL/NAND) +
+# `direction` (which way it runs), `semantics` (what it MEANS), and the
+# `predicate` (the specific verb). The semantics vocabulary is **CLOSED** —
+# core is canonical and a pack aligns to it, so a value outside this set is a
+# typo, never a new meaning, and validation names the valid alternatives
+# (warn-not-block, per W2 — see `_validate`).
+#
+# A value is chosen by the CO-VARIANCE TEST: does the relationship make the
+# two ends' confidence move together? `SEMANTICS_DIRECTIONS` records the one
+# the value carries; the two sets are pinned equal, so a value cannot be added
+# without stating the direction it records.
+SEMANTICS_VALUES = frozenset({
+    # epistemic — confidence moves along the edge
+    "addresses", "supports", "refutes", "causes",
+    "mutuallySupportive", "mutuallyExclusive",
+    # structural / neutral
+    "hasPart", "dependsOn", "transacts", "related",
+    # core structural rows (ONTOLOGY §3.6) a pack may name as a meaning
+    "ownedBy", "managedBy",
+})
+
+# The direction each ruled semantics value records (ONTOLOGY §8, #7852):
+# `->` source→target, `<-` target→source, `<->` both ways, `-` none (the
+# connection exists and NO confidence transfers — direction and
+# confidence-transfer are one axis). Every value in `SEMANTICS_VALUES` appears
+# here — the two sets are pinned equal by a test, so a value cannot be added
+# without stating the direction it records.
+SEMANTICS_DIRECTIONS: dict[str, str] = {
+    "addresses": "->",
+    "supports": "->",
+    "refutes": "->",
+    "causes": "->",
+    "dependsOn": "->",
+    "ownedBy": "->",
+    "managedBy": "->",
+    "mutuallySupportive": "<->",
+    "mutuallyExclusive": "<->",
+    "hasPart": "<->",
+    "transacts": "-",
+    "related": "-",
+}
+
+# Values shipped packs still declare, ruled to collapse onto the core
+# vocabulary. Recognised (never an error, so a pack is not dropped
+# mid-transition) and warned naming the canonical word. The pack alignment
+# is #7848; no NEW declaration should use a key of this map.
+SEMANTICS_TRANSITION: dict[str, str] = {
+    "opposes": "mutuallyExclusive",
+    "produces": "causes",
+    "holds": "ownedBy",
+    "funds": "transacts",
+}
+
+# ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
+# A pack `ontology.relations[]` entry is only *real* if some runtime surface
+# accepts its predicate. This is the ONE place that decides which declared
+# paths apply — so pack load, `tortoise pack validate` and
+# `sdk.list_relations()` cannot disagree about it. That disagreement is the
+# defect #2766 reports: the declared registry, the writer, the validator and
+# the discoverable API each derived the relation vocabulary independently, and
+# an edge no surface constrained was the only one that got through.
+#
+# The verdict is about the DECLARATION, and the paths are the surfaces a
+# relation's OWN declaration makes usable:
+#
+#   operator   — ``sdk.create_operator(op_type=<mechanism>, label=<predicate>)``
+#                (the path ``sdk.ingest`` uses for ``connections[].label``).
+#                Requires a declared ``mechanism`` (IMPL|NAND): the mechanism
+#                is what tells a caller WHICH op_type the verb means, so a
+#                relation without one gives the operator path no declared
+#                op_type. The predicate itself is a free Layer-3 label
+#                (ONTOLOGY §8, #7852) and is deliberately NOT checked against a
+#                vocabulary — any domain verb can ride a declared mechanism.
+#   structural — ``sdk.create_edge(predicate, from_id, to_id)`` and the other
+#                structural writers (``create_about_edge``, ``sdk.ingest``):
+#                the unions of their predicate sets. Read from its single home
+#                in the writer (``projection/edges.py::
+#                STRUCTURAL_WRITE_PREDICATES``) so a predicate added or
+#                removed THERE moves this verdict with it. It is not one of the
+#                three subsets — reading only ``_VALID_EDGE_PREDICATES``
+#                under-reported ``aboutPoint`` (create_about_edge) and
+#                ``extractedFrom`` (ingest) as unwritable (#8285 review P1).
+#
+# ⛔ DO NOT READ THE VERDICT AS A RUNTIME REFUSAL — it is not one. The two
+# writers are NOT symmetric:
+#   * ``create_edge`` is STRICT: an unlisted predicate is refused ("Unknown
+#     predicate").
+#   * ``create_operator`` is WARN-NOT-BLOCK (#1934, and the owner's
+#     2026-10-02 measurement on #2766): it accepts ANY label and warns only
+#     when the label is not a declared predicate. So a relation reported
+#     ``predicate-not-in-allowlist`` is still WRITABLE by a caller who passes
+#     an explicit ``op_type`` — what is missing is a DECLARED mechanism (i.e.
+#     what a caller would pass as ``op_type``), not the writer's acceptance.
+#     The warning text and docs/EXPANSION_PACKS.md must say exactly that, and
+#     nothing on this surface may claim the runtime drops the edge.
+#
+# A relation with neither declared path is no longer silently ambiguous: it is
+# ``declaration-only`` when the manifest says so (``declarationOnly: true`` —
+# an explicit author opt-in), and ``predicate-not-in-allowlist`` otherwise —
+# the state this verdict exists to make loud. Warn-not-block (W2), the same
+# contract the Layer-2 semantics check uses: a pack mid-alignment keeps
+# loading, and `tortoise pack validate` names every relation whose declaration
+# binds no mechanism.
+RELATION_WRITABLE = "writable"
+RELATION_DECLARATION_ONLY = "declaration-only"
+RELATION_PREDICATE_NOT_IN_ALLOWLIST = "predicate-not-in-allowlist"
+RELATION_WRITE_VERDICTS = (
+    RELATION_WRITABLE,
+    RELATION_DECLARATION_ONLY,
+    RELATION_PREDICATE_NOT_IN_ALLOWLIST,
+)
+
+
+def relation_write_paths(rel: dict) -> tuple[str, ...]:
+    """Name the DECLARED write paths a relation's declaration makes usable.
+
+    The paths are the two surfaces a caller can reach with the relation AS
+    DECLARED (see the block above): ``operator`` is gated on the declared
+    ``mechanism`` — the declaration's own op_type — and ``structural`` reads
+    the writer's own structural vocabulary (``STRUCTURAL_WRITE_PREDICATES``,
+    the union of every writers' set). Empty means the declaration binds no
+    path.
+
+    ⛔ Empty is NOT "the runtime refuses it": ``create_operator`` accepts any
+    label (warn-not-block, #1934), and what is missing is a declared mechanism
+    — i.e. what a caller would pass as ``op_type``. See the block above and
+    the load warning.
+    """
+    # Lazy: the pack registry is imported by the extraction path and must not
+    # drag the whole projection package in behind it (measured ~60 ms). The
+    # write vocabulary stays defined in ONE place — the writer — and is read
+    # here. It is the UNION of the writers' structural sets (#8285 review P1):
+    # `_VALID_EDGE_PREDICATES` alone excludes `aboutPoint` (create_about_edge)
+    # and `extractedFrom` (ingest), both of which the runtime demonstrably
+    # writes.
+    from .projection.edges import STRUCTURAL_WRITE_PREDICATES
+
+    predicate = rel.get("predicate") or ""
+    paths: list[str] = []
+    if rel.get("mechanism") in CORE_PREDICATES:
+        paths.append("operator")
+    if predicate in STRUCTURAL_WRITE_PREDICATES:
+        paths.append("structural")
+    return tuple(paths)
+
+
+def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
+    """``(verdict, paths)`` for one declared relation — the single source of truth.
+
+    Called by pack load (warn), ``tortoise pack validate`` (report) and
+    ``list_relations()`` (the discoverable API), so all three answer from the
+    same computation instead of each deriving its own contract (#2766).
+    """
+    paths = relation_write_paths(rel)
+    if paths:
+        return RELATION_WRITABLE, paths
+    if rel.get("declarationOnly") is True:
+        return RELATION_DECLARATION_ONLY, ()
+    return RELATION_PREDICATE_NOT_IN_ALLOWLIST, ()
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the
@@ -385,8 +565,8 @@ class PackManifest:
     # Parent must exist in core CANONICAL_OBJECT_KINDS or another pack's kinds.
     kind_subclasses: dict[str, str] = dataclasses.field(default_factory=dict)
 
-    # Equivalence declarations: {kind: [other_ns:kind, ...]} — e.g., {"issue": ["pm:task"]}
-    # Means "this pack's 'issue' is the same concept as 'pm:task'."
+    # Equivalence declarations: {kind: [other_ns:kind, ...]} — e.g., {"issue": ["pm:issue"]}
+    # Means "this pack's 'issue' is the same concept as 'pm:issue'."
     # Bidirectional: the registry makes it symmetric at query time.
     kind_equivalences: dict[str, list[str]] = dataclasses.field(default_factory=dict)
 
@@ -604,6 +784,14 @@ class PackRegistry:
         self.packs_dir = Path(packs_dir)
         self.packs: dict[str, PackManifest] = {}
         self.errors: dict[str, list[str]] = {}  # namespace → error messages
+        # #2781: namespace → UNRESOLVED EXTERNAL REFERENCE messages. Distinct
+        # from `errors` on purpose: an error isolates the pack (its manifest is
+        # unusable), while an unresolved reference is a MISSING PEER — the
+        # pack's own manifest is valid and it stays loaded, so one absent pack
+        # cannot cascade through the catalog. Named "unresolved_refs" rather
+        # than "warnings" because the hosted install path reads it as a
+        # FAIL-CLOSED refusal (see pack_manifest_store.validate_manifest).
+        self.unresolved_refs: dict[str, list[str]] = {}
         # #1930: set by domain_loader._get_registry when the TORTOISE_PACKS_DIR
         # leg was unusable (0 valid packs / load failure) and the registry
         # fell back to the default catalog — a queryable diagnostic for ops.
@@ -620,6 +808,27 @@ class PackRegistry:
         cross-pack) is excluded from self.packs so the compiled vocabulary
         (expansions, brief, register_kinds) only ever sees healthy packs.
         Errors remain queryable via self.errors.
+
+        #2781 — a MISSING PEER is not a broken manifest, and it no longer
+        cascades. Two buckets, deliberately separated:
+
+          * ``self.errors``      — the manifest is unusable (schema/cross-pack
+                                   typo). The pack is ISOLATED (removed from
+                                   ``self.packs``).
+          * ``self.unresolved_refs`` — the pack's own manifest is valid but a
+                                   reference (or a declared ``depends_on``)
+                                   names a pack that is not loaded. The pack
+                                   STAYS loaded; the reference simply matches
+                                   nothing, and the diagnostic names the
+                                   missing pack. Availability over strictness:
+                                   one absent pack must not take down the
+                                   catalog (before #2781, dropping `pm` also
+                                   dropped `dev` and `product-strategy`).
+
+        The hosted INSTALL path is the fail-closed half of the same contract:
+        ``pack_manifest_store.validate_manifest`` refuses an install whose refs
+        or declared dependencies cannot be satisfied by the tenant's installed
+        set (see ``_missing_pack_explanation`` for the exact clause split).
         """
         if not self.packs_dir.exists():
             return 0
@@ -629,6 +838,7 @@ class PackRegistry:
         # call. Reload must be idempotent.
         self.packs = {}
         self.errors = {}
+        self.unresolved_refs = {}
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -669,6 +879,23 @@ class PackRegistry:
                 "pack registry %s: %d pack(s) failed validation and were "
                 "isolated (see registry.errors): %s",
                 self.packs_dir, len(self.errors), ", ".join(sorted(self.errors)),
+            )
+        # #2781: an unresolved cross-pack reference must never be silent — but
+        # it must not take the pack down either. Warn-once per (dir, message
+        # set) so a repeated load of the same degraded dir does not spam.
+        if self.unresolved_refs:
+            _warn_packs_once(
+                ("unresolved-refs", str(self.packs_dir),
+                 tuple(sorted((ns, tuple(msgs))
+                              for ns, msgs in self.unresolved_refs.items()))),
+                "pack registry %s: %d pack(s) loaded with UNRESOLVED cross-pack "
+                "references — the packs stay loaded; install the named pack(s) "
+                "or declare them in depends_on (see registry.unresolved_refs): "
+                "%s",
+                self.packs_dir, len(self.unresolved_refs),
+                "; ".join(
+                    f"{ns}: {msgs[0]}"
+                    for ns, msgs in sorted(self.unresolved_refs.items())),
             )
         return count
 
@@ -876,6 +1103,105 @@ class PackRegistry:
                     errors.append(
                         f"relation '{pred}': 'extractable' must be a boolean"
                     )
+                # #2766: the explicit declaration-only opt-in (see
+                # `relation_write_verdict`). Shape only here; the effect on the
+                # verdict is decided by the ONE resolver below.
+                if "declarationOnly" in rel and not isinstance(rel["declarationOnly"], bool):
+                    errors.append(
+                        f"relation '{pred}': 'declarationOnly' must be a boolean"
+                    )
+
+                # Layer 2 (#7852, W2): the semantics vocabulary is CLOSED and
+                # every declared value is checked against it —**warn-not-block**,
+                # the contract W2 states and the repo's own precedent for an
+                # open-vocabulary path (#1934). An out-of-vocabulary or retired
+                # word, and a missing meaning, are warned WITH the valid
+                # alternatives; none of them drops the pack (a refusal would
+                # drop every pack that shares its kinds). The only hard error is
+                # a shape error — a non-string value, which no vocabulary can
+                # express.
+                if "semantics" in rel:
+                    semantics = rel.get("semantics")
+                    if not isinstance(semantics, str) or not semantics:
+                        errors.append(
+                            f"relation '{pred}': 'semantics' must be a non-empty "
+                            f"string"
+                        )
+                    elif semantics in SEMANTICS_TRANSITION:
+                        _warn_packs_once(
+                            ("relation-semantics-transition", ns, semantics),
+                            "relation '%s': semantics %r is retired in favour of "
+                            "%r (ONTOLOGY §8, #7852) — packs align to the core "
+                            "vocabulary (#7848)",
+                            pred, semantics, SEMANTICS_TRANSITION[semantics],
+                        )
+                    elif semantics not in SEMANTICS_VALUES:
+                        # An OUT-OF-VOCABULARY word is flagged, never refused.
+                        # W2's contract is warn-not-block (the repo's own
+                        # precedent for an open-vocabulary write path, #1934):
+                        # a refusal here would drop the pack — and the packs
+                        # that share its kinds — on a single typo.
+                        _warn_packs_once(
+                            ("relation-semantics-unknown", ns, semantics),
+                            "relation '%s': semantics %r is not in the core "
+                            "vocabulary (ONTOLOGY §8, #7852) — valid values: %s",
+                            pred, semantics, ", ".join(sorted(SEMANTICS_VALUES)),
+                        )
+                else:
+                    # A missing meaning is flagged, never refused, in a
+                    # transitional pack: completeness of the vocabulary is the
+                    # target and a pack mid-alignment must keep loading.
+                    _warn_packs_once(
+                        ("relation-semantics-missing", ns, pred),
+                        "relation '%s' declares no semantics — the Layer-2 "
+                        "meaning (ONTOLOGY §8, #7852); valid values: %s",
+                        pred, ", ".join(sorted(SEMANTICS_VALUES)),
+                    )
+
+                # #2766: the write-path verdict, emitted at pack load for EVERY
+                # declared relation. A relation the runtime cannot write is no
+                # longer silent — it is either declared `declarationOnly` or
+                # reported here. Warn-not-block (W2): the pack still loads, and
+                # `tortoise pack validate` prints the same verdict.
+                write_verdict, write_paths = relation_write_verdict(rel)
+                if write_verdict == RELATION_PREDICATE_NOT_IN_ALLOWLIST:
+                    _warn_packs_once(
+                        ("relation-not-writable", ns, pred),
+                        "relation '%s': the declaration binds no write path — "
+                        "'%s' is neither a structural edge predicate "
+                        "(create_edge refuses it) nor carried by a declared "
+                        "mechanism, so create_operator has no declared op_type "
+                        "for it. This is a declaration gap, not a runtime "
+                        "refusal: create_operator(op_type=..., label='%s') still "
+                        "accepts the bare label (warn-not-block, #1934). Declare "
+                        "`mechanism: IMPL|NAND`, use a structural predicate, or "
+                        "mark it `declarationOnly: true` (#2766)",
+                        pred, pred, pred,
+                    )
+                elif write_verdict == RELATION_WRITABLE \
+                        and rel.get("declarationOnly") is True:
+                    # A marker that cannot take effect is the silent divergence
+                    # this verdict exists to remove — the runtime WILL write this
+                    # relation, so say so rather than let the field lie.
+                    _warn_packs_once(
+                        ("relation-declaration-only-ignored", ns, pred),
+                        "relation '%s': `declarationOnly: true` has no effect — "
+                        "the runtime CAN write this relation via %s (#2766)",
+                        pred, " + ".join(write_paths),
+                    )
+
+                # #7852: `nearMisses` names the sibling predicates/semantics a
+                # relation is confused with, mirroring kindDefs (R6
+                # §3.1/§3.5). SHAPE is checked here; RESOLUTION is cross-pack,
+                # after every pack is loaded.
+                if "nearMisses" in rel:
+                    nms = rel.get("nearMisses")
+                    if (not isinstance(nms, list)
+                            or any(not isinstance(n, str) or not n for n in nms)):
+                        errors.append(
+                            f"relation '{pred}': 'nearMisses' must be a list of "
+                            f"non-empty strings"
+                        )
 
             # Validate hierarchies
             hierarchies = ont.get("hierarchies", [])
@@ -1326,6 +1652,20 @@ class PackRegistry:
                             f"equivalentTo: '{target}' must use 'namespace:kind' format"
                         )
 
+        # depends_on (#2781): the DECLARED pack-level dependency list. Consumed
+        # by load_all (an absent declared dep is reported against the declaring
+        # pack and — per #2781 — explains its unresolved references) and by the
+        # hosted install validator (which refuses the install). SHAPE is checked
+        # here so a malformed value is a schema error instead of a crash or a
+        # phantom dependency in the consumer: `depends_on: pm` (a bare string)
+        # iterates as characters and would report a dependency on `p`.
+        depends_on = raw.get("depends_on") or []
+        if not isinstance(depends_on, list) or not all(
+                isinstance(d, str) and d.strip() for d in depends_on):
+            errors.append(
+                "depends_on must be a list of non-empty pack namespaces"
+            )
+
         return errors
 
     # ── Cross-pack validation ──────────────────────────────────────────
@@ -1340,10 +1680,43 @@ class PackRegistry:
           4. Every chain step resolves — bare steps may be this pack's own
              kinds, core kinds, or kinds declared by exactly ONE other pack
              (ambiguous bare names are errors, R6 §3.2 / plan W-5 failure b).
-        Adds errors to self.errors keyed by pack namespace.
+
+        An UNRESOLVABLE reference lands in one of two buckets (#2781):
+
+          * ``self.errors`` — a typo. The namespace resolves but the kind does
+            not, or a bare name resolves nowhere and the declaring pack's own
+            ``depends_on`` is fully satisfied. The pack is isolated.
+          * ``self.unresolved_refs`` — a MISSING PACK. A namespaced ref whose
+            namespace is not loaded, or any unresolvable ref whose declaring
+            pack also has a ``depends_on`` entry that is not loaded. The pack
+            stays loaded; the diagnostic names the missing pack.
+
+        See ``_missing_pack_explanation`` for why those two clauses are
+        evidence of absence rather than leniency.
         """
+        # Rebuilt (never appended to): load_all re-runs this pass against the
+        # post-isolation surviving set and unresolved keys keep their packs, so
+        # an append would duplicate every message on the second pass.
+        self.unresolved_refs = {}
+
         # Build the set of all known kinds (core + all packs)
         all_known = self._all_known_kinds()
+        loaded = set(self.packs)
+
+        # #2781: declared dependencies that are not loaded. This is BOTH a
+        # report (below) and the evidence clause `_missing_pack_explanation`
+        # uses to tell a MISSING PACK from a typo for a bare kind name.
+        missing_deps: dict[str, list[str]] = {
+            ns: [d for d in pack.depends_on if d not in loaded]
+            for ns, pack in self.packs.items()
+        }
+        for ns, deps in missing_deps.items():
+            for dep in deps:
+                self.unresolved_refs.setdefault(ns, []).append(
+                    f"depends_on: declared dependency '{dep}' is not loaded — "
+                    f"install pack '{dep}' (the pack stays loaded; its "
+                    f"references into '{dep}' are unresolved)"
+                )
 
         # Bare-name index for single-namespace resolution (chain steps,
         # nearMisses): bare kind name → full 'ns:kind' forms.
@@ -1353,32 +1726,62 @@ class PackRegistry:
                 _ns, kind = full.split(":", 1)
                 bare_index.setdefault(kind, []).append(full)
 
+        # The relation nearMisses universe (#7852): a relation may be confused
+        # with another predicate or with another semantics value, so both are
+        # valid targets. Predicates are declared and matched BARE by contract
+        # (#2030), so a target is bare too.
+        all_predicates = set(CORE_PREDICATES) | set(SEMANTICS_VALUES)
+        for _ns, _pack in self.packs.items():
+            all_predicates.update(
+                r.get("predicate") for r in _pack.relations if r.get("predicate")
+            )
+
         # Check every relation's fromKind/toKind
         for ns, pack in self.packs.items():
+            rel_pack_kinds = self._pack_kind_set(pack)
             for rel in pack.relations:
                 pred = rel.get("predicate", "?")
                 for direction in ("fromKind", "toKind"):
                     kind_val = rel.get(direction, "")
                     if not kind_val:
                         continue  # old-format, already validated
-                    if kind_val not in all_known:
-                        msg = (
-                            f"relation '{pred}': {direction} '{kind_val}' "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
+                    # #7848: resolve through the SAME helper chains/nearMisses
+                    # use, so a `core:<kind>` reference (a core camelCase kind
+                    # such as `core:deployment`) resolves here too. The old
+                    # `kind_val not in all_known` test rejected it, because
+                    # `_all_known_kinds()` stores core kinds BARE — which left a
+                    # pack unable to point a relation at a core camelCase kind
+                    # without re-declaring it (the deformation #7848 fixes).
+                    # WIDENING only: every previously-valid ref still resolves.
+                    # (No `ambiguous` branch: `_validate` rejects an unprefixed
+                    # camelCase relation ref before this pass, and only a bare
+                    # ref can be ambiguous.)
+                    status = self._resolve_kind_ref(
+                        kind_val, rel_pack_kinds, all_known, bare_index)
+                    if status == "unknown":
+                        self._report_unresolved(
+                            ns, f"relation '{pred}': {direction} '{kind_val}'",
+                            kind_val, loaded, missing_deps[ns])
+
+                # #7852: every relation nearMisses target resolves to a
+                # declared predicate or a semantics value — the same split
+                # kindDefs uses (shape per-manifest, resolution here, because a
+                # bare name is not decidable from one manifest alone).
+                for target in rel.get("nearMisses", []) or []:
+                    if target not in all_predicates:
+                        self.errors.setdefault(ns, []).append(
+                            f"relation '{pred}': nearMisses target '{target}' does "
+                            f"not resolve to any declared predicate or semantics "
+                            f"value (core or loaded pack)"
                         )
-                        self.errors.setdefault(ns, []).append(msg)
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
                 for target in targets:
                     if target not in all_known:
-                        msg = (
-                            f"equivalentTo: target '{target}' (for '{kind}') "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"equivalentTo: target '{target}' (for '{kind}')",
+                            target, loaded, missing_deps[ns])
 
             # Manifest v3.1 (#1026): resolve every kind reference the v3.1
             # extraction slots declare. SHAPE was checked per-manifest in
@@ -1405,10 +1808,8 @@ class PackRegistry:
                 status = self._resolve_kind_ref(
                     ref, v31_kinds, all_known, bare_index)
                 if status == "unknown":
-                    self.errors.setdefault(ns, []).append(
-                        f"{label} does not resolve to any known kind "
-                        f"(core or loaded pack)"
-                    )
+                    self._report_unresolved(
+                        ns, label, ref, loaded, missing_deps[ns])
                 elif status == "ambiguous":
                     self.errors.setdefault(ns, []).append(
                         f"{label} is ambiguous — declared by multiple packs; "
@@ -1423,12 +1824,9 @@ class PackRegistry:
                         target, pack_kinds, all_known, bare_index
                     )
                     if status == "unknown":
-                        msg = (
-                            f"kindDefs '{kind}': nearMisses target '{target}' "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"kindDefs '{kind}': nearMisses target '{target}'",
+                            target, loaded, missing_deps[ns])
                     elif status == "ambiguous":
                         msg = (
                             f"kindDefs '{kind}': nearMisses target '{target}' is "
@@ -1445,17 +1843,91 @@ class PackRegistry:
                         step, pack_kinds, all_known, bare_index
                     )
                     if status == "unknown":
-                        msg = (
-                            f"chain '{cid}': step '{step}' does not resolve to "
-                            f"any known kind (core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"chain '{cid}': step '{step}'", step,
+                            loaded, missing_deps[ns])
                     elif status == "ambiguous":
                         msg = (
                             f"chain '{cid}': step '{step}' is ambiguous — "
                             f"declared by multiple packs; use 'namespace:kind'"
                         )
                         self.errors.setdefault(ns, []).append(msg)
+
+    def _report_unresolved(
+        self, ns: str, site: str, ref: str,
+        loaded: set[str], missing_deps: list[str],
+    ) -> None:
+        """Record an unresolvable ``ref`` as FATAL or as an unresolved peer.
+
+        ``site`` is the fully-qualified location prefix (e.g.
+        ``"relation 'addresses': toKind 'pm:issue'"``); ``ref`` is the bare
+        reference it carries. The FATAL half keeps the pre-#2781 message
+        verbatim so existing diagnostics and their assertions are unchanged.
+        """
+        explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
+        if explanation is None:
+            self.errors.setdefault(ns, []).append(
+                f"{site} does not resolve to any known kind (core or loaded pack)"
+            )
+        else:
+            self.unresolved_refs.setdefault(ns, []).append(
+                f"{site} does not resolve to any known kind — {explanation}"
+            )
+
+    @staticmethod
+    def _missing_pack_explanation(
+        ref: str, loaded: set[str], missing_deps: list[str],
+    ) -> str | None:
+        """Why an unresolvable ``ref`` is a MISSING PEER, not a typo (#2781).
+
+        Returns the explanatory tail of the diagnostic, or ``None`` when the
+        ref must stay a hard error (the pack is isolated). Two clauses, each
+        carrying its own evidence:
+
+          1. **A namespaced ref whose namespace is not loaded.** The namespace
+             does not resolve at all, so the ref cannot be a misspelling
+             *inside a present pack* — it names a pack that is simply not
+             installed. (A namespaced ref into a PRESENT pack is excluded from
+             this clause and every other: there the namespace resolves and only
+             the kind can be wrong, which is a typo — `dev:isue` must stay
+             fatal.)
+          2. **The declaring pack has an unloaded ``depends_on`` entry.** A
+             bare name carries no namespace, so its absence is not by itself
+             evidence of anything; but a pack that DECLARED a dependency it
+             does not have has already told us it expects a pack that is not
+             there. That is the declaration doing work — the reason
+             ``depends_on`` exists — and it is what turns a catalog-wide
+             cascade into one reported, survivable gap.
+
+        Neither clause weakens the typo guard where it can be exact: a bare
+        name that resolves nowhere with a complete dependency set, and any
+        ambiguous bare name, remain fatal (they go to ``errors``).
+        """
+        if ":" in ref:
+            if ref.startswith("core:"):
+                # A core ref never names a pack, so no declared dependency can
+                # explain it away (the engine emits this spelling for core kinds
+                # — see _resolve_kind_ref — and a bad kind after it is a typo).
+                return None
+            target_ns = ref.split(":", 1)[0]
+            if target_ns in loaded:
+                return None  # present namespace ⇒ only the kind can be wrong
+            hint = ""
+            close = difflib.get_close_matches(
+                target_ns, sorted(loaded), n=1, cutoff=0.8)
+            if close:
+                hint = f" (did you mean '{close[0]}'?)"
+            return (
+                f"it references pack '{target_ns}', which is not loaded — "
+                f"install pack '{target_ns}' or declare it in depends_on{hint}"
+            )
+        if missing_deps:
+            names = ", ".join(f"'{d}'" for d in missing_deps)
+            return (
+                f"the pack declares depends_on {names}, which is not loaded — "
+                f"install it if this name belongs to that pack"
+            )
+        return None
 
     @staticmethod
     def _pack_kind_set(pack: PackManifest) -> set[str]:
@@ -1586,7 +2058,7 @@ class PackRegistry:
         """Expand a kind to include subclasses and equivalents.
 
         Returns list of kind strings for Cypher IN clause.
-        Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:task"]
+        Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:issue", …]
 
         INVARIANT (#6146): the argument is ALWAYS in its own expansion —
         ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
@@ -1681,6 +2153,20 @@ class PackRegistry:
             else:
                 expansions[bare] = [bare, *fulls]
 
+        # Legacy aliases (LEGACY_KIND_ALIASES): a kind whose spelling moved
+        # namespaces still has nodes in stored graphs. Add the old spelling to
+        # the new kind's expansion (and the reverse) so read paths keep seeing
+        # them — the pack cannot declare it, because `equivalentTo` targets must
+        # resolve to a declared kind.
+        for new_kind, legacy_kinds in LEGACY_KIND_ALIASES.items():
+            bucket = expansions.setdefault(new_kind, [new_kind])
+            for old_kind in legacy_kinds:
+                if old_kind not in bucket:
+                    bucket.append(old_kind)
+                old_bucket = expansions.setdefault(old_kind, [old_kind])
+                if new_kind not in old_bucket:
+                    old_bucket.append(new_kind)
+
         self._kind_expansions = expansions
 
     def list_tools(self) -> list[dict]:
@@ -1737,6 +2223,23 @@ class PackRegistry:
                     entry["to"] = r.get("to")
                 if r.get("cardinality"):
                     entry["cardinality"] = r["cardinality"]
+                # Layer 2 (#7852): the MEANING a relation declares, and the
+                # siblings it is confused with. Declared-only today — the
+                # declaration is what the vocabulary is validated against.
+                if r.get("semantics"):
+                    entry["semantics"] = r["semantics"]
+                if r.get("nearMisses"):
+                    entry["nearMisses"] = list(r["nearMisses"])
+                # #2766: the SAME verdict pack load warns and `pack validate`
+                # prints, surfaced here so the discoverable API cannot assert a
+                # relation is bound to a path its declaration does not bind.
+                # `write_paths` names the DECLARED paths ("operator" |
+                # "structural"); empty when the declaration binds none. NOT a
+                # runtime refusal: `create_operator` accepts any label
+                # (warn-not-block, #1934); only `create_edge` is strict.
+                write_verdict, write_paths = relation_write_verdict(r)
+                entry["write_verdict"] = write_verdict
+                entry["write_paths"] = list(write_paths)
                 relations.append(entry)
         return relations
 

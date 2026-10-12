@@ -823,6 +823,61 @@ def test_pi_hooks_change_selects_the_capture_guard():
     assert "test_pi_capture_hooks.py" in r["test_files"]
 
 
+def test_token_ts_change_selects_the_consent_bridge_guard():
+    """#3524: the guard's `token.ts` half must be selected by a `token.ts` diff.
+
+    `test_oauth_consent_bridge.py`'s task-3 assertion reads
+    `website/apps/dashboard/functions/_shared/auth/token.ts`. That path matches
+    the `onboarding` SOURCE_PATTERN `website/apps/dashboard/functions/`, NOT
+    `api` — so an `api`-only registration (which covers the file's
+    `tortoise/oauth.py` + `tortoise/hosted_api.py` subjects) left the token.ts
+    guard unrun exactly when token.ts moved: a token.ts regression shipped green
+    while the guard that exists to catch it stayed asleep. This asserts the
+    SELECTION, not the registration, so it reds on the pre-fix manifest.
+    """
+    r = _sel(["website/apps/dashboard/functions/_shared/auth/token.ts"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["onboarding"], (
+        f"token.ts selects {r['surfaces']} — the consent bridge's token.ts guard "
+        "is only reachable through the surface that path matches"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
+        "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
+    """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
+
+    `test_oauth_consent_bridge.py` also pins `docs/engineering/auth/consent-identity-bridge.md`
+    (the spec) and `docs/ops/auth-email-flows.md` (the redirect-allowlist record).
+    `docs/` is in NON_PYTHON_PREFIXES and matches (now) the `onboarding`
+    SOURCE_PATTERNS entries added with this fix, so a docs-only edit to either
+    record selects the surface that runs the guard. Before those entries a
+    docs-only edit selected `surfaces=[]` and the guard never saw the record it
+    guards — the same silent-drop class the token.ts half (#3524) fixes.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = (
+        "docs/engineering/auth/consent-identity-bridge.md",
+        "docs/ops/auth-email-flows.md",
+    )
+    for changed in subjects:
+        assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "onboarding" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_oauth_consent_bridge.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_oauth_consent_bridge.py, so its record guard cannot fire "
+            "on the change it pins (#3524)"
+        )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -1033,6 +1088,40 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_docs_lint_baseline.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_supabase_control_change_selects_the_org_purge_rpc_guard():
+    # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
+    # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
+    # so a supabase_control.py-only change matches `api`, REPLACES the `core`
+    # fallback in select(), and the `core`-only registration is never reached.
+    # Before the guard was dual-registered under `api`, this diff selected
+    # ['api'] and never ran test_7968_org_purge_rpc.py (the
+    # #2938/#3154/#4367 silent-drop class). Mutation check: deleting the `api`
+    # arm fails the second assert.
+    r = _sel(["tortoise/supabase_control.py"])
+    assert r["full"] is False, r
+    assert "test_7968_org_purge_rpc.py" in r["test_files"], r
+
+
+def test_record_schema_pin_runs_on_migration_or_doc_change():
+    # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
+    # the record migrations against the placement table in
+    # `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`.
+    # Both paths are under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match
+    # no SOURCE_PATTERNS row, so before the CORE_ALSO entries a change to either
+    # side ALONE selected NO surface: the pin's own claim ("editing either side
+    # alone turns the test red") was untestable in CI, and the edit landed with
+    # the pin never running. Mutation check: removing either CORE_ALSO entry
+    # fails the corresponding arm below (surfaces == []).
+    for changed in (
+        "supabase/migrations/20261012000003_record_epistemic.sql",
+        "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
 
 
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():

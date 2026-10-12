@@ -161,6 +161,22 @@ routes:
   - method: POST
     path: /v1/data-sources/demand
     class: tenant
+  # #2081 (epic #2080 W4 phase 2): the PUSH half of the delivery path —
+  # register/list/delete webhook subscriptions over the durable event stream,
+  # plus the per-subscription delivery receipts. Four tenant routes added with
+  # the feature, declared here so the third surface grows VISIBLY (#3875).
+  - method: POST
+    path: /v1/context/subscriptions
+    class: tenant
+  - method: GET
+    path: /v1/context/subscriptions
+    class: tenant
+  - method: DELETE
+    path: /v1/context/subscriptions/{sub_id}
+    class: tenant
+  - method: GET
+    path: /v1/context/subscriptions/{sub_id}/deliveries
+    class: tenant
   - method: POST
     path: /v1/demo
     class: tenant

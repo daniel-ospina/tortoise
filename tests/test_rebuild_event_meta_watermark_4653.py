@@ -121,7 +121,7 @@ def test_rebuild_all_rederives_event_meta_watermark(tmp_path):
         "the fixture must really start from a 3-event watermark, or the pin "
         "below tests nothing")
     # A real subscriber, caught up at the last event BEFORE the rebuild.
-    parked = sdk.events_poll(after=None)["next_cursor"]
+    parked = sdk.poll_events(after=None)["next_cursor"]
 
     counts = proj.rebuild_all(str(events), confirm_destructive=True)
     assert counts["nodes"] == 3, "the replay must actually restore the points"
@@ -153,8 +153,8 @@ def test_rebuild_all_rederives_event_meta_watermark(tmp_path):
         "#4653: read_after must never hand the parked cursor [] while a NEW "
         "event occupies seq 1 — that was the silent under-count")
     with pytest.raises(ValueError, match="cursor expired"):
-        sdk.events_poll(after=parked)
-    assert [e["seq"] for e in sdk.events_poll(after=None)["events"]] == [4], (
+        sdk.poll_events(after=parked)
+    assert [e["seq"] for e in sdk.poll_events(after=None)["events"]] == [4], (
         "the subscriber re-syncs from the tail onto the POST-rebuild stream")
 
 
@@ -404,7 +404,7 @@ def test_reestablish_watermark_first_seq_is_last_plus_one_on_empty_log(tmp_path)
     """Empty log + carried mark → `first_seq = last_seq + 1`.
 
     FAILING VALUE: a restore that copied a stale `first_seq` (say 1) would tell
-    `events_poll` that events below the mark are still retained, so a subscriber
+    `poll_events` that events below the mark are still retained, so a subscriber
     parked there reads `[]` forever instead of the truthful 410. The empty-log
     floor is `_refresh_first_seq`'s own contract.
 
@@ -777,7 +777,7 @@ def test_reestablish_watermark_repairs_a_legacy_counter_missing_first_seq(
 
     FAILING VALUE: with the counter at `last_seq = 5` and no `first_seq`,
     `reestablish_watermark(proj, 3)` left `first_seq = NULL`, so
-    `events_poll`'s guard (`if first_seq is not None and after_seq <
+    `poll_events`'s guard (`if first_seq is not None and after_seq <
     int(first_seq)`) was skipped and a subscriber parked below the truncation
     read `[]` forever instead of the truthful 410. #3902's fallback is
     `last_seq + 1`.
@@ -794,9 +794,9 @@ def test_reestablish_watermark_repairs_a_legacy_counter_missing_first_seq(
 
     assert reestablish_watermark(proj, 3) == 5
     assert _meta(sdk) == (5, 6), (
-        "a NULL first_seq disables events_poll's 410 floor entirely")
+        "a NULL first_seq disables poll_events's 410 floor entirely")
     with pytest.raises(ValueError, match="cursor expired"):
-        sdk.events_poll(after=sdk._encode_cursor(1))
+        sdk.poll_events(after=sdk._encode_cursor(1))
 
 
 def test_reestablish_watermark_refuses_a_non_numeric_stored_counter(tmp_path):

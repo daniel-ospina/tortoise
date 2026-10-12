@@ -70,6 +70,34 @@ def _live_clause(var: str) -> str:
     return f"({var}.status IS NULL OR {var}.status <> 'draft')"
 
 
+def _dangling_workflow_ref_query() -> str:
+    """Cypher for rule 4 (`dangling_workflow_ref`), kept in one place so the
+    anchoring property is testable (#7848).
+
+    ⛔ `wf_id` MUST stay INSIDE each workflow node pattern. FalkorDB cannot
+    anchor a bare `MATCH (w) WHERE w.wf_id = …`: that leg degrades to
+    ``|req| × |V|``, and on a ~3 000-node graph it exceeds the default 1000 ms
+    ``GRAPH.CONFIG TIMEOUT``. ``run_domain_graph_validators`` swallows the
+    exception, so the timeout surfaces as a FALSE CLEAN — 300 genuine dangling
+    requirements reported as none (measured on PR #8173). Point and Object are
+    separate legs precisely so each one stays anchored; a workflow is a core
+    Object kind, and the legacy `dev:requirement` spelling is a stored Point.
+    """
+    return (
+        "MATCH (req) WHERE (req:Point OR req:Object) "
+        "AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds) "
+        f"AND {_live_clause('req')} "
+        "AND req.enabled_workflow IS NOT NULL AND req.enabled_workflow <> '' "
+        "AND req.enabled_workflow <> 'ALL' "
+        "OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow}) "
+        "WHERE wp.pointKind IN $wf_kinds "
+        "OPTIONAL MATCH (wo:Object {wf_id: req.enabled_workflow}) "
+        "WHERE wo.objectKind IN $wf_kinds "
+        "WITH req, wp, wo WHERE wp IS NULL AND wo IS NULL "
+        "RETURN req.id, req.enabled_workflow"
+    )
+
+
 # ── graph-surface validator: product-strategy chain integrity ─────────────
 
 @domain_validator("product-strategy", chain_id=_PRODUCT_DELIVERY_CHAIN,
@@ -170,15 +198,14 @@ def validate_chain_integrity(graph) -> list[dict]:
         })
 
     # 4. dangling_workflow_ref — batched; 'ALL' is a sentinel, not a ref.
+    # #7848: `requirement` is an OBJECT kind (owner ruling), so the node may be
+    # an Object, not a Point — match both labels and both kind properties, or
+    # the rule goes silently dead for the kind it exists for. `_expand` also
+    # carries the legacy `dev:requirement` point spelling as a read alias
+    # (LEGACY_KIND_ALIASES), so stored Points stay covered. The workflow lookup
+    # stays PATTERN-ANCHORED per label — see `_dangling_workflow_ref_query`.
     rows = graph.g.query(
-        "MATCH (req:Point) WHERE req.pointKind IN $req_kinds "
-        f"AND {_live_clause('req')} "
-        "AND req.enabled_workflow IS NOT NULL AND req.enabled_workflow <> '' "
-        "AND req.enabled_workflow <> 'ALL' "
-        "OPTIONAL MATCH (w:Point {wf_id: req.enabled_workflow}) "
-        "WHERE w.pointKind IN $wf_kinds "
-        "WITH req, w WHERE w IS NULL "
-        "RETURN req.id, req.enabled_workflow",
+        _dangling_workflow_ref_query(),
         params={"req_kinds": req_kind, "wf_kinds": wf_kind},
     ).result_set
     for req_id, wf_ref in rows:

@@ -851,3 +851,50 @@ def test_key_never_interpolated_into_env_blocks():
         # cursor pins env: expansion; the EXACT pi token is owned by #1729
         # (plain form — pi's mcp-client has no env: prefix support).
         assert "${env:TORTOISE_API_KEY}" in _extract_js_block(html, "CURSOR_MCP_CONFIG_ENV")
+
+
+# ── #3232: the MCP session boundary in the installer + generic copy ─────────
+#
+# The wizard prompts now cross the session boundary before they call the
+# server (#3232). The installer-written surfaces carry the SAME ordering
+# requirement, but with a different failure mode: the AGENTS.md standing block
+# is written into every provisioned repo and re-read by the agent in EVERY
+# later session, so a block that says "verify with tortoise_health before
+# reporting done" with no restart step re-creates the defect in every future
+# session of that repo. The two generic restart lines are pinned so a future
+# edit cannot make them contradict the per-harness credential mechanisms.
+QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
+
+
+def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
+    """The AGENTS.md heredoc must carry the corrected ORDER, not merely lack
+    the old demand: deleting the verify sentence would satisfy "no bad order"
+    while removing the only checkpoint cue the block has."""
+    src = _installer_text()
+    # The heredoc writes its delimiters via ${ms}/${me}, so the LITERAL markers
+    # only appear in the variable assignments — slice the block by its own first
+    # and last content lines instead.
+    block = src[src.index("# Tortoise — agent memory"):
+                src.index('${me}" > "$block"')]
+    flat = " ".join(block.split())
+    assert ("restart the client so the new session reads it, then verify with "
+            "tortoise_health before reporting done") in flat, (
+        "the AGENTS.md block must write the config, RESTART the client, and "
+        "only then verify — the standing block is re-read every session, so a "
+        "verify-before-restart order re-creates #3232 for the whole repo")
+
+
+def test_3232_generic_restart_lines_are_exact():
+    """The installer's stdout cue and the quickstart line are the two generic,
+    non-per-harness restart statements. Each is pinned against its exact
+    string so an edit that contradicts a harness's own mechanism (a new shell
+    for Pi/Codex CLI, a registry + relaunch for Codex Desktop) is visible."""
+    src = _installer_text()
+    assert ('echo "Next: restart your agent, then confirm the skills are '
+            'listed:"') in src, (
+        "the installer's closing cue must restart, THEN confirm/list the "
+        "skills — the skills directory is read at agent start")
+    quick = QUICKSTART.read_text(encoding="utf-8")
+    assert "Restart your client." in quick, (
+        "docs/quickstart-cloud.md must keep its restart cue before the "
+        "tools-appear sentence")

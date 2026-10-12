@@ -147,6 +147,33 @@ class TestPointsCRUD:
             assert props.get("baseline_set") is True, props
             assert props.get("baseline_source") == "set-by-author", props
 
+    def test_credibility_on_a_dedup_hit_calibrates_the_point(self, monkeypatch, tmp_path):
+        """#7980: a dedup hit is the DEFAULT path on this surface
+        (``CreatePointRequest.dedup`` defaults True, unlike the hosted
+        mirror), so a client re-writing identical content got a 200 back on a
+        point that could never be made EP-able — ``/v1/dream`` then refused
+        the graph (the fail-closed #344/#1157 gate).
+
+        Mutations that red this: dropping the baseline application in
+        ``create_point``'s dedup branch (the reported bug), and turning the
+        self-host ``dedup`` default off (the request below never names it).
+        """
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            body = {"content": "selfhost dedup-hit credibility",
+                    "kind": "statement"}
+            first = tc.post("/v1/points", json=body)
+            assert first.status_code == 200, first.text
+            pid = first.json()["id"]
+            assert not self._persisted_props(pid).get("baseline_set")
+            second = tc.post("/v1/points", json={**body, "credibility": "gold"})
+            assert second.status_code == 200, second.text
+            assert second.json()["id"] == pid, "must dedup, not duplicate"
+            props = self._persisted_props(pid)
+            assert props.get("baseline_set") is True, props
+            assert props.get("baseline_source") == "set-by-author", props
+            assert props.get("ep_alpha") == 10.0, props
+
     def test_bad_credibility_is_rejected_not_500(self, monkeypatch, tmp_path):
         # A ladder word the store cannot resolve is a client error — 4xx, not
         # the route's catch-all 500.

@@ -169,7 +169,10 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
-from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
+    redact_error,
+    redact_for_publication,
+)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
@@ -2730,9 +2733,59 @@ def _embed_metered(fn):
     return _sync_wrapper
 
 
+async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None) -> None:
+    """#2081: push this tenant graph's pending events to its subscribers.
+
+    Called at the END of ``_dream_worker`` (the dream cycle is the delivery
+    cadence — the phase-2 target is "push latency ≤ one dream-cycle cadence") and
+    ONLY there. Nothing on the write path ever awaits this: a capture must stay
+    2xx regardless of a subscriber's endpoint.
+
+    Best-effort by construction. ``dispatch_pending`` itself never raises; this
+    wrapper additionally catches the SDK/edge failures around it (an
+    unreachable graph, a build failure) and logs — a delivery problem must
+    never surface as a dream failure, and it must never abort the worker (the
+    roots are already drained; a raise here would be read as a dream bug).
+
+    KNOWN LIMITATION (follow-up filed, not fixed here): the pass runs when a
+    dream runs, so a subscription whose retry backoff elapses while the tenant
+    is IDLE waits for that tenant's next dream. The backoff/attempt state is
+    durable and correct (`next_attempt_at` gates the next pass), so the gap is
+    the TRIGGER, not the bookkeeping — a scheduled sweep across tenants is the
+    fix.
+    """
+    import logging
+
+    from tortoise import webhook_delivery as _webhook_delivery
+    from tortoise.security import redact_error
+
+    if not _webhook_delivery.dispatch_enabled():
+        return
+    _log = logging.getLogger("tortoise.api")
+
+    def _run() -> dict:
+        sdk = (_make_sdk(graph_name=graph_namespace) if graph_namespace is not None
+               else _make_sdk(namespace=org_id))
+        try:
+            return _webhook_delivery.dispatch_pending(sdk._get_proj())
+        finally:
+            sdk.close()
+
+    try:
+        summary = await asyncio.to_thread(_run)
+    except Exception as e:
+        _log.warning("webhook dispatch failed for tenant %s: %s",
+                     org_id, redact_error(e))
+        return
+    if summary.get("delivered") or summary.get("failed"):
+        _log.info("webhook dispatch tenant=%s graph=%s %s",
+                  org_id, graph_namespace or org_id, summary)
+
+
 @_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
+
     C5: key carries the graph (org_id, or org_id::<graph_namespace> for a
     custom graph) — the drain opens the DIRTY graph, never the default."""
     if key is None:
@@ -2776,6 +2829,12 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 sdk.dream(dirty_only=True, mode="local")
 
         await _run_dream_on_pool(_drain, _open_sdk)
+        # #2081: push the events this tenant's subscribers are behind on. Runs
+        # AFTER the dream pass — so a push can only ever carry post-dream
+        # state — and OUTSIDE the pool item (a slow subscriber endpoint must
+        # never hold the dream pool). Best-effort: never raises, never retries
+        # the dream, and a delivery failure becomes a receipt + a backoff.
+        await _dispatch_webhooks(org_id, gns)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -6647,8 +6706,10 @@ class CreatePointRequest(BaseModel):
     # and never make it EP-able through this surface. Forwarded to
     # ``create_point``'s ``credibility=`` and consumed into the
     # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
-    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
-    # with a logged warning (the existing point keeps its own baseline).
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` applies it
+    # to the existing point IF that point carries no baseline yet, and keeps
+    # the baseline it already has otherwise (with a logged warning) — never a
+    # silent drop either way (#7980).
     credibility: str | int | float | None = None
 
     @field_validator("kind")
@@ -8483,7 +8544,7 @@ async def events_poll(
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
         result = await asyncio.to_thread(
-            sdk.events_poll, after=after, types=type_list or None, limit=limit)
+            sdk.poll_events, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -8725,11 +8786,33 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
     not be reached is never served as a clean empty result. Unset/``0`` leaves
     this response byte-identical.
+
+    #7952 (§17.2): the COMPLETENESS MARKER rides its OWN field, ``residency``
+    (``hot`` / ``not-hot``), and is NOT a fifth status term — a residency
+    verdict is a directive about WHERE TO LOOK, not a status of the read. When
+    ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
+    PARTIAL, a read that falls outside the known-hot set returns
+    ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
+    from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
-    status_out: dict | None = {} if _read_status_enabled() else None
+    # The sink is the READ PATH's carrier for both fields; each field is
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
+    _status_on = _read_status_enabled()
+    _residency_on = _residency_enabled()
+    status_out: dict | None = {} if (_status_on or _residency_on) else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -8758,9 +8841,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         out.append(props)
     response = {"results": out, "count": len(out)}
     if status_out is not None:
-        # The SDK sets this on every return path; a missing term is a bug, not
-        # a reason to emit null under a vocabulary of exactly four terms.
-        response["status"] = status_out["status"]
+        # The SDK sets `status` on every return path; a missing term is a bug,
+        # not a reason to emit null under a vocabulary of exactly four terms.
+        # #7952: `residency` is present only when the known-hot set could be
+        # READ and a verdict was reached, so an unassessable read (a store that
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
+        if _residency_on and "residency" in status_out:
+            response["residency"] = status_out["residency"]
     return response
 
 
@@ -9320,7 +9414,7 @@ async def upload_pack_manifest(
         MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
-        validate_manifest,
+        validate_manifest_for_tenant,
     )
     # #2029: reject oversized request bodies BEFORE buffering/parsing them —
     # the 64KB check below alone only fires after request.json() has buffered
@@ -9351,11 +9445,14 @@ async def upload_pack_manifest(
                             detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
-    result = validate_manifest(manifest_yaml)
+    # #2781: the pre-check seeds the tenant's own installed manifests, exactly
+    # as the install below does — a pre-check that could not see them would
+    # refuse the very manifests it exists to admit.
+    sdk = _make_sdk(namespace=org_id)
+    result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
                             detail={"errors": result.errors or ["invalid manifest"]})
-    sdk = _make_sdk(namespace=org_id)
     try:
         record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
     except ValueError as e:
@@ -10460,12 +10557,14 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
-    # recovery lanes' EXPIRY exclusion diverges (the Supabase
-    # recover_team_key RPC still counts expired-but-unrevoked rows while
-    # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
-    # can revoke a LIVE key as collateral for expired rows that no longer
-    # occupy a slot); the RPC never 402s.
+    # recovery lanes' EXPIRY exclusion USED to diverge (the Supabase
+    # recover_team_key RPC counted expired-but-unrevoked rows while its
+    # registry twin excluded them, so the RPC's over-cap branch could
+    # revoke a LIVE key as collateral for rows that no longer occupy a
+    # slot) — closed as of #4550: 20261012000006_recover_team_key_expiry
+    # puts the RPC's count on public.api_key_slot_count (the ONE SQL
+    # declaration of this predicate) and gives its revoke-target scan the
+    # same expiry arm. No cap lane omits the expiry axis any more.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         KeyCapRefusal,
@@ -12084,6 +12183,18 @@ class VolunteerContextRequest(BaseModel):
     min_confidence: float = Field(0.7, ge=0.0, le=1.0)
     max_pointers: int = Field(3, ge=1, le=5)
     why: bool = True
+
+
+class ContextSubscriptionRequest(BaseModel):
+    """#2081: register a webhook target for the graph-event push stream.
+
+    ``url`` is validated by ``security.validate_webhook_url`` in the handler
+    (SSRF gate) — deliberately NOT here, so the refusal is the SAME readable
+    ``ValueError`` text whether it is reached through REST or in-process.
+    """
+    url: str = Field(..., max_length=2048)
+    types: list[str] | None = Field(None, max_length=32)
+    description: str | None = Field(None, max_length=500)
 
 
 # ── Session extraction (LLM-default — issue #822) ──────────────────────────
@@ -14862,19 +14973,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # INVERTED window still 422s — that is a correctable payload
             # error (the client fixes the window and retries), not a wedge,
             # and the two are deliberately not conflated.
+            from .live import LIFECYCLE_FANOUT_QUERY as _FANOUT_QUERY
+            from .live import classify_lifecycle_fanout as _classify_fanout
             from .live import is_terminal_status as _is_terminal_status
 
             def _terminal_state(point_id: str) -> tuple | None:
                 """The terminal state of ``point_id``, or ``None``.
 
-                The query is deliberately the SAME STATEMENT
-                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
-                same three projected columns in the same order, same
-                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                The query is the SHARED ``live.LIFECYCLE_FANOUT_QUERY`` — the
+                same statement ``sdk._assert_lifecycle_guard`` runs — and the
+                verdict is the same ``live.classify_lifecycle_fanout`` scan,
+                so the two cannot disagree (#7822). A differently-shaped or
                 first-row-only probe could select a DIFFERENT node than the
                 write's own guard: point ids are not unique and row order is
                 server-dependent, and that divergence would either resurrect
-                this bug or silently drop a legitimate supersede.
+                this bug or silently drop a legitimate supersede. Since #7822
+                the guard refuses when ANY node carrying the id is terminal,
+                so this pre-check must report terminal on the same condition —
+                otherwise the mixed duplicate id would 500-wedge again, which
+                is exactly what #3366 exists to prevent.
 
                 ``None`` means "not terminal, or not a statement point": an
                 ``is_operator`` prior is corruption, not a benign replay, so
@@ -14883,13 +15000,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 missing-point path is unchanged.
                 """
                 rows = sdk._get_proj().g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "RETURN n.is_operator, n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": point_id}).result_set
-                if not rows or bool(rows[0][0]):
-                    return None
-                return (rows[0][1], bool(rows[0][2]))
+                    _FANOUT_QUERY, params={"id": point_id}).result_set
+                kind, status, outdated = _classify_fanout(rows)
+                if kind == "terminal":
+                    return (status, outdated)
+                return None
 
             # #3366: the pre-check's mechanism is documented ONCE, on
             # ``_terminal_state`` above — including the LOCKSTEP requirement
@@ -16945,6 +17060,51 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     }
 
 
+async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
+    """#2810: THE one entitlement chokepoint — raise the structured 402 unless
+    *user_id* may own one more free org.
+
+    Every lane that can result in a NEW owned free org calls this and nothing
+    else: ``POST /v1/organizations`` (both control-plane lanes),
+    ``POST /v1/onboarding/team``, and the two anon-claim lanes (``/v1/claim``,
+    ``/v1/claim/email``). Before #2810 each create lane re-implemented the same
+    read-then-raise pair, so a new lane could silently omit it — and ``/v1/claim``
+    did: it binds an anon org to the caller as its OWNER, so one person could
+    mint N anon orgs (``/v1/agent/signup``) and claim each in turn, ending up
+    with N free orgs while the create lanes only blocked the NEXT create.
+
+    The predicate stays ``_owned_free_org_ids`` (ownership-scoped, not the
+    #1877 membership-scoped twin the invite-JOIN gates read — see that
+    helper). Callers that run the check and the write as read-then-write must
+    hold ``_org_create_lock(user_id)`` across BOTH (see the claim lanes, #1954
+    parity for the create lanes).
+
+    ``pool`` mirrors ``_owned_free_org_ids``: the org-create lane passes
+    ``"org"`` so its gate read does not queue behind authentication work;
+    every other caller keeps the default.
+
+    The invite-JOIN gates are deliberately NOT routed here (#2810 Q3): they read
+    the membership-scoped ``_count_active_free_memberships``, and an org OWNER
+    is always also an ACTIVE member of that org, so an owner already fails the
+    free-tier JOIN gate. Routing them here would change the settled invite
+    semantics #2789 pinned out of scope, and would refuse nothing extra.
+
+    KNOWN, DELIBERATELY-UNFIXED hole (recorded, not carried silently): after
+    ``customer.subscription.deleted`` the org drops to
+    ``tier='free', subscription_status='canceled'``, which this predicate counts
+    as free again — so *create A → buy B → cancel B* still ends with two free
+    orgs. The remedy changes the settled counting rule (docs/scoping/
+    2026-09-10-2789-one-free-org.md §2) and is a PRODUCT DECISION, so it is
+    pinned by
+    ``tests/test_one_free_org_entitlement.py::TestCancellationLifecycleKnownHole``
+    rather than improvised here."""
+    free_org_ids = await _owned_free_org_ids(user_id, pool=pool)
+    if free_org_ids:
+        raise HTTPException(
+            status_code=402,
+            detail=_one_free_org_detail(free_org_ids[0]))
+
+
 @app.post("/v1/organizations")
 async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create an org (zero-orgs state). Tier defaults Free; org
@@ -17163,11 +17323,8 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
     # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
     # dashboard renders the three-option dialog from `code`.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"], pool="org")
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the check is the ONE shared chokepoint — never an inline copy.
+    await _assert_free_org_allowance(user["user_id"], pool="org")
 
     org_id = str(_uuid.uuid4().hex[:26])
     # stored name == data-plane namespace (org_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.org_create keeps org_{name} — registry lane tracked in #2023)
@@ -17302,11 +17459,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"])
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the shared chokepoint (see also the claim lanes).
+    await _assert_free_org_allowance(user["user_id"])
 
     try:
         # #1921: mint_key=False — the registry twin of the Supabase lane's
@@ -21540,6 +21694,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     if pc_err is not None:
         raise ValueError(pc_err)
     packs = pc.get("packs", [])
+    # #2781: a restore installs a SET of packs, so a manifest may reference a
+    # sibling that appears later in this same pack_config. Seed every sibling
+    # with a yaml as an available pack, so the validator resolves against the
+    # set the restore will leave behind rather than against install order.
+    # (Before #2781 the validator's temp registry held one manifest and no
+    # cross-pack reference could validate at all.)
+    sibling_yamls = {
+        p.get("namespace"): p.get("yaml") for p in packs
+        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
+        and isinstance(p.get("yaml"), str) and p.get("yaml")
+    }
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
@@ -21552,13 +21717,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # residue. The ok-ness check is deliberately NOT duplicated:
             # upsert_tenant_manifest re-validates unconditionally before any
             # graph write with the identical message + zero residue.
-            result = validate_manifest(yaml_text)
+            result = validate_manifest(yaml_text, installed_manifests=sibling_yamls)
             if result.ok and result.namespace != ns:
                 raise ValueError(
                     f"pack_config pack namespace {ns!r} does not match "
                     f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
-            upsert_tenant_manifest(sdk, yaml_text)
+            # #2781: pass the restore's sibling set so a cross-referencing
+            # pack_config validates as the SET it will become, not in install
+            # order (the sibling may appear later in this same list).
+            upsert_tenant_manifest(
+                sdk, yaml_text, extra_manifests=sibling_yamls)
         else:
             # Starter-pack activation record (idempotent MERGE).
             reg = _get_registry()
@@ -23729,23 +23898,36 @@ async def claim_org(request: Request):
         raise HTTPException(status_code=409,
                             detail="Team has already been claimed")
 
-    # 6. claim_membership service-role RPC (same key, same org, memories
-    #    intact).
+    # 5b. #2810: the ownership entitlement chokepoint. Claiming binds the caller
+    #     to the org's owner row, so it is a create-org-equivalent event for the
+    #     "one free organization per person" rule — without this gate one person
+    #     could mint N anon orgs (/v1/agent/signup) and claim each in turn, and
+    #     the create lanes' cap would only block the NEXT create. Ordering
+    #     mirrors the create lanes (409 → 402): an already-claimed org is still
+    #     a 409 for a capped user. The gate read and the claim_membership write
+    #     are read-then-write (#1954), so the same per-user lock the create
+    #     lanes hold is held across BOTH — without it two concurrent claims of
+    #     two different anon orgs could each read "owns nothing" and both
+    #     commit two free orgs.
     from tortoise.auth import lookup_hash as _lookup_hash
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500. (str(e) not e.message — ClaimError has no .message,
-        # #1765 latent-bug fix.)
-        raise _control_plane_unavailable() from None
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        # 6. claim_membership service-role RPC (same key, same org, memories
+        #    intact).
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500. (str(e) not e.message — ClaimError has no .message,
+            # #1765 latent-bug fix.)
+            raise _control_plane_unavailable() from None
 
     # 7. audit org_claim — provider/email/user_id in detail (0002 has no
     #    provider/email columns; 20260813000004 added detail JSONB).
@@ -23848,22 +24030,35 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if not user_id:
         raise HTTPException(status_code=502, detail="Account created but no user id returned — try again")
 
-    # 3. claim_membership RPC links the new user to the org's owner row
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        # The RPC's already_claimed guard may fire if a concurrent OAuth
-        # claim won first — surface as a plain conflict.
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500.
-        raise _control_plane_unavailable() from None
+    # 3. #2810: the ownership entitlement chokepoint, then claim_membership
+    #    links the new user to the org's owner row.
+    #
+    #    This lane is invariant-preserving BY CONSTRUCTION — it always mints a
+    #    BRAND-NEW auth user (an existing email is a 409 at the admin-create
+    #    step above), and a brand-new user owns nothing. The gate is applied
+    #    anyway because that safety rests on an EXTERNAL API's behaviour: if
+    #    admin-create ever returns an EXISTING user (i.e. became idempotent on
+    #    email), this lane would silently reopen the multi-free-org hole with no
+    #    other surface noticing. The gate can only fire on exactly that drift —
+    #    when it does, the returned user already existed, so no orphan account
+    #    is created by the refusal.
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            # The RPC's already_claimed guard may fire if a concurrent OAuth
+            # claim won first — surface as a plain conflict.
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500.
+            raise _control_plane_unavailable() from None
 
     # audit
     await _async_audit(request, org_id, "team_claim", resource_type="team",
@@ -24986,6 +25181,132 @@ def _volunteer_slo_enforced() -> bool:
     it), through the declared truthy contract.
     """
     return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
+
+
+@app.post("/v1/context/subscriptions", status_code=201)
+async def create_context_subscription(
+    body: ContextSubscriptionRequest,
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081 (epic #2080 W4 phase 2): subscribe to pushed graph events.
+
+    The PUSH half of the delivery path. Events are the durable ``:GraphEvent``
+    rows written by every graph mutation (the same stream ``GET /v1/events``
+    serves by pull); a subscription hands them to ``url`` as they are produced,
+    drained at the end of the tenant's dream cycle (``_dream_worker`` →
+    ``webhook_delivery.dispatch_pending``). The subscription lives in the
+    CALLER'S graph namespace — the key's graph IS the partition, exactly as for
+    events, so a graph-bound key subscribes to that graph's events only.
+
+    Contract:
+      * auth fail-CLOSED (401/403 as everywhere on /v1): a subscription can
+        never be created cross-tenant; ``graphs:write`` scope required.
+      * 422 for a rejected target — non-http(s) scheme, credentials in the url,
+        a loopback/private/link-local/metadata host (SSRF gate,
+        ``security.validate_webhook_url``), an unknown event type (the same
+        registry ``events_poll`` validates against), or the per-graph cap.
+      * 503 when ``TORTOISE_ENCRYPTION_KEY`` is unset — the signing secret is a
+        long-lived credential and is never stored in the clear (``crypto``
+        fails loudly rather than downgrade).
+      * 201 with the record INCLUDING ``secret`` — the ONE time the signing
+        secret is returned. Every read path reports ``secret_set`` instead.
+
+    Delivery is at-least-once, ordered per subscription, and idempotent on the
+    consumer's side: dedupe on ``event_id`` (or the stable ``X-Tortoise-Delivery``
+    header ``<sub_id>:<seq>``). Verify each request with
+    ``webhook_delivery.verify_signature`` against the ``X-Tortoise-Signature``
+    header.
+    """
+    _require_scope(org, "graphs:write", "context subscription create")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+
+    def _create() -> dict:
+        return _webhook_delivery.create_subscription(
+            sdk._get_proj(), url=body.url, types=body.types,
+            description=body.description or "",
+            created_by=org.get("user_id") or org.get("key_id"),
+        )
+
+    try:
+        return await asyncio.to_thread(_create)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except RuntimeError as e:
+        # TORTOISE_ENCRYPTION_KEY unset/malformed (crypto fail-loud contract).
+        raise HTTPException(
+            status_code=503,
+            detail="webhook secrets are unavailable on this deployment "
+                   "(server-side encryption key not configured)",
+        ) from e
+
+
+@app.get("/v1/context/subscriptions")
+async def list_context_subscriptions(
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: this graph's webhook subscriptions (never the signing secrets)."""
+    _require_scope(org, "graphs:read", "context subscription list")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+    subs = await asyncio.to_thread(
+        lambda: _webhook_delivery.list_subscriptions(sdk._get_proj()))
+    return {"subscriptions": subs}
+
+
+@app.delete("/v1/context/subscriptions/{sub_id}")
+async def delete_context_subscription(
+    sub_id: str,
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: delete a subscription and its receipts (404 when unknown).
+
+    Deletion is the RE-ENABLE path for an auto-disabled subscription (a target
+    that failed ``TORTOISE_WEBHOOK_MAX_ATTEMPTS`` times is disabled rather than
+    retried forever) — recreate it to resume delivery from the tail.
+    """
+    _require_scope(org, "graphs:write", "context subscription delete")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+    deleted = await asyncio.to_thread(
+        lambda: _webhook_delivery.delete_subscription(sdk._get_proj(), sub_id))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="unknown subscription")
+    return {"deleted": True, "sub_id": sub_id}
+
+
+@app.get("/v1/context/subscriptions/{sub_id}/deliveries")
+async def list_context_deliveries(
+    sub_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: delivery receipts for a subscription, newest first.
+
+    One receipt per ATTEMPT — ``delivered`` / ``retrying`` / ``exhausted``
+    (the last means the attempt ceiling was reached and the subscription was
+    disabled) — so a subscriber can prove what was pushed and diagnose a
+    failing endpoint without reading server logs.
+    """
+    _require_scope(org, "graphs:read", "context subscription deliveries")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+
+    def _read() -> dict:
+        proj = sdk._get_proj()
+        if _webhook_delivery.get_subscription(proj, sub_id) is None:
+            return {"missing": True}
+        return {"missing": False,
+                "deliveries": _webhook_delivery.read_receipts(proj, sub_id, limit)}
+
+    result = await asyncio.to_thread(_read)
+    if result["missing"]:
+        raise HTTPException(status_code=404, detail="unknown subscription")
+    return {"deliveries": result["deliveries"]}
 
 
 @app.post("/v1/context")
@@ -27476,12 +27797,8 @@ async def create_onboarding_org(body: dict,
         # collaborator on someone else's free org can still create their own).
         # STRUCTURED detail (#2789) so the wizard lane renders the same
         # three-option dialog from `code`.
-        _free_org_ids = await _owned_free_org_ids(owner_user_id)
-        if _free_org_ids:
-            raise HTTPException(
-                status_code=402,
-                detail=_one_free_org_detail(_free_org_ids[0]),
-            )
+        # #2810: the shared chokepoint (never an inline copy).
+        await _assert_free_org_allowance(owner_user_id)
         return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
@@ -33080,9 +33397,15 @@ async def backups_drill(request: Request):
             org_id=org_id, backup_key=backup_key,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
 
 
 @app.post("/v1/internal/backups/drill-scheduled")
@@ -33128,20 +33451,46 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: an exception MESSAGE is app-controlled text and this
+                # detail is published verbatim into a PUBLIC issue body
+                # (``alert_store._body``). ``error_type`` is the bounded half
+                # the other operator incidents already carry
+                # (``operator_alert.alert_abuse_fault``); the message goes
+                # through the publication scrubber before it joins it.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        # #3293 review: the response body is echoed verbatim into a PUBLIC
+        # Actions log by the drill drivers (``registry-drill*.sh``), so the
+        # raw exception is a publication sink too — scrub it here, not only in
+        # the incident detail above. Internal-key auth gates WHO may call, not
+        # where the caller writes the response.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: see the ValueError path above — same public sink, same
+                # scrub. This is the path a STORAGE error takes, i.e. the one
+                # most likely to echo a signed URL or endpoint in its message.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        # #3293 review: see the ValueError path above — same public-Actions-log
+        # sink, same boundary scrub.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).
