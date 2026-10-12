@@ -388,6 +388,61 @@ def test_targeted_delete_is_still_allowed():
     assert len(guarded._g.queries) == 1
 
 
+# ── #3037: the property-map exemption is STRUCTURAL, not a bare `{` ────────
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n",                              # the plain wipe
+    "MATCH (n) DETACH DELETE n // {",                         # brace in a // comment
+    "MATCH (n) DETACH DELETE n /* { */",                      # brace in a /* */ comment
+    "CALL { MATCH (n) DETACH DELETE n }",                     # CALL subquery delimiter
+    "MATCH (n) DETACH DELETE n WHERE id(n) = '{'",            # brace in a string
+    "MATCH (n) DETACH DELETE n WHERE {",                      # stray trailing brace
+    "MATCH (m) WITH {a:1} AS x DETACH DELETE m",              # top-level map literal
+    "CALL { MATCH (n:Point {id:1}) RETURN n } MATCH (m) "
+    "DETACH DELETE m",                                        # map inside a CALL block
+])
+def test_non_property_map_brace_does_not_exempt_a_wipe(statement):
+    """#3037: a `{` that is not a pattern property map must not make a
+    whole-graph wipe look targeted. Before the fix every statement here
+    returned False ("targeted") because the classifier was a bare
+    ``"{" in cypher`` test, so on the raw-query lane — where L2 is the only
+    layer — the wipe reached a production server graph unguarded."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+    "MATCH (n:Meta {key:$key}) DETACH DELETE n",
+    "MATCH (n:Point) WHERE n.id = $id DETACH DELETE n",
+    "MATCH (a)-[r:IMPL {idx:0}]->(b) DETACH DELETE r",
+])
+def test_pattern_property_map_still_exempts_a_targeted_delete(statement):
+    """Indicator (3): the existing targeted-delete behaviour is unchanged."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n // {",
+    "CALL { MATCH (n) DETACH DELETE n }",
+])
+def test_spoofed_wipe_is_refused_by_the_guard(statement):
+    """The issue's two named forms, end-to-end through BOTH L2 call sites on a
+    non-test SERVER graph: the classifier verdict must reach
+    ``_assert_test_graph``, not merely the unit classifier."""
+    proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.query(statement)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query(statement)
+    assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
+
+
 # ── (b) the legitimate disposable paths still work ────────────────────────
 
 
