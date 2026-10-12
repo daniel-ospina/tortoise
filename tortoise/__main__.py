@@ -7717,8 +7717,10 @@ def _cmd_pack_validate(args) -> int:
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one
-    resolver pack load warns with — a non-writable relation is reported, never
-    a reason to fail the pack (warn-not-block, W2).
+    resolver pack load warns with — a relation whose declaration binds no path
+    is reported, never a reason to fail the pack (warn-not-block, W2). The
+    verdict is a DECLARATION check, not a runtime refusal: `create_operator`
+    accepts any label (warn-not-block, #1934); only `create_edge` is strict.
     """
     import json as _json
 
@@ -7736,9 +7738,10 @@ def _cmd_pack_validate(args) -> int:
         if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
             errors[ns] = errs
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
-    # load warns with — so `validate` cannot report a relation as usable that
-    # the writer refuses. Enumerated from the registry directly rather than by
-    # calling the public SDK method `list_relations()`: that call would widen
+    # load warns with — so `validate` cannot report a relation as bound to a
+    # path its own declaration does not bind. Enumerated from the registry
+    # directly rather than by calling the public SDK method `list_relations()`:
+    # that call would widen
     # its surface-manifest caller categories and demand a human re-cut, and this
     # is a CLI reporting view, not a new SDK reachability.
     from tortoise.pack_registry import RELATION_WRITABLE, relation_write_verdict

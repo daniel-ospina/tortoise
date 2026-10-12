@@ -126,12 +126,15 @@ ontology:
   #   - predicate: domain verb — "addresses", "competesWith", "implements"
   #   - fromKind/toKind: prefixed pack kinds — "myapp:concept" or core PascalCase kinds
   #   - mechanism: IMPL (A supports B) or NAND (A contradicts B)
-  #     ⤷ `mechanism` is what makes the relation WRITABLE (#2766): it is the
-  #       gate for the operator write path
+  #     ⤷ a declared `mechanism` is what BINDS this verb to the operator write
+  #       path (#2766): it is the op_type a caller passes
   #       (`create_operator(op_type=mechanism, label=predicate)`, the path
-  #       `sdk.ingest` uses). Without it, or without a structural predicate,
-  #       the runtime has no surface that can write the relation — see
-  #       "Declaring a relation" in docs/EXPANSION_PACKS.md.
+  #       `sdk.ingest` uses). Without it, and without a structural predicate,
+  #       the declaration binds no write path — reported as
+  #       `predicate-not-in-allowlist`. ⛔ That is a DECLARATION gap, not a
+  #       runtime refusal: `create_operator` accepts any label (warn-not-block,
+  #       #1934); only `create_edge` is strict. See "Declaring a relation" in
+  #       docs/EXPANSION_PACKS.md.
   #   - semantics: optional — the Layer-2 MEANING, from the closed core vocabulary
   #     (ONTOLOGY §8): "hasPart", "addresses", "supports", "mutuallySupportive",
   #     "mutuallyExclusive", "refutes", "causes", "dependsOn", "transacts", "related",
@@ -139,13 +142,14 @@ ontology:
   #   - nearMisses: optional — sibling predicates/semantics this relation is confused with
   #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
   #   - declarationOnly: optional bool — "documentation-only, on purpose". A
-  #     relation with no runtime write path is otherwise reported as
+  #     relation whose declaration binds no write path is otherwise reported as
   #     `predicate-not-in-allowlist` (#2766); set this to say the silence is intended.
   # Old format (compat): { predicate, from, to, cardinality? }
   #   - from/to: entity types — "Object", "Subject"
-  #     ⤷ the old format declares NO mechanism, so it is writable only when the
-  #       predicate is a structural edge predicate (hasPart, dependsOn, ownedBy,
-  #       related, ...). Otherwise mark it `declarationOnly: true`.
+  #     ⤷ the old format declares NO mechanism, so the declaration binds only the
+  #       structural path — and only when the predicate is a structural edge
+  #       predicate (hasPart, dependsOn, ownedBy, related, ...). Otherwise mark
+  #       it `declarationOnly: true`.
   # Example:
   #   relations:
   #     - predicate: contains

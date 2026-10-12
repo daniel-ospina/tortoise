@@ -127,8 +127,8 @@ class TestPackValidate:
 
     def test_prints_the_relation_verdict_table(self, tmp_path):
         """#2766: `pack validate` reports each declared relation's write-path
-        verdict. A non-writable relation is REPORTED, never a failure
-        (warn-not-block, W2) — the pack still validates clean."""
+        verdict. A relation whose declaration binds no path is REPORTED, never a
+        failure (warn-not-block, W2) — the pack still validates clean."""
         manifest = _scaffold("mydomain", tmp_path)
         text = manifest.read_text().replace(
             "  relations: []",

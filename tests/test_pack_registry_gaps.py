@@ -616,11 +616,19 @@ class TestRelationWriteVerdict:
                 "predicate": "blocks", "from": "Object", "to": "Object",
             }])
         assert "test" in reg.packs, reg.errors
-        assert "no runtime write path" in caplog.text
+        assert "the declaration binds no write path" in caplog.text
         assert "'blocks'" in caplog.text
         # The message names both routes out, so the author is not left stuck.
         assert "declarationOnly: true" in caplog.text
         assert "mechanism" in caplog.text
+        # #8285 P1: the verdict is a DECLARATION check, not a runtime refusal.
+        # `create_operator` accepts any label (warn-not-block, #1934) — measured
+        # on 2026-10-02, #2766 — so the warning must not claim the runtime
+        # refuses or drops the edge (that is the false claim this pins against).
+        assert "warn-not-block" in caplog.text
+        assert "declaration gap" in caplog.text
+        assert "no runtime write path" not in caplog.text
+        assert "silently drop" not in caplog.text
 
     def test_declaration_only_marker_loads_without_the_warning(self, tmp_path, caplog):
         import logging
@@ -671,15 +679,42 @@ class TestRelationWriteVerdict:
         })
         assert any("'declarationOnly' must be a boolean" in e for e in errors), errors
 
+    def test_shipped_guidance_states_the_declaration_gap_not_a_refusal(self):
+        """#8285 P1: the SHIPPED prose must not assert a runtime capability the
+        writer does not enforce.
+
+        `create_operator` accepts any label (warn-not-block, #1934); only
+        `create_edge` is strict. Before this pin, the warning and
+        `docs/EXPANSION_PACKS.md` claimed a non-mechanism relation had "no
+        runtime write path" and would be "silently dropped" — both false, and
+        measured false on 2026-10-02 (#2766). This test fails on that wording.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        docs = (root / "docs" / "EXPANSION_PACKS.md").read_text()
+        template = (root / "packs" / "_template" / "manifest.yaml").read_text()
+
+        for text, name in ((docs, "EXPANSION_PACKS.md"),
+                           (template, "_template/manifest.yaml")):
+            assert "warn-not-block" in text, name
+            # The three runtime-refusal claims the review found false.
+            assert "the runtime would silently drop it" not in text, name
+            assert "nothing writes it" not in text, name
+            assert "the runtime has no surface that can write" not in text, name
+        # The docs must name the actual gap, not a refusal.
+        assert "declaration" in docs and "gap" in docs
+
     def test_list_relations_carries_the_verdict(self, query_registry):
-        """The discoverable API must not assert a relation the writer refuses."""
+        """The discoverable API must not assert a path the declaration does not
+        bind."""
         relations = query_registry.list_relations()
         assert {r["write_verdict"] for r in relations} == {"writable"}
         assert {tuple(r["write_paths"]) for r in relations} == {("operator",)}
 
     def test_shipped_catalog_reports_the_legacy_relations(self):
-        """Regression pin on the real packs: the 4 legacy `pm` relations have
-        no write path and must be REPORTED (not silently dropped)."""
+        """Regression pin on the real packs: the 4 legacy `pm` relations
+        bind no mechanism and must be REPORTED."""
         from tortoise.pack_registry import (
             RELATION_WRITE_VERDICTS,
             default_packs_dir,

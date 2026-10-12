@@ -67,26 +67,38 @@ extraction:
 ## Declaring a relation — writable, or explicitly declaration-only (#2766)
 
 A `relations[]` entry is a **claim** that your pack's vocabulary includes an edge. Whether the
-runtime can actually write that edge is a separate question, and the pack author is told the answer
-rather than having to discover it from a silent drop. **Every declared relation gets a write-path
-verdict**, computed by one resolver (`tortoise/pack_registry.py::relation_write_verdict`) and reported
-in three places that therefore cannot disagree: a warning at pack load, the table `tortoise pack
-validate` prints, and `sdk.list_relations()` (`write_verdict` + `write_paths`).
+relation's own declaration binds a runtime write path is a separate question, and the pack author is
+told the answer rather than having to discover it from a silent drop. **Every declared relation gets a
+write-path verdict**, computed by one resolver (`tortoise/pack_registry.py::relation_write_verdict`) and
+reported in three places that therefore cannot disagree: a warning at pack load, the table `tortoise
+pack validate` prints, and `sdk.list_relations()` (`write_verdict` + `write_paths`).
 
-**There are exactly two write paths.** A relation is `writable` when at least one of them accepts it:
+**There are exactly two declared write paths.** A relation is `writable` when its declaration binds at
+least one of them:
 
-| path | surface | what makes it apply |
+| path | surface | what makes the declaration bind it |
 |---|---|---|
-| `operator` | `sdk.create_operator(op_type=<mechanism>, label=<predicate>)` — the path `sdk.ingest` uses for `connections[].label` | the relation declares a **`mechanism`** (`IMPL`/`NAND`). The predicate is a free Layer-3 label by owner ruling (ONTOLOGY §8, #7852) — `fixes`, `implements`, `deploysTo` all ride one mechanism and stay distinct by their verb — so the **mechanism is the gate**, not a predicate allowlist |
+| `operator` | `sdk.create_operator(op_type=<mechanism>, label=<predicate>)` — the path `sdk.ingest` uses for `connections[].label` | the relation declares a **`mechanism`** (`IMPL`/`NAND`) — the mechanism is what tells a caller which `op_type` the verb means. The predicate is a free Layer-3 label by owner ruling (ONTOLOGY §8, #7852) — `fixes`, `implements`, `deploysTo` all ride one mechanism and stay distinct by their verb — so the declared **`mechanism` is what binds the verb to the operator path**, not a predicate allowlist |
 | `structural` | `sdk.create_edge(<predicate>, from_id, to_id)` | the predicate is one of the structural edge predicates the writer accepts (`performs`, `produces`, `uses`, `authoredBy`, `ownedBy`, `managedBy`, `hasMember`, `holdsRole`, `memberOf`, `reportsTo`, `participatesIn`, `hasPart`, `related`, `dependsOn`, `references`, `wasDerivedFrom`, `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutDocument`, `aboutSource`, `aboutAction`) |
+
+⛔ **The verdict is about the DECLARATION, not about whether the writer refuses the write.** The two
+writers are not symmetric, and the difference is measured (2026-10-02, #2766):
+
+- `create_edge` is **strict** — a predicate outside the structural list is refused with
+  `Unknown predicate`.
+- `create_operator` is **warn-not-block** (#1934): it accepts **any** label, and warns only when the
+  label is not a declared predicate. So a relation reported `predicate-not-in-allowlist` is still
+  writable by a caller who passes an explicit `op_type`; what the verdict names is a **declaration
+  gap** — the relation binds no mechanism, so nothing declares what that `op_type` should be. It is
+  not a statement that the runtime drops the edge.
 
 The verdict vocabulary:
 
 | verdict | meaning | what to do |
 |---|---|---|
-| `writable` | ≥1 write path accepts it | nothing |
-| `declaration-only` | no write path, and **you said so** with `declarationOnly: true` | nothing — the marker is the point |
-| `predicate-not-in-allowlist` | no write path and **no marker** → the runtime would silently drop it | declare `mechanism: IMPL`/`NAND` (usually the answer), use a structural predicate, or mark it `declarationOnly: true` |
+| `writable` | the declaration binds ≥1 write path | nothing |
+| `declaration-only` | no declared write path, and **you said so** with `declarationOnly: true` | nothing — the marker is the point |
+| `predicate-not-in-allowlist` | no declared write path and **no marker** → the declaration binds no mechanism | declare `mechanism: IMPL`/`NAND` (usually the answer), use a structural predicate, or mark it `declarationOnly: true` |
 
 **The verdict is warn-not-block** (the W2 contract the Layer-2 `semantics` check already uses, the
 repo's precedent for an open-vocabulary path): a `predicate-not-in-allowlist` relation is named at
@@ -95,7 +107,7 @@ Refusing would drop the pack — and every pack sharing its kinds — over one d
 
 ```yaml
   relations:
-    # writable — the operator path; `mechanism` is what makes the verb real
+    # writable — the operator path; `mechanism` is what the declaration binds
     - predicate: groundedIn
       mechanism: IMPL
       fromKind: myapp:rule
@@ -106,20 +118,20 @@ Refusing would drop the pack — and every pack sharing its kinds — over one d
       toKind: myapp:subconcept
     # NOT writable, said on purpose — no warning
     - predicate: funds
-      declarationOnly: true   # documentation/vocabulary only; nothing writes it
+      declarationOnly: true   # the declaration binds no mechanism; say so on purpose
       from: Object
       to: Object
 ```
 
-`declarationOnly: true` on a relation that *does* have a write path is reported: the runtime will
-write it anyway, and a marker that cannot take effect is the same silent divergence the verdict
-exists to remove.
+`declarationOnly: true` on a relation whose declaration *does* bind a write path is reported: the
+runtime will write it anyway, and a marker that cannot take effect is the same silent divergence the
+verdict exists to remove.
 
 > ⚠️ **`relations[].extractable` is declaration-only today.** No runtime consumer reads it
 > (`PackManifest.relation_is_extractable` is exercised by tests only), so `extractable: true` does not
 > by itself change what the extractor mints. It is a carried intent (#2787 → the extractor-v4
-> write-path work, #4894). The verdict above — not this flag — is what tells you whether the runtime
-> can write the relation.
+> write-path work, #4894). The verdict above — not this flag — is what tells you whether the
+> relation's declaration binds a write path.
 
 > **Why a marker and not a third list.** The alternative — a manifest-level mapping table from domain
 > predicate to writable predicate — is a **second** source of truth for a vocabulary that already has

@@ -287,30 +287,49 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
-# accepts its predicate. There are exactly two, and this is the ONE place that
-# decides which apply — so pack load, `tortoise pack validate` and
+# accepts its predicate. This is the ONE place that decides which declared
+# paths apply — so pack load, `tortoise pack validate` and
 # `sdk.list_relations()` cannot disagree about it. That disagreement is the
 # defect #2766 reports: the declared registry, the writer, the validator and
 # the discoverable API each derived the relation vocabulary independently, and
 # an edge no surface constrained was the only one that got through.
 #
+# The verdict is about the DECLARATION, and the paths are the surfaces a
+# relation's OWN declaration makes usable:
+#
 #   operator   — ``sdk.create_operator(op_type=<mechanism>, label=<predicate>)``
 #                (the path ``sdk.ingest`` uses for ``connections[].label``).
-#                Requires a declared ``mechanism`` (IMPL|NAND). The predicate
-#                is a free Layer-3 label BY DESIGN (ONTOLOGY §8, #7852), so it
-#                is deliberately NOT checked against a vocabulary — the
-#                mechanism is the gate, and any domain verb is writable.
+#                Requires a declared ``mechanism`` (IMPL|NAND): the mechanism
+#                is what tells a caller WHICH op_type the verb means, so a
+#                relation without one gives the operator path no declared
+#                op_type. The predicate itself is a free Layer-3 label
+#                (ONTOLOGY §8, #7852) and is deliberately NOT checked against a
+#                vocabulary — any domain verb can ride a declared mechanism.
 #   structural — ``sdk.create_edge(predicate, from_id, to_id)``: the structural
 #                predicate allowlist. Read from its single home in the writer
 #                (``projection/edges.py::_VALID_EDGE_PREDICATES``) so a
 #                predicate added or removed THERE moves this verdict with it.
 #
-# A relation with neither path is no longer dropped in silence: it is
+# ⛔ DO NOT READ THE VERDICT AS A RUNTIME REFUSAL — it is not one. The two
+# writers are NOT symmetric:
+#   * ``create_edge`` is STRICT: an unlisted predicate is refused ("Unknown
+#     predicate").
+#   * ``create_operator`` is WARN-NOT-BLOCK (#1934, and the owner's
+#     2026-10-02 measurement on #2766): it accepts ANY label and warns only
+#     when the label is not a declared predicate. So a relation reported
+#     ``predicate-not-in-allowlist`` is still WRITABLE by a caller who passes
+#     an explicit ``op_type`` — what is missing is a DECLARED mechanism (i.e.
+#     what a caller would pass as ``op_type``), not the writer's acceptance.
+#     The warning text and docs/EXPANSION_PACKS.md must say exactly that, and
+#     nothing on this surface may claim the runtime drops the edge.
+#
+# A relation with neither declared path is no longer silently ambiguous: it is
 # ``declaration-only`` when the manifest says so (``declarationOnly: true`` —
 # an explicit author opt-in), and ``predicate-not-in-allowlist`` otherwise —
 # the state this verdict exists to make loud. Warn-not-block (W2), the same
 # contract the Layer-2 semantics check uses: a pack mid-alignment keeps
-# loading, and `tortoise pack validate` names every non-writable relation.
+# loading, and `tortoise pack validate` names every relation whose declaration
+# binds no mechanism.
 RELATION_WRITABLE = "writable"
 RELATION_DECLARATION_ONLY = "declaration-only"
 RELATION_PREDICATE_NOT_IN_ALLOWLIST = "predicate-not-in-allowlist"
@@ -322,12 +341,17 @@ RELATION_WRITE_VERDICTS = (
 
 
 def relation_write_paths(rel: dict) -> tuple[str, ...]:
-    """Name the runtime write paths that accept a declared relation.
+    """Name the DECLARED write paths a relation's declaration makes usable.
 
-    The paths are the two surfaces a caller can actually reach (see the block
-    above), not a re-statement of a list: ``operator`` is gated on the declared
-    ``mechanism`` and ``structural`` reads the writer's own allowlist. Empty
-    means the runtime has no surface that can write this predicate.
+    The paths are the two surfaces a caller can reach with the relation AS
+    DECLARED (see the block above): ``operator`` is gated on the declared
+    ``mechanism`` — the declaration's own op_type — and ``structural`` reads
+    the writer's own allowlist. Empty means the declaration binds no path.
+
+    ⛔ Empty is NOT "the runtime refuses it": ``create_operator`` accepts any
+    label (warn-not-block, #1934), and what is missing is a declared mechanism
+    — i.e. what a caller would pass as ``op_type``. See the block above and
+    the load warning.
     """
     # Lazy: the pack registry is imported by the extraction path and must not
     # drag the whole projection package in behind it (measured ~60 ms). The
@@ -1084,12 +1108,16 @@ class PackRegistry:
                 if write_verdict == RELATION_PREDICATE_NOT_IN_ALLOWLIST:
                     _warn_packs_once(
                         ("relation-not-writable", ns, pred),
-                        "relation '%s': no runtime write path — '%s' is neither a "
-                        "structural edge predicate (create_edge) nor carried by "
-                        "a declared mechanism (create_operator/ingest). Declare "
+                        "relation '%s': the declaration binds no write path — "
+                        "'%s' is neither a structural edge predicate "
+                        "(create_edge refuses it) nor carried by a declared "
+                        "mechanism, so create_operator has no declared op_type "
+                        "for it. This is a declaration gap, not a runtime "
+                        "refusal: create_operator(op_type=..., label='%s') still "
+                        "accepts the bare label (warn-not-block, #1934). Declare "
                         "`mechanism: IMPL|NAND`, use a structural predicate, or "
                         "mark it `declarationOnly: true` (#2766)",
-                        pred, pred,
+                        pred, pred, pred,
                     )
                 elif write_verdict == RELATION_WRITABLE \
                         and rel.get("declarationOnly") is True:
@@ -2035,9 +2063,11 @@ class PackRegistry:
                     entry["nearMisses"] = list(r["nearMisses"])
                 # #2766: the SAME verdict pack load warns and `pack validate`
                 # prints, surfaced here so the discoverable API cannot assert a
-                # relation is usable while the writer refuses it. `write_paths`
-                # names the surfaces that can write it ("operator" |
-                # "structural"); empty when none can.
+                # relation is bound to a path its declaration does not bind.
+                # `write_paths` names the DECLARED paths ("operator" |
+                # "structural"); empty when the declaration binds none. NOT a
+                # runtime refusal: `create_operator` accepts any label
+                # (warn-not-block, #1934); only `create_edge` is strict.
                 write_verdict, write_paths = relation_write_verdict(r)
                 entry["write_verdict"] = write_verdict
                 entry["write_paths"] = list(write_paths)
