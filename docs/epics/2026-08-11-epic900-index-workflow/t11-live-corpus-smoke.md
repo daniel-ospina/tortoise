@@ -70,7 +70,7 @@ an idempotency failure.
 
 Graph accounting (measured, fully closed):
 
-```
+```text
 nodes 10,934 = Source 8,451 + Event 2,364 + Object 118 + Meta 1
 edges  5,610 = Source→Source 3,040 + Source→Event 2,364 + Event→Object 206
 Sources 8,451 = 5,411 corpus (one per file) + 3,040 document (documentKind: conversation 3,038, brief 2)
@@ -97,7 +97,7 @@ loop the issue calls for — and it produced the journal's most useful datapoint
 | run 1 (cold) | 435 s | `indexed 5410, updated 0, skipped 0, **failed 1**` | 10,933 / 5,609 |
 | run 2 (drain) | 225 s | `updated 1, skipped 5410, failed 0` | 10,934 / 5,610 |
 | run 3 (stability) | 126 s | `updated 0, skipped 5411, failed 0` | 10,934 / 5,610 |
-| run 4 (confirmation) | 143 s | `updated 0, skipped 5411, failed 0` | 10,934 / 5,610 |
+| run 4 (confirmation; journal key `4-repair`) | 143 s | `updated 0, skipped 5411, failed 0` | 10,934 / 5,610 |
 
 **Failed set (run 1):**
 
@@ -109,13 +109,16 @@ loop the issue calls for — and it produced the journal's most useful datapoint
 delta between post-run-1 and post-run-2 is that file's `Source` (it is
 `document`-classified) and its corpus→document `references` edge. Per-file isolation
 held: the failing file never aborted the run (`aborted 0`) and did not perturb any
-other file's outcome. Both draining runs satisfy the arithmetic
-(`skipped + updated + failed == 5411`, `updated == 0`), and the last two runs are
-**delta-zero** — convergence reached inside **3 attempts** (cold, drain, stability).
+other file's outcome. It is the **stability and confirmation runs** (3 and 4 — journal
+keys `3-stability`, `4-repair`) that satisfy the arithmetic
+(`skipped + updated + failed == 5411`, `updated == 0`); run 2 is the repair run
+(`updated 1`) and is what makes the next two **delta-zero** — convergence reached
+inside **3 attempts** (cold, drain, stability).
 
-Transient DB timeouts at this scale: **3 per 10,822 file-indexings (0.03 %)** across
-both legs, all `cause=db`, all `retryable=true`, all surfaced rather than swallowed.
-Consistent with the host load (18.6–23.0 on 8 CPUs, 14 concurrent pytest processes).
+Transient DB timeouts at this scale: **1 per 10,822 cold-run file-indexings
+(0.009 %)** — one `cause=db`, `retryable=true` failure, in Leg B run 1; it is surfaced
+in the journal rather than swallowed, and the next run repaired it. Consistent with
+the host load (18.6–23.0 on 8 CPUs, 14 concurrent pytest processes).
 
 ## 5 — Coherence checkpoints (indicator 3)
 
@@ -139,7 +142,7 @@ Consistent with the host load (18.6–23.0 on 8 CPUs, 14 concurrent pytest proce
 change on run 1" behaviour CYCLE-21 warned about, then flat.
 
 **One correction made during the run (recorded for honesty):** the first pass used
-the pre-D10 `_required_sweep` clause (`test_backfill_sources.py:65`) and read
+the pre-D10 `_required_sweep` clause (`test_backfill_sources.py:57`) and read
 `3,040` violations. That is a **stale query, not a defect** — D10 (ONTOLOGY v3.15
 §4.4) makes a document a `:Source` keyed by `url` that deliberately does *not*
 carry `sourceKind`/`contentHash` (§4.6). The epic-owned D10-aware pin
@@ -151,7 +154,7 @@ never confused again.
 
 | finding | issue | one line |
 |---|---|---|
-| FalkorDB engine 6.x panics on a **read-only** aggregate whose `RETURN` names a property absent from the rows — the server exits and the container's graphs are lost | **#8083** | Cost this smoke its first full 5,411-file cold run (an ad-hoc checkpoint query killed the lane container). A/B: `v4.20.6` fine, `6.0.1` + `6.0.2` exit 1. `tools/test_lane.py:124` defaults to the panicking image; that site is outside #6386's fix scope. |
+| FalkorDB engine 6.x panics on a **read-only** aggregate whose `RETURN` names a property absent from the rows — the server exits and the container's graphs are lost | **#8083** | Cost this smoke its first full 5,411-file cold run (an ad-hoc checkpoint query killed the lane container). A/B: `v4.20.6` fine, `6.0.1` + `6.0.2` exit 1. `tools/test_lane.py:126` defaults to the panicking image; that site is outside #6386's fix scope. |
 | `session_index_health` / `tortoise index sessions` report **3,040 of 5,411** corpus files `unindexed` forever, and the re-index remedy mints orphan `AgentSession` Events | **#8084** | The corpus is 56 % sessionId-less legacy conversations; the pinned classifier (`file_indexer.py:469` rule 5) makes them `document`s, which the `AgentSession`-only health surface can never match. Fix option 1 (classification-aware health) recommended; option 2 (classify `type: conversation` as a session) reopens the pinned §6.2 rule and needs an owner decision. |
 
 **Cross-issue note:** the smoke did **not** reproduce a hash-idempotency failure of any
@@ -160,10 +163,12 @@ duplicate url, no forked eventId, no hash-pair drift, no growth after convergenc
 
 ## 7 — Residuals (not defects, recorded)
 
-1. **Transient `db` timeouts are load-correlated** (3 in 10,822). They are reported
-   per-file with `retryable: true` and repaired by the next run; a run-level retry
-   inside a single invocation does not exist, so an operator needs a second run.
-   Worth watching if the fleet's load average is meant to be lower than 20.
+1. **Transient `db` timeouts are rare at this scale** (1 in 10,822 cold-run
+   file-indexings). The one occurrence was reported per-file with `retryable: true`
+   and repaired by the next run; a run-level retry inside a single invocation does
+   not exist, so an operator needs a second run. The host load was 18.6–23.0 on
+   8 CPUs with 14 concurrent `pytest` processes, so a load correlation remains
+   plausible but is not established by a single observation.
 2. **`session_index_health.unindexed` is not an idempotency signal** on a corpus that
    mixes sessions and documents — see #8084. Do not read a non-zero `unindexed` here
    as "the index did not converge".
@@ -174,6 +179,7 @@ duplicate url, no forked eventId, no hash-pair drift, no growth after convergenc
 
 ```bash
 # frozen corpus (the real corpus, snapshot; 5,411 files in this run)
+mkdir -p /tmp/t11-live
 cp -a ~/.tortoise/docs/conversations /tmp/t11-live/corpus-frozen
 ( cd /tmp/t11-live/corpus-frozen && find . -type f -name '*.md' | sort | xargs shasum | shasum )
 
