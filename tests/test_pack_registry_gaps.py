@@ -539,6 +539,168 @@ class TestListRelations:
         assert "nearMisses" not in comp
 
 
+# ── Relation write-path verdicts (#2766) ──────────────────────────────────
+
+def _verdict_registry(tmp_path, relations):
+    """A one-pack registry carrying `relations`, for the verdict tests."""
+    d = str(tmp_path / "packs")
+    pack = {
+        "namespace": "test",
+        "name": "Test Pack",
+        "version": "1.0.0",
+        "tier": "free",
+        "description": "verdict fixture",
+        "ontology": {
+            "extends": "core",
+            "objectKinds": ["issue"],
+            "relations": relations,
+        },
+    }
+    os.makedirs(f"{d}/test", exist_ok=True)
+    with open(f"{d}/test/manifest.yaml", "w") as f:
+        yaml.dump(pack, f)
+    registry = PackRegistry(d)
+    registry.load_all()
+    return registry
+
+
+class TestRelationWriteVerdict:
+    """The three verdicts, on fixtures — `predicate-not-in-allowlist` is the
+    state the guard exists to make loud (declared but nothing can write it)."""
+
+    def test_operator_path_is_writable(self):
+        from tortoise.pack_registry import relation_write_verdict
+
+        verdict, paths = relation_write_verdict(
+            {"predicate": "groundedIn", "mechanism": "IMPL"})
+        assert verdict == "writable"
+        assert paths == ("operator",)
+
+    def test_structural_path_is_writable_without_a_mechanism(self):
+        """Old-format relations have no mechanism; a structural predicate is
+        still a real write path (create_edge)."""
+        from tortoise.pack_registry import relation_write_verdict
+
+        verdict, paths = relation_write_verdict({"predicate": "hasPart"})
+        assert verdict == "writable"
+        assert paths == ("structural",)
+
+    def test_declaration_only_is_reported_and_silent(self):
+        from tortoise.pack_registry import relation_write_verdict
+
+        verdict, paths = relation_write_verdict(
+            {"predicate": "funds", "declarationOnly": True})
+        assert verdict == "declaration-only"
+        assert paths == ()
+
+    def test_no_write_path_without_the_marker_is_not_in_allowlist(self):
+        from tortoise.pack_registry import relation_write_verdict
+
+        verdict, paths = relation_write_verdict({"predicate": "blocks"})
+        assert verdict == "predicate-not-in-allowlist"
+        assert paths == ()
+
+    def test_declaration_only_defaults_off(self):
+        """Absence of the marker must not silently count as declaration-only."""
+        from tortoise.pack_registry import relation_write_verdict
+
+        assert relation_write_verdict(
+            {"predicate": "blocks", "declarationOnly": False}
+        )[0] == "predicate-not-in-allowlist"
+
+    def test_no_path_warns_at_pack_load(self, tmp_path, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+            reg = _verdict_registry(tmp_path, [{
+                "predicate": "blocks", "from": "Object", "to": "Object",
+            }])
+        assert "test" in reg.packs, reg.errors
+        assert "no runtime write path" in caplog.text
+        assert "'blocks'" in caplog.text
+        # The message names both routes out, so the author is not left stuck.
+        assert "declarationOnly: true" in caplog.text
+        assert "mechanism" in caplog.text
+
+    def test_declaration_only_marker_loads_without_the_warning(self, tmp_path, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+            reg = _verdict_registry(tmp_path, [{
+                "predicate": "funds", "from": "Object", "to": "Object",
+                "declarationOnly": True,
+            }])
+        assert "test" in reg.packs, reg.errors
+        assert "no runtime write path" not in caplog.text
+        assert "has no effect" not in caplog.text
+        # ... and the discoverable API reports the author's choice, not a defect.
+        assert [r["write_verdict"] for r in reg.list_relations()] == ["declaration-only"]
+
+    def test_declaration_only_on_a_writable_relation_has_no_effect(self, caplog):
+        """A marker the runtime contradicts must not pass in silence."""
+        import logging
+
+        registry = PackRegistry("/tmp/nonexistent")
+        with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+            registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "hasPart", "from": "Object", "to": "Object",
+                        "declarationOnly": True,
+                    }],
+                },
+            })
+        assert "has no effect" in caplog.text
+        assert "structural" in caplog.text
+
+    def test_declaration_only_must_be_a_boolean(self):
+        registry = PackRegistry("/tmp/nonexistent")
+        errors = registry._validate({
+            "namespace": "dev", "name": "Dev",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["issue"],
+                "relations": [{
+                    "predicate": "blocks", "from": "Object", "to": "Object",
+                    "declarationOnly": "yes",
+                }],
+            },
+        })
+        assert any("'declarationOnly' must be a boolean" in e for e in errors), errors
+
+    def test_list_relations_carries_the_verdict(self, query_registry):
+        """The discoverable API must not assert a relation the writer refuses."""
+        relations = query_registry.list_relations()
+        assert {r["write_verdict"] for r in relations} == {"writable"}
+        assert {tuple(r["write_paths"]) for r in relations} == {("operator",)}
+
+    def test_shipped_catalog_reports_the_legacy_relations(self):
+        """Regression pin on the real packs: the 4 legacy `pm` relations have
+        no write path and must be REPORTED (not silently dropped)."""
+        from tortoise.pack_registry import (
+            RELATION_WRITE_VERDICTS,
+            default_packs_dir,
+        )
+
+        reg = PackRegistry(default_packs_dir())
+        reg.load_all()
+        relations = reg.list_relations()
+        # Every verdict is one the schema declares — the vocabulary is closed.
+        assert {r["write_verdict"] for r in relations} <= set(RELATION_WRITE_VERDICTS)
+        reported = {
+            (r["pack"], r["predicate"])
+            for r in relations
+            if r["write_verdict"] == "predicate-not-in-allowlist"
+        }
+        assert reported == {
+            ("pm", "blocks"), ("pm", "partOfSprint"),
+            ("pm", "assignedTo"), ("pm", "onBoard"),
+        }, reported
+
+
 class TestListConnectors:
     def test_returns_source_and_config(self, query_registry):
         connectors = query_registry.list_connectors()
