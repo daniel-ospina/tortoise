@@ -704,6 +704,10 @@ class TestRelationWriteVerdict:
             assert "the runtime has no surface that can write" not in text, name
         # The docs must name the actual gap, not a refusal.
         assert "declaration" in docs and "gap" in docs
+        # The `declarationOnly` path re-check: the marker silences the warning,
+        # it does NOT stop the writer from accepting the label.
+        assert "silences the warning" in docs
+        assert "stop a caller from writing the label" in docs
 
     def test_list_relations_carries_the_verdict(self, query_registry):
         """The discoverable API must not assert a path the declaration does not

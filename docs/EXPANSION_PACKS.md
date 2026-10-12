@@ -123,6 +123,10 @@ Refusing would drop the pack — and every pack sharing its kinds — over one d
       to: Object
 ```
 
+`declarationOnly: true` is a statement about the **declaration** — it silences the warning above. It
+does **not** stop a caller from writing the label: `create_operator` accepts any label (only
+`create_edge` is strict). What the marker records is that the pack declares no mechanism for the verb.
+
 `declarationOnly: true` on a relation whose declaration *does* bind a write path is reported: the
 runtime will write it anyway, and a marker that cannot take effect is the same silent divergence the
 verdict exists to remove.
