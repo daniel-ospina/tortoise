@@ -763,6 +763,13 @@ surfaces:
   # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
   # run the pin that says export-skip is not a durability statement.
   - test_rebuild_event_meta_watermark_4653.py
+  # #5353: the :TeamMeta first-org marker across the same wipe+replay. The
+  # `team_meta` sidecar section lives in tortoise/projection/ (core fallback),
+  # but the class IS the `#2789` guard implemented in `tortoise/hosted_api.py`
+  # (`_eager_provision_org_graph`, an exact `api` SOURCE_PATTERN) — so without
+  # this arm a hosted_api-only change to the guard probe could ship without the
+  # pin that says a rebuilt graph must read as provisioned.
+  - test_rebuild_team_meta_marker_5353.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1936,6 +1943,10 @@ surfaces:
   # watermark re-derivation, both in tortoise/projection/ (core fallback) over
   # tortoise/event_store.py's allocator.
   - test_rebuild_event_meta_watermark_4653.py
+  # #5353: the same wipe+replay drives the `team_meta` sidecar section and the
+  # post-restore marker verification, both in tortoise/projection/ (core
+  # fallback), over the `#2789` guard's probe in tortoise/hosted_api.py.
+  - test_rebuild_team_meta_marker_5353.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice

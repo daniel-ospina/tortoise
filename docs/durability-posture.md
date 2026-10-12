@@ -178,6 +178,30 @@ property). It gets its own declared sidecar sections instead:
   `session_snapshot` / `session_point_links` sections (**#3947** × **#3010**),
   for the same reason: the live turn loop's container write is raw and is not
   re-derived by `projection`.
+- `:TeamMeta` — the first-org marker, preserved by the `team_meta` section
+  (**#5353**). It uses a bare `CREATE (:TeamMeta {name, created})` with **no
+  identity property at all** (five writers: `sdk.org_create`,
+  `__main__._cmd_key_create`, and `hosted_api`'s registration / create-org /
+  eager-provision lanes), so it fits neither the registry above (whose rows are
+  keyed on one identity property — a row would have to invent one) nor the
+  container/link sections (which key on `id`). It is **not bookkeeping**: its
+  very presence is the `#2789` first-org guard, which is exactly
+  `_eager_provision_org_graph`'s `MATCH (m:TeamMeta) RETURN count(m)` probe. A
+  rebuilt graph that lost the marker reads **0**, so the next provisioning call
+  re-mints it with the control plane's name and a fresh `created` — replacing
+  the graph's own team identity on a rebuild the operator asked for. The class
+  is **at-most-one by intent** (that probe is the invariant), so the section
+  carries at most one entry even though the capture reads every node the graph
+  holds: the **earliest `created`** wins, deterministically, and the collapse is
+  reported rather than silent — a union that concatenated the leftover and fresh
+  legs would *manufacture* a second marker on the sidecar-recovery path, which
+  is the state `#2789` exists to prevent. The restore is an idempotent `MERGE`,
+  so a partially-restored graph cannot accumulate a duplicate on retry, and the
+  post-restore check requires the captured `name`/`created` back **exactly** — a
+  concurrent re-provision cannot make the run report a marker it did not
+  restore. A marker that came back absent is reported (never a silent success),
+  and a rescue file written before this class had a vehicle reports
+  `team_meta_state_unknown` instead of assuming the class was never there.
 <!-- config-registry:end -->
 
 ### The one carried high-water mark: `:GraphEventMeta`
@@ -291,26 +315,30 @@ window and every non-racing path; it cannot close this one, which is inherent to
 replacing a graph with a full wipe+replay.
 
 <!-- config-registry:unenrolled -->
-- `:TeamMeta` — written with a bare `CREATE` and no uniqueness guarantee
-  (`sdk.py`, `hosted_api.py`), so a graph can legitimately hold several and
-  none is addressable by a single identity key — it fits neither the registry
-  (whose rows are keyed) nor the container/link sections (which key on `id`).
-  Its presence is the whole `#2789` first-org guard, so its loss is
-  load-bearing, not bookkeeping. Preserving an at-most-one-per-graph,
-  label-wide class is its own design step — declared deliberately **not
-  preserved here**, with the class as a known residual. **#5353**
+*(none)* — every class this section has ever named now has a declared vehicle
+above: the onboarding state machine in **#4641** (the `onboarding_snapshot` /
+`onboarding_step_links` sections), the event-log high-water mark in **#4653**
+(the `event_meta` section), and the last entry — the first-org marker, filed by
+#4641 as "its own design step" — in **#5353** (the `team_meta` section). The
+block is kept, empty, as the declared home for the next known loss that has no
+carrier yet: a class belongs here only while it has NO vehicle, and an entry
+here is itself the claim that the rebuild destroys it — which is exactly what
+the three issues above removed. (The labels are deliberately not re-named in
+this note: the doc-consistency pin asserts that no declared class appears in
+this block, so naming one here would read as re-enrolling it.)
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; it enumerates the configuration classes the
 registry declares, the container nodes the declared sidecar sections preserve
-(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), and the one
-carried counter (`:GraphEventMeta`) by the query's last leg, so an operator
-can tell what survived a rebuild and the query cannot silently under-report
-after a class is added. The onboarding rows are pinned by the
-doc-consistency test (a section's classes must appear here); the container
-rows are hand-maintained there too, but as a presence check — the test does
-not prove the list is exhaustive, and the per-Point membership edges
-(`batch_point_links`, `session_point_links`) are not enumerated here.
+(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), the carried
+first-org marker (`:TeamMeta`), and the one carried counter
+(`:GraphEventMeta`) by the query's last legs, so an operator can tell what
+survived a rebuild and the query cannot silently under-report after a class is
+added. The onboarding rows are pinned by the doc-consistency test (a section's
+classes must appear here); the container rows are hand-maintained there too,
+but as a presence check — the test does not prove the list is exhaustive, and
+the per-Point membership edges (`batch_point_links`, `session_point_links`) are
+not enumerated here.
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -332,6 +360,10 @@ RETURN 'OnboardingStep' AS cls, s.org_id + '/' + s.step_id AS ident
 UNION ALL
 MATCH (m:GraphEventMeta)
 RETURN 'GraphEventMeta' AS cls, toString(m.last_seq) AS ident
+UNION ALL
+MATCH (t:TeamMeta)
+RETURN 'TeamMeta' AS cls,
+       coalesce(t.name, '') + '@' + coalesce(t.created, '') AS ident
 ```
 <!-- config-registry:end -->
 

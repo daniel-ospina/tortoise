@@ -108,19 +108,24 @@ def _config_state(sdk) -> set:
 
 
 def _sidecar_payload(**overrides) -> dict:
-    """A valid sidecar payload; `overrides` replaces whole sections."""
-    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
+    """A valid sidecar payload; `overrides` replaces whole sections.
+
+    Sections are DERIVED from `_SNAPSHOT_SECTIONS`, never hand-listed: the
+    contract `_legacy_pre_onboarding_sidecar` depends on is "this helper always
+    writes every section, empty or not", and a hand-list silently stops being
+    that the moment a section lands — the file then reads as one written by a
+    build that did not capture the missing class, which fires that class's
+    state-UNKNOWN ERROR (#5353's `team_meta` and #4653's `event_meta` each
+    moved this helper one section behind).
+    """
+    from tortoise.projection import (
+        _PREWIPE_SNAPSHOT_VERSION,
+        _SNAPSHOT_SECTIONS,
+    )
     payload = {
         "version": _PREWIPE_SNAPSHOT_VERSION,
         "created_at": "2026-01-01T00:00:00Z",
-        "synthetic_events": [],
-        "batch_snapshot": [],
-        "batch_point_links": [],
-        "session_snapshot": [],
-        "session_point_links": [],
-        "onboarding_snapshot": [],
-        "onboarding_step_links": [],
-        "config_snapshot": [],
+        **{section: [] for section in _SNAPSHOT_SECTIONS},
     }
     payload.update(overrides)
     return payload
@@ -1222,7 +1227,20 @@ def test_config_registry_doc_consistency():
     assert f"`:{ONBOARDING_STEP_LABEL}`" in preserved_sections
     assert f"`{COMPLETED_STEP_EDGE}`" in preserved_sections
     assert "#4641" in preserved_sections
-    assert "TeamMeta" in unenrolled and "#5353" in unenrolled
+    assert "TeamMeta" not in unenrolled, (
+        ":TeamMeta is preserved by the `team_meta` sidecar section since "
+        "#5353 — it must not still be declared an unenrolled loss")
+    # #5353: the last entry the `unenrolled` block ever carried now has a
+    # vehicle, so the block is empty (and kept, as the declared home for the
+    # next known loss that has none). The class must appear in
+    # `preserved-sections` with its issue, and — like the onboarding rows — the
+    # operator audit must enumerate it or the query under-reports the classes
+    # this doc promises it lists.
+    assert ":TeamMeta" in preserved_sections
+    assert "#5353" in preserved_sections
+    assert ":TeamMeta" in _doc_block("audit-query"), (
+        "the audit query omits the section-preserved :TeamMeta — an operator "
+        "could not tell whether the `#2789` first-org marker survived")
     for vehicle in ("OnboardingState", "TeamMeta"):
         assert vehicle not in label_wide
     # #4653: `:GraphEventMeta` LEFT this block — it now has a vehicle (the
@@ -1257,6 +1275,10 @@ def test_config_registry_doc_consistency():
             f"the preserved-sections block does not declare :{container}")
         assert f":{container}" in audit, (
             f"audit query omits the section-preserved :{container}")
+    # #5353: `:TeamMeta` is the third section-preserved class in that list. It
+    # is asserted above next to its own declaration, because unlike the two
+    # containers its presence is LOAD-BEARING (the `#2789` guard reads it) and
+    # not a container membership check.
 
 
 def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
