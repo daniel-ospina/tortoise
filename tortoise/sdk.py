@@ -23698,8 +23698,8 @@ class TortoiseSDK:
         # also wired the Source via `projection._link_source` (#394), and that
         # half was LOST in the move — `create_entity` minted NO `:Source` node
         # and NO `extractedFrom` edge, so a caller that had declared a source
-        # got a subject the auditor reads as a provenance gap
-        # (`audit.missing_sourceKind`). Measured, `type='document'`:
+        # got a DOCUMENT the auditor reads as a provenance gap. Measured,
+        # `type='document'`: create_entity wired NOTHING; create_document minted
         #     create_entity    sourceKind/edge: none
         #     create_document  :Source node + extractedFrom edge
         # `_link_source` is "declared inline, created if absent": it MERGEs the
@@ -23744,9 +23744,11 @@ class TortoiseSDK:
     #
     # The ruling (#398, delivered by #8171): an agent asserting something
     # without research is a WEAK source, and the source is the agent-session
-    # transcript. `audit.missing_sourceKind` already performs this check — as a
-    # POST-HOC sweep over the graph, which the writer of a sourceless claim
-    # never sees. The ruling asks for it AT WRITE TIME, the only point where it
+    # transcript. `audit` has no entity-level provenance check — checks 1 and 7
+    # are Point-only (`(op:Point {is_operator:true})-[:IMPL|NAND]->(ev:Point)`)
+    # and cannot see a `:Source`/`:Event`/`:Subject` written here, so nothing
+    # post-hoc reports this gap for an entity write at all. The ruling asks for
+    # it AT WRITE TIME, the only point where it
     # can change what the writer does next.
     #
     # ADVISORY ONLY. The ruling says "guard (advisory)", never a block, so this
@@ -23794,17 +23796,6 @@ class TortoiseSDK:
                 ),
                 "advisory": True,
             }]}
-        if props.get("sourceKind") and self._ENTITY_SOURCE_LABELS.get(
-                entity_type or ""):
-            # D10: a document IS a `:Source`, so a declared `sourceKind` IS its
-            # provenance statement — see the block comment above. GATED ON THE
-            # TYPE (review P2): the reasoning is document-scoped, so applying
-            # it unconditionally let a `sourceKind` on a subject/object/event
-            # silence the advisory while minting no `:Source` and wiring no
-            # edge — the same borrowed-capability bypass this function removed
-            # for `session_id`. A property no door honours is not provenance,
-            # and adding one must not buy silence.
-            return {}
         # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
         # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
         # (#3263). That inference lives ONLY in `create_point` — and
@@ -23825,11 +23816,25 @@ class TortoiseSDK:
             "extractedFrom='session:<session_id>' explicitly.)"
             if isinstance(_sid, str) and _sid.strip() else ""
         )
-        # A document that STATED its kind has declared what it is (D10: a
-        # document is a `:Source`, so `sourceKind` is its provenance
-        # statement). One that stated NEITHER its source nor its kind is the
-        # gap `audit.missing_sourceKind_source` (check 7) reports — advise it
-        # like any other unprovenanced write.
+        # NOTE: no analogous hint for `sourceKind`. MEASURED: it is already
+        # stripped from `props` by the time this runs (the doors DISCARD it —
+        # it is in `_SOURCE_HANDLED` and no SET clause writes it), so there is
+        # nothing here to detect. The caller is told up front instead, in the
+        # door's own docstring: "`sourceKind` is not stored on these nodes".
+        # No `sourceKind` branch (review P1 in round 7). An earlier revision
+        # treated a declared `sourceKind` as provenance on a document and
+        # returned `{}` — on the D10 reasoning that a document IS a `:Source`.
+        # MEASURED on the head tree: NEITHER document door stores it.
+        # `sourceKind` is in `_SOURCE_HANDLED` (`projection/entities.py:915`) and
+        # is denied the document upsert's open passthrough, and
+        # `_upsert_document`'s fixed SET clause never writes it — so a document
+        # created through either door with `sourceKind` only ends with no
+        # `sourceKind` property, no separate `:Source` and no edge. Keying
+        # silence on a property the write DISCARDs is the third
+        # borrowed-capability bypass on this function (after `session_id` and
+        # the unconditional `sourceKind`) and it silenced a genuinely
+        # unprovenanced write. There is now no branch here: only a materialized
+        # `extractedFrom` counts.
         node_id = node.get("id") or node.get("eventId")
         return {"advisories": [{
             "code": "no_source",

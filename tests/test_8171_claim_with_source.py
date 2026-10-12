@@ -15,8 +15,9 @@ Three facts, each falsifiable by a named mutation:
    via ``projection._link_source`` (#394). ``create_entity`` stored the
    ``extractedFrom`` STRING as a node property and created NOTHING: no
    ``:Source`` node, no ``extractedFrom`` edge. A caller that had declared a
-   source therefore got a node the auditor reads as a provenance gap
-   (``audit.missing_sourceKind``), and the provenance was not traversable.
+   source therefore got a node with no provenance, and the provenance was not
+   traversable. (``audit`` has no entity-level provenance check to catch it —
+   its checks 1 and 7 are Point-only — which is why the gap went unseen.)
 
    NOT claimed here: that the edge survives ``rebuild_all``. It does not, and
    that gap is PRE-EXISTING (#2296 — ``_create_entity`` journals no
@@ -31,8 +32,9 @@ Three facts, each falsifiable by a named mutation:
 
 3. A write with no source and no provenance is ADVISED, never blocked.
 
-   The ruling says "guard (advisory)". ``audit.missing_sourceKind`` already
-   performs the check — as a POST-HOC sweep the writer never sees. Doing it at
+   The ruling says "guard (advisory)". No post-hoc sweep covers an entity write
+   (``audit``'s checks 1 and 7 are Point-only), and a sweep the writer never
+   sees cannot change what they do next anyway. Doing it at
    write time is the only version that can change what the writer does next.
 
 Embedded lane (no Docker): ``TORTOISE_TEST_CARVE_OUT=1``.
@@ -216,30 +218,31 @@ def test_a_sourced_write_carries_no_advisory(tmp_path):
 # now ONE function all three doors call, so the rules cannot drift apart.
 
 
-def test_a_bare_source_kind_does_not_silence_the_advisory_either(tmp_path):
-    """`sourceKind` silences only on the type whose door HONOURS it.
+def test_a_bare_source_kind_does_not_silence_the_advisory_on_any_type(tmp_path):
+    """`sourceKind` is NOT provenance on ANY of these doors — advise it.
 
-    `sourceKind` is a Source-registry property, and D10's reasoning ("a document
-    IS a `:Source`, so `sourceKind` is its provenance statement") is
-    DOCUMENT-scoped. Applying it unconditionally let a writer silence the
-    advisory on any entity by adding a property no door honours — the same
-    borrowed-capability bypass removed for `session_id` (review P2).
+    `sourceKind` is a Source-registry property, and NEITHER document door
+    stores it: it is in `_SOURCE_HANDLED` (`projection/entities.py:915`) and so
+    is denied the document upsert's open passthrough, while `_upsert_document`'s
+    fixed SET clause never writes it. MEASURED: a document created through
+    either door with `sourceKind` only ends with no `sourceKind` property, no
+    separate `:Source` and no edge.
 
-    MUTATION THAT MUST RED: drop the `entity_type` gate from the `sourceKind`
-    branch of `_provenance_advisory`.
+    So keying silence on it — first unconditionally, then gated on the type —
+    was a borrowed-capability bypass on a write with no provenance at all. The
+    gate is deleted; only a materializable `extractedFrom` counts, and the
+    caller is told why the `sourceKind` they passed did not.
+
+    MUTATION THAT MUST RED: restore a `sourceKind` branch that returns `{}`.
     """
     sdk = _sdk(tmp_path)
-    inert = sdk.create_entity(type="subject", name="Not a source kind",
-                              sourceKind="agentSession")
-    assert inert.get("advisories"), (
-        "a subject has no :Source to carry a sourceKind, so it is not sourced")
-    assert inert["advisories"][0].get("code") == "no_source"
-
-    # ...and the document door, which DOES honour it, must stay silent.
-    real = sdk.create_entity(type="document", name="A real source kind",
-                             documentKind="note", sourceKind="agentSession")
-    assert not (real.get("advisories") or []), (
-        "a document stating its kind HAS declared what it is (D10)")
+    for _type in ("subject", "document"):
+        res = sdk.create_entity(type=_type, name=f"Bare kind {_type}",
+                                documentKind="note", sourceKind="agentSession")
+        advisories = res.get("advisories") or []
+        assert advisories, (
+            f"type={_type}: sourceKind is not stored, so this is unsourced")
+        assert advisories[0].get("code") == "no_source"
 
 
 def test_an_inert_extracted_from_on_a_non_document_still_advises(tmp_path):
