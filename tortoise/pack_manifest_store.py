@@ -37,6 +37,7 @@ import hashlib
 import logging
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,7 +113,96 @@ def _now() -> str:
 
 # ── Validation (shared validator — one source of truth) ────────────────────
 
-def validate_manifest(manifest_yaml: str) -> ManifestValidation:
+def _safe_namespace(ns: str) -> bool:
+    """The #2029 namespace charset guard, shared by every temp-dir writer."""
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", ns))
+
+
+def _catalog_manifests_by_namespace() -> dict[str, Path]:
+    """Shipped catalog: declared ``namespace`` → its ``manifest.yaml`` path.
+
+    Keyed by the DECLARED namespace, not the directory name — the catalog's
+    dir names are not the namespaces (``packs/project-management/`` declares
+    ``namespace: pm``), so a dir-name lookup silently misses `pm` and every
+    pack that depends on it. A manifest that cannot be parsed is skipped: the
+    catalog's own load is the authority on its validity, and a parse failure
+    here must not turn into an install-time 500.
+    """
+    from tortoise.pack_registry import default_packs_dir
+
+    out: dict[str, Path] = {}
+    for path in sorted(default_packs_dir().glob("*/manifest.yaml")):
+        if path.parent.name.startswith(("_", ".")):
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text()) or {}
+        except Exception:  # unparseable catalog entry: skip
+            continue
+        if isinstance(raw, dict) and isinstance(raw.get("namespace"), str):
+            out.setdefault(raw["namespace"], path)
+    return out
+
+
+def _seed_available_packs(
+    td_root: Path, new_ns: str,
+    installed_manifests: Mapping[str, str] | None,
+) -> None:
+    """Write every pack the uploading tenant may ALREADY reference into
+    ``td_root`` so the temp registry resolves cross-pack references against the
+    tenant's real installed set instead of against nothing (#2781).
+
+    Two legs, and the asymmetry is deliberate:
+
+    * the shipped **starter catalog** (``DEFAULT_STARTER_PACKS`` ∩ the resolved
+      catalog dir) — every tenant has these, by construction
+      (``pack_state.ensure_tenant_packs``);
+    * the tenant's **own** manifests (``installed_manifests``, read by the
+      caller from the graph) — so a second custom pack can reference the first.
+
+    NOT the whole shipped catalog: a tenant is not entitled to reference a pack
+    it has not installed (#2714 — the hosted extractor's vocabulary is the
+    installed set, so a reference outside it could never be built, and the
+    install is refused fail-closed rather than accepted as a dead edge).
+
+    Entries that fail the charset/containment guard are SKIPPED with a warning,
+    never written: a namespace is a directory name here, and the #2029
+    traversal defence is per-writer, not per-route.
+    """
+    from tortoise.pack_state import DEFAULT_STARTER_PACKS
+
+    catalog = _catalog_manifests_by_namespace()
+    seeded: set[str] = set()
+    for ns in DEFAULT_STARTER_PACKS:
+        src = catalog.get(ns)
+        if ns == new_ns or src is None:
+            continue
+        dest = (td_root / ns).resolve()
+        if not dest.is_relative_to(td_root):
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        dest.joinpath("manifest.yaml").write_text(src.read_text())
+        seeded.add(ns)
+    for ns, yaml_text in (installed_manifests or {}).items():
+        if not isinstance(ns, str) or ns == new_ns or ns in seeded:
+            continue
+        if not _safe_namespace(ns) or not isinstance(yaml_text, str):
+            log.warning(
+                "tenant manifest namespace %r is not a safe identifier — not "
+                "seeded into the install validator (it cannot have been "
+                "stored by a successful upload)", ns)
+            continue
+        dest = (td_root / ns).resolve()
+        if not dest.is_relative_to(td_root):
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        dest.joinpath("manifest.yaml").write_text(yaml_text)
+        seeded.add(ns)
+
+
+def validate_manifest(
+    manifest_yaml: str, *,
+    installed_manifests: Mapping[str, str] | None = None,
+) -> ManifestValidation:
     """Validate a single uploaded manifest against the registry schema.
 
     Runs the SAME validation as the filesystem catalog: writes the manifest
@@ -120,6 +210,15 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     refs + per-pack isolation), then applies the tenant-specific policy:
     reserved starter namespace → error; connector/tool entrypoints
     (ontology-only v1) → error; size cap enforced by the caller (413).
+
+    #2781 — the temp registry is no longer ISOLATED. It is seeded with the
+    packs the tenant can already reference (the starter catalog plus
+    ``installed_manifests``; see ``_seed_available_packs``), so a manifest that
+    references another INSTALLED pack resolves and installs. The install is
+    still FAIL-CLOSED: a reference — or a ``depends_on`` entry — that the
+    tenant's installed set cannot satisfy is refused with an error naming the
+    missing pack. Before #2781 every cross-pack reference failed here, because
+    the temp registry held exactly one manifest and nothing to resolve against.
     """
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         return ManifestValidation(False, errors=["manifest exceeds 64KB"])
@@ -146,12 +245,11 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     # resolve()+is_relative_to containment check backstops it regardless —
     # a single regex is one bug away from admitting a `..` component (or a
     # future relaxation), so containment is defense in depth, not ceremony.
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", ns):
+    if not _safe_namespace(ns):
         return ManifestValidation(
             False, namespace=ns,
             errors=["namespace must be a safe identifier "
                     "(letters, digits, '_', '-', '.')"])
-
 
     # Tenant policy (plan §4): reserved namespaces. The starter set is the
     # canonical collision surface (a tenant pack named `dev` would collide
@@ -182,11 +280,15 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     # Shared validator via temp-dir registry (schema + cross-pack).
     with tempfile.TemporaryDirectory(prefix="tortoise-manifest-") as td:
         td_root = Path(td).resolve()
+        # #2781: seed the packs the tenant can already reference BEFORE the new
+        # manifest, so a reference to an installed pack RESOLVES here. The new
+        # manifest wins any namespace collision (it is written last).
+        _seed_available_packs(td_root, ns, installed_manifests)
         pack_dir = (td_root / ns).resolve()
         if not pack_dir.is_relative_to(td_root):
             return ManifestValidation(False, namespace=ns,
                                       errors=["invalid namespace path"])
-        pack_dir.mkdir(parents=True)
+        pack_dir.mkdir(parents=True, exist_ok=True)
         (pack_dir / "manifest.yaml").write_text(manifest_yaml)
         from tortoise.pack_registry import PackRegistry
         reg = PackRegistry(Path(td))
@@ -196,18 +298,57 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
         if ns not in reg.packs:
             return ManifestValidation(False, namespace=ns,
                                       errors=["manifest failed to register"])
+        # #2781 FAIL-CLOSED: an unresolved reference (or a declared dependency
+        # outside the installed set) refuses the INSTALL, naming the pack. The
+        # self-hosted registry load deliberately does not fail closed here — it
+        # keeps such a pack loaded and reports it — because availability of the
+        # catalog and admissibility of an install are different questions.
+        unresolved = reg.unresolved_refs.get(ns) or []
+        if unresolved:
+            return ManifestValidation(
+                False, namespace=ns,
+                errors=[f"cannot install — {m}" for m in unresolved])
+
     return ManifestValidation(True, namespace=ns)
 
 
 # ── Storage (graph-native :PackManifest in the tenant graph) ───────────────
 
-def upsert_tenant_manifest(sdk, manifest_yaml: str) -> dict:
+def validate_manifest_for_tenant(
+    sdk, manifest_yaml: str, *,
+    extra_manifests: Mapping[str, str] | None = None,
+) -> ManifestValidation:
+    """``validate_manifest`` with the tenant's OWN installed manifests seeded.
+
+    The single entry point for every install route (the REST upload pre-check,
+    the MCP tool and the import/restore path via ``upsert_tenant_manifest``)
+    so the tenant-visible installed set cannot diverge between the routes: a
+    pre-check and an install that disagree on what the new manifest may
+    reference turns one of them into a no-op gate. Reads the tenant's
+    ``:PackManifest`` YAMLs (one query) and delegates — no second validator, no
+    parallel copy.
+
+    ``extra_manifests`` are packs available to THIS validation but not yet in
+    the graph — the import path's siblings, which the restore installs as a
+    set. They WIN over the graph read for a shared namespace (the incoming
+    set is the authoritative one for the artifact being validated).
+    """
+    available = dict(_get_tenant_manifest_yamls(sdk))
+    available.update(extra_manifests or {})
+    return validate_manifest(manifest_yaml, installed_manifests=available)
+
+
+def upsert_tenant_manifest(
+    sdk, manifest_yaml: str, *,
+    extra_manifests: Mapping[str, str] | None = None,
+) -> dict:
     """Validate + store + activate a tenant manifest. Returns the record.
 
     Raises ValueError on validation failure (caller maps to 422) — the
     graph is never touched on a failed validation.
     """
-    result = validate_manifest(manifest_yaml)
+    result = validate_manifest_for_tenant(
+        sdk, manifest_yaml, extra_manifests=extra_manifests)
     if not result.ok:
         raise ValueError("; ".join(result.errors or ["invalid manifest"]))
     ns = result.namespace
