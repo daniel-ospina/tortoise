@@ -397,6 +397,12 @@ class FakeControlPlane:
         self._patch_lock = threading.Lock()
         # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
         self._faults: list[dict] = []
+        # #3025: SEAM-level RPC injectors (see fail_rpc). Kept separate from
+        # `_faults` because an RPC is one round-trip that internally performs
+        # several table calls — a fault at the seam and a fault inside it are
+        # different failure events, and conflating them would make the
+        # committed-then-lost-response path untestable.
+        self._rpc_faults: list[dict] = []
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
@@ -406,11 +412,11 @@ class FakeControlPlane:
         """Scalar-returning RPC — the read counterpart of :meth:`rpc`
         (``SupabaseControlPlane.rpc_value``). #3825: ``metering_cohort_spend``
         is reached through this method, so a test that asserts the aggregate
-        over a WINDOW needs it on the double; the RPC emulation in :meth:`rpc`
-        already RETURNS the scalar, so this delegates and records the call
-        exactly once in ``rpc_calls``.
+        over a WINDOW needs it on the double; the RPC emulation in
+        :meth:`_rpc_dispatch` already RETURNS the scalar, so this delegates and
+        records the call exactly once in ``rpc_calls``.
         """
-        return self.rpc(fn, body)
+        return self.rpc(fn, body, representation=True)
 
     def _mint_org_lock(self, org_id: str):
         """Per-org mint lock (models the SQL `FOR NO KEY UPDATE` row lock)."""
@@ -470,9 +476,158 @@ class FakeControlPlane:
             if k.get("org_id") == org_id and (cb.startswith("anon-") or cb.startswith("reg-")):
                 k["created_by"] = str(user_id)
 
+    def _rpc_oauth_mint(self, fn: str, p: dict) -> dict:
+        """#3025: the OAuth mint RPCs, ATOMIC over the in-memory rows.
+
+        Both real functions are ONE Postgres transaction, so the emulation must be
+        all-or-nothing too: every internal write goes through `self.query` (so a
+        `fail_query` injector still fires at the same table/method boundary), and
+        ANY raise restores the snapshotted rows. A fake that applied the writes
+        incrementally would pass the atomicity drills without reproducing the real
+        function's most important property, and every fault case built on it would
+        be a silent false negative.
+
+        The rollback restores the PRE-EXISTING dict objects IN PLACE (not by rebinding
+        new copies), so a test holding a row reference — `row = cp.tables[...][0]` — sees
+        the rolled-back state, exactly as a re-read from Postgres would. A transaction
+        inside these functions only ever UPDATEs existing rows and APPENDs new ones, so
+        restoring by index is exact.
+        """
+        import copy
+        touched = ("oauth_codes", "oauth_refresh_tokens", "oauth_access_tokens")
+        snapshot = {t: copy.deepcopy(self.tables.get(t, [])) for t in touched}
+        try:
+            if fn == "redeem_oauth_code":
+                return self._rpc_redeem_oauth_code(p)
+            return self._rpc_rotate_oauth_refresh(p)
+        except BaseException:
+            for t, rows in snapshot.items():
+                current = self.tables.setdefault(t, [])
+                del current[len(rows):]          # undo the APPENDs
+                for i, snap in enumerate(rows):
+                    if i < len(current):
+                        current[i].clear()
+                        current[i].update(snap)
+                    else:
+                        current.append(snap)
+            raise
+
+    def _rpc_redeem_oauth_code(self, p: dict) -> dict:
+        """Mirrors `public.redeem_oauth_code` (migration 20261013000002)."""
+        claimed = self.query(
+            "oauth_codes", method="PATCH",
+            select=["id", "used_at", "redemption_state", "redemption_id"],
+            filters=[("id", "eq", p["p_code_id"]),
+                     ("code_hash", "eq", p["p_code_hash"]),
+                     ("client_id", "eq", p["p_client_id"]),
+                     # The identity predicates are part of the REAL CAS too
+                     # (migration: `AND user_id = p_user_id AND org_id = p_org_id`).
+                     # Omitting them here was inert while the caller always passes
+                     # identity read from the same row — but a double that accepts
+                     # what production refuses is the false-green class the
+                     # `Prefer` transport model exists to close.
+                     ("user_id", "eq", p["p_user_id"]),
+                     ("org_id", "eq", p["p_org_id"]),
+                     ("used_at", "is", None),
+                     ("redemption_state", "eq", "unclaimed"),
+                     ("expires_at", "gt", p["p_now"])],
+            json_body={"used_at": p["p_now"],
+                       "redemption_state": "claimed",
+                       "redemption_id": p["p_redemption_id"],
+                       "redemption_settled_at": None,
+                       "redemption_note": None})
+        if not claimed:
+            return {"status": "not_claimable"}
+        if p.get("p_burn"):
+            # The caller-detected refusal: claimed, then recorded terminal, in the
+            # SAME transaction, with NO token row inserted.
+            self.query("oauth_codes", method="PATCH", select=["id"],
+                       filters=[("id", "eq", p["p_code_id"])],
+                       json_body={"redemption_state": "burned",
+                                  "redemption_settled_at": p["p_now"],
+                                  "redemption_note": "terminal"})
+            return {"status": "burned"}
+        self.query("oauth_refresh_tokens", method="POST", json_body={
+            "id": p["p_refresh_id"], "token_hash": p["p_refresh_hash"],
+            "client_id": p["p_client_id"], "user_id": p["p_user_id"],
+            "org_id": p["p_org_id"], "scope": p["p_scope"],
+            "expires_at": p["p_refresh_expires_at"], "revoked_at": None,
+            "rotated_from": None, "created_at": p["p_now"],
+            "code_id": p["p_code_id"]})
+        self.query("oauth_access_tokens", method="POST", json_body={
+            "id": p["p_access_id"], "token_hash": p["p_access_hash"],
+            "client_id": p["p_client_id"], "user_id": p["p_user_id"],
+            "org_id": p["p_org_id"], "scope": p["p_scope"],
+            "expires_at": p["p_access_expires_at"], "revoked_at": None,
+            "refresh_token_id": p["p_refresh_id"], "created_at": p["p_now"],
+            "code_id": p["p_code_id"]})
+        return {"status": "minted"}
+
+    def _rpc_rotate_oauth_refresh(self, p: dict) -> dict:
+        """Mirrors `public.rotate_oauth_refresh` (migration 20261013000002)."""
+        claimed = self.query(
+            "oauth_refresh_tokens", method="PATCH",
+            select=["id", "client_id", "user_id", "org_id", "scope", "code_id"],
+            filters=[("id", "eq", p["p_prev_refresh_id"]),
+                     ("revoked_at", "is", None)],
+            json_body={"revoked_at": p["p_now"]})
+        if not claimed:
+            return {"status": "not_claimable"}
+        prev = claimed[0]
+        self.query("oauth_refresh_tokens", method="POST", json_body={
+            "id": p["p_refresh_id"], "token_hash": p["p_refresh_hash"],
+            "client_id": prev.get("client_id"), "user_id": prev.get("user_id"),
+            "org_id": prev.get("org_id"), "scope": prev.get("scope"),
+            "expires_at": p["p_refresh_expires_at"], "revoked_at": None,
+            "rotated_from": p["p_prev_refresh_id"], "created_at": p["p_now"],
+            "code_id": prev.get("code_id")})
+        self.query("oauth_access_tokens", method="POST", json_body={
+            "id": p["p_access_id"], "token_hash": p["p_access_hash"],
+            "client_id": prev.get("client_id"), "user_id": prev.get("user_id"),
+            "org_id": prev.get("org_id"), "scope": prev.get("scope"),
+            "expires_at": p["p_access_expires_at"], "revoked_at": None,
+            "refresh_token_id": p["p_refresh_id"], "created_at": p["p_now"],
+            "code_id": prev.get("code_id")})
+        # The PREVIOUS family's live access rows (by `refresh_token_id`, so the
+        # row just inserted — which points at the NEW id — is untouched).
+        self.query("oauth_access_tokens", method="PATCH",
+                   filters=[("refresh_token_id", "eq", p["p_prev_refresh_id"]),
+                            ("revoked_at", "is", None)],
+                   json_body={"revoked_at": p["p_now"]})
+        return {"status": "rotated",
+                "client_id": prev.get("client_id"),
+                "user_id": prev.get("user_id"),
+                "org_id": prev.get("org_id"),
+                "scope": prev.get("scope"),
+                "code_id": prev.get("code_id")}
+
     def rpc(self, fn: str, body: dict | None = None, *,
             representation: bool = False) -> object | None:
-        """Simulate provision_team (migration 0010) over the in-memory rows.
+        """The PostgREST TRANSPORT, modelled — `Prefer: return=minimal` does not
+        echo the function's body (#3025).
+
+        The effects are applied unconditionally (the function really ran); the
+        RESULT is returned only when ``representation=True``, which is what
+        ``SupabaseControlPlane.rpc`` does with the same header
+        (``return=representation`` iff ``representation``). Modelling this is
+        not pedantry: the repo measured the production behaviour twice
+        (``resolve_signup_token`` — "in production the echo is ALWAYS empty …
+        the token path 422'd in prod while passing against the fake's
+        bare-string rpc" — and ``metering_increment``). A double that echoes
+        anyway is a false-green generator: a caller that reads the envelope
+        through ``rpc()`` passes the whole suite and gets ``None`` in
+        production, which is exactly the #3025 P0 this guards.
+
+        Kept as a thin wrapper so the emulator itself stays one method
+        (:meth:`_rpc_dispatch`) and the transport rule is stated exactly once.
+        """
+        result = self._rpc_dispatch(fn, body)
+        return result if representation else None
+
+    def _rpc_dispatch(self, fn: str, body: dict | None = None) -> object | None:
+        """Emulate the function body itself — effects + returned value.
+
+        Simulate provision_team (migration 0010) over the in-memory rows.
 
         Mirrors the real SECURITY DEFINER function's observable effects:
         teams upsert on id (name/email refreshed), exactly one membership
@@ -486,6 +641,19 @@ class FakeControlPlane:
         abuse_suspend/abuse_unsuspend RPCs (teams.suspended_at/flagged_at).
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn in ("redeem_oauth_code", "rotate_oauth_refresh"):
+            # #3025: the two mint RPCs are ONE transaction each, so they are
+            # emulated atomically — see `_rpc_oauth_mint`. A seam-level injector
+            # fires either BEFORE the call is dispatched (nothing ran) or AFTER
+            # it committed (the response was lost); the emulator's own rollback
+            # covers a raise from inside.
+            fault = self._take_rpc_fault(fn)
+            if fault is not None and not fault["after_commit"]:
+                raise fault["exc"]
+            result = self._rpc_oauth_mint(fn, dict(body or {}))
+            if fault is not None:
+                raise fault["exc"]
+            return result
         if fn == "account_deletion_claim_org":
             # #4029 (cycle-2): the atomic per-org claim. Mirrors the SQL's
             # single `||` union — appends to claimed_org_ids AND org_ids,
@@ -1024,7 +1192,8 @@ class FakeControlPlane:
                 if not any(i.get("id") == iid and i.get("user_id") == uid
                            for i in self.auth_identities):
                     raise RuntimeError("reserve_unlink:identity_not_found")
-                inv = self.rpc("user_identity_inventory", {"p_user_id": uid})
+                inv = self.rpc("user_identity_inventory",
+                               {"p_user_id": uid}, representation=True)
                 login = int(inv["login_methods"])
                 pending = sum(1 for p2 in permits
                               if p2.get("user_id") == uid and p2.get("consumed_at") is None)
@@ -1510,11 +1679,43 @@ class FakeControlPlane:
         _FAULT_CPS.append(self)          # module-level registry: the guard's only view
                                          # of a bare `FakeControlPlane()` built by a test
 
+    def fail_rpc(self, fn: str, *, after_commit: bool = True, times: int = 1,
+                 exc: Exception | None = None) -> None:
+        """#3025: make an RPC raise at the SEAM rather than inside it.
+
+        `after_commit=True` models the ONE failure a transaction cannot remove: the
+        function COMMITTED and the HTTP response never arrived. `after_commit=False`
+        raises before the call is dispatched at all (nothing ran).
+
+        This is deliberately a different injector from `fail_query`, which raises
+        from a table call INSIDE the emulated transaction — and the emulator then
+        rolls the whole thing back. Making the real seam's two shapes
+        distinguishable is what lets the lost-response residue be tested while the
+        rollback path stays honest.
+        """
+        self._rpc_faults.append({
+            "fn": fn, "after_commit": after_commit, "consumed": False,
+            "times": times,
+            "exc": exc or RuntimeError("Supabase unreachable (simulated)"),
+        })
+        _FAULT_CPS.append(self)
+
+    def _take_rpc_fault(self, fn: str) -> dict | None:
+        for fault in self._rpc_faults:
+            if fault["times"] <= 0 or fault["fn"] != fn:
+                continue
+            fault["times"] -= 1
+            fault["consumed"] = True
+            return fault
+        return None
+
     def unfired_faults(self) -> list[dict]:
         """Injectors that did not do what the test intended — either never fired, or
         fired fewer times than `times` asked for. A test MUST fail on these; a stale
         matcher is otherwise a silent green test."""
-        return [f for f in self._faults if not f["consumed"] or f["times"] > 0]
+        return ([f for f in self._faults if not f["consumed"] or f["times"] > 0]
+                + [f for f in self._rpc_faults
+                   if not f["consumed"] or f["times"] > 0])
 
     def _take_fault(self, table, method, select, filters):
         for fault in self._faults:

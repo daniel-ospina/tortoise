@@ -21,18 +21,17 @@ measured, each against a real graph:
       on edge count would pass a two-read state-only pin. This is the shape that
       would go RED the day an edge term entered the cap, which is precisely the
       change this measurement forecasts.
-  (b) **the EP edge flush journals nothing** — the node posterior flush emits
-      ``ConfidenceChanged`` (the #2884 fix) and the message-cache flushes that
-      follow it emit nothing at all, so no journal record can carry an edge
-      slot. The first half of the assertion is the GUARD: without it a broken
-      emitter would make the second half pass vacuously.
-  (c) **a rebuild loses the edge messages while the node belief survives** —
-      ⚠️ a CHARACTERISATION PIN. It asserts the CURRENT (defective) behaviour of
-      a gap filed as #5380 and must be INVERTED by that fix: after it lands,
-      ``r.msg_alpha`` is expected to survive ``rebuild_all`` and this test
-      should be updated to assert that. It is here because the gap is otherwise
-      invisible — the node half was fixed by #2884 and the edge half looks
-      "restored" only because nothing checks it.
+  (b) **the EP edge flush JOURNALS the edge slots** (#5380) — the node
+      posterior flush emits ``ConfidenceChanged`` (the #2884 fix) and, since
+      #5380, the message-cache flushes that follow it emit one
+      ``EdgeMessageChanged`` per committed edge. The node half of the
+      assertion is the GUARD: without it a broken emitter would make the edge
+      half pass vacuously.
+  (c) **a rebuild RESTORES the edge messages and the node belief** — until
+      #5380 this was a CHARACTERISATION PIN asserting the defective behaviour
+      (the edge half was dropped while the node half survived, so a rebuild
+      *looked* restored). #5380 inverted it: ``r.msg_alpha`` now survives
+      ``rebuild_all``.
 
 Plus the census tool's own arithmetic (``tools/edge_census.py``) and the
 ``--org`` wiring of the cap's count to the graph actually censused — both in the
@@ -59,6 +58,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import subprocess
 from typing import Any
@@ -232,9 +232,49 @@ def test_cap_count_is_invariant_to_edge_state_growth(sdk):
             f"this pin must be updated rather than deleted.")
 
 
-# ── (b) the EP edge flush journals nothing ─────────────────────────────────
+# ── (b) the EP edge flush journals the edge slots (#5380) ──────────────────
 
-def test_ep_edge_flush_journals_no_edge_slot(journaled_sdk):
+def test_edge_message_slot_tuples_are_pinned_equal():
+    """#5380: the producer, the projection fold and the census tool MUST agree
+    on the four edge-resident message slots.
+
+    Three independent declarations exist — ``TortoiseEP.EDGE_MESSAGE_SLOTS``
+    (``tortoise/ep.py``), ``EDGE_MESSAGE_PROPS`` (``tortoise/projection/
+    entities.py``, which cannot import ``ep``) and ``EP_EDGE_SLOTS``
+    (``tools/edge_census.py``). The emit-site test above compares the journaled
+    RECORDS to ``EP_EDGE_SLOTS``, so it cannot see a slot dropped from the
+    FOLD's tuple. This pin is the anti-drift guard the producer comment claims.
+    Non-vacuous: dropping a slot from any of the three (or adding a fifth to
+    one only) reds this test, and nothing else in the suite would notice.
+    """
+    from tortoise.projection.entities import EDGE_MESSAGE_PROPS
+
+    # The pairing the emit sites use must reconstruct the flat tuple exactly —
+    # this is what makes "the emit sites consume the constant" true rather
+    # than aspirational.
+    assert TortoiseEP.EDGE_MESSAGE_SLOTS == (
+        TortoiseEP.EDGE_MESSAGE_FWD_SLOTS
+        + TortoiseEP.EDGE_MESSAGE_BACK_SLOTS)
+    # Cardinality + set equality together, so a duplicated string cannot hide
+    # behind a set comparison that a 3-element tuple would satisfy.
+    for name, other in (("EDGE_MESSAGE_PROPS", EDGE_MESSAGE_PROPS),
+                        ("EP_EDGE_SLOTS", EP_EDGE_SLOTS)):
+        assert len(TortoiseEP.EDGE_MESSAGE_SLOTS) == 4, (
+            f"the producer slot tuple has "
+            f"{len(TortoiseEP.EDGE_MESSAGE_SLOTS)} elements, not 4")
+        assert (frozenset(TortoiseEP.EDGE_MESSAGE_SLOTS)
+                == frozenset(other)), (
+            f"slot drift: TortoiseEP.EDGE_MESSAGE_SLOTS="
+            f"{TortoiseEP.EDGE_MESSAGE_SLOTS} != {name}={tuple(other)} — the "
+            f"producer and the consumer of the edge-message vocabulary have "
+            f"diverged, so a slot written on one side is invisible on the "
+            f"other (#5380)")
+
+
+def test_ep_edge_flush_journals_the_edge_slots(journaled_sdk):
+    """#5380 INVERTED this pin. It used to assert that no record carried an
+    edge message slot; now the flush journals exactly what it committed, so it
+    asserts the slots ARE journaled — with the COMMITTED values."""
     sdk, events = journaled_sdk
     ids = _build_edge_graph(sdk)
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
@@ -263,30 +303,94 @@ def test_ep_edge_flush_journals_no_edge_slot(journaled_sdk):
         r.get("posterior_alpha") is not None for r in node_records
     ), f"the node flush committed nothing: {node_records}"
 
-    # THE FINDING: no record carries any edge message slot — in its TOP-LEVEL
-    # keys (the `**extra` emit style, sdk._emit_event's `event.update(extra)`)
-    # NOR in a nested point snapshot (the other shape the same emitter can
-    # write). Checking only the top level would let a snapshot-style journal
-    # entry for #5380 pass this pin vacuously — and the pin's whole job is to
-    # be the thing that fails when #5380 lands.
-    for record in records:
-        scopes = [record, record.get("point") or {}]
-        for slot in EP_EDGE_SLOTS:
-            for scope in scopes:
-                assert slot not in scope, (
-                    f"an edge message slot reached the journal: {slot!r} in "
-                    f"{record.get('type')!r}. If #5380 landed, this pin is "
-                    f"superseded — update it to assert the slot IS journaled "
-                    f"rather than deleting it.")
+    # THE FINDING, INVERTED (#5380): the edge flush journals one
+    # `EdgeMessageChanged` per committed edge, carrying the slots in its
+    # TOP-LEVEL keys (the `**extra` emit style, sdk._emit_event's
+    # `event.update(extra)`). The record is checked top-level AND in a nested
+    # point snapshot so a snapshot-style journal entry would also satisfy it —
+    # the identity of the shape is not the point, the durability is.
+    edge_records = [r for r in records
+                    if r.get("type") == "EdgeMessageChanged"]
+    assert edge_records, (
+        "#5380 regression: the EP edge flush journaled NOTHING — every "
+        "rebuild_all discards the edge-level belief state, so a JSONL "
+        "wipe+rebuild returns a graph that is only half restored (node "
+        "posteriors via #2884, edge messages gone)")
+    carried = {slot for r in edge_records
+               for scope in (r, r.get("point") or {})
+               for slot in EP_EDGE_SLOTS if scope.get(slot) is not None}
+    assert carried == set(EP_EDGE_SLOTS), (
+        f"the flush journaled only {sorted(carried)} of "
+        f"{sorted(EP_EDGE_SLOTS)} — a slot the graph holds is still not "
+        "durable")
+
+    # …and the journaled value is the COMMITTED value, not a stale cache read
+    # or an iteration intermediate (#6761: one record per committed edge, at
+    # flush).
+    for a, b in itertools.pairwise(ids):
+        forward = [r for r in edge_records
+                   if r.get("op") == "set" and r.get("src") == a
+                   and r.get("tgt") == b and r.get("rel") == "IMPL"
+                   and r.get("msg_alpha") is not None]
+        assert forward, f"no journaled forward message for {a} -> {b}"
+        live = _edge_slots(sdk, a, b)
+        assert forward[-1]["msg_alpha"] == pytest.approx(
+            live["msg_alpha"], rel=1e-12), (
+            f"the journaled msg_alpha for {a} -> {b} is not the committed "
+            f"value: {forward[-1]['msg_alpha']} != {live['msg_alpha']}")
+
+
+# ── (b2) an edge message survives a JSONL wipe+rebuild (#5380) ────────────
+
+def test_rebuild_all_restores_the_edge_message_state(journaled_sdk):
+    """The #5380 regression proper: an OPERATOR edge's message state is
+    restored by ``rebuild_all``.
+
+    Operator edges are used deliberately: ``create_operator`` JOURNALS the
+    operator, so pass-1a re-creates the edge and the assertion is about its
+    PROPERTY rather than about a missing edge. (A plain raw-Cypher direct edge
+    is not journalled at all, and ``DirectEdgeCreated`` replay is deferred and
+    unimplemented — A10 #1048 — so a direct edge is lost regardless of this
+    change.)
+    """
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)
+
+    proj = sdk._get_proj()
+    _q_before = proj.g.query(
+        "MATCH (o:Point)-[r:IMPL]->(c) "
+        "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+        "RETURN o.id, c.id, r.msg_alpha, r.msg_beta").result_set
+    before = {(r[0], r[1]): (r[2], r[3]) for r in _q_before}
+    assert before, "precondition: EP wrote no edge message state"
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    _q_after = proj.g.query(
+        "MATCH (o:Point)-[r:IMPL]->(c) "
+        "RETURN o.id, c.id, r.msg_alpha, r.msg_beta").result_set
+    after = {(r[0], r[1]): (r[2], r[3]) for r in _q_after}
+    for edge, vals in before.items():
+        assert edge in after, (
+            f"the IMPL edge {edge} did not survive the rebuild")
+        assert after[edge] == pytest.approx(vals), (
+            f"#5380 regression: edge {edge} lost its message state across "
+            f"rebuild_all ({vals} -> {after[edge]})")
 
 
 # ── (c) rebuild loses the edge messages, keeps the node belief ─────────────
-# ⚠️ CHARACTERISATION PIN — asserts CURRENT defective behaviour. #5380 is the
-# issue that must invert it. Kept because the gap is invisible otherwise: the
-# node half was fixed by #2884, so a rebuild looks "restored" and nothing
+# ⚠️ INVERTED by #5380. This was the CHARACTERISATION PIN: before the fix a
+# rebuild restored the edges and the node belief but dropped every edge
+# message. It now asserts the state IS durable — the issue's own indicator (3).
+# Kept (rather than renamed away) because the gap is invisible otherwise: the
+# node half was fixed by #2884, so a rebuild looks "restored" and nothing else
 # checks the edge half.
 
-def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
+def test_rebuild_all_keeps_edge_messages_and_node_belief(
         journaled_sdk):
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
@@ -342,12 +446,149 @@ def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
     assert node_after == node_before, (
         f"node belief state was lost across rebuild_all ({node_before} -> "
         f"{node_after}) — that is a REGRESSION of #2884, not this finding")
-    # … but its message state does not. #5380 inverts this assertion.
-    assert msg_after == 0, (
-        f"{msg_after} edges kept r.msg_alpha across rebuild_all — if #5380 "
-        f"landed, invert this assertion (the state is now durable); if it did "
-        f"not, something else started journaling edge messages and the census "
-        f"in #4503 needs re-measuring")
+    # … and its message state survives TOO — #5380 inverted this assertion (it
+    # read `msg_after == 0` while the gap was live).
+    assert msg_after == edges_before, (
+        f"#5380 regression: only {msg_after} of {edges_before} dressed IMPL "
+        f"edges kept r.msg_alpha across rebuild_all — every rebuild discards "
+        f"the edge-level belief state, so the graph comes back half restored "
+        f"(the node posteriors above DID survive) and the next EP run "
+        f"warm-starts from a different state than the graph it replaced")
+
+
+# ── (c2) the `clear` leg survives a JSONL wipe+rebuild (#5380) ─────────────
+# The `set` leg is pinned above. The `clear` leg is the ANTI-DIVERGENCE half:
+# without it the fold RESURRECTS seeds the live graph dropped (#1242's
+# stale-seed class / the #330 parity break). No test referenced it before this
+# one — neutering `_emit_edge_message_clear` left the whole file green.
+
+def test_rebuild_all_does_not_resurrect_cleared_edge_messages(journaled_sdk):
+    """A full-scope live invalidation must be replayed, not undone."""
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)
+
+    proj = sdk._get_proj()
+    dressed = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert dressed > 0, "precondition: EP wrote no edge message state"
+
+    dropped = sdk._get_ep().invalidate_messages(None)
+    assert dropped > 0, "precondition: the live clear matched no edge"
+    live_after = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert live_after == 0, (
+        "the live clear did not drop the edge message state, so the rebuild "
+        "assertion below would be vacuous")
+
+    records = [json.loads(line) for line in (events / "events.jsonl")
+               .read_text().splitlines() if line.strip()]
+    clears = [r for r in records if r.get("type") == "EdgeMessageChanged"
+              and r.get("op") == "clear"]
+    assert clears, (
+        "#5380 regression: the live invalidation journaled NO clear record — "
+        "a rebuild resurrects the seeds the live graph just dropped (#330)")
+    assert any(r.get("scope") == "all" for r in clears), clears
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    resurrected = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert resurrected == 0, (
+        f"#5380 regression: the rebuild RESURRECTED message state on "
+        f"{resurrected} edge(s) the live graph had cleared — the `clear` leg "
+        f"is not replayed, so live and replay diverge (#330)")
+
+
+def test_rebuild_replays_touching_and_neighbourhood_clears(journaled_sdk):
+    """The other two scopes: ``touching`` and ``operator-neighbourhood``.
+
+    ``invalidate_factor_messages`` is the #2422 ghost-vote leg — a claim's
+    influence reaches its neighbours' SIBLING edges, which ``touching`` does
+    not cover. Both must replay or the rebuilt graph keeps ghost seeds.
+    """
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)
+
+    proj = sdk._get_proj()
+    mid = ids[1]
+    assert sdk._get_ep().invalidate_messages([mid]) > 0, \
+        "precondition: the `touching` clear matched no edge"
+    assert sdk._get_ep().invalidate_factor_messages([mid]) > 0, \
+        "precondition: the `operator-neighbourhood` clear matched no edge"
+
+    records = [json.loads(line) for line in (events / "events.jsonl")
+               .read_text().splitlines() if line.strip()]
+    scopes = {r.get("scope") for r in records
+              if r.get("type") == "EdgeMessageChanged"
+              and r.get("op") == "clear"}
+    assert {"touching", "operator-neighbourhood"} <= scopes, (
+        f"#5380 regression: the non-`all` clear scopes were not journaled: "
+        f"{scopes}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    resurrected = proj.g.query(
+        "MATCH ()-[r:IMPL]->() WHERE r.msg_alpha IS NOT NULL "
+        "RETURN count(r)").result_set[0][0]
+    assert resurrected == 0, (
+        f"#5380 regression: the rebuild resurrected message state on "
+        f"{resurrected} edge(s) cleared through `touching` / "
+        f"`operator-neighbourhood` (#330/#2422)")
+
+
+# ── (c3) the mixed pre-fix-journal case is REPORTED (#5380) ────────────────
+
+def test_rebuild_reports_drop_for_a_post_upgrade_journal(
+        journaled_sdk, caplog):
+    """A #5380-era journal PLUS older dressed edges must still report the drop.
+
+    The aggregate report used to be gated on "the journal holds NO
+    ``EdgeMessageChanged`` record" — zero records or nothing. Once ANY edge
+    message is journaled that flag stays False forever, so the report could
+    never fire again, including for the pre-#5380 dressed edges the journal
+    never mentions. This test builds exactly that mixed state: an operator
+    edge the journal recreates AND a raw direct edge it does not, then asserts
+    the post-replay comparison names the loss. Pre-fix: no such warning.
+    """
+    sdk, events = journaled_sdk
+    ids = _claims(sdk, 3)
+    for a, b in itertools.pairwise(ids):
+        sdk.create_operator("IMPL", a, [b])
+    _seed_evidence(sdk, ids[-1], 8.0, 2.0)
+    _run_ep(sdk, ids, emit=sdk._emit_event)   # journals EdgeMessageChanged
+
+    proj = sdk._get_proj()
+    # A dressed edge the journal NEVER records: raw Cypher, no create_operator,
+    # and DirectEdgeCreated is not folded by the replay (A10 #1048), so it is
+    # lost by the wipe+replay. This is the "older dressed edge" half.
+    extra = _claims(sdk, 1)[0]
+    _direct_impl_edge(sdk, ids[0], extra)
+    proj.g.query(
+        "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
+        "SET r.msg_alpha=0.5, r.msg_beta=0.5",
+        params={"a": ids[0], "b": extra})
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("were NOT restored" in m and "EP" in m
+               for m in messages), (
+        "#5380 regression: a mixed post-upgrade journal reported NO loss. The "
+        "aggregate report is gated on 'the journal holds NO EdgeMessageChanged "
+        "record', so it silently disables itself the moment one edge message "
+        f"is journaled — the realistic migration case: {messages}")
 
 
 # ── the census tool's own arithmetic (the re-runnable receipt) ─────────────

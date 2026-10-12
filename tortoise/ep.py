@@ -277,14 +277,24 @@ class TortoiseEP:
                     # #7853: o is id-anchored (the operator); drop the child's
                     # label and filter the traversal with the disjunction —
                     # no index is lost (the edge is reached FROM o).
-                    self.g.query(
+                    result = self.g.query(
                         f"UNWIND $params AS p "
                         f"MATCH (o:Point {{id: p.oid}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.cid "
-                        "SET r.msg_alpha = p.a, r.msg_beta = p.b",
+                        "SET r.msg_alpha = p.a, r.msg_beta = p.b "
+                        "RETURN p.oid, p.cid, p.a, p.b",
                         params={"params": params_list},
                     )
+                    # #5380: journal EXACTLY the edges this statement
+                    # committed. ``RETURN`` makes the journal set the committed
+                    # set — a parameter whose edge vanished mid-run is NOT
+                    # journaled as a write (the node arm's `RETURN n.id`
+                    # discipline, above).
+                    for _oid, _cid, _a, _b in result.result_set:
+                        self._emit_edge_message(
+                            _oid, _cid, rel, self.EDGE_MESSAGE_FWD_SLOTS,
+                            (_a, _b))
 
         if getattr(self, "_back_cache", None):
             for rel in ("IMPL", "NAND"):
@@ -303,9 +313,16 @@ class TortoiseEP:
                         f"MATCH (o:{{label}} {{id:p.src}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.tgt "
-                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b"
+                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b "
+                        "RETURN p.src, p.tgt, p.a, p.b"
                     ):
-                        self.g.query(_q, params={"params": params_list})
+                        _res = self.g.query(
+                            _q, params={"params": params_list})
+                        # #5380: one record per committed edge, per label.
+                        for _s, _t, _a, _b in _res.result_set:
+                            self._emit_edge_message(
+                                _s, _t, rel,
+                                self.EDGE_MESSAGE_BACK_SLOTS, (_a, _b))
         return True
 
     def _clear_caches(self) -> None:
@@ -313,6 +330,67 @@ class TortoiseEP:
         for _attr in ("_node_cache", "_msg_cache", "_back_cache"):
             if hasattr(self, _attr):
                 delattr(self, _attr)
+
+    # ── #5380: edge-message durability journaling ────────────────
+    # The four edge-resident EP message slots, paired by direction. The emit
+    # sites below pass the two PAIR constants — never a literal — and
+    # `tests/test_4503_edge_relationship_accounting.py` pins the flat
+    # `EDGE_MESSAGE_SLOTS` equal to the projection fold's
+    # `projection.entities.EDGE_MESSAGE_PROPS` and to
+    # `tools.edge_census.EP_EDGE_SLOTS`, so a fifth slot added to one copy of
+    # the vocabulary reds that pin instead of drifting silently.
+    EDGE_MESSAGE_FWD_SLOTS: tuple = ("msg_alpha", "msg_beta")
+    EDGE_MESSAGE_BACK_SLOTS: tuple = ("back_msg_alpha", "back_msg_beta")
+    EDGE_MESSAGE_SLOTS: tuple = (EDGE_MESSAGE_FWD_SLOTS
+                                 + EDGE_MESSAGE_BACK_SLOTS)
+
+    def _emit_edge_message(self, src: str, tgt: str, rel: str,
+                           keys: tuple, values: tuple) -> None:
+        """Journal ONE committed edge-message write (#5380).
+
+        ``_emit`` is ``None`` on a journal-less lane, so the graph-only path
+        stays byte-identical to the pre-#5380 behaviour (no emission, no
+        extra read). The record carries the edge IDENTITY
+        (``src``/``tgt``/``rel`` — the edge has no node id of its own, the
+        same flat composite ``DirectEdgeCreated`` uses) plus the slot values
+        actually committed, mirroring the node arm's ``RETURN n.id``
+        discipline above: the journal set IS the committed set.
+
+        Called ONCE per committed edge, never per EP iteration — the caches
+        are the batched accumulator (#6761's load→flush boundary).
+        """
+        if self._emit is None:
+            return
+        self._emit("EdgeMessageChanged", op="set",
+                   id=f"{src}->{tgt}:{rel}", src=src, tgt=tgt, rel=rel,
+                   **dict(zip(keys, values, strict=True)))
+
+    def _emit_edge_message_clear(self, scope: str,
+                                 point_ids: list | None = None) -> None:
+        """Journal ONE committed edge-message INVALIDATION (#5380).
+
+        A BULK record, deliberately not one-per-edge: the live clear is a
+        single Cypher ``REMOVE`` over a whole scope, and enumerating its edges
+        to journal per-edge records would turn a documented-cheap full drop
+        into an O(#edges) result-set materialization on a hot write path
+        (``create_point`` with a baseline reaches the full-graph drop).
+        ``scope`` names the live query the replay fold re-runs; a record is
+        emitted whenever the live statement MATCHED at least one edge. Its
+        ``RETURN count`` is the matched-edge count, NOT the number of edges
+        that actually carried message state — a topology change that merely
+        touches a bare edge still emits a record.
+
+        Without this leg the fold would RESURRECT seeds the live graph had
+        dropped — the #330 live/replay parity break, arriving the moment the
+        write leg above starts journaling: pre-#5380 a rebuild produced bare
+        edges, which happened to agree with a post-clear live graph.
+        """
+        if self._emit is None:
+            return
+        payload: dict = {"op": "clear", "scope": scope}
+        if point_ids is not None:
+            payload["point_ids"] = [p for p in point_ids if isinstance(p, str)]
+        self._emit("EdgeMessageChanged", id="edge-messages-clear", **payload)
 
     # ── Cached read/write ────────────────────────────────────────
 
@@ -388,12 +466,20 @@ class TortoiseEP:
         if _cache is not None:
             _cache[key] = (msg_alpha, msg_beta)
             return
-        self.g.query(
+        result = self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "SET r.msg_alpha=$a, r.msg_beta=$b",
+            "SET r.msg_alpha=$a, r.msg_beta=$b RETURN c.id",
             params={"oid": op_id, "cid": claim_id, "a": msg_alpha, "b": msg_beta},
         )
+        # #5380: the DIRECT (no-cache) path is a committed write — journal it
+        # here; the cached path defers to ``_flush_cache``'s batched emit.
+        # Guard on the MATCH, exactly as ``_write_node`` does: a missing edge
+        # committed nothing.
+        if result.result_set:
+            self._emit_edge_message(op_id, claim_id, rel_type,
+                                    self.EDGE_MESSAGE_FWD_SLOTS,
+                                    (msg_alpha, msg_beta))
 
     # ── Operator-less direct-edge back-messages (#888 W5) ──────────
     # The back-message of a direct edge (src)-[r]->(tgt) lives ON the edge
@@ -433,10 +519,16 @@ class TortoiseEP:
         for _q in epistemic_label_queries(
             f"MATCH (o:{{label}} {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b"
+            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b RETURN c.id"
         ):
-            self.g.query(_q, params={
+            _res = self.g.query(_q, params={
                 "oid": src_id, "cid": tgt_id, "a": msg_alpha, "b": msg_beta})
+            # #5380: journal the committed write (direct, no-cache path).
+            if _res.result_set:
+                self._emit_edge_message(
+                    src_id, tgt_id, rel_type,
+                    self.EDGE_MESSAGE_BACK_SLOTS,
+                    (msg_alpha, msg_beta))
 
     # ── Natural parameter helpers ─────────────────────────────────
 
@@ -1458,7 +1550,12 @@ class TortoiseEP:
                 "       r.back_msg_alpha, r.back_msg_beta "
                 "RETURN count(r)"
             ).result_set
-            return int(rows[0][0]) if rows else 0
+            count = int(rows[0][0]) if rows else 0
+            # #5380: the drop is committed state — journal it, or a rebuild
+            # resurrects the seeds the live graph just dropped.
+            if count:
+                self._emit_edge_message_clear("all")
+            return count
         if not point_ids:
             return 0
         rows = self.g.query(
@@ -1469,7 +1566,10 @@ class TortoiseEP:
             "RETURN count(DISTINCT r)",
             params={"ids": list(point_ids)},
         ).result_set
-        return int(rows[0][0]) if rows else 0
+        count = int(rows[0][0]) if rows else 0
+        if count:
+            self._emit_edge_message_clear("touching", point_ids)
+        return count
 
     def invalidate_factor_messages(self, point_ids: list[str]) -> int:
         """Drop messages on ALL edges of every operator connected to a point.
@@ -1502,7 +1602,10 @@ class TortoiseEP:
             "RETURN count(DISTINCT r)",
             params={"ids": list(point_ids)},
         ).result_set
-        return int(rows[0][0]) if rows else 0
+        count = int(rows[0][0]) if rows else 0
+        if count:
+            self._emit_edge_message_clear("operator-neighbourhood", point_ids)
+        return count
 
     def run(self, operator_ids: list[str], max_hops: int | None = 2,
             evidence: dict[str, tuple[float, float]] | None = None,

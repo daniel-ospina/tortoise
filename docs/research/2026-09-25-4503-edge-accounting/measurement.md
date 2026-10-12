@@ -312,10 +312,14 @@ This is the part that turned out to be sharper than the issue body states.
 The issue body's coupling note asserts that `#2884` (OPEN) reports EP state is never journaled.
 **`#2884` is CLOSED** — fix PR #4543, pinned by `tests/test_2884_ep_state_journaled.py`. So:
 
+> ⚠️ **Superseded (edge row) by #5380.** The measurement below was taken 2026-09-25, before the
+> edge-message durability fix landed. It is kept as the record of the gap that motivated #5380;
+> the edge row is **no longer current**.
+
 | state class | writer | journaled? | survives `rebuild_all`? |
 |---|---|---|---|
 | node: `posterior_alpha`/`posterior_beta`/`confidence`/`lastDreamedAt` | `ep.py:224-227` emits `ConfidenceChanged`; `dream.py` too | ✅ since #2884 | ✅ **verified below** |
-| **edge: `msg_alpha`/`msg_beta`/`back_msg_alpha`/`back_msg_beta`** | `ep.py:241`, `:256` (batch), `:333`, `:366` (direct) — **no `_emit` anywhere** | ❌ **never** | ❌ **verified below** |
+| **edge: `msg_alpha`/`msg_beta`/`back_msg_alpha`/`back_msg_beta`** | `ep.py:241`, `:256` (batch), `:333`, `:366` (direct) — **no `_emit` anywhere** *(pre-#5380 — the flush now emits `EdgeMessageChanged` per committed edge, plus a bulk `clear` record)* | ❌ **never** *(pre-#5380; ✅ since #5380)* | ❌ **verified below** *(pre-#5380; ✅ since #5380)* |
 
 **`BELIEF_PROPS = ("confidence", "posterior_alpha", "posterior_beta", "lastDreamedAt")`**
 (`tortoise/projection/entities.py:71`) is node-only, and `grep -rn "msg_alpha\|back_msg"
@@ -325,7 +329,11 @@ message even from a hand-written log line. This is not "the log has it and the w
 
 ### The measurement, end-to-end (a real `rebuild_all`)
 
-From `tests/test_4503_edge_relationship_accounting.py::test_rebuild_all_loses_edge_messages_while_node_belief_survives`:
+From `tests/test_4503_edge_relationship_accounting.py::test_rebuild_all_loses_edge_messages_while_node_belief_survives`
+— **renamed and INVERTED by #5380** to
+`test_rebuild_all_keeps_edge_messages_and_node_belief` (the renamed test now asserts the edge
+message state SURVIVES). The output below is the PRE-#5380 measurement this document records, not
+current behaviour:
 
 ```
 before rebuild : edges=4  msg_alpha=4  node posterior_alpha=3

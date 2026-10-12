@@ -47,6 +47,7 @@ from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
 )
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
+    SHAPE_EDGE_MESSAGE_MISS,
     SHAPE_POINT_BELIEF_MISS,
     SHAPE_STATE_OP_MISS,
     SHAPE_UNIMPLEMENTED_OP,
@@ -4028,6 +4029,13 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     # ``apply``/``rebuild_all``, but a Session node is not a Point, so this
     # ``{id: point}`` index has no representation for it.
     "SessionDeleted",
+    # #5380: the EP edge-message write-back / invalidation. A real fold in
+    # both graph engines (``_fold_edge_message_changed``), but its target is a
+    # RELATIONSHIP (``src``/``tgt``/``rel``, or a bulk scope) and this
+    # ``{id: point}`` index has no edge representation at all — the same
+    # reason ``DirectEdgeCreated``/``DirectEdgeRepoint`` are listed above. It
+    # is NOT in ``_NO_PROJECTION_FOLD``: the graph engines DO fold it.
+    "EdgeMessageChanged",
 })
 
 
@@ -7513,6 +7521,35 @@ class FalkorProjection(
                         id=_cc_rid,
                         detail="apply: belief write-back matched no Point",
                     )
+        elif t == "EdgeMessageChanged":
+            # #5380: the EP edge-message write-back / invalidation. Folded
+            # INLINE here — this engine feeds an in-order journal to
+            # ``apply()`` one record at a time, so the target edge exists by
+            # the time its message record arrives (the operator edge is
+            # PRECEDENT). A ``set`` miss is RECORDED and warned, never
+            # refused: a plain direct edge is legitimately absent (A10 #1048 —
+            # ``DirectEdgeCreated`` is not folded by this engine at all, so
+            # the EDGE is lost and refusing here would block recovery of a
+            # journal whose loss this fold does not cause), and a
+            # hard-deleted edge is gone live too. The shape is EXEMPT in
+            # ``nonfolded.EXEMPT_SHAPES`` with its degraded guarantee written
+            # down; ``rebuild_all``'s deferred sweep carries the same
+            # disposition.
+            if (self._fold_edge_message_changed(ev) == 0
+                    and ev.get("op") == "set"):
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=journal_seq,
+                    id=ev.get("id"), op=ev.get("op"),
+                    detail="apply: edge-message write matched no edge",
+                )
+                logger.warning(
+                    "apply: EdgeMessageChanged matched no edge "
+                    "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
+                    "re-created by any journaled event (#5380)",
+                    ev.get("event_id"), ev.get("src"), ev.get("tgt"),
+                    ev.get("rel"))
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
             # audit-only markers, the JSONL-only batch snapshot replayed in
@@ -8052,6 +8089,26 @@ class FalkorProjection(
         # turns a durability bug into permanent data loss).
         episodic_before = self._episodic_point_ids()
 
+        # #5380 indicator 4: a journal that PREDATES edge-message journaling
+        # carries no ``EdgeMessageChanged`` record, so the replay cannot
+        # restore the EP seeds the pre-wipe graph holds — and, with the node
+        # half already restored by #2884, the result LOOKS restored. Capture
+        # the pre-wipe population so ``rebuild_all`` can REPORT the drop it is
+        # about to perform instead of performing it silently. Read, never
+        # proven-absent: the count is informational, so a read that cannot
+        # answer reports "unknown" rather than aborting a recovery.
+        try:
+            _ep_edges_before_rows = self.g.query(
+                "MATCH ()-[r:IMPL|NAND]->() "
+                "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+                "   OR r.back_msg_alpha IS NOT NULL "
+                "   OR r.back_msg_beta IS NOT NULL "
+                "RETURN count(r)").result_set
+            ep_bearing_edges_before = (
+                int(_ep_edges_before_rows[0][0])
+                if _ep_edges_before_rows else 0)
+        except Exception:  # noqa: BLE001, RUF100
+            ep_bearing_edges_before = None
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
         # event in the JSONL log. Snapshot them now so they survive the
@@ -9187,6 +9244,22 @@ class FalkorProjection(
         # ms; JSONL carries no seq). Same events list pass-1a enumerates ⇒
         # identical seq space as last_recreate_seq.
         point_re_stamp_folds: list[tuple[int, dict]] = []
+        # #5380: EP edge-message write-backs / invalidations, DEFERRED to a
+        # trailing sweep that runs AFTER pass-2b. Inline pass-1b folding
+        # cannot work here: pass-1a hoists every Point/Operator creation (so
+        # an OPERATOR edge exists by pass-1b), but pass-2b re-creates a
+        # TRANSFERRED direct edge from its ``DirectEdgeRepoint`` descriptor
+        # (A10 #1048), so an edge that only exists by pass-2b would be missed
+        # inline. (``DirectEdgeCreated`` — plain direct-edge BASE creation —
+        # is folded by NEITHER engine: it is JSONL-only and its replay stays
+        # deferred (A10 #1048), so those edges are lost on rebuild by that
+        # pre-existing gap. That loss is the ``EXEMPT_SHAPES`` rationale for
+        # an edge-message MISS, not a reason to defer this sweep.)
+        # The sweep runs after EVERY edge-creating pass, so the edge set is
+        # final; records are buffered WITH their journal seq and replayed in
+        # journal order, which is what makes a ``clear`` followed by a
+        # ``set`` land on the ``set`` (last writer wins, per edge).
+        edge_message_events: list[tuple[int, dict]] = []
         # #2488: per-id highest journal seq of a same-id INLINE updatedAt
         # writer (PointRevised / PointPromoted — pass-1b applies both
         # inline; they never enter the deferred list); a PointInvalidated
@@ -9703,6 +9776,13 @@ class FalkorProjection(
                         "journaled event (legacy journal, unjournaled "
                         "producer, or delete race)",
                         ev.get("event_id"), ev.get("id"))
+            elif t == "EdgeMessageChanged":
+                # #5380: buffered — see ``edge_message_events`` above. The fold
+                # is a per-edge SET of absolute values (presence-conditional,
+                # ``None`` = the journaled clear) or a bulk scoped REMOVE, both
+                # idempotent, so deferring past pass-2b changes nothing except
+                # making the target edge exist.
+                edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -11234,6 +11314,98 @@ class FalkorProjection(
                             f"(b:Point {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
+
+        # ── #5380: replay the EP edge-message write-backs ─────────────
+        # AFTER every edge-creating pass (pass-1a hoists operator edges;
+        # pass-2b re-creates transferred direct edges), in JOURNAL ORDER, so
+        # the last writer per edge wins and a ``clear`` before a later ``set``
+        # does not clobber it. Deferred rather than folded in pass-1b because
+        # a plain DIRECT edge exists only after pass-2 — see
+        # ``edge_message_events`` at its declaration.
+        _edge_msg_journaled = bool(edge_message_events)
+        for _em_seq, _em_ev in edge_message_events:
+            self._replay_seq = _em_seq
+            _em_ev = self._norm(_em_ev)
+            if self._fold_edge_message_changed(_em_ev) == 0 \
+                    and _em_ev.get("op") == "set":
+                # RECORDED and warned, never refused — see
+                # ``_fold_edge_message_changed``: a plain direct edge is
+                # legitimately absent (A10 #1048), and a hard-deleted edge is
+                # gone live too, so a refusal here would block recovery of a
+                # journal whose edge loss this fold does not cause. Exempt in
+                # ``nonfolded.EXEMPT_SHAPES``; the record is what makes the
+                # miss visible at the run boundary
+                # (``assert_no_non_folded`` names every exempt record) and in
+                # this rebuild's post-replay dressed-edge report — NOT to
+                # ``check_consistency``, whose ``_apply_one``-based journal
+                # side never calls the edge-message fold.
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=_em_ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=_em_seq,
+                    id=_em_ev.get("id"), op=_em_ev.get("op"),
+                    detail="rebuild: edge-message write matched no edge",
+                )
+                logger.warning(
+                    "rebuild: EdgeMessageChanged matched no edge "
+                    "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
+                    "re-created by any journaled event (#5380)",
+                    _em_ev.get("event_id"), _em_ev.get("src"),
+                    _em_ev.get("tgt"), _em_ev.get("rel"))
+        # #5380 indicator 4 (the MIXED case): the report below is gated on
+        # ``not _edge_msg_journaled`` — zero records or nothing. Once a
+        # #5380-era journal has recorded even ONE edge message that flag stays
+        # False forever, so the aggregate report can never fire again —
+        # INCLUDING for the pre-#5380 dressed edges still resident in the graph
+        # that the journal never mentions. Those lose their message state
+        # across the wipe+replay with no report: the realistic migration case
+        # (old dressed edges + a post-upgrade journal), and precisely the
+        # "looks restored" outcome the pre-wipe capture exists to prevent.
+        # Compare the post-replay population against that capture instead, so
+        # the drop is reported whenever it actually happened, whatever the
+        # journal holds. The per-record ``miss`` warning above covers only a
+        # `set` whose OWN edge is missing — never an edge the journal does not
+        # mention at all.
+        if ep_bearing_edges_before:
+            try:
+                _ep_edges_after_rows = self.g.query(
+                    "MATCH ()-[r:IMPL|NAND]->() "
+                    "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+                    "   OR r.back_msg_alpha IS NOT NULL "
+                    "   OR r.back_msg_beta IS NOT NULL "
+                    "RETURN count(r)").result_set
+                ep_bearing_edges_after = (
+                    int(_ep_edges_after_rows[0][0])
+                    if _ep_edges_after_rows else 0)
+            except Exception:  # noqa: BLE001, RUF100
+                ep_bearing_edges_after = None
+            if (ep_bearing_edges_after is not None
+                    and ep_bearing_edges_after < ep_bearing_edges_before):
+                logger.warning(
+                    "rebuild: the pre-wipe graph carried %d edge(s) with EP "
+                    "message state but the rebuilt graph holds only %d — %d "
+                    "dressed edge(s) were NOT restored (#5380). A pre-#5380 "
+                    "journal carries no EdgeMessageChanged record for them, "
+                    "and this report is deliberately NOT gated on that: it "
+                    "fires whenever the state actually dropped, including the "
+                    "mixed case (an upgraded journal plus older dressed "
+                    "edges).",
+                    ep_bearing_edges_before, ep_bearing_edges_after,
+                    ep_bearing_edges_before - ep_bearing_edges_after)
+        if not _edge_msg_journaled and ep_bearing_edges_before:
+            # #5380 indicator 4 — the pre-fix journal. The rebuild has ALREADY
+            # dropped the state by this point (there is no record to fold), so
+            # this is a report, not a gate: fail only loud-and-named would make
+            # every existing production journal unrecoverable, which is the
+            # opposite of what a durability fix may do.
+            logger.warning(
+                "rebuild: the pre-wipe graph carried %d edge(s) with EP "
+                "message state but the journal holds NO EdgeMessageChanged "
+                "record — the edge-level belief state was NOT restored. The "
+                "node posteriors ARE (the #2884 fold), so the result looks "
+                "restored: the journal predates #5380, and the next EP run "
+                "warm-starts from bare edges instead of the pre-rebuild "
+                "seeds.", ep_bearing_edges_before)
 
         # ── #7951: re-assert the journal's session hard-deletes ───────
         # AFTER every replay pass. Pass 2 re-derives edges from EVERY

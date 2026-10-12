@@ -138,7 +138,13 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         try:
-            result = self.cp.rpc(fn, body)
+            # PostgREST's `Prefer: return=minimal` (the default) does not echo
+            # an RPC's body; the fake models that, so the header MUST be
+            # propagated or a `rpc_value` call is answered `{}` here while
+            # production answers the envelope.
+            prefer = self.headers.get("Prefer") or ""
+            result = self.cp.rpc(fn, body,
+                                 representation="return=representation" in prefer)
             self._send(200, b"{}" if result is None else json.dumps(result).encode())
         except RuntimeError as e:
             # PostgREST wraps RPC errors as 400 with the message embedded —

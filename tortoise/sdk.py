@@ -25758,9 +25758,23 @@ class TortoiseSDK:
         }
         if frontmatter.get("domain") is not None:
             ev["domain"] = str(frontmatter["domain"])
+        # #7951 — THE JOURNAL ORDERING CONTRACT (module top): **journal first,
+        # then project.** `ev` is fully built above, so this record qualifies
+        # for NEITHER contract exception (it is not a replay, and its payload
+        # does not depend on the fold) — it therefore MUST NOT be applied
+        # first. `_emit_event`'s append is the COMMIT POINT: if it fails it
+        # counts the failure (`_journal_write_failures`) and the fold is
+        # skipped, so the DERIVED store can never lead the TRUTH. Before this
+        # fix the fold ran first and the record was journalled after it — the
+        # window no replay can undo (contract window (a)).
+        p = {k: v for k, v in ev.items() if k not in ("type", "id")}
+        _failures_before = self._journal_write_failures
+        self._emit_event("DocumentCreated", id=doc_id, **p)
+        if self._journal_write_failures > _failures_before:
+            # Append failed → not committed → do NOT fold. `_emit_event` has
+            # already logged at ERROR and counted the failure.
+            return
         proj.apply(ev)
-        payload = {k: v for k, v in ev.items() if k not in ("type", "id")}
-        self._emit_event("DocumentCreated", id=doc_id, **payload)
 
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:
