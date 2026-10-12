@@ -32,9 +32,11 @@ Honest reading (the report's conclusion, corroborated by the review):
     run to run; the seam's contribution sits inside that noise, so the guard
     is not a material cost.
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import statistics
@@ -42,8 +44,7 @@ import sys
 import time
 import uuid
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _REPO_ROOT)
 
 DIM = 384
@@ -57,18 +58,22 @@ def _seed(g, label: str, ids: list[str], vec: list[float]) -> None:
     for pid in ids:
         g.query(
             f"CREATE (n:{label} {{id:$id}}) SET n.embedding = vecf32($e)",
-            params={"id": pid, "e": vec})
+            params={"id": pid, "e": vec},
+        )
 
 
-def _time_overwrites(g, label, ids, vec, *, seamed: bool,
-                     clear_then_set_prefix, set_embedding_clause) -> list[float]:
+def _time_overwrites(
+    g, label, ids, vec, *, seamed: bool, clear_then_set_prefix, set_embedding_clause
+) -> list[float]:
     if seamed:
-        query = (f"MATCH (n:{label} {{id:$id}}) "
-                 + clear_then_set_prefix("n", "$e")
-                 + "SET " + set_embedding_clause("n", "$e"))
+        query = (
+            f"MATCH (n:{label} {{id:$id}}) "
+            + clear_then_set_prefix("n", "$e")
+            + "SET "
+            + set_embedding_clause("n", "$e")
+        )
     else:
-        query = (f"MATCH (n:{label} {{id:$id}}) "
-                 "SET n.embedding = vecf32($e)")
+        query = f"MATCH (n:{label} {{id:$id}}) SET n.embedding = vecf32($e)"
     samples = []
     for pid in ids:
         t0 = time.perf_counter()
@@ -93,45 +98,62 @@ def _stats(samples: list[float]) -> dict:
 def _ensure_index(g, label: str) -> str:
     """Create an HNSW vector index on ``label.embedding``; return the API used."""
     try:
-        g.query(
-            f"CALL db.idx.vector.createNodeIndex('{label}', 'embedding', "
-            f"{DIM}, 'HNSW')")
+        g.query(f"CALL db.idx.vector.createNodeIndex('{label}', 'embedding', {DIM}, 'HNSW')")
         return "procedure"
     except Exception:
         g.query(
             f"CREATE VECTOR INDEX FOR (n:{label}) ON (n.embedding) "
-            f"OPTIONS {{dimension: {DIM}, similarityFunction: 'euclidean'}}")
+            f"OPTIONS {{dimension: {DIM}, similarityFunction: 'euclidean'}}"
+        )
         return "cypher"
 
 
-def _measure(g, label: str, ids: list[str], base, moved, *, seamed: bool,
-             clear_then_set_prefix, set_embedding_clause) -> list[float]:
+def _measure(
+    g,
+    label: str,
+    ids: list[str],
+    base,
+    moved,
+    *,
+    seamed: bool,
+    clear_then_set_prefix,
+    set_embedding_clause,
+) -> list[float]:
     _seed(g, label, ids, base)
     samples = _time_overwrites(
-        g, label, ids, moved, seamed=seamed,
+        g,
+        label,
+        ids,
+        moved,
+        seamed=seamed,
         clear_then_set_prefix=clear_then_set_prefix,
-        set_embedding_clause=set_embedding_clause)
+        set_embedding_clause=set_embedding_clause,
+    )
     g.query(f"MATCH (n:{label}) DETACH DELETE n")
     return samples
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--writes", type=int, default=200,
-                        help="overwrites measured per (shape, indexedness) cell")
-    parser.add_argument("--json", dest="json_path", default=None,
-                        help="also write the raw samples to this path")
+    parser.add_argument(
+        "--writes", type=int, default=200, help="overwrites measured per (shape, indexedness) cell"
+    )
+    parser.add_argument(
+        "--json", dest="json_path", default=None, help="also write the raw samples to this path"
+    )
     args = parser.parse_args(argv)
 
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
-        print("TORTOISE_DB_URI is unset — this harness measures the SERVER "
-              "lane; run `eval \"$(uv run python tools/test_lane.py uri)\"`.",
-              file=sys.stderr)
+        print(
+            "TORTOISE_DB_URI is unset — this harness measures the SERVER "
+            'lane; run `eval "$(uv run python tools/test_lane.py uri)"`.',
+            file=sys.stderr,
+        )
         return 2
 
-    from tortoise.projection import FalkorProjection  # noqa: E402
-    from tortoise.vector_write import (  # noqa: E402
+    from tortoise.projection import FalkorProjection
+    from tortoise.vector_write import (
         clear_then_set_prefix,
         set_embedding_clause,
     )
@@ -146,38 +168,50 @@ def main(argv=None) -> int:
     moved[0] += 0.02  # a realistic small-Δ overwrite (real embedder output)
     ids = [f"c{i}" for i in range(args.writes)]
 
-    result: dict = {"graph_name": graph_name, "writes": args.writes,
-                    "sections": {}}
+    result: dict = {"graph_name": graph_name, "writes": args.writes, "sections": {}}
     try:
-        for name, seamed in (("bare_unindexed", False),
-                             ("seamed_unindexed", True)):
-            result["sections"][name] = _stats(_measure(
-                g, f"_Churn{nonce}{'S' if seamed else 'B'}", ids, base, moved,
-                seamed=seamed,
-                clear_then_set_prefix=clear_then_set_prefix,
-                set_embedding_clause=set_embedding_clause))
+        for name, seamed in (("bare_unindexed", False), ("seamed_unindexed", True)):
+            result["sections"][name] = _stats(
+                _measure(
+                    g,
+                    f"_Churn{nonce}{'S' if seamed else 'B'}",
+                    ids,
+                    base,
+                    moved,
+                    seamed=seamed,
+                    clear_then_set_prefix=clear_then_set_prefix,
+                    set_embedding_clause=set_embedding_clause,
+                )
+            )
 
-        for name, seamed in (("bare_indexed", False),
-                             ("seamed_indexed", True)):
+        for name, seamed in (("bare_indexed", False), ("seamed_indexed", True)):
             label = f"_ChurnIdx{nonce}{'S' if seamed else 'B'}"
             result["sections"][name + "_api"] = _ensure_index(g, label)
-            result["sections"][name] = _stats(_measure(
-                g, label, ids, base, moved, seamed=seamed,
-                clear_then_set_prefix=clear_then_set_prefix,
-                set_embedding_clause=set_embedding_clause))
+            result["sections"][name] = _stats(
+                _measure(
+                    g,
+                    label,
+                    ids,
+                    base,
+                    moved,
+                    seamed=seamed,
+                    clear_then_set_prefix=clear_then_set_prefix,
+                    set_embedding_clause=set_embedding_clause,
+                )
+            )
     finally:
-        try:  # the scratch graph is disjoint from every product graph
+        with contextlib.suppress(Exception):  # cleanup must not mask a result
+            # the scratch graph is disjoint from every product graph
             proj.db.select_graph(graph_name).delete()
-        except Exception:  # noqa: BLE001 — cleanup must not mask a result
-            pass
 
-    for key in ("bare_unindexed", "seamed_unindexed",
-                "bare_indexed", "seamed_indexed"):
+    for key in ("bare_unindexed", "seamed_unindexed", "bare_indexed", "seamed_indexed"):
         st = result["sections"].get(key)
         if st:
-            print(f"{key:18s} n={st['n']:4d} mean={st['mean_ms']:8.3f} ms "
-                  f"median={st['median_ms']:8.3f} p90={st['p90_ms']:8.3f} "
-                  f"min={st['min_ms']:8.3f} max={st['max_ms']:8.3f}")
+            print(
+                f"{key:18s} n={st['n']:4d} mean={st['mean_ms']:8.3f} ms "
+                f"median={st['median_ms']:8.3f} p90={st['p90_ms']:8.3f} "
+                f"min={st['min_ms']:8.3f} max={st['max_ms']:8.3f}"
+            )
 
     bare_u = result["sections"].get("bare_unindexed")
     seam_u = result["sections"].get("seamed_unindexed")
@@ -189,8 +223,10 @@ def main(argv=None) -> int:
     seam_i = result["sections"].get("seamed_indexed")
     if bare_i and seam_i:
         delta = seam_i["mean_ms"] - bare_i["mean_ms"]
-        print(f"indexed:   {delta:+.3f} ms/write — HNSW maintenance variance "
-              f"(bare max {bare_i['max_ms']:.1f} ms) dominates; not material")
+        print(
+            f"indexed:   {delta:+.3f} ms/write — HNSW maintenance variance "
+            f"(bare max {bare_i['max_ms']:.1f} ms) dominates; not material"
+        )
 
     if args.json_path:
         with open(args.json_path, "w") as fh:
