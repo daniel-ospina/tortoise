@@ -1725,7 +1725,10 @@ test('#3783: the API Keys table names the auto-provisioned key instead of render
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.match(src, /\{keyDisplayName\(k\) \? keyDisplayName\(k\) : <span className="dim">—<\/span>\}/,
     'the keys table resolves a display name before falling back to the dash')
-  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
+  // #4370: the import moved to the shared predicate list — the predicate lives
+  // in the pure module now (A6), so it is asserted by NAME in the import, not
+  // by a copy of its body.
+  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, revealablePlaintext, revealableMintPlaintext \} from '\.\/sessionKey\.js'/,
     'the display-name helper is imported from the pure module')
 })
 

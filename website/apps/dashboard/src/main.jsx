@@ -70,7 +70,7 @@ import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, job
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, revealablePlaintext, revealableMintPlaintext } from './sessionKey.js'
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
@@ -4251,7 +4251,16 @@ function claimIntentInFlight() {
       try {
         const body = await response.json()
         if (body && body.api_key && body.org_name) {
-          return { api_key: body.api_key, org_name: body.org_name, graph_name: body.graph_name || '' }
+          // #4370: the org + its key are already COMMITTED server-side, so the
+          // envelope still resolves the org — but the plaintext leg is read
+          // through the SHARED predicate. A presence check accepted a truthy
+          // non-string (`42`, `{}`, `[]`) or a blank string, which reached
+          // `welcomeKey` verbatim: it was embedded in the connect snippet and
+          // `welcomeKey.startsWith(...)` threw `TypeError: …startsWith is not a
+          // function` in the row-truth effect and the revoke prefix-clear. An
+          // unrevealable value resolves to '' so the connect step re-gates on
+          // the durable ROWS instead of embedding a non-key.
+          return { api_key: revealablePlaintext(body.api_key), org_name: body.org_name, graph_name: body.graph_name || '' }
         }
       } catch { /* unreadable body — fall through to the error card */ }
       return null
@@ -5332,7 +5341,13 @@ function claimIntentInFlight() {
       // never on this card. In-memory only (ADR-010); a mid-wizard reload
       // loses it and the connect step re-gates via the rows.
       setWizardOrgName('')
-      setWelcomeKey(provisioned.api_key || '')
+      // #4370: the ONE write site for `welcomeKey` reads the shared predicate
+      // too — belt to `provisionInApp`'s braces, so this state can never hold a
+      // non-string even if a future producer hands one over. An empty value is
+      // the deliberate fall-through: the connect step resolves the row the
+      // provision just minted (`wizardExistingKeyAffordance`) and offers a
+      // rotate, instead of embedding a non-key in the snippet.
+      setWelcomeKey(revealablePlaintext(provisioned.api_key))
       setWelcomeOrgName(provisioned.org_name || name)
       setWelcomeGraphName(provisioned.graph_name || '')
       setWelcomeTeamReady(true)
@@ -5530,7 +5545,7 @@ function claimIntentInFlight() {
         // The remedy names the row this mint created: `keyName` is always set
         // here (unlike the create path's optional name), so pointing at "an
         // unlabeled key" would be false.
-        setWizardDurableError(`The server did not return the new key\u2019s value, so it cannot be shown. The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
+        setWizardDurableError(revealRefusalFor('new key\u2019s value') + ` The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
         await loadAll('').catch(() => {})
         return
       }
@@ -5850,11 +5865,28 @@ function claimIntentInFlight() {
       // FIRST key one time ({graph, key, key_plaintext, revealed_once}). The
       // plaintext exists ONLY here — hash-only storage server-side — so the
       // reveal modal is the sole render, never a route (no show-key page).
-      if (b && b.key_plaintext) {
-        setRevealKey({
-          plaintext: b.key_plaintext,
-          title: b.graph && b.graph.name ? `Graph ${b.graph.name} created` : 'Graph created',
-        })
+      //
+      // Round-16/#4370: the reveal latch carries the SAME identity guard the
+      // rest of this handler applies. `switchTeam` clears `revealKey`, so a
+      // stale continuation must not re-mount the PREVIOUS team's plaintext
+      // under the new team's header (mintGraphKey already guards its latch).
+      if (b && b.key_plaintext && orgIdRef.current === _teamAtCall) {
+        // #4370: read the envelope through the SAME shared predicate as every
+        // other reveal seam. A presence check (`if (b.key_plaintext)`) accepted
+        // the truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which
+        // mounted the modal on a blank `.key-value` whose copy wrote
+        // whitespace and then dismissed — destroying the only view of a live
+        // key. The graph and its first key WERE created, so the honest outcome
+        // is a refusal naming the key the user must revoke, never a blank modal.
+        const plaintext = revealablePlaintext(b.key_plaintext)
+        if (plaintext) {
+          setRevealKey({
+            plaintext,
+            title: b.graph && b.graph.name ? `Graph ${b.graph.name} created` : 'Graph created',
+          })
+        } else {
+          setError(revealRefusalFor('graph\u2019s first key\u2019s value') + ' The graph was created — open its key panel to revoke the key and mint a new one.')
+        }
       }
       setNewGraphName('')
       await Promise.all([loadGraphs(currentOrgId), loadTeams()])
@@ -5935,8 +5967,22 @@ function claimIntentInFlight() {
         useSession: true,
         body: JSON.stringify(graphMintBody(gid, graphKeyName)),
       })
-      const plaintext = resp && (resp.key || resp.api_key)
-      if (!plaintext) throw new Error('Mint response did not include a key')
+      // #4370: the per-graph mint latches through the SAME shared predicate as
+      // every other reveal seam. `resp && (resp.key || resp.api_key)` accepted
+      // the truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which
+      // mounted the modal on a blank `.key-value` whose copy wrote whitespace
+      // and then dismissed — destroying the only view of a live key. The row IS
+      // created server-side, so REFRESH BEFORE surfacing (the list is the only
+      // place the user can find and revoke it) and use the same refusal contract
+      // as the sibling seams, not a divergent `throw` (D2).
+      const plaintext = revealableMintPlaintext(resp)
+      if (!plaintext) {
+        if (orgIdRef.current !== _teamAtCall) return
+        await refreshPanelAndCounts(gid, seq)
+        if (orgIdRef.current !== _teamAtCall) return
+        setGraphMsg(revealRefusalFor('new key\u2019s value') + ' Refresh the list and revoke the unused key you just created.')
+        return
+      }
       if (orgIdRef.current !== _teamAtCall) return
       setGraphKeyName('')
       setRevealKey({ plaintext, title: `Key for ${graphNameFor(gid) || 'graph'} created` })
@@ -6552,7 +6598,7 @@ function claimIntentInFlight() {
         // team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return null
-        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
+        setError(revealRefusalFor('new key\u2019s value') + ' Refresh the list and revoke any unlabeled key you just created.')
         return null
       }
       setNewKey(plaintext)
@@ -6630,32 +6676,21 @@ function claimIntentInFlight() {
   // the form is its exact-complement else-branch, so it stays the single gate.
   const newKeyReveal = (keyModalStage === 'done' && revealablePlaintext(newKey)) || ''
 
-  // #4342/#4359: the ONE authority for "is this a revealable plaintext?" — a
-  // non-empty, non-blank STRING. A 2xx can carry a number, an object, or
-  // padding, and every one of those is non-falsy, so a bare `!plaintext` check
-  // latched a box the user could not copy.
-  //
-  // SCOPE: this is NOT a whole-file invariant. Same-class writers outside the
-  // create/connect/rotate reveals are tracked in #4370.
-  //
-  // `trim()` alone is NOT a blankness test — it strips whitespace but not
-  // zero-width / invisible characters, so a string of only those would pass
-  // this single gateway and reproduce the reported symptom exactly: a visually
-  // blank `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set
-  // plus the DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which
-  // is in NEITHER property. Only the DECISION uses the stripped copy — the
-  // returned value is always the verbatim secret.
-  function revealablePlaintext(value) {
-    return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
-  }
+  // #4342/#4359/#4370: the reveal predicate is no longer declared here — it is
+  // `revealablePlaintext`/`revealableMintPlaintext` from `./sessionKey.js`
+  // (module scope, so the pure connect module reads the SAME guard). Every
+  // reveal/embed writer in this file reads them before it stores; see
+  // sessionKey.js for the blankness class they cover.
 
-  // #4359: a mint response carries the plaintext on EITHER leg (`key` on the
-  // POST /v1/team/keys response, `api_key` on the provision envelope). The legs
-  // are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
-  // selected a truthy-but-unrevealable primary first, so `{key: {},
-  // api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
-  function revealableMintPlaintext(response) {
-    return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
+  // #4370 (D2): ONE refusal contract for every reveal seam. The seams' REMEDIES
+  // legitimately differ (create vs rotate-already-revoked vs labeled connect
+  // mint vs the create-graph envelope), so only the prefix — the part that
+  // tells the user the value exists but cannot be shown — is shared; each seam
+  // appends its own remedy sentence. Before this, `mintGraphKey` was the one
+  // seam with divergent wording (`Mint response did not include a key`), so the
+  // "cannot be shown" contract could not be asserted across the whole set.
+  function revealRefusalFor(subject) {
+    return `The server did not return the ${subject}, so it cannot be shown.`
   }
 
   // #4342: the rotate replacement's key, derived ONCE for the same reason as
@@ -6665,6 +6700,42 @@ function claimIntentInFlight() {
   // already refuses to latch a plaintext-less mint (the old key is revoked by
   // then); this is the render-side half of that same guard.
   const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
+
+  // #4370: the GRAPH reveal's key (the create-graph envelope + the per-graph
+  // mint), derived ONCE for the same reason as `newKeyReveal` /
+  // `rotatedKeyReveal`. Its two writers now latch through the shared predicate,
+  // and this is the render-side half of the same guard: the modal mounts iff
+  // this is a non-empty, non-blank string, so no future writer can mount it
+  // with a value the user cannot copy or with a blank `.key-value` (the #4330
+  // "square"), and the raw `revealKey.plaintext` is never handed to
+  // `navigator.clipboard.writeText`.
+  const revealKeyReveal = (revealKey && revealablePlaintext(revealKey.plaintext)) || ''
+
+  // #4370: the graph reveal's Copy. Reading the DERIVED gate — not the raw
+  // state — means the clipboard always receives exactly the value the user can
+  // see, and a falsy read returns before the clipboard is touched (`writeText`
+  // stringifies a non-string: `String(null)` is the four-character "null").
+  // The #2735 class is preserved: the reveal is dismissed only once the write
+  // has resolved, so a refused clipboard cannot destroy the only copy.
+  async function copyRevealKey() {
+    const plaintext = revealKeyReveal
+    if (!plaintext) return
+    try {
+      await navigator.clipboard.writeText(plaintext)
+      closeRevealKey()
+    } catch {
+      // Keep the shown-once key on screen and select it for a manual copy
+      // (mirrors copyNewKey / copyRotatedKey).
+      const el = document.querySelector('.modal .key-value')
+      if (el) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        const sel = window.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
+    }
+  }
 
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
@@ -6786,7 +6857,7 @@ function claimIntentInFlight() {
         // team's error under the new team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return
-        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
+        setError(revealRefusalFor('replacement key\u2019s value') + ` ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
       }
       // #4355: the server states whether the displaced row was actually
@@ -10430,12 +10501,15 @@ function claimIntentInFlight() {
                 )}
               </div>
             )}
-            {revealKey && (
+            {revealKeyReveal && (
               /* C7 indicator 2: the ONE-TIME reveal modal. Mounted only from
                  a mint response (create-graph envelope or per-graph mint);
                  the plaintext exists nowhere else (hash-only storage) — no
                  show-key route ever re-renders it. Clipboard failure keeps
-                 the key visible in the modal text; dismissing clears state. */
+                 the key visible in the modal text; dismissing clears state.
+                 #4370: gated on the DERIVED non-empty string, not the truthy
+                 object — `{revealKey && …}` mounts for `'   '`/`42`/`{}` and
+                 renders a blank `.key-value`. */
               <div className="modal-backdrop"
                    onPointerDown={(e) => {
                      // Track where the press began: only a pointerdown on the
@@ -10458,31 +10532,15 @@ function claimIntentInFlight() {
                      onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
                   <h2>{revealKey.title}</h2>
                   <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
-                  <code className="key-value">{revealKey.plaintext}</code>
+                  <code className="key-value">{revealKeyReveal}</code>
                   <div className="claim-actions">
                     {/* #2392 (a11y): autoFocus the primary control on open —
                         before this the trigger behind the backdrop kept focus.
                         closeRevealKey (backdrop/Escape/Copy & done/I saved it)
-                        restores focus to that trigger. */}
-                    <button className="ghost" autoFocus onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(revealKey.plaintext)
-                        closeRevealKey()
-                      } catch {
-                        // Clipboard unavailable (e.g. non-secure context): the
-                        // key stays visible so the user can copy by hand — it is
-                        // never re-fetched or re-shown elsewhere. Select the key
-                        // text itself for a manual Ctrl/Cmd+C.
-                        const el = document.querySelector('.modal .key-value')
-                        const range = document.createRange()
-                        if (el) {
-                          range.selectNodeContents(el)
-                          const sel = window.getSelection()
-                          sel.removeAllRanges()
-                          sel.addRange(range)
-                        }
-                      }
-                    }}>Copy &amp; done</button>
+                        restores focus to that trigger.
+                        #4370: the copy is a guarded handler reading the derived
+                        gate, not an inline `writeText(revealKey.plaintext)`. */}
+                    <button className="ghost" autoFocus onClick={copyRevealKey}>Copy &amp; done</button>
                     <button className="ghost" onClick={closeRevealKey}>I saved it</button>
                   </div>
                 </div>
