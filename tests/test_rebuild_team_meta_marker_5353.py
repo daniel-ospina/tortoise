@@ -289,6 +289,45 @@ def test_rebuild_all_recovers_the_marker_from_a_leftover_sidecar(tmp_path):
     assert counts["team_meta_state_unknown"] is False
 
 
+def test_rebuild_all_reports_no_collapse_for_one_marker_in_both_legs(
+        tmp_path, caplog):
+    """The kill-between-the-sidecar-write-and-the-wipe window: ONE marker.
+
+    FAILING VALUE: the interrupted run had already written the sidecar and was
+    killed before `DETACH DELETE`, so the SAME marker is in the leftover file
+    AND still live in the graph. The rebuild restores it, reports
+    `team_meta_expected == 1`, and logs NO collapse warning. Counting ENTRIES
+    across the two legs (1 + 1) instead of DISTINCT markers told the operator
+    that "a graph holding several is already in violation" — about a graph
+    holding exactly one — and every interrupted rebuild that got as far as the
+    sidecar write would have accused the graph of the `#2789` violation.
+
+    REACHABLE: the sidecar is planted exactly as that interrupted run would
+    have written it, carrying the marker the live graph is holding.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    marker = {"name": "Acme", "created": "2026-01-01T00:00:00+00:00"}
+    _create_marker(sdk, marker["name"], marker["created"])
+    assert _marker_count(sdk) == 1, "the fixture holds exactly one live marker"
+    _plant(Path(_sidecar_path(events)),
+           _sidecar_payload(batch_snapshot=[{"id": "b1"}], team_meta=[marker]))
+
+    with caplog.at_level(logging.WARNING):
+        counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
+
+    assert _markers(sdk) == [marker], (
+        "#5353: the collapse of one marker with itself restores that marker")
+    assert counts["team_meta_expected"] == 1, (
+        "one marker seen in BOTH legs is one marker, not two — counting the "
+        "entries reports a collapse that never happened")
+    assert counts["team_meta_restored"] == 1
+    assert counts["team_meta_gap"] == 0
+    assert not any("at-most-one" in r.getMessage() for r in caplog.records), (
+        "#5353: a single marker present in the leftover sidecar and in the "
+        "live graph is the DOCUMENTED interrupted-rebuild window — warning "
+        "here accuses a compliant graph of the `#2789` violation")
+
+
 # ── 3. the at-most-one merge rule, pinned directly ───────────────────────────
 
 

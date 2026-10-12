@@ -11523,7 +11523,7 @@ class FalkorProjection(
           the projection cannot place raises BEFORE the wipe — a half-applied
           projection is not reachable.
         * **One-way.** Nothing here reads the cache to decide what to project
-          (``rebuild_all``'s pre-wipe snapshot does exactly that, for five
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for six
           graph-only classes; this path deliberately does not — see
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`

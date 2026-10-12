@@ -114,7 +114,7 @@ they are: *"a field with no PRIMARY claim in the record that exists only here is
 a defect, not a shortcut."*
 
 So **this projection does not carry them.** The consequence is named, not
-hidden and not silent: a record-sourced rebuild **drops** them, and the five
+hidden and not silent: a record-sourced rebuild **drops** them, and the six
 classes are listed here (and in the module docstring). It is deliberately **not
 counted at runtime** — a count would need the same pre-wipe cache read this
 path forbids, and `rebuild_from_record`'s report describes the RECORD's coverage

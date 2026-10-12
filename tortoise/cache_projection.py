@@ -38,7 +38,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    destination, never an input"* — and the placement ruling says what they are:
    *"a field with no PRIMARY claim in the record that exists only here is a
    defect, not a shortcut."* A record-sourced rebuild **drops** them, and the
-   drop is **named**, not silent — the five classes are listed right here and in
+   drop is **named**, not silent — the six classes are listed right here and in
    ``06-cache-projection.md`` §0.5. It is deliberately **not counted at
    runtime**: counting them would require the pre-wipe cache read this path
    forbids, and `rebuild_from_record`'s report is about the RECORD's coverage,
