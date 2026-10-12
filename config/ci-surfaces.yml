@@ -546,6 +546,12 @@ surfaces:
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
+  # #5109: the CLI's no-literal-key gate pins `tortoise/__main__.py`, an EXACT
+  # `api` SOURCE_PATTERNS match — so like test_init_apikey_validation.py above
+  # it must be registered under `api`, not only `core` (the #2938 silent-drop
+  # class: a `__main__.py`-only change that selected `api` alone would skip a
+  # core-only registration). Dual-registered with `core`.
+  - test_secret_not_printed_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -985,6 +991,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_secret_not_printed_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
@@ -2705,6 +2712,14 @@ surfaces:
   # born-live default for goal-kind Points (a target-only draft goal is
   # EP-inert while `converged=True` is still reported).
   - test_7856_goal_state.py
+  # #7852 W1: the Layer-2 `semantics` write path — `create_operator` resolves the
+  # direction from the relation's declared meaning and records the basis it used
+  # as `direction_basis` (absent/`None` is NOT a declaration — review ISSUE 3).
+  # `sdk` owns it: the change is `tortoise/sdk.py` (a SHARED_MODULE, so an
+  # sdk.py diff selects the full matrix) plus the `tortoise_create_operator`
+  # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
+  # and replays the journal), so it is ALSO registered in `carve_out` below.
+  - test_semantics_write_path_7852.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -3177,6 +3192,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
+# fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
+# replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
+# Also in the `sdk` surface above, which is where the diff selects it.
+- test_semantics_write_path_7852.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level

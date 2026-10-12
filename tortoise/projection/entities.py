@@ -1111,6 +1111,11 @@ class _EntityHandlers:
         "embedding_preserved",
         # A10 operator-scoped replay extension
         "direction", "label",
+        # #7852 W1: the basis the direction chain used. Written by
+        # `create_operator` beside `direction`; handled here (its own clause
+        # below) so replay restores it instead of the open passthrough, exactly
+        # as `direction` is.
+        "direction_basis",
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
@@ -1563,6 +1568,13 @@ class _EntityHandlers:
         if op:
             set_clauses.append("n.direction=$dir")
             params["dir"] = p.get("direction")
+            # #7852 W1: `direction_basis` rides the same operator-scoped
+            # extension — written only when the payload carries it, so a legacy
+            # or foreign record leaves the property absent (never a fabricated
+            # 'default').
+            if p.get("direction_basis") is not None:
+                set_clauses.append("n.direction_basis=$dbasis")
+                params["dbasis"] = p["direction_basis"]
             if p.get("label") is not None:
                 set_clauses.append("n.label=$label")
                 params["label"] = p["label"]

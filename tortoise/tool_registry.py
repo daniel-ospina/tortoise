@@ -491,7 +491,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.create_operator",
         writes=True,
         description="Create an operator connecting Points. "
-                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.",
+                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps. "
+                    "semantics: the Layer-2 meaning (addresses, supports, refutes, "
+                    "mutuallyExclusive, hasPart, related, …) — it resolves the direction.",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_operator",
