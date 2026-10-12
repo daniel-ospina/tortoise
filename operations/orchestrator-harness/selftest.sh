@@ -161,6 +161,10 @@ fi
 SB="$TMP/sb"; mkdir -p "$SB/Library/LaunchAgents" "$SB/.config" "$SB/.pi/agent/scripts"
 ln -s "$HOME/.config/gh" "$SB/.config/gh" 2>/dev/null || true
 [ -f "$HOME/.pi/agent/scripts/record-review.sh" ] && ln -s "$HOME/.pi/agent/scripts/record-review.sh" "$SB/.pi/agent/scripts/record-review.sh"
+# install.sh prefers the version-independent pi-node symlink under $HOME, and the daemon probe now
+# EXECUTES pi — so a sandbox HOME must expose a runnable pi, exactly as a real install's HOME does.
+mkdir -p "$SB/.local/share/pi-node/current/bin"
+printf '#!/bin/bash\nexit 0\n' > "$SB/.local/share/pi-node/current/bin/pi"; chmod +x "$SB/.local/share/pi-node/current/bin/pi"
 HOSTILE="$TMP/x&y"
 HOME="$SB" O="$HOSTILE" REPO="$HERE/../.." OR="acme/widget" bash "$INST" >"$TMP/inst.out" 2>&1
 PL="$SB/Library/LaunchAgents/com.eldato.orchestrator-loop.plist"
@@ -196,6 +200,8 @@ grep -q 'check-ignore -q .worktrees/' "$INST" && rc=0 || rc=1
 ck "install.sh's gitignore guard uses the directory form .worktrees/" $rc
 SB2="$TMP/sb2"; mkdir -p "$SB2/Library/LaunchAgents" "$SB2/.config" "$SB2/.pi/agent/scripts"
 ln -s "$HOME/.config/gh" "$SB2/.config/gh" 2>/dev/null || true
+mkdir -p "$SB2/.local/share/pi-node/current/bin"
+printf '#!/bin/bash\nexit 0\n' > "$SB2/.local/share/pi-node/current/bin/pi"; chmod +x "$SB2/.local/share/pi-node/current/bin/pi"
 HOME="$SB2" O="$TMP/fresh-o" REPO="$FR/repo" OR="acme/widget" bash "$INST" > "$TMP/inst-fresh.out" 2>&1
 PL2="$SB2/Library/LaunchAgents/com.eldato.orchestrator-loop.plist"
 [ -f "$PL2" ] && rc=0 || { rc=1; echo "      fresh checkout: $(tail -2 "$TMP/inst-fresh.out")"; }
@@ -210,7 +216,27 @@ ck "selftest.sh does not point install.sh at the repo's parent" $rc
 grep -qF 'REPO="$HERE/../.."' "$HERE/selftest.sh" && rc=0 || rc=1
 ck "selftest.sh passes the repo root to install.sh" $rc
 [ -e "$HERE/../../.git" ] && rc=0 || rc=1
-ck "the repo-root path selftest.sh uses resolves to a git checkout" $rc
+ck "the repo-root path selftest.sh uses resolves to a git working tree" $rc
+
+# ── 6d) the rendered plist PATH IS the resolved daemon PATH (the integration seam) ─────────────
+# §17/§18 drive the extracted PATH-builder and probe, but nothing pinned that install.sh actually
+# RENDERS $DAEMON_PATH into the plist. Review mutation (H) restored the pre-fix hardcoded base at the
+# __PATH__ substitution and left the whole suite green — yet the rendered PATH is the fixed artifact.
+# Render in a sandbox with a CONTROLLED PATH whose tools live in one fixture dir: the rendered PATH
+# must contain it (so the check is red under the hardcoded base) and no shim/.pi segment. `uv` is
+# deliberately absent, which also exercises the documented non-fatal-uv path end to end.
+FB="$TMP/pathbin"; mkdir -p "$FB" "$TMP/sb3/Library/LaunchAgents" "$TMP/sb3/.config" "$TMP/sb3/.pi/agent/scripts"
+for b in tmux gh pi; do printf '#!/bin/bash\nexit 0\n' > "$FB/$b"; chmod +x "$FB/$b"; done
+ln -s "$HOME/.config/gh" "$TMP/sb3/.config/gh" 2>/dev/null || true
+HOME="$TMP/sb3" O="$TMP/path-o" REPO="$HERE/../.." OR="acme/widget" PATH="$FB:/usr/bin:/bin" bash "$INST" > "$TMP/inst-path.out" 2>&1
+PL3="$TMP/sb3/Library/LaunchAgents/com.eldato.orchestrator-loop.plist"
+[ -f "$PL3" ] && rc=0 || { rc=1; echo "      controlled-PATH install did not render: $(tail -3 "$TMP/inst-path.out")"; }
+ck "install.sh renders with a controlled PATH (uv absent stays non-fatal)" $rc
+PLP="$(plutil -extract EnvironmentVariables.PATH raw "$PL3" 2>/dev/null || echo MISSING)"
+case ":$PLP:" in *":$FB:"*) rc=0;; *) rc=1; echo "      rendered PATH=$PLP lacks the resolved tool dir $FB";; esac
+ck "the rendered plist PATH is resolved, not the pre-fix hardcoded base" $rc
+case ":$PLP:" in *"/shims"*|*"/.pi/"*) rc=1;; *) rc=0;; esac
+ck "the rendered plist PATH contains no */shims or */.pi/* segment" $rc
 
 # ── 7) in-script defaults agree with install.sh's defaults ───────────────────────
 # A limit documented in README §4 and rendered by install.sh must not be silently different in
@@ -429,6 +455,229 @@ SH
   ran=0; grep -q 'wall_limit=' "$TMP/ra.log" 2>/dev/null && ran=1
   if [ "$ran" = "1" ] && [ "${1:-0}" -ge 1 ] && [ "${1:-99}" -lt 30 ] && [ "${2:-0}" -ne 0 ]; then rc=0; else rc=1; fi
   ck "shipped run_agent() kills a hung agent at the wall limit (elapsed=${1:-?}s rc=${2:-?} ran=$ran)" $rc
+fi
+
+# ── 16) a FAILED open-PR count is never read as zero ─────────────────────────────
+# The pre-fix line was OPEN_N="$(gh pr list … 2>/dev/null)"; : "${OPEN_N:=0}" — rc and stderr
+# were discarded and the empty result was coerced to 0, so one transient `TLS handshake timeout`
+# turned a 25-open-PR queue into `open=0 -> OWN`, dropping the BROAD drain, the reviewer headroom
+# and the merge-priority gate at once. Drive the SHIPPED function (extracted, not re-implemented)
+# with a stubbed gh, and pin the failure path, the sticky fallback and the success write.
+unset -f gh pi uv tmux 2>/dev/null || true   # an exported function would shadow the gh stub below
+sed -n '/^open_pr_count() {/,/^}/p' "$LOOP" > "$TMP/opencount.sh"
+if need "$TMP/opencount.sh" "open_pr_count() is extracted from the shipped orch-loop.sh"; then
+  OC="$TMP/opencount"; mkdir -p "$OC/state"
+  { echo 'set -u'; grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/opencount.sh"; echo 'open_pr_count'; } > "$OC/drive.sh"
+  # Driver must be non-vacuous: it parses and really defines the shipped function.
+  bash -n "$OC/drive.sh" && rc=0 || rc=1
+  ck "the open-PR-count driver parses" $rc
+  # (a) gh FAILS: TLS handshake timeout on stderr, empty stdout, rc 1
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+echo 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout' >&2
+exit 1
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; LOG="$OC/log"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" != "0" ] && [ -n "$n" ] && rc=0 || { rc=1; echo "      failed gh produced '$n'"; }
+  ck "a failed open-PR count is NOT zero (got '$n')" $rc
+  [ "$n" = "11" ] && rc=0 || { rc=1; echo "      got '$n'"; }
+  ck "a first-ever failure assumes 11 (BROAD, resumes the drain)" $rc
+  grep -q 'open=UNKNOWN rc=1' "$LOG" && rc=0 || { rc=1; echo "      log: $(cat "$LOG")"; }
+  ck "a failed open-PR count logs an UNKNOWN diagnostic naming the rc" $rc
+  grep -q 'TLS handshake timeout' "$LOG" && rc=0 || { rc=1; echo "      log: $(cat "$LOG")"; }
+  ck "the diagnostic keeps gh's stderr instead of discarding it" $rc
+  # (b) sticky: a later failure reuses the last good count, never resets to 0
+  printf '25\n' > "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "25" ] && rc=0 || { rc=1; echo "      sticky produced '$n'"; }
+  ck "a later failure reuses the sticky last-known count (25)" $rc
+  # (b2) a sticky 0 must NOT be reused: a DRAINED queue is the dangerous case (PRs arrive, then one
+  # transient failure) and 0 drives OWN / no headroom / no merge-priority — the exact pre-fix bug.
+  printf '0\n' > "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" != "0" ] && [ -n "$n" ] && rc=0 || { rc=1; echo "      sticky-0 produced '$n'"; }
+  ck "a sticky last-known of 0 is not reused (got '$n')" $rc
+  [ "$n" = "11" ] && rc=0 || { rc=1; echo "      got '$n'"; }
+  ck "a sticky 0 falls back to 11 (BROAD)" $rc
+  # (b3) the fallback must clear the SCOPE threshold too, not just the merge-priority tunable:
+  # max(MERGE_PRIORITY_AT, 10) + 1. Keying it to the tunable alone left a below-default tunable in
+  # OWN — the unsafe direction — on a failed count.
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=4 bash "$OC/drive.sh" )"
+  [ "$_mp" = "11" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=4 produced '$_mp' (expected 11)"; }
+  ck "a below-default MERGE_PRIORITY_AT (4) falls back to 11, above the scope threshold" $rc
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=15 bash "$OC/drive.sh" )"
+  [ "$_mp" = "16" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=15 produced '$_mp' (expected 16)"; }
+  ck "an above-default MERGE_PRIORITY_AT (15) falls back to 16, above the tunable" $rc
+  # (b4) a leading-zero tunable must be read as DECIMAL: `[ … -ge 10 ]` parses base 10 but `$(( … ))`
+  # parses base 0, in which `010` is octal 8 — so the guard ratified "ten" and the arithmetic
+  # returned 9, landing in OWN, the same unsafe direction the tunable-keyed fallback was fixed for.
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=010 bash "$OC/drive.sh" )"
+  [ "$_mp" = "11" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=010 produced '$_mp' (expected 11)"; }
+  ck "a leading-zero MERGE_PRIORITY_AT (010) is decimal 10, falls back to 11" $rc
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=notanum bash "$OC/drive.sh" )"
+  [ "$_mp" = "11" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=notanum produced '$_mp' (expected 11)"; }
+  ck "a non-numeric MERGE_PRIORITY_AT falls back to 11 without aborting" $rc
+  # (c) SUCCESS: the count is returned and persisted for the next failure
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+printf '25\n'
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "25" ] && rc=0 || { rc=1; echo "      success produced '$n'"; }
+  ck "a successful open-PR count returns the count" $rc
+  [ "$(cat "$OC/state/last-open-n" 2>/dev/null)" = "25" ] && rc=0 || rc=1
+  ck "a successful open-PR count is persisted to last-open-n" $rc
+  # (c2) a GENUINE 0 (drained queue) must still be returned as 0 and persisted: the `-gt 0` guard
+  # lives ONLY in the failure branch. Coercing a real 0 to 11 would make BROAD permanent and the
+  # queue would never be treated as drained.
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+printf '0\n'
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "0" ] && rc=0 || { rc=1; echo "      success-0 produced '$n'"; }
+  ck "a genuine 0 (drained queue) is still returned as 0" $rc
+  [ "$(cat "$OC/state/last-open-n" 2>/dev/null)" = "0" ] && rc=0 || rc=1
+  ck "a genuine 0 is persisted to last-open-n" $rc
+fi
+# The SEAM, not just the logic: a perfect open_pr_count() is dead code if the loop stops calling it.
+# Review mutation (G) restored the pre-fix inline line at the call site — `OPEN_N="$(gh pr list …)";
+# : "${OPEN_N:=0}"` — and left the extracted-function checks green because nothing pinned the wiring.
+grep -qF 'OPEN_N="$(open_pr_count)"' "$LOOP" && rc=0 || { rc=1; echo "      the loop does not assign OPEN_N from open_pr_count()"; }
+ck "the loop actually calls open_pr_count() (not the pre-fix inline gh count)" $rc
+# The sweep listing must be captured and rc-checked too: piped straight into `while read` with
+# 2>/dev/null, a failed listing is ZERO iterations and no output — a sweep that silently does
+# nothing for the whole cycle. These pin the fix's shape; (a) above pins its behavioural sibling.
+grep -q 'SWEEP_RC' "$LOOP" && rc=0 || rc=1
+ck "the sweep listing captures its rc instead of discarding it" $rc
+grep -q 'PR listing FAILED' "$LOOP" && rc=0 || rc=1
+ck "a failed sweep listing is logged, not silently empty" $rc
+# …and the sweep loop must be fed the CAPTURED listing: a shape that logs the failure but still
+# pipes gh directly would sweep an empty list around the captured variable.
+grep -qF '${SWEEP_LIST:-}" |' "$LOOP" && rc=0 || rc=1
+ck "the sweep loop is fed the captured listing, not gh directly" $rc
+
+# ── 17) the daemon PATH never contains a shim / ~/.pi directory ──────────────────
+# macOS TCC blocks LAUNCHD from reading ~/Documents, so ~/.pi/agent/shims/gh (a symlink into
+# ~/Documents) is EPERM under the daemon ("Operation not permitted") even though it runs fine in
+# this interactive shell — which is why the install.sh probe-by-execution reports a FALSE GREEN.
+# The guard is the exclusion in add_dir(), so DRIVE THE SHIPPED PATH CODE (extracted, not
+# re-implemented): put a shim FIRST on the driving PATH, render DAEMON_PATH, and assert no shim/
+# ~/.pi directory survives while the real binary's directory is kept. A pre-fix add_dir fixture
+# proves the scenario is real and that dropping the exclusion would fail this check.
+unset -f gh pi uv tmux 2>/dev/null || true   # an exported function would shadow the stubs below
+awk '/^add_dir\(\) \{/{f=1} f{ if (/^ok "daemon PATH:/) exit; print }' "$INST" > "$TMP/daemonpath.sh"
+if need "$TMP/daemonpath.sh" "the daemon-PATH block is extracted from the shipped install.sh"; then
+  DP="$TMP/dp"; mkdir -p "$DP/home/.pi/agent/shims" "$DP/realbin"
+  # the shim lives under a ~/.pi/.../shims path (exactly the shape TCC refuses); the REAL binary
+  # lives in a plain directory that matches none of the excluded patterns.
+  printf '#!/bin/bash\nprintf "gh 9.9.9 (shim)\\n"\n' > "$DP/home/.pi/agent/shims/gh"
+  printf '#!/bin/bash\nprintf "gh 9.9.9 (real)\\n"\n' > "$DP/realbin/gh"
+  chmod +x "$DP/home/.pi/agent/shims/gh" "$DP/realbin/gh"
+  DRIVE_PATH="$DP/home/.pi/agent/shims:$DP/realbin:/usr/bin:/bin"
+  pre="$(HOME="$DP/home" PATH="$DRIVE_PATH" command -v gh)"
+  [ "$pre" = "$DP/home/.pi/agent/shims/gh" ] && rc=0 || { rc=1; echo "      'gh' resolved to '$pre'"; }
+  ck "non-vacuity: 'gh' on the driving PATH resolves through the shim" $rc
+  { echo 'set -u'; cat "$TMP/daemonpath.sh"; echo 'printf "%s\\n" "$DAEMON_PATH"'; } > "$DP/drive.sh"
+  bash -n "$DP/drive.sh" && rc=0 || rc=1
+  ck "the daemon-PATH driver parses" $rc
+  out="$(HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/drive.sh")"
+  case "$out" in *"/shims"*|*"/.pi/"*) rc=1; echo "      daemon PATH: $out";; *) rc=0;; esac
+  ck "the daemon PATH contains no */shims or */.pi/* directory" $rc
+  case ":$out:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      daemon PATH: $out";; esac
+  ck "the daemon PATH keeps the real binary's directory (the shim is dropped, not the tool)" $rc
+  res="$(PATH="$out" command -v gh)"
+  # The base DAEMON_PATH prefix is hardcoded and may hold a real gh on a brew box, so the invariant
+  # is "resolves to a REAL executable, not the shim" — asserting equality with the fixture's realbin
+  # over-specifies which of two real binaries wins and false-reds a `brew install gh` box.
+  case "$res" in ""|"$DP/home/.pi/agent/shims/gh") rc=1;; *) [ -x "$res" ] && rc=0 || rc=1;; esac
+  ck "under the daemon PATH, gh resolves to a real (non-shim) executable" $rc
+  # Non-vacuity: the PRE-FIX add_dir (no exclusion) does bake the shim dir into the PATH.
+  cat > "$DP/prefix-add_dir.sh" <<'SH'
+add_dir() {
+  case "$1" in /*) ;; *) return 0 ;; esac
+  case ":$DAEMON_PATH:" in *":$1:"*) ;; *) DAEMON_PATH="$DAEMON_PATH:$1" ;; esac
+}
+DAEMON_PATH="/usr/bin:/bin"
+p="$(command -v gh)"; add_dir "$(cd "$(dirname "$p")" && pwd)"
+printf '%s\n' "$DAEMON_PATH"
+SH
+  old="$(HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/prefix-add_dir.sh")"
+  case "$old" in *"/shims"*) rc=0;; *) rc=1; echo "      pre-fix PATH: $old";; esac
+  ck "non-vacuity: the pre-fix add_dir really admitted the shim dir" $rc
+  # A PATH entry that is a SYMLINK to the shim directory must not slip past a name-only match,
+  # and must not suppress the real binary (the resolve-past loop keys off the same test).
+  ln -s "$DP/home/.pi/agent/shims" "$DP/shims-link"
+  LINK_PATH="$DP/shims-link:$DP/realbin:/usr/bin:/bin"
+  out2="$(HOME="$DP/home" PATH="$LINK_PATH" bash "$DP/drive.sh")"
+  case "$out2" in *"/shims"*|*"/.pi/"*) rc=1; echo "      symlinked-shim daemon PATH: $out2";; *) rc=0;; esac
+  ck "a symlink TO the shim dir cannot enter the daemon PATH" $rc
+  case ":$out2:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      symlinked-shim daemon PATH: $out2";; esac
+  ck "a symlinked shim dir does not suppress the real binary's directory" $rc
+  # An EXPORTED `gh` function must not hide the real binary's directory: `type -P` ignores functions
+  # (a function is not what launchd execs), so resolution still finds realbin.
+  fnout="$( unset -f gh; gh() { exit 0; }; export -f gh; HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/drive.sh" )"
+  case ":$fnout:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      function-perturbed daemon PATH: $fnout";; esac
+  ck "an exported 'gh' function does not hide the real binary's directory" $rc
+fi
+
+# ── 18) the install-time probe EXECUTES every tool, not just resolves it ────────
+# Resolving a name is not running it: a shim/wrapper directory that does NOT match the exclusion
+# patterns (cmux's `cmux-cli-shims` is a real one on this box) resolves the tool to a wrapper that
+# exits 127, and a resolution-only probe reports install success while every lane spawn then fails.
+# Drive the SHIPPED probe block with a fixture whose `pi` resolves but cannot run.
+awk '/^for bin in tmux uv pi gh; do$/{f=1} f{print} f&&/^done$/{exit}' "$INST" > "$TMP/probe.sh"
+if need "$TMP/probe.sh" "the install-time probe is extracted from the shipped install.sh"; then
+  PB="$TMP/probe"; mkdir -p "$PB/bin"
+  for b in tmux uv gh; do printf '#!/bin/bash\nexit 0\n' > "$PB/bin/$b"; chmod +x "$PB/bin/$b"; done
+  # ⛔ The driver runs under install.sh's OWN shell options (`set -euo pipefail`, line 12), not a
+  # weaker `set -u`: `_p="$(… || true)"` is reached only because install.sh runs under errexit, and
+  # a `set -u`-only driver cannot see the unguarded-assignment regression it exists to pin.
+  { echo 'set -euo pipefail'; echo 'die() { echo "DIED: $*" >&2; exit 9; }'; echo 'warn() { echo "WARN: $*" >&2; }'; cat "$TMP/probe.sh"; } > "$PB/drive.sh"
+  bash -n "$PB/drive.sh" && rc=0 || rc=1
+  ck "the probe driver parses" $rc
+  printf '#!/bin/bash\nexit 127\n' > "$PB/bin/pi"; chmod +x "$PB/bin/pi"
+  PATH="$PB/bin:/usr/bin:/bin" DAEMON_PATH="$PB/bin" bash "$PB/drive.sh" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "9" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 9 — a resolved-but-non-running pi must fail install)"; }
+  ck "the probe fails install when a resolved tool cannot RUN (exit 127)" $rc
+  printf '#!/bin/bash\nexit 0\n' > "$PB/bin/pi"; chmod +x "$PB/bin/pi"
+  PATH="$PB/bin:/usr/bin:/bin" DAEMON_PATH="$PB/bin" bash "$PB/drive.sh" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "0" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 0 when every resolved tool runs)"; }
+  ck "the probe passes when every resolved tool runs" $rc
+  # An EXPORTED shell function named `gh` must NOT satisfy the probe: `command -v` reports it, but a
+  # function is not what launchd execs and the daemon PATH has no gh binary at all.
+  PB2="$PB/bin2"; mkdir -p "$PB2"
+  for b in tmux uv pi; do printf '#!/bin/bash\nexit 0\n' > "$PB2/$b"; chmod +x "$PB2/$b"; done
+  ( unset -f gh pi uv tmux; gh() { exit 0; }; export -f gh; \
+    PATH="$PB2:/usr/bin:/bin" DAEMON_PATH="$PB2" bash "$PB/drive.sh" ) >/dev/null 2>&1; rc=$?
+  [ "$rc" = "9" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 9 — an exported gh FUNCTION is not a daemon binary)"; }
+  ck "an exported shell function does not satisfy the probe" $rc
+  # A wrapper that DELEGATES by name must not pass because the AMBIENT PATH can satisfy it: the
+  # probe must execute under $DAEMON_PATH, where nothing can (the false green one layer in).
+  PB3="$PB/w3"; mkdir -p "$PB3/shared" "$PB3/wrap" "$PB3/real" "$PB3/base"
+  for b in tmux uv gh; do printf '#!/bin/bash\nexit 0\n' > "$PB3/shared/$b"; chmod +x "$PB3/shared/$b"; done
+  printf '#!/bin/bash\nexit 0\n' > "$PB3/real/pi"; chmod +x "$PB3/real/pi"
+  cat > "$PB3/wrap/pi" <<'SH'
+#!/bin/bash
+self="$(cd "${0%/*}" && pwd)"
+found=""
+IFS=:
+for d in $PATH; do
+  d="$(cd "$d" 2>/dev/null && pwd)" || continue
+  [ "$d" = "$self" ] && continue
+  [ -x "$d/pi" ] && { found="$d/pi"; break; }
+done
+[ -n "$found" ] && exec "$found" "$@"
+exit 127
+SH
+  chmod +x "$PB3/wrap/pi"
+  ( unset -f gh pi uv tmux; \
+    PATH="$PB3/shared:$PB3/wrap:$PB3/real:/usr/bin:/bin" DAEMON_PATH="$PB3/base:$PB3/shared:/usr/bin:/bin:$PB3/wrap" bash "$PB/drive.sh" ) >/dev/null 2>&1; rc=$?
+  [ "$rc" = "9" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 9 — a name-delegating wrapper must fail under the daemon PATH)"; }
+  ck "a name-delegating wrapper is probed under the daemon PATH, not the ambient one" $rc
 fi
 
 echo
