@@ -18870,6 +18870,19 @@ class TortoiseSDK:
             STATUS_DEGRADED as _STATUS_DEGRADED,
             classify_leg_trace as _classify_leg_trace,
         )
+        # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
+        # path CONSUMES it and mints no verdict of its own, exactly as it does
+        # for the status vocabulary above — and `not-hot` is never a term of
+        # that vocabulary. Lazily imported so a default deployment pays
+        # nothing and the field stays off (the #3892 flag pattern).
+        from .residency import (
+            RESIDENCY_FIELD as _RESIDENCY_FIELD,
+            ResidencyDeclaration as _ResidencyDeclaration,
+            apply_residency as _apply_residency,
+            mark_residency as _mark_residency,
+            read_declaration as _read_declaration,
+            residency_enabled as _residency_enabled,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -18899,6 +18912,16 @@ class TortoiseSDK:
         else:
             _caller_trace = None
 
+        # #7952 (§17.2): the COMPLETENESS MARKER. Declared only AFTER the
+        # projection is obtained and the bounded probe has answered, so the
+        # known-hot set is read from a store known to be reachable — and never
+        # read at all when the flag is off (zero steady-state cost, and the
+        # response is byte-identical). ``None`` means NOT ASSESSED: the marker
+        # is a directive, so an unassessable read leaves the field absent and
+        # lets ``status`` carry the impairment, rather than guessing `not-hot`
+        # for a store that is merely down (§17.3's S5 failure mode).
+        _residency: _ResidencyDeclaration | None = None
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -18909,10 +18932,22 @@ class TortoiseSDK:
             ``configured=True`` / ``reached=True`` are facts, not defaults.
             """
             if read_status_out is not None:
-                read_status_out["status"] = _classify_leg_trace(
+                status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
                     configured=True,
                     reached=True)
+                if _residency is not None:
+                    # §17.3: a `not-hot` read may not be reported as `empty` —
+                    # a partial store cannot establish "nothing matched". The
+                    # truth store was NOT consulted on this path (no residency
+                    # router exists yet — #7953), so a zero-hit read of a
+                    # declared-partial store is `degraded`, never `empty`.
+                    marker = _mark_residency(
+                        _residency, hits=len(rows))
+                    status = _apply_residency(
+                        status, marker, record_consulted=False)
+                    read_status_out[_RESIDENCY_FIELD] = marker
+                read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             return rows
@@ -18951,6 +18986,10 @@ class TortoiseSDK:
                     "degraded", e)
                 read_status_out["status"] = _STATUS_DEGRADED
                 return []
+        # #7952: the store is reachable, so the known-hot set can be READ.
+        if read_status_out is not None and _residency_enabled():
+            _residency = _read_declaration(
+                graph, timeout_ms=int(_elevated_timeout_ms or 500))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -20418,6 +20457,13 @@ class TortoiseSDK:
             combine_read_statuses,
         )
 
+        # #7952: the completeness marker's ONE home — the composite read
+        # coalesces its legs' markers rather than minting a verdict of its own.
+        from .residency import (
+            RESIDENCY_FIELD,
+            combine_residency,
+        )
+
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
         if not (0.0 <= min_confidence <= 1.0):
@@ -20595,6 +20641,16 @@ class TortoiseSDK:
             if _composite == STATUS_AVAILABLE and not out:
                 _composite = STATUS_EMPTY
             read_status_out["status"] = _composite
+            # #7952: the legs' completeness markers coalesce the same way the
+            # statuses do — the composite read is a residency miss if ANY leg
+            # fell outside the known-hot set, because the answer the caller
+            # receives is then incomplete. Absent when no leg was assessed
+            # (the declaration is only read under its own flag).
+            _markers = [(_point_status or {}).get(RESIDENCY_FIELD),
+                        (_object_status or {}).get(RESIDENCY_FIELD)]
+            _marker = combine_residency(*_markers)
+            if _marker is not None:
+                read_status_out[RESIDENCY_FIELD] = _marker
         return out
 
     def retrieval_legs(

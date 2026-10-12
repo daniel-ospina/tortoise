@@ -929,6 +929,7 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
         # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.residency import DECLARATION_META_KEY
         from tortoise.sdk import TortoiseSDK
 
         classes = (
@@ -936,8 +937,13 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
             _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
             # `:Meta` is SHARED with derived markers (the FTS keys), so this
             # class is key-scoped: a label-wide read would sweep them in.
+            # `residency` (#7952) is the completeness marker's declared
+            # known-hot set — graph-only operator metadata that a rebuild must
+            # carry, or a declared-partial store silently reverts to
+            # `complete` and the marker cannot fire (§17.2).
             _ConfigClass("Meta", "key", frozenset({
-                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY})),
+                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY,
+                DECLARATION_META_KEY})),
         )
         # `_CONFIG_CLASS_BY_LABEL` is a side effect so the validator and the
         # restore path can resolve a label without repeating the import dance.
