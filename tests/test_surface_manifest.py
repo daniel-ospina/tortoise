@@ -171,26 +171,26 @@ def test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it(tmp_p
     )
 
 
-def test_the_green_banner_reports_the_STAGED_status_and_the_documents_separately():
-    """A green run must not claim the manifest's staged status came from the doc (#4185).
+def test_the_green_banner_reports_the_CLAIMED_approval_and_the_documents_separately():
+    """A green run must report the manifest's approval AND the document it mirrors (#4185).
 
-    The banner used to print `approval_status=<status> is READ from <doc>`. Two things were
-    wrong: the value printed is the MANIFEST's, and a staged `pending-owner-approval`
-    approves nothing. At this head the two files disagree by design (#8144 owns the flip),
-    so a green run has to say which of them claimed what — and whether anything was
-    actually compared.
+    The banner used to print `approval_status=<status> is READ from <doc>`, which was wrong
+    twice over: the value printed came from the manifest, and a staged
+    `pending-owner-approval` approves nothing. Now that the flip has landed (#8144) the
+    committed manifest CLAIMS an approval, so a green run must say so and name the document
+    the claim is checked against.
     """
     result = _run("tools/surface-guard.py")
     assert result.returncode == 0, result.stdout
-    assert "The manifest is STAGED on approval_status=pending-owner-approval" in result.stdout, (
-        f"the banner did not report the manifest's staged status as staged:\n{result.stdout}"
+    assert "The manifest CLAIMS an approval (approval_status=approved)" in result.stdout, (
+        f"the banner did not report the manifest's claimed approval:\n{result.stdout}"
     )
     assert "which records 'approved'" in result.stdout, (
         "the banner did not report the DOCUMENT's recorded status separately — the manifest "
         f"is not the file that recorded it:\n{result.stdout}"
     )
-    assert "makes NO claim, so nothing was compared" in result.stdout, (
-        f"the banner did not say that no comparison ran:\n{result.stdout}"
+    assert "it matches" in result.stdout, (
+        f"the banner did not say the claim was compared against the document:\n{result.stdout}"
     )
 
 
@@ -727,10 +727,10 @@ def test_the_manifest_approval_is_DERIVED_from_the_canonical_doc(tmp_path):
 
     Point `read_approval` at a FIXTURE doc and prove the returned approval follows it.
     No `26`/`40` and no approval value is typed into the manifest by hand: `cut` copies the
-    four values from the doc. In THIS PR `check` still excludes them (the exclusion is removed
-    by the #4185 follow-up), and what catches a hand-set field that disagrees is the guard's
-    provenance comparison, scoped to a manifest that CLAIMS an approval. This test pins the
-    READING, not the `check`-side comparison.
+    four values from the doc. `check` now compares them too (they are out of
+    `NON_DERIVABLE_DOC_KEYS` since #8144), and the guard's own provenance comparison reds a
+    manifest that CLAIMS an approval the doc does not record. This test pins the READING,
+    not the `check`-side comparison.
     """
     sm = _load_manifest_tool()
     fixture = tmp_path / "canonical-mcp-tools.md"
@@ -900,18 +900,13 @@ def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseli
 
 def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseline):
     sm = _load_manifest_tool()
-    # The top-level `approval_*` keys ARE here FOR THIS PR (#4185, first PR): CI's required
-    # `surface-guard` pins the BASE guard, whose per-row rule fires on `approved`, so the
-    # committed manifest must stay `pending-owner-approval` and `check` must not compare the
-    # copy yet. A follow-up PR removes them once the new guard is on `main`. Provenance is
-    # enforced by `tools/surface-guard.py` in the meantime, whenever a manifest CLAIMS an
-    # approval. `high_water_counts` is the hand-set growth pin (also not derived).
+    # The top-level `approval_*` keys are deliberately NOT here: they are DERIVED from
+    # `docs/product/canonical-mcp-tools.md` (#4185; the flip landed in #8144), so `check`
+    # compares them and a hand-set field cannot disagree with the owner's approval record.
+    # `high_water_counts` is the hand-set growth pin (also not derived), and
+    # `response_fields` is the carried-forward hand-authored block.
     assert {
         "cut_at_commit",
-        "approval_status",
-        "approval_principal",
-        "approval_pr",
-        "approval_date",
         "high_water_counts",
         "response_fields",
     } == sm.NON_DERIVABLE_DOC_KEYS
@@ -939,14 +934,35 @@ def test_a_nonderivable_key_is_still_seen_when_it_is_the_ONLY_difference(derived
     assert problems, "a renamed row slipped through the projection"
 
 
-# The two `check`-based provenance tests that used to live here
-# (`test_the_check_reds_when_the_manifest_approval_disagrees_with_the_doc` and
-# `test_the_check_reds_when_the_manifest_claims_an_approval_the_doc_does_not`) are moved to
-# the FOLLOW-UP PR (#4185, second PR): the approval keys are back in NON_DERIVABLE_DOC_KEYS
-# in this PR, so `check` cannot compare them yet. Provenance is pinned by the guard in the
-# meantime — `test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it` and
-# `test_approval_principal_cannot_disagree_with_the_canonical_doc` both exercise the exact
-# comparisons, so the behaviour is not unpinned; only its `check`-side home is deferred.
+# The two `check`-based provenance tests that #8026 deferred to this PR (#4185, second PR).
+# They live here now that the four approval keys are out of NON_DERIVABLE_DOC_KEYS, so `check`
+# compares the committed copy against `read_approval`'s derivation. `tools/surface-guard.py`
+# pins the same behaviour independently —
+# `test_approval_cannot_be_claimed_without_the_canonical_doc_recording_it` and
+# `test_approval_principal_cannot_disagree_with_the_canonical_doc` exercise the guard side.
+
+
+def test_the_check_reds_when_the_manifest_approval_disagrees_with_the_doc(checker, tmp_path):
+    """#4185: the approval is DERIVED, so `check` must catch a hand-edited copy.
+
+    Removing the approval keys from `NON_DERIVABLE_DOC_KEYS` is what arms this: before,
+    `check` could not see a doctored `approval_principal`, which is how the manifest said
+    `pending` for an approved surface for a month.
+    """
+    doc = _manifest()
+    doc["approval_principal"] = "a-hand-typed-imposter"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited approval principal did not red the lint"
+    assert "approval_principal" in out, out
+
+
+def test_the_check_reds_when_the_manifest_claims_an_approval_the_doc_does_not(checker, tmp_path):
+    """The `approval_status` copy is compared too — the field that caused the defect."""
+    doc = _manifest()
+    doc["approval_status"] = "pending-owner-approval"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited approval status did not red the lint"
+    assert "approval_status" in out, out
 
 
 def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_path):
@@ -1652,7 +1668,7 @@ def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_b
     assert "OVERRIDES: the frozen-snapshot-as-approval-baseline practice" in written
     # The approval-provenance comment must survive too: the committed manifest carries it,
     # and a re-cut that dropped it would erase the record of WHERE the approval is read from.
-    assert "The top-level approval is STAGED from docs/product/canonical-mcp-tools.md" in written
+    assert "The top-level approval is READ from docs/product/canonical-mcp-tools.md" in written
     # The growth pin's rationale must survive too — a re-cut that dropped it would leave the
     # next reader with no idea why `high_water_counts` cannot be edited by hand.
     assert "`high_water_counts` is a GROWTH PIN" in written
@@ -1686,22 +1702,30 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
-def test_the_committed_manifest_is_the_STAGED_pending_copy():
-    """#4185 lands in two PRs, so THIS head must not carry the flip (#4185 review).
+def test_the_committed_manifest_carries_the_DERIVED_approval():
+    """#8144: the flip has landed, so the committed copy carries the owner's approval.
 
-    The guard's provenance comparison is scoped to a manifest that CLAIMS an approval, so
-    flipping here would arm a comparison the base-pinned guard cannot survive (242 rows).
-    The staged state is the split's contract; the follow-up (#8144) owns the flip.
+    The staged two-PR split is over: `read_approval` derives the four values from
+    `docs/product/canonical-mcp-tools.md`, `cut` copies them in, and `check` compares them
+    (they are no longer in `NON_DERIVABLE_DOC_KEYS`). Asserting EQUALITY against the live
+    derivation — rather than hardcoding the doc's values — is what makes this the invariant
+    rather than a second copy of the document: if the doc's approval moves, this reds until
+    a re-cut copies it.
     """
+    sm = _load_manifest_tool()
     doc = _manifest()
-    assert doc["approval_status"] == "pending-owner-approval", (
-        "the committed manifest flipped to the approved copy — that is the FOLLOW-UP "
-        "(#8144) change, not this PR's (#4185 lands in two PRs)"
+    derived = sm.read_approval()
+    assert doc["approval_status"] == derived["status"] == "approved", (
+        "the committed manifest is not the approved copy — the flip (#8144) is missing"
     )
-    for key in ("approval_principal", "approval_pr", "approval_date"):
-        assert doc[key] is None, (
-            f"{key} is staged but non-null — the committed copy must not claim an approval "
-            "at this head (#8144 owns the flip)"
+    for key, want in (
+        ("approval_principal", derived["principal"]),
+        ("approval_pr", derived["pr"]),
+        ("approval_date", derived["date"]),
+    ):
+        assert doc[key] == want, (
+            f"{key} is {doc[key]!r} in the committed copy but {want!r} derived from "
+            "docs/product/canonical-mcp-tools.md — re-cut to copy the document"
         )
 
 

@@ -109,13 +109,12 @@ The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the s
 are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEYS` and
 `NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
 `basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
-flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
-`approval_date` / `high_water_counts` / `response_fields`. The top-level `approval_*` keys are **read from**
-`docs/product/canonical-mcp-tools.md` by `tools/surface_manifest.py::read_approval`, but in this PR they
-are still **excluded** from that comparison (#4185 lands in two PRs — see "CI's `surface-guard` pins
-the BASE copy" below). What catches a hand-edit that disagrees with the document is
-`tools/surface-guard.py`, whose provenance comparison applies whenever a manifest **claims** an
-approval; the follow-up removes them from this list when it flips the committed copy. One
+flag, and the doc-level `cut_at_commit` / `high_water_counts` / `response_fields`. The top-level
+`approval_status` / `approval_principal` / `approval_pr` / `approval_date` are **read from**
+`docs/product/canonical-mcp-tools.md` by `tools/surface_manifest.py::read_approval` at cut time and **are
+compared** by `check` — a hand-edit that disagrees with the document reds the lint (#4185; the flip
+landed in #8144). `tools/surface-guard.py` independently re-reads the same document and reds a manifest
+that **claims** an approval disagreeing with it. One
 consequence worth stating plainly: the remaining columns **are** editable in a PR, so the review evidence a reader
 sees in the generated document is not gate-verified — the served surface is. So hand-editing the
 baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived
@@ -235,20 +234,15 @@ uv run python tools/surface-target-check.py
 
 **CI's `surface-guard` pins the BASE copy of `tools/surface-guard.py`**: it copies `origin/main`'s
 guard over the PR's and runs it against the PR tree, so a change to what the guard *enforces*
-cannot be green in its own PR. #4185 therefore lands in **two PRs**, and this paragraph is the
-prescription:
+cannot be green in its own PR. #4185 was therefore split into **two PRs** — the tooling
+(`read_approval`, `tools/surface-target-check.py`, the scoped provenance comparison) landed in
+[#8026](https://github.com/daniel-ospina/tortoise/pull/8026), and the flip
+([#8144](https://github.com/daniel-ospina/tortoise/issues/8144)) removed the four `approval_*` keys
+from `NON_DERIVABLE_DOC_KEYS` and flipped the committed copy to the derived `approved` once the
+post-#8026 guard was on `main`. The base-pinned guard no longer demands per-row approvals, so the
+flip is green.
 
-1. **This PR** lands `read_approval` and `tools/surface-target-check.py` with the committed manifest
-   still `approval_status: pending-owner-approval` and the four top-level `approval_*` keys still in
-   `NON_DERIVABLE_DOC_KEYS`. The base guard sees `pending` (passes) and `check` excludes the keys
-   (passes). The guard's provenance comparison is scoped to a manifest that *claims* an approval, so
-   the empty `pending` copy is skipped rather than treated as a stale copy.
-2. **The follow-up PR** ([#8144](https://github.com/daniel-ospina/tortoise/issues/8144)) — after
-the new guard is on `main` — removes the four keys from
-   `NON_DERIVABLE_DOC_KEYS` and flips the committed copy to the derived `approved`. The base-pinned
-   guard is now the *new* guard, which no longer demands per-row approvals, so the flip is green.
-
-Do not "resolve" the red by stamping every row with the doc's approval: that would record per-row
+Do not "resolve" a red by stamping every row with the doc's approval: that would record per-row
 owner approvals nobody gave, and the per-row field is an audit reference, not the gate.
 
 **To propose an addition**, in the same PR:
@@ -266,9 +260,9 @@ deliberately (those references are optional audit records and nothing machine-va
    `approvedBy`, `approved`, and `approval_pr`. **Then re-run `cut` (step 2).** The manifest is a
    committed snapshot, so the doc's approval reaches it only when a `cut` copies it: recording the
    approval *after* the cut leaves the committed copy stale, and a re-cut is what carries it
-   forward. `tools/surface_manifest.py check` is what catches the stale copy — not the guard,
-   which skips a manifest that makes no claim — and #8144 arms that comparison by dropping the
-   four `approval_*` keys from `NON_DERIVABLE_DOC_KEYS`. A per-row
+   forward. `tools/surface_manifest.py check` is what catches the stale copy — it compares the four
+   `approval_*` keys against `read_approval`'s derivation (#4185; armed in #8144) — and
+   `tools/surface-guard.py` reds a manifest that claims an approval the doc does not record. A per-row
    `approval:` remains an optional audit reference (nothing machine-validates its format); it is
    no longer the approval gate. The `exemption: true` flag is **not** an approval
    carve-out — it records a method deliberately outside
