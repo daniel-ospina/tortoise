@@ -22,9 +22,13 @@ SHAPE. A mutable :class:`RetrievalTally` lives in a :class:`contextvars.ContextV
 The read funnel — :meth:`tortoise.sdk.TortoiseSDK.tortoise_fts_query`, the ONE
 entry point every product read surface funnels through (``GET /v1/search``, the
 MCP recall tools, the ask lane, ``volunteer_context``) — MUTATES it in place:
-O(1), no I/O, no lock on the hot path. A WORK-OWNING boundary arms / notes, then
-takes-and-resets the tally and writes it once through
-``metering.record_retrieval_usage``:
+O(1), no I/O, no network round trip. An ARMED note takes ONE short-lived
+module-global mutex (:data:`_LOCK`) around the integer bump — the snapshot in
+:func:`flush_tally` must observe a tally that no pool thread is editing — so
+armed notes on one process serialize on that mutex, never on I/O. The UNARMED
+path (every non-product caller) is a single ``ContextVar.get()`` and no lock at
+all. A WORK-OWNING boundary arms / notes, then takes-and-resets the tally and
+writes it once through ``metering.record_retrieval_usage``:
 
 * :class:`RetrievalMeteringMiddleware` — every HTTP request on the hosted app,
   REST and the mounted MCP app alike. The org is resolved AT FLUSH TIME from
@@ -70,7 +74,11 @@ MEASURED VS EXCLUDED — stated, not implied:
   switches on extra declaration work inside the vector leg (the #4199/#5287
   scope probe), so a measurement that required it would either record no legs on
   the default product path or make every read pay for a declaration it never
-  asked for.
+  asked for. The product funnel passes NO trace, so ``note_leg`` is the ONLY
+  leg source there and a leg can never be counted twice;
+  :meth:`RetrievalTally.note_query`'s optional ``legs`` argument exists only for
+  a caller that ALREADY holds a trace, and must not be combined with the per-leg
+  hooks on the same tally (that would double-count ``leg_runs``).
 * EXCLUDED, and why: the query ENCODE (it is the embedding lane's figure, #4488);
   post-retrieval annotation / dedup / assembly (not retrieval); writes and
   background extraction reads (the write lanes' figures — this dimension is the
@@ -78,10 +86,13 @@ MEASURED VS EXCLUDED — stated, not implied:
   not be opened, which fails before a leg runs and is therefore not a query this
   lane ever served.
 * NOT ATTRIBUTED: an MCP (``/mcp``) request, whose org lives in the
-  ``mcp_auth`` ContextVar this ASGI layer cannot see. Its retrieval is measured
-  and written to the honest unattributed (``""``) row — the same documented
-  limit the sibling compute (#4490) and egress (#4491) dimensions carry — unless
-  the MCP dispatch seam binds the org (see ``mcp_server``'s per-call bind).
+  ``mcp_auth`` ContextVar this ASGI layer cannot see. Its retrieval is measured,
+  then DROPPED rather than filed under an invented org: :func:`flush_tally`
+  writes no row and reports the drop to the operator on the ``retrieval`` lane
+  when a non-empty tally has no resolvable org. Nothing is written to an
+  unattributed (``""``) row — there is no such row. This is the same documented
+  limit the sibling compute (#4490) and egress (#4491) dimensions carry; a
+  future MCP dispatch seam that binds the org removes it.
 """
 
 from __future__ import annotations
@@ -91,6 +102,7 @@ import contextlib
 import functools
 import logging
 import threading
+import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
@@ -242,6 +254,33 @@ def note_leg(leg: str, *, ran: bool, degraded: bool) -> None:
             _logger.debug("retrieval leg note failed", exc_info=True)
 
 
+def metered_query(fn):
+    """Wrap a read ENTRY POINT so ONE call measures ONE retrieval query.
+
+    Applied to ``TortoiseSDK.tortoise_fts_query`` — the one funnel every product
+    read surface goes through — so the query count and its wall time are
+    recorded at exactly the boundary the docstring names, with no caller
+    cooperation and no per-call-site bookkeeping. The wrapper is TOTAL: the
+    measurement sits in a ``finally`` and can never change the read's result or
+    mask its exception.
+
+    The UNARMED path (no tally in this context — every non-product caller)
+    returns ``fn``'s result after one ``ContextVar.get()`` and takes no clock
+    reading, so a default deployment pays one dict-free lookup per read.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _ACTIVE.get() is None:
+            return fn(*args, **kwargs)
+        started = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            note_query(wall_ms=(time.monotonic() - started) * 1000.0)
+
+    return wrapper
+
+
 def bind_worker_context(fn):
     """Wrap ``fn`` so a WORKER THREAD runs it under this thread's retrieval tally.
 
@@ -380,8 +419,8 @@ class RetrievalMeteringMiddleware:
     The org is resolved at FLUSH time, after the handler has run: the auth
     dependencies write ``scope["state"]["org_id"]`` DURING the request and
     ``scope`` is the same dict by then. A lane whose org never reaches scope
-    state (MCP, session-JWT, health probes) is written to the honest
-    unattributed row rather than an invented org.
+    state (MCP, session-JWT, health probes) is DROPPED and alerted on the
+    ``retrieval`` lane rather than being filed under an invented org.
     """
 
     def __init__(self, app) -> None:

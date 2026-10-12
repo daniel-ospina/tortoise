@@ -525,7 +525,7 @@ class TestLedger:
         SAME org and window — that is what makes the comparison possible without
         a second system or a dashboard.
         """
-        sdk, org = reg_org
+        _sdk, org = reg_org
         metering.record_write_ops(org, tier="free", n=4)
         metering.record_retrieval_usage(org, queries=9, leg_runs=11, wall_ms=90.0,
                                         leg_fts=9, leg_vector=1, leg_structural=1)
@@ -675,7 +675,7 @@ class TestTeamRoute:
 # ════════════════════════════════════════════════════════════════════════════
 
 MIGRATION = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
-             / "20261012000001_metering_retrieval_columns.sql")
+             / "20261013000001_metering_retrieval_columns.sql")
 
 
 class TestMigrationContract:

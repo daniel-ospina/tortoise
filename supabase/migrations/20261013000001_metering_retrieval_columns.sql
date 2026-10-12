@@ -1,5 +1,12 @@
--- Migration 20261012000001: the RETRIEVAL lane's search work on the metering
+-- Migration 20261013000001: the RETRIEVAL lane's search work on the metering
 -- ledger (#4489, lane c4-answer-quality / c7-instrumentation).
+--
+-- RENUMBERED FORWARD from 20261012000001 (#4489 review). ``main`` landed a
+-- second migration under that exact version prefix (20261012000001_record_event
+-- _stream.sql) after this lane branched, and the Supabase CLI keys migrations by
+-- prefix — two files under one version means one of them is never applied and
+-- ``db push`` aborts (the class #1235 blocks and #7634 documents). A version
+-- strictly greater than main's newest keeps this file pending on every lane.
 --
 -- WHY THIS EXISTS. Reads are free by DECISION (``product/pricing.json`` →
 -- ``billing.reads_free: true``), so the engine cost of answering a query had no
@@ -142,6 +149,13 @@ BEGIN
         retrieval_leg_fts        = coalesce(public.metering_records.retrieval_leg_fts, 0) + p_leg_fts,
         retrieval_leg_vector     = coalesce(public.metering_records.retrieval_leg_vector, 0) + p_leg_vector,
         retrieval_leg_structural = coalesce(public.metering_records.retrieval_leg_structural, 0) + p_leg_structural,
+        -- #4242: the WINDOW follows the authoritative bound. Every period-keyed
+        -- writer carries this (20261010000001 re-created all five) because a row
+        -- minted under an APPROXIMATED anchor keeps a stale ``period_end``
+        -- forever, which the cohort read's half-open overlap test can then miss
+        -- — fail-OPEN on a spend ceiling. This lane is the first writer of a
+        -- shared row and must not pin a window it cannot later correct.
+        period_end             = EXCLUDED.period_end,
         updated_at             = now();
 END;
 $$;
