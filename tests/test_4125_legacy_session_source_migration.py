@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util as _ilu
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.session_source_migration import (
     find_legacy_session_sources,
     is_pre_fix_url_hash,
+    reconcile_after_replay,
     reconcile_legacy_session_sources,
 )
 
@@ -592,6 +594,36 @@ class TestRebuildDurability:
         assert agent_session_urls(s) == ["session:s1"]
         assert [u for _, u in extracted_from(s)] == ["session:s1"]
 
+    def test_the_rebuild_engine_labels_its_reconciliation_as_rebuild(
+            self, sdk, caplog):
+        """The diagnostic names the engine that ran it (#8229 review, P2).
+
+        ``reconcile_after_replay`` prefixes every message with ``engine``; the
+        ``rebuild()`` call site passed ``engine="rebuild_all"``, so a rebuild-
+        failure investigation was misdirected to the wrong engine. The
+        observable is the log record's text, which is the only place the label
+        surfaces.
+
+        (1) FAILS if ``rebuild()`` passes the ``rebuild_all`` label: the
+            migration record reads ``rebuild_all: migrated …`` instead of
+            ``rebuild: migrated …``.
+        (2) REACHABLE: the pre-#4005 journal below leaves a legacy candidate
+            that this engine's end-of-replay sweep migrates, which emits the
+            ``migrated`` record under test.
+        """
+        s, events = sdk
+        pre_4005_commit(s, "s1")
+
+        with caplog.at_level(logging.INFO,
+                             logger="tortoise.session_source_migration"):
+            s._get_proj().rebuild(EventLog(str(events / "events.jsonl")),
+                                  confirm_destructive=True)
+
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "tortoise.session_source_migration"]
+        assert any(m.startswith("rebuild: migrated") for m in msgs), msgs
+        assert not any(m.startswith("rebuild_all:") for m in msgs), msgs
+
     def test_the_recover_from_log_engine_converges_too(self, sdk):
         """``recover_from_log`` (the module-level recovery path) agrees.
 
@@ -613,9 +645,53 @@ class TestRebuildDurability:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 5. The operator CLI (the issue's migration surface)
+# 4b. The unmigrated-source diagnostic count (no double-counting)
 # ══════════════════════════════════════════════════════════════════════════
 
+
+class TestUnmigratedWarning:
+    def test_a_blocked_node_is_counted_once_in_the_unmigrated_warning(
+            self, sdk, caplog):
+        """One unmigrated node, one unit in the warning total (#8229, P2).
+
+        A node blocked by an unmovable relation stays on the graph, so
+        ``reconcile_legacy_session_sources`` appends it to ``ambiguous`` —
+        ``blocked`` is therefore a SUBSET of ``ambiguous``. The warning total
+        summed ``unattributed + ambiguous + blocked``, so one blocked node was
+        announced as two. The observable is the formatted log message.
+
+        (1) FAILS if the total re-adds ``blocked``: one node prints ``2 legacy
+            session Source(s) could NOT be migrated`` instead of ``1``.
+        (2) REACHABLE: the ``mysteryRel`` below genuinely blocks the delete,
+            so the node is reported in both ``blocked`` and ``ambiguous``.
+        """
+        s, _ = sdk
+        pre_4005_commit(s, "s1")
+        g_of(s).query("MERGE (o:Object {name:'outsider'}) "
+                      "WITH o MATCH (old:Source {url:$u}) "
+                      "CREATE (old)-[:mysteryRel]->(o)",
+                      params={"u": LEGACY_URL})
+
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.session_source_migration"):
+            report = reconcile_after_replay(s._get_proj(), engine="probe")
+
+        # The double-report this test pins: blocked ⊆ ambiguous.
+        assert report["blocked"] == {LEGACY_URL: ["mysteryRel"]}
+        assert report["ambiguous"] == [LEGACY_URL]
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.name == "tortoise.session_source_migration"
+                    and r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, warnings
+        assert "1 legacy session Source(s) could NOT be migrated" in warnings[0], \
+            warnings[0]
+        assert "1 ambiguous" in warnings[0], warnings[0]
+        assert "1 blocked by an unmovable relation" in warnings[0], warnings[0]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 5. The operator CLI (the issue's migration surface)
+# ══════════════════════════════════════════════════════════════════════════
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CLI_PATH = _REPO_ROOT / "graph-scripts" / "4125_migrate_legacy_session_sources.py"

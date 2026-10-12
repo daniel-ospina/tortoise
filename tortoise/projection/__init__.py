@@ -7340,11 +7340,14 @@ class FalkorProjection(
         # mapping for them exists in it to fold — but the replayed Points carry
         # the attribution (`session_id` + the `extractedFrom` edge the passes
         # above just rebuilt). Re-derive the migrated state here, AFTER every
-        # pass and AFTER the #7951 re-assert, so a rebuild converges on the same
-        # identity a live migration produces. Never raises (see
-        # `reconcile_after_replay`).
+        # pass, so a rebuild converges on the same identity a live migration
+        # produces. Never raises (see `reconcile_after_replay`).
+        #
+        # NOTE: this is ``rebuild()``, not ``rebuild_all()`` — the engine label
+        # must match, or a rebuild-failure investigation is misdirected to the
+        # wrong engine (there is no #7951 re-assert in this engine).
         from tortoise.session_source_migration import reconcile_after_replay
-        reconcile_after_replay(self, engine="rebuild_all")
+        reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:

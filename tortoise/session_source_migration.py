@@ -425,8 +425,10 @@ def reconcile_after_replay(projection, *, engine: str) -> dict | None:
             "derivable for them from the journal; they stay in place and need "
             "an operator decision (#4125)",
             engine,
-            len(report["unattributed"]) + len(report["ambiguous"])
-            + len(report["blocked"]),
+            # ``blocked`` ⊆ ``ambiguous`` (a node blocked by an unmovable
+            # relation is never deleted, so it lands in ``ambiguous`` too) —
+            # count it ONCE, or the total double-counts every blocked node.
+            len(report["unattributed"]) + len(report["ambiguous"]),
             len(report["unattributed"]), len(report["ambiguous"]),
             ", {} blocked by an unmovable relation".format(
                 len(report["blocked"]))
