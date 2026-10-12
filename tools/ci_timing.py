@@ -854,9 +854,15 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         match = _DURATION_LINE_RE.match(lines[index])
         assert match is not None  # located by the same regex
         tail = match.group("tail")
-        # A stale `# unmeasured` marker stops being true once measured. Any
-        # other trailing comment is preserved verbatim.
-        if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
+        # A stale `# unmeasured` marker stops being true once measured, and the
+        # marker is recognised by its LEADING TOKEN rather than by the whole
+        # tail: authors write long-form provenance (`# unmeasured — #7359: …`),
+        # and the old whole-tail `fullmatch` cleared only the bare form, so a
+        # measured row kept a `# unmeasured` claim the refresh had falsified
+        # (#8254 review, P3 — 3 rows went stale that way). Any OTHER trailing
+        # comment is preserved verbatim, including one that merely mentions the
+        # word later on; `\b` keeps a token like `# unmeasuredly` out.
+        if re.match(r"[ \t]*#\s*unmeasured\b", tail):
             tail = ""
         # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
         # quoted key (`'test_a.py'`) must stay quoted when its value is
@@ -1026,6 +1032,47 @@ def validate_refreshed_manifest(manifest_text: str) -> list[str]:
 
     manifest = _manifest_of(manifest_text)
     return cs.duration_issues(manifest) + cs.duration_coverage_issues(manifest)
+
+
+def unmeasured_rows_measured_by_artifact(
+    manifest_text: str, measured_basenames: set[str]
+) -> list[str]:
+    """`durations:` keys that still LEAD with `# unmeasured` although the
+    rendered artifact measured a file with their BASENAME.
+
+    The artifact's `files` map is BASENAME-keyed by construction (`parse_log`:
+    "`files` is keyed by basename"), while a `durations:` key is a tests-relative
+    PATH — so `eval/retrieval/test_run.py` is measured when `test_run.py` is in
+    the map. Comparing the FULL key (the pre-fix guard's rule) silently skipped
+    every subdir row: 9 rows at #8254's head (#8254 review, P2).
+
+    A basename shared by two or more `durations:` rows cannot be attributed to
+    either, so it is REFUSED rather than silently matched to both — the same
+    fail-closed shape as `_resolve_to_manifest_keys`. No collision exists in the
+    repo today; this is the guard against the class, not a live case.
+    """
+    lines = manifest_text.split("\n")
+    _, entries = _locate_durations_block(lines)
+    by_basename: dict[str, list[str]] = {}
+    for key in entries:
+        by_basename.setdefault(Path(key).name, []).append(key)
+    stale: list[str] = []
+    for basename, keys in by_basename.items():
+        if basename not in measured_basenames:
+            continue
+        if len(keys) > 1:
+            raise DurationsBridgeError(
+                f"the rendered artifact measured a file named {basename!r}, but "
+                f"{len(keys)} durations rows share that basename "
+                f"{sorted(keys)} — the measurement cannot be attributed, so "
+                f"whether their `# unmeasured` tails went stale cannot be "
+                f"judged; refusing to guess"
+            )
+        match = _DURATION_LINE_RE.match(lines[entries[keys[0]]])
+        assert match is not None  # located by the same regex
+        if re.match(r"[ \t]*#\s*unmeasured\b", match.group("tail")):
+            stale.append(keys[0])
+    return sorted(stale)
 
 
 def integrity_problems(manifest_text: str) -> list[str]:
@@ -1305,7 +1352,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         for s in job_steps:
             lines.append(f"| {job_name} | {s['name']} | {s['duration_ms'] / 1000:.1f} |")
     if not steps:
-        lines.append("| _no job data_ | | |")
+        lines.append("| *no job data* | | |")
     lines += [
         "",
         "## Per-file durations (aggregated from --durations=15, slowest tests only)",
@@ -1320,7 +1367,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     for fname, entry in files.items():
         lines.append(f"| {fname} | {entry['tests']} | {entry['total_ms'] / 1000:.1f} | {entry['max_ms'] / 1000:.1f} |")
     if not files:
-        lines.append("| _no per-file data (logs unavailable)_ | | | |")
+        lines.append("| *no per-file data (logs unavailable)* | | | |")
     lines += [
         "",
         "## Outcome (suite totals across jobs)",
@@ -1349,7 +1396,14 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         for f in flakes:
             lines.append(f"| `{f['test']}` | `{f['run_id']}` | {f['passed_at']} |")
     else:
-        lines.append("_No candidate flakes in the sampled window yet (needs ≥ 2 consecutive samples)._")
+        # Asterisk, not underscore: MD049 (`consistent`) keys on the document's
+        # FIRST emphasis, and the `*candidate flake*` blockquote above it is
+        # asterisk. Every emphasis this renderer emits is therefore asterisk —
+        # the mixed style made a first REAL render fail the required `docs`
+        # check (`_No candidate flakes…_` flagged at 669:1 and :80), while the
+        # #1483 stub's earlier underscore placeholders had masked it (#8254
+        # review, P1). One style here, not per-line patches of the artifact.
+        lines.append("*No candidate flakes in the sampled window yet (needs ≥ 2 consecutive samples).*")
     lines += [
         "",
         "## History (bounded to last 52 samples)",
@@ -1370,7 +1424,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
                      f"| {c['passed']} | {c['failed']} | {c['error']} | {c['skipped']} "
                      f"| {(row.get('steps_max_job_ms') or 0) / 1000:.0f} |")
     if not history:
-        lines.append("| _no history yet_ | | | | | | | |")
+        lines.append("| *no history yet* | | | | | | | |")
     lines.append("")
     return "\n".join(lines)
 

@@ -833,6 +833,15 @@ def get_layout_optional(harness: str) -> HarnessLayout | None:
 #: two can never name different files (#4680).
 PI_EXTENSION_NAME = "tortoise-capture.ts"
 
+#: The OpenClaw seam (#2120): a plugin DIRECTORY, not a single file.  The
+#: directory name is the manifest `id` (OpenClaw's own identity rule), and the
+#: entry file is the one `package.json#openclaw.extensions` declares.  Declared
+#: HERE for the same reason as ``PI_EXTENSION_NAME``: the version contract's
+#: detector must inspect exactly the file the installer writes, so writer and
+#: reader read one declaration (#4680).
+OPENCLAW_PLUGIN_DIRNAME = "tortoise"
+OPENCLAW_ENTRY_NAME = "index.mjs"
+
 
 @dataclass(frozen=True)
 class ArtifactContract:
@@ -863,6 +872,14 @@ class ArtifactContract:
     install_name: str
     #: Directory the artifact installs into, RELATIVE to ``$HOME``.
     root_relpath: Path
+    #: The harness's own state-directory environment variable, when it has one
+    #: (OpenClaw's ``OPENCLAW_STATE_DIR``).  ``None`` for a harness with no env
+    #: override (Pi).  The variable relocates the seam's OWN state directory —
+    #: ``root_relpath``'s FIRST component — so an install that ignored it would
+    #: write where the harness never looks and report success (#2120).  This is
+    #: the artifact peer of ``HarnessLayout.root_env``, resolved with the same
+    #: rules (tilde-expanded; a relative value anchored at ``home``).
+    root_env: str | None = None
 
 
 def _pi_artifact_contract() -> ArtifactContract:
@@ -876,30 +893,110 @@ def _pi_artifact_contract() -> ArtifactContract:
     )
 
 
+def _openclaw_artifact_contract() -> ArtifactContract:
+    """OpenClaw's seam — the native plugin installed at
+    ``~/.openclaw/extensions/tortoise/`` (#2120).
+
+    ``install_name`` is deliberately the plugin's ENTRY file
+    (``index.mjs``): the contract's readers (``detect_artifact_install``,
+    ``contract_version_for``) compose ``root / install_name`` and read the
+    version marker out of THAT file, so naming the entry pins the generation
+    of the plugin OpenClaw actually loads.  The manifest
+    (``openclaw.plugin.json``), ``package.json`` and ``README.md`` the
+    installer also copies are metadata, not the behaviour, and carry no
+    marker.
+
+    ``root_relpath`` ends at the PLUGIN DIRECTORY, not at OpenClaw's shared
+    ``extensions`` parent: the seam is the plugin, so the contract root is
+    the directory whose entry file the version detector grades — the same
+    relation Pi's single-file contract expresses with its own basename (the
+    registry pins ``source.name == install_name``, which a nested
+    ``tortoise/index.mjs`` would break).  ``OPENCLAW_STATE_DIR`` relocates the
+    whole state tree, so the state directory is ``root.parent.parent``
+    (``.openclaw`` by default, its env override when set) and the contract's
+    ``root_env`` resolves through it.
+    """
+    return ArtifactContract(
+        harness="openclaw",
+        source=(Path(__file__).resolve().parent / "openclaw-plugin"
+                / OPENCLAW_ENTRY_NAME),
+        install_name=OPENCLAW_ENTRY_NAME,
+        root_relpath=(Path(".openclaw") / "extensions"
+                      / OPENCLAW_PLUGIN_DIRNAME),
+        root_env="OPENCLAW_STATE_DIR",
+    )
+
+
+def _artifact_env_base(contract: ArtifactContract,
+                       home: Path) -> Path | None:
+    """The state directory ``contract.root_env`` relocates the seam to, or
+    ``None`` when the variable is unset/blank or the contract declares none.
+
+    Mirrors ``default_root``'s env rules exactly: the value is
+    tilde-expanded, and a RELATIVE value is anchored at ``home`` so the root
+    is always absolute — a relative env value must never produce a
+    cwd-relative install root that ``install`` and ``status`` resolve
+    differently (the ``CODEX_HOME=relcodex`` defect, #3818).
+    """
+    if not contract.root_env:
+        return None
+    value = os.environ.get(contract.root_env, "").strip()
+    if not value:
+        return None
+    base = Path(value).expanduser()
+    if not base.is_absolute():
+        base = Path(home).expanduser() / base
+    return base
+
+
+def _artifact_relpath_under_env(contract: ArtifactContract) -> Path:
+    """``root_relpath`` with its state-directory component dropped.
+
+    ``root_relpath``'s FIRST component names the harness's own state
+    directory (``.openclaw``), whose parent the env variable replaces; what
+    remains (``extensions``) is appended to the relocated base.
+    """
+    parts = contract.root_relpath.parts
+    return Path(*parts[1:]) if len(parts) > 1 else Path()
+
+
 def artifact_root(harness: str, home: Path) -> Path | None:
-    """The ``$HOME``-scoped install root for a REGISTERED artifact seam.
+    """The state-scoped install root for a REGISTERED artifact seam.
 
     ``None`` for a harness that declares no artifact contract, so a caller can
     tell "no such seam" from "a seam at this path" — the same distinction
     :func:`get_layout_optional` draws for the shell half.
+
+    A contract that declares ``root_env`` (OpenClaw's ``OPENCLAW_STATE_DIR``)
+    resolves through it when set, else ``$HOME/<root_relpath>`` — the artifact
+    peer of :func:`default_root`, so an install never lands where the harness
+    does not look (#2120).
     """
     contract = ARTIFACT_CONTRACTS.get(harness)
     if contract is None:
         return None
+    base = _artifact_env_base(contract, Path(home))
+    if base is not None:
+        return base / _artifact_relpath_under_env(contract)
     return Path(home) / contract.root_relpath
 
 
 def artifact_home(harness: str, root: str | os.PathLike[str]) -> Path | None:
-    """The ``$HOME`` an artifact install root is scoped under, or ``None``.
+    """The base an artifact install root is scoped under, or ``None``.
 
-    The INVERSE of :func:`artifact_root`: ``root`` is that ``$HOME`` with the
-    contract's ``root_relpath`` appended, so the home is the ancestor
+    The INVERSE of :func:`artifact_root`: ``root`` is that base with the
+    contract's relpath appended, so the home is the ancestor
     ``artifact_root`` appended to.  ``None`` when ``root`` does not END with
     that relpath, or the harness declares no artifact contract.
 
+    The relpath is the ENV-RELATIVE one when ``root_env`` is set: with
+    ``OPENCLAW_STATE_DIR`` active the base is the state directory itself, not
+    the user home, and comparing against the un-relocated ``.openclaw/…``
+    relpath would report ``None`` for the install the installer just wrote.
+
     The distinction is LOAD-BEARING, never a best-effort guess: the installer
-    is HOME-scoped (it writes ``<home>/<root_relpath>``), so a caller that
-    derived a home from an unrelated directory would install into a DIFFERENT
+    is state-scoped (it writes ``<base>/<relpath>``), so a caller that
+    derived a base from an unrelated directory would install into a DIFFERENT
     tree while leaving the directory it named untouched (#5351).
 
     A caller that only grades whatever is AT ``root`` does not need this —
@@ -909,7 +1006,11 @@ def artifact_home(harness: str, root: str | os.PathLike[str]) -> Path | None:
     contract = ARTIFACT_CONTRACTS.get(harness)
     if contract is None:
         return None
-    parts = contract.root_relpath.parts
+    if _artifact_env_base(contract, Path.home()) is not None:
+        relpath = _artifact_relpath_under_env(contract)
+    else:
+        relpath = contract.root_relpath
+    parts = relpath.parts
     root_path = Path(root)
     if not parts or tuple(root_path.parts[-len(parts):]) != parts:
         return None
@@ -929,6 +1030,7 @@ def artifact_home(harness: str, root: str | os.PathLike[str]) -> Path | None:
 #: not by delegation (#4680).
 ARTIFACT_CONTRACTS: dict[str, ArtifactContract] = {
     "pi": _pi_artifact_contract(),
+    "openclaw": _openclaw_artifact_contract(),
 }
 
 

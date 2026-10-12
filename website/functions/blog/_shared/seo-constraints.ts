@@ -55,6 +55,13 @@ export const constraints: Constraints = {
   metaTitle(raw: string): string {
     let t = truncateAtWord(raw.trim(), META_TITLE_MAX);
     if (!t) return "";
+    // IDEMPOTENT (#8293): `generate-seo.ts` enforces the model output, repairs
+    // the keyword, then enforces AGAIN so the repair cannot exceed the field
+    // limits. Appending unconditionally would give the second pass a doubled
+    // brand suffix ("… | Tortoise | Tortoise") — user-visible, because SSR
+    // renders the stored value verbatim. A title that already carries the
+    // suffix is left alone, so `enforce(enforce(x)) === enforce(x)`.
+    if (t.endsWith(BRAND_SUFFIX)) return t;
     // Brand suffix when it fits — meta_title is the FINAL title (SSR renders
     // the stored value verbatim; the suffix is only appended to the title
     // fallback when meta_title is null). Editor maxLength=60 includes the
