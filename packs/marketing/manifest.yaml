@@ -82,4 +82,8 @@ ontology:
     a strategy is working. Ephemeral: publishing mechanics, scheduling logistics.'
 connectors: []
 tools: []
-depends_on: []
+# #2781: bare `nearMisses` targets (`customerSegment`) belong to
+# `product-strategy` — declared so an absent pack is reported instead of
+# isolating `marketing` for a reference that is not its own defect.
+depends_on:
+- product-strategy
