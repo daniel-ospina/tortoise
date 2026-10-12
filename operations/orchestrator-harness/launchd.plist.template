@@ -22,12 +22,14 @@
   <key>StandardErrorPath</key>
   <string>__O__/logs/launchd.err</string>
 
-  <!-- launchd gives no shell env: PATH must include brew (tmux, gh, uv, pi) and the
-       per-box constants must be explicit here, since nothing sources a profile. -->
+  <!-- launchd gives no shell env, so EVERY binary the daemon shells out to must be on this
+       PATH. It is rendered by install.sh from the directories the binaries ACTUALLY resolve to
+       (__PATH__), not hardcoded, because a wrong PATH here does not fail loudly — see the
+       OPEN_N note in install.sh: the loop reads an empty queue and idles. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__PATH__</string>
     <key>HOME</key>
     <string>__HOME__</string>
 

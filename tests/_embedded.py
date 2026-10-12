@@ -404,6 +404,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # carve_out list in config/ci-surfaces.yml (the two are one set in two
     # homes; tests/test_ci_selection.py pins the equality).
     "test_vecf32_overwrite_seams_4524",
+    # #4520 residual: the module-level `embedded_only` plain-list embedding
+    # guard asserts the EMBEDDED engine's type flip (`Vectorf32` -> `List` on a
+    # bare `+=` embedding write) and the seam that fixes it, so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the carve_out
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_update_point_derived_embedding_4520",
     # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
     # (it constructs a real embedded store), so it is a permanently green,
     # permanently unexecuted gate on main unless this stem is routed to the

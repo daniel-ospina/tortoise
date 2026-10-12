@@ -155,6 +155,54 @@ def _cmd_rebuild(args):
                 f"Re-run onboarding for the affected org(s) (#4641).",
                 file=sys.stderr,
             )
+        # #5353: the `:TeamMeta` first-org marker. Printed at zero expected
+        # too, so "this graph had no marker to preserve" is distinguishable
+        # from "preservation was not attempted". The count line and the shape
+        # lines are separate for the same reason as the onboarding pair above:
+        # the projection's `team_meta_gap` is a max over a confirmed loss, an
+        # unverified restore and a pre-preservation UNKNOWN, so the CLI names
+        # the shapes instead of printing the aggregate.
+        team_meta_expected = counts.get("team_meta_expected", 0)
+        team_meta_unverified = counts.get("team_meta_verified") is False
+        if team_meta_unverified:
+            print(f"TeamMeta: restore UNVERIFIED "
+                  f"({team_meta_expected} first-org marker(s) expected)")
+        else:
+            print(f"TeamMeta: {counts.get('team_meta_restored', 0)} of "
+                  f"{team_meta_expected} first-org marker(s) restored")
+        if team_meta_unverified:
+            # "Could not confirm" must not be printed as "gone" (round 5's
+            # rule, applied to this class): the missing flag is unset when the
+            # verification read never produced a result.
+            print(
+                "TeamMeta: the post-restore verification COULD NOT RUN — the "
+                "rebuilt graph's first-org marker is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Check it before "
+                "re-provisioning the team (#5353).",
+                file=sys.stderr,
+            )
+        elif team_meta_expected and not counts.get("team_meta_restored"):
+            print(
+                "TeamMeta: the pre-wipe first-org marker was NOT restored — "
+                "the wipe is unconditional, only the journal is replayed, and "
+                "no replay pass recreates this class, so the `#2789` first-org "
+                "guard now reads 0 and a later provisioning call can mint a "
+                "replacement with the control plane's name and a fresh "
+                "`created`. Re-create the team's marker deliberately "
+                "(#5353).",
+                file=sys.stderr,
+            )
+        if counts.get("team_meta_state_unknown"):
+            print(
+                "TeamMeta: the leftover pre-wipe snapshot does not carry a "
+                "usable marker record — it either predates first-org marker "
+                "preservation or carries a state-UNKNOWN marker from an "
+                "earlier interrupted rebuild — so whether this graph's marker "
+                "was destroyed CANNOT be determined (UNKNOWN, not absent). "
+                "Check the graph's marker before re-provisioning the team "
+                "(#5353).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker
@@ -2937,6 +2985,18 @@ def _cmd_install_hooks(args) -> int:
               f"{scripts} and their {events} entries in "
               "~/.cursor/hooks.json to uninstall it.")
         return 0
+    # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
+    # injection IS the native plugin, and the capture installer owns the whole
+    # install. Routing `--uninstall` here would inspect — and could rewrite — a
+    # CLINE registration while the plugin stayed live.
+    if uninstall and harness == "openclaw":
+        print("openclaw has no shell-hook read seam — nothing for --uninstall "
+              "to remove. The plugin is left in place: run "
+              "`openclaw plugins uninstall tortoise`, or delete "
+              "~/.openclaw/extensions/tortoise/ and the "
+              "plugins.entries.tortoise block in ~/.openclaw/openclaw.json, "
+              "to uninstall the seam.")
+        return 0
     # `--list` / no harness prints the catalogue.
     if listing or uninstall:
         rc = _install_read_hook(args)
@@ -2986,7 +3046,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "codex", "pi", "cursor"):
+    if harness in ("claude", "codex", "pi", "cursor", "openclaw"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2994,6 +3054,13 @@ def _cmd_install_hooks(args) -> int:
         # Pi has no shell-hook read seam — its only seam is the capture
         # extension; `_install_capture_seam` already reported the install,
         # the no-op, and the MCP/restart guidance.
+        return 0
+    # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
+    # injection IS the native plugin, so the capture installer's report is the
+    # whole install. Falling through to `_install_read_hook` would inspect —
+    # and could rewrite — a CLINE registration (that helper's `else` branch)
+    # as if it were OpenClaw's.
+    if harness == "openclaw":
         return 0
     if harness == "cursor":
         # Cursor has no shell-hook read seam either: the sessionEnd capture
@@ -3089,6 +3156,28 @@ def _install_capture_seam(args, install_capture) -> int:
             "have no editor-lifetime session boundary. sessionEnd is tied to "
             "the IDE session, not a cloud agent chat.' If you use cloud "
             "agents, their sessions are not filed by this seam.")
+    if args.harness == "openclaw" and not getattr(args, "dry_run", False):
+        # #2120: the plugin is discovered under the HOME-scoped
+        # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
+        # user who installed while a gateway was live would otherwise conclude
+        # the seam is inert (fail-open = silence).  Name the restart AND the
+        # ingestion command — the captured spool is useless until it is
+        # imported, and a printed success over an unimported spool is the
+        # #3808 R13 class.
+        from tortoise.capture_install import openclaw_home
+        # openclaw_home() IS the plugin directory (…/.openclaw/extensions/tortoise).
+        # Appending the dirname again printed a path that does not exist, while
+        # `tortoise hooks status --harness openclaw` printed the correct one.
+        plugin_root = openclaw_home(_P.home())
+        print(
+            f"OpenClaw loads plugins at Gateway startup: restart it (or run "
+            f"`openclaw plugins reload tortoise`) so the plugin at "
+            f"{plugin_root} binds its hooks. Sessions are captured to "
+            "$OPENCLAW_STATE_DIR/tortoise/turns/ (default "
+            "~/.openclaw/tortoise/turns/), one FILE per session — file them "
+            "with `tortoise sessions import --harness openclaw <file>`, e.g. "
+            "`for f in ~/.openclaw/tortoise/turns/*.jsonl; do tortoise "
+            "sessions import --harness openclaw \"$f\"; done`.")
     return 0
 
 
@@ -6113,7 +6202,10 @@ def _process_saved_backlog(state: dict, *, decided_at: str) -> int:
 
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
-    transcript from a harness store (codex / claude-desktop / pi).
+    transcript from a harness store (any harness in the parser registry — see
+    `tortoise.session_import.PARSERS`; no harness is listed here on purpose,
+    because a hand-maintained copy is what made #2120's `openclaw` parseable
+    but unreachable from the CLI).
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
@@ -10599,9 +10691,17 @@ def main(argv: list[str] | None = None) -> int:
              "is not consent)")
     sess_import.add_argument("--file", required=True,
                              help="Path to the session transcript (JSONL or text)")
+    # #2120 review P1: the accepted harnesses are DERIVED from the parser
+    # registry, never re-listed. The hand-maintained list that stood here had
+    # already fallen behind it: `openclaw` parsed correctly, but
+    # `sessions import --harness openclaw` — the exact command `install
+    # openclaw` prints, and the one the seam's docs instruct — was rejected by
+    # argparse before any parser was reached. 'desktop' is a CLI alias for
+    # claude-desktop rather than a registry key, so it is added explicitly.
+    from tortoise.session_import import PARSERS as _SESSION_IMPORT_PARSERS
     sess_import.add_argument(
         "--harness", required=True,
-        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
+        choices=[*_SESSION_IMPORT_PARSERS, "desktop"],
         help="Harness format to parse (each harness has its own record "
              "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
@@ -10655,8 +10755,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "devin", "cursor", "pi"],
-        help="Harness to install (codex | claude | cline | devin | cursor | pi)")
+        choices=["codex", "claude", "cline", "devin", "cursor", "pi", "openclaw"],
+        help="Harness to install (codex | claude | cline | devin | cursor | "
+             "pi | openclaw)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")

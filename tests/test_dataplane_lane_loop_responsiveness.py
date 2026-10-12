@@ -26,6 +26,17 @@ probe below covers one representative per lane, because that is what can be
 driven without a full backup/R2/drill fixture — and two cases cover the calls
 NO guard can see (see the next paragraph).
 
+#4660 — the probe observes the SDK CONSTRUCTION too, not only the attach. The
+AST pin gained the same class (``_SDK_CONSTRUCTION_SEAMS``) but a SOURCE scan
+cannot see construction reached through a sync wrapper (``_registry_sdk``,
+``_open_org_graph_sdk``); this probe can, because it records the seam call's own
+view of the loop. ``sdk_built_on_loop`` / ``sdk_build_threads`` are that
+record. In embedded mode a construction is not free — ``_make_sdk`` probes the
+keepalive anchor (``_anchor_usable``) and may eagerly connect and hold the
+socket — which is why #4645's round-1 P1 (four bodies that built their SDK on
+the loop while every guard passed) is now a behavioural failure and not only a
+structural one.
+
 MECHANISM UNDER TEST. Every off-load here is ONE ``asyncio.to_thread`` hand-off
 of the body's synchronous region. Where the region was a single no-``await``
 sequence on the loop (``commit_session``, ``delete_session``), the hand-off is
@@ -139,12 +150,19 @@ class _RequestScopedProbe:
     instances built while ``state["active"]`` is set (see the module docstring
     for why the sibling file's main-thread gate cannot be used here).
 
-    LIMIT, stated rather than implied: this observes the ATTACH. Helper-mediated
-    graph work inside these bodies (`_record_write_op` — tracked by #4451 —
+    LIMIT, stated rather than implied: this observes the ATTACH and, since
+    #4660, the CONSTRUCTION. Helper-mediated graph work inside these bodies
+    (`_record_write_op` — tracked by #4451 —
     `_reconcile_capture_receipts`, `_update_onboarding_state`, `_seed_demo_graph`
     on the demo path's pre-offload shape) is outside both this probe and the
     AST scan; it is the declared one-level-down residual, `_seed_demo_graph`
     excepted (this change off-loads that call itself).
+
+    ``sdk_built_on_loop`` / ``sdk_build_threads`` (#4660) are what make the
+    CONSTRUCTION class behavioural rather than structural-only. They catch the
+    construction the AST pin cannot see (a sync wrapper — ``_registry_sdk``,
+    ``_open_org_graph_sdk``) and the one it sees but declares, so the two guards
+    fail independently instead of together.
     """
 
     def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool):
@@ -158,6 +176,31 @@ class _RequestScopedProbe:
 
         def _capture(real):
             def _wrapped(*args, **kwargs):
+                # #4660: record the construction's OWN view of the loop BEFORE
+                # the SDK is built. This is the behavioural half of the widened
+                # AST pin — the pin sees `_make_sdk` / `_data_sdk` in an async
+                # body, but NOT construction reached through a sync wrapper
+                # (`_registry_sdk`, `_open_org_graph_sdk`), which is exactly the
+                # helper-mediated shape that stayed invisible in
+                # #4645's round-1 P1 (four "off-loaded" bodies still built their
+                # SDK on the loop and every guard passed).
+                if self._state.get("active"):
+                    try:
+                        asyncio.get_running_loop()
+                        built_on_loop = True
+                    except RuntimeError:
+                        built_on_loop = False
+                    # AGGREGATED, not last-call-wins: a body building several
+                    # SDKs must not let a later off-loop construction erase an
+                    # on-loop first one.
+                    self._state["sdk_built_on_loop"] = (
+                        self._state.get("sdk_built_on_loop", False)
+                        or built_on_loop)
+                    self._state["sdk_builds"] = (
+                        self._state.get("sdk_builds", 0) + 1)
+                    if built_on_loop:
+                        self._state.setdefault("sdk_build_threads", []).append(
+                            threading.current_thread().name)
                 sdk = real(*args, **kwargs)
                 # Only SDKs built while the request window is open are owned —
                 # `_seed_session` and the fixture's boot seeding run before it.
@@ -383,6 +426,18 @@ def test_dataplane_handler_offloads_graph_io(client, monkeypatch, label, handler
         f"[{label}] {handler} ran its synchronous FalkorDB attach ON the event "
         f"loop (thread={state.get('thread')!r}) — one slow graph round trip "
         f"freezes every concurrent request (#3718)")
+    assert state.get("sdk_builds", 0) > 0, (
+        f"[{label}] {handler} built no SDK through `_make_sdk` / `_data_sdk` "
+        f"while the request was live — this run proves nothing about the "
+        f"CONSTRUCTION off-load (#4660)")
+    assert state.get("sdk_built_on_loop") is not True, (
+        f"[{label}] {handler} CONSTRUCTED its SDK on the event loop "
+        f"(threads={state.get('sdk_build_threads')!r}) — in embedded mode "
+        f"`_make_sdk` probes the anchor (`_anchor_usable`) and may eagerly "
+        f"connect with the socket held, so a construction on the loop freezes "
+        f"every concurrent request just as the attach did. Off-load it through "
+        f"the `_graph_offload` seam / `_data_sdk_offloaded` (#4660, the #4645 "
+        f"round-1 P1 class)")
     if expected is not None:
         assert response.status_code == expected, (
             f"[{label}] the off-loaded handler did not return its real response "

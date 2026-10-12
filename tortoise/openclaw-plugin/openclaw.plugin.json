@@ -1,0 +1,37 @@
+{
+  "id": "tortoise",
+  "name": "Tortoise",
+  "description": "Per-turn volunteering-memory injection and session capture for Tortoise (epic #2080, #2120).",
+  "categories": ["memory"],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "description": "Tortoise API base URL used by the hosted reflex (POST /v1/context)."
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Tortoise API key for the hosted reflex and for capture."
+      },
+      "command": {
+        "type": "string",
+        "description": "Local `tortoise` executable to run the reflex through instead of the hosted API."
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 60000,
+        "description": "Per-turn reflex budget in milliseconds. The reflex is fail-open: on timeout nothing is injected."
+      },
+      "capture": {
+        "type": "boolean",
+        "description": "Append each turn to the local capture spool read by `tortoise sessions import --harness openclaw`."
+      }
+    }
+  }
+}

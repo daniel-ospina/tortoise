@@ -301,6 +301,9 @@ def test_every_known_vector_writer_uses_the_seam():
     Scope is the ENUMERATED set below, not "every writer in the repo": the net
     cannot prove anything about an unenumerated file, and `update_point` /
     `update_entity` are a KNOWN, tracked gap (see `tortoise/vector_write.py`).
+    As of the #4520 residual change, `update_point`'s DERIVED branch is seamed
+    (its `embedding` key is stripped from the `+=` merge); the CALLER-supplied
+    branch and `update_entity` remain the tracked gap.
 
     This net is FILE-granular — it only asserts the module imports a seam name,
     so it cannot see a SECOND, un-seamed write inside a module it already
