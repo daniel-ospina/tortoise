@@ -827,7 +827,7 @@ class TestEventsTools:
     """#432 Task 6 — tortoise_events_poll + tortoise_retract_point tool functions.
 
     Previously skipped ("#432 SDK wiring incomplete" — the claim that
-    TortoiseSDK.events_poll / retract_point did not exist was stale: they
+    TortoiseSDK.poll_events / retract_point did not exist was stale: they
     landed on main via #432 and the merged suite passes without the skip,
     code-review #803).
     """
@@ -846,7 +846,7 @@ class TestEventsTools:
         assert ev.annotations.readOnlyHint is True
         assert rt.annotations.destructiveHint is True
 
-    def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
+    def test_poll_events_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
         from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 
@@ -862,7 +862,7 @@ class TestEventsTools:
         assert result["events"] and result["events"][0]["type"] == "PointAdded"
         assert result["next_cursor"]
 
-    def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
+    def test_poll_events_unknown_type_error(self, monkeypatch, tmp_path):
         from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 

@@ -223,7 +223,7 @@ loudly afterwards rather than coerced into a value the node does not hold.
 from the surviving log either — the rebuild replays points, not `:GraphEvent`
 rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
 `last_seq + 1`. That is the truthful floor once the stream is truncated, and it
-makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
+makes `poll_events` answer 410 instead of returning `[]` forever to a subscriber
 parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
 would only relabel the same truncation. The pre-wipe purge floor is therefore
 LOST, which is why the backup/restore sibling

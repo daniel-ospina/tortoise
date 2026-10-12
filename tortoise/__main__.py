@@ -7714,6 +7714,13 @@ def _cmd_pack_validate(args) -> int:
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
     the validator is the single source of truth). Exit 0 clean, 1 errors.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    #2766: also prints the per-relation write-path verdict
+    (writable | declaration-only | predicate-not-in-allowlist) from the one
+    resolver pack load warns with — a relation whose declaration binds no path
+    is reported, never a reason to fail the pack (warn-not-block, W2). The
+    verdict is a DECLARATION check, not a runtime refusal: `create_operator`
+    accepts any label (warn-not-block, #1934); only `create_edge` is strict.
     """
     import json as _json
 
@@ -7730,6 +7737,28 @@ def _cmd_pack_validate(args) -> int:
     for ns, errs in reg.errors.items():
         if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
             errors[ns] = errs
+    # #2766: the per-relation write-path verdict, from the ONE resolver pack
+    # load warns with — so `validate` cannot report a relation as bound to a
+    # path its own declaration does not bind. Enumerated from the registry
+    # directly rather than by calling the public SDK method `list_relations()`:
+    # that call would widen
+    # its surface-manifest caller categories and demand a human re-cut, and this
+    # is a CLI reporting view, not a new SDK reachability.
+    from tortoise.pack_registry import RELATION_WRITABLE, relation_write_verdict
+    relations = []
+    for ns in sorted(reg.packs):
+        for rel in reg.packs[ns].relations:
+            verdict, paths = relation_write_verdict(rel)
+            relations.append({
+                "pack": ns,
+                "predicate": rel.get("predicate"),
+                "write_verdict": verdict,
+                "write_paths": list(paths),
+            })
+    verdict_counts: dict[str, int] = {}
+    for rel in relations:
+        verdict_counts[rel["write_verdict"]] = (
+            verdict_counts.get(rel["write_verdict"], 0) + 1)
     ok = not errors
     if getattr(args, "json", False):
         print(_json.dumps({
@@ -7737,6 +7766,10 @@ def _cmd_pack_validate(args) -> int:
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "relation_verdicts": {
+                "counts": verdict_counts,
+                "relations": relations,
+            },
         }, indent=2))
     else:
         print(f"tortoise pack validate: {packs_dir}")
@@ -7746,6 +7779,13 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if relations:
+            print("  relation write verdicts:")
+            for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
+                mark = "✓" if rel["write_verdict"] == RELATION_WRITABLE else "⚠"
+                paths = f" [{', '.join(rel['write_paths'])}]" if rel["write_paths"] else ""
+                print(f"    {mark} {rel['write_verdict']:28s} "
+                      f"{rel['pack']}.{rel['predicate']}{paths}")
         if ok:
             print("✓ Clean — pack(s) validate")
         else:

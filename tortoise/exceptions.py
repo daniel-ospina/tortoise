@@ -403,3 +403,53 @@ class UnrepresentableNumberError(ValueError):
     Subclasses ``ValueError``: the SDK's #4647 call sites raise ``ValueError``
     for this same condition, and that call convention is kept.
     """
+
+
+class WriteNotLandedError(RuntimeError):
+    """#7209 — a write reported SUCCESS and is not in the graph.
+
+    The defect this closes is the SILENT half of #7209: ``create_point``
+    mints its Point id client-side, issues the ``CREATE``, and then reads the
+    point back — but it returned whatever that read returned, including an
+    EMPTY dict, raising nothing and logging nothing. A caller holding ``{}``
+    cannot tell a discarded write from a successful one, so a finding the
+    writer believes it recorded can be gone (the same "write that looks lost"
+    shape as the abort path in #7405 / #7685, one layer up).
+
+    The write path this guards already retries the engine's
+    graph-deleted-or-replaced abort (``TortoiseSDK._graph_write_with_retry``),
+    and that retry's own docstring records the residual it CANNOT close: the
+    retry is gated on the graph KEY being present, so a rebuild whose recreate
+    has already landed is retried INTO the rebuilt graph — and if the rebuild's
+    replay then replaces the graph again, the statement is gone while the
+    writer was told it succeeded. Separating those two fully needs an
+    engine-level identity token (#7685's escalation line).
+
+    What the SDK can do — and now does — is refuse to REPORT that success.
+    ``create_point`` verifies its own write against the read-back it already
+    performs: an unreadable Point raises this error naming the graph and the
+    id, and the ``PointAdded`` event is never journaled for a point that is not
+    there, so a rebuild cannot resurrect a journal record the graph never had.
+
+    Loud by construction: a caller that sees this error knows the write did NOT
+    land and may safely re-issue it (``create_point`` is content-hash
+    idempotent under ``dedup=True``). It is never raised for a read-back that
+    SUCCEEDED.
+    """
+
+    def __init__(self, point_id: str, graph: str | None = None,
+                 detail: str = "") -> None:
+        self.point_id = point_id
+        self.graph = graph
+        self.detail = detail
+        _where = f" on graph {graph!r}" if graph else ""
+        super().__init__(
+            f"create_point: the Point {point_id!r} was written{_where} but is "
+            f"NOT READABLE on the read-back that immediately follows its own "
+            f"CREATE — the write did not land (the graph is being "
+            f"replaced/rebuilt, or it was replaced between the write and the "
+            f"read-back). No Point exists and nothing was journaled; do NOT "
+            f"treat this call as successful — re-issue it (dedup=True is "
+            f"content-hash idempotent). (#7209)"
+            + (f" [{detail}]" if detail else "")
+        )

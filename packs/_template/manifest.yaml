@@ -122,18 +122,34 @@ ontology:
   hierarchies: []
 
   # New predicates (edges between entities)
-  # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, nearMisses?, cardinality? }
+  # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, nearMisses?, cardinality?, declarationOnly? }
   #   - predicate: domain verb — "addresses", "competesWith", "implements"
   #   - fromKind/toKind: prefixed pack kinds — "myapp:concept" or core PascalCase kinds
   #   - mechanism: IMPL (A supports B) or NAND (A contradicts B)
+  #     ⤷ a declared `mechanism` is what BINDS this verb to the operator write
+  #       path (#2766): it is the op_type a caller passes
+  #       (`create_operator(op_type=mechanism, label=predicate)`, the path
+  #       `sdk.ingest` uses). Without it, and without a structural predicate,
+  #       the declaration binds no write path — reported as
+  #       `predicate-not-in-allowlist`. ⛔ That is a DECLARATION gap, not a
+  #       runtime refusal: `create_operator` accepts any label (warn-not-block,
+  #       #1934); only `create_edge` is strict. See "Declaring a relation" in
+  #       docs/EXPANSION_PACKS.md.
   #   - semantics: optional — the Layer-2 MEANING, from the closed core vocabulary
   #     (ONTOLOGY §8): "hasPart", "addresses", "supports", "mutuallySupportive",
   #     "mutuallyExclusive", "refutes", "causes", "dependsOn", "transacts", "related",
   #     "ownedBy", "managedBy"
   #   - nearMisses: optional — sibling predicates/semantics this relation is confused with
   #   - cardinality: optional (one_to_one, one_to_many, many_to_one, many_to_many)
+  #   - declarationOnly: optional bool — "documentation-only, on purpose". A
+  #     relation whose declaration binds no write path is otherwise reported as
+  #     `predicate-not-in-allowlist` (#2766); set this to say the silence is intended.
   # Old format (compat): { predicate, from, to, cardinality? }
   #   - from/to: entity types — "Object", "Subject"
+  #     ⤷ the old format declares NO mechanism, so the declaration binds only the
+  #       structural path — and only when the predicate is a structural edge
+  #       predicate (hasPart, dependsOn, ownedBy, related, ...). Otherwise mark
+  #       it `declarationOnly: true`.
   # Example:
   #   relations:
   #     - predicate: contains
@@ -146,8 +162,11 @@ ontology:
   #       mechanism: IMPL
   #       fromKind: myapp:concept
   #       toKind: myapp:subconcept
-  #       extractable: true      # v3 (R6 §3.3): may the extractor assert this
-  #                              # edge? bool, default FALSE — opt-in only
+  #       extractable: true      # v3 (R6 §3.3): declared intent that the
+  #                              # extractor may assert this edge. bool, default
+  #                              # FALSE — opt-in only. ⚠️ DECLARATION-ONLY today:
+  #                              # no runtime consumer reads it (#2787 → #4894),
+  #                              # so it does not by itself change extraction.
   relations: []
 
 # ── Manifest v3 (epic #909 / research-r6 §3.4): extraction activation + enforcement ──
@@ -279,4 +298,19 @@ connectors: []
 tools: []
 
 # ── Dependencies ──────────────────────────────────────────────────────────
+# Pack-level dependencies (#2781), by namespace. CONSUMED, not decorative:
+#   * registry load — a declared pack that is not loaded is reported against
+#     THIS pack (naming the missing one) and the pack still loads. The
+#     declaration is also what explains an unresolvable BARE kind reference
+#     (one that carries no `ns:` prefix): with a declared-but-absent
+#     dependency the reference is a reported gap, without one it is treated
+#     as a typo and the pack is isolated.
+#   * hosted install (`validate_manifest`) — FAIL-CLOSED: an upload whose
+#     declared dependency or cross-pack reference cannot be satisfied by the
+#     tenant's installed set (starter catalog + the tenant's own packs) is
+#     refused, naming the missing pack.
 depends_on: []
+# Example — a pack whose relations/nearMisses reach into two other packs:
+# depends_on:
+# - product-strategy
+# - pm

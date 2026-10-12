@@ -18,9 +18,12 @@ cannot silently go stale when a new edge type is added.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # ── Filter keys (sdk.query / sdk.paginated_query) ─────────────────────────
 
@@ -972,6 +975,143 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
         if n:
             counts[kind] = counts.get(kind, 0) + n
     return out, counts
+
+
+# ── Outbound URL validation (webhook registration) ────────────────────────
+
+#: The longest accepted webhook URL. Bounded so a registration body cannot
+#: smuggle a multi-KB target into a per-dispatch header/body write.
+MAX_WEBHOOK_URL_LEN = 2048
+
+#: Hostnames that resolve to the loopback interface (or the cloud metadata
+#: endpoint) on the deployments we run on, and that a user could register as a
+#: webhook target. `ipaddress.is_global` already covers the IP-LITERAL forms;
+#: this set covers the NAMES, which are not IP literals and so never reach it.
+#: `169.254.169.254` (the GCP/AWS IMDS address) is covered by the IP branch
+#: (link-local is not global), and is listed here as a NAME only because
+#: `metadata.google.internal` is the name form of the same endpoint.
+_BLOCKED_WEBHOOK_HOSTS = frozenset({
+    "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+    "metadata", "metadata.google.internal", "metadata.goog",
+})
+
+#: Suffixes that are never a public webhook target: mDNS, private DNS zones,
+#: and the RFC 6761 special-use TLDs (``.test``, ``.invalid``, ``.example``,
+#: ``.local``) plus the single-label DNS names a container network uses.
+_BLOCKED_WEBHOOK_HOST_SUFFIXES = (
+    ".local", ".internal", ".localhost", ".home.arpa", ".test",
+    ".invalid", ".example", ".onion",
+)
+
+
+def validate_webhook_url(url: str) -> str:
+    """Validate an OUTBOUND webhook target (SSRF guard). Returns the URL.
+
+    A tenant-supplied webhook URL is a server-side request to an address the
+    tenant chose — i.e. exactly SSRF. This is the registration-time gate: it
+    rejects the scheme/credential/host shapes that can never be a legitimate
+    public callback, so a new subscription cannot be pointed at the process's
+    own loopback, a private RFC 1918 / ULA address, a link-local address, or
+    the cloud instance-metadata endpoint.
+
+    Rules (each raises ``ValueError`` with a caller-readable message):
+
+    * scheme must be ``http`` or ``https`` — no ``file:``/``gopher:``/
+      ``unix:`` or any other scheme ``httpx`` might be taught to handle;
+    * no userinfo (``https://user:pass@host/``) — the credentials would be
+      stored in the graph and logged in receipts, and they add nothing;
+    * a host is required, and it must not be a blocked name, a blocked
+      suffix, or an IP LITERAL that ``ipaddress.is_global`` rejects
+      (loopback, private, link-local, multicast, reserved, unspecified, and
+      IPv6 ULA all fail that predicate);
+    * the URL must be at most ``MAX_WEBHOOK_URL_LEN`` characters.
+
+    Known residual — DNS REBINDING, deliberately not closed here: a public
+    name that resolves to a private address is accepted (nothing resolves the
+    name at registration), and the name can be re-pointed between registration
+    and dispatch. Closing it needs the connected peer's IP checked against the
+    same policy at CONNECT time (a custom transport), which is a transport
+    change; this predicate is the honest, bounded half and the dispatch path
+    is documented as carrying the residual.
+
+    Why this is not a second loopback predicate (#1647 P1-3, the
+    ``config.LOOPBACK_HOSTS`` single-source rule): it is a DIFFERENT question.
+    That predicate answers "does this URI point at the local test box" for the
+    docker/embedded redirect, over three host names; this one answers "is this
+    an address the process may be made to call", over every non-global range
+    plus the name forms that resolve to one. It also CANNOT reuse that
+    constant: this module is stdlib-only by design (its docstring) and
+    ``config`` imports from ``tortoise``. The containment invariant is pinned
+    by ``tests/test_webhook_delivery.py`` instead — every host the shared
+    predicate refuses is refused here.
+    """
+    if not isinstance(url, str) or not url:
+        raise ValueError("webhook url must be a non-empty string")
+    if len(url) > MAX_WEBHOOK_URL_LEN:
+        raise ValueError(
+            f"webhook url exceeds the {MAX_WEBHOOK_URL_LEN}-character cap")
+
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:  # malformed IPv6 literal / bad port
+        raise ValueError(f"webhook url is not parseable: {e}") from e
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(
+            f"webhook url scheme must be http or https, not "
+            f"{parts.scheme or '(none)'}")
+    # Read userinfo through the ONE decoding rule (#3039) rather than by hand off
+    # the urlsplit result: a raw `.username`/`.password` read is exactly the shape
+    # `test_from_uri_userinfo` guards. Local import keeps this module cycle-free.
+    from tortoise.config import parse_uri_userinfo
+
+    if any(parse_uri_userinfo(url)):
+        raise ValueError("webhook url must not carry credentials (user:pass@)")
+    try:
+        # `.rstrip(".")`: a trailing dot is an FQDN spelling of the SAME name
+        # (``localhost.`` resolves to loopback exactly as ``localhost`` does), so
+        # it must be normalised BEFORE the name blocklist — otherwise every
+        # check below is comparing against a string the resolver never sees.
+        host = (parts.hostname or "").strip().lower().rstrip(".")
+        port = parts.port
+    except ValueError as e:  # non-numeric / out-of-range port
+        raise ValueError(f"webhook url has an invalid port: {e}") from e
+    if not host:
+        raise ValueError("webhook url has no host")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"webhook url port {port} is outside 1-65535")
+    if host in _BLOCKED_WEBHOOK_HOSTS or host.endswith(_BLOCKED_WEBHOOK_HOST_SUFFIXES):
+        raise ValueError(
+            f"webhook url host {host!r} is a local/private name — a webhook "
+            f"target must be a public address")
+    # A bare single-label host (``http://db/``) is a container-network name on
+    # every deployment we run on: it has no public DNS meaning. Public targets
+    # are FQDNs (``hooks.example.com``) or public IP literals.
+    if "." not in host and ":" not in host:
+        raise ValueError(
+            f"webhook url host {host!r} is a single-label name — a webhook "
+            f"target must be a public host")
+    literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    try:
+        addr = ipaddress.ip_address(literal)
+    except ValueError:
+        # Not the canonical text form — but the C resolver ALSO accepts legacy
+        # numeric spellings (`127.1`, `0x7f.1`, `2130706433`), and `ipaddress`
+        # rejects every one of them. Asking by character class is what let
+        # `0x7f.1` through a digits-only guard: a class covers the spellings you
+        # thought of, and hex octets were not one of them. So ask the SAME
+        # question the resolver asks — if `inet_aton` can read it, it IS an
+        # address, whatever it looks like — and let the is_global check below
+        # refuse it. A DNS name fails inet_aton and keeps the residual above.
+        try:
+            addr = ipaddress.ip_address(
+                socket.inet_ntoa(socket.inet_aton(literal)))
+        except (OSError, ValueError):
+            addr = None  # genuinely a DNS name — the residual above applies
+    if addr is not None and not addr.is_global:
+        raise ValueError(
+            f"webhook url host {host!r} is not a globally routable address "
+            f"(loopback/private/link-local/reserved targets are refused)")
+    return url
 
 
 # ── Publication redaction (public issue bodies / chat messages, #3293) ─────

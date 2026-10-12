@@ -200,6 +200,10 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MIN_SWAP_FREE` | `600` | MB; **the binding gate in practice** |
 | `BATCH` | `2` | issues dispatched per cycle |
 | `CYC` | `240` | seconds between cycles |
+| `STALE_MIN` | `40` | a worker whose log has not grown in this many minutes is presumed hung and its session is killed (§6) |
+| `LANE_TIMEOUT` | `2400` | wall-clock limit on a lane's `pi` run (s) |
+| `REVIEW_TIMEOUT` | `1800` | wall-clock limit on a reviewer `pi` run (s) |
+| `FIX_TIMEOUT` | `2400` | wall-clock limit on a fixer `pi` run (s) |
 
 **Swap, not lanes, is what actually throttles this box.** Observed at 15 concurrent workers:
 `swap_free=588M` → dispatch correctly refused. Raising `MAX_LANES` alone buys nothing on 8 GB;
@@ -301,6 +305,24 @@ record that they existed. Today this is recovered by reading `git worktree list`
 `$O/logs/*.log` tails, and the `wip/` patches. **This is the main operational weakness — see
 §7.1.**
 
+### Detecting a hung worker (do this first if the queue stops moving)
+
+`pi -p` has no internal timeout, so a reviewer or fixer can hang indefinitely — and because the
+concurrency caps count **tmux sessions**, one hang permanently occupies a slot. Observed
+2026-10-12: three merge workers hung for 6–9 hours (one had spawned a `find /` that ran for 8
+hours), so half the merge capacity was dead weight overnight while the queue looked busy.
+
+```bash
+# a worker whose log has not grown in 40+ minutes is hung
+tmux ls -F '#{session_name}' | grep -E '^(merge|lane|fix)-' | while read s; do
+  f=~/orchestrator/logs/$s.log
+  printf '%s silent %ss\n' "$s" "$(( $(date +%s) - $(stat -f %m "$f") ))"
+done | sort -k3 -n -r | head
+```
+
+`orch-loop.sh` now reaps these itself (`STALE_MIN`, default 40): the session is killed and the PR
+is re-dispatched on the next sweep, with `claim_live()` freeing the dead owner's claim.
+
 ### Reading the logs
 
 `$O/logs/orch-loop.log` is the controller's decision log; every line is prefixed by a tag:
@@ -396,6 +418,7 @@ because the self-test now drives every one of them:
 | **a PR branch name was interpolated into the `sh -c` string `tmux new-session` executes** | **arbitrary command execution on the unattended host that holds the merge key.** git permits `'` `;` `$` `` ` `` `&` `\|` `(` `)` `{` `}` `"` `<` `>` `#` in a ref name, so a fork PR on `fix/x';touch${IFS}/tmp/x;#` broke out of the quotes. Reproduced end-to-end before fixing | `safe_ref` allowlist + `check-ref-format`; numeric-only PR ids; and worker args now travel in a file (`--argv`) so no PR-derived value is interpolated at all |
 | the claim-file guard added in the first fix round introduced a permanent stall | the controller treated *the existence of* `mergeclaim-<PR>.lock` as "in flight", but only `merge-one.sh` removes it — a SIGKILLed worker or a reboot mid-merge left the PR skipped forever with no fixer and no re-record | `claim_live()` tests the recorded pid with `kill -0` and removes a dead owner's claim |
 | 6 self-test checks passed vacuously because an empty extraction did not fail the check | the round-1 vacuity fix was incomplete: checks depending on `sess()`, the claim block or the reaper passed when the shipped script had no such code | `need()` turns a missing extraction into a FAIL; each check was then re-proved against the pre-fix tree it pins |
+| **a hung worker held a concurrency slot for 9 hours** | `pi -p` has no timeout and the caps count **tmux sessions**, so a hung reviewer (or a runaway `find /` it spawned) permanently reduced merge throughput while the queue looked busy — three slots were dead weight overnight on 2026-10-12 | portable `run_agent()` wall-clock limit (bash `wait` + watchdog subshell, since macOS ships no `timeout`) plus a `reap_stale_workers()` sweep that kills any worker silent for `STALE_MIN` minutes |
 
 ### 7.5 Still open, deliberately not fixed here
 

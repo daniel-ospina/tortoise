@@ -823,6 +823,61 @@ def test_pi_hooks_change_selects_the_capture_guard():
     assert "test_pi_capture_hooks.py" in r["test_files"]
 
 
+def test_token_ts_change_selects_the_consent_bridge_guard():
+    """#3524: the guard's `token.ts` half must be selected by a `token.ts` diff.
+
+    `test_oauth_consent_bridge.py`'s task-3 assertion reads
+    `website/apps/dashboard/functions/_shared/auth/token.ts`. That path matches
+    the `onboarding` SOURCE_PATTERN `website/apps/dashboard/functions/`, NOT
+    `api` — so an `api`-only registration (which covers the file's
+    `tortoise/oauth.py` + `tortoise/hosted_api.py` subjects) left the token.ts
+    guard unrun exactly when token.ts moved: a token.ts regression shipped green
+    while the guard that exists to catch it stayed asleep. This asserts the
+    SELECTION, not the registration, so it reds on the pre-fix manifest.
+    """
+    r = _sel(["website/apps/dashboard/functions/_shared/auth/token.ts"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["onboarding"], (
+        f"token.ts selects {r['surfaces']} — the consent bridge's token.ts guard "
+        "is only reachable through the surface that path matches"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
+        "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
+    """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
+
+    `test_oauth_consent_bridge.py` also pins `docs/engineering/auth/consent-identity-bridge.md`
+    (the spec) and `docs/ops/auth-email-flows.md` (the redirect-allowlist record).
+    `docs/` is in NON_PYTHON_PREFIXES and matches (now) the `onboarding`
+    SOURCE_PATTERNS entries added with this fix, so a docs-only edit to either
+    record selects the surface that runs the guard. Before those entries a
+    docs-only edit selected `surfaces=[]` and the guard never saw the record it
+    guards — the same silent-drop class the token.ts half (#3524) fixes.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = (
+        "docs/engineering/auth/consent-identity-bridge.md",
+        "docs/ops/auth-email-flows.md",
+    )
+    for changed in subjects:
+        assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "onboarding" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_oauth_consent_bridge.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_oauth_consent_bridge.py, so its record guard cannot fire "
+            "on the change it pins (#3524)"
+        )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be

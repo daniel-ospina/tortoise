@@ -382,6 +382,22 @@ def _struct_edges(proj, pid: str) -> set:
         params={"id": pid, "rels": list(_STRUCT_RELS)}).result_set}
 
 
+def _about_edges(proj, pid: str) -> int:
+    """aboutPoint edges OUT of ``pid`` — counted, not set-deduped by logical
+    id, so a fan-out to two nodes carrying one id is visible (#7822)."""
+    return proj.g.query(
+        "MATCH (p:Point {id:$id})-[:aboutPoint]->() RETURN count(*)",
+        params={"id": pid}).result_set[0][0]
+
+
+def _self_about_edges(proj, pid: str) -> int:
+    """aboutPoint edges whose BOTH endpoints carry ``pid`` — the phantom the
+    2b no-self-edge guard exists to prevent (client-visible corruption)."""
+    return proj.g.query(
+        "MATCH (a:Point {id:$id})-[:aboutPoint]->(b:Point {id:$id}) "
+        "RETURN count(*)", params={"id": pid}).result_set[0][0]
+
+
 def _descriptors(events) -> list[dict]:
     """DirectEdgeRepoint descriptors journaled so far (structural 2b + 2a)."""
     import json
@@ -498,6 +514,50 @@ def test_no_self_edge_guard_delete_only_descriptor(sup):
     assert not {e for e in _struct_edges(proj, y)
                 if e[0] == "aboutPoint"}, \
         "Y must carry no aboutPoint self-edge post-rebuild"
+
+
+def test_no_self_edge_guard_covers_every_duplicate_successor_node(sup):
+    """#7822: the 2b no-self-edge guard scans EVERY node carrying the successor
+    id, not ``succ_rows[0][0]``.
+
+    With a duplicated successor id the writer's MERGE binds every node carrying
+    ``new_id``; a first-row-only scalar protected only the row the server
+    returned first, so an old edge ending at a LATER successor was transferred
+    and minted the phantom ``(Y)-[:aboutPoint]->(Y)`` self-edge there. The
+    fixture gives X an aboutPoint edge to BOTH successor nodes, so exactly one
+    of them was unprotected whichever row the server returned first — the
+    failure does not depend on row order. Asserted live and post-rebuild.
+    """
+    _, events, sdk = sup
+    y = "pt_dup_successor_7822"
+    sdk.create_point("statement", "dup Y first", status="live", id=y,
+                     name="DupTarget")
+    sdk.create_point("statement", "dup Y second", status="live", id=y)
+    # aboutEntities gives old's snapshot a name to re-mint on pass-2, so the
+    # delete-only descriptor's replay delete-leg is actually exercised.
+    x = sdk.create_point("statement", "X about Y", status="live",
+                         aboutEntities=["DupTarget"])["id"]
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (x:Point {id:$x}), (t:Point {id:$y}) "
+        "CREATE (x)-[:aboutPoint]->(t)", params={"x": x, "y": y})
+    assert _about_edges(proj, x) == 2, "premise: an edge to EACH successor node"
+
+    sdk.supersede_point(x, y)
+
+    assert _about_edges(proj, x) == 0, "old X's aboutPoint edges are deleted"
+    assert _self_about_edges(proj, y) == 0, (
+        "guard must not mint a phantom self-edge at ANY successor node")
+    descs = [d for d in _descriptors(events) if d.get("delete_only") is True]
+    assert len(descs) == 1, (
+        f"one descriptor per rel — the replay delete-leg is logical-id keyed "
+        f"and deletes every matching edge: {descs}")
+    assert descs[0]["src"] == x and descs[0]["tgt"] == y
+    _rebuild(sdk, events)
+    assert _about_edges(proj, x) == 0, (
+        "old X must carry no aboutPoint edge post-rebuild")
+    assert _self_about_edges(proj, y) == 0, (
+        "no successor node may carry the self-edge post-rebuild")
 
 
 def test_no_self_edge_guard_chain_delete_keys_direct_successor(sup):
