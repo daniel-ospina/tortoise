@@ -481,10 +481,18 @@ def _journal_line_types(journal_path: Path) -> list[str]:
 
 @pytest.fixture
 def sdk_with_journal(tmp_path):
-    """A real embedded SDK whose JSONL journal is a temp file.
+    """A real SDK whose JSONL journal is a temp file.
 
-    Embedded lane by construction (a temp `db_path`), so nothing here needs
-    `TORTOISE_DB_URI` and the docker lane is untouched."""
+    The fixture passes an explicit temp `db_path` and depends on nothing else
+    in the process environment, so it runs in EITHER lane: embedded when no
+    `TORTOISE_DB_URI` is configured, and — in a URI-set session — the SDK's
+    projection construction is REDIRECTED to the docker server, exactly like
+    any other non-carve-out test's (the normal shape; this stem is deliberately
+    in neither `config/ci-surfaces.yml`'s `carve_out` nor
+    `tests/_embedded.TEST_NO_REDIRECT_STEMS`). It needs no URI, but it is NOT
+    embedded-only, and the assertions below are lane-agnostic — so do not add
+    the stem to those two registries to "match" an embedded-only reading of
+    this fixture."""
     from tortoise.sdk import TortoiseSDK
 
     journal = tmp_path / "journal.jsonl"
