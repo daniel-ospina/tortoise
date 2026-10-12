@@ -83,8 +83,12 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
     * a map/list/``None`` strength is dropped by that passthrough (the Point
       layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
       strength and a fabricated edge dampens at the fallback anyway;
-    * a non-numeric value is persisted, and then makes
-      ``weights.compute_operator_weight`` RAISE on every read of that operator.
+    * a non-numeric value is persisted. It used to make
+      ``weights.compute_operator_weight`` RAISE on every read of that operator;
+      since #6151 that read degrades an unreadable strength to the fallback, so
+      the value is merely useless rather than poisonous — but the fold below
+      still refuses it, because admitting it would persist a strength nothing
+      can ever read.
     * an out-of-band value (``-0.5``, ``5.0``, ``2**62``) is refused by the
       writer's own band check (``sdk.mitigate_operator``: ``if not 0 <=
       strength <= 1: raise ValueError``), so admitting it would authorise a

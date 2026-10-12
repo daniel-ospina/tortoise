@@ -430,8 +430,10 @@ class TestMitigatedBySurvivesRebuild:
         # with NO strength and a fabricated edge would dampen at the fallback
         pytest.param({"not": "persistable"}, id="map"),
         pytest.param([0.5], id="undeclared-list"),
-        # persistable, so it LANDS on the node and then makes
-        # ``weights.compute_operator_weight`` raise on every read
+        # persistable, so it LANDS on the node and is then ignored at read time
+        # (#6151: `weights.compute_operator_weight` degrades an unusable strength
+        # to the fallback instead of raising, so what the fold protects the
+        # rebuild from is silent tolerance, not a crash)
         pytest.param("not-a-number", id="non-numeric"),
         # a value ``math.isfinite`` cannot even CONVERT: accepting it (or
         # letting the conversion raise) turned one hand-edited record into an
@@ -459,8 +461,8 @@ class TestMitigatedBySurvivesRebuild:
         non-operator point. That is not a record any live writer produced — and
         neither is one whose ``mitigation_strength`` is merely PRESENT but
         unusable (``mitigate_operator`` writes a finite real IN ITS BAND; the
-        passthrough drops a map/list, a non-numeric value poisons every weight
-        read, an out-of-band value is one the writer itself rejects, and a
+        passthrough drops a map/list, a non-numeric value is ignored at read
+        time (#6151), an out-of-band value is one the writer itself rejects, and a
         value past float range must not be allowed to abort the rebuild).
         Minting ``mitigated_by`` for any of them dampens the operator by the
         fallback strength (measured 1.0 -> 0.7) — a silent belief change.

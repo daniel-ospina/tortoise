@@ -8,6 +8,7 @@
 //        npm run validate
 // Exit:  0 = all migrations applied + all assertions passed; 1 = any failure.
 import { PGlite } from '@electric-sql/pglite';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -379,6 +380,12 @@ const suites = [
   // is not named here never runs, and "the suite exists" is then mistaken for
   // "the suite passes". Add the entry in the same commit as the file.
   '20261012000001_record_schema.sql',  // #7968
+  // #4550 — `recover_team_key`'s cap count AND revoke-target scan exclude
+  // EXPIRED-but-unrevoked rows, driven against the REAL function. NOTE: this
+  // list is EXPLICIT, not a glob — a suite file that is not named here never
+  // runs, and "the suite exists" is then mistaken for "the suite passes".
+  // Add the entry in the same commit as the file.
+  '20261012000006_recover_team_key_expiry.sql',  // #4550
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -611,6 +618,291 @@ try {
   process.exit(1);
 }
 
-console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
+// ── #7969: the record projection — replay a journal TWICE, assert idempotence ─
+//
+// Interface A (`journal → Postgres, replayable and idempotent`, epic #7879) is a
+// claim about a REAL database, so it is checked on one. The statements come from
+// `tortoise/record_projection.py` itself — the harness never restates a mutation,
+// or it would be testing its own copy of the projection rather than the
+// projection. The Python half is spawned with `-c` and loads the module by FILE
+// PATH, so it needs neither a venv nor the `tortoise` package (stdlib only) and
+// cannot drift from the code under test.
+//
+// Three assertions, one per Interface A clause:
+//   TOTAL     — every record type in the fixture materialized (the fixture
+//               carries the whole declared vocabulary), and an UNDECLARED type
+//               is a hard failure;
+//   IDEMPOTENT— replay twice ⇒ byte-identical tables;
+//   PLACEMENT — the EP scalars the journal carries (`ep_alpha`, `confidence`,
+//               `version`, `content_hash`) are stored NOWHERE, as a column or as
+//               a props key (STORAGE-ARCHITECTURE §2.0/§17.5).
+const PROJECTION_PY = `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("record_projection", sys.argv[1])
+rp = importlib.util.module_from_spec(spec)
+# Register BEFORE exec: dataclasses resolves the defining module through
+# sys.modules[cls.__module__] on 3.14, and an unregistered module is None.
+sys.modules["record_projection"] = rp
+spec.loader.exec_module(rp)
+records = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+plan = []
+for statement in rp.replay_plan(records, org_id="7969-org", graph_id="7969-graph"):
+    sql, params = rp.to_dollar_placeholders(statement)
+    plan.append({"sql": sql, "params": params})
+json.dump({"records": len(records), "plan": plan}, sys.stdout)
+`;
+const PROJECTION_RECORD_TABLES = [
+  'node_identity', 'journal_event', 'source', 'event', 'session',
+  'object', 'subject', 'point', 'relation',
+];
 
+async function projectionSnapshot() {
+  const out = [];
+  for (const table of PROJECTION_RECORD_TABLES) {
+    const r = await db.query(`SELECT * FROM public.${table}`);
+    out.push([table, r.rows.map((row) => JSON.stringify(row)).sort()]);
+  }
+  return JSON.stringify(out);
+}
+
+try {
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('7969-org', '7969-org', 'org_7969-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('7969-graph', '7969-org', '7969-graph', 'org_7969-org_7969-graph');
+  `);
+  const fixture = join(HERE, '..', 'fixtures', 'record_projection_journal.jsonl');
+  const modulePath = join(REPO_ROOT, 'tortoise', 'record_projection.py');
+  const emitted = JSON.parse(execFileSync(
+    'python3', ['-c', PROJECTION_PY, modulePath, fixture], { encoding: 'utf8' },
+  ));
+  if (!emitted.plan.length) {
+    throw new Error('the projection emitted no statements for a non-empty journal');
+  }
+
+  // ONE transaction per replay — §3: "One transaction covers the journal and
+  // its projection — no dual write between them".
+  const applyOnce = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  await applyOnce();
+  const first = await projectionSnapshot();
+  await applyOnce();
+  const second = await projectionSnapshot();
+  if (first !== second) {
+    console.error('✗ #7969: a SECOND replay of the same journal CHANGED the record');
+    process.exit(1);
+  }
+
+  const counts = await db.query(`SELECT
+      (SELECT count(*) FROM public.journal_event) AS journal,
+      (SELECT count(*) FROM public.point)         AS points,
+      (SELECT count(*) FROM public.source)        AS sources,
+      (SELECT count(*) FROM public.object)        AS objects,
+      (SELECT count(*) FROM public.subject)       AS subjects,
+      (SELECT count(*) FROM public.session)       AS sessions,
+      (SELECT count(*) FROM public.relation)      AS relations`);
+  const c = counts.rows[0];
+  const wantJournal = emitted.records;
+  // Every fixture project is replayed to the same record twice; the counts are
+  // the totality evidence (a skip would land one short) plus the fold's own
+  // verdicts: p2 is hard-deleted by its EntityMutated, sess1 by SessionDeleted,
+  // the `delete_only` DirectEdgeRepoint removes the `aboutPoint` row its
+  // DirectEdgeCreated landed, the hard delete's identity cascade removes the
+  // `IMPL(op1 -> p2)` edge incident to the deleted p2, the `session:{id}`
+  // agentSession Source stub is created then removed with its session, and the
+  // two surviving sources + one object + one subject + two relations remain:
+  // the `aboutObject` edge to the SURVIVING object (keyed by name) and the
+  // `IMPL(op1 -> p1)` edge. The second Object (`o2`) is hard-deleted, the
+  // absent-endpoint link lands nothing, and `delete_only` + the p2 hard-delete
+  // cascade leave exactly two.
+  const expected = { journal: String(wantJournal), points: '2',
+                     sources: '2', objects: '1', subjects: '1',
+                     sessions: '0', relations: '2' };
+  for (const [key, value] of Object.entries(expected)) {
+    if (String(c[key]) !== value) {
+      console.error(`✗ #7969: record.${key} = ${c[key]}, expected ${value}`);
+      process.exit(1);
+    }
+  }
+
+  // The Event row is keyed by the payload `eventId` (the fold's MERGE key), NOT
+  // the `_emit_event` envelope `event_id` (a per-record ULID). A count-only
+  // assertion cannot see the wrong key (both spellings satisfy the CHECK), so
+  // this asserts the key itself.
+  const eventKey = await db.query(
+    `SELECT node_key, event_id FROM public.event WHERE node_key = 'e1'`);
+  if (eventKey.rows.length !== 1 || eventKey.rows[0].event_id !== 'e1') {
+    console.error(`✗ #7969: the Event row is not keyed by the payload eventId: ${JSON.stringify(eventKey.rows)}`);
+    process.exit(1);
+  }
+  const envelopeKey = await db.query(
+    `SELECT count(*) AS n FROM public.event WHERE node_key = 'ev-14'`);
+  if (Number(envelopeKey.rows[0].n)) {
+    console.error('✗ #7969: the journal envelope `event_id` keyed an Event row');
+    process.exit(1);
+  }
+
+  // The `EntityMutated` Subject supersede is a state op whose record identity
+  // is the entity `id` — the row's `node_key` is `name`, so a `node_key`-keyed
+  // patch silently touches 0 rows (the count assertion above cannot see it).
+  const superseded = await db.query(
+    `SELECT superseded_by FROM public.subject WHERE node_key = 'team-x'`);
+  if (superseded.rows[0]?.superseded_by !== 'team-y') {
+    console.error(`✗ #7969: the Subject supersede was silently dropped: ${JSON.stringify(superseded.rows)}`);
+    process.exit(1);
+  }
+
+  // The hard delete is the graph's `DETACH DELETE`: the node row AND its edges.
+  // `relation`'s endpoints are composite FKs into `node_identity` with
+  // ON DELETE CASCADE, so the identity row's removal is the edge removal. A
+  // bare node DELETE left both alive — the record kept `IMPL(op1 -> p2)` after
+  // p2 was gone. Assert both halves directly, not via the relation count.
+  const p2Identity = await db.query(
+    `SELECT count(*) AS n FROM public.node_identity
+      WHERE node_label = 'Point' AND node_key = 'p2'`);
+  if (Number(p2Identity.rows[0].n)) {
+    console.error('✗ #7969: the hard-deleted Point left a stale node_identity row');
+    process.exit(1);
+  }
+  const p2Edges = await db.query(
+    `SELECT count(*) AS n FROM public.relation
+      WHERE (src_label = 'Point' AND src_key = 'p2')
+         OR (tgt_label = 'Point' AND tgt_key = 'p2')`);
+  if (Number(p2Edges.rows[0].n)) {
+    console.error(`✗ #7969: ${p2Edges.rows[0].n} relation(s) still reference the hard-deleted p2`);
+    process.exit(1);
+  }
+
+  // The `SessionDeleted` companion: the `session:{id}` agentSession Source stub
+  // is created (ev-35) then removed in the same step as its session
+  // (the fold's `remove_source=True`). Neither the stub nor its identity row
+  // survives; the two real sources do (a count assertion alone cannot see it).
+  const stub = await db.query(
+    `SELECT
+       (SELECT count(*) FROM public.source WHERE node_key = 'session:sess1') AS source_row,
+       (SELECT count(*) FROM public.node_identity
+          WHERE node_label = 'Source' AND node_key = 'session:sess1')       AS identity_row`);
+  if (Number(stub.rows[0].source_row) || Number(stub.rows[0].identity_row)) {
+    console.error(`✗ #7969: the SessionDeleted left its agentSession Source stub: ${JSON.stringify(stub.rows)}`);
+    process.exit(1);
+  }
+
+  // The `EntityLinked` endpoint is addressed by its journal `id` (`o1`,
+  // `link_entity(proj,"Point",pid,o.id)`), but the relation's endpoints are
+  // composite FKs into `node_identity`, whose key for an Object is its `name`.
+  // Writing the raw id through attached the edge to a PHANTOM `Object/o1` and
+  // left it alive when the Object was hard-deleted (the cascade resolves the
+  // id to the name-keyed row). Assert the resolution, not the row count.
+  const objectEdge = await db.query(
+    `SELECT count(*) AS n FROM public.relation
+      WHERE rel_type = 'aboutObject' AND src_label = 'Point' AND src_key = 'p1'
+        AND tgt_label = 'Object' AND tgt_key = 'release-1.0'`);
+  if (Number(objectEdge.rows[0].n) !== 1) {
+    console.error(`✗ #7969: the EntityLinked endpoint did not resolve to the name-keyed Object: ${JSON.stringify(objectEdge.rows)}`);
+    process.exit(1);
+  }
+  const phantomIdentity = await db.query(
+    `SELECT count(*) AS n FROM public.node_identity
+      WHERE node_label = 'Object' AND node_key IN ('o1', 'no-such-object')`);
+  if (Number(phantomIdentity.rows[0].n)) {
+    console.error(`✗ #7969: an EntityLinked endpoint minted a phantom Object node_identity: ${JSON.stringify(phantomIdentity.rows)}`);
+    process.exit(1);
+  }
+  // An absent endpoint is the fold's `absent` verdict: NO edge, and no
+  // identity row for the key it named.
+  const absentEdge = await db.query(
+    `SELECT count(*) AS n FROM public.relation
+      WHERE tgt_label = 'Object' AND tgt_key = 'no-such-object'`);
+  if (Number(absentEdge.rows[0].n)) {
+    console.error(`✗ #7969: an EntityLinked to an ABSENT Object landed ${absentEdge.rows[0].n} edge(s)`);
+    process.exit(1);
+  }
+  // A hard-deleted Object cascades its identity row (and therefore its edges):
+  // the `aboutObject` edge to `release-2.0` must not survive `o2`'s delete.
+  const o2 = await db.query(
+    `SELECT
+       (SELECT count(*) FROM public.object WHERE node_key = 'release-2.0')          AS node_row,
+       (SELECT count(*) FROM public.node_identity
+          WHERE node_label = 'Object' AND node_key = 'release-2.0')                 AS identity_row,
+       (SELECT count(*) FROM public.relation
+          WHERE tgt_label = 'Object' AND tgt_key = 'release-2.0')                   AS edges`);
+  if (Number(o2.rows[0].node_row) || Number(o2.rows[0].identity_row) ||
+      Number(o2.rows[0].edges)) {
+    console.error(`✗ #7969: the hard-deleted Object kept state: ${JSON.stringify(o2.rows)}`);
+    process.exit(1);
+  }
+
+  // The envelope `event_id` must not reach any node's props tail either.
+  for (const table of ['object', 'subject', 'session', 'source', 'event']) {
+    const leaked = await db.query(
+      `SELECT count(*) AS n FROM public.${table} WHERE props ? 'event_id'`);
+    if (Number(leaked.rows[0].n)) {
+      console.error(`✗ #7969: the journal envelope leaked into ${table}.props`);
+      process.exit(1);
+    }
+  }
+
+  const folded = await db.query(
+    `SELECT content FROM public.point WHERE node_key = 'p1'`);
+  if (folded.rows[0]?.content !== 'second reading of p1') {
+    console.error(`✗ #7969: PointRevised did not fold in order: ${JSON.stringify(folded.rows)}`);
+    process.exit(1);
+  }
+
+  // The EP-scalar carve-out, on the stored rows rather than in the emitter.
+  const leak = await db.query(`SELECT
+      (SELECT count(*) FROM public.point
+        WHERE props ?| ARRAY['ep_alpha','ep_beta','confidence','version','content_hash']::text[]) AS point_props,
+      (SELECT count(*) FROM public.point
+        WHERE props ? 'lastDreamedAt')                                        AS point_extra,
+      (SELECT count(*) FROM public.source WHERE props ? 'reliability')        AS source_props,
+      (SELECT count(*) FROM public.subject WHERE props ? 'status')            AS subject_cache,
+      (SELECT count(*) FROM public.source
+        WHERE props ?| ARRAY['content','doc_status','object_kind']::text[])   AS retired_props`);
+  const l = leak.rows[0];
+  if (Number(l.point_props) || Number(l.point_extra) || Number(l.source_props) ||
+      Number(l.subject_cache) || Number(l.retired_props)) {
+    console.error(`✗ #7969: a DERIVED/cache/retired value was stored as authority: ${JSON.stringify(l)}`);
+    process.exit(1);
+  }
+
+  // TOTALITY, the other half: an undeclared record type must FAIL the replay,
+  // not be skipped. Spawned (not imported) so the failure is the real one a
+  // caller sees: a raised exception and a non-zero exit.
+  let refused = false;
+  try {
+    execFileSync('python3', ['-c', `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("record_projection", sys.argv[1])
+rp = importlib.util.module_from_spec(spec)
+sys.modules["record_projection"] = rp
+spec.loader.exec_module(rp)
+rp.replay_plan([{"type": "PointTeleported", "id": "p1"}], org_id="o", graph_id="g")
+`, modulePath], { encoding: 'utf8', stdio: 'pipe' });
+  } catch {
+    refused = true;
+  }
+  if (!refused) {
+    console.error('✗ #7969: an UNDECLARED record type was SKIPPED — Interface A is total');
+    process.exit(1);
+  }
+
+  // NO cleanup: `public.journal_event` is append-only by TRIGGER (a DELETE is
+  // refused unless the tenant-erasure GUC is set), and the harness database is
+  // thrown away at the end of the run — a cleanup that tried to satisfy the
+  // trigger here would be testing the erasure path, which #7968's own suite
+  // already covers.
+  console.log(`✓ #7969: the record projection replays ${wantJournal} journal records, is idempotent, total, and stores no EP scalar`);
+} catch (e) {
+  console.error(`✗ #7969 record projection FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 await db.close();

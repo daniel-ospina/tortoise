@@ -68,6 +68,8 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
+from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
@@ -4555,6 +4557,29 @@ def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
         return None
     from tortoise.pack_state import graph_installed_namespaces
     return graph_installed_namespaces(sdk)
+
+
+def _read_stored_number(value, default):
+    """Coerce a STORED numeric property for display/sorting; never raise (#6151).
+
+    ``annotator_*`` and ``mitigation_strength`` are writable through the generic
+    entity surface, which does not validate, so a stored string or an int past
+    float range reaches the readers. ``weights.compute_operator_weight`` degrades
+    such a value to a harmless default rather than aborting the run, and the state
+    readers must hold the SAME contract: they read the same two properties, and
+    `recall_state` is an agent-facing path, so one malformed row would otherwise
+    make every state query touching that operator raise while the weight read on
+    the identical input succeeded.
+
+    ``default`` is the caller's own "nothing usable here" value, because the two
+    sites disagree on it on purpose: a rating falls back to the neutral term (the
+    value an unrated operator yields), while a mitigation strength falls back to
+    ``None`` (the value an absent strength yields).
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 class TortoiseSDK:
@@ -9046,22 +9071,30 @@ class TortoiseSDK:
         ``ValueError`` for a missing point (unless ``missing_ok``, used by
         ``invalidate_point``'s retry-friendly contract — then returns
         ``None``), an operator node, or an already-terminal claim.
+
+        #7822: the verdict is over EVERY node carrying the id, not ``row[0]``.
+        The writer's stamp MATCHes and writes EVERY node with that id (point
+        ids are not unique), so a first-row-only read made the terminal /
+        operator verdict depend on server row order: a live sibling returned
+        first let the operation re-terminalize an already-dead claim and
+        transfer its edges — exactly what #2498 exists to forbid. The scan is
+        the shared ``live.classify_lifecycle_fanout`` (the hosted commit
+        pre-check runs the same statement and the same classifier, so the two
+        cannot disagree).
         """
-        row = self._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) "
-            "RETURN n.is_operator, n.status, coalesce(n.outdated, false)",
-            params={"id": point_id},
+        rows = self._get_proj().g.query(
+            LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
         ).result_set
-        if not row:
+        kind, status, outdated = classify_lifecycle_fanout(rows)
+        if kind == "absent":
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
-        is_op, status, outdated = bool(row[0][0]), row[0][1], bool(row[0][2])
-        if is_op:
+        if kind == "operator":
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
                 f"statement points")
-        if is_terminal_status(status, outdated):
+        if kind == "terminal":
             marker = ("outdated" if outdated
                       and status not in TERMINAL_EXCLUDED_STATUSES
                       else (status or "live"))
@@ -9677,17 +9710,30 @@ class TortoiseSDK:
         # never the FalkorDB internal ID (internal ids die at rebuild).
         from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
-        # Successor internal node id — runtime-only (never journaled). The 2b
+        # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
-        # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
-        # it the MERGE below mints a phantom (new)-[:rel]->(new) self-edge when
-        # old's edge terminates at the successor (cycle-26 class — e.g. old
-        # X-[:aboutPoint]->Y live, supersede(X->Y)).
+        # EVERY successor node (mirror 2a-DIRECT's tid==new_id guard at ~4407):
+        # without it the MERGE below mints a phantom (new)-[:rel]->(new)
+        # self-edge when old's edge terminates at a successor (cycle-26 class —
+        # e.g. old X-[:aboutPoint]->Y live, supersede(X->Y)).
+        #
+        # #7822: the whole fan-out, not ``succ_rows[0][0]``. Point ids are not
+        # unique, so the successor is not one node: the MERGE below binds EVERY
+        # node carrying ``new_id`` and a first-row-only scalar protected only
+        # the row the server happened to return first, minting the phantom at
+        # the LATER successor nodes — the verdict was server-row-order
+        # dependent.
         succ_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN ID(n)",
             params={"id": new_id},
         ).result_set
-        succ_internal = succ_rows[0][0] if succ_rows else None
+        succ_internals = {row[0] for row in succ_rows}
+        # #7822: the delete-only descriptor keys its replay delete-leg on the
+        # LOGICAL successor id and the replay deletes EVERY (old)-[rel]->(t)
+        # edge, so ONE descriptor per rel covers every successor node the
+        # fan-out matched. Emitting one per matching node would journal N
+        # identical descriptors for the same operation.
+        emitted_self_deletes: set = set()
         for rel in structural_rels:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
@@ -9702,8 +9748,7 @@ class TortoiseSDK:
                 # replay key (name / coalesce(title,name) / url) at emission.
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
-                if (succ_internal is not None
-                        and target_graph_id == succ_internal):
+                if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
                     # transfer would MERGE the phantom (new)-[:rel]->(new)). For
@@ -9715,7 +9760,8 @@ class TortoiseSDK:
                     # Non-derivable rels emit NOTHING (never snapshot-recreated;
                     # a delete_only descriptor would journal a permanent no-op
                     # delete-leg for a family this fix does not own).
-                    if derivable:
+                    if derivable and rel not in emitted_self_deletes:
+                        emitted_self_deletes.add(rel)
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:self",
@@ -10054,12 +10100,17 @@ class TortoiseSDK:
         if (point.get("temporal_candidate")
                 and point.get("temporal_reviewed") == "merge"):
             for tgt in temporal_targets:
-                trow = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": tgt},
+                # #7822: the SAME fan-out statement the lifecycle guard runs,
+                # classified over EVERY node carrying the target id. The
+                # pre-#7822 probe read ``trow[0]``: on a duplicate target id
+                # a live sibling returned first let this path NAND-wire (or
+                # hand to ``supersede_point``) a target the guard refuses on
+                # its terminal sibling — and the verdict depended on server
+                # row order. A target is live only when NO sibling is dead.
+                trows = proj.g.query(
+                    LIFECYCLE_FANOUT_QUERY, params={"id": tgt},
                 ).result_set
-                if not trow:
+                if not trows:
                     # MISSING node (stale target) — distinct from an unset
                     # status node, which is live by the canonical read model
                     # (#1080 round-2 review: missing targets crashed the
@@ -10068,16 +10119,17 @@ class TortoiseSDK:
                         "promote_point: temporal target %s for %s no longer "
                         "exists — skipping the wire", tgt, point_id)
                     continue
-                tstatus = trow[0][0] or "live"
-                # #2498: the SHARED terminal predicate — a flag-outdated
-                # target is terminal too, so it must not be NAND-wired or
-                # (temporal_replacement) sent to supersede_point.
-                if not is_terminal_status(tstatus, bool(trow[0][1])):
+                dead = sorted(
+                    ((r[1], bool(r[2])) for r in trows
+                     if is_terminal_status(r[1], bool(r[2]))),
+                    key=lambda s: (str(s[0] or ""), s[1]))
+                if not dead:
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
-                        "skipping the wire", tgt, point_id, tstatus)
+                        "skipping the wire", tgt, point_id,
+                        dead[0][0] or "live")
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:
@@ -10917,12 +10969,36 @@ class TortoiseSDK:
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
 
+        These dimensions are not inert: they modulate the operator's EP weight in a
+        symmetric bounded band, so a well-rated connection counts for MORE than an
+        unrated one and the worst-rated for less. Leaving them unset is exactly
+        neutral (factor 1.0) and is the default — set them only to express a
+        deliberate judgement about the connection's quality.
+
         Args:
             id: Operator Point ID (must have is_operator=true).
             bias: 0-1, how much hidden stake/additional interest beyond stated position.
-            precision: 0-1, how narrow/well-defined the relevance claim is.
-            consistency: 0-1, how stable this relevance is across contexts.
-            directness: 0-1, how directly the source bears on the target.
+                INVERTED: higher bias means LESS weight, because a one-sided source
+                should count for less than a disinterested one.
+            precision: 0-1, how narrow/well-defined the relevance claim is (higher = more weight).
+            consistency: 0-1, how stable this relevance is across contexts (higher = more weight).
+            directness: 0-1, how directly the source bears on the target (higher = more weight).
+
+        The four are averaged (never multiplied), so rating one well cannot penalise
+        the others, and a partial rating moves the weight only as far as that
+        dimension justifies. Do not use these to disagree with a connection — that is
+        NAND's job; use them to grade how much the connection contributes. A rating
+        does not require a source.
+
+        HOW FAR IT MOVES depends on the operator's base weight, because the rating
+        multiplies the base and the result is then clamped to ``[0.1, 10.0]``. A
+        NAND starts at 8.0 and DOUBLES when it targets another operator, so a
+        best-rated operator-targeting NAND is clamped both before and after the
+        rating and gains NOTHING; even a top-level NAND gains only 1.25x
+        (8.0 -> 16.0 -> clamped to 10.0). On an ordinary IMPL the base is 1.0
+        (2.0 when operator-targeting), and the band applies in full there. So the
+        band is exact near the low end of the range and compresses as the base
+        approaches the ceiling — a rating on a contradiction is rarely worth much.
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """
@@ -18823,6 +18899,19 @@ class TortoiseSDK:
             STATUS_DEGRADED as _STATUS_DEGRADED,
             classify_leg_trace as _classify_leg_trace,
         )
+        # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
+        # path CONSUMES it and mints no verdict of its own, exactly as it does
+        # for the status vocabulary above — and `not-hot` is never a term of
+        # that vocabulary. Lazily imported so a default deployment pays
+        # nothing and the field stays off (the #3892 flag pattern).
+        from .residency import (
+            RESIDENCY_FIELD as _RESIDENCY_FIELD,
+            ResidencyDeclaration as _ResidencyDeclaration,
+            apply_residency as _apply_residency,
+            mark_residency as _mark_residency,
+            read_declaration as _read_declaration,
+            residency_enabled as _residency_enabled,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -18852,6 +18941,16 @@ class TortoiseSDK:
         else:
             _caller_trace = None
 
+        # #7952 (§17.2): the COMPLETENESS MARKER. Declared only AFTER the
+        # projection is obtained and the bounded probe has answered, so the
+        # known-hot set is read from a store known to be reachable — and never
+        # read at all when the flag is off (zero steady-state cost, and the
+        # response is byte-identical). ``None`` means NOT ASSESSED: the marker
+        # is a directive, so an unassessable read leaves the field absent and
+        # lets ``status`` carry the impairment, rather than guessing `not-hot`
+        # for a store that is merely down (§17.3's S5 failure mode).
+        _residency: _ResidencyDeclaration | None = None
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -18862,10 +18961,22 @@ class TortoiseSDK:
             ``configured=True`` / ``reached=True`` are facts, not defaults.
             """
             if read_status_out is not None:
-                read_status_out["status"] = _classify_leg_trace(
+                status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
                     configured=True,
                     reached=True)
+                if _residency is not None:
+                    # §17.3: a `not-hot` read may not be reported as `empty` —
+                    # a partial store cannot establish "nothing matched". The
+                    # truth store was NOT consulted on this path (no residency
+                    # router exists yet — #7953), so a zero-hit read of a
+                    # declared-partial store is `degraded`, never `empty`.
+                    marker = _mark_residency(
+                        _residency, hits=len(rows))
+                    status = _apply_residency(
+                        status, marker, record_consulted=False)
+                    read_status_out[_RESIDENCY_FIELD] = marker
+                read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             return rows
@@ -18904,6 +19015,10 @@ class TortoiseSDK:
                     "degraded", e)
                 read_status_out["status"] = _STATUS_DEGRADED
                 return []
+        # #7952: the store is reachable, so the known-hot set can be READ.
+        if read_status_out is not None and _residency_enabled():
+            _residency = _read_declaration(
+                graph, timeout_ms=int(_elevated_timeout_ms or 500))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -20371,6 +20486,13 @@ class TortoiseSDK:
             combine_read_statuses,
         )
 
+        # #7952: the completeness marker's ONE home — the composite read
+        # coalesces its legs' markers rather than minting a verdict of its own.
+        from .residency import (
+            RESIDENCY_FIELD,
+            combine_residency,
+        )
+
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
         if not (0.0 <= min_confidence <= 1.0):
@@ -20548,6 +20670,16 @@ class TortoiseSDK:
             if _composite == STATUS_AVAILABLE and not out:
                 _composite = STATUS_EMPTY
             read_status_out["status"] = _composite
+            # #7952: the legs' completeness markers coalesce the same way the
+            # statuses do — the composite read is a residency miss if ANY leg
+            # fell outside the known-hot set, because the answer the caller
+            # receives is then incomplete. Absent when no leg was assessed
+            # (the declaration is only read under its own flag).
+            _markers = [(_point_status or {}).get(RESIDENCY_FIELD),
+                        (_object_status or {}).get(RESIDENCY_FIELD)]
+            _marker = combine_residency(*_markers)
+            if _marker is not None:
+                read_status_out[RESIDENCY_FIELD] = _marker
         return out
 
     def retrieval_legs(
@@ -20693,18 +20825,26 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}, {}
+        # The ranking default is the weight mechanism's own neutral constant, not a
+        # literal: a literal here would silently disagree with the weight the same
+        # dimension produces if that constant ever moves (#6151). Imported locally
+        # because `weights` is a leaf module this file otherwise does not need.
+        from tortoise.weights import ANNOTATION_TERM_NEUTRAL
+
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
             "WHERE n.id IN $ids "
             "RETURN n.id, op.id, op.label, op.op_type, "
-            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
-            params={"ids": point_ids},
+            "  coalesce(op.annotator_precision, op.precision, $n), type(r)",
+            params={"ids": point_ids, "n": ANNOTATION_TERM_NEUTRAL},
         ).result_set
         args: dict[str, list[dict]] = {}
         nands: dict[str, list[dict]] = {}
         for nid, op_id, label, op_type, precision, rel in rows:
             op = {"id": op_id, "label": label or "", "op_type": op_type or "",
-                  "precision": round(float(precision), 4), "mechanism": rel}
+                  "precision": round(
+                      _read_stored_number(precision, ANNOTATION_TERM_NEUTRAL), 4),
+                  "mechanism": rel}
             if rel == "NAND":
                 nands.setdefault(nid, []).append(op)
             else:
@@ -20738,7 +20878,8 @@ class TortoiseSDK:
         for op_id, mid, content, strength in rows:
             out.setdefault(op_id, []).append(
                 {"id": mid, "content": content or "",
-                 "strength": float(strength) if strength is not None else None})
+                 "strength": None if strength is None
+                 else _read_stored_number(strength, None)})
         # Attach under the owning result point (via its surfaced operator).
         # Dedup: an operator can appear in BOTH arguments and nands for the
         # same target (mixed IMPL+NAND edges) — mitigations must not double.

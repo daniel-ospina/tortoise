@@ -8730,11 +8730,33 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
     not be reached is never served as a clean empty result. Unset/``0`` leaves
     this response byte-identical.
+
+    #7952 (§17.2): the COMPLETENESS MARKER rides its OWN field, ``residency``
+    (``hot`` / ``not-hot``), and is NOT a fifth status term — a residency
+    verdict is a directive about WHERE TO LOOK, not a status of the read. When
+    ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
+    PARTIAL, a read that falls outside the known-hot set returns
+    ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
+    from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
-    status_out: dict | None = {} if _read_status_enabled() else None
+    # The sink is the READ PATH's carrier for both fields; each field is
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
+    _status_on = _read_status_enabled()
+    _residency_on = _residency_enabled()
+    status_out: dict | None = {} if (_status_on or _residency_on) else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -8763,9 +8785,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         out.append(props)
     response = {"results": out, "count": len(out)}
     if status_out is not None:
-        # The SDK sets this on every return path; a missing term is a bug, not
-        # a reason to emit null under a vocabulary of exactly four terms.
-        response["status"] = status_out["status"]
+        # The SDK sets `status` on every return path; a missing term is a bug,
+        # not a reason to emit null under a vocabulary of exactly four terms.
+        # #7952: `residency` is present only when the known-hot set could be
+        # READ and a verdict was reached, so an unassessable read (a store that
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
+        if _residency_on and "residency" in status_out:
+            response["residency"] = status_out["residency"]
     return response
 
 
@@ -10465,12 +10498,14 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
-    # recovery lanes' EXPIRY exclusion diverges (the Supabase
-    # recover_team_key RPC still counts expired-but-unrevoked rows while
-    # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
-    # can revoke a LIVE key as collateral for expired rows that no longer
-    # occupy a slot); the RPC never 402s.
+    # recovery lanes' EXPIRY exclusion USED to diverge (the Supabase
+    # recover_team_key RPC counted expired-but-unrevoked rows while its
+    # registry twin excluded them, so the RPC's over-cap branch could
+    # revoke a LIVE key as collateral for rows that no longer occupy a
+    # slot) — closed as of #4550: 20261012000006_recover_team_key_expiry
+    # puts the RPC's count on public.api_key_slot_count (the ONE SQL
+    # declaration of this predicate) and gives its revoke-target scan the
+    # same expiry arm. No cap lane omits the expiry axis any more.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         KeyCapRefusal,
@@ -14867,19 +14902,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # INVERTED window still 422s — that is a correctable payload
             # error (the client fixes the window and retries), not a wedge,
             # and the two are deliberately not conflated.
+            from .live import LIFECYCLE_FANOUT_QUERY as _FANOUT_QUERY
+            from .live import classify_lifecycle_fanout as _classify_fanout
             from .live import is_terminal_status as _is_terminal_status
 
             def _terminal_state(point_id: str) -> tuple | None:
                 """The terminal state of ``point_id``, or ``None``.
 
-                The query is deliberately the SAME STATEMENT
-                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
-                same three projected columns in the same order, same
-                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                The query is the SHARED ``live.LIFECYCLE_FANOUT_QUERY`` — the
+                same statement ``sdk._assert_lifecycle_guard`` runs — and the
+                verdict is the same ``live.classify_lifecycle_fanout`` scan,
+                so the two cannot disagree (#7822). A differently-shaped or
                 first-row-only probe could select a DIFFERENT node than the
                 write's own guard: point ids are not unique and row order is
                 server-dependent, and that divergence would either resurrect
-                this bug or silently drop a legitimate supersede.
+                this bug or silently drop a legitimate supersede. Since #7822
+                the guard refuses when ANY node carrying the id is terminal,
+                so this pre-check must report terminal on the same condition —
+                otherwise the mixed duplicate id would 500-wedge again, which
+                is exactly what #3366 exists to prevent.
 
                 ``None`` means "not terminal, or not a statement point": an
                 ``is_operator`` prior is corruption, not a benign replay, so
@@ -14888,13 +14929,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 missing-point path is unchanged.
                 """
                 rows = sdk._get_proj().g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "RETURN n.is_operator, n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": point_id}).result_set
-                if not rows or bool(rows[0][0]):
-                    return None
-                return (rows[0][1], bool(rows[0][2]))
+                    _FANOUT_QUERY, params={"id": point_id}).result_set
+                kind, status, outdated = _classify_fanout(rows)
+                if kind == "terminal":
+                    return (status, outdated)
+                return None
 
             # #3366: the pre-check's mechanism is documented ONCE, on
             # ``_terminal_state`` above — including the LOCKSTEP requirement

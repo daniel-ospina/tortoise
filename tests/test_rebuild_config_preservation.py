@@ -246,6 +246,7 @@ def test_config_registry_covers_domain_writers(tmp_path):
     from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
     from tortoise.pack_state import PACK_INSTALL_LABEL
     from tortoise.projection import _CONFIG_RESET_KEY, _config_classes
+    from tortoise.residency import DECLARATION_META_KEY
     from tortoise.sdk import TortoiseSDK
 
     classes = {c.label: c for c in _config_classes()}
@@ -254,7 +255,8 @@ def test_config_registry_covers_domain_writers(tmp_path):
     meta = classes["Meta"]
     assert meta.identity_prop == "key"
     assert meta.keys == {TortoiseSDK._CALIBRATION_MARKER_KEY,
-                         _CONFIG_RESET_KEY}
+                         _CONFIG_RESET_KEY,
+                         DECLARATION_META_KEY}
     # Derived markers must NOT be enrolled: they are re-created on open, so
     # preserving them would restore a stale index as if it were config.
     assert "point_fts_v2" not in meta.keys
@@ -732,6 +734,39 @@ def test_rebuild_all_preserves_config_reset_marker(graph):
     assert after["at"] == written["at"]
 
 
+def test_rebuild_all_preserves_residency_declaration(graph):
+    """The declared known-hot set survives a rebuild (#7952).
+
+    `residency` is graph-only operator metadata: the whole-graph wipe would
+    destroy it, and a declared-partial store would silently revert to
+    `complete`, under which the §17.2 marker CANNOT fire. The sidecar is its
+    only carrier, so it must be enrolled in the `:Meta` config class.
+    """
+    from tortoise.residency import (
+        COVERAGE_PARTIAL,
+        DECLARATION_META_KEY,
+        ResidencyDeclaration,
+        declare_residency,
+        read_declaration,
+    )
+
+    events, sdk = graph
+    _write_journal(events, [])
+    declare_residency(_g(sdk), ResidencyDeclaration(
+        coverage=COVERAGE_PARTIAL, hot_keys=frozenset({"p1", "p2"})))
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    after = read_declaration(_g(sdk))
+    assert after.coverage == COVERAGE_PARTIAL
+    assert after.hot_keys == frozenset({"p1", "p2"})
+    # and the node is still keyed where the registry expects it
+    rows = _g(sdk).query(
+        "MATCH (n:Meta {key:$key}) RETURN count(n)",
+        params={"key": DECLARATION_META_KEY}).result_set
+    assert rows[0][0] == 1
+
+
 def test_config_reset_marker_is_sticky_across_rebuilds(graph):
     """Sticky across rebuilds, and monotonic on ONE node when re-set."""
     from tortoise.projection import read_config_reset, set_config_reset_marker
@@ -1168,6 +1203,7 @@ def test_config_registry_doc_consistency():
         _CONFIG_RESET_KEY,
         _config_classes,
     )
+    from tortoise.residency import DECLARATION_META_KEY
     from tortoise.sdk import TortoiseSDK
 
     classes = list(_config_classes())
@@ -1185,7 +1221,8 @@ def test_config_registry_doc_consistency():
     doc_pair = set(re.findall(r"`:(\w+)\{key:'([^']+)'\}`", doc_preserved))
     doc_meta_keys = {k for label, k in doc_pair if label == "Meta"}
     assert doc_meta_keys == {TortoiseSDK._CALIBRATION_MARKER_KEY,
-                             _CONFIG_RESET_KEY}
+                             _CONFIG_RESET_KEY,
+                             DECLARATION_META_KEY}
     for label, keys in scoped.items():
         assert doc_meta_keys == set(keys), (
             f"the doc's `:{label}{{key:…}}` rows disagree with the registry")
