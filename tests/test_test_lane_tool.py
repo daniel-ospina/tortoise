@@ -47,6 +47,167 @@ def lane(monkeypatch):
     return "fdb-lane-0123456789"
 
 
+@pytest.fixture(autouse=True)
+def _host_probe_and_sweep_are_stubbed(monkeypatch):
+    """#8180: `_ping_over_host` is a REAL TCP connect, and `start()` now sweeps
+    orphans with real git/docker calls. Unit tests stub `_docker` only, so
+    without this every `start()` would look wedged and the sweep would touch the
+    real box. Both are stubbed here and each has its own explicit test below —
+    the gate itself is not relaxed."""
+    monkeypatch.setattr(tl, "_ping_over_host", lambda port, timeout: True)
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+
+
+# ── #8180: the three defects, as regressions ─────────────────────────────
+
+def test_start_refuses_a_container_that_answers_INSIDE_but_not_on_the_host_port(
+        lane, monkeypatch):
+    """Defect 2 in its MEASURED shape: the container is Up and `docker exec ...
+    PING` answers PONG from inside, while the published host port is dead. That
+    container used to be handed to a lane as usable; the host path is the one a
+    lane actually uses, so it is the one readiness must mean."""
+    monkeypatch.setattr(tl, "_ping_over_host", lambda port, timeout: False)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "PONG\n", ""))
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 1)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "published host port" in msg and "16390" in msg, msg
+
+
+def test_stop_escalates_a_zombie_and_reports_it_precisely(lane, monkeypatch):
+    """Defect 1 in its measured shape (#2653): `rm -f` reports that the
+    container's PID 1 is a zombie. Removal must escalate, and when even that
+    fails the report must say WHY — the remedy is the runtime, not a retry, and a
+    generic "failed to remove" hides that."""
+    real = ("could not kill container: container e93b6466ba18 PID 11035 is "
+            "zombie and can not be killed. Use the `--init` option")
+    calls: list = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        if a[0] == "inspect":
+            return _R(0, "running\n", "")
+        if a[0] == "rm":
+            return _R(1, "", f"failed to remove {lane}: {real}")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as e:
+        tl.stop()
+    msg = str(e.value)
+    assert "zombie" in msg and "--init" in msg, msg
+    assert "runtime restarted" in msg, msg
+    assert [c[0] for c in calls][:3] == ["inspect", "rm", "kill"], calls
+
+
+def test_reaper_reaps_an_unowned_container_and_keeps_a_live_owner(
+        tmp_path, monkeypatch):
+    """Task 1, where the NEGATIVE case is the one that matters: a container whose
+    owner is live must never be reaped, however old it is, and an unreadable
+    ownership record must remove nothing at all (fail-closed). The age is stubbed
+    ancient precisely to prove that ownership, not a clock, decides."""
+    dead, alive = tmp_path / "dead-worktree", tmp_path / "alive-worktree"
+    alive.mkdir()
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(
+        0, "fdb-lane-dead\nfdb-lane-alive\nfdb-lane-mine\n", "") if a[0] == "ps"
+        else _R(0, "", ""))
+    monkeypatch.setattr(tl, "_worktree_slugs",
+                        lambda: {"dead": str(dead), "alive": str(alive)})
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    out = tl.reap_orphans()
+    joined = "\n".join(out)
+    assert "removed fdb-lane-dead" in joined, out
+    assert "kept fdb-lane-alive" in joined, out
+    assert "kept fdb-lane-mine" in joined, out
+    assert "removed fdb-lane-alive" not in joined, out
+
+    # Fail-closed: no ownership record -> no docker call at all, nothing removed.
+    calls: list = []
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: None)
+    monkeypatch.setattr(tl, "_docker",
+                        lambda *a, **k: (calls.append(a), _R(0, "", ""))[1])
+    out = tl.reap_orphans()
+    assert calls == [], calls
+    assert "NOTHING was removed" in out[0], out
+
+
+def test_the_container_is_created_with_init_so_pid1_reaps_orphans(lane, monkeypatch):
+    """Task 2 pinned at the ARGV. An error text that merely NAMES `--init` is not
+    a fix: without this, dropping the flag from `docker run` reintroduces the
+    zombie defect and the whole suite still passes."""
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl.start()
+    run_args = next(c for c in seen if c[0] == "run")
+    assert "--init" in run_args, run_args
+
+
+def test_a_failed_docker_run_is_cleaned_up_by_the_id_it_printed(lane, monkeypatch):
+    """Task 3's documented `Created`-state leak: `docker run -d` can CREATE the
+    container and then fail to start it. The ID it printed addresses exactly that
+    container, so it is what the cleanup must target."""
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(1, "deadbeefcafe\n", "Error response from daemon: cannot start")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    assert "removed the container it created" in str(e.value), str(e.value)
+    assert [c[2] for c in seen if c[0] == "rm"] == ["deadbeefcafe"], seen
+
+
+def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatch):
+    """The central report-only rule. An unowned slug may belong to a DIFFERENT
+    clone of this repo, whose live lane this tool cannot see — so nothing about
+    that container authorizes a removal, including its age (stubbed ancient here
+    precisely to prove a clock is not the trigger)."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-someoneelse\n", "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    out = tl.reap_orphans()
+    assert removed == [], removed
+    assert "report only" in out[0], out
+
+
+def test_ping_over_host_is_false_when_nothing_is_listening(monkeypatch):
+    """Pins the probe's REAL body. It is stubbed for the whole module, so this
+    test must UNDO that stub — otherwise it asserts the stub and `return True`
+    inside the real probe would satisfy every test in the file."""
+    monkeypatch.undo()
+    assert tl._ping_over_host(1, 0.5) is False
+
+
 # ── the ownership guard (the part that must never be wrong) ────────────────
 
 @pytest.mark.parametrize("name", [
@@ -626,7 +787,7 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     removed = []
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
-    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda n: removed.append(n) or "removed it")
 
@@ -671,7 +832,7 @@ def test_start_accepts_an_explicit_port_that_matches(lane, monkeypatch):
     port the lane already publishes is not a conflict."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
-    monkeypatch.setattr(tl, "_wait_ready", lambda _n: True)
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda n: (_ for _ in ()).throw(
                             AssertionError("must not remove a live lane")))
@@ -814,7 +975,7 @@ def test_start_removes_only_a_container_this_tool_manages(lane, monkeypatch):
         raise AssertionError("docker was reached for an unmanaged container")
 
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
-    monkeypatch.setattr(tl, "is_managed", lambda _n: False)
+    monkeypatch.setattr(tl, "is_managed", lambda _n, _host_port=None: False)
     monkeypatch.setattr(tl, "_docker", _boom)
     with pytest.raises(SystemExit) as exc:
         tl.start()
@@ -826,7 +987,7 @@ def test_start_refuses_to_reuse_a_running_container_that_is_wedged(lane, monkeyp
     answered, or a wedged long-lived container would be reused indefinitely."""
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
-    monkeypatch.setattr(tl, "_wait_ready", lambda _n: False)
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: False)
     with pytest.raises(SystemExit) as exc:
         tl.start()
     assert "never answered PING" in str(exc.value)
@@ -883,7 +1044,7 @@ def test_wait_ready_is_bounded_in_wall_time(lane, monkeypatch):
 def test_cleanup_reports_a_failed_removal_instead_of_claiming_success(lane, monkeypatch):
     """`_remove_and_describe`'s whole point is that the cleanup's result is READ
     — reverting it to an unverified "removed it" must not leave the suite green."""
-    monkeypatch.setattr(tl, "is_managed", lambda _n: True)
+    monkeypatch.setattr(tl, "is_managed", lambda _n, _host_port=None: True)
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "container busy"))
     assert "FAILED to remove it" in tl._remove_and_describe("fdb-lane-0123456789")
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))

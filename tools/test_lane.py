@@ -117,12 +117,21 @@ import re
 import socket
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 #: Overridable so CI can pin a digest/version; `latest` matches the existing
 #: in-repo precedent (scripts/restore-smoke.sh also runs falkordb/falkordb:latest).
 IMAGE = os.environ.get("TORTOISE_TEST_LANE_IMAGE", "falkordb/falkordb:latest")
 NAME_PREFIX = "fdb-lane-"
+
+#: Age backstop. It exists so a caller can REPORT the age of an
+#: owner-indeterminate container, and it is never on its own a reason to delete:
+#: #5084's owner ruling rejects "delete by age" and requires fail-closed — when
+#: ownership cannot be determined, report only. A container whose owner IS
+#: determined is never reaped by age either, however old it is: a lane may
+#: legitimately run far longer than this bound.
+ORPHAN_MAX_AGE_H = float(os.environ.get("TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H", "6"))
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
 #: Docker calls are bounded: this tool exists for an overloaded host, so a
@@ -368,22 +377,49 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
     )
 
 
-def _wait_ready(name: str) -> bool:
+def _ping_over_host(port: int, timeout: float) -> bool:
+    """PING the server through the container's PUBLISHED HOST PORT (#8180).
+
+    `docker exec` asks the server from INSIDE the container, which answers even
+    when the host mapping is unusable — so a container whose published port was
+    unreachable was handed to a lane, and the lane then failed against a URI
+    that looked usable. Measured shape: `PING` timing out from the host while
+    the exec probe still returned `PONG`. A lane uses the HOST path, so the host
+    path is what "ready" has to mean.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(b"*1\r\n$4\r\nPING\r\n")
+            return b"PONG" in s.recv(64)
+    except OSError:
+        return False
+
+
+def _wait_ready(name: str, host_port: int | None = None) -> bool:
     """Wait for the container's server to answer PING — bounded in WALL TIME.
 
     Seconds, not iterations: an iteration count is not a bound when each
     iteration awaits a docker call of its own. Every call's timeout comes from
     the REMAINING budget, so the deadline is not overshot by a full per-call
     timeout.
+
+    When `host_port` is given the PING must ALSO succeed over the published host
+    port (#8180). Both are required: the host probe is the one that matters to a
+    caller, and the exec probe distinguishes "the server is wedged" from "the
+    mapping is broken" in the refusal message.
     """
     deadline = time.monotonic() + READY_TIMEOUT
+    host_ok = host_port is None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
+        if not host_ok:
+            host_ok = _ping_over_host(host_port, max(1.0, remaining))
         ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
                        timeout=max(1, int(remaining)))
-        if "PONG" in (ping.stdout or ""):
+        if host_ok and "PONG" in (ping.stdout or ""):
             return True
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
@@ -459,6 +495,15 @@ def start(port: int | None = None) -> tuple[str, int]:
     """
     if port is not None and not (0 < port < 65536):
         raise SystemExit(f"test-lane: --port {port} is not a valid TCP port")
+    # #8180: the call site that makes ownership reaping actually BITE. Every lane
+    # that starts sweeps containers whose owning worktree is gone, so a lane
+    # closed without `down` (measured: `cmux workspace close` never runs it)
+    # leaves a container that dies at the NEXT start instead of surviving until
+    # someone notices. Reported, and never fatal: a sweep that cannot run must
+    # not stop a lane from starting.
+    if os.environ.get("TORTOISE_TEST_LANE_REAP", "1") == "1":
+        for _line in reap_orphans():
+            print(_line, file=sys.stderr)
     name = lane_name()
     state = container_state(name)
     if state == "running":
@@ -483,10 +528,11 @@ def start(port: int | None = None) -> tuple[str, int]:
                 f"--port {port} cannot be applied to it; run `uv run python "
                 f"tools/test_lane.py down` first to move it"
             )
-        if not _wait_ready(name):
+        if not _wait_ready(name, published):
             raise SystemExit(
-                f"test-lane: {name} is running but never answered PING within "
-                f"{READY_TIMEOUT}s — it may be wedged: run `uv run python "
+                f"test-lane: {name} is running but never answered PING over its "
+                f"published host port {published} within {READY_TIMEOUT}s — it "
+                f"may be wedged: run `uv run python "
                 f"tools/test_lane.py down` and retry"
             )
         return name, published
@@ -510,16 +556,42 @@ def start(port: int | None = None) -> tuple[str, int]:
 
     chosen = port if port is not None else pick_port()
     r = _docker(
-        "run", "-d", "--name", name,
+        # #8180: `--init` puts a real init at container PID 1. Without it PID 1
+        # IS redis, which never reaps its orphaned children — so a container can
+        # reach a state where `docker rm -f` cannot kill it. Measured on #2653:
+        # "container <id> is zombie and can not be killed. Use the `--init`
+        # option", leaving a container no `down()` could remove.
+        "run", "-d", "--init", "--name", name,
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
         IMAGE,
         timeout=IMAGE_PULL_TIMEOUT,   # the image may need pulling first
     )
     if r.returncode != 0:
-        raise SystemExit(f"test-lane: docker run failed: {r.stderr.strip()}")
+        # #8180 task 3: a failed `docker run` can still have CREATED a
+        # container — `-d` creates it, then starting it can fail — and it then
+        # sits in `Created` holding a reserved port for good. `docker run`
+        # prints the container ID on success, so RETAIN it and clean up by ID
+        # when we have one: the ID addresses exactly the container this call
+        # created, even if something else raced the name. When no ID was
+        # reported there is nothing to target by ID, so fall back to the name
+        # we asked for, which is ours by construction.
+        cid = (r.stdout or "").strip()
+        detail = (r.stderr or "").strip() or (r.stdout or "").strip()
+        if cid:
+            gone = _docker("rm", "-f", cid)
+            outcome = ("removed the container it created" if gone.returncode == 0
+                       else f"could NOT remove {cid} — check `docker ps -a`")
+        elif is_managed(name):
+            gone = _docker("rm", "-f", name)
+            outcome = ("removed the container it created (by name)"
+                       if gone.returncode == 0
+                       else f"could NOT remove {name} — check `docker ps -a`")
+        else:
+            outcome = "no container ID was reported, so there was nothing to clean up"
+        raise SystemExit(f"test-lane: docker run failed: {detail} ({outcome})")
 
-    if not _wait_ready(name):
+    if not _wait_ready(name, chosen):
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
             f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
@@ -564,6 +636,131 @@ def _remove_and_describe(name: str) -> str:
             else "FAILED to remove it — check `docker ps -a`")
 
 
+def _worktree_slugs() -> dict[str, str] | None:
+    """`slug -> worktree path` for every worktree git still knows about.
+
+    `None` means the ownership record could NOT be read. That is deliberately
+    distinct from `{}` ("git answered, and nothing claims any container"): the
+    first must never authorize a delete, the second may. #8180 fail-closed rule.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(repo_root()), capture_output=True, text=True,
+            timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # `repo_root()` already treats these two conditions this way: git may be
+        # absent (OSError) or hung (TimeoutExpired, a SubprocessError). The sweep
+        # runs on EVERY `start()` by default, so an exception here would make a
+        # lane unable to start because a bookkeeping read failed — the opposite
+        # of the contract ("a sweep that cannot run must not stop a lane from
+        # starting"). Unreadable is `None`, and `None` authorizes no removal.
+        return None
+    if r.returncode != 0:
+        return None
+    found: dict[str, str] = {}
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+            found[slug_for(path)] = path
+    return found
+
+
+def _started_epoch(name: str) -> float | None:
+    """When the container last started, in epoch seconds; `None` if unreadable.
+
+    Unreadable must not read as "old": the age backstop is the WEAKER half of
+    the reaping rule, so a failed query is never permission to delete.
+    """
+    r = _docker("inspect", "--format", "{{.State.StartedAt}}", name)
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        # Docker emits RFC3339 with nanoseconds, e.g. 2026-10-11T12:00:00.123456789Z
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def reap_orphans() -> list[str]:
+    """Remove `fdb-lane-*` containers whose OWNING WORKTREE IS GONE (#8180).
+
+    Ownership is the mechanism, not age: a lane container is named after
+    `slug_for()` of the worktree that owns it, so the container's owner is
+    recoverable from its own name and the reaping decision is a lookup rather
+    than a guess. This tool can therefore only ever remove a container whose
+    owner it has POSITIVELY established is gone — never a peer lane's, and never
+    this worktree's own (`stop()` is the only thing that removes that one).
+
+    Age is not consulted and there is deliberately NO age backstop here. The
+    measured defect is a container that outlives its owner, and a clock firing on
+    a live owner's database would be a far worse bug than the leak it fixes —
+    the rule the whole module defends.
+
+    Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
+    removed and the reason is reported. Returns one line per container
+    considered, so a caller reports what actually happened instead of counting.
+    """
+    slugs = _worktree_slugs()
+    if slugs is None:
+        return ["reap: skipped — `git worktree list` failed, so ownership "
+                "cannot be determined; NOTHING was removed (fail-closed)"]
+    listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
+                     "--format", "{{.Names}}")
+    if listed.returncode != 0:
+        return ["reap: skipped — `docker ps` failed; NOTHING was removed "
+                "(fail-closed)"]
+    mine = lane_name()
+    out: list[str] = []
+    for name in sorted(n for n in (listed.stdout or "").split() if n):
+        if not is_managed(name):
+            continue
+        if name == mine:
+            out.append(f"reap: kept {name} — this is THIS worktree's container")
+            continue
+        owner = slugs.get(name[len(NAME_PREFIX):])
+        if owner is not None:
+            # The owner IS determined, so ownership alone decides — and a live
+            # owner is never reaped, at any age.
+            try:
+                present: bool | None = Path(owner).is_dir()
+            except OSError:
+                # pathlib suppresses ENOENT/ENOTDIR/EBADF/ELOOP but NOT EACCES,
+                # so an inaccessible worktree path raises. "Cannot tell" is the
+                # REPORT-ONLY case: it must never be read as "the owner is gone".
+                present = None
+            if present is None:
+                out.append(f"reap: kept {name} — its owning worktree {owner} "
+                           f"could not be examined (fail-closed, report only)")
+                continue
+            if present:
+                out.append(f"reap: kept {name} — its owning worktree exists ({owner})")
+                continue
+            rm = _docker("rm", "-f", name)
+            out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
+                       f"{name} — its owning worktree {owner} is gone")
+            continue
+        # Owner INDETERMINATE: no worktree in THIS clone claims it. That is not
+        # proof of death — the container may belong to a different clone of the
+        # repo, whose live lane this tool cannot see — so ownership cannot
+        # authorize a delete here.
+        #
+        # #5084 owner ruling: fail-closed means REPORT ONLY. When ownership
+        # cannot be determined, do NOT delete. The age is reported and is NEVER
+        # on its own a reason to delete — applying a clock to a slug nothing
+        # claims is exactly the "delete by age" option that was rejected.
+        age = _started_epoch(name)
+        age_txt = ("start time unreadable" if age is None
+                   else f"{(time.time() - age) / 3600.0:.1f}h old")
+        out.append(f"reap: kept {name} — no owner here, so ownership is NOT "
+                   f"determined ({age_txt}); report only, fail-closed")
+    return out
+
+
 def stop() -> str:
     """Remove THIS LANE's container. Takes no argument, by design.
 
@@ -592,10 +789,31 @@ def stop() -> str:
         )
     r = _docker("rm", "-f", name)
     if r.returncode != 0:
+        detail = (r.stderr or r.stdout).strip()
+        # #8180 defect 1: a container whose PID 1 is a zombie cannot be killed —
+        # measured on #2653: "container <id> is zombie and can not be killed.
+        # Use the `--init` option", after which no `down()` could remove it.
+        # Escalate ONCE (a kill then a remove clears the remaining state on most
+        # daemons), and if that fails report the ZOMBIE case precisely: the
+        # remedy is not "try again", it is the container runtime, and a generic
+        # "failed to remove" hides that.
+        if "zombie" in detail.lower():
+            _docker("kill", name)
+            again = _docker("rm", "-f", name)
+            if again.returncode == 0:
+                return "removed after a kill (its PID 1 was a zombie)"
+            detail = (again.stderr or again.stdout).strip() or detail
+            raise SystemExit(
+                f"test-lane: {name} is UNREMOVABLE — its PID 1 is a zombie, "
+                f"which `docker rm -f` cannot kill (#8180, #2653), and a kill "
+                f"did not clear it either. New containers cannot reach this "
+                f"state (creation now passes `--init`), but this one needs the "
+                f"container runtime restarted before anything can remove it. "
+                f"Reported, not worked around. Last error: {detail}"
+            )
         # Never report a removal that did not happen.
         raise SystemExit(
-            f"test-lane: failed to remove {name}: "
-            f"{(r.stderr or r.stdout).strip()}"
+            f"test-lane: failed to remove {name}: {detail}"
         )
     return "removed"
 
