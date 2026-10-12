@@ -8692,7 +8692,10 @@ function claimIntentInFlight() {
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                                 {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
-                                  : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
+                                  /* #3232: the group is the SAME derivation as the procedure split —
+                                     a second literal leaf list here left the newly two-block Claude
+                                     Code / Codex reading the single-prompt label. */
+                                  : (agentDriven2Step.includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
                               </button>
                               <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                             </div>

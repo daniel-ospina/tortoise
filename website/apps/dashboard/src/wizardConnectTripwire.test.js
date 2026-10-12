@@ -1347,6 +1347,16 @@ test('#3218: every multi-part connect procedure renders a numbered step 3', () =
     'the step-3 block renders only when a tail exists')
   assert.match(owner, /\{harnessKey && \(\s*<>\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>[\s\S]{0,200}?\{procedureTail && \(/,
     'both procedure blocks sit inside the harnessKey gate (no key → no procedure)')
+  // #3232 review (P2): the continue label's group must be the SAME derivation as
+  // the procedure split. It was a second literal list — `['pi','cursor']` — so
+  // when Claude Code / Codex gained the restart/verify block they kept the
+  // single-prompt "I've set it up" label while rendering three blocks.
+  // MUTATION: re-introducing a literal list here fails the second assertion.
+  assert.match(owner,
+    /agentDriven2Step\.includes\(wizardHarness\) \? 'Done — Continue to dashboard' : "I've set it up — Continue →"/,
+    'the Done label keys on agentDriven2Step (one source for the two-block leaves)')
+  assert.doesNotMatch(owner, /\['pi', 'cursor'\]\.includes\(wizardHarness\)/,
+    'no second literal leaf list may re-appear for the continue label')
 })
 
 // #3218 (item 3): the parenthetical beside the key said "shown once", which
