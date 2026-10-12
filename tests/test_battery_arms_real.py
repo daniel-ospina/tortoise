@@ -123,6 +123,20 @@ class TestA4Graph:
         assert len(mems) >= 1  # seeded claims retrievable
         a.close()
 
+    def test_store_integrity_does_not_refuse_the_embedded_store(self, scenarios, tmp_path):
+        """#4520: the store-integrity probe checks the PRODUCT write path.
+
+        The real a4 lane runs on an embedded store, and the clear-then-set seam
+        makes that store land a small-Δ overwrite — so the probe must NOT refuse
+        it. A raw-engine probe would deterministically skip the treatment arm.
+        """
+        a = A4TortoiseArm(db_path=str(tmp_path / "a4-integrity.db"))
+        a.require_store_integrity = True
+        try:
+            a.setup_scenarios([scenarios[0]])  # must not raise
+        finally:
+            a.close()
+
     def test_record_wires_evidence(self, scenarios, tmp_path):
         a = A4TortoiseArm(db_path=str(tmp_path / "a4b.db"))
         a.setup_scenarios([scenarios[0]])

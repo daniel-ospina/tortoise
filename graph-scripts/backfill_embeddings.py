@@ -58,6 +58,11 @@ import argparse
 import json
 import os
 
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
+
 DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
@@ -318,7 +323,8 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                 g.query(
                     f"UNWIND $batch AS row "
                     f"MATCH (n:{label} {{{cfg['id_prop']}: row.id}}) "
-                    "SET n.embedding = vecf32(row.emb)",
+                    + clear_then_set_prefix("n", "row.emb")
+                    + "SET " + set_embedding_clause("n", "row.emb"),
                     params={"batch": batch},
                 )
                 updated += len(batch)
