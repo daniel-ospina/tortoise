@@ -8425,9 +8425,19 @@ class FalkorProjection(
         # read HERE, before `team_meta_snapshot` is rebound from `merged` below
         # (the same reason the onboarding reassignment is ordered after this
         # point) — the collapse is reported, never silent.
-        team_meta_entries_merged = (
-            len((leftover or {}).get("team_meta") or [])
-            + len(team_meta_snapshot))
+        #
+        # The count is of DISTINCT markers, not of entries: a kill between the
+        # sidecar write and the `DETACH DELETE` leaves the same marker in BOTH
+        # legs, and counting entries would report a collision (and accuse the
+        # graph of the `#2789` violation) for a graph holding exactly one.
+        team_meta_entries_merged = len({
+            tuple(sorted((k, repr(v)) for k, v in e.items()))
+            if isinstance(e, dict) else repr(e)
+            for e in (
+                list((leftover or {}).get("team_meta") or [])
+                + list(team_meta_snapshot)
+            )
+        })
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,

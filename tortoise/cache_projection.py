@@ -29,10 +29,11 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
 1. **One-way by construction.** Nothing here reads the cache to decide what to
    project. The plan is built entirely from the record; the only read it
    contains is the endpoint ``MATCH`` inside a relation upsert, which resolves
-   a **record** coordinate. ⛔ That is why the five graph-only classes
+   a **record** coordinate. ⛔ That is why the six graph-only classes
    ``rebuild_all`` currently rescues from the cache (``_SNAPSHOT_SECTIONS``:
    ``#548`` synthetic Points, ``#990`` ``:Batch`` markers, ``#2814`` config,
-   ``#4641`` onboarding state, ``#4653`` ``:GraphEventMeta``) are **not carried
+   ``#4641`` onboarding state, ``#4653`` ``:GraphEventMeta``, ``#5353``
+   ``:TeamMeta``) are **not carried
    here**. The issue's own words forbid exactly that — *"the cache is a
    destination, never an input"* — and the placement ruling says what they are:
    *"a field with no PRIMARY claim in the record that exists only here is a
