@@ -125,13 +125,14 @@ from pathlib import Path
 IMAGE = os.environ.get("TORTOISE_TEST_LANE_IMAGE", "falkordb/falkordb:latest")
 NAME_PREFIX = "fdb-lane-"
 
-#: Age backstop. It exists so a caller can REPORT the age of an
-#: owner-indeterminate container, and it is never on its own a reason to delete:
-#: #5084's owner ruling rejects "delete by age" and requires fail-closed — when
-#: ownership cannot be determined, report only. A container whose owner IS
-#: determined is never reaped by age either, however old it is: a lane may
-#: legitimately run far longer than this bound.
-ORPHAN_MAX_AGE_H = float(os.environ.get("TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H", "6"))
+#: NOTE (#8180 review): there is deliberately NO age backstop constant here.
+#: `TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H` used to exist and was read by nothing,
+#: so it advertised a bound the code does not implement (and contradicted
+#: `reap_orphans`'s docstring). #5084's owner ruling rejects "delete by age" and
+#: requires fail-closed — when ownership cannot be determined, REPORT the age
+#: and delete nothing — so the age arm is deliberately not implemented and the
+#: dead knob is gone rather than left as a silent lie
+#: (pinned by tests/test_test_lane_tool.py::test_no_inert_age_backstop_knob_exists).
 PORT_RANGE = (16390, 16499)
 DEFAULT_GRAPH = "tortoise_test_matrix"
 #: Docker calls are bounded: this tool exists for an overloaded host, so a
@@ -159,13 +160,30 @@ PROTECTED_NAMES = frozenset({
 GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
+def _git_env() -> dict[str, str]:
+    """The environment every git call in this module must run under.
+
+    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED rather than inherited: with
+    ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) git answers about
+    the OTHER tree, so the tool would compute a peer lane's container name — or
+    read a peer clone's worktree list — and act on it with no flag involved.
+    Both git call sites (`repo_root`, `_worktree_slugs`) go through this ONE
+    helper so the scrub cannot be applied to one and forgotten on the other
+    (#8180 review: the new `_worktree_slugs` call had skipped it, and the
+    ownership answer a delete is authorized from was being read from the wrong
+    repository).
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+
+
 def repo_root() -> Path:
     """The git worktree this invocation belongs to.
 
-    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED rather than inherited: with
-    ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) `rev-parse`
-    reports the OTHER tree, so the tool would compute a peer lane's container
-    name and act on it with no flag involved.
+    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED (via `_git_env`) rather than
+    inherited: with ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts)
+    `rev-parse` reports the OTHER tree, so the tool would compute a peer lane's
+    container name and act on it with no flag involved.
 
     The fallback to ``Path.cwd()`` (git timed out, or is absent from PATH) is
     deliberate but DEGRADES the contract: invoked from a subdirectory it yields
@@ -174,8 +192,7 @@ def repo_root() -> Path:
     one). The stderr warning is the signal, not a detail — run from the worktree
     root, or restore git, and the derived name is the worktree's again.
     """
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    env = _git_env()
     try:
         out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, check=False, env=env,
@@ -406,8 +423,14 @@ def _wait_ready(name: str, host_port: int | None = None) -> bool:
 
     When `host_port` is given the PING must ALSO succeed over the published host
     port (#8180). Both are required: the host probe is the one that matters to a
-    caller, and the exec probe distinguishes "the server is wedged" from "the
-    mapping is broken" in the refusal message.
+    caller, and the exec probe reports whether the server or the mapping is the
+    broken half (a caller may ignore the distinction; the refusal message in
+    `start()` is what carries it).
+
+    The host probe's own timeout comes OUT of the remaining budget, and the
+    budget is re-derived after it: a host port that black-holes (a filtered/DROP
+    mapping) burns its whole slice, so reusing the pre-probe `remaining` for the
+    exec call charged one iteration up to 2x the deadline (#8180 review).
     """
     deadline = time.monotonic() + READY_TIMEOUT
     host_ok = host_port is None
@@ -417,6 +440,11 @@ def _wait_ready(name: str, host_port: int | None = None) -> bool:
             return False
         if not host_ok:
             host_ok = _ping_over_host(host_port, max(1.0, remaining))
+            # Re-derive (and re-check) after the probe, so its slice is charged
+            # to this iteration's budget instead of being spent on top of it.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
         ping = _docker("exec", name, "redis-cli", "--no-auth-warning", "PING",
                        timeout=max(1, int(remaining)))
         if host_ok and "PONG" in (ping.stdout or ""):
@@ -647,7 +675,7 @@ def _worktree_slugs() -> dict[str, str] | None:
         r = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=str(repo_root()), capture_output=True, text=True,
-            timeout=GIT_TIMEOUT,
+            timeout=GIT_TIMEOUT, env=_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         # `repo_root()` already treats these two conditions this way: git may be
@@ -670,8 +698,9 @@ def _worktree_slugs() -> dict[str, str] | None:
 def _started_epoch(name: str) -> float | None:
     """When the container last started, in epoch seconds; `None` if unreadable.
 
-    Unreadable must not read as "old": the age backstop is the WEAKER half of
-    the reaping rule, so a failed query is never permission to delete.
+    Unreadable must not read as "old": the age is REPORTED only and is never on
+    its own a reason to delete (see `reap_orphans`), so a failed query must not
+    be rendered as an age that a reader could mistake for one.
     """
     r = _docker("inspect", "--format", "{{.State.StartedAt}}", name)
     if r.returncode != 0:
@@ -702,8 +731,10 @@ def reap_orphans() -> list[str]:
     the rule the whole module defends.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
-    removed and the reason is reported. Returns one line per container
-    considered, so a caller reports what actually happened instead of counting.
+    removed and the reason is reported. Returns one line per container this
+    function ACTED on or decided to KEEP; a name refused by `is_managed()` is not
+    reported (it was never a candidate), so a caller reports what actually
+    happened instead of counting.
     """
     slugs = _worktree_slugs()
     if slugs is None:

@@ -21,8 +21,10 @@ leaves the property itself free to regress.
 from __future__ import annotations
 
 import inspect
+import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -208,6 +210,112 @@ def test_ping_over_host_is_false_when_nothing_is_listening(monkeypatch):
     assert tl._ping_over_host(1, 0.5) is False
 
 
+def test_ping_over_host_is_true_when_something_answers(monkeypatch):
+    """The POSITIVE half of the same REAL body (#8180 review). The negative test
+    above only closes one direction: with the real body replaced by
+    `return False` — a probe that can never succeed, so every container is
+    declared wedged and torn down — the whole file still passed. This binds a
+    loopback socket that answers the RESP PING so the probe is pinned BOTH ways."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve() -> None:
+        conn, _addr = srv.accept()
+        with conn:
+            conn.recv(64)
+            conn.sendall(b"+PONG\r\n")
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+    try:
+        monkeypatch.undo()   # the module-wide stub must not satisfy this test
+        assert tl._ping_over_host(port, 2.0) is True
+    finally:
+        srv.close()
+        worker.join(timeout=2)
+
+
+def test_no_inert_age_backstop_knob_exists():
+    """#8180 review: `ORPHAN_MAX_AGE_H` (and its
+    `TORTOISE_TEST_LANE_ORPHAN_MAX_AGE_H` knob) was read by nothing, so it
+    advertised an age bound the code deliberately does not implement — and an
+    operator setting it changed no behaviour on a DESTRUCTIVE sweep. The dead
+    knob is removed; re-adding an unread age constant fails here."""
+    assert not hasattr(tl, "ORPHAN_MAX_AGE_H"), (
+        "an age constant that nothing reads is a claim the code does not keep")
+
+
+def test_wait_ready_does_not_overshoot_its_budget_when_the_host_probe_black_holes(
+        lane, monkeypatch):
+    """A host port that BLACK-HOLES (filtered/DROP) makes the probe consume its
+    whole timeout. `remaining` was captured once per iteration and then reused
+    for the exec call, so one iteration could spend 2x READY_TIMEOUT (measured
+    6.0s against READY_TIMEOUT=3). The probe's slice must be charged to the
+    budget, not added on top of it."""
+    now = [100.0]
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 3)
+    monkeypatch.setattr(tl.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(tl.time, "sleep", lambda _s: None)
+
+    def black_hole(_port, timeout):
+        now[0] += timeout          # the probe burns its entire slice
+        return False
+
+    seen: list = []
+
+    def fake(*_a, **k):
+        seen.append(k.get("timeout"))
+        now[0] += k.get("timeout") or 0    # a docker call blocks for its timeout
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_ping_over_host", black_hole)
+    monkeypatch.setattr(tl, "_docker", fake)
+    assert tl._wait_ready("fdb-lane-x", 16390) is False
+    # deadline was 100.0 + 3.0 = 103.0; the re-derived remaining is 0 after the
+    # probe, so the exec call must not have been issued with a stale 3s slice.
+    assert now[0] <= 103.05, f"_wait_ready overshot its 3s budget: {now[0]}"
+    assert seen == [], f"the exec probe was issued past the deadline: {seen}"
+
+
+def test_start_sweeps_orphans_and_reports_them_on_stderr(
+        tmp_path, lane, monkeypatch, capsys):
+    """The call site that makes ownership reaping BITE (#8180). Every reaper
+    test calls `reap_orphans()` directly and the module-wide fixture sets
+    `TORTOISE_TEST_LANE_REAP=0`, so deleting the call from `start()` left the
+    suite green and the whole mechanism dead — the predicate is not the fix.
+    This enables the sweep and asserts the removal HAPPENED, and that its report
+    goes to STDERR: stdout is the `eval`-able export line, so a reap line there
+    would corrupt a lane's target instead of aborting it."""
+    dead = tmp_path / "dead-worktree"
+    monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "1")
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"dead": str(dead)})
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-dead\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        if a[0] == "exec":
+            return _R(0, "PONG\n", "")
+        if a[0] == "rm":
+            removed.append(a)
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl.start(port=16390)
+    assert ("rm", "-f", "fdb-lane-dead") in removed, removed
+    out, err = capsys.readouterr()
+    assert "removed fdb-lane-dead" in err, err
+    assert "reap:" not in out, out
+
+
 # ── the ownership guard (the part that must never be wrong) ────────────────
 
 @pytest.mark.parametrize("name", [
@@ -337,6 +445,29 @@ def test_repo_root_ignores_an_inherited_git_work_tree(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
     assert tl.repo_root().resolve() == ROOT.resolve()
     assert tl.lane_name() == tl.container_name(tl.slug_for(ROOT))
+
+
+def test_worktree_slugs_reads_this_repo_not_an_inherited_git_env(tmp_path, monkeypatch):
+    """`_worktree_slugs` is the ownership record a delete is AUTHORIZED from, and
+    it shells out to `git worktree list` — the same hazard `repo_root()` scrubs
+    `GIT_DIR`/`GIT_WORK_TREE` for. Unscrubbed, an inherited git env var makes
+    the reaper read a PEER clone's worktrees, so every real `fdb-lane-*`
+    container resolves to `owner is None` (silent no-op) and a foreign record
+    can authorize a removal this worktree never established (#8180 review).
+
+    The decoy is a REAL repository (a non-existent path makes git fail and
+    `_worktree_slugs` return None, which would let the unscrubbed code pass).
+    """
+    decoy = tmp_path / "decoy-worktree"
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True)
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    slugs = tl._worktree_slugs()
+    assert slugs is not None
+    assert tl.slug_for(ROOT) in slugs, (
+        f"this worktree must be in the ownership map; got {len(slugs)} entries")
+    assert tl.slug_for(decoy) not in slugs, (
+        "the decoy repository's worktree must NOT appear in the ownership map")
 
 
 # ── naming / URI shape ─────────────────────────────────────────────────────
