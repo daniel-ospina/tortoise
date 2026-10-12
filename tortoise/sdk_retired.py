@@ -22,10 +22,12 @@ map is separate and deliberately tiny:
   * the table maps names that still EXIST. This map holds only names that have **already
     left** the surface — the ones ``__getattr__`` will actually be asked about.
 
-``tests/test_sdk_retirement.py`` pins every entry here to the approved rename table
-(``tools/sdk_rename_table.py``), so an entry cannot be added here that the owner has not
-approved — an unapproved rename would otherwise fail every caller of a live method with a
-hint pointing at a name the owner never approved.
+``tests/test_sdk_retirement.py`` pins every entry here to the owner-approved
+``docs/product/beta-sdk-surface.md`` "Renamed …" table — the same source
+``tools/sdk_rename_table.py`` draws its destinations from — so an entry cannot be added
+here that the owner has not approved: an unapproved rename would otherwise fail every
+caller of a live method with a hint pointing at a name the owner never approved. A green
+run is a CONSISTENCY CHECK against that document, never consent to edit it.
 """
 
 from __future__ import annotations
