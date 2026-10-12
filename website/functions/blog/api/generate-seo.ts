@@ -23,6 +23,7 @@ import {
   TAG_KEYWORDS,
   keywordsFor,
   primaryKeyword,
+  resolvePrimaryKeyword,
   ensureKeyword,
   containsKeyword,
 } from "../_shared/seo-keywords.ts";
@@ -224,10 +225,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "not_configured", message: "OPENROUTER_API_KEY missing" }, 503);
   }
 
-  // THE primary keyword for this post — deterministic, so the repair below is
-  // reproducible. null when no tag maps to the research vocabulary.
-  const primary = primaryKeyword(tags);
-  const userPrompt = buildUserPrompt(title, body, tags, primary);
+  // The keyword the PROMPT is built around. It can only use the caller's tags,
+  // because the model's own tags do not exist yet — see the note after
+  // `enforced` for the keyword the RESPONSE is verified against. null when no
+  // supplied tag maps to the research vocabulary.
+  const promptPrimary = primaryKeyword(tags);
+  const userPrompt = buildUserPrompt(title, body, tags, promptPrimary);
 
   let result = await callProvider(env, PRIMARY, userPrompt);
   if (!result) result = await callProvider(env, FALLBACK, userPrompt);
@@ -247,6 +250,17 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     },
     title,
   );
+
+  // THE keyword the RESPONSE is verified against (#8320). The prompt above could
+  // only use the caller's tags, but the model GENERATES the tags — so when the
+  // caller supplied none (the pipeline's normal shape: title + body), the
+  // prompt-time keyword was null, the repair below had nothing to enforce, and
+  // `keyword_ok` returned `true` while checking nothing at all.
+  //
+  // Prefer the caller's tags when they exist (they are an explicit statement of
+  // intent); otherwise use the model's own tags, which describe what the article
+  // is actually about. Deterministic, so the repair below is reproducible.
+  const primary = resolvePrimaryKeyword(tags, enforced.tags);
 
   // VERIFY, DON'T HOPE (#8293). The prompt above ASKS for the primary keyword;
   // a prompt is a request, not a guarantee, and the previous behaviour never
@@ -280,14 +294,17 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // The caller can see WHETHER the keyword landed instead of trusting that
-      // it did — and `keyword_ok` false means the field limits won the tie,
-      // which is a real signal rather than a silent miss.
+      // `null` means "no primary keyword could be derived, so nothing was
+      // verified" — NOT success. Reporting `true` there was the vacuity #8320
+      // fixed; a caller that needs a guarantee must read a non-null value.
+      // `false` still means the field limits won the tie over the repair, which
+      // is a real signal rather than a silent miss.
       primary_keyword: primary,
       keyword_ok:
-        primary === null ||
-        (containsKeyword(repaired.meta_title, primary) &&
-          containsKeyword(repaired.meta_description, primary)),
+        primary === null
+          ? null
+          : containsKeyword(repaired.meta_title, primary) &&
+            containsKeyword(repaired.meta_description, primary),
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,

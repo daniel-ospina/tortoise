@@ -42,6 +42,24 @@ export function primaryKeyword(tags: string[]): string | null {
   return null;
 }
 
+/**
+ * THE primary keyword for a request, given what the CALLER supplied and what
+ * the MODEL generated (#8320).
+ *
+ * The caller's tags win when present — they are an explicit statement of
+ * intent. When the caller supplied none (the pipeline's normal shape: title +
+ * body), the model's own generated tags are used instead, because otherwise the
+ * primary keyword is null for every such call: the prompt has nothing to ask
+ * for, the repair has nothing to enforce, and `keyword_ok` would report success
+ * while checking nothing.
+ *
+ * Kept as a named function rather than inlined in the handler so the ordering
+ * it encodes is testable without driving the whole HTTP handler.
+ */
+export function resolvePrimaryKeyword(suppliedTags: string[], generatedTags: string[]): string | null {
+  return primaryKeyword(suppliedTags.length > 0 ? suppliedTags : generatedTags);
+}
+
 /** Normalize for a contains-check: lowercase, punctuation -> spaces. */
 export function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
