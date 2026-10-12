@@ -387,21 +387,36 @@ def test_create_document_refuses_a_bad_ref_instead_of_swallowing_it(
         "node behind for the caller to lose track of")
 
 
-def test_the_advisory_does_not_fire_on_a_write_that_carries_a_session_id(
-        tmp_path):
-    """A supplied `session_id` IS provenance — do not advise it as a gap.
+def test_a_session_id_alone_does_not_silence_the_advisory(tmp_path):
+    """`session_id` is NOT provenance on this door — advise it, and say so.
 
-    `create_point` infers `session:<id>` from a usable `session_id` (#3263), so
-    a writer that supplied one is not unsourced. Advising it would be a FALSE
-    POSITIVE telling the writer to declare the very ref the sibling door
-    derives for free — and a false-positive advisory is how an advisory stops
-    being read.
+    This test previously asserted the OPPOSITE, on the reasoning that
+    `create_point` infers `session:<id>` from a usable `session_id` (#3263).
+    That reasoning was borrowed, and false: the inference lives only in
+    `create_point`, which never calls `_provenance_advisory`. Its only callers
+    are `create_entity` and `create_document`, and neither derives anything
+    from `session_id` — so a `session_id`-only write here lands with no
+    `:Source` and no `extractedFrom` edge, and suppressing the advisory hid
+    exactly the gap it exists to report (review P1).
+
+    MEASURED on the head tree before this fix: `advisories: None`,
+    `extractedFrom` prop `None`, `:Source` count 0, edges 0.
+
+    MUTATION THAT MUST RED: restore the `if isinstance(_sid, str): return {}`
+    bypass in `_provenance_advisory` — no `advisories` key is returned.
     """
     sdk = _sdk(tmp_path)
     res = sdk.create_entity(type="document", name="Session ctx doc",
                             documentKind="note", session_id="sess-8171")
-    assert not (res.get("advisories") or []), (
-        "a write carrying a usable session_id already has a derivable source")
+    advisories = res.get("advisories") or []
+    assert advisories, (
+        "this door derives no source from session_id, so the write is unsourced")
+    assert advisories[0].get("code") == "no_source"
+    assert "session:<session_id>" in advisories[0].get("message", ""), (
+        "the advisory must name the ref that WOULD have made this sourced")
+    assert "only `create_point` derives" in advisories[0].get("message", ""), (
+        "and must say why the session_id the caller DID pass did not count — "
+        "otherwise the advice reads as ignoring information the writer gave")
 
 
 def test_create_document_delivers_the_advisory_too(tmp_path):

@@ -23798,13 +23798,26 @@ class TortoiseSDK:
             # D10: a document IS a `:Source`, so a declared `sourceKind` IS its
             # provenance statement — see the block comment above.
             return {}
-        # #3263 parity (review P2): `create_point` INFERS `session:<id>` from
-        # the write context, so a writer that supplied a usable `session_id` is
-        # NOT unsourced — advising it would be a FALSE POSITIVE telling the
-        # writer to declare the very ref the sibling door derives for free.
+        # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
+        # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
+        # (#3263). That inference lives ONLY in `create_point` — and
+        # `create_point` never calls this helper. Its only callers are
+        # `create_entity` and `create_document`, and NEITHER derives or
+        # materializes anything from `session_id`, so a `session_id`-only write
+        # through either door is genuinely UNSOURCED: the bypass silenced the
+        # advisory on exactly the class of write the advisory exists to report.
+        # Sourcedness must be judged by what THIS door will materialize, so a
+        # borrowed capability cannot be counted as provenance the door does not
+        # provide — the same rule the inert-`extractedFrom` branch above
+        # applies. The right fix for a writer that wants that inference is the
+        # message's advice, not a silent exemption.
         _sid = props.get("session_id")
-        if isinstance(_sid, str) and _sid.strip():
-            return {}
+        _sid_hint = (
+            " (A `session_id` was supplied, but only `create_point` derives a "
+            "source from one; this door does not. Pass "
+            "extractedFrom='session:<session_id>' explicitly.)"
+            if isinstance(_sid, str) and _sid.strip() else ""
+        )
         # A document that STATED its kind has declared what it is (D10: a
         # document is a `:Source`, so `sourceKind` is its provenance
         # statement). One that stated NEITHER its source nor its kind is the
@@ -23820,6 +23833,7 @@ class TortoiseSDK:
                 "that produced it with extractedFrom='session:<session_id>' "
                 "(registered as sourceKind=agentSession) — an unsourced "
                 "assertion carries whatever credibility its wording implies."
+                + _sid_hint
             ),
             "advisory": True,
         }]}
