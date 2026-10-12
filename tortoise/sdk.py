@@ -23697,11 +23697,82 @@ class TortoiseSDK:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
                 f"subject, object, event, document")
+        # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
+        # `extractedFrom` is a recognised prop on this door — it rides the
+        # generic passthrough (see `_ALLOWED_PROPS`) and is stored on the node.
+        # Storing it is NOT the capability: `create_document` (which
+        # `type='document'` absorbed in the epic #888 / #4282 consolidation)
+        # also wired the Source via `projection._link_source` (#394), and that
+        # half was LOST in the move — `create_entity` minted NO `:Source` node
+        # and NO `extractedFrom` edge, so a caller that had declared a source
+        # got a claim the auditor reads as a provenance gap
+        # (`audit.missing_sourceKind`). Measured, `type='document'`:
+        #     create_entity    sourceKind/edge: none
+        #     create_document  :Source node + extractedFrom edge
+        # `_link_source` is "declared inline, created if absent": it MERGEs the
+        # Source stub on the ref and is idempotent, so a re-declared ref
+        # converges instead of duplicating. The LABEL is the created node's
+        # own — a document IS a `:Source` (D10), and `_link_source` keys a
+        # Source by `url` and every other label by `id`.
+        _prov_ref = props.get("extractedFrom")
+        _prov_label = self._ENTITY_SOURCE_LABELS.get(t)
+        if _prov_ref and _prov_label:
+            _prov_id = node.get("id") or node.get("eventId")
+            if _prov_id:
+                self._get_proj()._link_source(
+                    _prov_id, _prov_ref, label=_prov_label)
         return {
             "node": node,
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
+            **self._provenance_advisory(node, props),
         }
+
+    # ── #8171: the write-time provenance advisory ────────────────────
+    #
+    # The ruling (#398, delivered by #8171): an agent asserting something
+    # without research is a WEAK source, and the source is the agent-session
+    # transcript. `audit.missing_sourceKind` already performs this check — as a
+    # POST-HOC sweep over the graph, which the writer of a sourceless claim
+    # never sees. The ruling asks for it AT WRITE TIME, the only point where it
+    # can change what the writer does next.
+    #
+    # ADVISORY ONLY. The ruling says "guard (advisory)", never a block, so this
+    # returns a note and NEVER raises, NEVER refuses the write and NEVER changes
+    # what was stored. A caller ignoring it loses nothing; a caller reading it
+    # learns the one cheap fix (declare `extractedFrom`, e.g. a
+    # `session:<id>` ref for what the writer itself asserts).
+    _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {
+        "subject": "Subject", "object": "Object",
+        "event": "Event", "document": "Source"}
+
+    def _provenance_advisory(self, node: dict, props: dict) -> dict:
+        """Advisory when a write lands with no source and no provenance.
+
+        Returns ``{}`` when the node carries provenance (``extractedFrom``),
+        and ``{"advisories": [...]}`` when it does not. Never raises, never
+        blocks — see the block comment above.
+        """
+        if props.get("extractedFrom") or props.get("sourceKind"):
+            return {}
+        # A document that STATED its kind has declared what it is (D10: a
+        # document is a `:Source`, so `sourceKind` is its provenance
+        # statement). One that stated NEITHER its source nor its kind is the
+        # gap `audit.missing_sourceKind_source` (check 7) reports — advise it
+        # like any other unprovenanced write.
+        node_id = node.get("id") or node.get("eventId")
+        return {"advisories": [{
+            "code": "no_source",
+            "node_id": node_id,
+            "message": (
+                "No source and no provenance on this write. If it is "
+                "something YOU are asserting, source it from the session "
+                "that produced it with extractedFrom='session:<session_id>' "
+                "(registered as sourceKind=agentSession) — an unsourced "
+                "assertion carries whatever credibility its wording implies."
+            ),
+            "advisory": True,
+        }]}
 
     # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
 
