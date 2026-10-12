@@ -2761,11 +2761,21 @@ def purge_org_control_plane(cp, org_id: str) -> None:
     ``_purge_registry_org``. Only called once the soft-delete grace
     window has elapsed. Raises on failure (fail-closed) — the purge sweep
     logs and skips, never crashes.
+
+    The orgs row goes through the SECURITY DEFINER RPC
+    ``purge_org_record`` (migration 20261012000005), NOT a raw table
+    DELETE: the organizations -> graphs -> journal_event cascade fires
+    the append-only trigger on every journal row, and the trigger
+    refuses unless ``app.record_journal_purge='on'`` — a GUC a PostgREST
+    table DELETE cannot set. The RPC sets it transaction-locally and then
+    deletes the row (review of PR #8179 P2: without this, the erasure
+    would fail closed once the journal is populated and the org would
+    never be purged).
     """
     cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("invitations", method="DELETE", filters=[("org_id", "eq", org_id)])
-    cp.query("organizations", method="DELETE", filters=[("id", "eq", org_id)])
+    cp.rpc("purge_org_record", {"p_org_id": org_id})
 
 
 # ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────
@@ -4408,6 +4418,75 @@ def metering_increment_embedding(cp, org_id: str, period_start: str,
          "p_model": model, "p_revision": revision,
          "p_identity_mixed": identity_mixed},
     )
+
+
+def metering_increment_retrieval(cp, org_id: str, period_start: str,
+                                 period_end: str, *, queries: int = 0,
+                                 leg_runs: int = 0, leg_degraded: int = 0,
+                                 wall_ms: float = 0.0, leg_fts: int = 0,
+                                 leg_vector: int = 0,
+                                 leg_structural: int = 0) -> None:
+    """Increment the org's RETRIEVAL workload for the window
+    ``[period_start, period_end)`` (#4489) via the
+    ``metering_increment_retrieval`` SQL RPC — the retrieval-side mirror of
+    ``metering_increment_embedding`` (atomic under Postgres row locking;
+    best-effort by contract — the caller swallows exceptions).
+
+    The per-leg counters are the RECORDED vocabulary (fts / vector /
+    structural); the total ``p_leg_runs`` may exceed their sum, because a leg
+    name outside the vocabulary advances the total and no per-leg column.
+
+    #3825: the window, not a month label, is the row key. The RPC is DROPPED
+    and recreated by its migration rather than replaced in place: a new
+    argument list would otherwise be an OVERLOAD, leaving the old signature
+    callable — the silent second path #3825 removes.
+    """
+    cp.rpc(
+        "metering_increment_retrieval",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_queries": queries,
+         "p_leg_runs": leg_runs, "p_leg_degraded": leg_degraded,
+         "p_wall_ms": wall_ms, "p_leg_fts": leg_fts,
+         "p_leg_vector": leg_vector,
+         "p_leg_structural": leg_structural},
+    )
+
+
+def metering_get_retrieval_usage(cp, org_id: str, period_start: str) -> dict:
+    """Retrieval workload for an org's window STARTING at *period_start*
+    (#4489) — the supabase-mode READ path for ``get_retrieval_usage``. Returns
+    the ``retrieval_*`` columns as a dict (all ZEROS when the row is absent —
+    the ledger row is created by whichever lane writes FIRST, and a fresh org
+    has none, P2-14).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    rows = cp.query(
+        "metering_records",
+        select=["retrieval_queries", "retrieval_leg_runs",
+                "retrieval_leg_degraded", "retrieval_wall_ms",
+                "retrieval_leg_fts", "retrieval_leg_vector",
+                "retrieval_leg_structural"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return {"retrieval_queries": 0, "retrieval_leg_runs": 0,
+                "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,
+                "retrieval_leg_fts": 0, "retrieval_leg_vector": 0,
+                "retrieval_leg_structural": 0}
+    row = rows[0]
+    return {
+        "retrieval_queries": int(row.get("retrieval_queries") or 0),
+        "retrieval_leg_runs": int(row.get("retrieval_leg_runs") or 0),
+        "retrieval_leg_degraded": int(
+            row.get("retrieval_leg_degraded") or 0),
+        "retrieval_wall_ms": float(row.get("retrieval_wall_ms") or 0.0),
+        "retrieval_leg_fts": int(row.get("retrieval_leg_fts") or 0),
+        "retrieval_leg_vector": int(row.get("retrieval_leg_vector") or 0),
+        "retrieval_leg_structural": int(
+            row.get("retrieval_leg_structural") or 0),
+    }
 
 
 def metering_set_graph_storage(cp, org_id: str, period_start: str,

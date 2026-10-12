@@ -46,10 +46,18 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripComments } from './testSupport.js'
+// #4370 (A6): the REAL predicate, imported from its module-scope home in the
+// pure module — not a copy extracted out of main.jsx. `main.jsx` now IMPORTS it
+// too, so a test that extracted a local declaration would fail loudly rather
+// than silently stop guarding the seams.
+import { revealablePlaintext, revealableMintPlaintext } from './sessionKey.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 const mainJsxCode = stripComments(mainJsx)
+// #4370 (A6): the predicate's body now lives here, so the static pin reads it
+// from its real home instead of a copy inside `main.jsx`.
+const sessionKeyJs = readFileSync(join(here, 'sessionKey.js'), 'utf8')
 
 // ── token-aware extraction of a real declaration from main.jsx ──────────────
 // Strings, template literals and comments are skipped so a brace inside copy
@@ -124,6 +132,33 @@ function build(deps, decls) {
   return new Function(...params, body)(...params.map((n) => deps[n]))
 }
 
+// ── #8249: reading the latched disclosure the way the RENDER does ──────
+// The plaintext-less refusal is not written to the `error` slot any more: it
+// is latched on the per-team outcome record and read back through
+// `rotateOutcomeFor` (the active team's record only). These helpers go through
+// the REAL declarations so a test cannot pass by reading a shape the app never
+// renders. #4370 (A6)/merge: `revealablePlaintext` lives at module scope in
+// `sessionKey.js` now, so it is IMPORTED (line 53) rather than extracted from
+// `main.jsx`; only `rotateOutcomeFor` is still declared there.
+const { rotateOutcomeFor: _rotateOutcomeFor } =
+  build({}, ['function rotateOutcomeFor'])
+
+// The record the app would resolve for `orgId` after the last latch.
+function recordOf(calls, orgId = 'org-A') {
+  return _rotateOutcomeFor(calls.rotateOutcomes.at(-1) || {}, orgId) || {}
+}
+
+// The disclosure the app would render for `orgId` — '' means "dropped".
+function refusalOf(calls, orgId = 'org-A') {
+  return recordOf(calls, orgId).refusal || ''
+}
+
+// The reveal the app would render for `orgId` (the real derivation, over the
+// real predicate) — a refusal record must always resolve to ''.
+function derivedReveal(calls, orgId = 'org-A') {
+  return revealablePlaintext(recordOf(calls, orgId).plaintext) || ''
+}
+
 // ── regenerateKey ───────────────────────────────────────────────────────────
 // #4355: rotate is ONE call now (`POST /v1/team/keys/{id}/rotate`), so the
 // harness stubs `api` instead of `mintKey`+`revokeKey`. `response` is the
@@ -160,6 +195,11 @@ function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays 
     wizardDurableKey: '',
     team: { tier: 'free' },
     _MS_PER_DAY: 86400000,
+    // #4370 (A6): the REAL shared predicate + refusal builder, imported/extracted
+    // rather than stubbed — a stub here would verify the stub (the repo's
+    // "real helper, not a copy" standard).
+    revealablePlaintext,
+    revealableMintPlaintext,
     // Pure helpers — irrelevant to the plaintext guard; stubs keep the file
     // free of their own dependencies.
     lifetimeDaysFromRow: () => (lifetimeDays === undefined ? null : lifetimeDays),
@@ -195,37 +235,42 @@ function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays 
     setWelcomeKey: (v) => calls.welcomeKeys.push(v),
     setWizardDurableKey: (v) => calls.wizardKeys.push(v),
   }
-  return { deps, calls, regenerateKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey }
+  return { deps, calls, regenerateKey: build(deps, ['function revealRefusalFor', 'async function regenerateKey']).regenerateKey }
 }
 
-test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old key is revoked', async () => {
+test('#4342/#8249: a plaintext-less rotate 2xx latches NO reveal and states the old key is revoked', async () => {
   // The reported mechanism: a 2xx mint carrying only a row id — the secret is
   // unrecoverable. Pre-fix this reached `setRotatedKey({ plaintext: '', … })`.
+  // #8249: the disclosure it produces is latched on the PER-TEAM record (it
+  // used to ride the transient `error` slot — the reason a team switch could
+  // drop it).
   const { calls, regenerateKey } = rotateEnv({
     response: { id: 'k-new', key_prefix: 'tt_rot_new', replaced_revoked: true },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotateOutcomes, [],
-    'a plaintext-less mint must never latch an outcome (the empty `.key-value` box)')
+  const rec = recordOf(calls)
+  assert.equal(rec.plaintext, '',
+    'a plaintext-less mint must never latch a plaintext (the empty `.key-value` box)')
+  assert.equal(derivedReveal(calls), '',
+    'and the derivation the JSX gates on must resolve empty — the reveal can never render')
   assert.deepEqual(calls.order, ['rotate'],
     'the single rotate call revokes the old key server-side — the message must say so')
   assert.equal(calls.loadAll, 1,
     'the replacement row exists server-side — the table must be refreshed')
-  const msg = calls.error.filter(Boolean).at(-1) || ''
+  const msg = refusalOf(calls)
   assert.match(msg, /cannot be shown/, 'the failure must say the replacement cannot be shown')
   assert.match(msg, /already been revoked/,
     'and that the OLD key is already revoked (the rotate-specific remedy)')
   assert.match(msg, /create a new key/, 'and name the remedy')
-  // Never an empty string latched, and never a non-string in the error slot.
-  assert.ok(!calls.rotateOutcomes.some((m) => Object.values(m).some((v) => !v.plaintext)),
-    'no latched outcome may carry a falsy plaintext')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    '#8249: the refusal is not a second, un-keyed copy in the `error` slot')
 })
 
 test('#4342: a mint returning nothing at all is refused the same way', async () => {
   const { calls, regenerateKey } = rotateEnv({ response: undefined })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotateOutcomes, [], 'a missing response must not latch a reveal')
-  assert.match(calls.error.filter(Boolean).at(-1) || '', /cannot be shown/)
+  assert.equal(recordOf(calls).plaintext, '', 'a missing response must not latch a reveal')
+  assert.match(refusalOf(calls), /cannot be shown/)
 })
 
 test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused too', async () => {
@@ -235,35 +280,178 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
   for (const value of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
     const { calls, regenerateKey } = rotateEnv({ response: { key: value } })
     await regenerateKey('k-old')
-    assert.deepEqual(calls.rotateOutcomes, [],
+    assert.equal(recordOf(calls).plaintext, '',
       `a mint carrying ${JSON.stringify(value)} must not latch the reveal`)
-    const msg = calls.error.filter(Boolean).at(-1) || ''
-    assert.match(msg, /cannot be shown/,
+    assert.equal(derivedReveal(calls), '',
+      `the derived reveal must be empty for ${JSON.stringify(value)}`)
+    assert.match(refusalOf(calls), /cannot be shown/,
       `the failure must be surfaced for ${JSON.stringify(value)}`)
   }
 })
 
-test('#4342: a failing refresh cannot overwrite the already-revoked message', async () => {
-  // `loadAll` owns the same `error` slot and overwrites it from its own catch
-  // (main.jsx). If the refusal message were set FIRST, a compound failure (the
-  // rotate succeeded, the follow-up read did not) would replace the one
-  // message that tells the user their old key is gone. The refusal must be
-  // surfaced AFTER the refresh — pinned here behaviourally.
+test('#8249: a plaintext-less response that also carries a warning retains BOTH disclosures', async () => {
+  // The server's contract says `replaced_revoked:false` also ships the live
+  // replacement's plaintext, so this shape should not occur — but if it ever
+  // does, the branch must not drop the partial state on its way to recording
+  // the lost secret. #8249's defect statement is explicit that the stale path
+  // lost "no warning" too, so both live on the record.
+  const warning = 'The previous key could not be revoked and the rollback failed — both are currently active.'
+  const { calls, regenerateKey } = rotateEnv({
+    response: { id: 'k-new', key_prefix: 'tt_rot_new', replaced_revoked: false, warning },
+  })
+  await regenerateKey('k-old')
+  const rec = recordOf(calls)
+  assert.equal(rec.warning, warning, 'the partial state is retained alongside the refusal')
+  assert.match(rec.refusal || '', /cannot be shown/, 'and so is the lost-secret disclosure')
+  assert.equal(rec.plaintext, '', 'still no reveal')
+})
+
+test('#4342/#8249: a failing refresh cannot overwrite the already-revoked message', async () => {
+  // `loadAll` owns the `error` slot and overwrites it from its own catch
+  // (main.jsx). The refusal used to be ordered AFTER the refresh on purpose —
+  // if it were set first, a compound failure (the rotate succeeded, the
+  // follow-up read did not) would replace the one message that tells the user
+  // their old key is gone. #8249 removes that ordering dependency: the refusal
+  // is latched on the team-scoped record BEFORE the refresh, so no refresh
+  // outcome can reach it at all.
   const { calls, regenerateKey } = rotateEnv({
     response: { id: 'k-new', key_prefix: 'tt_rot_new' },
     loadAll: (c) => { c.error.push('Failed to fetch') },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotateOutcomes, [], 'still no reveal')
-  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.equal(derivedReveal(calls), '', 'still no reveal')
+  const msg = refusalOf(calls)
   assert.match(msg, /has already been revoked/,
     'the rotate truth must survive a refresh failure, not be replaced by the network error')
   assert.doesNotMatch(msg, /Failed to fetch/)
+  assert.deepEqual(calls.error.filter(Boolean), ['Failed to fetch'],
+    'a refresh failure is its own disclosure — the refusal does not share the transient slot')
 })
 
+test('#8249 (review P2): the composed banner shows the refusal, not the refresh error', async () => {
+  // The existing field checks above assert the record and the `error` slot
+  // SEPARATELY — they pass while the user still sees `Failed to fetch`,
+  // because the banner preferred `error`. This executes the banner's OWN
+  // composed decision over the real `errorBannerText` helper: the compound
+  // failure (rotate succeeded, follow-up `loadAll('')` failed) must render the
+  // destroyed-key message. On the pre-fix main.jsx the helper does not exist,
+  // so the extraction throws — the test cannot pass vacuously.
+  const { calls, regenerateKey } = rotateEnv({
+    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
+    loadAll: (c) => { c.error.push('Failed to fetch') },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.error.filter(Boolean), ['Failed to fetch'],
+    'the refresh failure did land in the error slot (the precondition for the displacement)')
+  const refusal = refusalOf(calls)
+  const { errorBannerText } = build(
+    { errorMessage: (e) => (typeof e === 'string' ? e : (e && e.message) || 'error') },
+    ['function errorBannerText'])
+  assert.equal(errorBannerText('Failed to fetch', refusal), refusal,
+    'the retained refusal OUTRANKS the refresh error in the composed banner')
+  assert.equal(errorBannerText('Failed to fetch', ''), 'Failed to fetch',
+    'an absent refusal leaves the error slot authoritative — the three-branch banner is unchanged')
+  assert.equal(errorBannerText(null, 'only a refusal'), 'only a refusal',
+    'and a refusal with no error renders alone')
+  assert.match(mainJsxCode, /\{errorBannerText\(error, rotateRefusalText\)\}/,
+    'the JSX banner must render the composed message, not `error ? errorMessage(error) : rotateRefusalText`')
+})
+
+test('#8249: a team switch during the rotate RTT retains the plaintext-less refusal', async () => {
+  // THE DEFECT this file gained this case for. A 2xx with no revealable
+  // plaintext means the displaced row is revoked and the replacement's secret
+  // is unrecoverable, so the refusal is the ONLY thing that can tell the user.
+  // It used to be written after the team-identity guard, so a switch landing
+  // on the RTT dropped it: no reveal (there is none), no warning, no refusal.
+  // The pre-#8249 assertion of this file pinned exactly that drop (`calls.error
+  // .filter(Boolean)` empty, `rotateOutcomes` empty) — the latent bug.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    apiImpl: async () => {
+      // The switch lands DURING the RTT: by the time the response is in hand
+      // the displaced row is already revoked server-side.
+      orgIdRef.current = 'org-B'
+      return { id: 'k-new', key_prefix: 'tt_rot_new', replaced_revoked: true }
+    },
+  })
+  await regenerateKey('k-old')
+  const rec = recordOf(calls, 'org-A')
+  assert.match(rec.refusal || '', /has already been revoked/,
+    '#8249: the refusal must SURVIVE the switch — it is the only notice that a key was destroyed')
+  assert.match(rec.refusal || '', /cannot be shown/)
+  assert.equal(rec.plaintext, '', 'and it is not a reveal: no plaintext was ever delivered')
+  assert.equal(derivedReveal(calls, 'org-A'), '', 'a refusal record must never render a reveal')
+  // AC2 — attribution: the retained refusal belongs to org-A and is not
+  // retrievable through any other team's record.
+  assert.equal(refusalOf(calls, 'org-B'), '', 'team B must NEVER render team A\u2019s refusal')
+  assert.equal(refusalOf(calls, 'org-C'), '')
+  assert.equal(calls.loadAll, 0,
+    'a stale response must not refresh the NEW team\u2019s key list')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'and the refusal must not be re-surfaced through the shared, un-keyed error slot')
+  assert.deepEqual(calls.welcomeKeys, [],
+    'nor may its row-truth prefix clear write into the new team\u2019s held plaintexts')
+})
+
+test('#8249: the refusal latch is a MERGE too — one team\u2019s lost secret cannot wipe another team\u2019s outcome', async () => {
+  // Same rule as the plaintext latch (#4429): a retained outcome is the only
+  // copy of a live credential, or the only notice that one was destroyed — a
+  // refusal for one team must never come at the cost of another team\u2019s state.
+  const { deps, calls, regenerateKey } = rotateEnv({
+    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
+  })
+  const heldForC = { plaintext: 'tt_held_c', expiresAt: null, warning: '' }
+  deps.setRotateOutcomes({ 'org-C': heldForC })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotateOutcomes.at(-1), {
+    'org-C': heldForC,
+    'org-A': {
+      plaintext: '', expiresAt: null, warning: '',
+      refusal: calls.rotateOutcomes.at(-1)['org-A'].refusal,
+    },
+  }, 'the refusal latch must merge into the per-team map, never replace it')
+  assert.equal(recordOf(calls, 'org-C').plaintext, 'tt_held_c',
+    'team C\u2019s retained replacement is untouched')
+})
+
+test('#8249 (review P1): a plaintext-less rotate cannot wipe the SAME team\u2019s live unread replacement', async () => {
+  // One record per team, and that record is ALSO the reveal's only home. A
+  // plaintext-less rotate delivers NO secret, so writing `plaintext: ''` would
+  // destroy a live, already-minted, not-yet-copied replacement from an earlier
+  // successful rotate on this same team — the server is hash-only and can
+  // never re-deliver it ("shown once"). The cross-team merge case above does
+  // not cover this: the clobber is same-team, so it survived every test that
+  // seeded only OTHER teams.
+  const { deps, calls, regenerateKey } = rotateEnv({
+    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
+  })
+  const heldForA = {
+    plaintext: 'tt_live_prior',
+    expiresAt: '2026-10-20T00:00:00+00:00',
+    warning: 'both keys are live',
+  }
+  deps.setRotateOutcomes({ 'org-A': heldForA })
+  await regenerateKey('k-old')
+  const rec = recordOf(calls, 'org-A')
+  assert.equal(rec.plaintext, 'tt_live_prior',
+    'the earlier live replacement must SURVIVE a later plaintext-less rotate on the same team')
+  assert.equal(rec.expiresAt, '2026-10-20T00:00:00+00:00',
+    'and its expiry echo rides with the carried-forward plaintext')
+  assert.equal(rec.warning, 'both keys are live',
+    'and a warning-less plaintext-less response does not drop the prior partial-state notice')
+  assert.equal(derivedReveal(calls, 'org-A'), 'tt_live_prior',
+    'so the reveal the user has still not copied is not silently destroyed')
+  assert.match(rec.refusal || '', /cannot be shown/,
+    'while the NEW lost-secret disclosure is still recorded')
+})
+
+// ── #4355: the single call, the pin, and the partial-state disclosure ────
+
 test('#4342: a successful rotate still latches the plaintext and its expiry echo', async () => {
-  // Positive control: the guard must not swallow the working path (#2426 must
-  // keep riding the outcome).
+  // Positive control: the refusal latch must not swallow the working path
+  // (#2426 must keep riding the outcome), and the two latches are mutually
+  // exclusive — a reveal record carries no `refusal`.
   const { calls, regenerateKey } = rotateEnv({
     response: { key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00', replaced_revoked: true },
   })
@@ -272,25 +460,9 @@ test('#4342: a successful rotate still latches the plaintext and its expiry echo
     [{ 'org-A': { plaintext: 'tt_ok', expiresAt: '2026-10-20T00:00:00+00:00', warning: '' } }])
   assert.deepEqual(calls.error, [''], 'the open-time clear is the only error write')
   assert.equal(calls.loadAll, 1)
+  assert.equal(derivedReveal(calls), 'tt_ok', 'the working reveal is still derived from the record')
+  assert.equal(refusalOf(calls), '', 'a successful rotate latches no refusal')
 })
-
-test('#4342/#4359: a team switch during the rotate refusal refresh suppresses the refusal', async () => {
-  // Mirrors the create-path guard (`createKey`): the refusal names the row and
-  // the already-revoked old key, so a switch mid-refresh must not carry it
-  // under the new team's header.
-  const orgIdRef = { current: 'org-A' }
-  const { calls, regenerateKey } = rotateEnv({
-    orgIdRef,
-    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
-    loadAll: async () => { orgIdRef.current = 'org-B' },
-  })
-  await regenerateKey('k-old')
-  assert.deepEqual(calls.rotateOutcomes, [], 'still no reveal')
-  assert.deepEqual(calls.error.filter(Boolean), [],
-    'a refusal whose team changed mid-refresh must not be surfaced under the new team')
-})
-
-// ── #4355: the single call, the pin, and the partial-state disclosure ────
 
 test('#4355: rotate is ONE pinned session call — never a mint-then-revoke pair', async () => {
   const { calls, regenerateKey } = rotateEnv({
@@ -451,8 +623,7 @@ test('#4355: rotating a row whose prefix we hold clears the held plaintext (row 
   const env = rotateEnv({ response: { key: 'tt_ok', replaced_revoked: true } })
   env.deps.welcomeKey = 'tt_live_re_abc'
   env.deps.wizardDurableKey = 'tt_other'
-  const fn = build(env.deps,
-    ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey
+  const fn = build(env.deps, ['function revealRefusalFor', 'async function regenerateKey']).regenerateKey
   await fn('k-old')
   assert.deepEqual(env.calls.welcomeKeys, [''],
     'the welcome plaintext belonging to the rotated row is cleared')
@@ -536,8 +707,9 @@ test('#4429: the two outcome readers never surface another team\u2019s record', 
   // (main.jsx\u2019s, reproduced verbatim) read only through it.
   const rec = { plaintext: 'tt_rot_kept', expiresAt: '2026-10-20T00:00:00+00:00', warning: 'both keys are live' }
   const outcomes = { 'org-A': rec }
-  const { revealablePlaintext, rotateOutcomeFor } = build({},
-    ['function revealablePlaintext', 'function rotateOutcomeFor'])
+  // #4370 (A6): `revealablePlaintext` is imported at module scope now, so only
+  // `rotateOutcomeFor` is extracted from `main.jsx`.
+  const { rotateOutcomeFor } = build({}, ['function rotateOutcomeFor'])
   const revealOf = (orgId) => {
     const o = rotateOutcomeFor(outcomes, orgId)
     return (o && revealablePlaintext(o.plaintext)) || ''
@@ -545,6 +717,12 @@ test('#4429: the two outcome readers never surface another team\u2019s record', 
   const noticeOf = (orgId) => {
     const o = rotateOutcomeFor(outcomes, orgId)
     return (o && o.warning) || ''
+  }
+  // #8249: the THIRD reader — the plaintext-less refusal. Same scoping rule:
+  // the retained disclosure belongs to the team whose row the message names.
+  const refusalOf = (orgId) => {
+    const o = rotateOutcomeFor(outcomes, orgId)
+    return (o && o.refusal) || ''
   }
   assert.equal(revealOf('org-A'), 'tt_rot_kept', 'the owning team still sees its replacement')
   assert.equal(noticeOf('org-A'), 'both keys are live')
@@ -554,6 +732,22 @@ test('#4429: the two outcome readers never surface another team\u2019s record', 
   assert.equal(revealOf(undefined), '')
   assert.equal(rotateOutcomeFor(null, 'org-A'), null, 'no outcomes map → no record')
   assert.equal(rotateOutcomeFor(outcomes, 'org-Z'), null, 'an unrelated team has no record')
+  // #8249: over a record that carries the refusal instead of a reveal.
+  const refused = { 'org-A': { plaintext: '', expiresAt: null, warning: '', refusal: 'a key was destroyed' } }
+  const refusedRefusalOf = (orgId) => {
+    const o = rotateOutcomeFor(refused, orgId)
+    return (o && o.refusal) || ''
+  }
+  const refusedRevealOf = (orgId) => {
+    const o = rotateOutcomeFor(refused, orgId)
+    return (o && revealablePlaintext(o.plaintext)) || ''
+  }
+  assert.equal(refusedRefusalOf('org-A'), 'a key was destroyed',
+    'the owning team retrieves the retained refusal')
+  assert.equal(refusedRefusalOf('org-B'), '',
+    'team B must NEVER render team A\u2019s refusal (AC2: attributed to the team whose row it names)')
+  assert.equal(refusedRevealOf('org-A'), '',
+    'a refusal record renders NO reveal on its own team either — there is no secret')
 })
 
 // ── copyRotatedKey ──────────────────────────────────────────────────────────
@@ -572,6 +766,7 @@ function copyEnv(outcome, clipboard = {}) {
   const deps = {
     rotateOutcome: outcome,
     currentOrgId: 'org-A',
+    revealablePlaintext,
     navigator: {
       clipboard: {
         writeText: async (v) => { written.push(v); return (clipboard.writeText || (async () => {}))(v) },
@@ -592,7 +787,7 @@ function copyEnv(outcome, clipboard = {}) {
       cleared.push(outcomesState)
     },
   }
-  return { written, cleared, selected, fakeEl, copyRotatedKey: build(deps, ['function revealablePlaintext', 'async function copyRotatedKey']).copyRotatedKey }
+  return { written, cleared, selected, fakeEl, copyRotatedKey: build(deps, ['async function copyRotatedKey']).copyRotatedKey }
 }
 
 test('#4342: the rotate copy NEVER hands a non-string/empty value to the clipboard', async () => {
@@ -643,7 +838,7 @@ test('#4342: a refused clipboard keeps the rotate replacement visible and SELECT
 })
 
 // ── static backstops for the parts execution cannot reach (JSX) ─────────────
-test('#4342/#4429: the rotate reveal is gated on a derived non-empty string, and the raw state never hits the clipboard', () => {
+test('#4342/#4429/#8249: the rotate reveal is gated on a derived non-empty string, and the raw state never hits the clipboard', () => {
   // ONE derivation gates the reveal, mirroring `newKeyReveal` — so a falsy
   // `rotateOutcome.plaintext` can never render the empty `.key-value` box.
   // #4429: the derivation reads the ACTIVE team\u2019s record (the scoping rule
@@ -654,9 +849,14 @@ test('#4342/#4429: the rotate reveal is gated on a derived non-empty string, and
   assert.match(mainJsxCode,
     /const rotateNoticeText = \(rotateOutcome && rotateOutcome\.warning\) \|\| ''/,
     'the partial-state notice must render from the same team-scoped record (#4429)')
-  assert.match(mainJsxCode,
-    /function revealablePlaintext\(value\) \{\s*return \(typeof value === 'string' && value\.replace\([^\n]*\)\.trim\(\)\) \? value : ''/,
+  // #4370 (A6): the predicate moved to module scope in the pure module, so the
+  // body pin follows it there (it is no longer declared in main.jsx).
+  assert.match(sessionKeyJs,
+    /export function revealablePlaintext\(value\) \{\s*return \(typeof value === 'string' && value\.replace\([^\n]*\)\.trim\(\)\) \? value : ''/,
     'the shared predicate must reject a blank (including zero-width/invisible) string, not just a falsy one')
+  assert.match(mainJsxCode,
+    /import \{[^}]*revealablePlaintext[^}]*\} from '\.\/sessionKey\.js'/,
+    'main.jsx must import the shared predicate from its module-scope home')
   assert.match(mainJsxCode, /\{rotatedKeyReveal && \(/,
     'the JSX must gate on the derived string, not the truthy object')
   assert.match(mainJsxCode, /\{rotateNoticeText && \(/,
@@ -669,4 +869,17 @@ test('#4342/#4429: the rotate reveal is gated on a derived non-empty string, and
     'the raw outcome object must not gate the notice either')
   assert.match(mainJsxCode, /onClick=\{copyRotatedKey\}/,
     'the reveal Copy must call the guarded `copyRotatedKey`')
+  // #8249: the refusal is derived from the SAME team-scoped record and reaches
+  // the surface through the error-banner element — the element is unchanged
+  // (its `.error.banner` locator is pinned by the e2e suite), the SOURCE is not
+  // the un-keyed `error` slot any more, which is what let a team switch drop
+  // it. The latch must also precede the identity guard (the pin lives in
+  // keyExpiryTripwire, beside #4429's).
+  assert.match(mainJsxCode,
+    /const rotateRefusalText = \(rotateOutcome && rotateOutcome\.refusal\) \|\| ''/,
+    '#8249: the refusal must be derived from the active team\u2019s record, like the other two disclosures')
+  assert.match(mainJsxCode, /\{\(error \|\| rotateRefusalText\) && \(/,
+    '#8249: the refusal must render through the banner element, sourced from the record')
+  assert.equal((mainJsxCode.match(/setError\(`The server did not return the replacement key/g) || []).length, 0,
+    '#8249: the refusal must not be written to the un-keyed, transient `error` slot')
 })

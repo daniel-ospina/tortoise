@@ -11,6 +11,41 @@
 // — welcome plaintext, paste validation, rows-routed gate), and the rows
 // resolution helper (usableDurableRows) the session connect gate sources from.
 
+// #4342/#4359/#4370: the ONE authority for "is this a revealable plaintext?" —
+// a non-empty, non-blank STRING. A 2xx can carry a number, an object, or
+// padding, and every one of those is non-falsy, so a bare `!plaintext` check
+// latched a box the user could not copy.
+//
+// #4370 (A6): this lives at MODULE scope — not inside main.jsx's App component —
+// so the pure module that already reads held plaintext (`durableConnectKey`'s
+// `welcome.startsWith`) shares the SAME guard instead of assuming a string. It
+// is the single gateway every writer of reveal/embed key material reads before
+// it stores: createKey, wizardMintDurableKey, regenerateKey, the create-graph
+// envelope, the per-graph mint, copyNewKey, dismissKeyModal and the provisioned
+// welcome key. Moving it here is what makes the pure module total; a caller
+// that only guards its WRITERS leaves `durableConnectKey` exported and
+// throwable on a non-string.
+//
+// `trim()` alone is NOT a blankness test — it strips whitespace but not
+// zero-width / invisible characters, so a string of only those would pass this
+// single gateway and reproduce the reported symptom exactly: a visually blank
+// `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set plus the
+// DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which is in
+// NEITHER property. Only the DECISION uses the stripped copy — the returned
+// value is always the verbatim secret.
+export function revealablePlaintext(value) {
+  return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
+}
+
+// #4359: a mint response carries the plaintext on EITHER leg (`key` on the
+// POST /v1/team/keys response, `api_key` on the provision envelope). The legs
+// are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
+// selected a truthy-but-unrevealable primary first, so `{key: {},
+// api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
+export function revealableMintPlaintext(response) {
+  return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
+}
+
 // #2166 + #2426: durable product keys are the ONLY rows the API Keys page
 // shows. The dashboard's OWN access credentials — auto-minted session keys
 // (created_via 'bootstrap') — are never presented as product API keys.
@@ -135,7 +170,14 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   // aside and proceed as if it were absent so the normal rows/paste resolution
   // (rows-durable / none / durable / bootstrap / expiring / revoked / disabled
   // / unknown) runs.
-  let welcome = welcomeKey
+  // #4370 (A6): read the held plaintext through the SHARED predicate. Before
+  // this, `welcome` was the raw argument, so a truthy non-string (or a blank
+  // string) survived to `welcome.startsWith(...)` below — `TypeError:
+  // …startsWith is not a function` — and a blank string WON as `source:
+  // 'welcome'`, embedding whitespace into the connect snippet. This function is
+  // exported and unit-tested, so the guard has to sit here, not only at
+  // main.jsx's writer.
+  let welcome = revealablePlaintext(welcomeKey)
   if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
     const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
     if (!heldRowEmbeddable(row)) welcome = ''

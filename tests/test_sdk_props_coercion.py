@@ -120,14 +120,20 @@ class TestUpdateAndEntityProps:
 # ── search_keys flattening parity across the write paths (#5482) ──────
 
 class TestSearchKeysFlattenedOnEveryWritePath:
-    """#5482: ``search_keys`` must be stored FLAT on a Point by EVERY writer.
+    """``search_keys`` must be stored FLAT on a Point by EVERY writer.
 
     FalkorDB's fulltext index does not index array-valued properties, so a
     Point whose ``search_keys`` is a list is permanently unfindable by
-    ``queryNodes`` — while the write reports success. ``create_point`` and
-    ``update_point`` flatten via ``_flatten_search_keys_prop``; the generic
-    entity surface (``update_entity``, the ``surface.update_entity`` MCP tool)
-    wrote caller props straight through ``SET n += $props`` and did not.
+    ``queryNodes`` — while the write reports success. #5482 fixed the generic
+    entity surface (``update_entity``, the ``surface.update_entity`` MCP tool),
+    which wrote caller props straight through ``SET n += $props``; #8006 fixed
+    the last door, ``EventAPI.add_point`` (the E3 producer seam), whose
+    list-valued ``search_keys`` was dropped OUTRIGHT by the projection's
+    undeclared-list policy, so the node held nothing at all.
+
+    All three doors now share ONE implementation of the rule —
+    ``projection/entities.py::flatten_search_keys_prop``, applied on the shared
+    Point writer so the live write and the rebuild replay agree.
     """
 
     @staticmethod
@@ -178,6 +184,115 @@ class TestSearchKeysFlattenedOnEveryWritePath:
         assert self._stored(sdk, p["id"]) == "one two"
         sdk.update_point(p["id"], search_keys=["three", "four"])
         assert self._stored(sdk, p["id"]) == "three four"
+
+
+class TestEventApiDoorFlattensSearchKeys:
+    """#8006: the ``EventAPI.add_point`` door — the E3 producer seam every
+    extractor / mining / CLI caller mirrors — must store the SAME flat graph
+    form as the SDK doors.
+
+    Defect (measured, pre-fix): the projection's list policy in
+    ``_persist_extra_props`` drops undeclared lists BEFORE the declared-key
+    check, and ``_POINT_LIST_PROPS`` is EMPTY (an ARRAY is not fulltext-
+    indexed, so populating it would re-mint #5482, not fix it). With the
+    flatten rule living on the SDK doors alone, this door stored NOTHING and
+    logged one WARNING — the write reported success while the Point was
+    unfindable by its own aliases.
+    """
+
+    @staticmethod
+    def _stored(sdk, pid):
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.search_keys",
+            params={"id": pid},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    @staticmethod
+    def _api(sdk, log_dir):
+        from tortoise.api import EventAPI, provenance
+        from tortoise.log import EventLog
+        log_path = os.path.join(log_dir, "events.jsonl")
+        api = EventAPI(EventLog(log_path), initiated_by="extractor",
+                       projection=sdk._get_proj())
+        return api, provenance, log_path
+
+    def test_the_door_stores_the_flat_string_not_nothing(self, sdk, tmp_path):
+        """The defect: the node held NO ``search_keys`` at all."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        pid = api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                            pointKind="statement",
+                            search_keys=["alpha", "beta"])
+        assert self._stored(sdk, pid) == "alpha beta"
+
+    def test_the_stored_point_is_findable_by_its_aliases(self, sdk, tmp_path):
+        """The user-visible consequence, and the reason the flat STRING (not
+        an array) is the contract: FalkorDB's fulltext index does not index
+        array-valued props, so a Point whose alias never matched was invisible
+        to ``queryNodes`` while the write reported success."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        pid = api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                            pointKind="statement",
+                            search_keys=["zetatoken", "beta"])
+        hits = sdk._get_proj().g.query(
+            "CALL db.idx.fulltext.queryNodes('Point', 'zetatoken') "
+            "YIELD node RETURN node.id").result_set
+        assert pid in [r[0] for r in hits], (pid, hits)
+
+    def test_a_rebuild_restores_the_same_value(self, sdk, tmp_path):
+        """LIVE == REPLAY (#330). This is the half a write-door-only fix would
+        miss: the rebuild reads the journal payload, which keeps E3's list
+        spelling, so the flatten rule has to live on the shared writer that
+        both the live apply and the replay call."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        pid = api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                            pointKind="statement",
+                            search_keys=["alpha", "beta"])
+        sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert self._stored(sdk, pid) == "alpha beta"
+
+    def test_the_journal_keeps_the_e3_list_spelling(self, sdk, tmp_path):
+        """The normalization is DERIVED, never recorded: E3's canonical
+        payload pins ``list[str]`` (``commit_schema``), and the graph value is
+        computed from it. An in-place mutation of the payload would write the
+        flattened string into the journal, so every replay would depend on a
+        value the contract says is an input, not an output."""
+        from tortoise.log import EventLog
+        api, provenance, log_path = self._api(sdk, str(tmp_path))
+        api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                      pointKind="statement",
+                      search_keys=["alpha", "beta"])
+        payloads = [ev["point"] for ev in EventLog(log_path).read_all()
+                    if ev.get("type") == "PointAdded"]
+        assert payloads and payloads[0]["search_keys"] == ["alpha", "beta"]
+
+    def test_a_blank_list_writes_no_property(self, sdk, tmp_path):
+        """E3's ``or None`` convention, on THIS door too: a blank list is
+        popped, so the property is omitted rather than written as an empty
+        string (the pre-E3 shape)."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        pid = api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                            pointKind="statement", search_keys=[])
+        assert self._stored(sdk, pid) is None
+
+    def test_a_flat_string_is_left_alone(self, sdk, tmp_path):
+        """No-op for scalars — the shared writer must not rewrite a value the
+        SDK doors already normalized."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        pid = api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                            pointKind="statement",
+                            search_keys="already flat")
+        assert self._stored(sdk, pid) == "already flat"
+
+    def test_the_caller_payload_is_not_mutated(self, sdk, tmp_path):
+        """The normalization returns a COPY — a direct ``EventAPI`` caller
+        keeps the list it passed (E3's spelling), so it can re-use or inspect
+        it after the write."""
+        api, provenance, _ = self._api(sdk, str(tmp_path))
+        keys = ["alpha", "beta"]
+        api.add_point("statement", provenance("doc.txt", [0, 5], "q"),
+                      pointKind="statement", search_keys=keys)
+        assert keys == ["alpha", "beta"]
 
 
 # ── Entity arbitrary props persistence (#228) ─────────────────────────

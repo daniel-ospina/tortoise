@@ -225,7 +225,7 @@ def test_the_pure_fold_agrees_with_the_rebuilt_graph(retracted):
 def test_a_new_named_parameter_must_not_steal_an_extra_key(tmp_path):
     """``ts`` is an established ``**extra`` key for two OTHER emitters, and
     ``extra`` is what builds the ``:GraphEvent`` payload — which
-    ``events_poll`` returns to clients verbatim.
+    ``poll_events`` returns to clients verbatim.
 
     This test exists because the first version of this change named its new
     parameter ``ts``, which silently REMOVED ``ts`` from the

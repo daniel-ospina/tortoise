@@ -114,7 +114,7 @@ Three rules, each of which caught a real error in this document.
 | R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
 | R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
 | R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
-| R8 | `poll_events` | #8 | `events_poll` | keep |
+| R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
 
 ### WRITE
@@ -407,7 +407,7 @@ this" is **not** by itself a strong justification, and several entries below fai
 | R5 | `status`, `taxonomy`, `list_*`, `audit`, `check_structure`, `validate_domain`, `stale_points`, `summarize_structure`, `dream_health_check`, `dream_health_state`, **`test_guard`** | `cognee.validate` | Graph structural validation — **Cognee has this**, so the claim is *"we differ in kind"*: ours is ontology-aware (`docs/ONTOLOGY.md`) where Cognee checks orphaned edges and identity mismatch generically. **`test_guard` is kept — see the note below the table.** | adequate |
 | R6 | `get_cross_lens_candidates`, `list_dedup_candidates` | `detect_contradictions` (Cognee, internal) | A **read-only** review queue for link candidates — surfaces the candidate, never auto-merges. No competitor exposes candidate review as public API. | adequate |
 | R7 | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | provenance graph (Cognee) | Cognee also has provenance, so ours must differ in kind: ours is **who decided** (Point→authoredBy→Subject→delegation) to their **where it came from**. `belief_timeline` — how a belief itself changed over time — has no analogue. | adequate / strong |
-| R8 | `events_poll`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
+| R8 | `poll_events`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
 | R9 | `get_confidence`, `calibrate_summary`, `calibration_passed` | PSL, OpenCog PLN, NARS, Knowledge Vault | Belief propagation over a graph. **Not novel as a mechanism** — PSL, PLN and NARS all do BP with evidence revision, and Knowledge Vault fused probabilistic claims at web scale. **Novel only as a shipped product surface**: no commercial graph database found that ships belief propagation (Neo4j, Neptune, ArangoDB, TigerGraph, Memgraph, FalkorDB treat confidence as an ordinary property). | **strong as product, not as method** |
 | W1 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | add (13/13) | **Core.** | — |
 | W2 | `create_source`, `complete_source` | `write_note`, `add` | A **source with a credibility tier** whose URL *is* its identity. No competitor models source trust; credibility is not a field anywhere in the survey. | **strong** |

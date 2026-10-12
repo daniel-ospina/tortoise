@@ -474,17 +474,134 @@ _WHERE_REAL_RE = re.compile(
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
     re.IGNORECASE,
 )
+# #3037/#8223: the property-map exemption is anchored to the statement's
+# structure — a brace behind a pattern element under an unclosed ``(``/``[`` —
+# never a bare ``"{" in cypher``. That substring test treated a brace in a
+# COMMENT
+# (``MATCH (n) DETACH DELETE n // {``), a ``CALL { ... }`` subquery delimiter
+# (``CALL { MATCH (n) DETACH DELETE n }``) and a brace inside a STRING literal
+# as a property map, so a whole-graph wipe written that way was classified
+# "targeted" and reached a production server graph on the raw-query lane —
+# where L2 is the only layer.
+#
+# The exemption this grants is NARROW. The brace must sit under an unclosed
+# ``(`` or ``[`` **behind a pattern element** — a variable and/or label,
+# optionally with a type (``(n {…})``, ``(:Label {…})``, ``(n:Label {…})``,
+# ``[r:IMPL {…}]``). A bracket of any other kind therefore does NOT exempt:
+# an expression map literal (``properties({…})``, ``[{…}]``, ``coalesce({…})``,
+# ``keys({…})``), a parenthesised map in a WHERE (``({…}).a = 1``) and a map
+# projection (``n {.a}``) all fail the pattern-element requirement, so a
+# whole-graph wipe carrying one is still classified bulk (#8223). A ``CALL {``
+# opens after the keyword and a top-level map literal opens with no bracket, so
+# neither is exempt either.
+#
+# This is still a LEXICAL test — it does not verify that the bracket really
+# opens a MATCH pattern, so a malformed statement is failed closed by
+# ``_mask_is_unterminated`` first. Delete-target awareness (a property map on a
+# pattern OTHER than the deleted variable) is the separate remainder #8215 and
+# is NOT claimed here (see KNOWN GAPS).
+_PROPERTY_MAP_RE = re.compile(
+    r"[\(\[]\s*:?\s*[A-Za-z_]\w*(?:\s*:\s*[A-Za-z_]\w*)*\s*\{(?!\s*[.,])"
+)
+# The START of a ``CALL { ... }`` subquery. The subquery's own braces are
+# delimiters, not a property map, and a property map INSIDE it does not scope a
+# DELETE outside it — so ``_strip_call_subqueries`` blanks the whole block and
+# a wipe cannot borrow a read-subquery's brace as its "targeted" evidence.
+_CALL_SUBQUERY_START_RE = re.compile(r"\bCALL\s*\{", re.IGNORECASE)
+
+
+def _mask_cypher_text(cypher: str) -> str:
+    """Blank comments, string literals and backtick identifiers (#3037).
+
+    The classifier decides on STRUCTURE — a ``{`` that opens a property map, a
+    ``WHERE`` reference — so a brace (or a ``DETACH DELETE``) that appears only
+    in TEXT must not influence the verdict. Reuses the module's single strip
+    convention, ``_LITERAL_OR_COMMENT_RE`` (defined below with
+    ``_statement_writes``), so the two readers cannot drift apart. It is a
+    forward reference to a module-level constant, resolved at call time.
+    """
+    return _LITERAL_OR_COMMENT_RE.sub(" ", cypher)
+
+
+def _mask_is_unterminated(masked: str) -> bool:
+    """True when masking left an unterminated literal or comment behind (#3037).
+
+    ``_LITERAL_OR_COMMENT_RE`` matches only TERMINATED literals and comments, so
+    a malformed statement (``MATCH (n) DETACH DELETE n WHERE x = 'foo({``)
+    keeps its stray quote and a brace after it. An unreadable statement is not
+    evidence of targeting, so the classifier fails closed — every terminated
+    literal/comment was replaced by a space, which means any surviving quote,
+    backtick or block-comment opener marks an unterminated one.
+    """
+    return "'" in masked or '"' in masked or "`" in masked or "/*" in masked
+
+
+def _strip_call_subqueries(statement: str) -> str:
+    """Blank every ``CALL { ... }`` subquery block (balanced braces, #3037).
+
+    Removing the block removes both the delimiter braces and any property map
+    inside it, so neither can exempt a whole-graph wipe that merely sits next
+    to a CALL read-subquery. A targeted DELETE *inside* a CALL subquery (no
+    such statement in this codebase) would now be refused — the conservative
+    direction, and it belongs to the #3007 over-classification decision rather
+    than here.
+    """
+    text = statement
+    while True:
+        m = _CALL_SUBQUERY_START_RE.search(text)
+        if m is None:
+            return text
+        depth, i, n = 0, text.index("{", m.start()), len(text)
+        while i < n:
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        end = i + 1 if i < n else n
+        text = text[:m.start()] + " " * (end - m.start()) + text[end:]
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    up = cypher.upper()
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037).
+
+    Bulk = contains DETACH DELETE and carries no targeting construct: a
+    property map on a node/relationship pattern, or a real WHERE clause. The
+    verdict is made on structure, not on raw text — comments, string literals,
+    backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
+    a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    """
+    # Fast path: the overwhelming majority of statements are reads. A DETACH
+    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
+    # statement is not a wipe and the scan below is skipped entirely — the
+    # read path pays no more than it did before #3037.
+    up_raw = cypher.upper()
+    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+        return False
+    # The DELETE keyword is read from the masked text (a CALL subquery's
+    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
+    # a comment is not a DELETE at all); the TARGETING constructs are read from
+    # the text with CALL subqueries blanked, so a brace or WHERE clause that
+    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
+    masked = _mask_cypher_text(cypher)
+    up = masked.upper()
     if "DETACH" not in up or "DELETE" not in up:
         return False
-    # Property map in MATCH => targeted (e.g. {id:$id}, {org_id:$id})
-    if "{" in cypher:
+    # #3037: masking removes only TERMINATED literals/comments. A malformed
+    # statement keeps its quote, and a brace after it would still look like a
+    # pattern property map — an unreadable statement is not evidence, so fail
+    # closed BEFORE the target tests.
+    if _mask_is_unterminated(masked):
+        return True
+    text = _strip_call_subqueries(masked)
+    # Property map on a node/relationship pattern => targeted
+    # (e.g. {id:$id}, {org_id:$id})
+    if _PROPERTY_MAP_RE.search(text):
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
-    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
+    m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
@@ -527,7 +644,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 5
+_PREWIPE_SNAPSHOT_VERSION = 6
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -589,7 +706,17 @@ _PREWIPE_SNAPSHOT_VERSION = 5
 # allocator, which is the defect — so the version gate is what makes an
 # older binary REFUSE instead. v1-v4 stay readable (`v1` written by the
 # #2943/#990 build, `v2` by #2814, `v3` by #3049, `v4` by #4641).
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4, 5)
+#
+# #5353: v6 adds the `team_meta` section (the `:TeamMeta` first-org marker,
+# the class #4641 declared and filed rather than absorbing). It takes the next
+# FREE number after v5 (#4653's `event_meta`), by exactly the argument #4653
+# used to take 5: a v5-aware build reading this file would ignore the section
+# it does not know and let its unconditional wipe land on `:TeamMeta` — the
+# fail-open in the direction that destroys data — so the version gate is what
+# makes that build REFUSE the rebuild instead. v1-v5 stay readable (`v5` was
+# written by the #4653 build, and `_SNAPSHOT_ENTRY_CHECK` still refuses a
+# foreign-section file whatever its version says).
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6)
 # Top-level keys that are METADATA, never a preserved class. The
 # unknown-section refusal below subtracts these so it cannot mistake the
 # envelope for a section.
@@ -601,7 +728,12 @@ _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4, 5)
 # this build's `_SNAPSHOT_SECTIONS` does not name it.
 _PREWIPE_SNAPSHOT_META_KEYS = frozenset(
     {"version", "created_at", "completed", "onboarding_unknown",
-     "graph_identity"})
+     "graph_identity",
+     # #5353: the `:TeamMeta` sibling of `onboarding_unknown` — a rescue file
+     # written before the class had a vehicle cannot say whether the wipe it
+     # followed destroyed one, so the UNKNOWN rides the payload forward rather
+     # than being re-derived (and lost) on a second interruption.
+     "team_meta_unknown"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -646,7 +778,26 @@ _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       # `test_event_meta_section_and_validator_are_wired` pins
                       # its key set against this tuple — a section added here and
                       # forgotten there cannot pass silently.
-                      "event_meta")
+                      "event_meta",
+                      # #5353: the `:TeamMeta` first-org marker. Written with a
+                      # bare `CREATE` and NO identity property (sdk.py,
+                      # hosted_api.py ×4, __main__.py), it rides no journal
+                      # record and no replay pass recreates it — so the wipe
+                      # leaves the graph with ZERO, its `name`/`created` are
+                      # destroyed, and the `#2789` first-org guard (which is
+                      # exactly `MATCH (m:TeamMeta) RETURN count(m)`) reads 0
+                      # and lets a later provisioning call re-mint the marker
+                      # with the control plane's name and a fresh `created`.
+                      # Enrolled as a SECTION rather than a `_config_classes()`
+                      # row because the registry is keyed on a single identity
+                      # property and this class has none at all; the row's
+                      # `identity_prop` would have to be invented, and an
+                      # invented key silently de-enrols the class the day the
+                      # writers add a second property. See
+                      # `_capture_team_meta` for the entry shape and
+                      # `_union_prewipe_snapshot` for the at-most-one merge
+                      # rule this class needs.
+                      "team_meta")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
 # memory on the recovery path. The cap is now WRITER-ENFORCED
@@ -776,6 +927,13 @@ def _assert_config_registry_safe() -> None:
             "high-water mark would neither be validated nor written, so a "
             "rebuild would silently reset the event-log allocator to 1 (#4653)"
         )
+    if "team_meta" not in _SNAPSHOT_SECTIONS:
+        raise RuntimeError(
+            "`team_meta` is not in _SNAPSHOT_SECTIONS — the `:TeamMeta` "
+            "first-org marker would neither be validated nor written, so a "
+            "rebuild would silently destroy the class the `#2789` guard "
+            "reads, and a later provisioning call would re-mint it (#5353)"
+        )
 
 
 def _config_classes() -> tuple[_ConfigClass, ...]:
@@ -812,6 +970,7 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
         # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.residency import DECLARATION_META_KEY
         from tortoise.sdk import TortoiseSDK
 
         classes = (
@@ -819,8 +978,13 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
             _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
             # `:Meta` is SHARED with derived markers (the FTS keys), so this
             # class is key-scoped: a label-wide read would sweep them in.
+            # `residency` (#7952) is the completeness marker's declared
+            # known-hot set — graph-only operator metadata that a rebuild must
+            # carry, or a declared-partial store silently reverts to
+            # `complete` and the marker cannot fire (§17.2).
             _ConfigClass("Meta", "key", frozenset({
-                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY})),
+                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY,
+                DECLARATION_META_KEY})),
         )
         # `_CONFIG_CLASS_BY_LABEL` is a side effect so the validator and the
         # restore path can resolve a label without repeating the import dance.
@@ -1189,6 +1353,98 @@ def _event_meta_last_seq(entries) -> int | None:
     return max(values) if values else None
 
 
+# #5353: the one place THIS module names the class. There is no domain constant
+# to import — its five writers (`sdk.org_create`, `__main__._cmd_key_create` and
+# `hosted_api`'s three provisioning lanes) each spell the literal inline, and
+# `tests/test_write_ahead_mint.py` anchors on that spelling. Naming it once here
+# keeps the capture, the restore, the tests and the doc pin from drifting apart;
+# a rename in the writers reds that guard test, which is the signal to move the
+# literal here too.
+_TEAM_META_LABEL = "TeamMeta"
+
+
+def _capture_team_meta(proj) -> list[dict]:
+    """Read every `:TeamMeta` property map into the `team_meta` section.
+
+    #5353: the class is written with a bare ``CREATE`` and NO identity
+    property — the literal is ``(:TeamMeta {name:$name, created:$now})``,
+    spelled inline by sdk.py, hosted_api.py ×3 and __main__.py — so it rides no
+    journal record, no sidecar vehicle existed for it before this change, and
+    `rg -n "TeamMeta" tortoise/projection/` was ZERO hits: the unconditional
+    wipe destroyed the class outright. Its presence
+    IS the `#2789` first-org guard (`_eager_provision_org_graph` short-circuits
+    on `MATCH (m:TeamMeta) RETURN count(m)`), so a rebuilt graph read 0 and a
+    later provisioning call re-minted the marker with the control plane's name
+    and a fresh `created` — the "stale TeamMeta display name" the hosted lane
+    already tolerates for a DIFFERENT reason (the org row is the authority).
+
+    The capture is FAITHFUL — it returns every node's property map, in whatever
+    order the graph answers — because a capture that silently picked one would
+    hide a pre-existing `#2789` violation from the union's report below. The
+    section is COLLAPSED to at most one entry by `_team_meta_marker`.
+
+    No identity property is required or invented: requiring one would re-type
+    the very fact this issue establishes (the class has none), and inventing one
+    (`created`) would make two markers written in the same microsecond collapse
+    silently at the CAPTURE, where nothing can report it.
+
+    A read failure propagates to the caller's `capture_failed` gate — the #2943
+    discipline (a corrupt/heavy read failing while the light DELETE succeeds
+    would otherwise destroy the class with no durable record, I3).
+    """
+    rows = proj.g.query(
+        f"MATCH (m:{_TEAM_META_LABEL}) RETURN properties(m)").result_set
+    return [r[0] for r in rows] if rows else []
+
+
+def _team_meta_order(entry: dict) -> tuple:
+    """Sort key choosing WHICH captured marker the section carries.
+
+    `(0, created, props)` for a marker carrying a string `created` — the shape
+    every writer produces — and `(1, "")` for a degenerate one, so a real mint
+    always beats a property-less hand-plant. A tie on `created` is broken by the
+    marker's full property map (`props`), so the outcome is REPRODUCIBLE even
+    though the capture itself answers in whatever order the graph returns: a
+    stable `min` preserves that arbitrary *input* order, so the secondary key is
+    what actually makes the choice deterministic (review I2).
+    """
+    created = entry.get("created")
+    if isinstance(created, str):
+        props = tuple(sorted((k, repr(v)) for k, v in entry.items()))
+        return (0, created, props)
+    return (1, "")
+
+
+def _team_meta_marker(entries) -> dict | None:
+    """The single `:TeamMeta` marker a (unioned) `team_meta` section carries.
+
+    #5353: the class is AT-MOST-ONE BY INTENT — the `#2789` guard is literally
+    `MATCH (m:TeamMeta) RETURN count(m)`, and the retry path's own rule is "the
+    FIRST name wins: a replay must not overwrite the live org's name"
+    (`test_eager_provision_org_graph_never_duplicates_team_meta`). The section
+    therefore carries 0 or 1 marker however many the capture saw, and the marker
+    it keeps is the EARLIEST `created` — deterministic, and the same first-wins
+    rule the mint path applies.
+
+    Why collapse rather than carry every entry (the design step #4641 filed
+    with this issue): a union that concatenated both legs would MANUFACTURE a
+    second marker on the sidecar-recovery path — the leftover carries the
+    pre-wipe marker and a post-wipe re-provision contributes a second, distinct
+    one — which is exactly the state `#2789` exists to prevent. Collapsing is
+    also faithful to the class rather than a loss of it: a graph holding SEVERAL
+    markers is already in violation of its own invariant, and the rebuild's job
+    is not to replicate corruption.
+
+    A discard is REPORTED (`rebuild_all` warns with both counts), never silent
+    — the `#4641` "carried or refused, never silently lost" discipline applied to
+    a class whose correct cardinality is one.
+    """
+    candidates = [e for e in entries or [] if isinstance(e, dict)]
+    if not candidates:
+        return None
+    return min(candidates, key=_team_meta_order)
+
+
 def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
@@ -1362,6 +1618,37 @@ def _validate_event_meta_entry(entry) -> str | None:
     return None
 
 
+def _validate_team_meta_entry(entry) -> str | None:
+    """Return a complaint about a `team_meta` entry, else None.
+
+    #5353: the entry is the `:TeamMeta` PROPERTY MAP itself (the
+    `batch_snapshot` / `session_snapshot` / `onboarding_snapshot` shape), and
+    there is deliberately NO required key: the class has no identity property,
+    and demanding one here would re-introduce exactly the requirement that kept
+    it out of the `#2814` config registry (whose rows are keyed). A `name`-must-
+    be-a-string rule would also REFUSE a marker the live graph legitimately
+    holds — `:TeamMeta` is written by five call sites with no schema, so the
+    validator would turn an odd-but-present marker into a pre-wipe abort and a
+    blocker on the rebuild lane.
+
+    What IS enforced is storability, for the same reason as the sibling
+    validators: a nested object passes a shape check and then dies inside the
+    driver AFTER the `DETACH DELETE`, which is the post-wipe failure this
+    validator exists to prevent. The section is accepted with SEVERAL entries
+    (the `event_meta` precedent): a hand-planted file may carry more than one,
+    each is validated here, and `_team_meta_marker` collapses them to the
+    earliest — the pre-wipe gate must not reject a file the writer can never
+    produce on the strength of a count it does not itself trust.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
 _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
@@ -1372,6 +1659,8 @@ _SNAPSHOT_ENTRY_CHECK = {
     "onboarding_step_links": _validate_onboarding_step_link,
     "config_snapshot": _validate_config_entry,
     "event_meta": _validate_event_meta_entry,
+    # #5353: the `:TeamMeta` first-org marker (see `_capture_team_meta`).
+    "team_meta": _validate_team_meta_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
 # reconstruct, restored by the pass-1b tail.
@@ -1959,6 +2248,26 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
          if v is not None),
         default=None)
     event_meta = [{"last_seq": carried}] if carried is not None else []
+    # #5353: the `:TeamMeta` first-org marker. AT MOST ONE entry, and the merge
+    # rule is EARLIEST-`created`-WINS across both legs — not `_merge_entry`
+    # (there is no per-field split to make: `name` and `created` are written
+    # together by one bare CREATE and never updated), not per-leg preference
+    # (the leftover leg is the pre-wipe marker and the fresh leg a post-wipe
+    # re-provision, so "earliest" and "leftover" agree on every reachable
+    # path — and "earliest" is the rule that needs no special case when the
+    # sidecar-recovery path's fresh capture is EMPTY), and not concatenation
+    # (two distinct markers restored = the second TeamMeta `#2789` exists to
+    # prevent — see `_team_meta_marker`).
+    #
+    # This is also why the class is a SECTION and not a `_config_classes()` row:
+    # the registry keys an instance on ONE identity property and `:TeamMeta` has
+    # none, so a row would have to invent `created` — an invented key collapses
+    # two same-microsecond markers at the CAPTURE, where no caller can see it,
+    # while the collapse here is reported by `rebuild_all`.
+    team_marker = _team_meta_marker(
+        list(leftover.get("team_meta") or [])
+        + list(fresh.get("team_meta") or []))
+    team_meta = [team_marker] if team_marker is not None else []
     return {"synthetic_events": events, "batch_snapshot": batches,
             "batch_point_links": links,
             "session_snapshot": session_containers,
@@ -1966,7 +2275,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             "onboarding_snapshot": onboarding_nodes,
             "onboarding_step_links": onboarding_links,
             "config_snapshot": config_entries,
-            "event_meta": event_meta}
+            "event_meta": event_meta,
+            "team_meta": team_meta}
 # ── Destructive-op guard: TWO independent layers (#99 P0, hardened #2944) ──
 #
 # The unconditional graph wipe (``MATCH (n) DETACH DELETE n``) is the most
@@ -2064,12 +2374,28 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
 #     WARNING) — the per-team event cap no-ops without a build failure
 #     (tracked: #3007).
-#   * ``_is_bulk_wipe`` also UNDER-classifies: a bare ``"{" in cypher``
-#     exemption means a whole-graph wipe whose text contains a brace
-#     (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH DELETE
-#     n }``) is treated as targeted, so on the raw-query lane it reaches a
-#     production server graph with no name check and no token (tracked:
-#     #3037).
+#   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
+#     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
+#     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
+#     DELETE n }``) was treated as targeted, so on the raw-query lane it reached
+#     a production server graph with no name check and no token. The exemption
+#     is now anchored to the statement's structure: comments/strings/CALL
+#     subqueries are blanked first, an
+#     unterminated literal/comment fails closed, and the brace must sit under
+#     an unclosed ``(``/``[`` behind a pattern element (``_mask_cypher_text`` /
+#     ``_strip_call_subqueries`` / ``_mask_is_unterminated`` /
+#     ``_PROPERTY_MAP_RE``). An expression map literal (``UNWIND [{a:1}]``,
+#     ``properties({a:1})``, ``keys({a:1})``, ``({a:1}).a``) no longer counts
+#     (#8223).
+#     REMAINDERS (still open):
+#       - a property map on a pattern OTHER than the deleted variable still
+#         exempts the statement (``MATCH (n:Point {id:$id}) WITH n MATCH (m)
+#         DETACH DELETE m``) — tracked: #8215. Deciding it needs a
+#         delete-target-aware classifier — the same scope decision #3007 defers.
+#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
+#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
+#         — tracked: #8256 (pre-existing; widening the classifier is its own
+#         scope decision).
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -4719,11 +5045,37 @@ def _epistemic_forward_reference(existence, rid, seq) -> bool:
     return future
 
 
+def _reference_fold_non_point_labels(existence, rid, journal_seq) -> tuple[str, ...]:
+    """The REFERENCE-FOLD labels (``:Subject`` / ``:Object`` / ``:Event``) under
+    which ``rid`` EXISTS at ``journal_seq`` — the existence resolver both the
+    non-Point belief EXEMPTION and the non-Point belief FOLD read.
+
+    ``_fold_confidence_changed`` sweeps ALL FOUR epistemic labels and writes
+    every one that matches (the live writers ``TortoiseEP._write_node`` /
+    ``_flush_cache`` never stop at the first match either, #7853 P2), so a
+    belief whose id is carried under more than one label lands on EACH carrier.
+    A caller that folds the belief — not merely exempts the miss — therefore
+    has to fold the same SET, or the reference fold and the graph disagree on a
+    multi-label id.
+
+    Returned in a DETERMINISTIC order (the label set is a ``frozenset``), so a
+    caller writing into an ordered structure cannot depend on hash order.
+    ``()` means the write resolved no reference-fold node at all.
+    """
+    if (not isinstance(existence, dict) or not isinstance(rid, str)
+            or not isinstance(journal_seq, int)):
+        return ()
+    return tuple(
+        label for label in sorted(_REFERENCE_FOLD_ENTITY_LABELS)
+        if _existence_state(*existence.get((label, rid), ((), ())),
+                            journal_seq) == _EXISTENCE_EXISTS)
+
+
 def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
     """True when the journal materializes ``rid`` as a REFERENCE-FOLD entity
     (``:Subject`` / ``:Object`` / ``:Event``) that EXISTS at ``journal_seq``.
 
-    #7936 interim. The #7813 widening makes EP journal a ``ConfidenceChanged``
+    #7936. The #7813 widening makes EP journal a ``ConfidenceChanged``
     for any of the four epistemic labels, but ``_apply_one``'s index is the
     point-only ``{id: point}`` dict — it has no representation for a non-Point
     target. That is a BOUND of this index, NOT a fold-miss: the graph fold
@@ -4754,18 +5106,15 @@ def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
     (#7936 P2). Adding the value gate here would change what this predicate
     means for its existence-only readers.
 
-    NOTE the index itself is still point-only: the exemption suppresses the
-    false miss, it does not fold the belief into ``fold()`` /
-    ``InMemoryProjection`` (that needs the ``(label, id)`` re-key in #7936).
+    The predicate is the boolean face of
+    :func:`_reference_fold_non_point_labels`, so the exemption and the FOLD
+    cannot decide existence differently: the labels the caller folds the belief
+    onto are exactly the labels this answers True for (see ``_apply_one``'s
+    ``entities`` index, #7936). The exemption is reached on EVERY caller (it is
+    what keeps a healthy graph green); the fold needs the entity index, so a
+    Point-only caller still drops the belief and the caller says so.
     """
-    if (not isinstance(existence, dict) or not isinstance(rid, str)
-            or not isinstance(journal_seq, int)):
-        return False
-    for label in _REFERENCE_FOLD_ENTITY_LABELS:
-        creates, deletes = existence.get((label, rid), ((), ()))
-        if _existence_state(creates, deletes, journal_seq) == _EXISTENCE_EXISTS:
-            return True
-    return False
+    return bool(_reference_fold_non_point_labels(existence, rid, journal_seq))
 
 
 def journal_object_surviving_keys(
@@ -4878,11 +5227,50 @@ def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
         if _hard_deleted_any(hard_deleted, "Object", rid))
 
 
+def _apply_belief_props(dest: dict, ev: dict) -> None:
+    """Apply ONE ``ConfidenceChanged`` record's belief properties onto ``dest``.
+
+    THE belief-write seam, shared by the point-only index (``_apply_one``'s
+    ``:Point`` arm), the non-Point entity index (its ``entities`` arm) and —
+    through ``fold_with_entities`` — ``consistency``'s non-Point content leg.
+    One implementation is the point: ``_fold_confidence_changed``'s
+    presence-conditional shape and its two value gates are already pinned to
+    ``_apply_one`` as the single source of fold semantics (#330 parity), and a
+    second hand-written copy of the same loop is exactly what drifts.
+
+    Presence-conditional, exactly like ``_fold_confidence_changed``: only the
+    keys the record carries are written; a key present with ``None`` writes
+    ``None`` (the journaled CLEAR — the writer's SET removes the property, and
+    every comparison normaliser drops a ``None`` so the two sides still agree).
+    ``_belief_prop_value_ok`` / ``_belief_bool_value_ok`` are the ONE value
+    gates the graph fold also uses, so a corrupt line degrades identically on
+    both sides.
+    """
+    for key in BELIEF_PROPS:
+        if key not in ev:
+            continue
+        value = ev[key]
+        if not _belief_prop_value_ok(key, value):
+            continue
+        dest[key] = value
+    # #2884 A5: the boolean flag riding the same record (`assess_source`'s
+    # `outdated=true`) — same presence-conditional shape and its own strict
+    # bool gate, so the pure fold and the graph fold agree.
+    for key in BELIEF_BOOL_PROPS:
+        if key not in ev:
+            continue
+        value = ev[key]
+        if not _belief_bool_value_ok(value):
+            continue
+        dest[key] = value
+
+
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_first_materialized: dict[tuple[str, str], int]
                | None = None,
                journal_seq: int | None = None,
-               journal_existence: dict | None = None) -> None:
+               journal_existence: dict | None = None,
+               entities: dict | None = None) -> None:
     """Fold ONE normalized journal record into the pure point index.
 
     ``journal_first_materialized`` / ``journal_seq`` are the whole-journal
@@ -4898,7 +5286,24 @@ def _apply_one(points: dict[str, dict], ev: dict,
     :func:`_reference_fold_non_point_target`) — a last-delete-wins membership
     map cannot express re-creation or a delete on either side of the write.
 
-    All three default to ``None`` for a bare ``_apply_one(points, ev)`` (no
+    ``entities`` is the OPTIONAL non-Point belief index, keyed ``(label, id)``
+    (#7936): when supplied, a ``ConfidenceChanged`` whose target is a
+    journaled ``:Subject`` / ``:Object`` / ``:Event`` is FOLDED onto every
+    reference-fold label the id EXISTS under at this record, through the shared
+    :func:`_apply_belief_props`. That fold happens whether or not a ``:Point``
+    shares the id: the graph fold sweeps all four labels and writes every
+    carrier, so a Point-sharing id has to fill the index too or the comparison
+    goes blind to the non-Point carrier (#7936 P2 review). Without it the arm
+    can only warn — the
+    ``{id: point}`` index has no representation for a non-Point node, which is
+    the parity gap this parameter closes for the BATCH fold
+    (:func:`fold_with_entities`) and for a ``rebuild``-ed ``InMemoryProjection``.
+    The one-record incremental path (``InMemoryProjection.apply``) still cannot
+    fold it: it has no journal to ask which label the id is, and this index
+    does not model the non-Point CREATION records (see the bound on
+    ``_reference_fold_non_point_target``'s warning arm).
+
+    All four default to ``None`` for a bare ``_apply_one(points, ev)`` (no
     journal to consult), which preserves the pre-existing behaviour.
     """
     ev = _norm(ev)
@@ -5214,41 +5619,60 @@ def _apply_one(points: dict[str, dict], ev: dict,
                     event_type="ConfidenceChanged", seq=journal_seq, id=rid,
                     detail="reference fold: belief write matched no Point",
                 )
-            for key in BELIEF_PROPS:
-                if key not in ev:
-                    continue
-                value = ev[key]
-                if not _belief_prop_value_ok(key, value):
-                    continue
-                p[key] = value
-            # #2884 A5: the boolean flag riding the same record
-            # (`assess_source`'s `outdated=true`) — same presence-conditional
-            # shape and its own strict bool gate, so the pure fold and the
-            # graph fold agree.
-            for key in BELIEF_BOOL_PROPS:
-                if key not in ev:
-                    continue
-                value = ev[key]
-                if not _belief_bool_value_ok(value):
-                    continue
-                p[key] = value
+            _apply_belief_props(p, ev)
+            # #7936 P2 (review): the SAME id may ALSO be carried by a
+            # `:Subject`/`:Object`/`:Event`. `_fold_confidence_changed`
+            # sweeps all four epistemic labels and writes EVERY carrier, so
+            # on the duplicate-id shape (`PointAdded X` +
+            # `ObjectRegistered X`, pinned by
+            # `test_fold_confidence_changed_sweeps_every_label_not_just_the_first`)
+            # the graph holds the belief on BOTH nodes. `points` holds only the
+            # Point, so without this the companion index carries no
+            # journal-side expectation for the non-Point carrier and
+            # `_compare_entities` — presence-conditional from the journal side
+            # — skips it: a corrupted or lost non-Point belief stays a false
+            # green, the exact class #7936 exists to remove. The Point arm must
+            # therefore fold the reference-fold labels too, not only the
+            # `elif` (Point-absent) arm. `()` when the caller has no ordered
+            # boundary (the one-record incremental path), so nothing is
+            # guessed without a journal.
+            if entities is not None:
+                for _label in _reference_fold_non_point_labels(
+                        journal_existence, rid, journal_seq):
+                    _apply_belief_props(
+                        entities.setdefault((_label, rid), {}), ev)
         elif (_writable_id(rid) and _foldable_prop
                 and _reference_fold_non_point_target(
                     journal_existence, rid, journal_seq)):
-            # #7936 interim: the id IS materialized by the journal — as a
+            # #7936: the id IS materialized by the journal — as a
             # `:Subject`/`:Object`/`:Event` — AND at least one carried belief
             # value survives the value gate, so the graph fold WILL resolve and
-            # write it. `points` cannot represent it, so this point-only fold
-            # DROPS the belief (the graph fold does not). Say so instead of
-            # dropping it silently, and do NOT record a miss: a false
-            # `non-folded` reds a healthy graph and, tested first, masks a
+            # write it. `points` cannot represent it. Do NOT record a miss: a
+            # false `non-folded` reds a healthy graph and, tested first, masks a
             # genuine content divergence on it (#7936). The `_foldable_prop`
             # half is the P2: with every value corrupt `rebuild_all` refuses,
             # so the exemption must fall through to the miss arm below.
-            logger.warning(
-                "reference fold: ConfidenceChanged targets the non-Point "
-                "epistemic node %r; the in-memory {id: point} index cannot "
-                "hold it (the graph fold resolves it) — #7936", rid)
+            #
+            # The belief is FOLDED whenever the caller supplied the non-Point
+            # index, onto EVERY reference-fold label the id EXISTS under at
+            # this record — the same set `_fold_confidence_changed` sweeps, so
+            # a multi-label id is written on all of its carriers here too
+            # (#7936; `_reference_fold_non_point_labels` is the ONE existence
+            # resolver the exemption above also reads). Without the index
+            # (``_fold_journal`` is Point-only by contract, and the one-record
+            # incremental path has no journal) the drop is SURFACED instead of
+            # happening silently.
+            _labels = _reference_fold_non_point_labels(
+                journal_existence, rid, journal_seq)
+            if entities is None:
+                logger.warning(
+                    "reference fold: ConfidenceChanged targets the non-Point "
+                    "epistemic node %r; the in-memory {id: point} index cannot "
+                    "hold it (the graph fold resolves it) — #7936", rid)
+            else:
+                for _label in _labels:
+                    _apply_belief_props(
+                        entities.setdefault((_label, rid), {}), ev)
         elif (journal_existence is not None and journal_seq is not None
                 and _writable_id(rid)
                 and _has_prop
@@ -5318,20 +5742,52 @@ def _apply_one(points: dict[str, dict], ev: dict,
         logger.warning("unrecognized event type %r — not folded by this index", t)
 
 
-def fold(events: list[dict]) -> dict[str, dict]:
+def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
+    """``fold`` PLUS the non-Point belief index — ``(points, entities)``.
+
+    ``entities`` is keyed ``(label, id)`` and holds the belief properties a
+    ``ConfidenceChanged`` wrote to a ``:Subject`` / ``:Object`` / ``:Event``
+    (#7936). Before it, this fold represented POINTS ONLY, so a belief write to
+    any of the other three epistemic labels was dropped while the graph fold
+    (``_fold_confidence_changed``) resolved and wrote it — the ``_apply_one``
+    parity contract at the top of this module ("an incrementally-updated
+    projection and ``fold(read_all())`` can never diverge") stopped holding the
+    moment #7853 widened EP propagation across all four labels.
+
+    ``fold`` is deliberately UNCHANGED: it keeps the public ``{id: point}``
+    contract every existing caller depends on (``ingest``, ``sdk``, ``api``,
+    ``m0``, ``embeddings`` all index it by POINT id), and this companion
+    carries the rest of the fold instead of re-keying them. The remaining
+    durable step — one ``(label, id)`` index deriving ``log_points`` /
+    ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
+    stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
+    digest would move ``content_hash`` for every existing baseline, and the
+    sidecar has no format-migration path (a bumped ``format_version`` is
+    untrusted forever and the baseline is never re-recorded).
+
+    ``entities`` is a BATCH/replay view: it is built from the journal's ordered
+    existence boundary, which the one-record incremental path does not have.
+    """
     points: dict[str, dict] = {}
+    entities: dict = {}
     first_materialized = journal_first_materialization(events)
     # #7936 review: the ORDERED boundary, hoisted ONCE — the non-Point belief
-    # exemption asks whether the target EXISTS at each record (re-creation and
-    # deletes on either side of the write), and rebuilding it per record is the
-    # O(N²) class this module already fixed.
+    # exemption AND the fold ask whether the target EXISTS at each record
+    # (re-creation and deletes on either side of the write), and rebuilding it
+    # per record is the O(N²) class this module already fixed.
     existence = journal_epistemic_existence(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
                    journal_first_materialized=first_materialized,
                    journal_seq=seq,
-                   journal_existence=existence)
-    return points
+                   journal_existence=existence,
+                   entities=entities)
+    return points, entities
+
+
+def fold(events: list[dict]) -> dict[str, dict]:
+    """The POINT-only view of the fold — see :func:`fold_with_entities`."""
+    return fold_with_entities(events)[0]
 
 
 def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
@@ -5364,9 +5820,21 @@ class Projection(Protocol):
 class InMemoryProjection:
     def __init__(self):
         self.points: dict[str, dict] = {}
+        # #7936: the non-Point belief index, keyed ``(label, id)`` — the
+        # ``:Subject`` / ``:Object`` / ``:Event`` half of the fold that the
+        # ``{id: point}`` index cannot hold. ``rebuild`` fills it from the
+        # journal; ``apply`` is bounded (see its comment).
+        self.entities: dict = {}
 
     def apply(self, event: dict) -> None:
-        _apply_one(self.points, event)
+        # #7936 BOUND: a one-record fold has no journal, so it cannot say which
+        # reference-fold label an unknown id is — ``_apply_one`` surfaces the
+        # drop rather than guessing, and never manufactures a ``non-folded``
+        # record the batch path would not. ``rebuild`` is the path that holds
+        # the non-Point belief; the durable ``(label, id)`` re-key that would
+        # let the incremental path fold the non-Point CREATION records too
+        # stays open on #7936.
+        _apply_one(self.points, event, entities=self.entities)
 
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """Fold the log into memory.
@@ -5384,7 +5852,10 @@ class InMemoryProjection:
         events = log.read_all()
         _refuse_revival_torn_tail(
             getattr(log, "torn_tail_revival_records", lambda: [])())
-        self.points = fold(events)
+        # #7936: the BATCH fold, so the non-Point belief index is filled too —
+        # a rebuilt in-memory projection must not silently lack a belief the
+        # graph fold wrote.
+        self.points, self.entities = fold_with_entities(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -6549,6 +7020,25 @@ class FalkorProjection(
                             "(#4641). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
+                    elif result.get("team_meta_gap"):
+                        # #5353: the sibling of the onboarding leg above. A
+                        # `:TeamMeta` marker that did not come back makes the
+                        # `#2789` first-org guard read 0, so a later
+                        # provisioning call can re-mint it with the control
+                        # plane's name. The clean "auto-recovered" line drops
+                        # `reason`, so without this leg the operator sees a
+                        # success shape over the one signal the class exists
+                        # for.
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT its :TeamMeta first-org marker "
+                            "is NOT confirmed intact — the #2789 first-org "
+                            "guard may read 0 and a later provisioning call "
+                            "can re-mint it with the control plane's name; "
+                            "see the rebuild ERROR log (#5353). Recovery "
+                            "reason: %s",
+                            events_dir, result.get("log_points"),
+                            result.get("reason"))
                     else:
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -6569,10 +7059,12 @@ class FalkorProjection(
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
 
-        A completed recovery with an onboarding gap is NOT a reason to refuse
-        to open the store (it is usable, and refusing would be strictly worse)
-        — but it must not pass unmentioned either, since this is the caller for
-        the unresponsive-graph path where no other surface reports it (#4641).
+        A completed recovery with an onboarding gap — or a `:TeamMeta`
+        first-org marker gap (#5353), the same producer-signal shape — is NOT a
+        reason to refuse to open the store (it is usable, and refusing would be
+        strictly worse) — but neither must pass unmentioned, since this is the
+        caller for the unresponsive-graph path where no other surface reports
+        it (#4641/#5353).
 
         #7929: a DECLINED recovery that had already replayed is rolled back to
         the empty state this call found (see `recover_from_log`'s ATOMICITY
@@ -6594,6 +7086,18 @@ class FalkorProjection(
                 "is NOT confirmed intact — re-run onboarding for the "
                 "affected org(s) and see the rebuild ERROR log (#4641). "
                 "Recovery reason: %s",
+                result.get("reason"))
+        if result.get("team_meta_gap"):
+            # #5353: the marker's own consumer on this caller. Its absence from
+            # this path is the same log-only defect the onboarding leg above
+            # was added to close: the marker IS the `#2789` first-org guard, so
+            # a gap here reads as a provisioned graph on the next call.
+            logger.warning(
+                "recovery completed but the rebuilt graph's :TeamMeta "
+                "first-org marker is NOT confirmed intact — the #2789 "
+                "first-org guard may read 0 and a later provisioning call "
+                "can re-mint it with the control plane's name; see the "
+                "rebuild ERROR log (#5353). Recovery reason: %s",
                 result.get("reason"))
 
     @classmethod
@@ -7254,6 +7758,21 @@ class FalkorProjection(
             capture_watermark, reestablish_watermark)
         carried_watermark = capture_watermark(self)
         carried_last_seq = (carried_watermark or {}).get("last_seq")
+        # #5353: the `:TeamMeta` first-org marker. This engine has no `log_dir`
+        # and therefore no durable pre-wipe sidecar, so the marker is held in
+        # memory — an interrupted `rebuild()` cannot restore it (the ROUTED
+        # recovery path, `recover_from_log` → `rebuild_all`, and the CLI are the
+        # ones that carry it durably). Strictly better than the silent loss it
+        # replaces, and identical in effect on the normal path.
+        #
+        # The read runs BEFORE `DETACH DELETE`, so a failure aborts with the
+        # graph untouched — never captured-then-swallowed (#2943's "a graph
+        # that cannot answer a read is no evidence the wipe is safe").
+        # `_team_meta_marker` collapses the captured set to the one marker the
+        # class's `#2789` invariant allows, and the warning below reports a
+        # collapse — the in-memory analogue of `rebuild_all`'s report.
+        captured_markers = _capture_team_meta(self)
+        team_marker = _team_meta_marker(captured_markers)
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild")
         # #3664: this engine feeds ``apply()`` ONE record at a time, so an
@@ -7353,6 +7872,44 @@ class FalkorProjection(
                 "`rebuild_all(log_dir)` carries the mark durably instead "
                 "(#4653)",
                 type(e).__name__, e)
+        # #5353: restore the `:TeamMeta` first-org marker captured above.
+        # DEGRADES, never raises — this runs after the wipe (#2943), and the
+        # consequence is named rather than absorbed: a rebuilt graph with no
+        # marker leaves the `#2789` guard reading 0, so the next provisioning
+        # call re-mints the marker with the control plane's name and a fresh
+        # `created`.
+        if len(captured_markers) > 1:
+            logger.warning(
+                "rebuild: %d :TeamMeta marker(s) were captured, but the class "
+                "is at-most-one (the `#2789` first-org guard reads "
+                "`count(m) > 0`) — a graph holding several is already in "
+                "violation of that invariant. The EARLIEST `created` is "
+                "restored; the other(s) are NOT recreated, because restoring "
+                "them would manufacture the second marker #2789 exists to "
+                "prevent (#5353).",
+                len(captured_markers),
+            )
+        if team_marker is not None:
+            try:
+                self.g.query(
+                    f"MERGE (m:{_TEAM_META_LABEL}) ON CREATE SET m += $props",
+                    params={"props": team_marker},
+                )
+                logger.info(
+                    "rebuild: restored the :TeamMeta first-org marker — the "
+                    "`#2789` guard reads it as provisioned (#5353)")
+            except Exception as e:  # noqa: BLE001, RUF100
+                logger.error(
+                    "rebuild: could not restore the :TeamMeta first-org "
+                    "marker (%s: %s) — the rebuilt graph has NO marker, so "
+                    "the `#2789` guard reads 0 and a later provisioning call "
+                    "can mint a replacement with the control plane's name and "
+                    "a fresh `created`. The graph itself is rebuilt; re-create "
+                    "the team's marker deliberately, or run "
+                    "`rebuild_all(log_dir)` which carries it durably "
+                    "(#5353)",
+                    type(e).__name__, e,
+                )
 
     def _prewipe_graph_identity(self) -> dict:
         """The graph a pre-wipe sidecar describes, stamped into its payload.
@@ -7717,6 +8274,32 @@ class FalkorProjection(
             capture_failed.append(
                 f"event-log watermark/#4653 ({type(e).__name__}: {e})")
 
+        # ── :TeamMeta first-org marker snapshot (#5353) ──────────────
+        # The wipe destroys `:TeamMeta` and NOTHING restores it: the writers
+        # (`sdk.org_create`, `__main__._cmd_key_create`, hosted_api's three
+        # provisioning lanes) use a bare `CREATE` that rides no journal record,
+        # so no replay pass recreates the node. Before this change
+        # `rg -n "TeamMeta" tortoise/projection/` was ZERO hits — the class was
+        # invisible to the whole rebuild lane.
+        #
+        # Its presence is LOAD-BEARING rather than bookkeeping: it is the
+        # entire `#2789` first-org guard
+        # (`_eager_provision_org_graph`: `MATCH (m:TeamMeta) RETURN count(m)` →
+        # return early when non-zero). A rebuilt graph reads 0, so a later
+        # provisioning call re-mints the marker with the control plane's name
+        # and a fresh `created` — the graph's own team identity is replaced by
+        # a value the org row cannot correct (the marker is not derived from
+        # the row; the row is only called the authority for the DISPLAY name).
+        #
+        # Best-effort read funneled into the SAME `capture_failed` gate: a
+        # failed read must not fall through to the wipe (I3, the #2943 rule).
+        team_meta_snapshot: list[dict] = []
+        try:
+            team_meta_snapshot = _capture_team_meta(self)
+        except Exception as e:
+            capture_failed.append(
+                f"TeamMeta snapshot/#5353 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -7861,7 +8444,8 @@ class FalkorProjection(
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
                 "%d session container(s), %d session link(s), "
                 "%d onboarding state(s), %d onboarding step link(s), "
-                "%d config entry(ies), event-log watermark %s) "
+                "%d config entry(ies), event-log watermark %s, "
+                "%d TeamMeta marker(s)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
@@ -7873,7 +8457,25 @@ class FalkorProjection(
                 len(leftover.get("onboarding_snapshot") or []),
                 len(leftover.get("onboarding_step_links") or []),
                 len(leftover.get("config_snapshot") or []),
-                _event_meta_last_seq(leftover.get("event_meta")))
+                _event_meta_last_seq(leftover.get("event_meta")),
+                len(leftover.get("team_meta") or []))
+        # #5353: the marker count the union is about to collapse. Both legs are
+        # read HERE, before `team_meta_snapshot` is rebound from `merged` below
+        # (the same reason the onboarding reassignment is ordered after this
+        # point) — the collapse is reported, never silent.
+        #
+        # The count is of DISTINCT markers, not of entries: a kill between the
+        # sidecar write and the `DETACH DELETE` leaves the same marker in BOTH
+        # legs, and counting entries would report a collision (and accuse the
+        # graph of the `#2789` violation) for a graph holding exactly one.
+        team_meta_entries_merged = len({
+            tuple(sorted((k, repr(v)) for k, v in e.items()))
+            if isinstance(e, dict) else repr(e)
+            for e in (
+                list((leftover or {}).get("team_meta") or [])
+                + list(team_meta_snapshot)
+            )
+        })
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,
@@ -7884,6 +8486,7 @@ class FalkorProjection(
             "onboarding_step_links": onboarding_step_links,
             "config_snapshot": config_snapshot,
             "event_meta": event_meta_snapshot,
+            "team_meta": team_meta_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
         batch_snapshot = merged["batch_snapshot"]
@@ -7934,6 +8537,57 @@ class FalkorProjection(
         # and can be LOWER (that wipe reset the counter), which is exactly why
         # the union takes the maximum of the two instead of picking a side.
         event_meta_snapshot = merged["event_meta"]
+        # #5353: the marker needs the same reassignment, for the same reason —
+        # on the sidecar-recovery path the live capture is EMPTY (the wipe
+        # already landed), so restoring from the pre-union local would restore
+        # nothing and the marker would be lost on exactly the path the sidecar
+        # exists to cover. The write payload below is derived from `merged` too,
+        # so a crash between the sidecar write and the replay keeps the
+        # recovered marker in the retry's rescue file.
+        team_meta_snapshot = merged["team_meta"]
+        # #5353: the class is at-most-one, so the union COLLAPSES — and a
+        # collapse is reported here rather than left to be inferred from a
+        # count of 1. A graph holding several markers is already in violation
+        # of the `#2789` invariant (bare `CREATE`, no uniqueness), so the
+        # rebuild restores the earliest one and says so; silence would make a
+        # pre-existing invariant violation indistinguishable from a marker
+        # that was never there.
+        if len(team_meta_snapshot) < team_meta_entries_merged:
+            logger.warning(
+                "rebuild: %d :TeamMeta marker(s) were captured but the "
+                "`team_meta` section carries exactly %d — the class is "
+                "at-most-one (the `#2789` first-org guard reads "
+                "`count(m) > 0`), so a graph holding several is already in "
+                "violation of that invariant. The EARLIEST `created` is kept "
+                "and restored; the other(s) are NOT recreated, because "
+                "restoring them would manufacture the second marker #2789 "
+                "exists to prevent (#5353).",
+                team_meta_entries_merged, len(team_meta_snapshot))
+        # #5353: the pre-preservation window, the `onboarding_unknown` pattern
+        # one class out. A rescue file written by a build that did not capture
+        # the class cannot say whether the wipe it followed destroyed a marker
+        # — the live capture may be empty simply because the earlier wipe
+        # landed. TWO gates, because each covers a direction the other cannot:
+        # the VERSION (the `#2814` T2 shape — a file below v6 predates the
+        # section by construction, which is how the ordering is pinned for
+        # `config_snapshot` at v2), and the KEY (a hand-edited or truncated
+        # CURRENT-version file, which the writer can never emit — it derives
+        # every key from `_SNAPSHOT_SECTIONS` — and whose absent section must
+        # not be read as "captured and empty"). `or`, not `and`, on the carried
+        # flag: a leftover carrying the flag a previous run staged inherits it,
+        # so a SECOND interruption cannot lose the evidence (the flag is a
+        # METADATA key, so this run's own empty section cannot erase it
+        # either). Reported at the restore leg below, where the operator reads
+        # the outcome. The version literal is 6 — the version at which the
+        # section LANDED — not "the current version": a v6 file is
+        # #5353-aware by definition, so a later bump must not re-flag it.
+        # (`config_reset`'s T2 block below re-derives the same `leftover_version`.)
+        leftover_version = (leftover or {}).get("version")
+        team_meta_unknown = bool((leftover or {}).get("team_meta_unknown")) or (
+            leftover is not None
+            and (not isinstance(leftover_version, int)
+                 or leftover_version < 6
+                 or "team_meta" not in leftover))
         # ── #2814 T2: a pre-preservation rescue file cannot record config ──
         # A sidecar written by a build that predates this change has no
         # `config_snapshot` section at all — so on the sidecar-RECOVERY path
@@ -8062,6 +8716,12 @@ class FalkorProjection(
                 # "captured and empty" — and the UNKNOWN would be lost.
                 if onboarding_unknown:
                     payload["onboarding_unknown"] = True
+                # #5353: the same carry for the `:TeamMeta` UNKNOWN (see the
+                # pre-wipe computation above) — a retry reading a sidecar whose
+                # `team_meta` section is present-but-empty cannot tell
+                # "captured and empty" from "the class was never captured".
+                if team_meta_unknown:
+                    payload["team_meta_unknown"] = True
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
                 # #4653: the `event_meta` section is named as well. It is the one
@@ -8073,6 +8733,16 @@ class FalkorProjection(
                     " The wipe would also destroy the event-log high-water "
                     "mark this snapshot carries (#4653) — no other record "
                     "holds it." if event_meta_snapshot else "")
+                # #5353: and the `:TeamMeta` marker, for the same reason — it is
+                # the class whose only record is the node the wipe destroys
+                # (`rg -n TeamMeta tortoise/projection/` was zero hits before
+                # this change), so a marker-only refusal must not read as
+                # protecting "0 of everything".
+                team_meta_note = (
+                    " The wipe would also destroy the :TeamMeta first-org "
+                    "marker this snapshot carries (#5353) — no other record "
+                    "holds it, and the `#2789` guard reads exactly that node."
+                    if team_meta_snapshot else "")
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
                     f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
@@ -8086,7 +8756,8 @@ class FalkorProjection(
                     f"{len(onboarding_step_links)} step link(s) that ride no "
                     f"journal record at all (#4641) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
-                    f"entr(y/ies) with them (#2814).{watermark_note} Fix the "
+                    f"entr(y/ies) with them (#2814).{watermark_note}"
+                    f"{team_meta_note} Fix the "
                     f"cause — write permissions/space on the event-log "
                     f"directory, or a non-serializable Point property — and "
                     f"re-run."
@@ -8760,7 +9431,30 @@ class FalkorProjection(
                     if (isinstance(_del_label, str)
                             and _del_label in _CANONICAL_ENTITY_LABELS):
                         anchor = last_recreate_seq.get((_del_label, rid))
-                    else:
+                    elif ev.get("op") == "delete":
+                        # #7936 — the ANY-KIND anchor is for the LEGACY ID-WIDE
+                        # DELETE ONLY. `last_recreate_seq_any` is the bare-id max
+                        # over kinds precisely because a delete record with a
+                        # missing/non-canonical label folds id-wide
+                        # (`_delete_entity_by_id(rid, None)`), so gating it on the
+                        # id's last re-creation is what keeps a legitimate
+                        # delete→recreate :Point from being destroyed.
+                        #
+                        # Applying it to a NON-delete op (a state op or an op
+                        # outside the vocabulary) silently EXEMPTED a record the
+                        # fold cannot replay — a fail-open: `_fold_entity_mutation`
+                        # would have recorded `state-op-miss` / `unknown-op` and
+                        # failed the run, and all three INLINE engines
+                        # (`rebuild(log)`, `recover_from_log`, `backup.restore`)
+                        # plus the reference fold DO fail it, so `rebuild_all`
+                        # alone reported a journal complete that the other four
+                        # reject (measured: 4-vs-1 on
+                        # `[EntityMutated(label=Widget, id=X, ...), PointAdded(X)]`,
+                        # and on the `label=null` / unknown-op variants). For a
+                        # DELETE the same shape is verdict-neutral — a 0-row
+                        # delete is the EXEMPT `delete-miss` either way — so this
+                        # narrowing changes no delete verdict and removes the
+                        # silent-drop divergence.
                         anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
@@ -9911,6 +10605,138 @@ class FalkorProjection(
                 onboarding_restore_failures,
             )
 
+        # ── #5353: restore the :TeamMeta first-org marker ───────────────
+        # Same class as the `:Session` / `:Batch` / onboarding blocks above,
+        # and the same reason: the five `:TeamMeta` writers use a RAW write
+        # that rides no journal record, and no replay pass recreates the node —
+        # `rg -n "TeamMeta" tortoise/projection/` was ZERO hits before this
+        # change. Without this block the wipe leaves the graph with no marker,
+        # the `#2789` guard (`MATCH (m:TeamMeta) RETURN count(m)`) reads 0, and
+        # the next provisioning call re-mints the marker with the control
+        # plane's name and a fresh `created` — destroying the graph's own team
+        # identity on a rebuild the operator asked for.
+        #
+        # `MERGE` (not `CREATE`) is the faithful write here: the class is
+        # AT-MOST-ONE by intent (`_team_meta_marker` documents why), the graph
+        # was wiped so the pattern matches nothing on the ordinary path, and an
+        # idempotent write means a partially-restored graph cannot accumulate a
+        # SECOND marker on the retry — the one write shape this class must
+        # never produce. It deliberately does NOT journal through
+        # `journal_mint_write_ahead`: that seam records the ownership of a graph
+        # this process MATERIALIZES (`#3390`), and this rebuild targets a graph
+        # that already exists. `SET m += $props` rather than replacing the node
+        # keeps any property a concurrent writer added after the wipe.
+        #
+        # A failure here runs AFTER the wipe, so — like the `:Session`,
+        # onboarding and config restores — it must DEGRADE rather than raise
+        # (#2943: a post-wipe raise leaves the store empty). Every failure is
+        # counted and reported, and the post-restore verification below turns a
+        # resulting gap into a gap count.
+        team_meta_restore_failures = 0
+        team_meta_verified = True
+        team_meta_missing = False
+        for props in team_meta_snapshot:
+            try:
+                self.g.query(
+                    f"MERGE (m:{_TEAM_META_LABEL}) ON CREATE SET m += $props",
+                    params={"props": props},
+                )
+            except Exception as e:
+                team_meta_restore_failures += 1
+                logger.warning(
+                    "rebuild: :TeamMeta marker restore failed (%s: %s) — the "
+                    "pre-wipe marker was NOT restored, so the `#2789` guard "
+                    "will read 0 and a later provisioning call can re-mint it "
+                    "(#5353)",
+                    type(e).__name__, e,
+                )
+        # Post-restore verification: the marker must be PRESENT and carry the
+        # captured property map, i.e. I1's "the same name/created". Read back
+        # through the same query shape the capture used, so the comparison
+        # cannot drift from it. A failed read is treated as a MISMATCH — "could
+        # not confirm" must not read as "confirmed" — and neither branch
+        # raises (this runs after the wipe).
+        #
+        # The comparison is EXACT rather than presence-only on purpose: a
+        # concurrent re-provision between the wipe and this line would make the
+        # unconditional `MERGE` match ITS node and skip our `$props`, silently
+        # losing the captured identity. Exactness turns that race into a
+        # reported gap instead of a quiet success.
+        team_meta = team_meta_snapshot[0] if team_meta_snapshot else None
+        if team_meta is not None:
+            try:
+                live_markers = [
+                    row[0] for row in self.g.query(
+                        f"MATCH (m:{_TEAM_META_LABEL}) RETURN properties(m)"
+                    ).result_set
+                    if row and isinstance(row[0], dict)]
+                team_meta_missing = not any(
+                    live == team_meta for live in live_markers)
+            except Exception as e:
+                team_meta_verified = False
+                logger.error(
+                    "rebuild: could not VERIFY the restored :TeamMeta marker "
+                    "(%s: %s) — the class is the entire `#2789` first-org "
+                    "guard, so the graph's marker is UNVERIFIED: not "
+                    "confirmed intact, and NOT observed gone. Re-check it "
+                    "before trusting it (#5353)",
+                    type(e).__name__, e,
+                )
+        if not team_meta_verified:
+            # "Could not confirm" must not be printed as "gone" — the missing
+            # flag is still False here (the verification read never produced a
+            # result), so the branch below would assert a loss it did not
+            # observe. Same rule as the onboarding block above (#4641).
+            logger.error(
+                "rebuild: :TeamMeta post-restore verification COULD NOT RUN "
+                "(%d restore attempt(s) raised) — the rebuilt graph's "
+                "first-org marker is UNVERIFIED: not confirmed intact, and "
+                "NOT observed gone. Check the graph's :TeamMeta marker "
+                "before re-provisioning the team (#5353).",
+                team_meta_restore_failures,
+            )
+        elif team_meta_missing:
+            logger.error(
+                "rebuild: the captured :TeamMeta marker is ABSENT from the "
+                "rebuilt graph (or no longer carries the captured "
+                "name/created) after %d restore attempt(s), %d of which "
+                "raised. This is a TRUE POSITIVE, not a silent success: the "
+                "wipe is unconditional, only the journal is replayed, and no "
+                "replay pass recreates this class — so the `#2789` first-org "
+                "guard now reads 0 and a later provisioning call can mint a "
+                "replacement marker with the control plane's name and a fresh "
+                "`created`. Re-create the team's marker deliberately rather "
+                "than letting a provisioning retry do it (#5353)",
+                len(team_meta_snapshot), team_meta_restore_failures,
+            )
+        elif team_meta_restore_failures:
+            logger.warning(
+                "rebuild: %d :TeamMeta restore attempt(s) raised, but the "
+                "post-restore verification confirms the expected marker is "
+                "PRESENT — treated as transient (an error after the write "
+                "landed), not as loss (#5353).",
+                team_meta_restore_failures,
+            )
+        if team_meta_unknown:
+            logger.error(
+                "rebuild: the leftover pre-wipe snapshot at %s does not "
+                "carry a `team_meta` record — it either predates :TeamMeta "
+                "preservation or carries a state-UNKNOWN marker from an "
+                "earlier interrupted rebuild — so whether the wipe it "
+                "followed destroyed a :TeamMeta marker CANNOT be determined. "
+                "This is a state-UNKNOWN signal, not proof the class was "
+                "absent: a missing marker leaves the `#2789` first-org guard "
+                "reading 0 on a graph that may still be provisioned. Check "
+                "the graph's marker before re-provisioning the team (#5353).",
+                snapshot_path,
+            )
+        # The single canonical gap this change reports, mirroring the
+        # onboarding shape: non-zero for a confirmed loss, an unverified read
+        # and a pre-preservation UNKNOWN alike, with the granular key below
+        # (`team_meta_state_unknown`) telling the caller which it is.
+        team_meta_gap = 1 if (team_meta_missing or not team_meta_verified
+                              or team_meta_unknown) else 0
+
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
         # write) and before pass 2, alongside the other sidecar-borne graph
@@ -10697,7 +11523,111 @@ class FalkorProjection(
                 # file cannot say whether the class was lost or never present.
                 "onboarding_gap": onboarding_gap,
                 "onboarding_missing_total": onboarding_missing_total,
-                "onboarding_state_unknown": onboarding_unknown}
+                "onboarding_state_unknown": onboarding_unknown,
+                # #5353: the `:TeamMeta` first-org marker, additive and the
+                # same shape as the onboarding pair above. `team_meta_expected`
+                # is 0 or 1 (the class is at-most-one); `team_meta_restored` is
+                # 1 only when the post-restore verification CONFIRMED the
+                # captured `name`/`created` are back, so a caller cannot read a
+                # rebuilt-but-markerless graph as a clean success.
+                # `team_meta_state_unknown` is the pre-preservation signal: a
+                # rescue file with no `team_meta` key cannot say whether the
+                # earlier wipe destroyed the marker.
+                "team_meta_expected": len(team_meta_snapshot),
+                "team_meta_restored": (0 if (team_meta_missing
+                                             or not team_meta_verified)
+                                       else len(team_meta_snapshot)),
+                "team_meta_verified": team_meta_verified,
+                "team_meta_restore_failures": team_meta_restore_failures,
+                "team_meta_gap": team_meta_gap,
+                "team_meta_state_unknown": team_meta_unknown}
+
+    def rebuild_from_record(self, view, *, confirm_destructive: bool = False,
+                            declare: bool = True, scope: str = "",
+                            limit: int | None = None) -> dict:
+        """The record-sourced sibling of :meth:`rebuild_all` (#7971).
+
+        ``rebuild_all`` rebuilds the cache from **the journal** (a ``log_dir``
+        of JSONL files). This rebuilds it from **the record** — Postgres's own
+        layer tables — which is what ``STORAGE-ARCHITECTURE.md`` §2.0 means by
+        *"data goes to postgres and it's loaded to hot (falkor)"*. The
+        machinery is shared (the destructive-token gate, the disposability
+        guard, the wipe, the index creation); what changes is the **SOURCE**.
+
+        Three properties, each enforced rather than promised:
+
+        * **Refuse before touching the graph.** The whole plan is built from
+          the record first (``cache_projection.record_plan``), so a record row
+          the projection cannot place raises BEFORE the wipe — a half-applied
+          projection is not reachable.
+        * **One-way.** Nothing here reads the cache to decide what to project
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for six
+          graph-only classes; this path deliberately does not — see
+          ``tortoise/cache_projection.py``).
+        * **The declaration follows the writes.** ``coverage`` is `complete`
+          **iff** every record key was materialised; ``limit`` bounds how many
+          nodes are written, and a bounded run therefore declares `partial`,
+          enumerating what it wrote. That is the seam through which the
+          completeness marker (#7952) can FIRE — it is not an eviction policy
+          (§2.0 holds the FalkorDB limit high; the trigger for partiality is
+          still §17.3's).
+
+        ``limit`` is a bound and nothing more: nodes are taken in a
+        deterministic key order, and a relation whose endpoint falls outside
+        the bound is a no-op (the same verdict the record projection's own
+        endpoint resolution gives an absent endpoint).
+        """
+        from tortoise.cache_projection import (
+            declaration_for,
+            project_records,
+            record_plan,
+            write_declaration,
+        )
+
+        nodes = tuple(view.nodes)
+        if limit is not None:
+            if limit < 0:
+                raise ValueError(f"limit must be >= 0, got {limit}")
+            nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
+            kept = {(n.label, n.key) for n in nodes}
+            relations = tuple(
+                r for r in view.relations
+                if (r.src_label, r.src_key) in kept
+                and (r.tgt_label, r.tgt_key) in kept)
+        else:
+            relations = tuple(view.relations)
+
+        plan = record_plan(nodes, relations)  # raises BEFORE any wipe
+
+        self._assert_destructive_confirmed(confirm_destructive,
+                                          "rebuild_from_record")
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild_from_record")
+        self._ensure_indexes()
+        statements = project_records(self.g, plan)
+
+        declaration = None
+        if declare:
+            materialized = plan.node_keys()
+            declaration = declaration_for(
+                view.record_keys,
+                [(label, key) for label, key in materialized],
+                scope=scope,
+            )
+            write_declaration(self.g, declaration)
+
+        return {
+            "nodes_written": len(nodes),
+            "relations_written": len(relations),
+            "statements": statements,
+            "record_nodes": len(view.nodes),
+            "record_relations": len(view.relations),
+            "coverage": declaration.coverage if declaration else None,
+            "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
+            "source": "record",
+        }
 
     def query(self, cypher: str, **params):
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is

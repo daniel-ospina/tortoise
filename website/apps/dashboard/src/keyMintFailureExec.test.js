@@ -34,6 +34,11 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripComments } from './testSupport.js'
+// #4370 (A6): the REAL predicate, imported from its module-scope home in the
+// pure module. `main.jsx` imports it too (it is no longer declared in the
+// component), so this file hands the implementation to the sandbox instead of
+// extracting a copy.
+import { revealablePlaintext, revealableMintPlaintext } from './sessionKey.js'
 // The REAL cap-notice builder, not a stub. A local copy is a second authority:
 // its fallback branch can drift from the shipped one, and the assertions would
 // then verify the copy instead of the product (review cycle 3, P2).
@@ -125,6 +130,8 @@ function createEnv(overrides = {}) {
     calls,
     currentOrgId: 'org-A',
     busy: false,
+    revealablePlaintext,
+    revealableMintPlaintext,
     newKeyExpiryPreset: '30',
     newKeyExpiryDate: '',
     newKeyName: '',
@@ -152,7 +159,7 @@ function createEnv(overrides = {}) {
     setNewKeyExpiryDate: () => {},
     ...overrides,
   }
-  return { deps, calls, createKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function createKey']).createKey }
+  return { deps, calls, createKey: build(deps, ['function revealRefusalFor', 'async function createKey']).createKey }
 }
 
 test('#4330: a 402 mint returns falsy — the caller cannot advance to the reveal', async () => {
@@ -320,6 +327,7 @@ function copyEnv(newKey, clipboard) {
   const fakeEl = { nodeType: 1, __keyValue: true }
   const deps = {
     newKey,
+    revealablePlaintext,
     navigator: { clipboard: { writeText: async (v) => { written.push(v); return clipboard.writeText(v) } } },
     document: {
       querySelector: (sel) => { assert.equal(sel, '.key-create-modal .key-value'); return fakeEl },
@@ -335,7 +343,7 @@ function copyEnv(newKey, clipboard) {
     setKeyCopied: (v) => flags.copied.push(v),
     setKeyCopyFailed: (v) => flags.failed.push(v),
   }
-  return { written, flags, selected, fakeEl, copyNewKey: build(deps, ['function revealablePlaintext', 'async function copyNewKey']).copyNewKey }
+  return { written, flags, selected, fakeEl, copyNewKey: build(deps, ['async function copyNewKey']).copyNewKey }
 }
 
 test('#4330: the clipboard is NEVER handed a non-string (writeText(null) copies "null")', async () => {
@@ -394,6 +402,7 @@ function dismissEnv(newKey, keyCopied, confirmReturn) {
   const deps = {
     newKey,
     keyCopied,
+    revealablePlaintext,
     window: { confirm: (msg) => { prompts.push(msg); return confirmReturn } },
     setWizardDurableKey: (v) => fed.push(v),
     setKeyModalOpen: (v) => closed.push(v),
@@ -403,7 +412,7 @@ function dismissEnv(newKey, keyCopied, confirmReturn) {
     setKeyCopyFailed: () => {},
     setKeyModalCapNotice: () => {},
   }
-  return { closed, prompts, fed, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function revealablePlaintext', 'function dismissKeyModal']).dismissKeyModal }
+  return { closed, prompts, fed, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function dismissKeyModal']).dismissKeyModal }
 }
 
 test('#4330: Done without a copy cannot silently destroy a shown-once key', () => {
@@ -454,6 +463,8 @@ function wizardEnv(overrides = {}) {
   const calls = { wizardDurableKey: [], error: [], capped: [], paste: [], loadAll: 0 }
   const deps = {
     calls,
+    revealablePlaintext,
+    revealableMintPlaintext,
     wizardDurableBusy: false,
     setWizardDurableBusy: () => {},
     setWizardDurableError: (v) => calls.error.push(v),
@@ -475,7 +486,7 @@ function wizardEnv(overrides = {}) {
     loadAll: async () => { calls.loadAll++ },
     ...overrides,
   }
-  return { deps, calls, wizardMintDurableKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function wizardMintDurableKey']).wizardMintDurableKey }
+  return { deps, calls, wizardMintDurableKey: build(deps, ['function revealRefusalFor', 'async function wizardMintDurableKey']).wizardMintDurableKey }
 }
 
 test('#4359: the connect mint latches only a revealable plaintext (truthy non-string / blank refused)', async () => {
@@ -629,9 +640,10 @@ test('#4330: the cap notice renders INSIDE the create-key modal from its OWN slo
     'the dialog must not read the shared tab notice (rotate-specific advice)')
 })
 
-test('#4359: every create/connect reveal seam reads the shared predicate', () => {
-  // SCOPE — this asserts the DECLARED surface (the create/connect seams), not
-  // the whole file. Same-class writers outside it are tracked in #4370.
+test('#4359/#4370: every create/connect reveal seam reads the shared predicate', () => {
+  // SCOPE — #4359 declared the create/connect surface only. #4370 closed the
+  // remaining seams and D6 makes the WHOLE writer set the assertion (below),
+  // so this arm now pins the create/connect writers inside that larger set.
   const createBody = extractDeclaration(mainJsx, 'async function createKey')
   assert.match(createBody,
     /const plaintext = revealableMintPlaintext\(mk\)/,
@@ -666,8 +678,6 @@ test('#4359: the shared predicate refuses every visually-blank shape and never m
   // character must not latch a reveal, render a blank `.key-value`, or set
   // `keyCopied`. The class is the Unicode FORMAT + DEFAULT-IGNORABLE properties
   // plus BRAILLE PATTERN BLANK (U+2800), which is in neither property.
-  const { revealablePlaintext, revealableMintPlaintext } =
-    build({}, ['function revealablePlaintext', 'function revealableMintPlaintext'])
   const blanks = ['', '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad',
     '\u061c', '\u180e', '\u115f', '\u1160', '\uffa0', '\ufe0f', '\u200b\u2800 ']
   for (const blank of blanks) {
@@ -696,4 +706,429 @@ test('#4359: the shared predicate refuses every visually-blank shape and never m
   for (const missing of [null, undefined, {}, { key: '' }]) {
     assert.equal(revealableMintPlaintext(missing), '', `${JSON.stringify(missing)} carries no plaintext`)
   }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// #4370 — the three REMAINING reveal/embed latches.
+//
+// #4342 (rotate) and #4359 (create/connect) routed their seams through the
+// shared `revealablePlaintext` predicate. Three same-class latches were left
+// outside that declared surface and are closed here, each driven over stub
+// deps exactly like the seams above:
+//
+//   1. `createGraph`'s nested-envelope latch (`b.key_plaintext`) — a presence
+//      check, so `42` / `{}` / `[]` / `'   '` mounted the modal on a blank
+//      `.key-value` whose copy wrote whitespace and then dismissed, destroying
+//      the only view of a live key.
+//   2. `mintGraphKey`'s per-graph latch (`resp.key || resp.api_key`) — the same
+//      object/number/blank shapes, now refused with the shared contract (D2)
+//      instead of the divergent `Mint response did not include a key` throw.
+//   3. the provisioned first-timer `welcomeKey` (`provisionInApp`'s envelope +
+//      the `setWelcomeKey` write site) — a truthy non-string reached state, was
+//      embedded in the connect snippet, and made the row-truth effect and the
+//      revoke prefix-clear throw `TypeError: …startsWith is not a function`.
+
+// ── createGraph (the C7 "graph created" envelope) ───────────────────────────
+function createGraphEnv({ body, status = 201, orgIdRef, onPost } = {}) {
+  const calls = { revealKey: [], error: [], busy: [], graphName: [], loadGraphs: 0, loadTeams: 0 }
+  const ref = orgIdRef || { current: 'org-A' }
+  const deps = {
+    calls,
+    currentOrgId: 'org-A',
+    busy: false,
+    newGraphName: 'g1',
+    API_BASE: '/api',
+    // The REAL predicate + the REAL refusal builder (never a stub — a stub
+    // would verify the stub, not the product).
+    revealablePlaintext,
+    orgIdRef: ref,
+    sessionTokenRef: { current: 'jwt' },
+    revealRestoreRef: { current: null },
+    rememberFocusedTrigger: () => {},
+    withLimitContact: (s) => s,
+    fetch: async () => { if (onPost) onPost(ref); return { ok: status < 400, status, json: async () => body } },
+    loadGraphs: async () => { calls.loadGraphs++ },
+    loadTeams: async () => { calls.loadTeams++ },
+    setBusy: (v) => calls.busy.push(v),
+    setError: (v) => calls.error.push(v),
+    setNewGraphName: (v) => calls.graphName.push(v),
+    setRevealKey: (v) => calls.revealKey.push(v),
+  }
+  return { ref, deps, calls, createGraph: build(deps, ['function revealRefusalFor', 'async function createGraph']).createGraph }
+}
+
+test('#4370: a truthy-but-unrevealable create-graph envelope never latches the reveal', async () => {
+  // Pre-fix the guard was `if (b && b.key_plaintext)`: all four shapes are
+  // TRUTHY (or a non-blank-shaped string), so `setRevealKey` was written with a
+  // value the modal could not render or copy. The graph and its first key WERE
+  // created, so the honest outcome is a surfaced refusal naming both facts.
+  for (const bad of [42, {}, [], '   ', '\n\t', '\u200b', '\u2800']) {
+    const { calls, createGraph } = createGraphEnv({ body: { graph: { name: 'G' }, key_plaintext: bad } })
+    await createGraph()
+    assert.deepEqual(calls.revealKey, [],
+      `an envelope carrying key_plaintext=${JSON.stringify(bad)} must never latch the reveal`)
+    const msg = calls.error.filter(Boolean).at(-1) || ''
+    assert.match(msg, /cannot be shown/, `the refusal must be surfaced for ${JSON.stringify(bad)}`)
+    assert.match(msg, /graph was created/, 'and must state that the graph itself WAS created')
+    assert.equal(calls.loadGraphs, 1, 'the graph list is refreshed — the graph exists')
+  }
+})
+
+test('#4370: the create-graph reveal still latches every legitimate envelope', async () => {
+  // Positive control: without this the guard could be satisfied by never
+  // latching at all.
+  const real = createGraphEnv({ body: { graph: { name: 'G' }, key_plaintext: 'tt_graph_first' } })
+  await real.createGraph()
+  assert.deepEqual(real.calls.revealKey,
+    [{ plaintext: 'tt_graph_first', title: 'Graph G created' }])
+  assert.deepEqual(real.calls.error, [''], 'no refusal — a revealable plaintext existed')
+
+  // No plaintext leg at all keeps the pre-#4370 behaviour (skip the reveal,
+  // no refusal): the envelope legitimately omits it when nothing was minted.
+  const absent = createGraphEnv({ body: { graph: { name: 'G' } } })
+  await absent.createGraph()
+  assert.deepEqual(absent.calls.revealKey, [])
+  assert.deepEqual(absent.calls.error, [''])
+})
+
+test('#4370: a team switch during the create-graph POST cannot re-latch the previous team’s plaintext', async () => {
+  // Pre-existing sibling of the same class: the latch ran BEFORE this handler's
+  // own Round-16 identity guard, so a switch mid-POST (which clears `revealKey`)
+  // was immediately undone by the stale continuation — the previous team's
+  // plaintext mounted under the new team's header. `mintGraphKey` already
+  // guarded its latch; this makes the two writers agree.
+  const { calls, createGraph } = createGraphEnv({
+    body: { graph: { name: 'G' }, key_plaintext: 'tt_stale' },
+    onPost: (ref) => { ref.current = 'org-B' },
+  })
+  await createGraph()
+  assert.deepEqual(calls.revealKey, [], 'a stale response must not latch a reveal under the new team')
+  assert.deepEqual(calls.error, [''], 'and must not surface a refusal under the new team either')
+})
+
+// ── mintGraphKey (the per-graph key panel) ──────────────────────────────────
+function panelMintEnv({ response, orgIdRef } = {}) {
+  const calls = { revealKey: [], graphMsg: [], graphBusy: [], graphKeyName: [], refresh: 0, api: [] }
+  const ref = orgIdRef || { current: 'org-A' }
+  const deps = {
+    calls,
+    panelGraphId: 'g-1',
+    graphBusy: false,
+    currentOrgId: 'org-A',
+    orgIdRef: ref,
+    graphPanelReqRef: { current: 0 },
+    graphKeyName: 'label',
+    revealRestoreRef: { current: null },
+    rememberFocusedTrigger: () => {},
+    revealableMintPlaintext,
+    graphMintBody: (gid, name) => ({ graph_id: gid, scopes: ['graph:read'], ...(name ? { name } : {}) }),
+    api: async (url, opts) => {
+      calls.api.push([url, opts])
+      if (response instanceof Error) throw response
+      return response
+    },
+    graphNameFor: () => 'G',
+    refreshPanelAndCounts: async () => { calls.refresh++ },
+    setGraphBusy: (v) => calls.graphBusy.push(v),
+    setGraphMsg: (v) => calls.graphMsg.push(v),
+    setGraphKeyName: (v) => calls.graphKeyName.push(v),
+    setRevealKey: (v) => calls.revealKey.push(v),
+  }
+  return { ref, deps, calls, mintGraphKey: build(deps, ['function revealRefusalFor', 'async function mintGraphKey']).mintGraphKey }
+}
+
+test('#4370: a truthy-but-unrevealable panel mint never latches the reveal', async () => {
+  for (const bad of [42, {}, [], '   ', '\n\t', '\u200b', '\u2800']) {
+    for (const field of ['key', 'api_key']) {
+      const { calls, mintGraphKey } = panelMintEnv({ response: { [field]: bad } })
+      await mintGraphKey()
+      assert.deepEqual(calls.revealKey, [],
+        `a mint carrying ${field}=${JSON.stringify(bad)} must never latch the reveal`)
+      const msg = calls.graphMsg.filter(Boolean).at(-1) || ''
+      assert.match(msg, /cannot be shown/,
+        `the refusal must use the shared contract for ${field}=${JSON.stringify(bad)} (D2)`)
+      assert.equal(calls.refresh, 1,
+        'the row IS created server-side, so the panel must be refreshed so it can be revoked')
+    }
+  }
+})
+
+test('#4370: the panel mint still latches every legitimate response', async () => {
+  const key = panelMintEnv({ response: { key: 'tt_panel_new' } })
+  await key.mintGraphKey()
+  assert.deepEqual(key.calls.revealKey,
+    [{ plaintext: 'tt_panel_new', title: 'Key for G created' }])
+  assert.deepEqual(key.calls.graphMsg, [''])
+  assert.equal(key.calls.refresh, 1)
+
+  // A revealable `api_key` leg is still reachable, and an unrevealable primary
+  // does not shadow it.
+  const fallback = panelMintEnv({ response: { api_key: 'tt_panel_fallback' } })
+  await fallback.mintGraphKey()
+  assert.deepEqual(fallback.calls.revealKey,
+    [{ plaintext: 'tt_panel_fallback', title: 'Key for G created' }])
+
+  const shadowed = panelMintEnv({ response: { key: {}, api_key: 'tt_panel_shadowed' } })
+  await shadowed.mintGraphKey()
+  assert.deepEqual(shadowed.calls.revealKey,
+    [{ plaintext: 'tt_panel_shadowed', title: 'Key for G created' }])
+  assert.deepEqual(shadowed.calls.graphMsg, [''],
+    'an unrevealable primary must not produce a refusal while a valid value was in hand')
+})
+
+test('#4370: a team switch during the panel mint suppresses both the reveal and the refusal', async () => {
+  const { ref, calls, mintGraphKey } = panelMintEnv({
+    response: { key: '   ' },
+  })
+  // The stub api() hands the response back; the switch has already happened.
+  ref.current = 'org-B'
+  await mintGraphKey()
+  assert.deepEqual(calls.revealKey, [])
+  assert.deepEqual(calls.graphMsg, [''], 'the refusal names THIS team’s key — it must not follow a switch')
+  assert.equal(calls.refresh, 0, 'and no refresh runs for another team’s panel')
+})
+
+// ── provisionInApp + the welcomeKey write site ──────────────────────────────
+function provisionInAppEnv({ body, ok = true, status = 201 } = {}) {
+  const calls = { provisioning: [], provisionError: [] }
+  const deps = {
+    calls,
+    revealablePlaintext,
+    session: { user: { id: 'u1' } },
+    readSession: async () => ({ kind: 'signed-in', user: { id: 'u1', email: 'a@b.c', displayName: 'A' } }),
+    document: { cookie: '' },
+    API_BASE: '/api',
+    fetch: async () => ({ ok, status, json: async () => body }),
+    window: { location: { search: '' } },
+    bounceToAuth: () => {},
+    oauthErrorHash: () => '',
+    setWelcomeProvisioning: (v) => calls.provisioning.push(v),
+    setWelcomeProvisionError: (v) => calls.provisionError.push(v),
+  }
+  return { deps, calls, provisionInApp: build(deps, ['async function provisionInApp']).provisionInApp }
+}
+
+test('#4370: the provision envelope hands over only a revealable plaintext (the org still resolves)', async () => {
+  for (const bad of [42, {}, [], '   ', '\u200b']) {
+    const { provisionInApp } = provisionInAppEnv({ body: { org_id: 'o-1', org_name: 'Org', api_key: bad } })
+    const out = await provisionInApp({ user: { id: 'u1' } }, 'Org')
+    assert.equal(out && out.api_key, '',
+      `an envelope carrying api_key=${JSON.stringify(bad)} must resolve to '' (the connect step re-gates on the rows)`)
+    assert.equal(out && out.org_name, 'Org', 'the org itself IS committed, so it must still resolve')
+  }
+  const real = provisionInAppEnv({ body: { org_id: 'o-1', org_name: 'Org', api_key: 'tt_provisioned' } })
+  assert.equal((await real.provisionInApp({ user: { id: 'u1' } }, 'Org')).api_key, 'tt_provisioned')
+})
+
+function welcomeCreateOrgEnv({ provisioned }) {
+  const calls = { welcomeKey: [], orgName: [], graphName: [], teamReady: [], step: [] }
+  const deps = {
+    calls,
+    revealablePlaintext,
+    wizardOrgBusy: false,
+    wizardOrgName: 'Org',
+    orgNameError: () => '',
+    teams: [],
+    sessionRef: { current: { user: { id: 'u1' } } },
+    provisionInApp: async () => provisioned,
+    setWizardOrgError: () => {},
+    setWizardOrgName: (v) => calls.orgName.push(v),
+    setWelcomeKey: (v) => calls.welcomeKey.push(v),
+    setWelcomeOrgName: (v) => calls.orgName.push(v),
+    setWelcomeGraphName: (v) => calls.graphName.push(v),
+    setWelcomeTeamReady: (v) => calls.teamReady.push(v),
+    setWizardStep: (v) => calls.step.push(v),
+    setWizardOrgBusy: () => {},
+    setWelcomeProvisioning: () => {},
+    loadTeams: async () => {},
+    refreshTeam: async () => ({ org_id: 'o-1' }),
+    teamRefreshSeqRef: { current: 0 },
+    loadAlerts: () => {},
+  }
+  return { deps, calls, handleWizardCreateOrg: build(deps, ['async function handleWizardCreateOrg']).handleWizardCreateOrg }
+}
+
+test('#4370: the welcomeKey write site stores only a revealable string (no later startsWith TypeError)', async () => {
+  // The write site is the LAST line of defence: even if a producer handed over
+  // a non-string, `welcomeKey` must never hold one — that state feeds
+  // `snippetKey`, `durableConnectKey`'s `welcome.startsWith(...)` and the revoke
+  // prefix-clear. An empty value is the deliberate fall-through to the rows
+  // re-gate path (the connect step offers a rotate of the key just minted).
+  // Every shape is awaited IN TURN (not `return`ed out of the loop): a `return`
+  // here exited the test on the first shape, silently skipping `{}`/`[]`/blank
+  // and making the positive control below dead code.
+  for (const bad of [42, {}, [], '   ', '\u200b']) {
+    const env = welcomeCreateOrgEnv({ provisioned: { api_key: bad, org_name: 'Org', graph_name: 'g' } })
+    await env.handleWizardCreateOrg()
+    assert.deepEqual(env.calls.welcomeKey, [''],
+      `a producer handing api_key=${JSON.stringify(bad)} must not put it in welcomeKey`)
+  }
+  const real = welcomeCreateOrgEnv({ provisioned: { api_key: 'tt_welcome', org_name: 'Org', graph_name: 'g' } })
+  await real.handleWizardCreateOrg()
+  assert.deepEqual(real.calls.welcomeKey, ['tt_welcome'],
+    'a valid provisioned key must still reach setWelcomeKey')
+})
+
+// ── the graph reveal modal's derived gate + guarded copy ────────────────────
+function revealCopyEnv(revealKeyReveal, clipboard = { writeText: async () => {} }) {
+  const written = []
+  const closed = []
+  const selected = { selectNodeContents: [], addRange: [], removeAllRanges: 0 }
+  const fakeEl = { nodeType: 1, __keyValue: true }
+  const deps = {
+    revealKeyReveal,
+    navigator: {
+      clipboard: {
+        writeText: async (v) => { written.push(v); return (clipboard.writeText || (async () => {}))(v) },
+      },
+    },
+    document: {
+      querySelector: (sel) => { assert.equal(sel, '.modal .key-value'); return fakeEl },
+      createRange: () => ({ selectNodeContents: (el) => { selected.selectNodeContents.push(el) } }),
+    },
+    window: {
+      getSelection: () => ({
+        removeAllRanges: () => { selected.removeAllRanges++ },
+        addRange: (r) => { selected.addRange.push(r) },
+      }),
+    },
+    closeRevealKey: () => closed.push(true),
+  }
+  return { written, closed, selected, fakeEl, copyRevealKey: build(deps, ['async function copyRevealKey']).copyRevealKey }
+}
+
+test('#4370: the graph reveal Copy reads the derived gate and never writes a non-string', async () => {
+  // The old inline handler ran `writeText(revealKey.plaintext)` unconditionally
+  // and then dismissed: `writeText('   ')` resolves, so the only view of a live
+  // key was destroyed by a silent no-op copy.
+  for (const bad of ['', null, undefined, 0]) {
+    const { written, closed, copyRevealKey } = revealCopyEnv(bad)
+    await copyRevealKey()
+    assert.deepEqual(written, [], `writeText must not be reached with ${JSON.stringify(bad)}`)
+    assert.deepEqual(closed, [], 'and the modal must not be dismissed')
+  }
+  const real = revealCopyEnv('tt_graph_reveal')
+  await real.copyRevealKey()
+  assert.deepEqual(real.written, ['tt_graph_reveal'])
+  assert.deepEqual(real.closed, [true], 'a successful copy is the #2392 contract — close only after it resolves')
+  assert.equal(String({}), '[object Object]', 'the coercion the object shapes would have ridden')
+})
+
+test('#4370: a refused graph-reveal clipboard keeps the key on screen and SELECTS it', async () => {
+  const env = revealCopyEnv('tt_graph_reveal', { writeText: async () => { throw new Error('blocked') } })
+  await env.copyRevealKey()
+  assert.deepEqual(env.written, ['tt_graph_reveal'], 'the write is attempted with the string')
+  assert.deepEqual(env.closed, [],
+    'a failed write must NOT dismiss the only view of a live key (#2735 class)')
+  assert.deepEqual(env.selected.selectNodeContents, [env.fakeEl],
+    'the key element must be handed to selectNodeContents')
+  assert.equal(env.selected.addRange.length, 1)
+  assert.equal(env.selected.removeAllRanges, 1)
+})
+
+test('#4370: the graph reveal modal is gated on the derived string, not the truthy object', () => {
+  // ONE derivation gates the modal, mirroring `newKeyReveal` /
+  // `rotatedKeyReveal`; `{revealKey && …}` was truthy for `{}`/`42`/`[]` and
+  // rendered a blank `.key-value`.
+  assert.match(mainJsxCode,
+    /const revealKeyReveal = \(revealKey && revealablePlaintext\(revealKey\.plaintext\)\) \|\| ''/,
+    'the graph reveal key must be derived once from a non-blank string')
+  assert.match(mainJsxCode, /\{revealKeyReveal && \(/,
+    'the JSX must gate on the derived string, not the truthy object')
+  assert.equal((mainJsxCode.match(/\{revealKey && \(/g) || []).length, 0,
+    'the raw-object gate must be gone')
+  assert.equal((mainJsxCode.match(/writeText\(revealKey\.plaintext\)/g) || []).length, 0,
+    'the raw state must never be handed to the clipboard')
+  assert.match(mainJsxCode, /<code className="key-value">\{revealKeyReveal\}<\/code>/,
+    'the modal must render the derived value it copies')
+  assert.match(mainJsxCode, /onClick=\{copyRevealKey\}>Copy &amp; done<\/button>/,
+    'the reveal Copy must call the guarded `copyRevealKey`')
+})
+
+// ── D6: the writer-set ratchet ──────────────────────────────────────────────
+test('#4370 (D6): the plaintext-writer set is closed, and every member reads the shared predicate', () => {
+  // #4359's completeness assertion was NAME-scoped (`typeof newKey === 'string'`
+  // appeared nowhere), so a seam landing on a DIFFERENT plaintext state — or on
+  // a bare-truthy spelling — was invisible. This is the whole-set version.
+  //
+  // (a) THE RATCHET: every store of reveal/embed plaintext that is NOT a clear
+  // (`''` / null / false / undefined). A new seam changes this count and fails
+  // here, so it must be classified by function below instead of landing
+  // silently. Comment-stripped source, so a commented-out seam cannot satisfy it.
+  // #4429: the rotate writer stores into the per-team map via a functional
+  // updater (`setRotateOutcomes((prev) => ({ … plaintext … }))`), not the
+  // single-slot `setRotatedKey({…})` this ratchet originally saw. The
+  // block-bodied clear in `copyRotatedKey` (`(prev) => {`) and the `{}` reset
+  // in `switchTeam` are NOT stores, so the alternation matches only the
+  // object-literal store.
+  const NON_CLEAR_STORE = /\bset(?:RevealKey|NewKey|RotatedKey|WizardDurableKey|WelcomeKey)\((?!\s*(?:''|""|null|false|undefined)\s*\))|setRotateOutcomes\(\(prev\) => \(\{/g
+  const stores = mainJsxCode.match(NON_CLEAR_STORE) || []
+  assert.equal(stores.length, 9,
+    `the plaintext-writer set changed (${stores.length} non-clear stores). Classify the new/removed writer here and in this test's table:\n${stores.join('\n')}`)
+
+  // (b) EVERY writer reads the predicate. The stored expression and the
+  // predicate read are pinned per writer, by function — never by counting
+  // `typeof` occurrences (name-scoping is what let the class land before).
+  const WRITERS = [
+    ['async function createKey', /setNewKey\(plaintext\)/, /const plaintext = revealableMintPlaintext\(mk\)/],
+    ['async function wizardMintDurableKey', /setWizardDurableKey\(plaintext\)/, /const plaintext = revealableMintPlaintext\(mk\)/],
+    ['async function copyNewKey', /setWizardDurableKey\(plaintext\)/, /const plaintext = revealablePlaintext\(newKey\)/],
+    ['function dismissKeyModal', /if \(plaintext\) setWizardDurableKey\(plaintext\)/, /const plaintext = revealablePlaintext\(newKey\)/],
+    ['async function regenerateKey', /setRotateOutcomes\(\(prev\) => \(\{/, /const plaintext = revealableMintPlaintext\(mk\)/],
+    ['async function createGraph', /setRevealKey\(\{/, /const plaintext = revealablePlaintext\(b\.key_plaintext\)/],
+    ['async function mintGraphKey', /setRevealKey\(\{ plaintext, title:/, /const plaintext = revealableMintPlaintext\(resp\)/],
+    ['async function handleWizardCreateOrg', /setWelcomeKey\(revealablePlaintext\(provisioned\.api_key\)\)/, null],
+    ['async function provisionInApp', /api_key: revealablePlaintext\(body\.api_key\)/, null],
+  ]
+  for (const [fn, store, predicate] of WRITERS) {
+    const body = extractDeclaration(mainJsx, fn)
+    assert.match(body, store, `${fn} must still store the plaintext into reveal/embed state`)
+    if (predicate) {
+      assert.match(body, predicate, `${fn} must derive that value through the shared predicate`)
+    } else {
+      assert.match(body, /revealablePlaintext\(/, `${fn} must read the shared predicate`)
+    }
+  }
+
+  // The 9th store is the wizard's PASTE box, which is classified differently
+  // and deliberately so: it is a USER-typed candidate, not a server envelope.
+  // `pasted` is a trimmed string (`wizardDurablePaste.trim()`), prefix-checked
+  // (`/^tt_/`) and row-verified (`durableConnectKey('', pasted, keys)` must not
+  // resolve 'unknown'/'bootstrap'/'expiring'/'revoked'/'disabled') BEFORE it is
+  // stored, so no non-string can reach it. Pin all three guards so a future edit
+  // cannot drop them and keep this arm green.
+  const pastedStart = mainJsxCode.indexOf('const pasted = wizardDurablePaste.trim()')
+  const pastedEnd = mainJsxCode.indexOf('setWizardDurableKey(pasted)', pastedStart)
+  assert.ok(pastedStart > -1 && pastedEnd > pastedStart,
+    'the classified paste writer must still exist')
+  const pasted = mainJsxCode.slice(pastedStart, pastedEnd + 'setWizardDurableKey(pasted)'.length)
+  assert.match(pasted, /setWizardDurableKey\(pasted\)/,
+    'the paste writer must still be the classified site')
+  assert.match(pasted, /const pasted = wizardDurablePaste\.trim\(\)/,
+    'the pasted value is a trimmed string')
+  assert.match(pasted, /if \(!\/\^tt_\/\.test\(pasted\)\)/,
+    'and it is prefix-checked before it is stored')
+  assert.match(pasted, /durableConnectKey\('', pasted, keys\)/,
+    'and row-verified (never embedded on unknown)')
+})
+
+test('#4370 (D2): the "cannot be shown" refusal is ONE contract across every reveal seam', () => {
+  // The seams' remedies legitimately differ, so only the prefix is shared —
+  // before this, `mintGraphKey` was the one seam with divergent wording, which
+  // is why the class could not be asserted as a whole.
+  const refusal = extractDeclaration(mainJsx, 'function revealRefusalFor')
+  assert.match(refusal, /The server did not return the \$\{subject\}, so it cannot be shown\./,
+    'the shared prefix must be the one authority')
+  assert.equal((mainJsxCode.match(/The server did not return the /g) || []).length, 1,
+    'no seam may re-inline the prefix (the builder is the only copy)')
+  for (const fn of ['async function createKey', 'async function wizardMintDurableKey',
+    'async function regenerateKey', 'async function mintGraphKey', 'async function createGraph']) {
+    assert.match(extractDeclaration(mainJsx, fn), /revealRefusalFor\(/,
+      `${fn} must surface its refusal through the shared contract`)
+  }
+  // The one seam that is deliberately NOT the "server did not return" shape: the
+  // ambiguous rotate failure may not have completed, so its disclosure says so.
+  assert.match(extractDeclaration(mainJsx, 'async function regenerateKey'),
+    /The rotate request did not return a usable response/,
+    'the ambiguous rotate disclosure keeps its own (legitimately different) sentence')
 })

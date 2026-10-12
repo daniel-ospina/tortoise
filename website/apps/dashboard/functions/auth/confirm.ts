@@ -91,6 +91,7 @@ import {
   buildCookie,
   clearCookie,
   createSession,
+  ensurePendingTable,
   ensureSchema,
   json,
   randomHandle,
@@ -122,28 +123,10 @@ const RECOVERY_MAX_AGE_S = 10 * 60;
 /** Rendered responses are Functions output, so `_headers` does not reach them. */
 const HSTS = "max-age=31536000; includeSubDomains";
 
-/**
- * A pending email-flow confirmation: the outcome of a VERIFIED `token_hash`,
- * held server-side until the user confirms on the interstitial. Its own table
- * (not `auth_flows`) because the credential it carries — the refresh token —
- * must never be exposed to, or controllable by, a flow-start request.
- *
- * `kind` is the GoTrue `type` the link arrived with, and it is what makes
- * recovery-only behaviour (F15 bulk revoke, the reset panel) apply to recovery
- * and NOT to an ordinary confirmation or magic link.
- */
-async function ensurePendingTable(db: D1Database): Promise<void> {
-  await db.exec(
-    "CREATE TABLE IF NOT EXISTS email_flow_pending (" +
-      "flow_id TEXT PRIMARY KEY, " +
-      "kind TEXT NOT NULL, " +
-      "user_id TEXT NOT NULL, " +
-      "refresh_token TEXT NOT NULL, " +
-      "email TEXT, " +
-      "created_at INTEGER NOT NULL, " +
-      "expires_at INTEGER NOT NULL);",
-  );
-}
+// The `email_flow_pending` bootstrap — its DDL and the credential-handling
+// rationale — lives in `_shared/auth/session.ts` beside the other store
+// bootstraps, because `/auth/start` sweeps expired rows of this table too and
+// both routes must create an identical schema (#8032).
 
 const HTML_ENTITIES: Record<string, string> = {
   "&": "&amp;",

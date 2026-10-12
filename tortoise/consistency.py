@@ -69,6 +69,8 @@ from .projection import (
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
     _writable_id,
+    entities,
+    fold_with_entities,
     hard_deleted_pairs,
     journal_epistemic_existence,
     journal_first_materialization,
@@ -78,10 +80,13 @@ from .projection import (
     prewipe_snapshot_path,
 )
 from .projection.entities import (
+    BELIEF_BOOL_PROPS,
+    BELIEF_PROPS,
     _EntityHandlers,
     _is_persistable_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    flatten_search_keys_prop,
     is_non_operator_payload,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
@@ -104,6 +109,12 @@ logger = logging.getLogger(__name__)
 _POINT_HANDLED: frozenset = _EntityHandlers._POINT_HANDLED
 _POINT_LIST_PROPS: frozenset = _EntityHandlers._POINT_LIST_PROPS
 _POINT_DENY: frozenset = _EntityHandlers._POINT_DENY
+# #8006: the props the SHARED Point writer normalizes from a payload LIST into
+# the graph's flat STRING (`flatten_search_keys_prop`). Read from the writer's
+# own declaration for the same reason as the three above: `_uncarried` must not
+# call such a value "the projection cannot hold this" when it now carries it,
+# and the canonical view must compare the WRITER'S form, not the payload's.
+_POINT_FLATTEN_LIST_PROPS: frozenset = entities._POINT_FLATTEN_LIST_PROPS
 
 
 # ── #5011: the projection's declared content schema ───────────────────────
@@ -431,6 +442,16 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     OWN explicit-False identity therefore outranks the descriptor, exactly as
     it does in ``projection/entities.py::_upsert_point_props``.
 
+    #8006: the ``_POINT_FLATTEN_LIST_PROPS`` keys are normalized to the graph's
+    canonical STRING form on BOTH sides, through the writer's own function. The
+    journal records E3's ``list[str]`` while the node holds the space-joined
+    string, so comparing the raw values would report a FALSE content divergence
+    on every faithfully replayed point that carries one — and the graph's
+    legacy ARRAY form (#5444, which the writer's fixup repairs) normalizes too,
+    so a legitimate repair is not reported as a divergence. Presence is still
+    compared: a journal list with NO graph value reports the key, which is the
+    coverage the pre-#8006 ``uncarried`` classification did not have.
+
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
     so the exclusion stays visible instead of becoming a silent hole.
@@ -441,6 +462,9 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         k: v for k, v in props.items()
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
+    # The writer's OWN normalization, so the checker's view of a point matches
+    # what the writer makes of it (#8006).
+    flatten_search_keys_prop(out)
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
@@ -488,6 +512,12 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
     (`_POINT_HANDLED`) or one already excluded with its own reason is not a
     "loss", and anything else that `_persist_extra_props` would drop (null,
     non-persistable value, undeclared list) is.
+
+    #8006: a list-valued `_POINT_FLATTEN_LIST_PROPS` key is NOT a loss — the
+    shared writer flattens it to the graph's string form, so the journal's list
+    is carried (in its canonical form) rather than dropped. Excluding it here
+    is what lets `_canonical_point_fields` compare it: leaving it out would have
+    made the checker blind to a future regression on that very door.
     """
     out: dict[str, dict[str, str]] = {}
     for pid, props in journal_by_id.items():
@@ -499,6 +529,10 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 continue
             if v is None:
                 found[k] = _UNCARRIED_NULL
+            elif k in _POINT_FLATTEN_LIST_PROPS:
+                # Carried in canonical form — not uncarried, whatever its
+                # payload type (a list flattens, a str is already canonical).
+                continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)
             elif not _is_persistable_prop_value(v):
@@ -1219,6 +1253,28 @@ _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 #: neither can share this constant without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
+#: #7936 — the belief properties the entity leg COMPARES, read from the
+#: writer's own declarations (``_fold_confidence_changed`` writes exactly this
+#: set), so a key added to the writer cannot silently stay outside the check.
+#: Before this the entity leg compared entity PRESENCE and Object/Subject
+#: ``status`` only, so a wrong, stale or lost belief on a ``:Subject`` /
+#: ``:Object`` / ``:Event`` was invisible to the whole durability gate: the
+#: Point-only ``_compare_views`` never sees the id, and (being graph-only) the
+#: Point-only fingerprint could not move either. Measured: corrupting an
+#: ``:Event``'s ``confidence`` left ``ok=True, divergence=None``.
+#:
+#: STATED BOUND: the leg still runs journal→graph only, so a graph-only belief
+#: write on a non-Point node with NO ``ConfidenceChanged`` anywhere in the
+#: journal (an unjournalled producer — the #4240 class) remains invisible here.
+#: The ``db_hash`` baseline is deliberately NOT widened to cover it: the digest
+#: covers the Point view, and folding the entity view into it would move
+#: ``content_hash`` for every existing baseline, which the check reports as an
+#: ``unrecorded-mutation`` and — because it never re-records over an
+#: untrusted/differing baseline — would report for ever. Widening the digest
+#: needs a baseline-format migration, which is #7936's remaining durable step.
+_ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
+    BELIEF_BOOL_PROPS)
+
 
 def _creation_entity_id(t: str, ev: dict) -> object:
     """The id a creation record registers, resolved as the GRAPH fold does.
@@ -1700,6 +1756,15 @@ def _graph_entities(projection) -> tuple[dict, dict]:
             eid = props.get(prop)
             if isinstance(eid, str) and eid:
                 rec = {"status": props.get("status")}
+                # #7936: carry the belief properties too — the comparison's
+                # non-Point content leg is what makes a corrupted/stale belief
+                # on this node a divergence (`_ENTITY_BELIEF_FIELDS`). Only
+                # keys the node actually has are copied, so a node with no
+                # belief at all keeps `rec` at `{"status": …}` and the
+                # comparison stays presence-conditional.
+                for _bk in _ENTITY_BELIEF_FIELDS:
+                    if _bk in props:
+                        rec[_bk] = props[_bk]
                 out[(label, eid)] = rec
                 name = props.get("name")
                 if isinstance(name, str) and name:
@@ -1750,24 +1815,44 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         # clobbering it), so a superseded team/role/person is exactly the
         # "buried behind a live status" shape this leg exists to catch.
         # `Event` carries `eventStatus` under a different name and its
-        # lifecycle has no such fold, so the comparison stays bounded to the
+        # lifecycle has no such fold, so the STATUS leg stays bounded to the
         # families that model the field. Presence is compared for every kind.
         # (The Object-only `ambiguous_status` bound is unaffected: a Subject
         # name-only ref is REFUSED as never-guess, so it never becomes
         # ambiguous.)
-        if label not in ("Object", "Subject") or ambiguous_status:
-            continue
-        jv = rec.get("status")
-        if jv is None:
-            continue
-        gv = g.get("status")
-        if gv != jv:
-            count += 1
-            if len(mismatches) < _MAX_DIVERGENT_POINTS:
-                mismatches.append({
-                    "id": eid, "label": label, "field": "status",
-                    "expected": jv, "found": gv,
-                })
+        if label in ("Object", "Subject") and not ambiguous_status:
+            jv = rec.get("status")
+            if jv is not None:
+                gv = g.get("status")
+                if gv != jv:
+                    count += 1
+                    if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                        mismatches.append({
+                            "id": eid, "label": label, "field": "status",
+                            "expected": jv, "found": gv,
+                        })
+        # #7936: the BELIEF leg — every reference-fold label, `Event` included
+        # (the belief fold matches it on its `id` property exactly like the
+        # other three, so `eventStatus`'s separate lifecycle is irrelevant
+        # here). Presence-conditional from the JOURNAL side, like the Point
+        # leg: only a key the journal's own fold carries can state an
+        # expectation, and a journal-side `None` is "absent" rather than a
+        # value (`_canonical_point_fields`'s rule — the writer cannot persist a
+        # null property, so the graph removes it).
+        for field in _ENTITY_BELIEF_FIELDS:
+            if field not in rec:
+                continue
+            jv = rec.get(field)
+            if jv is None:
+                continue
+            gv = g.get(field)
+            if not _values_equal(jv, gv):
+                count += 1
+                if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                    mismatches.append({
+                        "id": eid, "label": label, "field": field,
+                        "expected": jv, "found": gv,
+                    })
     for key in deleted:
         if key in graph_entities:
             count += 1
@@ -1843,28 +1928,46 @@ def check_consistency(log_path: str, projection, *,
     non_folded = list(_nf_entries)
     non_folded_refused = refused_events(non_folded)
 
+    # #7936: the non-Point BELIEF leg. `_fold_journal` above is the point-only
+    # index and `_fold_journal_entities` models the entity LIFECYCLE (creation /
+    # rename / collapse / supersede) but folds no belief, so before this the
+    # whole check was blind to a belief on a `:Subject`/`:Object`/`:Event`.
+    # ONE authority folds it — `projection.fold_with_entities`, through the very
+    # `_apply_belief_props` the Point arm uses — and the result is merged onto
+    # the records `_compare_entities` already reads (a record the entity fold
+    # does not model is NOT invented here: presence stays the entity fold's
+    # question). Called OUTSIDE the non-folded collector on purpose: this walk
+    # visits every record, so an unknown/unimplemented type would be recorded a
+    # SECOND time and the diagnostic's own count would double.
+    for _key, _belief in fold_with_entities(events)[1].items():
+        _rec = journal_entities.get(_key)
+        if isinstance(_rec, dict):
+            _rec.update(_belief)
+
     # The COUNT is read from the graph directly, NOT from `len(graph_by_id)`.
     # `graph_by_id` is keyed by `n.id`, so two nodes sharing an id (or a node
     # whose id is not a string) would COLLAPSE and the size check would pass
     # while the graph holds more nodes than the journal — a fail-open. The
     # comparison still uses `graph_by_id`; the count does not.
     #
-    # ⛔ #7936 KNOWN GAP (content leg): both the journal side
-    # (`journal_by_id = _fold_journal(events)`) and the graph side below are
-    # POINT-ONLY, and `db_hash` is a digest of this Point-only dict. So a wrong,
-    # stale, or unjournaled BELIEF on a `:Subject`/`:Object`/`:Event`
-    # (`confidence` / `posterior_alpha` / `posterior_beta` / `lastDreamedAt` /
-    # `outdated`) is INVISIBLE here: `_compare_views` never sees the id, the
-    # non-Point leg (`_compare_entities`) compares presence and Object `status`
-    # only, and the Point-only fingerprint cannot move. `check_consistency`
-    # therefore returns `ok=True` for a graph whose non-Point belief diverges.
-    # The non-folded exemption above (`projection._reference_fold_non_point_target`)
-    # correctly STOPS reporting a HEALTHY non-Point belief as a miss, but this
-    # content blind spot is the other half of #7936 and is NOT contained here —
-    # it needs the `(label, id)` re-key of both sides and of the fingerprint.
-    # Pinned as a DOCUMENTED GAP (not as correct) by
-    # `tests/test_7853_confidence_label_propagation.py::
-    # test_content_comparison_known_gap_non_point_belief_is_invisible`.
+    # ⛔ #7936 CLOSED (content leg): the non-Point BELIEF blind spot is removed.
+    # `journal_by_id`/`db_hash` below are still POINT-ONLY by construction, but
+    # the entity leg (`_fold_journal_entities` + `_compare_entities`) now folds
+    # and compares the belief properties (`_ENTITY_BELIEF_FIELDS`) on every
+    # `:Subject`/`:Object`/`:Event`, so a wrong, stale or lost belief there is a
+    # `divergence="content"` instead of `ok=True`. Measured before/after on the
+    # shape `rebuild_all` had just produced (`hash_match=True`): corrupting the
+    # Event's `confidence` read `ok=True, divergence=None`; it now reports
+    # `ok=False, divergence="content"` with the `confidence` field named.
+    # Pinned by `tests/test_7853_confidence_label_propagation.py::
+    # test_content_comparison_sees_a_non_point_belief_divergence` (the inverted
+    # form of the gap pin that used to assert the blind spot).
+    #
+    # The `(label, id)` re-key of THIS Point view and of `db_hash` — one index
+    # deriving `log_points`/`db_points`/`_compare_views`/the fingerprint — stays
+    # open on #7936: widening the digest moves `content_hash` for every existing
+    # baseline and the sidecar has no migration (an untrusted/differing state is
+    # never re-recorded), so it needs a baseline-format change first.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
@@ -2008,7 +2111,16 @@ def check_consistency(log_path: str, projection, *,
         "entity_parity_ambiguous_count": len(entity_ambiguous_excluded),
         "entity_parity_bounds": {
             "direction": "journal->graph",
-            "status_compared": ["Object"],
+            "status_compared": ["Object", "Subject"],
+            # #7936: the non-Point belief leg. `fields` are the properties
+            # compared on every reference-fold label; the digest bound names
+            # what the BASELINE still cannot see (it covers the Point view
+            # only), so the check states its own blind spot instead of implying
+            # a coverage it does not have.
+            "belief_compared": list(_ENTITY_BELIEF_FIELDS),
+            "baseline_digest_covers": (
+                "Point-only (the entity beliefs are compared journal->graph, "
+                "not fingerprinted)"),
             "name_keyed": ["Object", "Subject"],
             "identity": {"Object": "name", "Subject": "name",
                          "Event": "eventId"},
@@ -2105,6 +2217,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
     every one of those cases: the rebuild did complete and refusing to open the
     store would be strictly worse, so the signal is PROPAGATED for the caller
     to branch on rather than swallowed into a success-shaped result.
+
+    #5353 adds the `:TeamMeta` first-org marker on the SAME four-part shape —
+    `team_meta_gap`, `team_meta_state_unknown`, and their own additive `reason`
+    clauses — because the class is the entire `#2789` first-org guard: a marker
+    the rebuild did not carry back leaves that guard reading 0, so the next
+    provisioning call re-mints it with the control plane's name and a fresh
+    `created`. The two classes report SEPARATELY (neither aggregate absorbs the
+    other) for the same reason the three onboarding shapes do.
 
     ATOMICITY on refusal (#7929): the refusals this function can only reach
     AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
@@ -2383,6 +2503,38 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "from an earlier interrupted rebuild — so this graph's "
                     "onboarding state is UNKNOWN (not confirmed absent) — "
                     "see #4641")
+        # #5353: the `:TeamMeta` first-org marker, reported separately for the
+        # same reason as the onboarding legs — its gap key is a max over three
+        # shapes (a confirmed loss, an unverified restore, a pre-preservation
+        # UNKNOWN), so a caller must read the shape it needs rather than infer
+        # it from the aggregate. A marker that did not come back leaves the
+        # `#2789` guard reading 0, which is the whole reason the class is
+        # carried.
+        team_meta_gap = int(counts.get("team_meta_gap") or 0)
+        if team_meta_gap:
+            result["team_meta_gap"] = team_meta_gap
+            if counts.get("team_meta_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the :TeamMeta post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's first-org marker "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #5353")
+            elif (counts.get("team_meta_expected")
+                  and not counts.get("team_meta_restored")):
+                result["reason"] += (
+                    "; WARNING: the pre-wipe :TeamMeta first-org marker was "
+                    "NOT restored, so the #2789 guard reads 0 and a later "
+                    "provisioning call can re-mint it with the control "
+                    "plane's name — see the rebuild ERROR log (#5353)")
+            if counts.get("team_meta_state_unknown"):
+                result["team_meta_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not carry "
+                    "a usable :TeamMeta record — it either predates marker "
+                    "preservation or inherits a state-UNKNOWN marker from an "
+                    "earlier interrupted rebuild — so whether this graph's "
+                    "first-org marker was destroyed CANNOT be determined — "
+                    "see #5353")
         return result
 
     if not files:

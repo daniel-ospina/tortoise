@@ -55,12 +55,65 @@ set -euo pipefail
 # line may only stay unmasked when it is a RECOGNISED-SAFE shape: empty, a plain
 # host with no ':', a single-':' host:port with a NUMERIC port, or a bracketed
 # IPv6 host with an optional numeric port. Everything else fails closed.
+#
+# #5267 — the cut set is not only whitespace, so the boundary the predicate
+# judges at is only the fragment UP TO the first delimiter, and everything
+# beyond it used to be echoed: `rediss://u:pw@h:1 :S3nPw`, `...@h:1":S3nPw`,
+# `...@h:1#:S3nPw`, `...@host\r:S3nPw` (a lone CR is not a line break here —
+# `read` splits on LF), `rediss:// :S3nPw/db`. Every delimiter-bounded fragment
+# beyond the region is now judged by `_fragment_tell` (below), and a scheme-less
+# continuation line is judged the same way when the VALUE carries a scheme
+# (`user:S3nPw:6379` — the port-retaining copy-paste). The tell is deliberately
+# NARROWER than the authority predicate: prose is full of `key: value` shapes
+# (`error:`, `12:30:45`, `warn: bad`, `C:\foo`, a timestamp), and failing closed
+# on those would drop the diagnostic the mask exists to preserve.
 _redact_uri() {
     local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
-          tail before rest cut=$'[/?#"\047 \t\v\f\r\n]'
+          tail before rest cut=$'[/?#"\047 \t\v\f\r\n]' \
+          region scan frag uri_has_scheme=0
     if [ -z "$uri" ]; then
         return 0
     fi
+    # #5267: a scheme-less line is judged as credential material only when the
+    # VALUE carries a scheme — `user:pw:6379` is a continuation of a URI value
+    # split across lines, while the same text alone (prose, a path) is not.
+    # Mirrors `_uri_bearing` in the canonical helper.
+    case "$uri" in
+        *://*) uri_has_scheme=1 ;;
+    esac
+    # #5267 — the fragment tell. The authority region is bounded at the first
+    # delimiter, so a credential in a LATER delimiter-bounded fragment was never
+    # judged (`rediss://u:pw@h:1 :S3nPw`, `...@host\r:S3nPw`,
+    # `rediss:// :S3nPw/db`). The authority predicate cannot judge a fragment:
+    # it fails closed on any `key: value` (`error:`, `C:\foo`, `connect:`),
+    # which is prose the boot log must keep printing. Two tells are unambiguous,
+    # and mirror `tortoise/__main__.py::_credential_tell` exactly:
+    #   * ':'-led with a non-empty tail (`:S3nPw`) — the empty-user form of a
+    #     dropped '@host', a shape no prose takes;
+    #   * `user:pw:6379` — two-or-more ':' with an ALL-DIGIT last field AND at
+    #     least one ASCII letter. The letter requirement is what separates the
+    #     credential from the prose that shares its arity (a bare timestamp
+    #     `12:30:45` has no letter; a single colon, `warn: bad`, is excluded).
+    _fragment_tell() {
+        case "$1" in
+            :?*) return 0 ;;
+        esac
+        case "$1" in
+            *:*:*)
+                case "$1" in
+                    *[a-zA-Z]*) ;;
+                    *) return 1 ;;
+                esac
+                case "${1##*:}" in
+                    ''|*[!0-9]*) return 1 ;;
+                esac
+                if [ -n "${1%%:*}" ]; then
+                    return 0
+                fi
+                ;;
+        esac
+        return 1
+    }
     while IFS= read -r line || [ -n "$line" ]; do
         if ! masked=$(printf '%s' "$line" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|'); then
             # A redaction failure must not silently blank the target either:
@@ -123,13 +176,33 @@ _redact_uri() {
                 # sync — a different cut set is a divergence, and `[[:space:]]`
                 # additionally matches NBSP under a UTF-8 locale, which the
                 # canonical literal set does not (a parity break).
-                candidate="${candidate%%$cut*}"
-                if [ -n "$candidate" ]; then
-                    case "$candidate" in
+                region="${candidate%%$cut*}"
+                # #5267: everything AFTER the bounded region is delimiter-
+                # bounded fragment material too, judged by the tell above —
+                # the canonical judges the same text in the same place. A
+                # scheme-less line is that material in full (its region is the
+                # line's own first fragment, predicated just below).
+                scan="${candidate#"$region"}"
+                if [ "$uri_has_scheme" -eq 1 ] && [ -z "$candidate" ]; then
+                    scan="$line"
+                fi
+                while [ -n "$scan" ]; do
+                    frag="${scan%%$cut*}"
+                    if [ -n "$frag" ] && _fragment_tell "$frag"; then
+                        shaped=1
+                        break
+                    fi
+                    if [ "$frag" = "$scan" ]; then
+                        break
+                    fi
+                    scan="${scan#*$cut}"
+                done
+                if [ "$shaped" -eq 0 ] && [ -n "$region" ]; then
+                    case "$region" in
                         \[*)
                             # A bracketed IPv6 host is recognised-safe with an
                             # optional numeric port; a malformed bracket is not.
-                            tail="${candidate#*\]}"
+                            tail="${region#*\]}"
                             case "$tail" in
                                 '') ;;
                                 :*)
@@ -147,8 +220,8 @@ _redact_uri() {
                             esac
                             ;;
                         *:*)
-                            before="${candidate%%:*}"
-                            rest="${candidate#*:}"
+                            before="${region%%:*}"
+                            rest="${region#*:}"
                             if [ -z "$before" ] || [ "$rest" != "${rest#*:}" ]; then
                                 # empty user before the first ':' (a dropped
                                 # '@host'), or more than one ':' — a genuine

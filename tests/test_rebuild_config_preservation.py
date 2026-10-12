@@ -108,19 +108,24 @@ def _config_state(sdk) -> set:
 
 
 def _sidecar_payload(**overrides) -> dict:
-    """A valid sidecar payload; `overrides` replaces whole sections."""
-    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
+    """A valid sidecar payload; `overrides` replaces whole sections.
+
+    Sections are DERIVED from `_SNAPSHOT_SECTIONS`, never hand-listed: the
+    contract `_legacy_pre_onboarding_sidecar` depends on is "this helper always
+    writes every section, empty or not", and a hand-list silently stops being
+    that the moment a section lands — the file then reads as one written by a
+    build that did not capture the missing class, which fires that class's
+    state-UNKNOWN ERROR (#5353's `team_meta` and #4653's `event_meta` each
+    moved this helper one section behind).
+    """
+    from tortoise.projection import (
+        _PREWIPE_SNAPSHOT_VERSION,
+        _SNAPSHOT_SECTIONS,
+    )
     payload = {
         "version": _PREWIPE_SNAPSHOT_VERSION,
         "created_at": "2026-01-01T00:00:00Z",
-        "synthetic_events": [],
-        "batch_snapshot": [],
-        "batch_point_links": [],
-        "session_snapshot": [],
-        "session_point_links": [],
-        "onboarding_snapshot": [],
-        "onboarding_step_links": [],
-        "config_snapshot": [],
+        **{section: [] for section in _SNAPSHOT_SECTIONS},
     }
     payload.update(overrides)
     return payload
@@ -246,6 +251,7 @@ def test_config_registry_covers_domain_writers(tmp_path):
     from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
     from tortoise.pack_state import PACK_INSTALL_LABEL
     from tortoise.projection import _CONFIG_RESET_KEY, _config_classes
+    from tortoise.residency import DECLARATION_META_KEY
     from tortoise.sdk import TortoiseSDK
 
     classes = {c.label: c for c in _config_classes()}
@@ -254,7 +260,8 @@ def test_config_registry_covers_domain_writers(tmp_path):
     meta = classes["Meta"]
     assert meta.identity_prop == "key"
     assert meta.keys == {TortoiseSDK._CALIBRATION_MARKER_KEY,
-                         _CONFIG_RESET_KEY}
+                         _CONFIG_RESET_KEY,
+                         DECLARATION_META_KEY}
     # Derived markers must NOT be enrolled: they are re-created on open, so
     # preserving them would restore a stale index as if it were config.
     assert "point_fts_v2" not in meta.keys
@@ -732,6 +739,39 @@ def test_rebuild_all_preserves_config_reset_marker(graph):
     assert after["at"] == written["at"]
 
 
+def test_rebuild_all_preserves_residency_declaration(graph):
+    """The declared known-hot set survives a rebuild (#7952).
+
+    `residency` is graph-only operator metadata: the whole-graph wipe would
+    destroy it, and a declared-partial store would silently revert to
+    `complete`, under which the §17.2 marker CANNOT fire. The sidecar is its
+    only carrier, so it must be enrolled in the `:Meta` config class.
+    """
+    from tortoise.residency import (
+        COVERAGE_PARTIAL,
+        DECLARATION_META_KEY,
+        ResidencyDeclaration,
+        declare_residency,
+        read_declaration,
+    )
+
+    events, sdk = graph
+    _write_journal(events, [])
+    declare_residency(_g(sdk), ResidencyDeclaration(
+        coverage=COVERAGE_PARTIAL, hot_keys=frozenset({"p1", "p2"})))
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    after = read_declaration(_g(sdk))
+    assert after.coverage == COVERAGE_PARTIAL
+    assert after.hot_keys == frozenset({"p1", "p2"})
+    # and the node is still keyed where the registry expects it
+    rows = _g(sdk).query(
+        "MATCH (n:Meta {key:$key}) RETURN count(n)",
+        params={"key": DECLARATION_META_KEY}).result_set
+    assert rows[0][0] == 1
+
+
 def test_config_reset_marker_is_sticky_across_rebuilds(graph):
     """Sticky across rebuilds, and monotonic on ONE node when re-set."""
     from tortoise.projection import read_config_reset, set_config_reset_marker
@@ -1168,6 +1208,7 @@ def test_config_registry_doc_consistency():
         _CONFIG_RESET_KEY,
         _config_classes,
     )
+    from tortoise.residency import DECLARATION_META_KEY
     from tortoise.sdk import TortoiseSDK
 
     classes = list(_config_classes())
@@ -1185,7 +1226,8 @@ def test_config_registry_doc_consistency():
     doc_pair = set(re.findall(r"`:(\w+)\{key:'([^']+)'\}`", doc_preserved))
     doc_meta_keys = {k for label, k in doc_pair if label == "Meta"}
     assert doc_meta_keys == {TortoiseSDK._CALIBRATION_MARKER_KEY,
-                             _CONFIG_RESET_KEY}
+                             _CONFIG_RESET_KEY,
+                             DECLARATION_META_KEY}
     for label, keys in scoped.items():
         assert doc_meta_keys == set(keys), (
             f"the doc's `:{label}{{key:…}}` rows disagree with the registry")
@@ -1222,7 +1264,20 @@ def test_config_registry_doc_consistency():
     assert f"`:{ONBOARDING_STEP_LABEL}`" in preserved_sections
     assert f"`{COMPLETED_STEP_EDGE}`" in preserved_sections
     assert "#4641" in preserved_sections
-    assert "TeamMeta" in unenrolled and "#5353" in unenrolled
+    assert "TeamMeta" not in unenrolled, (
+        ":TeamMeta is preserved by the `team_meta` sidecar section since "
+        "#5353 — it must not still be declared an unenrolled loss")
+    # #5353: the last entry the `unenrolled` block ever carried now has a
+    # vehicle, so the block is empty (and kept, as the declared home for the
+    # next known loss that has none). The class must appear in
+    # `preserved-sections` with its issue, and — like the onboarding rows — the
+    # operator audit must enumerate it or the query under-reports the classes
+    # this doc promises it lists.
+    assert ":TeamMeta" in preserved_sections
+    assert "#5353" in preserved_sections
+    assert ":TeamMeta" in _doc_block("audit-query"), (
+        "the audit query omits the section-preserved :TeamMeta — an operator "
+        "could not tell whether the `#2789` first-org marker survived")
     for vehicle in ("OnboardingState", "TeamMeta"):
         assert vehicle not in label_wide
     # #4653: `:GraphEventMeta` LEFT this block — it now has a vehicle (the
@@ -1257,6 +1312,10 @@ def test_config_registry_doc_consistency():
             f"the preserved-sections block does not declare :{container}")
         assert f":{container}" in audit, (
             f"audit query omits the section-preserved :{container}")
+    # #5353: `:TeamMeta` is the third section-preserved class in that list. It
+    # is asserted above next to its own declaration, because unlike the two
+    # containers its presence is LOAD-BEARING (the `#2789` guard reads it) and
+    # not a container membership check.
 
 
 def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
@@ -2167,6 +2226,107 @@ def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
                and "NOT confirmed intact" in r.getMessage()
                for r in caplog.records), (
         f"the recovery caller discarded the onboarding gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+# ── #5353: the `:TeamMeta` gap has the same producer → consumer contract ─────
+
+
+def _team_meta_only_gap_sidecar() -> dict:
+    """A rescue file whose `:TeamMeta` record is UNKNOWN and nothing else is.
+
+    Version 5 (pre-#5353) with no `team_meta` key at all: onboarding landed at
+    v4 and its sections are present, so the ONLY gap this file produces is the
+    first-org marker's — a team_meta-ONLY gap, the shape the projection
+    consumers had no branch for.
+    """
+    payload = _sidecar_payload(version=5, batch_snapshot=[{"id": "b1"}])
+    payload.pop("team_meta")
+    return payload
+
+
+def test_team_meta_gap_is_visible_to_recover_from_log(graph):
+    """The automatic-recovery ENTRY POINT must not return a clean success for
+    the marker either (#5353).
+
+    The pending sidecar is retired after the replay (#4305), so the
+    `team_meta_gap` key plus the appended `reason` clause are the only record
+    `consistency.recover_from_log` can hand its caller. `recovered` stays True
+    (the rebuild DID complete), exactly as the onboarding leg does. Without
+    this block the new keys are set nowhere and a team_meta-only gap is
+    swallowed at the recovery entry point.
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    rec = recover_from_log(str(events), sdk._get_proj())
+
+    assert rec["recovered"] is True, "the rebuild itself did complete"
+    assert rec.get("team_meta_gap") == 1, (
+        "a missing/unconfirmable first-org marker must be machine-visible to "
+        "the auto-recovery caller")
+    assert rec.get("team_meta_state_unknown") is True, (
+        "a pre-preservation sidecar cannot say whether a marker was destroyed")
+    assert ":TeamMeta" in rec["reason"]
+
+
+def test_auto_health_recover_warns_on_the_team_meta_gap(graph, caplog,
+                                                        monkeypatch):
+    """The embedded auto-recovery consumer of `team_meta_gap` acts on it.
+
+    `_auto_health_recover` (the probe-OK lost-graph path) logged only its clean
+    "auto-recovered" line when the onboarding gap was absent, so a
+    team_meta-only gap had a producer and no consumer — the same log-only defect
+    #4641 fixed for onboarding (#5353).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+    proj = sdk._get_proj()
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    # Assert the CALLER's own message, not a bare `:TeamMeta` substring:
+    # `rebuild_all` already logs an ERROR naming the class on this path, so a
+    # looser match would pass with the consumer removed (mutation-verified).
+    assert any("auto-recovered empty embedded DB" in r.getMessage()
+               and ":TeamMeta first-org marker" in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the auto-recovery consumer discarded the marker gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_team_meta_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
+    """A producer signal with no consumer is the same log-only defect (#5353).
+
+    `_recover_or_raise` is the real caller on the unresponsive-graph path; it
+    must warn on a team_meta gap and must NOT raise for it — the store is
+    usable, and the marker is re-provisionable, so refusing to open would be
+    strictly worse.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _team_meta_only_gap_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        sdk._get_proj()._recover_or_raise(str(events))  # must not raise
+
+    assert any("recovery completed but the rebuilt graph's :TeamMeta "
+               "first-org marker" in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the recovery caller discarded the marker gap: "
         f"{[r.getMessage() for r in caplog.records]}")
 
 

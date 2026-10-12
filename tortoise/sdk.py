@@ -59,6 +59,8 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
 )
+# #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
+from .sdk_retired import retirement_hint
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -68,6 +70,8 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
+from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
     RAW_ABSENT_STATES,
@@ -87,12 +91,28 @@ from .session_projection import session_extraction_status
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
+# #4489: the read funnel's retrieval meter. ``metered_query`` wraps
+# ``tortoise_fts_query`` so ONE product read notes ONE query and its wall time
+# without any caller cooperation; it is a no-op (one ``ContextVar.get()``) when
+# no tally is armed. Imported at module level because it is stdlib-only at
+# import (its ``metering`` dependency is deferred), so no cycle is introduced.
+from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
+)
+# #8006: the `search_keys` flatten rule has ONE home — the projection module that
+# owns the Point prop contract (`_POINT_DECLARED_PROPS` / `_POINT_LIST_PROPS` /
+# `_upsert_point_props`). The SDK write doors below call it under their
+# historical private name, so the three write doors and the replay share ONE
+# implementation instead of two that can drift — which is exactly what #8006
+# was: the SDK doors flattened, the shared projection writer did not, so
+# `EventAPI.add_point` stored NOTHING.
+from .projection.entities import (
+    flatten_search_keys_prop as _flatten_search_keys_prop,
 )
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
@@ -2989,32 +3009,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     return props
 
 
-def _flatten_search_keys_prop(props: dict) -> None:
-    """R2 (#1541) D3: search_keys must be a FLAT space-joined STRING in the
-    graph — FalkorDB's fulltext index (``db.idx.fulltext.createNodeIndex``)
-    does NOT index array-valued properties (verified on server v4.16.7: a
-    list-valued search_keys never matches, the flat string does). E3's
-    canonical payload keeps the list (commit_schema pins ``list[str]`` and
-    E3's persistence tests assert the list at the node); the GRAPH value is
-    flattened here — a cross-lane deviation the R2 plan pre-authorized with
-    an owner flag (plan D3: "R2 normalizes at index time via ' '.join(...) in
-    the projection"). The FTS index then matches unqualified query tokens
-    against content ∪ search_keys — the issue's "question ∪ search_keys"
-    query expansion, at the index level.
-
-    No-op for str values, None, and absent keys (absent search_keys → no
-    prop written, the pre-E3 shape). An empty list drops the prop (E3's
-    ``or None`` convention).
-    """
-    sk = props.get("search_keys")
-    if sk is None:
-        return
-    if isinstance(sk, (list, tuple)):
-        flat = " ".join(str(s).strip() for s in sk if str(s).strip())
-        if flat:
-            props["search_keys"] = flat
-        else:
-            props.pop("search_keys", None)
+# R2 (#1541) D3: `_flatten_search_keys_prop` used to be DEFINED here. It now
+# lives with the Point prop contract it serves — `tortoise/projection/
+# entities.py::flatten_search_keys_prop`, imported at the top of this module —
+# because the SHARED projection writer (`_upsert_point_props`) is the door every
+# write reaches and it needs the same rule (#8006). `create_point`,
+# `update_point` and `update_entity` still call it here, under this name.
 
 
 def _coerce_props(props: dict) -> dict:
@@ -4567,6 +4567,29 @@ def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
     return graph_installed_namespaces(sdk)
 
 
+def _read_stored_number(value, default):
+    """Coerce a STORED numeric property for display/sorting; never raise (#6151).
+
+    ``annotator_*`` and ``mitigation_strength`` are writable through the generic
+    entity surface, which does not validate, so a stored string or an int past
+    float range reaches the readers. ``weights.compute_operator_weight`` degrades
+    such a value to a harmless default rather than aborting the run, and the state
+    readers must hold the SAME contract: they read the same two properties, and
+    `recall_state` is an agent-facing path, so one malformed row would otherwise
+    make every state query touching that operator raise while the weight read on
+    the identical input succeeded.
+
+    ``default`` is the caller's own "nothing usable here" value, because the two
+    sites disagree on it on purpose: a rating falls back to the neutral term (the
+    value an unrated operator yields), while a mitigation strength falls back to
+    ``None`` (the value an absent strength yields).
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -4582,6 +4605,23 @@ class TortoiseSDK:
     env var. This lets tests/fixtures force a temp embedded DB even when a
     shared test URI is set in the environment (#139).
     """
+
+    def __getattr__(self, name: str):
+        """A retired public SDK name fails with its replacement named (#3836 (c)).
+
+        Reached ONLY when normal attribute lookup fails, so it can never shadow a real
+        method. The dunder is private, so it adds nothing to the public surface
+        (`tools/sdk_surface.py` counts public names on the class).
+
+        A name that was never public keeps the interpreter's own shape — only a name
+        the owner actually retired gets the migration hint.
+        """
+        hint = retirement_hint(name)
+        if hint is not None:
+            raise AttributeError(hint)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
                  event_log_path: str | None = None,
@@ -5165,7 +5205,7 @@ class TortoiseSDK:
         except Exception:  # noqa: BLE001, RUF100
             raise ValueError("invalid cursor") from None
 
-    def events_poll(self, after: str | None = None, types: list[str] | None = None,
+    def poll_events(self, after: str | None = None, types: list[str] | None = None,
                     limit: int = 100) -> dict:
         """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
 
@@ -5213,7 +5253,7 @@ class TortoiseSDK:
     _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
 
     def _maybe_purge_events(self, proj) -> None:
-        """Best-effort, interval-gated retention purge (see events_poll).
+        """Best-effort, interval-gated retention purge (see poll_events).
 
         Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
         PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
@@ -5282,7 +5322,7 @@ class TortoiseSDK:
         ``tests/test_object_registered_journal.py`` do the same for
         ``ObjectSuperseded``. Promoting the name to a named parameter silently
         REMOVES it from that payload — a client-visible change to a durable
-        artifact (``events_poll`` returns the payload verbatim), invisible to
+        artifact (``poll_events`` returns the payload verbatim), invisible to
         every existing test. ``recorded_ts`` collides with no caller key, so
         the default path is additive in the strict sense: every existing
         caller's envelope, graph payload and JSONL record are byte-identical.
@@ -5765,10 +5805,6 @@ class TortoiseSDK:
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
                 props.pop("content_hash", None)
-                if credibility is not None:
-                    _logger.warning(
-                        "credibility=%r ignored — point %s already exists and dedup=True",
-                        credibility, pid)
                 # #3263 (review P1): `extractedFrom` must NOT ride the
                 # update_point prop path on a dedup hit. update_point writes the
                 # node property but never calls _link_source, so the Point would
@@ -5826,6 +5862,54 @@ class TortoiseSDK:
                     # P2-1: re-capture would churn confidence for every point).
                     props["updatedAt"] = now
                     self.update_point(pid, **props)
+                # #7980: an authored ``credibility`` is a WRITE, not a no-op.
+                # This path used to log-and-drop it, so a caller that supplied
+                # one got HTTP 200 back on a point that has NO baseline: not
+                # EP-able, and the fail-closed #344/#1157 calibration gate then
+                # refuses the whole graph (`/v1/dream` errors). That is the
+                # #4032 silent-false-green shape, on the field #7909 added to
+                # BOTH REST surfaces — and on self-host it was the DEFAULT path
+                # (``selfhost_api.CreatePointRequest.dedup`` defaults True).
+                #
+                # FIRST-WRITER-WINS: the prior is applied only while the
+                # existing point has none. That is the contract this suite
+                # already pins (tests/test_sdk_dedup.py::
+                # test_dedup_with_extra_props — "must not overwrite the
+                # existing baseline"), and it follows #844: a set baseline is
+                # IMMUTABLE evidence, so a dedup hit — which matches by
+                # CONTENT HASH, and so may be an unrelated writer stating a
+                # different belief — never rewrites the one already there. A
+                # point that does carry one keeps it and SAYS SO, loudly:
+                # never a silent drop. Consistency: ``confidence`` (a plain
+                # prop) is already applied on a dedup hit, and
+                # ``mitigate_operator``'s idempotent path applies an authored
+                # belief to an existing point rather than dropping it.
+                if cred_prior is not None:
+                    _existing = self.get_point(pid)
+                    if not _existing.get("baseline_set"):
+                        self.set_point_baseline(
+                            pid, cred_prior[0], cred_prior[1],
+                            source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                    elif (_existing.get("baseline_source"),
+                          _existing.get("ep_alpha"),
+                          _existing.get("ep_beta")) != (
+                              BASELINE_SOURCE_SET_BY_AUTHOR,
+                              cred_prior[0], cred_prior[1]):
+                        # Nothing was dropped when the point ALREADY carries
+                        # exactly this author-stated prior — the self-host
+                        # default path makes that the NORMAL idempotent retry,
+                        # and a WARNING on every healthy retry is how a
+                        # warning stops being read. The provenance token is
+                        # compared too: an equal-valued baseline that is
+                        # INHERITED (or a legacy token-less row) is still a
+                        # different claim, and inheritance will recompute it.
+                        _logger.warning(
+                            "credibility=%r not applied — point %s already "
+                            "exists with a %r baseline, and a dedup hit never "
+                            "overwrites the baseline a point already carries "
+                            "(#7980, #844)",
+                            credibility, pid,
+                            _existing.get("baseline_source"))
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -6074,13 +6158,31 @@ class TortoiseSDK:
         # a per-query race and `proj` is as valid after a retry as before it
         # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+        #
+        # #7209: the follow-up writes of a fresh create ride the SAME bounded
+        # retry as the CREATE above. Before this they were bare `proj.g.query`
+        # calls, so a rebuild's per-query abort landing here aborted the write
+        # AFTER the Point had already landed — leaving a half-materialized
+        # point (no TAGGED / no extractedFrom edges), which is a finding that
+        # provenance and tag reads cannot reach: the same "the map loses a
+        # finding" outcome by a narrower route. Every statement in these two
+        # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+        # documented no-op on re-run), so re-issuing one after an engine ABORT
+        # cannot duplicate anything — the abort means the statement did not
+        # land, exactly the contract `retryable_aborted_write` is built on.
         tags = props.get("tags") or []
         if isinstance(tags, list):
-            self._sync_tags(proj, pid, tags)
+            self._graph_write_with_retry(
+                lambda: self._sync_tags(proj, pid, tags),
+                what="create_point TAGGED edges",
+            )
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_source(pid, props["extractedFrom"],
-                              source_versions=_source_versions)
+            self._graph_write_with_retry(
+                lambda: proj._link_source(pid, props["extractedFrom"],
+                                          source_versions=_source_versions),
+                what="create_point extractedFrom edges",
+            )
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
             # #2952: a born point carries no `inherited_at` stamp, so the
@@ -6141,7 +6243,23 @@ class TortoiseSDK:
                          pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        #
+        # #7209: this read-back is the SDK's own proof that the write LANDED,
+        # so it must not be a silent one. `get_point` answers `{}` for a Point
+        # it cannot see — indistinguishable, to the caller, from a successful
+        # create whose result happens not to carry an id. Returning that `{}`
+        # is how a discarded write read as success (#7209); the retry above
+        # closes the abort path, and this guard closes the RESIDUAL the retry
+        # documents but cannot: a state-gated re-issue applied into a rebuilt
+        # graph that the rebuild's own replay then replaces again (#7685's
+        # escalation line — closing it fully needs an engine identity token).
+        # Raising here also stops the `PointAdded` below from journaling a
+        # point the graph does not hold, so a rebuild cannot resurrect a
+        # journal record that never had a node behind it.
         _snapshot = self.get_point(pid)
+        if not _snapshot:
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
                          point=_snapshot)
         if _source_change_notices:
@@ -9012,22 +9130,30 @@ class TortoiseSDK:
         ``ValueError`` for a missing point (unless ``missing_ok``, used by
         ``invalidate_point``'s retry-friendly contract — then returns
         ``None``), an operator node, or an already-terminal claim.
+
+        #7822: the verdict is over EVERY node carrying the id, not ``row[0]``.
+        The writer's stamp MATCHes and writes EVERY node with that id (point
+        ids are not unique), so a first-row-only read made the terminal /
+        operator verdict depend on server row order: a live sibling returned
+        first let the operation re-terminalize an already-dead claim and
+        transfer its edges — exactly what #2498 exists to forbid. The scan is
+        the shared ``live.classify_lifecycle_fanout`` (the hosted commit
+        pre-check runs the same statement and the same classifier, so the two
+        cannot disagree).
         """
-        row = self._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) "
-            "RETURN n.is_operator, n.status, coalesce(n.outdated, false)",
-            params={"id": point_id},
+        rows = self._get_proj().g.query(
+            LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
         ).result_set
-        if not row:
+        kind, status, outdated = classify_lifecycle_fanout(rows)
+        if kind == "absent":
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
-        is_op, status, outdated = bool(row[0][0]), row[0][1], bool(row[0][2])
-        if is_op:
+        if kind == "operator":
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
                 f"statement points")
-        if is_terminal_status(status, outdated):
+        if kind == "terminal":
             marker = ("outdated" if outdated
                       and status not in TERMINAL_EXCLUDED_STATUSES
                       else (status or "live"))
@@ -9643,17 +9769,30 @@ class TortoiseSDK:
         # never the FalkorDB internal ID (internal ids die at rebuild).
         from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
-        # Successor internal node id — runtime-only (never journaled). The 2b
+        # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
-        # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
-        # it the MERGE below mints a phantom (new)-[:rel]->(new) self-edge when
-        # old's edge terminates at the successor (cycle-26 class — e.g. old
-        # X-[:aboutPoint]->Y live, supersede(X->Y)).
+        # EVERY successor node (mirror 2a-DIRECT's tid==new_id guard at ~4407):
+        # without it the MERGE below mints a phantom (new)-[:rel]->(new)
+        # self-edge when old's edge terminates at a successor (cycle-26 class —
+        # e.g. old X-[:aboutPoint]->Y live, supersede(X->Y)).
+        #
+        # #7822: the whole fan-out, not ``succ_rows[0][0]``. Point ids are not
+        # unique, so the successor is not one node: the MERGE below binds EVERY
+        # node carrying ``new_id`` and a first-row-only scalar protected only
+        # the row the server happened to return first, minting the phantom at
+        # the LATER successor nodes — the verdict was server-row-order
+        # dependent.
         succ_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN ID(n)",
             params={"id": new_id},
         ).result_set
-        succ_internal = succ_rows[0][0] if succ_rows else None
+        succ_internals = {row[0] for row in succ_rows}
+        # #7822: the delete-only descriptor keys its replay delete-leg on the
+        # LOGICAL successor id and the replay deletes EVERY (old)-[rel]->(t)
+        # edge, so ONE descriptor per rel covers every successor node the
+        # fan-out matched. Emitting one per matching node would journal N
+        # identical descriptors for the same operation.
+        emitted_self_deletes: set = set()
         for rel in structural_rels:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
@@ -9668,8 +9807,7 @@ class TortoiseSDK:
                 # replay key (name / coalesce(title,name) / url) at emission.
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
-                if (succ_internal is not None
-                        and target_graph_id == succ_internal):
+                if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
                     # transfer would MERGE the phantom (new)-[:rel]->(new)). For
@@ -9681,7 +9819,8 @@ class TortoiseSDK:
                     # Non-derivable rels emit NOTHING (never snapshot-recreated;
                     # a delete_only descriptor would journal a permanent no-op
                     # delete-leg for a family this fix does not own).
-                    if derivable:
+                    if derivable and rel not in emitted_self_deletes:
+                        emitted_self_deletes.add(rel)
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:self",
@@ -10020,12 +10159,17 @@ class TortoiseSDK:
         if (point.get("temporal_candidate")
                 and point.get("temporal_reviewed") == "merge"):
             for tgt in temporal_targets:
-                trow = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": tgt},
+                # #7822: the SAME fan-out statement the lifecycle guard runs,
+                # classified over EVERY node carrying the target id. The
+                # pre-#7822 probe read ``trow[0]``: on a duplicate target id
+                # a live sibling returned first let this path NAND-wire (or
+                # hand to ``supersede_point``) a target the guard refuses on
+                # its terminal sibling — and the verdict depended on server
+                # row order. A target is live only when NO sibling is dead.
+                trows = proj.g.query(
+                    LIFECYCLE_FANOUT_QUERY, params={"id": tgt},
                 ).result_set
-                if not trow:
+                if not trows:
                     # MISSING node (stale target) — distinct from an unset
                     # status node, which is live by the canonical read model
                     # (#1080 round-2 review: missing targets crashed the
@@ -10034,16 +10178,17 @@ class TortoiseSDK:
                         "promote_point: temporal target %s for %s no longer "
                         "exists — skipping the wire", tgt, point_id)
                     continue
-                tstatus = trow[0][0] or "live"
-                # #2498: the SHARED terminal predicate — a flag-outdated
-                # target is terminal too, so it must not be NAND-wired or
-                # (temporal_replacement) sent to supersede_point.
-                if not is_terminal_status(tstatus, bool(trow[0][1])):
+                dead = sorted(
+                    ((r[1], bool(r[2])) for r in trows
+                     if is_terminal_status(r[1], bool(r[2]))),
+                    key=lambda s: (str(s[0] or ""), s[1]))
+                if not dead:
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
-                        "skipping the wire", tgt, point_id, tstatus)
+                        "skipping the wire", tgt, point_id,
+                        dead[0][0] or "live")
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:
@@ -10634,7 +10779,8 @@ class TortoiseSDK:
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
                         direction: str = "bidirectional",
-                        promote_source: bool = True) -> dict:
+                        promote_source: bool = True,
+                        semantics: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -10643,12 +10789,23 @@ class TortoiseSDK:
             a mitigation is a SEPARATE Point that attacks the operator bridge
             it damps, so it can express neither an op_type nor a bridge. It is
             created by ``mitigate_operator`` AFTER the operator exists.
-          - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
+          - label: Layer-3 predicate — the domain verb ("fixes", "bearsOn", …).
+          - semantics: Layer-2 meaning — the closed vocabulary in
+            ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
+            ``refutes``, ``mutuallyExclusive``, ``hasPart``, ``related`` …).
+            When supplied it RESOLVES the direction (the model's chain step 2):
+            a one-way meaning records ``unidirectional``, a mutual one
+            ``bidirectional``. The basis actually used is recorded on the node
+            as ``direction_basis`` (``explicit`` / ``semantics`` / ``default``).
+            An unknown word warns (warn-not-block, never refuses).
           - direction: "bidirectional" (default) or "unidirectional" — explicit
             flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
             Default bidirectional (mutual) for all op types; pass
-            "unidirectional" for a directed attack (no back-pressure).
-          - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
+            "unidirectional" for a directed attack (no back-pressure). A
+            NON-default explicit value outranks ``semantics``; the signature
+            default does not (it is the default, not a declaration).
+          - Operator carries the label, direction and direction_basis; IMPL/NAND
+            edges carry confidence via EP.
           - promote_source: default True fills in a source point's NEVER-SET
             status (``status IS NULL``) to live when its first edge is
             created. An EXPLICIT or prior ``draft`` is NOT retro-promoted
@@ -10717,6 +10874,91 @@ class TortoiseSDK:
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
+        # ── direction: the precedence chain (#7852 W1, the owner-approved `w1
+        # yes approved` 2026-10-09) ────────────────────────────────────────
+        # The three-layer model records a direction DERIVED FROM the relation's
+        # meaning (ONTOLOGY §8): the caller states the Layer-2 `semantics`, this
+        # write path resolves the direction, and `direction_basis` records which
+        # step fired. Order: (1) an explicit `direction=` → 'explicit'; (2) the
+        # declared `semantics` → 'semantics'; (3) endpoint kinds → 'kind-pair' (a
+        # SEPARATE scoped change, not implemented here); (4) the per-op_type
+        # default → 'default'.
+        #
+        # The signature default is the literal "bidirectional" (#807/#753/#86,
+        # kept by the #7813 ruling) and `None` is the CYCLE-25 "absent" input —
+        # canonicalized per op_type below, and the value the ingest path passes
+        # whenever a connection omits `direction` (`conn.get("direction")`).
+        # NEITHER is a declaration: treating `None` as explicit would record a
+        # FALSE provenance and silently disable the semantics step below. A
+        # declared semantics therefore outranks both, and never overrides a
+        # direction the caller actually differentiated.
+        direction_basis = "explicit" if direction not in (None, "bidirectional") else "default"
+        if semantics is not None:
+            from tortoise.enforcement import emit_violation
+            from tortoise.pack_registry import (
+                SEMANTICS_TRANSITION,
+                SEMANTICS_VALUES,
+            )
+            # A retired word (e.g. `opposes`) is recognised and warned with its
+            # canonical replacement (#7852 W2's pack-transition contract) — the
+            # write proceeds, the retired word is not silently accepted.
+            if semantics in SEMANTICS_TRANSITION:
+                canonical = SEMANTICS_TRANSITION[semantics]
+                warnings.append({
+                    "code": "undeclared_relation",
+                    "message": (
+                        f"semantics '{semantics}' is retired — uses of it "
+                        f"resolve to '{canonical}' (warn-not-block, #7852)"
+                    ),
+                    "semantics": semantics,
+                })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (retired -> {canonical})")
+                semantics = canonical
+            if semantics not in SEMANTICS_VALUES:
+                warnings.append({
+                    "code": "undeclared_relation",
+                    "message": (
+                        f"semantics '{semantics}' is not in the closed Layer-2 "
+                        f"vocabulary; valid values: "
+                        f"{', '.join(sorted(SEMANTICS_VALUES))} "
+                        f"(warn-not-block, #7852)"
+                    ),
+                    "semantics": semantics,
+                })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (out of vocabulary)")
+            else:
+                derived = self._direction_from_semantics(semantics)
+                if derived is None:
+                    # `-` (e.g. `related`, `transacts`) means the connection
+                    # exists and NO confidence transfers. The shipped runtime
+                    # encodes only bidirectional/unidirectional (§8 Transition
+                    # state — the four-value migration is the separate change
+                    # named on #7852), so no direction can be derived. Say what
+                    # actually happens: the caller-supplied/signature default is
+                    # what gets recorded (naming the "op_type default" here
+                    # would be false for NAND, whose canonical default is
+                    # unidirectional but whose signature default is
+                    # bidirectional).
+                    warnings.append({
+                        "code": "undeclared_relation",
+                        "message": (
+                            f"semantics '{semantics}' carries no transferable "
+                            f"direction ('-') — no direction is derived from "
+                            f"it, so the caller-supplied/write-path default is "
+                            f"recorded (#7852)"
+                        ),
+                        "semantics": semantics,
+                    })
+                elif direction in (None, "bidirectional"):
+                    # Chain step 2 — basis `semantics`: the direction was resolved
+                    # from the Layer-2 meaning the caller declared, which is the
+                    # input actually read here. (Named for the layer that produced
+                    # it, not the Layer-3 `label` predicate, which is a different
+                    # input and does not touch direction.)
+                    direction = derived
+                    direction_basis = "semantics"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
@@ -10775,7 +11017,13 @@ class TortoiseSDK:
         # coalesce) is overridden by the explicit status." So the door, not the
         # replay, was the omission.
         extra_props = []
-        params = {"id": pid, "op": op_type, "direction": direction}
+        params = {"id": pid, "op": op_type, "direction": direction,
+                  "dbasis": direction_basis}
+        # #7852 W1: the basis the chain used is recorded on the node, beside the
+        # direction it produced — so "why is this direction what it is" is a
+        # property of the write, not a re-derivation. Replay parity is carried by
+        # the explicit clause in `projection/entities.py`.
+        extra_props.append("direction_basis:$dbasis")
         if label:
             extra_props.append("label:$label")
             params["label"] = label
@@ -10883,12 +11131,36 @@ class TortoiseSDK:
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
 
+        These dimensions are not inert: they modulate the operator's EP weight in a
+        symmetric bounded band, so a well-rated connection counts for MORE than an
+        unrated one and the worst-rated for less. Leaving them unset is exactly
+        neutral (factor 1.0) and is the default — set them only to express a
+        deliberate judgement about the connection's quality.
+
         Args:
             id: Operator Point ID (must have is_operator=true).
             bias: 0-1, how much hidden stake/additional interest beyond stated position.
-            precision: 0-1, how narrow/well-defined the relevance claim is.
-            consistency: 0-1, how stable this relevance is across contexts.
-            directness: 0-1, how directly the source bears on the target.
+                INVERTED: higher bias means LESS weight, because a one-sided source
+                should count for less than a disinterested one.
+            precision: 0-1, how narrow/well-defined the relevance claim is (higher = more weight).
+            consistency: 0-1, how stable this relevance is across contexts (higher = more weight).
+            directness: 0-1, how directly the source bears on the target (higher = more weight).
+
+        The four are averaged (never multiplied), so rating one well cannot penalise
+        the others, and a partial rating moves the weight only as far as that
+        dimension justifies. Do not use these to disagree with a connection — that is
+        NAND's job; use them to grade how much the connection contributes. A rating
+        does not require a source.
+
+        HOW FAR IT MOVES depends on the operator's base weight, because the rating
+        multiplies the base and the result is then clamped to ``[0.1, 10.0]``. A
+        NAND starts at 8.0 and DOUBLES when it targets another operator, so a
+        best-rated operator-targeting NAND is clamped both before and after the
+        rating and gains NOTHING; even a top-level NAND gains only 1.25x
+        (8.0 -> 16.0 -> clamped to 10.0). On an ordinary IMPL the base is 1.0
+        (2.0 when operator-targeting), and the band applies in full there. So the
+        band is exact near the low end of the range and compresses as the base
+        approaches the ceiling — a rating on a contradiction is rarely worth much.
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """
@@ -11880,6 +12152,37 @@ class TortoiseSDK:
                 and not conn.get("reify"):
             return "direct"
         return "operator"
+
+    @staticmethod
+    def _direction_from_semantics(semantics: str) -> str | None:
+        """The runtime direction a Layer-2 semantics value records (#7852 W1).
+
+        ``None`` when the value records no transferable direction — `-`
+        (`related`, `transacts`) or an unrecognised word. The vocabulary and
+        the per-value direction are the registry's single source of truth
+        (``pack_registry.SEMANTICS_DIRECTIONS``), so this cannot drift from the
+        validation that admits the word in the first place.
+        """
+        from tortoise.pack_registry import SEMANTICS_DIRECTIONS
+        model_direction = SEMANTICS_DIRECTIONS.get(semantics)
+        if model_direction is None:
+            return None
+        return TortoiseSDK._SEMANTICS_RUNTIME_DIRECTION.get(model_direction)
+
+    # The model's four-value direction (ONTOLOGY §8: `->` / `<-` / `<->` / `-`)
+    # mapped onto the runtime's two-value vocabulary, which is what the
+    # `direction` property stores today (the four-value migration is the
+    # separate scoped change named on #7852). `<-` is deliberately ABSENT: the
+    # runtime's `unidirectional` means source→target only (ep.py writes the
+    # target message and withholds the source back-message), so mapping
+    # target→source onto it would record the OPPOSITE direction. No ruled
+    # semantics value produces `<-`, and an unmapped value safely returns None
+    # (falls through with a warning) instead. `-` maps to nothing too — no
+    # confidence transfers.
+    _SEMANTICS_RUNTIME_DIRECTION: ClassVar[dict[str, str]] = {
+        "->": "unidirectional",
+        "<->": "bidirectional",
+    }
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str | None:
@@ -18545,6 +18848,7 @@ class TortoiseSDK:
 
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
+    @_metered_query
     def tortoise_fts_query(
         self,
         query: str | None = None,
@@ -18569,6 +18873,13 @@ class TortoiseSDK:
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
+        # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
+        # asked about, as ``label:key`` (``cache_projection.declared_key``).
+        # The read path passes it to the marker so a partial declaration can
+        # tell "outside the known-hot set" from "inside it and genuinely
+        # absent"; a SET read names no node and passes nothing, keeping
+        # today's set-level polarity. Default None = byte-identical.
+        _residency_key: str | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -18664,6 +18975,16 @@ class TortoiseSDK:
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
             passed by production callers.
+        _residency_key (#7953, §17.3): PRIVATE — the residency coordinate this
+            read named, as ``label:key`` (build it with
+            ``cache_projection.declared_key``, the SAME function the cache
+            projection declares hot keys with). It is handed to the
+            completeness marker (#7952) so a PARTIAL declaration can separate
+            "outside the known-hot set" (a residency miss → fetch the record)
+            from "inside it and genuinely absent" (a real in-store finding).
+            A SET read names no node and leaves this None, which is the
+            set-level polarity the marker already had — so default None is
+            byte-identical behavior.
         leg_trace (R3 #1542 D4): PRIVATE trace contract — when provided,
             appends per-leg entries (vector/fts/structural/fallback — the
             R2 #1541 shared shape {"leg", "ran", "degraded", "reason",
@@ -18789,6 +19110,19 @@ class TortoiseSDK:
             STATUS_DEGRADED as _STATUS_DEGRADED,
             classify_leg_trace as _classify_leg_trace,
         )
+        # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
+        # path CONSUMES it and mints no verdict of its own, exactly as it does
+        # for the status vocabulary above — and `not-hot` is never a term of
+        # that vocabulary. Lazily imported so a default deployment pays
+        # nothing and the field stays off (the #3892 flag pattern).
+        from .residency import (
+            RESIDENCY_FIELD as _RESIDENCY_FIELD,
+            ResidencyDeclaration as _ResidencyDeclaration,
+            apply_residency as _apply_residency,
+            mark_residency as _mark_residency,
+            read_declaration as _read_declaration,
+            residency_enabled as _residency_enabled,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -18818,6 +19152,16 @@ class TortoiseSDK:
         else:
             _caller_trace = None
 
+        # #7952 (§17.2): the COMPLETENESS MARKER. Declared only AFTER the
+        # projection is obtained and the bounded probe has answered, so the
+        # known-hot set is read from a store known to be reachable — and never
+        # read at all when the flag is off (zero steady-state cost, and the
+        # response is byte-identical). ``None`` means NOT ASSESSED: the marker
+        # is a directive, so an unassessable read leaves the field absent and
+        # lets ``status`` carry the impairment, rather than guessing `not-hot`
+        # for a store that is merely down (§17.3's S5 failure mode).
+        _residency: _ResidencyDeclaration | None = None
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -18828,10 +19172,22 @@ class TortoiseSDK:
             ``configured=True`` / ``reached=True`` are facts, not defaults.
             """
             if read_status_out is not None:
-                read_status_out["status"] = _classify_leg_trace(
+                status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
                     configured=True,
                     reached=True)
+                if _residency is not None:
+                    # §17.3: a `not-hot` read may not be reported as `empty` —
+                    # a partial store cannot establish "nothing matched". The
+                    # truth store was NOT consulted on this path (the residency
+                    # router is not wired here yet — #7970), so a zero-hit read
+                    # of a declared-partial store is `degraded`, never `empty`.
+                    marker = _mark_residency(
+                        _residency, hits=len(rows), key=_residency_key)
+                    status = _apply_residency(
+                        status, marker, record_consulted=False)
+                    read_status_out[_RESIDENCY_FIELD] = marker
+                read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             return rows
@@ -18870,6 +19226,10 @@ class TortoiseSDK:
                     "degraded", e)
                 read_status_out["status"] = _STATUS_DEGRADED
                 return []
+        # #7952: the store is reachable, so the known-hot set can be READ.
+        if read_status_out is not None and _residency_enabled():
+            _residency = _read_declaration(
+                graph, timeout_ms=int(_elevated_timeout_ms or 500))
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -20337,6 +20697,13 @@ class TortoiseSDK:
             combine_read_statuses,
         )
 
+        # #7952: the completeness marker's ONE home — the composite read
+        # coalesces its legs' markers rather than minting a verdict of its own.
+        from .residency import (
+            RESIDENCY_FIELD,
+            combine_residency,
+        )
+
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
         if not (0.0 <= min_confidence <= 1.0):
@@ -20514,6 +20881,16 @@ class TortoiseSDK:
             if _composite == STATUS_AVAILABLE and not out:
                 _composite = STATUS_EMPTY
             read_status_out["status"] = _composite
+            # #7952: the legs' completeness markers coalesce the same way the
+            # statuses do — the composite read is a residency miss if ANY leg
+            # fell outside the known-hot set, because the answer the caller
+            # receives is then incomplete. Absent when no leg was assessed
+            # (the declaration is only read under its own flag).
+            _markers = [(_point_status or {}).get(RESIDENCY_FIELD),
+                        (_object_status or {}).get(RESIDENCY_FIELD)]
+            _marker = combine_residency(*_markers)
+            if _marker is not None:
+                read_status_out[RESIDENCY_FIELD] = _marker
         return out
 
     def retrieval_legs(
@@ -20659,18 +21036,26 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}, {}
+        # The ranking default is the weight mechanism's own neutral constant, not a
+        # literal: a literal here would silently disagree with the weight the same
+        # dimension produces if that constant ever moves (#6151). Imported locally
+        # because `weights` is a leaf module this file otherwise does not need.
+        from tortoise.weights import ANNOTATION_TERM_NEUTRAL
+
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
             "WHERE n.id IN $ids "
             "RETURN n.id, op.id, op.label, op.op_type, "
-            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
-            params={"ids": point_ids},
+            "  coalesce(op.annotator_precision, op.precision, $n), type(r)",
+            params={"ids": point_ids, "n": ANNOTATION_TERM_NEUTRAL},
         ).result_set
         args: dict[str, list[dict]] = {}
         nands: dict[str, list[dict]] = {}
         for nid, op_id, label, op_type, precision, rel in rows:
             op = {"id": op_id, "label": label or "", "op_type": op_type or "",
-                  "precision": round(float(precision), 4), "mechanism": rel}
+                  "precision": round(
+                      _read_stored_number(precision, ANNOTATION_TERM_NEUTRAL), 4),
+                  "mechanism": rel}
             if rel == "NAND":
                 nands.setdefault(nid, []).append(op)
             else:
@@ -20704,7 +21089,8 @@ class TortoiseSDK:
         for op_id, mid, content, strength in rows:
             out.setdefault(op_id, []).append(
                 {"id": mid, "content": content or "",
-                 "strength": float(strength) if strength is not None else None})
+                 "strength": None if strength is None
+                 else _read_stored_number(strength, None)})
         # Attach under the owning result point (via its surfaced operator).
         # Dedup: an operator can appear in BOTH arguments and nands for the
         # same target (mixed IMPL+NAND edges) — mitigations must not double.
