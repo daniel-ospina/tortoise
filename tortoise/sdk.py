@@ -23794,9 +23794,16 @@ class TortoiseSDK:
                 ),
                 "advisory": True,
             }]}
-        if props.get("sourceKind"):
+        if props.get("sourceKind") and self._ENTITY_SOURCE_LABELS.get(
+                entity_type or ""):
             # D10: a document IS a `:Source`, so a declared `sourceKind` IS its
-            # provenance statement — see the block comment above.
+            # provenance statement — see the block comment above. GATED ON THE
+            # TYPE (review P2): the reasoning is document-scoped, so applying
+            # it unconditionally let a `sourceKind` on a subject/object/event
+            # silence the advisory while minting no `:Source` and wiring no
+            # edge — the same borrowed-capability bypass this function removed
+            # for `session_id`. A property no door honours is not provenance,
+            # and adding one must not buy silence.
             return {}
         # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
         # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
@@ -26286,8 +26293,11 @@ class TortoiseSDK:
         # `_link_source` as `create_entity`, so it needs the SAME pre-write
         # shape check. Without it the choke point's container gate turns a bad
         # ref into a SILENT no-op — the caller gets a 200, no provenance, and
-        # no advisory — where the sibling document door (`create_entity`) and
-        # this door's own pre-fix behaviour both failed loudly. A ref this door
+        # no advisory. Pre-fix, only a NON-ITERABLE scalar failed loudly (and it
+        # failed AFTER the CREATE, leaving an orphan); the two other bad shapes
+        # were silent — a DICT had its keys minted as `:Source` nodes (invented
+        # provenance), and a mixed list DROPPED its non-str members. Those two
+        # silent cases are what this guard is for on this door: a ref the door
         # cannot honour must not be accepted in silence.
         _validate_extracted_from(props, door="create_document")
 

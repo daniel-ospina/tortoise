@@ -2920,10 +2920,11 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
     mitigate connections to related Points (advisory, not enforced).
 
-    Also returns ``advisories`` when the write declared no source and no
-    provenance (no ``extractedFrom``, no ``sourceKind``, no usable
-    ``session_id``) — ADVISORY only, it never blocks the write. Declare a
-    source with ``props={"extractedFrom": "session:<session_id>"}`` and the
+    Also returns ``advisories`` when the write landed with no source and no
+    provenance (no ``extractedFrom``, no ``sourceKind``) — ADVISORY only, it
+    never blocks the write. A supplied ``session_id`` does NOT count here: only
+    ``create_point`` derives a source from one, so pass
+    ``props={"extractedFrom": "session:<session_id>"}`` explicitly and the
     ``:Source`` is materialized for you (#8171).
     """
     props = _parse(props)

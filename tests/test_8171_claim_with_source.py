@@ -216,6 +216,32 @@ def test_a_sourced_write_carries_no_advisory(tmp_path):
 # now ONE function all three doors call, so the rules cannot drift apart.
 
 
+def test_a_bare_source_kind_does_not_silence_the_advisory_either(tmp_path):
+    """`sourceKind` silences only on the type whose door HONOURS it.
+
+    `sourceKind` is a Source-registry property, and D10's reasoning ("a document
+    IS a `:Source`, so `sourceKind` is its provenance statement") is
+    DOCUMENT-scoped. Applying it unconditionally let a writer silence the
+    advisory on any entity by adding a property no door honours — the same
+    borrowed-capability bypass removed for `session_id` (review P2).
+
+    MUTATION THAT MUST RED: drop the `entity_type` gate from the `sourceKind`
+    branch of `_provenance_advisory`.
+    """
+    sdk = _sdk(tmp_path)
+    inert = sdk.create_entity(type="subject", name="Not a source kind",
+                              sourceKind="agentSession")
+    assert inert.get("advisories"), (
+        "a subject has no :Source to carry a sourceKind, so it is not sourced")
+    assert inert["advisories"][0].get("code") == "no_source"
+
+    # ...and the document door, which DOES honour it, must stay silent.
+    real = sdk.create_entity(type="document", name="A real source kind",
+                             documentKind="note", sourceKind="agentSession")
+    assert not (real.get("advisories") or []), (
+        "a document stating its kind HAS declared what it is (D10)")
+
+
 def test_an_inert_extracted_from_on_a_non_document_still_advises(tmp_path):
     """A declared ref this type cannot WIRE is a provenance gap, so advise it.
 
