@@ -687,6 +687,48 @@ class FakeControlPlane:
                              "embed_identity_mixed": bool(
                                  p.get("p_identity_mixed"))})
             return None
+        if fn == "metering_increment_retrieval":
+            # #4489: the retrieval lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row (migration 20261013000001). The
+            # fake is the ONLY behavioural proxy for this RPC in CI (the SQL
+            # never runs in the Python lane), so it mirrors the SQL: additive
+            # counters and the #4242 window refresh.
+            p = body or {}
+            _ps, _pe = _as_dt(p.get("p_period_start")), _as_dt(
+                p.get("p_period_end"))
+            if _ps is not None and _pe is not None and _pe <= _ps:
+                raise RuntimeError(
+                    "metering_increment_retrieval: period_end must be after "
+                    "period_start")
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            counters = {
+                "retrieval_queries": int(p.get("p_queries") or 0),
+                "retrieval_leg_runs": int(p.get("p_leg_runs") or 0),
+                "retrieval_leg_degraded": int(p.get("p_leg_degraded") or 0),
+                "retrieval_wall_ms": float(p.get("p_wall_ms") or 0.0),
+                "retrieval_leg_fts": int(p.get("p_leg_fts") or 0),
+                "retrieval_leg_vector": int(p.get("p_leg_vector") or 0),
+                "retrieval_leg_structural": int(
+                    p.get("p_leg_structural") or 0),
+            }
+            if row:
+                _refresh_period_end(row, p)
+                for key, value in counters.items():
+                    if key.endswith("wall_ms"):
+                        row[key] = float(row.get(key) or 0.0) + value
+                    else:
+                        row[key] = int(row.get(key) or 0) + value
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             **counters})
+            return None
         if fn == "metering_set_graph_storage":
             # #5331: migration 20261001000005_metering_graph_storage.sql — a GAUGE SETTER mirroring the SQL
             # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
