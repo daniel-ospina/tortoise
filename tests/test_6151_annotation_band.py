@@ -432,16 +432,30 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
 
         # 4. A NON-FINITE strength reached through the STRING "nan": the store
         #    refuses a real non-finite number outright (UnrepresentableNumberError,
-        #    even on a raw Cypher parameter — so that route is unreachable), but a
-        #    string is persisted unvalidated and converts to NaN. It matters
-        #    because `max([nan, 0.25])` is `nan`, so ONE such row would return NaN
-        #    as the weight of the whole operator.
+        #    even on a raw Cypher parameter), but a string is persisted unvalidated
+        #    and converts to NaN. It matters because `max([nan, 0.25])` is `nan`,
+        #    so ONE such row would return NaN as the weight of the whole operator.
         sdk.update_point(mit_id, mitigation_strength="nan")
         got = compute_operator_weight(proj, op["id"])
         assert got == got, (
-            f"a non-finite mitigation strength made the weight NaN ({got}) — one "
+            f"a NaN mitigation strength made the weight NaN ({got}) — one "
             "such row poisons every read of this operator"
         )
-        assert 0.1 <= got <= 10.0, f"non-finite mitigation strength gave {got}"
+        assert 0.1 <= got <= 10.0, f"NaN mitigation strength gave {got}"
+
+        # 5. An INFINITE strength must still CLAMP to the band edge, not be
+        #    dropped to the mid-band default: `mitigation_dampening_factor`
+        #    promises that, and dropping it would silently turn a maximum-damping
+        #    `inf` into the milder fallback. This is the behaviour a NaN-only
+        #    filter preserves and an isfinite filter does not.
+        sdk.update_point(mit_id, mitigation_strength="inf")
+        damped_hard = compute_operator_weight(proj, op["id"])
+        sdk.update_point(mit_id, mitigation_strength="-inf")
+        damped_soft = compute_operator_weight(proj, op["id"])
+        assert damped_hard < damped_soft, (
+            f"an infinite strength ({damped_hard}) did not damp harder than a "
+            f"negative one ({damped_soft}) — infinities are being dropped to the "
+            "mid-band default instead of clipped to the band edges"
+        )
     finally:
         sdk.close()

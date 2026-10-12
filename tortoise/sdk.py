@@ -10906,11 +10906,15 @@ class TortoiseSDK:
         NAND's job; use them to grade how much the connection contributes. A rating
         does not require a source.
 
-        HOW FAR IT MOVES depends on the operator's base weight: the rating doubles
-        or halves it, but the final weight is clamped to ``[0.1, 10.0]``, and a NAND
-        starts at 8.0 — so the best rating on a NAND reaches the clamp (10.0, a
-        1.25x gain) rather than the full 2x. On an IMPL, whose base is 1.0, the band
-        applies in full.
+        HOW FAR IT MOVES depends on the operator's base weight, because the rating
+        multiplies the base and the result is then clamped to ``[0.1, 10.0]``. A
+        NAND starts at 8.0 and DOUBLES when it targets another operator, so a
+        best-rated operator-targeting NAND is clamped both before and after the
+        rating and gains NOTHING; even a top-level NAND gains only 1.25x
+        (8.0 -> 16.0 -> clamped to 10.0). On an ordinary IMPL the base is 1.0
+        (2.0 when operator-targeting), and the band applies in full there. So the
+        band is exact near the low end of the range and compresses as the base
+        approaches the ceiling — a rating on a contradiction is rarely worth much.
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """

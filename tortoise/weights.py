@@ -34,8 +34,7 @@ skills/how-to-use-tortoise, tortoise/onboarding, graph-scripts/decide.py,
 commit_ops, audit) references THIS docstring for the band + formula.
 """
 
-import math  # noqa: I001
-
+import math
 
 # ── Mitigation strength band (#2315) ──────────────────────────────────
 MITIGATION_STRENGTH_MIN = 0.10  # 0.10: minor caveat — weakest dampening
@@ -122,7 +121,12 @@ NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier
 # * Applied BEFORE the final [0.1, 10.0] clamp, so on a NAND (`NAND_BASE_WEIGHT`
 #   = 8.0) the TOP of the band is partly absorbed — `8.0 * 2.0 = 16.0` clamps to
 #   10.0. Strengthening is fully effective on IMPL (base 1.0) and only partly on
-#   NAND. That is the clamp's existing rule (a contradiction is at most so
+#   NAND. Note the operator-targeting doubling (an operator whose target is
+#   itself an operator has its base doubled, so 16.0 and 20.0 respectively) means
+#   a NAND that CONTRADICTS AN OPERATOR has no headroom left at all: neutral is
+#   already clamped to 10.0, so a best rating gains nothing there. The band is
+#   exact near the bottom of the range and compresses as the base approaches the
+#   ceiling. That is the clamp's existing rule (a contradiction is at most so
 #   forceful) and is deliberately NOT changed here: raising it is a separate
 #   question about `NAND_BASE_WEIGHT`, measured on its own.
 ANNOTATION_TERM_NEUTRAL = 0.5  # neutral value of EACH of the four terms
@@ -306,11 +310,16 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
             # because the conversion can raise anything and the run must survive.
             except Exception:
                 continue
-            # A non-finite strength is filtered for the same reason a NaN
-            # DIMENSION degrades to neutral: `max([nan, 0.25])` is `nan`, so one
-            # non-finite row would poison `w` and return nan to the whole run.
-            # `math.isfinite` also rejects the infinities `float()` accepts.
-            if math.isfinite(v):
+            # Filter NaN ONLY — not every non-finite value. NaN is the one that
+            # cannot be reasoned about: `max([nan, 0.25])` is `nan`, so a single
+            # NaN row would return NaN as the weight of the whole operator.
+            # `+/-inf` is finite-ly comparable and `mitigation_dampening_factor`
+            # CLAMPS it to the band edge, which is the module's documented
+            # contract for an out-of-band strength; dropping it here would
+            # silently downgrade a maximum-damping `inf` to the mid-band default
+            # (0.50 -> 0.70) instead. That is also what `_annotation_term` does
+            # with an infinite DIMENSION, so the two mechanisms agree.
+            if not math.isnan(v):
                 present.append(v)
         # Legacy mitigation with NO strength property → the documented
         # mid-band default (see module docstring).
