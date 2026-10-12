@@ -41,8 +41,7 @@ absorbs every failure and reports the drops it can DETECT — a
 **window-unresolvable** window and a non-empty tally with **no resolvable org**
 — to the operator through ``metering.report_unmetered_increment``, the same
 lane-visible signal the eight swallow sites use (this module is the ``embed``
-lane; #4489 added the eighth, ``retrieval``). A failure of the increment RPC
-ITSELF is logged at WARNING and is the
+lane; #4489 added the eighth, ``retrieval``). A failure of the increment RPC ITSELF is logged at WARNING and is the
 #3824 residual, shared with every other lane (see
 ``metering.record_embedding_usage``); a note landing after the tally was
 consumed is the capture-cancellation residual. Those two are the ones this

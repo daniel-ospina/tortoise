@@ -189,8 +189,8 @@ _PERIOD_KEYED_LANES = [
     ("metering_increment_capture_cost", {"p_calls": 1, "p_cost_usd": 1.0}),
     ("metering_increment_embedding", {"p_calls": 1, "p_texts": 1, "p_chars": 1}),
     # #4489: the retrieval lane joined the period-keyed set and inherits the
-    # #4242 window refresh. Without this entry the drift guard's hardcoded lane
-    # list would be blind to it (the defect the guard exists to stop).
+    # #4242 window refresh. Without this entry the static drift guard's
+    # hardcoded lane list would be blind to it (the defect it exists to stop).
     ("metering_increment_retrieval", {"p_queries": 1, "p_leg_runs": 1}),
     ("metering_set_graph_storage", {"p_total_mb": 1.0}),
 ]

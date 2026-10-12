@@ -439,12 +439,9 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 
     ``lane`` names the swallow site (one stable token per site) so an alert is
     attributable to the handler that dropped the increment rather than to
-    "metering failed somewhere". The lanes are ``write_op``,
+    "metering failed somewhere". The eight lanes are ``write_op``,
     ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
-    ``mcp_write_op``, ``ask_ledger``, ``embed`` (#4488) and ``retrieval``
-    (#4489) — the #3981 inventory, extended by each lane that owns a swallow
-    site of its own. It is pinned against source by
-    ``tests/test_metering_window_admission.py``.
+    ``mcp_write_op``, ``ask_ledger``, ``embed`` and ``retrieval``.
 
     Never raises: the alert itself must not become a new failure path (a signal
     that can raise is a refusal by another name). The incident — a GitHub issue
@@ -1460,36 +1457,26 @@ def get_embedding_usage(org_id: str) -> dict:
         return _zero_view(period.label, period)
 
 
-# ── Retrieval lane: per-org SEARCH work (#4489) ──────────────────────────────
+# ── Retrieval lane: per-org SEARCH workload (#4489) ─────────────────────────
 #
 # WHY. Reads are free by DECISION (``product/pricing.json`` →
 # ``billing.reads_free: true``), so the engine cost of answering a query had no
-# meter at all: write-ops was the only per-org dimension (``_ops_allowance``
-# below), and a read-heavy org and an idle one were indistinguishable. These two
-# functions put retrieval workload — queries, wall time, and WHICH legs ran — on
-# the SAME durable per-period row as write-ops and the embedding lane, so the
-# read/write split (and the retrieval/encode split) is readable off ONE row with
-# no new store and no new read path.
+# meter at all: the only per-org dimension was write-ops, and a read-heavy org
+# and an idle one were indistinguishable. These two functions put that workload
+# on the SAME durable per-period row, so the reading needs no new store and no
+# new read path.
 #
 # NOT a billing change (#4489 is explicit): nothing here prices, caps, throttles
 # or bills. The columns are WORKLOAD, and `get_cohort_spend_usd` does not read
 # them — the spend ceiling is untouched by construction.
-#
-# WHY NOT A PROCESS COUNTER. The sibling compute/egress lanes (#4490/#4491) keep
-# their figures in the in-process Prometheus registry and state the limit that
-# follows (nothing scrapes it in production, so the figure dies with the
-# process). A cost base for "unlimited reads" has to survive a deploy and be
-# comparable against the SAME org's write-ops figure, which is on this ledger —
-# so this dimension is the ledger, read through the existing ``/v1/team`` path.
 
 
 def record_retrieval_usage(org_id: str | None, *, queries: int = 0,
                            leg_runs: int = 0, leg_degraded: int = 0,
                            wall_ms: float = 0.0, leg_fts: int = 0,
-                           leg_vector: int = 0,
-                           leg_structural: int = 0,
+                           leg_vector: int = 0, leg_structural: int = 0,
                            _selfhost_transport: bool = False) -> dict | None:
-    """Record one batch of retrieval WORKLOAD for *org_id* (#4489).
+    """Record one batch of RETRIEVAL workload for *org_id* (#4489).
 
     Window resolution RAISES on an unresolvable anchor (#3825), exactly like the
     other writers. That raise is a SIGNAL, not a refusal (#3981): the caller
@@ -1499,17 +1486,13 @@ def record_retrieval_usage(org_id: str | None, *, queries: int = 0,
     dropped, not retried at any call site (representing that increment is
     #3824, the same residual as the other lanes).
 
-    The per-leg counts are the legs that RAN, by the recorded leg-trace
-    vocabulary (``fts`` / ``vector`` / ``structural`` — see
-    ``search_engine._trace_entry``); ``leg_runs`` is their total, so a leg name
-    this writer does not know is counted in the total and in no per-leg column
-    (the fold is what keeps the row bounded). ``leg_degraded`` counts legs that
-    ran but contributed nothing — a read silently served by one leg is visible
-    as such.
+    The leg counters are the RECORDED vocabulary (``fts`` / ``vector`` /
+    ``structural``) — a name outside it is folded into ``leg_runs`` at the
+    caller (``retrieval_metering``), so the row shape cannot grow by accident.
 
-    Exemptions mirror ``record_ask_usage`` / ``record_embedding_usage``:
-    ``not org_id`` (stdio/None) or the selfhost-transport ContextVar (the value
-    ``selfhost`` is NEVER the key).
+    Exemptions mirror ``record_embedding_usage``: ``not org_id`` (stdio/None)
+    or the selfhost-transport ContextVar (the value ``selfhost`` is NEVER the
+    key).
 
     A NON-FINITE ``wall_ms`` is dropped to 0.0 (with a warning): the value is
     summed into a figure an operator reads, and a ``nan`` would poison it.
@@ -1539,23 +1522,16 @@ def _record_retrieval_usage_locked(org_id: str, period: MeteringPeriod,
                                    wall_ms: float, leg_fts: int,
                                    leg_vector: int,
                                    leg_structural: int) -> dict | None:
-    """The serialized retrieval increment body.
-
-    Every counter is an ADDITIVE increment mirroring the SQL RPC's own
-    ``coalesce(...) + p_...`` term, so the two homes of this lane (registry /
-    Postgres) cannot diverge in arithmetic — the same pairing the embed lane
-    carries.
-    """
+    """The serialized retrieval increment body (see the embed sibling)."""
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_increment_retrieval,
             )
             metering_increment_retrieval(
-                get_control_plane(), org_id, period.start_iso,
-                period.end_iso, queries=queries, leg_runs=leg_runs,
-                leg_degraded=leg_degraded, wall_ms=wall_ms,
-                leg_fts=leg_fts, leg_vector=leg_vector,
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                queries=queries, leg_runs=leg_runs, leg_degraded=leg_degraded,
+                wall_ms=wall_ms, leg_fts=leg_fts, leg_vector=leg_vector,
                 leg_structural=leg_structural,
             )
             return {"period": period.label,
@@ -1621,10 +1597,6 @@ def get_retrieval_usage(org_id: str) -> dict:
     not an error (the MERGE only creates the record on the first write, P2-14).
     Read failures degrade to the zero view (never 500, #923), including an
     unresolvable window.
-
-    Read NEXT TO ``get_current_usage``'s ``write_ops_used`` for the same org and
-    window to see the read/write split #4489 indicator 3 asks for, and next to
-    ``get_embedding_usage`` for the retrieval/encode split of the SAME reads.
     """
     zeros: dict = {"retrieval_queries": 0, "retrieval_leg_runs": 0,
                    "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,

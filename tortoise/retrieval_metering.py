@@ -85,20 +85,14 @@ MEASURED VS EXCLUDED — stated, not implied:
   cost base behind the READS promise); and any read served by a store that could
   not be opened, which fails before a leg runs and is therefore not a query this
   lane ever served.
-* ATTRIBUTED FROM THE MCP DISPATCH POINT: an MCP (``/mcp``) request resolves
-  its org in the ``mcp_auth`` ContextVar, which this ASGI layer cannot see, so
-  ``mcp_server._wrapped_call_tool`` — the single dispatch point for every
-  client tool call — calls :func:`bind_org` on the armed tally before the
-  handler runs. The middleware's flush-time resolution then finds it, and the
-  whole MCP read surface is attributed rather than dropped for want of an org.
-* NOT ATTRIBUTED: any OTHER lane whose org never reaches the tally (a
-  session-JWT path the auth dependencies bind outside ``scope["state"]``, a
-  health probe, an unresolved MCP org). Its retrieval is measured, then DROPPED
-  rather than filed under an invented org: :func:`flush_tally` writes no row and
-  reports the drop to the operator on the ``retrieval`` lane when a non-empty
-  tally has no resolvable org. Nothing is written to an unattributed (``""``)
-  row — there is no such row. This is the same documented limit the sibling
-  compute (#4490) and egress (#4491) dimensions carry.
+* NOT ATTRIBUTED: an MCP (``/mcp``) request, whose org lives in the
+  ``mcp_auth`` ContextVar this ASGI layer cannot see. Its retrieval is measured,
+  then DROPPED rather than filed under an invented org: :func:`flush_tally`
+  writes no row and reports the drop to the operator on the ``retrieval`` lane
+  when a non-empty tally has no resolvable org. Nothing is written to an
+  unattributed (``""``) row — there is no such row. This is the same documented
+  limit the sibling compute (#4490) and egress (#4491) dimensions carry; a
+  future MCP dispatch seam that binds the org removes it.
 """
 
 from __future__ import annotations
@@ -424,10 +418,8 @@ class RetrievalMeteringMiddleware:
 
     The org is resolved at FLUSH time, after the handler has run: the auth
     dependencies write ``scope["state"]["org_id"]`` DURING the request and
-    ``scope`` is the same dict by then, and an MCP call — whose org lives in the
-    ``mcp_auth`` ContextVar this layer cannot see — is bound onto the tally by
-    ``mcp_server._wrapped_call_tool``. A lane whose org never reaches either
-    place (a session-JWT path, a health probe) is DROPPED and alerted on the
+    ``scope`` is the same dict by then. A lane whose org never reaches scope
+    state (MCP, session-JWT, health probes) is DROPPED and alerted on the
     ``retrieval`` lane rather than being filed under an invented org.
     """
 

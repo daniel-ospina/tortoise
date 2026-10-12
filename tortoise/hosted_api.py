@@ -88,9 +88,6 @@ from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
 )
-from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
-    RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
-)
 from tortoise.graph_ops import (  # #3359: per-capture graph-op accounting
     GraphOpsCounter,
     counts_capture_ops_async,
@@ -137,6 +134,9 @@ from tortoise.projection import (
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
+from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
+    RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
+)
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
     _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
@@ -3691,17 +3691,14 @@ class InFlightMiddleware:
             workload_exit()
 
 
-# #4489: the RETRIEVAL work boundary. Registered on the same seat as the embed
-# boundary below it — inside ``InFlightMiddleware`` and therefore inside the
-# WaitBound-owned task, and outside every route — for the same reason: a request
-# the transport bound refuses must not be credited with retrieval work. It arms
-# EVERY HTTP method (a read is a GET as well as a POST; the embed boundary arms
-# non-GET only because an encode is a write-lane activity), takes the tally in a
-# ``finally`` with NO early return (a return there would discard the app's own
-# exception), and flushes OFF the loop. The org comes from
-# ``scope["state"]["org_id"]`` at flush time — the auth-written dict, never a
-# client-supplied header — and an MCP call, whose org lives in a ContextVar this
-# layer cannot see, is bound by ``mcp_server._wrapped_call_tool`` instead.
+# #4489: the RETRIEVAL boundary, at the same seat as the compute/egress/embed
+# wrappers — INSIDE ``InFlightMiddleware`` and ``WaitBoundMiddleware`` (both
+# registered after this line, and ``add_middleware`` inserts at index 0), so a
+# request the transport bound refuses is not credited with retrieval work.
+# Unlike the embed boundary it arms EVERY method, because a read is a GET.
+# ``test_retrieval_metering.py::TestMiddleware::
+# test_the_middleware_is_actually_installed_on_the_app`` is the guard that
+# this line is the only thing making the hosted read lane measurable.
 app.add_middleware(_RetrievalMeteringMiddleware)
 app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
@@ -6856,13 +6853,13 @@ class OrgInfoResponse(BaseModel):
     #: Sticky: TRUE once two different encoder identities were seen in the
     #: window. A figure that silently averaged two models would be unusable.
     embed_identity_mixed: bool = False
-    # #4489: per-org RETRIEVAL work for the current period — the read-side cost
-    # base behind the `reads_free` decision (`product/pricing.json`). WORKLOAD,
-    # not a price: nothing here can bill, cap or throttle. Read next to
-    # `write_ops_used` above (indicator 3's read/write split) and to `embed_*`
-    # (the encode half of the SAME reads). Additive + defaulted, so every
-    # existing consumer of this response is unaffected; a fresh org reads zeros
-    # (the MERGE creates the row on first write).
+    # #4489: per-org RETRIEVAL workload for the current period. WORKLOAD, not a
+    # price — nothing here can bill, cap or throttle (the issue's explicit
+    # out-of-scope list). Additive + defaulted, so every existing consumer is
+    # unaffected; a fresh org reads zeros (the ledger row is created by
+    # whichever lane writes first). The per-leg counters are the recorded
+    # vocabulary (fts / vector / structural); ``retrieval_leg_runs`` may exceed
+    # their sum, because a leg outside the vocabulary advances the total only.
     retrieval_queries: int = 0
     retrieval_leg_runs: int = 0
     retrieval_leg_degraded: int = 0
@@ -9003,19 +9000,23 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
             max_nodes = None
 
     # Metering: write-op usage for the current billing period (#681), ask usage
-    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
-    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
-    # straight on the event loop. #4488 added the third, which is the clearest
-    # possible reason to move the GROUP off the loop rather than add another
-    # blocking hop to a route that is also under a 10s transport bound
-    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
-    # from the same moment, and the route does strictly less blocking work than
-    # before this PR rather than more. Found in review.
+    # (#1987 Task 6), embedding-encode workload (#4488) and retrieval workload
+    # (#4489). All four are SYNCHRONOUS ledger/control-plane reads, and each was
+    # previously run straight on the event loop. #4488 added the third and #4489
+    # the fourth, which is the clearest possible reason to move the GROUP off
+    # the loop rather than add another blocking hop to a route that is also
+    # under a 10s transport bound (`mcp_auth.py`). ONE offloaded hop for all
+    # four — the figures then come from the same moment, and the route does
+    # strictly less blocking work than before this PR rather than more.
     #
-    # All three degrade internally to a zero view (never raising), so the
+    # All four degrade internally to a zero view (never raising), so the
     # best-effort contract is unchanged by where they run.
-    from tortoise.metering import (get_ask_usage, get_current_usage,
-                                   get_embedding_usage, get_retrieval_usage)
+    from tortoise.metering import (
+        get_ask_usage,
+        get_current_usage,
+        get_embedding_usage,
+        get_retrieval_usage,
+    )
 
     def _read_usage():
         oid = org["org_id"]
@@ -9075,9 +9076,10 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         embed_revision=embed_usage.get("embed_revision"),
         embed_identity_mixed=bool(
             embed_usage.get("embed_identity_mixed", False)),
-        # #4489: retrieval workload for the current period — the read-side cost
-        # base. The read degrades to the zero view on failure (never 500), so a
-        # fresh org renders zeros rather than an error.
+        # #4489: retrieval workload for the current period, read from the SAME
+        # ledger row as the write-ops figure — that is what makes #4489
+        # indicator 3 (a read-heavy org vs a write-heavy one) one response away.
+        # The read degrades to the zero view on failure (never 500).
         retrieval_queries=retrieval_usage.get("retrieval_queries", 0),
         retrieval_leg_runs=retrieval_usage.get("retrieval_leg_runs", 0),
         retrieval_leg_degraded=retrieval_usage.get(

@@ -408,23 +408,38 @@ A 500ms timeout caps all strategies. If all FalkorDB strategies fail, the system
 
 ## Creating Relationships with Semantic Labels
 
-When connecting Points with operators, use the `label` parameter to add domain context. **Direction is an explicit flag, not derived from the label** (ONTOLOGY v3.1 §3.1, §8 — #189):
+A relationship has **three layers** (ONTOLOGY §8): the **mechanism** (`IMPL` / `NAND`) and the
+**direction** it records; the **semantics** (the meaning vocabulary); and the **predicate** — the
+specific verb, which is the `label` parameter. **Declare the meaning and the write path resolves the
+direction** — the model's chain step that used to have no way to run (#7852 W1):
 
-| Semantic Type | Mechanism | Typical Direction | When to Use |
+| semantics (Layer 2) | mechanism | resolves to | When to Use |
 |--------------|-----------|-------------------|-------------|
-| **hasPart** | IMPL | bidirectional (parts↔whole) | Composition — "Epic hasPart Issue", "Product hasPart Feature" |
 | **addresses** | IMPL | unidirectional (A→B) | "Feature addresses Need", "Task implements Feature" |
-| **opposes** | NAND | unidirectional (A→B) | "Feature competesWith Competitor", "Issue blocks Issue" |
+| **supports** | IMPL | unidirectional (A→B) | Evidence bears on a claim |
+| **refutes** | NAND | unidirectional (A→B) | The directed attack — attacker's truth penalizes the target, no back-pressure |
+| **mutuallySupportive** | IMPL | bidirectional (A↔B) | Each reinforces the other |
+| **mutuallyExclusive** | NAND | bidirectional (A↔B) | "A and B can't both be true" — "Feature competesWith Competitor" |
+| **hasPart** | IMPL | bidirectional (parts↔whole) | Composition — "Epic hasPart Issue", "Product hasPart Feature" |
+| **related** / **transacts** | — | `-` in the model; the runtime records the caller/default direction | Neutral association. The model says no confidence transfers — but the runtime stores no `-` value yet, so the write path falls through and records `bidirectional` (unless you pass `direction=`). The four-value **storage** migration is the open half of #7852; for a genuinely transfer-free association use the plain (operator-less) `related` edge. |
 
-**Direction is explicit, not label-derived.** `create_operator(..., direction="bidirectional"|"unidirectional")` controls EP back-propagation: `bidirectional` (default) propagates both ways; `unidirectional` is source→target only. The `label` carries domain semantics only — EP reads `direction`, never the label. NAND defaults to bidirectional but also supports unidirectional. (Hosted: `tortoise_create_operator`; self-hosted: `sdk.create_operator`.)
+**`semantics` is resolved by the write path, and the basis it used is recorded** on the operator as
+`direction_basis` (`explicit` = the caller stated a non-default direction, `semantics` = the declared
+meaning resolved it, `default` = neither). An explicit non-default `direction=` still outranks the
+meaning; the signature default (`bidirectional`) does not. `label` is a **different input** — the
+Layer-3 predicate (the domain verb: `fixes`, `deploysTo`, `bearsOn`) — and it does not affect the
+direction. An unknown word **warns and the write proceeds** (warn-not-block, never refuses); a retired
+word (e.g. `opposes`) resolves to its canonical replacement. (Hosted: `tortoise_create_operator`;
+self-hosted: `sdk.create_operator`.)
 
 **Backward compatibility:** existing operators without a `direction` property default to bidirectional in EP (with a warning log). Self-hosted: run `graph-scripts/migrate_direction.py` to backfill `direction` on existing operators per their old semantics (NAND / hasPart / part-of → bidirectional; other IMPL → unidirectional). Hosted tenants do not run graph-scripts — the hosted API does not expose them.
 
 **Strength:** Set via `set_point_baseline(operator_id, alpha, beta)` (hosted: `tortoise_set_point_baseline`; self-hosted: `sdk.set_point_baseline`). High alpha = strong support. High beta = strong contradiction.
 
 ```python
-# Create a relationship with semantic context + explicit direction
-op = sdk.create_operator("IMPL", feature_id, [need_id], label="addresses", direction="unidirectional")
+# The meaning resolves the direction — no need to state it
+op = sdk.create_operator("IMPL", feature_id, [need_id],
+                         semantics="addresses", label="implements")
 sdk.set_point_baseline(op["id"], alpha=10, beta=1)  # strong support
 ```
 

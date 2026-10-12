@@ -654,7 +654,8 @@ SOURCE_PATTERNS = {
             # and the per-leg hooks' caller, and its guard
             # (tests/test_retrieval_metering.py) is registered in `api`. Without
             # this entry a retrieval_metering.py-only diff matched no pattern,
-            # fell through to `core`, and skipped the guard that pins it.
+            # fell through to `core`, and skipped the guard that pins it — the
+            # #7076 self-guard class the test below refuses.
             "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,

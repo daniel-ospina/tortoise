@@ -17,7 +17,6 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
 from .env_truthy import is_truthy
-from .retrieval_metering import note_leg as _note_retrieval_leg  # #4489
 from .security import entity_label, validate_entity_type
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
@@ -46,9 +45,10 @@ from .commit_ops import SUBJECT_TERMINAL_STATUSES  # #1423: the Subject family
 # — without binding the legs to the caller's metering context, a capture's
 # off-thread FTS/vector/structural reads are never counted.
 from .graph_ops import bind_metering_context
-# #4489: the retrieval dimension's worker-context binder — the legs run in a
-# ThreadPoolExecutor below, which does NOT propagate ContextVars.
-from .retrieval_metering import bind_worker_context as _bind_retrieval_worker
+# #4489: the per-leg retrieval meter. The legs note their OWN executions here
+# (trace-INDEPENDENT by design), so a read that never opted into ``leg_trace``
+# still reports which legs ran. Stdlib-only at import, so no cycle.
+from . import retrieval_metering as _retrieval_metering
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,
@@ -1069,12 +1069,11 @@ def run_fts_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
-        # #4489: note the leg for the RETRIEVAL dimension independently of the
-        # caller's opt-in trace — the trace switches on extra declaration work
-        # inside the vector leg, so it cannot be the measurement's source (see
-        # ``retrieval_metering``'s module docstring). Unarmed → one ContextVar
-        # read and nothing else.
-        _note_retrieval_leg("fts", ran=ran, degraded=degraded)
+        # #4489: the ledger note is UNCONDITIONAL (unarmed → no-op), placed
+        # ahead of the opt-in trace so a default product read still records the
+        # leg. Mutation: moving it inside the ``leg_trace`` gate → the read
+        # funnel's leg count stays 0.
+        _retrieval_metering.note_leg("fts", ran=ran, degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("fts", ran=ran, degraded=degraded,
                                           reason=reason, count=count))
@@ -1335,11 +1334,12 @@ def run_vector_query(
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int, mechanism: str | None = None,
                 failure: bool = False) -> None:
-        # The #4199 scope-hollow rewrite is HOISTED above the trace gate so the
-        # #4489 meter sees the FINAL verdict (an empty-scope read is recorded as
-        # degraded), not the pre-rewrite one. It mutates locals only, so hoisting
-        # changes no behavior: with no trace the function returned before using
-        # them, and it still does.
+        # #4489: noted with the RAW ran/degraded the leg reports, BEFORE the
+        # opt-in trace's ``_scope_hollow`` re-labelling below — the ledger is a
+        # fact about the leg execution, not a derived declaration.
+        _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
+        if leg_trace is None:
+            return
         if _scope_hollow and ran and not degraded:
             # #4199: the leg ran, but the READ's scope holds no dense
             # material — this record must not present the read as hybrid.
@@ -1351,11 +1351,6 @@ def run_vector_query(
                 degraded = True
             else:
                 degraded, reason, count = True, "no_embeddings", 0
-        # #4489: same trace-independent note as the other legs; placed after the
-        # rewrite so the recorded verdict is the one the trace would carry.
-        _note_retrieval_leg("vector", ran=ran, degraded=degraded)
-        if leg_trace is None:
-            return
         entry = _trace_entry("vector", ran=ran, degraded=degraded,
                              reason=reason, count=count,
                              mechanism=mechanism)
@@ -1771,8 +1766,9 @@ def run_structural_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
-        # #4489: same trace-independent note as the FTS leg above.
-        _note_retrieval_leg("structural", ran=ran, degraded=degraded)
+        # #4489: unconditional ledger note (see the fts leg's comment).
+        _retrieval_metering.note_leg("structural", ran=ran,
+                                     degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("structural", ran=ran,
                                           degraded=degraded,
@@ -2189,10 +2185,15 @@ def degradation_chain(
         # #1391: the caller's exclusion applies uniformly (best-match AND
         # full-scan). Full-scan completeness callers (the #1353 supersede-
         # structure surface) opt in via excluded_statuses=() (include_terminal).
+        # #4489: the retrieval tally lives in a ContextVar too, and a NEW thread
+        # does not inherit ContextVars (CPython) — so each leg is wrapped with
+        # the retrieval binder AS WELL as the graph-ops one, or the leg half of
+        # the retrieval figure would be permanently, silently zero. Both binders
+        # are identity when their context is unarmed.
         if strategies.get("fts") and query:
             futures[executor.submit(
-                _bind_retrieval_worker(bind_metering_context(run_fts_query)),
-                graph, query,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_fts_query)), graph, query,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 keep_numeric=keep_numeric,
@@ -2213,8 +2214,8 @@ def degradation_chain(
                 # byte-identical submit kwargs).
                 _vec_kwargs["scope_kinds"] = scope_kinds
             futures[executor.submit(
-                _bind_retrieval_worker(bind_metering_context(run_vector_query)),
-                graph, query_vec,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_vector_query)), graph, query_vec,
                 limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
@@ -2223,9 +2224,8 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                _bind_retrieval_worker(
-                    bind_metering_context(run_structural_query)),
-                graph, kind,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_structural_query)), graph, kind,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 **_runner_kwargs("structural"),
