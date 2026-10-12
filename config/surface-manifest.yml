@@ -167,7 +167,9 @@ response_fields:
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded
     direction came from: explicit (the caller stated a non-default direction), semantics (the declared Layer-2
-    meaning resolved it) or default (neither was declared, so the per-op_type default applied)'
+    meaning resolved it) or default (nothing was declared, so the caller-supplied/write-path default was
+    recorded — the signature default is bidirectional for EVERY op_type; only an explicit direction=None
+    canonicalizes per op_type)'
   unchanged_when_off: n/a — not flag-gated; an additive key on the returned operator properties, and every
     pre-existing key keeps its value
 - response: tortoise_create_operator
