@@ -77,7 +77,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, heldRo
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
+import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -1108,11 +1108,13 @@ function WizardBlock({ step, title, children }) {
 // (Billing plan cards, welcome plan chooser, API-keys cap notice). A missing
 // server price id renders a DISABLED Upgrade control + the honest reason; it
 // never becomes a marketing link. The caller may add the secondary
-// "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
-// Graphs-tab upgrade buttons) are out of scope here.
-function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false }) {
+// "Compare plans" link. Other CTAs keep their own controls: the header badge
+// (#4331) and the error banner (#4639's nudgeRoute gate, which is unreachable
+// without a server price id).
+// #4386: the Graphs-tab lock line reads this control too, with its own copy.
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false, label = 'Upgrade' }) {
   const reasonId = React.useId()
-  const cta = checkoutCtaFor(priceId, { anyConfigured })
+  const cta = checkoutCtaFor(priceId, { anyConfigured, label })
   if (cta.disabled) {
     // #4335 review: native `disabled` already conveys the state (a redundant
     // aria-disabled would contradict it), and the reason is visible AND tied
@@ -3103,6 +3105,17 @@ function claimIntentInFlight() {
   // check out (the nudge's checkout target).
   const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
   const nodeNext = nextUpgradePlan(planOptions(), team)
+  // #4386: the Graphs-tab lock line's own upgrade target. Same derivation the
+  // Billing grid and the node nudge use — deliberately a SEPARATE call, so a
+  // future node-specific retarget cannot silently move the graphs CTA. null
+  // means the deployment sells no paid tier, and the control then renders
+  // DISABLED with the honest reason rather than a button that does nothing.
+  // `nextUpgradePlan` returns the PLAN; its id lives on the team's
+  // server-resolved map (the same lookup the node nudge does).
+  const graphUpgrade = nextUpgradePlan(planOptions(), team)
+  const graphUpgradePriceId = graphUpgrade
+    ? (team?.checkout_price_ids?.[graphUpgrade.tier] || '')
+    : ''
   // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
   // allowance" promise when no plan above the current one is purchasable
   // (top tier, or an empty catalog).
@@ -3112,7 +3125,16 @@ function claimIntentInFlight() {
   // server-resolved default (team.checkout_price_id); the Billing page and
   // welcome plan step pass a per-tier price id from team.checkout_price_ids.
   async function upgradeToPrice(priceId) {
-    if (!priceId || checkoutPending) return
+    // #4386: a missing price id is NOT a silent no-op. Every render site
+    // disables/skips the control when no checkout is possible, so this branch
+    // is a backstop — but it is the choke point the silence originated from,
+    // and it fails LOUD so "the button did nothing" cannot come back through
+    // a future call site that forgets the gate.
+    if (!priceId) {
+      setError(CHECKOUT_UNAVAILABLE_REASON)
+      return
+    }
+    if (checkoutPending) return
     setCheckoutPending(true)
     try {
       const { checkout_url } = await api('/v1/billing/checkout', {
@@ -10054,7 +10076,23 @@ function claimIntentInFlight() {
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
-                    <button className="ghost" onClick={upgrade}>Upgrade to add more.</button>
+                    {/* #4386: this was a raw <button onClick={upgrade}> — an
+                        ENABLED control that silently did nothing when the
+                        server resolved no checkout price id. It also ignored a
+                        PARTIAL catalog: `upgrade()` targets the pro-default
+                        `checkout_price_id`, so a solo-only deployment left the
+                        button dead while solo was purchasable. It now renders
+                        the honest control off the NEXT purchasable plan (like
+                        the Billing grid and the node nudge): a real checkout,
+                        or a DISABLED control carrying the reason. */}
+                    <UpgradeCta
+                      priceId={graphUpgradePriceId}
+                      anyConfigured={Object.keys(team?.checkout_price_ids || {}).length > 0}
+                      onUpgrade={() => upgradeToPrice(graphUpgradePriceId)}
+                      pending={checkoutPending}
+                      className="ghost"
+                      label="Upgrade to add more."
+                    />
                     {LIMIT_CONTACT}
                   </span>
                 ) : (
