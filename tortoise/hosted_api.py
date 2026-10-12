@@ -19039,10 +19039,41 @@ async def invite_info(token: str):
     def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
         reg = sdk._get_registry()
+        # #4588: the expiry predicate is part of the QUERY, not only the
+        # caller's post-check, because THIS route is unauthenticated and the
+        # per-row cost is a full PBKDF2 (100k iterations, `hash_api_key`).
+        # Without the prune, every expired-but-not-yet-swept ``Invitation``
+        # node was materialised and hashed for ANY attacker-supplied token —
+        # an amplification the caller drives at will. The bound is now the
+        # number of LIVE invites. Nothing but accept, revoke, the admin
+        # ``expire_invite`` and the clock sweep writes a terminal ``status``
+        # (#1890), so an invite that expires by the clock alone sat at
+        # 'pending' — scanned on every request — until a sweep ran.
+        #
+        # Stored form: both writers (``invite_to_org`` above and
+        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
+        # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
+        # STRING — so the comparison is the same lexicographic ISO compare the
+        # sibling registry predicates use (the #1890 dup-check below,
+        # ``list_pending_invites_for_me``, ``_get_current_org``'s API-key
+        # lanes). Legacy nodes have no ``expires_at`` prop → NULL → the
+        # ``IS NULL`` arm keeps them (Never-expires), never silently dropped.
+        #
+        # No indexed ``lookup_hash`` equality is available on this lane: the
+        # registry stores only ``token_hash`` in the salted ``salt:hash``
+        # PBKDF2 form, so the per-row verify is unavoidable and the expiry
+        # prune is the ceiling. A ``LIMIT``/cap was considered and REJECTED —
+        # it would silently stop resolving valid invites past the cap, turning
+        # an amplification into a correctness failure on the accept path.
+        # The caller's post-match expiry check below stays as the authority
+        # (defence in depth): the predicate only prunes, it never decides.
+        now_iso = datetime.now(UTC).isoformat()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN i.id, i.org_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
+            params={"now": now_iso},
         ).result_set
         for iid, tid, role, ie, exp, th in rows:  # noqa: B007
             if _verify(token, th):
