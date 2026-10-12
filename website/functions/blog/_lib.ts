@@ -10,6 +10,7 @@
 // Local dev: wrangler pages dev reads .env / .dev.vars
 
 import { RELAXED_CSP } from "../_shared/security-headers.ts";
+import { createAnchorAllocator } from "./_shared/slug.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
@@ -171,11 +172,147 @@ function inline(text: string): string {
   return out;
 }
 
+/**
+ * Render a callout body as blocks: prose paragraphs plus real lists. The body
+ * is a blockquote's lines with the `>` prefix already stripped, so a `-`/`1.`
+ * run becomes a <ul>/<ol> instead of one run-on paragraph. Runs of non-list
+ * lines stay a single paragraph (spaces joined), matching the previous shape.
+ */
+function renderCalloutBody(lines: string[]): string {
+  const parts: string[] = [];
+  let buf: string[] = [];
+  const flush = (): void => {
+    if (buf.length) parts.push(`<p>${inline(buf.join(" "))}</p>`);
+    buf = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    if (/^[-*]\s+/.test(lines[i])) {
+      flush();
+      const items: string[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*]\s+/, ""));
+        i++;
+      }
+      parts.push(`<ul>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+\.\s+/.test(lines[i])) {
+      flush();
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ""));
+        i++;
+      }
+      parts.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
+      continue;
+    }
+    buf.push(lines[i]);
+    i++;
+  }
+  flush();
+  return parts.join("");
+}
+
+// ── Headings, table of contents, callouts ──────────────────────────────────
+// A heading gets a stable `id` so an in-article table of contents (and a shared
+// deep link) has a real target. The slug is derived from the heading's TEXT, so
+// it never depends on surrounding markup, and it is restricted to [a-z0-9-] —
+// the only characters that may appear in an unescaped HTML attribute.
+
+const HEADING_SLUG_MAX = 80;
+
+/**
+ * Markdown → plain text (for slugs, TOC labels and FAQ questions).
+ *
+ * Derived from the RENDERER, not a second hand-rolled stripper: `inline()` is
+ * the sole authority on what a heading shows, so running it and stripping the
+ * allowlisted tags yields exactly the text the reader sees. A second stripper
+ * drifted on every construct `inline()` treats as literal — underscores
+ * (`snake_case` → `snakecase`), tildes (`~~old~~` → `old`), and backslash-
+ * escaped delimiters (`\*fair use\*` → `fair use`) — and it deleted a heading's
+ * leading list marker (`## 3. Hybrid retrieval` → `Hybrid retrieval`), which the
+ * heading body keeps. One classifier, so the label/id/question cannot diverge.
+ */
+function plainText(md: string): string {
+  return htmlToText(inline(md));
+}
+
+/**
+ * Plain text of a markdown fragment, derived from the renderer itself: render
+ * with the SAME block/inline logic the page uses, then strip the allowlisted
+ * tags and decode the entities `escapeHtml()` emitted. This is what keeps
+ * `FAQPage.acceptedAnswer.text` byte-equal to the visible answer — a second
+ * hand-rolled stripper is what let the two drift.
+ */
+function markdownToText(md: string): string {
+  return htmlToText(renderMarkdown(md));
+}
+
+/** HTML → text for an already-rendered fragment (see `markdownToText`). */
+function htmlToText(html: string): string {
+  return html
+    // A callout's label is chrome (its own styled heading), not answer text.
+    .replace(/<p class="callout-label">[\s\S]*?<\/p>/g, " ")
+    // An image contributes its alt text, the same rule the renderer applies to
+    // a heading label.
+    .replace(/<img[^>]*\balt="([^"]*)"[^>]*>/g, " $1 ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Heading text → URL-safe anchor id. Empty results fall back to "section". */
+function slugifyHeading(md: string): string {
+  const slug = plainText(md)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/['\u2019]/g, "") // apostrophes vanish: isn't → isnt
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, HEADING_SLUG_MAX)
+    .replace(/-+$/g, "");
+  return slug || "section";
+}
+
+// GitHub-style alerts: `> [!ANSWER]` / `[!NOTE]` / `[!TIP]` / `[!WARNING]`.
+// TipTap backslash-escapes the brackets, so the pattern tolerates `\[`.
+const MD_ALERT_RE = /^\\?\[!(\w+)\\?\]\s*(.*)$/;
+const MD_ALERTS: Record<string, { slug: string; label: string }> = {
+  ANSWER: { slug: "answer", label: "Quick answer" },
+  KEY: { slug: "key", label: "Key takeaways" },
+  TAKEAWAY: { slug: "key", label: "Key takeaways" },
+  TAKEAWAYS: { slug: "key", label: "Key takeaways" },
+  NOTE: { slug: "note", label: "Note" },
+  TIP: { slug: "tip", label: "Tip" },
+  IMPORTANT: { slug: "important", label: "Important" },
+  WARNING: { slug: "warning", label: "Warning" },
+};
+
+// Table-of-contents placeholder. Replaced after every heading is known, so the
+// list can never drift from the headings it points at.
+const MD_TOC_RE = /^\\?\[\\?\[\s*toc\s*\\?\]\\?\]$/i;
+
 export function renderMarkdown(markdown: string): string {
   const paragraphBuf: string[] = []; // per-render buffer (no cross-render leakage)
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
+  const tocEntries: { level: number; id: string; text: string }[] = [];
+  let tocIndex = -1;
   let i = 0;
+
+  // Duplicate headings get `-1`, `-2`, … allocated against the ids ALREADY
+  // ISSUED — not just the base's own counter, or `A`, `A`, `A 1` both take
+  // `a-1`. Every id stays unique and stable. The allocator RESUMES each base's
+  // suffix cursor, so a body that repeats one heading thousands of times stays
+  // linear rather than rescanning from `-1` on every duplicate (≈23 s at 8 000
+  // headings — see `_shared/slug.ts`).
+  const uniqueSlug = createAnchorAllocator();
 
   const flushPara = (buf: string[]): void => {
     if (buf.length) out.push(`<p>${inline(buf.join("\n"))}</p>`);
@@ -184,6 +321,15 @@ export function renderMarkdown(markdown: string): string {
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Table-of-contents placeholder (filled in once every heading is known)
+    if (MD_TOC_RE.test(line.trim())) {
+      flushPara(paragraphBuf);
+      tocIndex = out.length;
+      out.push("");
+      i++;
+      continue;
+    }
 
     // Fenced code block
     if (/^```/.test(line)) {
@@ -204,7 +350,13 @@ export function renderMarkdown(markdown: string): string {
     if (h) {
       flushPara(paragraphBuf);
       const level = h[1].length;
-      out.push(`<h${level}>${inline(h[2])}</h${level}>`);
+      const text = h[2];
+      const id = uniqueSlug(slugifyHeading(text));
+      // The TOC label is PLAIN TEXT (markdown stripped), like the slug. Inline
+      // markup here would nest an <a> inside the TOC's <a> (invalid HTML — a
+      // browser closes the outer one) or inject an <img>.
+      tocEntries.push({ level, id, text: plainText(text) });
+      out.push(`<h${level} id="${escapeHtml(id)}">${inline(text)}</h${level}>`);
       i++;
       continue;
     }
@@ -217,7 +369,19 @@ export function renderMarkdown(markdown: string): string {
         buf.push(lines[i].replace(/^>\s?/, ""));
         i++;
       }
-      out.push(`<blockquote>${inline(buf.join(" "))}</blockquote>`);
+      const alert = MD_ALERT_RE.exec(buf[0] ?? "");
+      const kind = alert ? MD_ALERTS[alert[1].toUpperCase()] : undefined;
+      if (kind && alert) {
+        const bodyLines = [alert[2], ...buf.slice(1)].map((s) => s.trim()).filter(Boolean);
+        out.push(
+          `<aside class="callout callout-${kind.slug}">` +
+            `<p class="callout-label">${escapeHtml(kind.label)}</p>` +
+            renderCalloutBody(bodyLines) +
+            `</aside>`,
+        );
+      } else {
+        out.push(`<blockquote>${inline(buf.join(" "))}</blockquote>`);
+      }
       continue;
     }
 
@@ -256,8 +420,8 @@ export function renderMarkdown(markdown: string): string {
         i++;
       }
       out.push(
-        `<table><thead><tr>${headerCells.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead>` +
-        `<tbody>${bodyRows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`,
+        `<div class="table-wrap"><table><thead><tr>${headerCells.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead>` +
+        `<tbody>${bodyRows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
       );
       continue;
     }
@@ -281,7 +445,191 @@ export function renderMarkdown(markdown: string): string {
   }
   flushPara(paragraphBuf);
 
+  if (tocIndex !== -1) {
+    // H2 only — the article's section structure, matching the author's intent.
+    // `splice` rather than `out[tocIndex] = …`: the guard counts a computed
+    // member assignment as an unattributable header stamp, so naming the write
+    // site keeps `_lib.ts` clean rather than requiring the guard to be widened.
+    const top = tocEntries.filter((e) => e.level === 2);
+    out.splice(
+      tocIndex,
+      1,
+      top.length
+        ? `<nav class="toc" aria-label="Table of contents">` +
+          `<ol>${top.map((e) => `<li><a href="#${escapeHtml(e.id)}">${escapeHtml(e.text)}</a></li>`).join("")}</ol>` +
+          `</nav>`
+        : "",
+    );
+  }
+
   return out.join("\n");
+}
+
+// ── FAQ extraction (#8292) ─────────────────────────────────────────────────
+// The `FAQPage` structured data is derived from the SAME markdown the page
+// renders: the question is the rendered heading text and the answer is the
+// RENDERED text of the answer's markdown (markdownToText), so the schema can
+// never claim a question the reader cannot see — or publish text they cannot.
+
+export interface FaqEntry {
+  question: string;
+  answer: string;
+}
+
+const FAQ_SECTION_RE = /^##\s+.*(faq|frequently asked)/i;
+
+/**
+ * Pull the question/answer pairs out of an article's FAQ section.
+ *
+ * The section is the `## … FAQ/frequently asked …` block; each `###` heading in
+ * it is a question and the text beneath it is the answer. Returns `[]` when the
+ * article has no FAQ section, so the caller can simply skip the schema.
+ */
+export function extractFaq(markdown: string): FaqEntry[] {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const entries: FaqEntry[] = [];
+  let inFaq = false;
+  let inFence = false;
+  let question: string | null = null;
+  let answer: string[] = [];
+
+  const flush = (): void => {
+    if (question) {
+      // The answer text is the RENDERED text of the answer's own markdown — the
+      // same renderMarkdown() the page uses — so the schema cannot drift from
+      // what the reader sees (underscores/tildes stay, `---` is an <hr>, a lone
+      // `|` line is a paragraph, an unknown `[!WORD]` is literal, `[[toc]]` is
+      // replaced by nav). A second hand-rolled stripper is what let them drift.
+      const text = answer.length ? markdownToText(answer.join("\n")) : "";
+      if (text) entries.push({ question, answer: text });
+    }
+    question = null;
+    answer = [];
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      // Keep the fence markers so markdownToText renders the block as code
+      // (otherwise a `#` inside the snippet would parse as a heading).
+      if (inFaq && question) answer.push(line);
+      i++;
+      continue;
+    }
+    if (inFence) {
+      // Fenced code IS visible to the reader (rendered as <pre><code>), so its
+      // content belongs in the answer — otherwise an answer that is only a code
+      // block yields an empty text and the whole question is dropped. Its lines
+      // are never scanned for headings, so the fence cannot open a question.
+      if (inFaq && question) answer.push(line);
+      i++;
+      continue;
+    }
+
+    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    if (h) {
+      const level = h[1].length;
+      if (level === 2) {
+        flush();
+        inFaq = FAQ_SECTION_RE.test(line);
+      } else if (level === 3 && inFaq) {
+        flush();
+        question = plainText(h[2]);
+      } else if (inFaq && question) {
+        // An h4 inside an answer is part of that answer — its text is visible
+        // to the reader, so the schema must carry it too. Push the WHOLE line
+        // (`#### …`), not just its text: the answer is re-rendered by
+        // markdownToText(), and a bare text line whose first characters look
+        // like a block marker (`- item`, `1. Plan`, `> quote`, `---`) would be
+        // reclassified — so the schema text would differ from the visible <h4>.
+        answer.push(line);
+      }
+      i++;
+      continue;
+    }
+
+    // Every other line is kept verbatim; the block structure (blockquote,
+    // table, list, `[[toc]]`) is resolved by the renderer in markdownToText,
+    // so extraction and rendering share one classifier instead of two.
+    if (inFaq && question) answer.push(line);
+    i++;
+  }
+
+  flush();
+  return entries;
+}
+
+/** The `FAQPage` node for an article's FAQ section (or `null`). */
+export function faqPageJsonLd(entries: FaqEntry[]): unknown | null {
+  if (!entries.length) return null;
+  return {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: entries.map((e) => ({
+      "@type": "Question",
+      name: e.question,
+      acceptedAnswer: { "@type": "Answer", text: e.answer },
+    })),
+  };
+}
+
+/** `BlogPosting` for an article. */
+function blogPostingJsonLd(post: BlogPost, url: string): unknown {
+  const description = post.meta_description ?? (post.excerpt ?? post.title);
+  return {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: post.title,
+    description,
+    url,
+    image: post.cover_image_url ?? undefined,
+    author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
+    datePublished: post.published_at,
+    dateModified: post.updated_at,
+  };
+}
+
+/** `BreadcrumbList` for an article. */
+function breadcrumbJsonLd(post: BlogPost, url: string): unknown {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Blog", item: `${SITE_URL}/blog` },
+      { "@type": "ListItem", position: 2, name: post.title, item: url },
+    ],
+  };
+}
+
+/** `FAQPage` for an article that has an FAQ section, or `null` when it has none. */
+function faqPageJsonLdFor(post: BlogPost): unknown | null {
+  return faqPageJsonLd(extractFaq(post.body));
+}
+
+/**
+ * The schema types an article composes, in output order. Adding a type (e.g.
+ * #7751's `VideoObject`) is a local change to THIS list plus one small builder
+ * function — not an edit to a fixed JSON literal a contributor has to find in
+ * the page (#8292 indicator 2).
+ */
+const ARTICLE_SCHEMA_BUILDERS: ReadonlyArray<(post: BlogPost, url: string) => unknown> = [
+  blogPostingJsonLd,
+  breadcrumbJsonLd,
+  faqPageJsonLdFor,
+];
+
+/**
+ * The JSON-LD array for an article, composed from `ARTICLE_SCHEMA_BUILDERS`.
+ * Pure, so the wiring is testable without a Cloudflare runtime; a builder that
+ * returns `null` (currently only the FAQ node) is omitted.
+ */
+export function articleJsonLd(post: BlogPost, url: string): unknown[] {
+  return ARTICLE_SCHEMA_BUILDERS
+    .map((build) => build(post, url))
+    .filter((node) => node !== null && node !== undefined);
 }
 
 // ── HTML shell ─────────────────────────────────────────────────────────────
@@ -368,18 +716,33 @@ h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;
 .share-bar a:hover,.share-bar button:hover{color:var(--accent);border-color:var(--accent)}
 .cover-img{margin:24px 0;border-radius:12px;border:1px solid var(--border);min-height:320px;background-size:cover;background-position:center;background-color:#0e7490}
 .art-body{font-size:15px;line-height:1.75;color:var(--text)}
-.art-body h2{font-family:var(--serif);font-size:26px;color:#fff;font-weight:400;margin:40px 0 14px}
-.art-body h3{font-family:var(--serif);font-size:20px;color:#fff;font-weight:400;margin:28px 0 10px}
-.art-body h4{font-family:var(--serif);font-size:17px;color:#fff;font-weight:400;margin:22px 0 8px}
+.art-body h2{font-family:var(--serif);font-size:26px;color:#fff;font-weight:400;margin:40px 0 14px;scroll-margin-top:84px}
+.art-body h3{font-family:var(--serif);font-size:20px;color:#fff;font-weight:400;margin:28px 0 10px;scroll-margin-top:84px}
+.art-body h4{font-family:var(--serif);font-size:17px;color:#fff;font-weight:400;margin:22px 0 8px;scroll-margin-top:84px}
 .art-body p{margin:14px 0}
 .art-body ul,.art-body ol{margin:14px 0 14px 22px}
 .art-body li{margin:6px 0}
 .art-body blockquote{border-left:2px solid var(--accent);padding-left:16px;color:var(--text-dim);margin:20px 0;font-style:italic}
+.art-body .toc{border:1px solid var(--border);border-radius:10px;background:var(--bg-soft);padding:18px 24px;margin:22px 0}
+.art-body .toc ol{margin:0 0 0 20px}
+.art-body .toc li{margin:5px 0}
+.art-body .toc a{color:var(--text);text-decoration:none;border-bottom:1px solid transparent;transition:color .15s,border-color .15s}
+.art-body .toc a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.art-body .callout{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg-soft);padding:18px 20px;margin:22px 0;font-style:normal}
+.art-body .callout-label{margin:0 0 6px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.art-body .callout p:last-child{margin-bottom:0}
+.art-body .callout-note{border-left-color:#64748b}.art-body .callout-note .callout-label{color:#94a3b8}
+.art-body .callout-tip{border-left-color:#22c55e}.art-body .callout-tip .callout-label{color:#4ade80}
+.art-body .callout-important{border-left-color:#8b5cf6}.art-body .callout-important .callout-label{color:#a78bfa}
+.art-body .callout-warning{border-left-color:#f59e0b}.art-body .callout-warning .callout-label{color:#fbbf24}
 .art-body code{background:#0b1220;border:1px solid var(--border);padding:1px 6px;border-radius:4px;font-size:13px;color:#4ade80}
 .art-body pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:16px 0}
 .art-body pre code{border:0;background:transparent;padding:0;color:inherit}
+.art-body .table-wrap{overflow-x:auto;margin:16px 0}
 .art-body table{border-collapse:collapse;margin:16px 0;width:100%}
+.art-body .table-wrap table{margin:0}
 .art-body th,.art-body td{border:1px solid var(--border);padding:8px 12px;text-align:left}
+.art-body th{background:var(--bg-soft);color:#fff;font-weight:600}
 .art-body img{max-width:100%;border-radius:8px;border:1px solid var(--border);margin:20px 0}
 .art-body hr{border:0;border-top:1px solid var(--border);margin:24px 0}
 .end-note{margin-top:40px;padding:20px;border:1px solid var(--border);border-radius:10px;background:var(--bg-soft);color:var(--text-dim);font-size:13px}
