@@ -14,11 +14,11 @@ reproduce, on any image pullable today, at the issue's own scale:
 
 | engine (graph module) | nodes | DUMP | RESTORE | instance after |
 |---|---|---|---|---|
-| ``falkordb/falkordb:6.0.1`` (60001) | 3 000 | 1.44 MB | 0.36 s | serving |
-| ``falkordb/falkordb:6.0.1`` (60001) | 30 000 | 14.42 MB | 4.70 s | serving |
-| ``falkordb/falkordb:6.0.1`` (60001) | 90 000 | 43.19 MB | ≥53 s (client socket timeout; server completed) | serving |
-| ``falkordb/falkordb:latest`` (60002) | 30 000 | 37.67 MB | 2.62 s | serving |
-| ``falkordb/falkordb-server:v4.20.6`` (42006, the CI pin) | 5 000 | 2.44 MB | 1.57 s | serving |
+| ``falkordb/falkordb:6.0.1`` (60001) | 3 000 | 1.44 MB | 0.42 s | serving |
+| ``falkordb/falkordb:6.0.1`` (60001) | 30 000 | 14.42 MB | 2.62 s | serving |
+| ``falkordb/falkordb:6.0.1`` (60001) | 90 000 | 43.19 MB | 53.3 s (client read bound; server completed) | serving |
+| ``falkordb/falkordb:latest`` (60002) | 30 000 | 14.42 MB | 2.61 s | serving |
+| ``falkordb/falkordb-server:v4.20.6`` (42006, the CI pin) | 5 000 | 2.44 MB | 2.25 s | serving |
 
 Four falsification attempts — index ``OPERATIONAL`` *and* index ``UNDER
 CONSTRUCTION`` at dump time, three sizes, three graph-module versions — all
@@ -121,8 +121,9 @@ import redis
 from tests import _live_utils
 
 #: Node count for the fixture graph. Overridable because the issue's own scale
-#: is 30 000 (≈20 s of writes) and this file runs on the always-selected `core`
-#: surface — see the registration comment in `config/ci-surfaces.yml`.
+#: is 30 000 (≈20 s of writes) and this file is registered on the `core`
+#: FALLBACK surface (it matches no named surface) — see the registration
+#: comment in `config/ci-surfaces.yml`.
 NODES = int(os.environ.get("TORTOISE_7846_NODES") or "3000")
 
 #: Neighbours requested from the vector index. A POPULATED index returns all K.
@@ -130,8 +131,15 @@ K = 3
 
 #: Bounds. A RESTORE that overruns its read bound IS the reported wedge (the
 #: server never answers again), so the client timeout is the assertion's edge.
+#:
+#: The assertion bound (`_RESTORE_BOUND_S`) is deliberately BELOW the socket
+#: timeout (`_RESTORE_TIMEOUT_S`). If the two were equal, the client socket
+#: would raise at the same instant the assertion would fire, and "the restore
+#: overran its bound" could not be told apart from "the socket timed out" —
+#: the two failure modes criterion 3 exists to distinguish.
 _CONNECT_TIMEOUT_S = 10.0
 _RESTORE_TIMEOUT_S = 120.0
+_RESTORE_BOUND_S = 90.0
 _INDEX_READY_BOUND_S = 180.0
 _BATCH = 500
 
@@ -284,9 +292,10 @@ def _assert_instance_serving(client) -> None:
         started = time.perf_counter()
         client.ping()
         elapsed_ms = (time.perf_counter() - started) * 1000
-        assert elapsed_ms < _RESTORE_TIMEOUT_S * 1000, (
-            f"PING #{attempt} took {elapsed_ms:.0f} ms after the restore — the "
-            f"instance is not serving (the #7846 wedge)"
+        assert elapsed_ms < _RESTORE_BOUND_S * 1000, (
+            f"PING #{attempt} took {elapsed_ms:.0f} ms after the restore "
+            f"(bound {_RESTORE_BOUND_S:.0f}s) — the instance is not serving "
+            f"(the #7846 wedge)"
         )
 
 
@@ -406,8 +415,9 @@ def test_graph_key_restore_of_an_indexed_graph_is_bounded_and_keeps_serving(
         )
 
     assert len(payload) > 0, "DUMP produced an empty payload"
-    assert elapsed < _RESTORE_TIMEOUT_S, (
-        f"RESTORE took {elapsed:.1f}s (bound {_RESTORE_TIMEOUT_S:.0f}s)"
+    assert elapsed < _RESTORE_BOUND_S, (
+        f"RESTORE took {elapsed:.1f}s (bound {_RESTORE_BOUND_S:.0f}s, socket "
+        f"timeout {_RESTORE_TIMEOUT_S:.0f}s)"
     )
 
     # ⛔ Criterion 3's own assertion.

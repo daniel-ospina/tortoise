@@ -2328,8 +2328,15 @@ surfaces:
   # select it when some unrelated source file changed. It runs on the docker
   # lane only (the vector index needs the engine's vector-index API); URI-less
   # runs skip visibly with the URI-gate reason, so the tier-2 embedded leg
-  # excludes it and the `core` always-on set carries it on the docker lane.
+  # excludes it and the `core` fallback surface carries it on the docker lane.
   - test_indexed_graph_key_restore_7846.py
+  # #7846 review (P2): a HERMETIC guard for the restore test itself — no server,
+  # so it runs on every `core` selection. It pins two things a reviewer caught:
+  # the docstring's "WHAT WAS MEASURED" table must match the committed evidence
+  # it cites (`docs/evidence/7846-indexed-graph-restore/README.md` §2), and the
+  # restore assertion bound must stay BELOW the client socket timeout so
+  # "overran its bound" and "the socket timed out" remain distinguishable.
+  - test_7846_restore_doc_and_bounds.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
