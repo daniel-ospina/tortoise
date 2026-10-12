@@ -150,11 +150,18 @@ ok "daemon PATH: $DAEMON_PATH"
 # trap (3) — TCC refuses the read only when LAUNCHD does it, not when an interactive shell does.
 for bin in tmux uv pi gh; do
   command -v "$bin" >/dev/null 2>&1 || continue     # not present in this shell at all
-  _p="$(PATH="$DAEMON_PATH" type -P "$bin" 2>/dev/null)"
+  # ⛔ `|| true`: install.sh runs under `set -euo pipefail`, and `type -P` returns non-zero for a
+  # tool that is not on $DAEMON_PATH. Unguarded, that bare assignment aborts the script AT THIS
+  # LINE — before the `if [ -n "$_p" ]` test below — so the operator gets a bare rc=1 with no
+  # diagnostic, and the optional `uv` (documented and warned as non-fatal above) becomes fatal.
+  _p="$(PATH="$DAEMON_PATH" type -P "$bin" 2>/dev/null || true)"
   case "$_p" in /*) ;; *) _p="" ;; esac
   # tmux takes -V; the rest take --version. Either way it must actually EXECUTE.
   _vflag="--version"; [ "$bin" = "tmux" ] && _vflag="-V"
-  if [ -n "$_p" ] && "$_p" "$_vflag" >/dev/null 2>&1; then continue; fi
+  # ⛔ Execute under the DAEMON PATH, not this shell's: a wrapper that DELEGATES by name (strip
+  # its own dir, `exec $bin`) would find the tool on the interactive PATH and exit 0 while launchd
+  # gets 127 — the same false green one layer in. The prefix reproduces the daemon's environment.
+  if [ -n "$_p" ] && PATH="$DAEMON_PATH" "$_p" "$_vflag" >/dev/null 2>&1; then continue; fi
   if [ "$bin" = "uv" ]; then
     warn "daemon PATH cannot run uv — lane.sh will not sync worktrees: $DAEMON_PATH"
   else

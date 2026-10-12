@@ -122,7 +122,7 @@ review_slots() { # <open_prs>
 # BROAD, because resuming a drain is idempotent while opening more lanes is not). It never
 # assigns 0.
 open_pr_count() { # -> echoes the open-PR count; never 0 on failure
-  local raw rc err sticky
+  local raw rc err sticky fc
   # `if …; then` rather than `raw=$(…); rc=$?` so this stays correct if errexit is ever enabled —
   # under `set -e` the bare assignment would exit the loop BEFORE rc was read, on a transient blip.
   if raw="$(gh pr list --repo "$OR" --state open --limit 300 --json number --jq 'length' 2>"$O/state/.open-err.$$")"; then
@@ -137,16 +137,18 @@ open_pr_count() { # -> echoes the open-PR count; never 0 on failure
     # ⛔ A sticky 0 is NOT reused. A drained queue (last success = 0) is exactly when new PRs are
     # most likely to have arrived before this failure, and returning 0 drives the UNSAFE direction:
     # OWN scope, no reviewer headroom, no merge-priority gate. Reuse only a POSITIVE last-known;
-    # absent / 0 / non-numeric assumes MERGE_PRIORITY_AT+1 = BROAD, because resuming a drain is
-    # idempotent while opening more lanes is not. THIS is what "never 0 on failure" means, and
-    # keying the fallback to the tunable (not a literal 11) keeps it above the threshold when
-    # MERGE_PRIORITY_AT is configured away from its default of 10.
+    # absent / 0 / non-numeric assumes a count ABOVE the fallback threshold, because resuming a
+    # drain is idempotent while opening more lanes is not. THIS is what "never 0 on failure" means.
+    # The fallback must exceed BOTH the merge-priority tunable AND the scope gate's threshold (a
+    # literal 10 below), so it is max(MERGE_PRIORITY_AT, 10) + 1 — keying it to the tunable alone
+    # left a below-default tunable landing in OWN, the unsafe direction, on a failed count.
+    fc="${MERGE_PRIORITY_AT:-10}"; [ "$fc" -ge 10 ] || fc=10; fc=$(( fc + 1 ))
     if is_num "$sticky" && [ "$sticky" -gt 0 ]; then
       echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> sticky last-known=$sticky" >> "$LOG"
       echo "$sticky"
     else
-      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming $(( ${MERGE_PRIORITY_AT:-10} + 1 )) (BROAD)" >> "$LOG"
-      echo $(( ${MERGE_PRIORITY_AT:-10} + 1 ))
+      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming $fc (BROAD)" >> "$LOG"
+      echo "$fc"
     fi
     return 0
   fi
