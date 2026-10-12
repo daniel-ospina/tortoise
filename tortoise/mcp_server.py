@@ -3216,8 +3216,9 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     promotion_policy='auto': #131 parity — a no-status connection-source
     point goes live on first edge creation (null-status sources only; an
     explicit or prior draft is never retro-promoted, #1088; retracted/
-    deprecated are never resurrected); the operator node is written without
-    a status property (live by projection — the #780 asymmetry). Deduped
+    deprecated are never resurrected); the operator node is written 'live'
+    (#5089 — it previously carried no status property, which excluded it from
+    the strict grounding selector while a rebuild produced 'live'). Deduped
     connections never retro-promote (promotion fires on FIRST edge creation
     only).
     Idempotent-ish: points dedup by content hash + kind, sources by url,

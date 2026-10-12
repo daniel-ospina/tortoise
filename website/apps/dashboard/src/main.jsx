@@ -462,7 +462,7 @@ function SettingsTab(props) {
     state, loading, onResumeSetup,
     github, githubConnected, reposCount, onConnectGithub, githubError,
     githubDisconnect, onOpenGithubDisconnect, onCloseGithubDisconnect, onConfirmGithubDisconnect,
-    sessions, sessionsOn, sessionsLoading,
+    sessions, sessionsOn, sessionsLoading, sessionsLoaded, onRetrySessions,
     memorySourcesProps,
     // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
     // W4 built the home + named the seam; W6 consumes it).
@@ -590,6 +590,18 @@ function SettingsTab(props) {
           <p className="dim">
             Session recording is off — new sessions are not captured. Turn it on under Memory sources above.
           </p>
+        ) : !sessionsLoaded ? (
+          /* #3520 (§8): the Captured-sessions screen's own fetch-error state —
+             retryable, and NEVER a fabricated empty list. `sessions` is [] both
+             when the read failed and when the org has no captures, so the
+             `sessionsLoaded` bit is what tells them apart; without it this arm
+             would be unreachable and a failed read would read as "no captures". */
+          <p className="dim small">
+            Couldn&apos;t load captured sessions.{' '}
+            {onRetrySessions && (
+              <button type="button" className="ghost small" onClick={onRetrySessions}>Retry</button>
+            )}
+          </p>
         ) : sessions.length === 0 ? (
           <p className="dim">No captured sessions yet — recordings appear here after your agent's first session.</p>
         ) : (
@@ -604,6 +616,26 @@ function SettingsTab(props) {
                   <li key={sid} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
                     <span className="small">{fmt(s.created_at)}</span>
                     <span className="dim small">{meta.turns} turns · {meta.extracted} extracted</span>
+                    {/* #3520: the PER-SESSION extraction status — the second
+                        status axis, and the only home for it. `stored`,
+                        `stored-and-processed` and `stored-extraction-failed`
+                        are distinguished here, so a capture that returned 200
+                        having extracted nothing no longer renders as a clean
+                        success. The label comes from capturedSessions.js and
+                        is null on a pre-#3520 payload — nothing is fabricated.
+                        R10: the status region is a POLITE live region, and the
+                        qualifier REPLACES the status word when the server
+                        recorded no outcome (`outcome not recorded`), so an
+                        unknown outcome can never read as `stored`.
+                        There is deliberately NO harness-level rollup of this
+                        axis: the install pill stays `active` beside a failed
+                        session, and no aggregate is computed anywhere. */}
+                    {meta.extractionLabel && (
+                      <span className="capture-state dim small" aria-live="polite"
+                        title={meta.extractionStatus ? `extraction: ${meta.extractionStatus}` : undefined}>
+                        {meta.extractionLabel}
+                      </span>
+                    )}
                     {/* #2600: server-resolved actor (membership email when the
                         seam retains it, else the raw id) — legacy null renders
                         nothing, never a crash. */}
@@ -710,6 +742,16 @@ function SessionTranscriptPanel({ sessionId, detail, loading, error, onRetry, on
     <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
       <div className="dim small" style={{ margin: '0.5rem 0 0.25rem' }}>
         Transcript — {tm.counts.turns} turns · {tm.counts.extracted} extracted memory
+        {/* #3520: the SAME per-session extraction status the row shows. The
+            detail payload carries the same object and transcriptModel derives
+            it through the same helpers, so an expanded row cannot disagree
+            with the row that opened it — and the two endpoints agree on
+            `extracted` by construction (#3555's unified non-turn predicate). */}
+        {tm.extractionLabel && (
+          <span className="dim small" style={{ marginLeft: '0.5rem' }} aria-live="polite">
+            · {tm.extractionLabel}
+          </span>
+        )}
         {/* #2600: same actor normalization as the row (display or raw id;
             legacy null renders blank, never a crash). */}
         {tm.actor && <span style={{ marginLeft: '0.5rem' }}>{tm.actor.includes('@') ? `by ${tm.actor}` : tm.actor}</span>}
@@ -1323,6 +1365,12 @@ function claimIntentInFlight() {
     setKeysLoadNonce((n) => n + 1)
   }
   const [sessions, setSessions] = React.useState([])
+  // #3520 (§8, the Captured-sessions screen's own state contract): whether a
+  // sessions read has EVER landed for the current team. `sessions === []` is
+  // ambiguous on its own — the fetch failing and an org with no captures both
+  // leave an empty array — so the card rendered "No captured sessions yet" for
+  // a failed read. This is the discriminator the honest fetch-error arm reads.
+  const [sessionsLoaded, setSessionsLoaded] = React.useState(false)
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
@@ -4954,6 +5002,7 @@ function claimIntentInFlight() {
       // managedKeys (isManagedKey render filter) + durableConnectKey's
       // rows-resolution keep working off the full payload.
       setSessions(Array.isArray(s) ? s : s.sessions || [])
+      setSessionsLoaded(true)
       // #4355: return the loaded rows so a caller that must decide something
       // from the TRUE state (the rotate catch's ambiguous-failure branch) reads
       // the same payload this call landed in `keys` — state updates are async,
@@ -4964,6 +5013,10 @@ function claimIntentInFlight() {
       // Round-12: a stale switch's error must not land under the newer team's header
       if (orgIdRef.current === _teamAtCall) {
         setError(e)
+        // #3520: the sessions read failed as part of the same Promise.all —
+        // the card must render its retryable error arm, never a fabricated
+        // empty list.
+        setSessionsLoaded(false)
         // #3783 (review P2): Promise.all rejects both reads together, so a
         // failure here means the keys payload never landed. Record it, so the
         // connect gate resolves 'error' (retryable) instead of waiting on a
@@ -5530,6 +5583,10 @@ function claimIntentInFlight() {
     // effect below re-run and schedule a fresh timer.
     resetKeysLoadUnresolved()
     setSessions([])
+    // #3520: same discipline as `setKeysLoaded(false)` above — a switch must
+    // not inherit the previous team's "a sessions read landed" bit, or the
+    // next team's failed read would render as an honest empty list.
+    setSessionsLoaded(false)
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
     setSessionsActionError(null)
@@ -6986,6 +7043,16 @@ function claimIntentInFlight() {
     setSelectedSessionId(null)
     setSessionDetail(null)
     setSessionDetailError(null)
+  }
+
+  // #3520 (§8): the Captured-sessions card's retry. Re-runs the SAME overview
+  // read the card is fed from (`refreshTeam` — the /v1/sessions and onboarding
+  // reads are one batched call), through the same seq guard every other refresh
+  // caller uses, so a retry cannot land a stale team's rows. Failure is already
+  // recorded in `sessionsLoaded`/`error` by `loadAll` — nothing to catch here
+  // beyond not producing an unhandled rejection.
+  function retrySessions() {
+    refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
   }
 
   // #2002 (W6): delete a captured session (Settings Captured-sessions home,
@@ -9564,6 +9631,8 @@ function claimIntentInFlight() {
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
+            sessionsLoaded={sessionsLoaded}
+            onRetrySessions={retrySessions}
             selectedSessionId={selectedSessionId}
             onViewSession={fetchSessionDetail}
             onClearSessionDetail={clearSessionDetail}

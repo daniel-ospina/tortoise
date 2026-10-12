@@ -75,6 +75,10 @@ from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 # self-hosted CLI can derive from it too; re-exported here because the SDK read
 # and `tests/test_hosted_api.py` bind it under this name.
 from .session_projection import SESSION_READ_FIELDS  # noqa: F401
+# #3520: the per-session extraction-status derivation — imported from the SAME
+# module as the projection it is a field of, so the SDK read and the hosted
+# reads cannot disagree about one session's status.
+from .session_projection import session_extraction_status
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
@@ -10757,14 +10761,28 @@ class TortoiseSDK:
         # #780: extraction operators (promote_source=False) carry status:'draft' so
         # the EP draft filter excludes them; the event path default ('live',
         # projection/entities.py coalesce) is overridden by the explicit status.
+        #
+        # #5089 (epic: derived = replay(journal)): the status is written on BOTH
+        # postures. Only the extraction posture used to set it, so a DEFAULT
+        # (`promote_source=True`) operator was born status-less — and the replay
+        # writer's coalesce default ('live') then did NOT reproduce the live graph.
+        # The graph's standing rule after any write is `status in ('draft','live')`
+        # (a status-less Point is admitted by EP factor extraction but excluded by
+        # the STRICT grounding selector, while a rebuilt one satisfies it — so the
+        # rebuild alone changed the operator's grounding participation); and
+        # `consistency._WRITER_DEFAULTS`
+        # states the rule this restores — "When the journal omits one, the graph's
+        # value must EQUAL the default". 'live' IS that default, per this writer's
+        # own docstring: "the event path default ('live', projection/entities.py
+        # coalesce) is overridden by the explicit status." So the door, not the
+        # replay, was the omission.
         extra_props = []
         params = {"id": pid, "op": op_type, "direction": direction}
         if label:
             extra_props.append("label:$label")
             params["label"] = label
-        if not promote_source:
-            extra_props.append("status:$st")
-            params["st"] = "draft"
+        extra_props.append("status:$st")
+        params["st"] = "live" if promote_source else "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
         proj.g.query(
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
@@ -12606,9 +12624,11 @@ class TortoiseSDK:
           sources (retracted/deprecated terminal sources are never
           resurrected; an explicit or prior draft is never retro-promoted,
           #1088).
-          Under auto the operator node is written WITHOUT a status property
-          (live by projection — the #780 asymmetry: gated writes explicit
-          draft on the operator, auto writes none).
+          Under auto the operator node is written 'live' (#5089 — it used to be
+          written WITHOUT a status property, which excluded the live operator
+          from the strict grounding selector while a rebuild produced 'live'; the
+          EP factor-extraction path admits a NULL status either way. Gated still
+          writes an explicit draft on the operator).
 
         Returns {granularity, batch_id, created: {points, entities, sources,
         connections}, deduped: {...}, ids: {points, entities, sources,
@@ -13656,8 +13676,12 @@ class TortoiseSDK:
         label-absent appends `o.label IS NULL` (no-label requests match only
         unlabeled operators).
 
-        Partial-absorb: on an exact miss, a NULL-status (unpromoted) operator
-        whose input set is a PROPER SUBSET of the requested set AND whose
+        Partial-absorb: on an exact miss, a PARTIAL operator
+        (`status IS NULL`, `'draft'`, or `'live'` — the promoting posture writes
+        'live', so admitting only NULL/draft went blind on it, #5089; the
+        distinguishing property is SUBSET, not liveness, hence "partial" rather
+        than "not-yet-live") whose input
+        set is a PROPER SUBSET of the requested set AND whose
         label/direction STRICT-MATCH the declared values (a label-absent
         request must NOT absorb a labeled operator — the cross-absorption
         semantic-theft class) AND whose written input set is NON-EMPTY —
@@ -13706,14 +13730,31 @@ class TortoiseSDK:
             return {"id": rows[0][0], "status": rows[0][1],
                     "kind": "exact", "written": list(inputs)}
         # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
-        # NULL-status partial whose written set is a PROPER SUBSET of the
+        # PARTIAL operator (any non-terminal status — see the status clause in
+        # pcond below) whose written set is a PROPER SUBSET of the
         # requested set with STRICT label/direction matching (the declared
         # values — absent↔default canonicalized the same way).
+        #
+        # #5089: the status clause admits 'live' as well as 'draft'/'NULL'. It
+        # used to read `(o.status IS NULL OR o.status = 'draft')`, which was
+        # correct only while the DEFAULT door left the operator status-less:
+        # create_operator now writes 'live' on the promoting posture (so live ==
+        # replay), and a crash between the node CREATE and the edge loop under
+        # that posture would otherwise be INVISIBLE here — the retry would miss
+        # the partial and mint a DUPLICATE operator, double-counting it in EP.
+        # The subset conditions are what identify the crash window. The status
+        # clause is a legacy guard: it admitted the two shapes the door used to
+        # write, and it is retained so a `'draft'` partial from the extraction
+        # posture is still absorbed. NOTE it is a weaker guard than it looks —
+        # the exact-hit query above carries no status clause at all, so a
+        # TERMINAL operator is reused on an exact match regardless. And the
+        # window covered is n >= 1 written edges: `size(targets) > 0` below means
+        # a crash immediately after CREATE (zero edges) is NOT absorbed.
         pcond = [
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
-            "(o.status IS NULL OR o.status = 'draft')",
+            "(o.status IS NULL OR o.status IN ['draft', 'live'])",
         ]
         if label is not None:
             pcond.append("o.label = $label")
@@ -23991,7 +24032,12 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
             "s.turn_count, s.actor_user_id, s.harness, "
-            "s.machine_id, s.model",
+            "s.machine_id, s.model, "
+            # #3520: APPENDED at the END (sess[7]/sess[8]) — the existing
+            # sess[0..6] mapping is unchanged, and the SDK read must serve the
+            # SAME extraction status the hosted surfaces do (#5498 binds the
+            # three key sets to one declaration).
+            "s.capture_ok, s.capture_extractor",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -24047,6 +24093,14 @@ class TortoiseSDK:
             "harness": sess[4],
             "machine_id": sess[5],
             "model": sess[6],
+            # #3520: the per-session extraction status, derived by the ONE
+            # shared helper so the SDK and the hosted reads cannot disagree on
+            # one session. Additive key at the END of the projection — no
+            # existing key changes value and no method is added (#3557's
+            # parity contract consumes the shared declaration, so this key is
+            # part of the SDK read by construction rather than a second
+            # opinion).
+            "extraction": session_extraction_status(sess[7], sess[8]),
             "extracted": extracted_count,
             "turn_points": turn_points,
             "extracted_points": extracted_points,

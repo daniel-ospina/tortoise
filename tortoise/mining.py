@@ -1358,9 +1358,11 @@ class EpSafeCommit:
                 continue
             op_status = op_rows[0][0]
             # Canonical read model (tortoise/live.py): a missing raw status is
-            # LIVE (projection coalesce default) — the pre-#780 create_operator
-            # path writes no status, so the R7 leak manifests as raw NULL
-            # (#944 review). Explicit 'draft' is the ONLY clean state.
+            # LIVE (projection coalesce default). Since #5089 BOTH doors write a
+            # status ('live' promoting / 'draft' extraction), so raw NULL is now
+            # the LEGACY/graph-migration shape only — but the gate must still
+            # refuse it, because a legacy NULL operator is live by that same
+            # coalesce (#944 review). Explicit 'draft' is the ONLY clean state.
             if (op_status or "live") == "live":
                 violations.append({"id": oid, "reason": "operator_node_live",
                                    "status": op_status})

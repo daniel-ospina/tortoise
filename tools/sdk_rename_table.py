@@ -93,15 +93,26 @@ from tools.bridge_table import _sdk_targets  # noqa: E402
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 CANON_DOC = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
+# The owner-approved MCP menu. A THIRD source doc, because the journal rows' evidence is
+# the canonical ABSORPTION ROW there (the two docs disagreed, and the owner's 2026-10-09
+# ruling makes that row governing — see `w5_diary_write` / `w5_checkpoint` / `w5_diary_read`).
+MCP_CANON_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
 OUT = ROOT / "docs" / "product" / "sdk-rename-table.md"
 
 BETA = "beta-sdk-surface.md"
 CANON = "canonical-sdk-methods.md"
+MCP_CANON = "canonical-mcp-tools.md"
 
 
 def _doc_text(name: str) -> str:
     """The source text a citation names, read fresh at build time."""
-    return (BETA_DOC if name == BETA else CANON_DOC).read_text(encoding="utf-8")
+    if name == BETA:
+        path = BETA_DOC
+    elif name == MCP_CANON:
+        path = MCP_CANON_DOC
+    else:
+        path = CANON_DOC
+    return path.read_text(encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────────────
 # THE DISPOSITION VOCABULARY — declared in `config/disposition-vocabulary.yml` and
@@ -412,7 +423,24 @@ CITES: dict[str, tuple[str, str]] = {
     # its wrapped continuation lines included. The old citation AUTHORED the bullet's
     # extent, so a prefix that stopped at the "live in the MCP server" line wrap still
     # passed while dropping "Filed post-beta … unlisted until then."
-    "w5": (BETA, "- **The journal capability**"),
+    # W5's three members each carry their OWN citation below (`w5_diary_write`,
+    # `w5_checkpoint`, `w5_diary_read`) — there is no group-level `w5` citation left,
+    # because there is no group-level destination left.
+    # ── The journal — RECONCILED to the canonical MCP menu (owner ruling, #4282 2026-10-09) ──
+    # The two owner-approved docs disagreed on all three journal names: the canonical
+    # MCP menu ABSORBS them, while beta files them under "Named but not solved"
+    # (post-beta, unlisted, #4667). The owner ruled which governs: "the approved menu
+    # absorbs `diary_write` into `create_entity`, absorbs `checkpoint` into
+    # `capture_knowledge`, and dissolves `diary_read` into `list_knowledge`. The approval
+    # wins; the table is the defect." So each row now cites the CANONICAL region that
+    # states its absorption, and the W5 group default is gone.
+    "w5_diary_write": (MCP_CANON, "| 10 | `create_entity` | create_point, create_entity, "
+                                  "create_event, create_object, create_subject, "
+                                  "create_document, diary_write |"),
+    "w5_checkpoint": (MCP_CANON, "| 13 | `capture_knowledge` | session_capture, ingest, "
+                                 "checkpoint |"),
+    "w5_diary_read": (MCP_CANON, "| `diary_read` | dissolves into "
+                                 "`list_knowledge(kind=\"diary\")` |"),
     "w6": (BETA, "| `capture_session` / `commit_session` | → row 16 "
                  "`mine_knowledge_from_session`, one method. The backend is the target "
                  "graph's configuration. |"),
@@ -531,10 +559,16 @@ GROUP_TARGET: dict[str, tuple[str, str]] = {
     "W2": ("write_knowledge_batch", "w2"),
     "W3": ("register_source", "w3"),
     "W4": ("index_sources_from_directory", "w4"),
-    # W5 is beta's "Named but not solved": the journal is LIVE (in the MCP server),
-    # filed post-beta and unlisted — NOT dead. `DISCARDED` here would tell Phase 2 to
-    # delete a capability the owner ruled is merely unlisted.
-    "W5": (UNLISTED, "w5"),
+    # W5 is no longer a group-level default: the owner's 2026-10-09 ruling (#4282)
+    # reconciled the journal to the canonical MCP menu, which gives each of the three
+    # members its OWN destination (see their OVERRIDE rows). A group default here would
+    # be dead data and — worse — would silently re-classify a fourth member if one were
+    # ever added to W5. Absent the entry, `_validate` fails closed with
+    # "UNRECOGNISED destination" for any W5 member with no OVERRIDE of its own.
+    #
+    # OVERRIDES: the beta doc's `#4667` post-beta/unlisted reading of the journal —
+    # the canonical menu's absorptions govern, so each journal name retires into the
+    # replacement that already exists for it.
     "W6": ("mine_knowledge_from_session", "w6"),
     "W7": ("mine_knowledge_from_session", "w6"),
     "W8": ("manage_source_trust", "w8"),
@@ -617,6 +651,11 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "create_edge": ("link_entities", "w9_canon"),
     # W10
     "file_decision": ("write_question", "w10_file_decision"),
+    # W5 — the journal reconciliation. Each member's destination is its OWN, taken from
+    # the canonical menu's absorption row; see the `w5_*` citations above.
+    "diary_write": ("create_entity", "w5_diary_write"),
+    "checkpoint": ("mine_knowledge_from_session", "w5_checkpoint"),
+    "diary_read": ("list_knowledge", "w5_diary_read"),
     # W11
     "update": ("update_knowledge", "w11_canon"),
     "retract_point": ("update_knowledge", "w11_retract"),
@@ -1256,18 +1295,11 @@ BRIDGE_DETERMINATION: dict[str, str] = {
                            "`list_knowledge`\u201d, and canonical R2 (`list_knowledge`) "
                            "lists all three. beta row 4 is explicit that `list_knowledge` "
                            "is the browse-and-filter method.",
-    # The journal: the bridge's `REMOVED` repeats the exact defect this table fixes.
-    "checkpoint": "**Part A is right; the sibling carries the same defect.** beta files "
-                  "`checkpoint` under \u201cNamed but not solved\u201d: live in the MCP "
-                  "server, filed post-beta, unlisted \u2014 not dead. The bridge's "
-                  "`REMOVED` (\u201cretires with no destination\u201d) reads it as "
-                  "discarded.",
-    "diary_read": "**Part A is right; the sibling carries the same defect.** beta files "
-                  "`diary_read` under \u201cNamed but not solved\u201d \u2014 live and "
-                  "unlisted, not dead. The bridge's `REMOVED` reads it as discarded.",
-    "diary_write": "**Part A is right; the sibling carries the same defect.** beta files "
-                   "`diary_write` under \u201cNamed but not solved\u201d \u2014 live and "
-                   "unlisted, not dead. The bridge's `REMOVED` reads it as discarded.",
+    # The journal is deliberately ABSENT from this table: the bridge's `REMOVED` used to
+    # repeat the exact defect this table fixed, and the owner ruled on 2026-10-09 (#4282)
+    # that the canonical menu's absorptions govern — so BOTH artifacts now carry
+    # `create_entity` / `mine_knowledge_from_session` / `list_knowledge` for the three
+    # names and the divergence is resolved, not disclosed.
 }
 
 

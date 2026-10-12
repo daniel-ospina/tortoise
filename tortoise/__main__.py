@@ -6621,6 +6621,14 @@ def _session_fields(s: dict, fields: tuple[str, ...] | None = None) -> dict[str,
         if field in ("turn_points", "extracted_points"):
             # the point LISTS render as their own section / a count
             out[field] = str(len(val)) if isinstance(val, list) else "0"
+        elif field == "extraction":
+            # #3520: the per-session extraction status is an OBJECT
+            # ({status, extractor, outcome_known}), not a scalar — a bare
+            # `str(val)` would print a Python dict repr at the user. Render the
+            # honest PAIR: the status word, and the qualifier when the outcome
+            # is unrecorded (never a bare `stored` for a session whose
+            # extraction outcome nobody recorded).
+            out[field] = _session_extraction_display(val)
         elif val is None or val == "":
             out[field] = "-"
         elif field == "created_at" and isinstance(val, str):
@@ -6628,6 +6636,22 @@ def _session_fields(s: dict, fields: tuple[str, ...] | None = None) -> dict[str,
         else:
             out[field] = str(val)
     return out
+
+
+def _session_extraction_display(val) -> str:
+    """#3520: the CLI rendering of one session's extraction status object.
+
+    Absent (a pre-#3520 payload) → `-`, never the string `None`. The
+    `outcome_known` qualifier is SPOKEN, not implied: an unknown outcome reads
+    `stored (outcome not recorded)`, so the CLI cannot present a session as
+    merely stored when nothing recorded what happened to its memory.
+    """
+    if not isinstance(val, dict):
+        return "-"
+    status = str(val.get("status") or "") or "-"
+    if val.get("outcome_known") is False:
+        return f"{status} (outcome not recorded)"
+    return status
 
 
 def _cmd_session_list(api_key: str, api_url: str) -> int:

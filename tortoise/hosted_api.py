@@ -174,6 +174,7 @@ from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
     SESSION_LIST_FIELDS,
+    session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
 from tortoise.supabase_control import _service_key  # #3677
 
@@ -13536,7 +13537,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             _update_onboarding_state(org["org_id"], _echo=False, **{
                 receipt_key: now,
             })
-            _record_capture_last_error(org["org_id"], capture_harness, None)
+            # #3520: the `session_capture_last_error_<harness>` clear used to sit
+            # HERE, before `_capture_ok` was known — which is exactly how an
+            # extraction failure cleared its own error. It now rides the outcome,
+            # above. The receipt write itself is unchanged: a stored session IS
+            # a receipt-worthy capture, and the extraction status is the surface
+            # that says what happened to its memory.
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception(
@@ -13591,7 +13597,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
         _sweep_orphaned_writes()
-        _record_capture_last_error(org["org_id"], capture_harness, None)
+        # #3520: the unconditional clear that used to sit HERE is gone as well.
+        # The per-harness `last_error` is written ONCE, from the capture
+        # outcome, above — clearing it here as well would be a second writer of
+        # one fact (the drift this issue removes). The sweep above still runs:
+        # the writes THIS capture landed have to be removed whether or not an
+        # outcome is recorded.
 
     # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
     # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
@@ -13811,6 +13822,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
+    # #3520 (§C): ONE fact, ONE place. The per-harness `last_error` and the
+    # per-session extraction status the read endpoints serve are written from
+    # THIS outcome, so one surface can no longer read "processed" while the
+    # other reads "no error". Before this, the receipt block below cleared
+    # `session_capture_last_error_<harness>` unconditionally on any 2xx — and an
+    # extraction failure RETURNS 200 (the turns really were stored, so a non-2xx
+    # would hide the partial write) — so a capture that extracted nothing
+    # cleared its own failure and the dashboard showed a clean pill.
+    #
+    # The clear STILL happens on every other 2xx (a store-only capture, a
+    # replay, a clean success): "only when extraction succeeded" is the
+    # failure-side rule, and neither a keyless capture (#3892 — STORED, only
+    # extraction skipped, never a fault) nor a replay performed an attempt that
+    # could have failed. Only a GENUINE attempt that did not fully succeed sets
+    # a detail.
+    _attempted_extraction = (
+        not store_only and (not session_existed or retry_failed_capture))
+    try:
+        _record_capture_last_error(
+            org["org_id"], capture_harness,
+            _capture_outcome_last_error(extraction_errors, skipped)
+            if (not _capture_ok and _attempted_extraction) else None)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "capture last-error state write failed (non-fatal)")
+        extraction_warnings.append(
+            "capture last-error state write failed (non-fatal)")
     # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
     # its real outcome + lane, exactly as before. A KEYLESS attempt records
     # capture_ok=False + lane "none" (no extraction lane ran) — recording
@@ -14004,12 +14043,51 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # as ``_capture_receipt_key`` / ``_capture_last_error_key``.
 
 
+# ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
+def _capture_outcome_last_error(extraction_errors: list, skipped: int) -> str:
+    """#3520: the descriptive per-harness `last_error` for a GENUINE attempt
+    whose extraction did not fully succeed.
+
+    Called from exactly ONE site — the 2xx handler, from the SAME variables that
+    derive the session's extraction status — so the two surfaces report one
+    fact. The text names the FIRST error verbatim (an operator reading the
+    dashboard gets the provider's own words, not a category) and counts the
+    rest, plus the post-write-verification shortfall when that is the cause.
+
+    `skipped` is the fail-soft enrichment case (a point the graph did not
+    return after the write). It is reported as a shortfall rather than an
+    error because nothing raised — but it is NOT "ok": a capture that claims
+    to have processed a point it cannot find is the false positive this issue
+    exists to remove.
+    """
+    parts: list[str] = []
+    if extraction_errors:
+        first = str(extraction_errors[0])
+        rest = len(extraction_errors) - 1
+        parts.append(first if rest <= 0 else f"{first} (+{rest} more)")
+    if skipped:
+        parts.append(
+            f"{skipped} extracted point(s) missing from the graph post-write")
+    detail = "; ".join(parts) or "extraction did not complete"
+    return f"session stored, extraction failed — {detail}"
+
+
 def _record_capture_last_error(org_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
     Called on every non-2xx (set) EXCEPT the #3060 capacity 429 and the #3129
     in-flight 409 — server conditions, not org capture failures — and every
-    2xx (cleared)."""
+    2xx (cleared).
+
+    #3520: the 2xx half is no longer unconditional. It is called ONCE per
+    capture request, from the handler's single outcome point, with a detail
+    ONLY for a genuine extraction attempt that did not fully succeed
+    (``_capture_outcome_last_error``) and ``None`` everywhere else — a clean
+    success, a replay, or a store-only capture (#3892/#4258: nothing ran, so
+    nothing failed). The clear-on-2xx site in the receipt block is gone; two
+    writers of one fact is how a status surface came to read "processed" for a
+    capture that had just cleared its own failure.
+    """
     key = _capture_last_error_key(harness)
     if key is None:
         return
@@ -15394,6 +15472,15 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     returns an empty list, never a 500 (a 500 also strips the CORS headers
     and surfaces as a misleading 'CORS blocked' to the browser).
 
+    #3520: each row carries the server-resolved per-session EXTRACTION status
+    (`extraction`: `{status, extractor, outcome_known}`), so the dashboard can
+    tell "stored" from "stored AND processed" — including the
+    extraction-failed-but-HTTP-200 capture, which writes a receipt and a
+    Session while extracting nothing. It is the SAME pair the detail endpoint
+    and the SDK read serve, derived in ONE place
+    (tortoise/session_projection.py::session_extraction_status) and APPENDED at
+    the END of the projection so no positional consumer shifts.
+
     #2600: ?actor_user_id=<uuid> optional filter (GET has no body) — the
     filter EXCLUDES null-actor (legacy) rows by construction (a MATCH-level
     WHERE on a property a legacy Session does not have can never match).
@@ -15447,7 +15534,13 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
             "s.actor_user_id, s.harness, "
-            "s.machine_id, s.model "
+            "s.machine_id, s.model, "
+            # #3520: the extraction-status pair APPENDED at the END — never
+            # inserted or reordered. The handler builds its dicts from these
+            # POSITIONAL columns (r[0..3] is the id/created/turns/extracted
+            # count), so a column placed anywhere earlier would silently
+            # re-bind every one of them. r[8]/r[9] are new; nothing above moves.
+            "s.capture_ok, s.capture_extractor "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -15499,6 +15592,11 @@ def _session_row_dict(r, members_by_id: dict) -> dict:
         # fields, null when absent (legacy / hook-less sessions).
         "machine_id": r[6],
         "model": r[7],
+        # #3520: the server-resolved per-session EXTRACTION status. LAST key in
+        # the projection, matching the LAST columns in the RETURN above — the
+        # positional contract is `r[8]`/`r[9]`, and #5498's binding assert just
+        # below keeps the wire dict and the shared declaration from drifting.
+        "extraction": session_extraction_status(r[8], r[9]),
     }
     assert set(d) == set(SESSION_LIST_FIELDS), (
         f"session projection drifted: wire={sorted(d)} "
@@ -15576,7 +15674,11 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         lambda: proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
             "s.turn_count, s.actor_user_id, s.harness, "
-            "s.machine_id, s.model",
+            "s.machine_id, s.model, "
+            # #3520: APPENDED at the END — the existing sess[0..6] mapping is
+            # unchanged (sess[7]/sess[8] are the new pair), and the detail
+            # endpoint must serve the SAME extraction status the list does.
+            "s.capture_ok, s.capture_extractor",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -15683,6 +15785,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         # fields, null when absent.
         "machine_id": sess[5],
         "model": sess[6],
+        # #3520: the per-session extraction status — appended at the END of the
+        # detail projection too, so the wire key set is the shared declaration
+        # plus the detail-only fields (the #5498 binding assert below).
+        "extraction": session_extraction_status(sess[7], sess[8]),
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,

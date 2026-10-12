@@ -8,8 +8,8 @@ capstone run on ``origin/main`` found a divergence ``#7882`` (the
     live     {direction, id, is_operator, op_type}
     rebuilt  {… the same …, content: 'IMPL(src, claim)', status: 'live'}
 
-The two halves are NOT the same defect, and this file pins both facts — one
-fixed, one a door question:
+The two halves are NOT the same defect, and this file pins both facts — both
+now fixed, one in the EMITTER and one at the DOOR:
 
 **``content`` — FIXED, in the EMITTER.** ``sdk._emit_event`` SYNTHESIZED the
 ``IMPL(inputs)`` label into the record's payload under a comment asserting
@@ -33,18 +33,25 @@ correctly-replayed graph
 (``test_consistency_divergence_5011.py::test_a_promotion_snapshot_without_the_operator_key_resets_operator_ness``,
 measured). The two intents need a per-record distinction, not one clause.
 
-**``status`` — A DOOR QUESTION, not fixed here.** Its
+**``status`` — SETTLED AND FIXED (#5089).** Its
 ``coalesce($st, n.status, 'live')`` default is LOAD-BEARING, not cosmetic:
 reads select on it (``projection/grounding.py`` matches ``{status: 'live'}``),
 so it decides whether a point participates in belief propagation. Dropping it
 for operator records removed the point from the grounding result
 (``test_projection.py::test_compute_grounding_basic`` reds — measured, and the
-reason that half was reverted). The divergence is real in the other direction
-too: NEITHER live door writes ``'live'`` (the SDK's ``create_operator`` writes no
-status at all; ``api._point`` writes ``'draft'``), so no LIVE door's operator is
-a grounding participant while every REBUILT one is. Which side is canonical is a
-decision reported on #5089/#5091; the last test pins the measured state so the
-ruling has a red-to-green target.
+reason that half was reverted). The divergence ran in the other direction too:
+the SDK door's ``create_operator`` wrote NO status at all, so the live operator
+was not a grounding participant while every rebuilt one was.
+
+**That is now fixed at the door, not pinned.** ``create_operator`` writes
+``'live'`` on the promoting posture and ``'draft'`` on the extraction posture, so
+live == replay and the operator's grounding participation no longer changes
+across a rebuild. The evidence that settled it, and why a status-less operator
+was the defect rather than a design, is on #5089; the sources were
+``consistency._WRITER_DEFAULTS['status'] = 'live'``, graph PARENT CAUSE 28
+(``1a0e9120c82``), TORTOISE-GRAPH-BRIEF's ``status=None`` leak class, and
+ONTOLOGY §5. The test below was the pin, and it is updated to the resolved state
+rather than deleted.
 
 MUTATIONS THAT MUST RED:
 - restore the ``sdk._emit_event`` content synthesis → the record carries the
@@ -117,7 +124,7 @@ def sdk_and_events(tmp_path):
 
 
 def _sdk_operator(sdk):
-    """An operator created by the SDK door: no content, no status, live."""
+    """An operator created by the SDK door: no content, status 'live' (#5089)."""
     src = sdk.create_point("statement", "T0 source", status="live",
                            dedup=False)["id"]
     claim = sdk.create_point("statement", "downstream claim", status="live",
@@ -223,34 +230,55 @@ def test_check_consistency_agrees_after_rebuilding_an_operator(sdk_and_events):
     assert r["ok"] is True, r.get("divergent_points")
 
 
-def test_operator_status_divergence_is_a_door_question(sdk_and_events):
-    """PINNED DIVERGENCE (#5089/#5091) — not fixed here, deliberately.
+def test_operator_status_parity_holds_across_the_doors(sdk_and_events):
+    """RULING APPLIED (#5089): the SDK door writes the status the replay reproduces.
 
-    Reads select on ``status`` (``grounding.py`` matches ``{status: 'live'}``),
-    so this is a PARTICIPATION difference, not a prop difference: whichever side
-    is canonical changes whether operators feed the belief state. Both live
-    doors are measured below; if this test starts failing, a ruling landed and
-    this assertion (plus the epic's DoD) should be updated with it.
+    This assertion pair replaces the PINNED DIVERGENCE that lived here. The pin's
+    own contract read: *"if this test starts failing, a ruling landed and this
+    assertion (plus the epic's DoD) should be updated with it."* It failed, the
+    evidence was assembled, and the pin is now updated — so this is that update,
+    not a bypass of it.
+
+    The evidence, none of which endorses a status-less operator:
+      * graph PARENT CAUSE 28 (``1a0e9120c82``, high confidence, reproduced):
+        "10 points with status=None that are inert in EP ... Work that is recorded
+        and does NOT vote is worse than work that is not recorded, because it
+        reads as done."
+      * ``consistency.py`` ``_WRITER_DEFAULTS['status'] = 'live'`` — "the graph's
+        value must EQUAL the default"; a different value is a divergence.
+      * ``create_operator``'s own docstring: "the event path default ('live',
+        projection/entities.py coalesce)" — 'live' IS the designed default.
+      * TORTOISE-GRAPH-BRIEF: a ``status=None`` birth is a leak; after any write,
+        ``assert status in ('draft','live')``.
+      * ONTOLOGY.md §5: ``live`` = "Full EP participation", with ``create_operator``
+        named on that row.
+
+    So the SDK door's omission was the defect, and the replay's 'live' was right.
+    The EventAPI door's ``draft`` is its own deliberate journal-composer posture
+    (#1088) and is likewise preserved by the replay.
     """
     sdk, events = sdk_and_events
     sdk_op = _sdk_operator(sdk)
     api_op, _, _ = _eventapi_operator(sdk, events)
 
-    assert "status" not in _props(sdk, sdk_op), "SDK door writes no status"
+    assert _props(sdk, sdk_op).get("status") == "live", (
+        "#5089: the SDK door must write the status the replay reproduces")
     assert _props(sdk, api_op).get("status") == "draft", "EventAPI door drafts"
 
     def _live_participants() -> set:
         return {r[0] for r in sdk._get_proj().g.query(
             "MATCH (n:Point {status: 'live'}) RETURN n.id").result_set}
 
-    assert sdk_op not in _live_participants(), (
-        "the SDK door's operator is not a grounding participant live")
+    # Both doors are EP participants only if 'live'; the SDK operator is, now.
+    assert sdk_op in _live_participants(), (
+        "the SDK door's operator participates in grounding")
 
     _rebuild(sdk, events)
     assert _props(sdk, sdk_op).get("status") == "live", (
-        "the replay promotes a status-less operator record to 'live'")
+        "the replay must reproduce the door's own status, not invent one")
     assert _props(sdk, api_op).get("status") == "draft", (
         "a recorded status is not overridden by the default")
     assert sdk_op in _live_participants(), (
-        "the rebuild alone made an operator a grounding participant that live "
-        "excluded")
+        "the rebuild must not change an operator's EP posture")
+    assert api_op not in _live_participants(), (
+        "an extracted draft operator stays EP-inert across the rebuild")

@@ -1083,8 +1083,9 @@ class TestDocumentFtsPostRetrievalFilters:
 # list_drafts: J-5 draft queue for promotion review.
 
 def _set_status(sdk, pid, status):
-    """Direct status write — test seam for pre-#780 paths (create_operator
-    writes no operator status on main and auto-promotes the source, #131)."""
+    """Direct status write — test seam for pre-#780 paths (create_operator now
+    writes the operator's status itself — 'live' on the default posture, 'draft'
+    on the extraction one, #5089 — and auto-promotes the source, #131)."""
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=$st",
         params={"id": pid, "st": status},
@@ -1312,8 +1313,9 @@ def test_r16_skips_unset_status_operator(sdk):
                        event_log_path=os.path.join(tmp, "events.jsonl"))
     a = _make_point(sdk2, status="draft", content="a")
     b = _make_point(sdk2, status="draft", content="b")
-    # Legacy shape: operator node with NO status property (create_operator
-    # default path on main before #780 wrote no status).
+    # Legacy shape: operator node with NO status property. Built explicitly
+    # (#5089): create_operator used to write no operator status, and now writes
+    # one — the W-3 gate must still catch the legacy shape either way.
     op = _make_draft_operator(sdk2, "NAND", [a["id"], b["id"]])
     sdk2._get_proj().g.query(
         "MATCH (o:Point {id:$id}) REMOVE o.status", params={"id": op["id"]})

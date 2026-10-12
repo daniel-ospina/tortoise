@@ -279,7 +279,8 @@ class TestPromotionPolicy:
         # E2E-8 assertion 1 (SDK surface): auto → source promotes live on
         # first IMPL edge; target stays draft; operator is NOT draft (the
         # live-side of the #780 promote_source asymmetry — gated writes an
-        # explicit draft, auto writes no status → projection coalesces live).
+        # explicit draft, auto writes 'live' since #5089; before that it wrote
+        # no status, which a rebuild turned into 'live').
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
@@ -292,12 +293,19 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"   # source promoted
         assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
-        # #780 asymmetry: gated writes explicit draft on the operator; auto
-        # writes NO status prop (EP treats null-status as live). Assert the
-        # honest discriminator — key absence, not == "live" (which would
-        # fail on the raw-properties read surface) and not != "draft"
-        # (which false-passes on garbage statuses like "retracted").
-        assert "status" not in sdk.get_point(op_id)
+        # #5089: this connection carries no `reify`, so `_connection_route`
+        # returns 'direct' and NO operator node is minted — `ids["connections"]
+        # [0]` is the direct-edge descriptor, not an id. Assert the NODE ABSENCE
+        # with a graph query. (Round 5: the previous form here,
+        # `assert sdk.get_point(op_id) == {}`, was STILL unfalsifiable —
+        # `get_point` returns `{}` for any unknown input, so it held even when a
+        # mutation minted a real operator node. Proved by mutation, not argued.)
+        assert _operator_count(sdk) == 0, (
+            "a direct-route connection must not mint an operator node"
+        )
+        # And the entry is the direct-edge DESCRIPTOR, not a node id (which is
+        # what made a `get_point(op_id) == {}` assertion unable to fail).
+        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
 
     def test_auto_nand_promotes_source_live(self, sdk):
         # Promotion is op-type-agnostic: NAND wires the same #131 path
@@ -437,7 +445,11 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"
         assert sdk.get_point(pB)["status"] == "draft"
-        assert "status" not in sdk.get_point(op_id)  # #780 live-side
+        # #5089: no `reify` → 'direct' route → no operator node. Assert the node
+        # absence by GRAPH QUERY: `get_point(op_id) == {}` would also hold for an
+        # unknown input, so it cannot fail (round 5).
+        assert _operator_count(sdk) == 0
+        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
 
     def test_keyword_only_enforced(self, sdk):
         # Q2-lock: positional auto-promotion must NOT silently opt in — a
@@ -540,7 +552,7 @@ class TestPromotionPolicy:
 
     def test_gated_rejects_terminal_status(self, sdk):
         # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
-        # gated ( _live_only excludes only exact 'draft') and no fresh point
+        # gated ( _live_only excludes 'draft' and every terminal status) and no fresh point
         # can legitimately carry them (terminal states come from retract/-
         # supersede flows) — fail-closed under gated, top-level and nested.
         for bad in ("retracted", "superseded", "outdated", "archived"):
@@ -1363,7 +1375,7 @@ class TestA3OperatorDedupRicherReturn:
         assert second["deduped"]["connections"] == 1
 
     def test_partial_absorb_completes_input_set(self, sdk):
-        """§5.5 partial-absorb: a NULL-status partial operator on a PROPER
+        """§5.5 partial-absorb: a draft partial operator on a PROPER
         SUBSET absorbs the retry — completes the written set on the REAL
         operator (is_operator:true, per-input multiplicity 1), one node per
         id, operator_absorb_completed warning."""

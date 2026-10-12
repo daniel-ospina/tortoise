@@ -44,6 +44,12 @@ DETAIL = {
     "actor_display": "me@example.com",
     "machine_id": "mbp-14",
     "model": "claude-sonnet-4",
+    # #3520: the per-session extraction status object, APPENDED at the end of
+    # the projection. `GET /v1/sessions` and `{id}` both serve it and the CLI
+    # renders BOTH of its facts — the status word and, when nothing recorded an
+    # outcome, the `outcome not recorded` qualifier.
+    "extraction": {"status": "stored-and-processed", "extractor": "v2",
+                   "outcome_known": True},
     "turn_points": [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -53,6 +59,7 @@ DETAIL = {
 }
 
 # A positional row exactly as `list_sessions`' SQL RETURN clause produces it.
+# The #3520 columns are the LAST two (r[8]/r[9]) — never inserted earlier.
 ROW = (
     "sess-1",                      # s.id
     "2026-09-26T00:00:00Z",        # s.created_at
@@ -62,6 +69,8 @@ ROW = (
     "claude-code",                 # s.harness
     "mbp-14",                      # s.machine_id
     "claude-sonnet-4",             # s.model
+    True,                          # s.capture_ok         (NEW, #3520)
+    "v2",                          # s.capture_extractor  (NEW, #3520)
 )
 
 
@@ -161,6 +170,11 @@ def test_session_fields_helper_carries_the_values():
     assert rendered["actor_display"] == "me@example.com"
     assert rendered["machine_id"] == "mbp-14"
     assert rendered["model"] == "claude-sonnet-4"
+    # #3520: the extraction status renders the SERVER's vocabulary member
+    # verbatim (the CLI shows what the API said, never a re-worded second
+    # opinion) — a dict repr would be a Python data structure at the user, and
+    # the unknown-outcome qualifier is spoken beside it below.
+    assert rendered["extraction"] == "stored-and-processed"
     # every declared field is bound by a value assertion above — a regression
     # that erased one (e.g. rendered `-`) must not be able to ship green
     assert set(rendered) == set(SESSION_LIST_FIELDS)
@@ -171,11 +185,33 @@ def test_session_fields_helper_renders_missing_values_as_dash():
     rendered = _session_fields(
         {"id": "s", "created_at": None, "turns": 0, "extracted": None,
          "actor_user_id": None, "harness": None, "actor_display": None,
-         "machine_id": None, "model": None}
+         "machine_id": None, "model": None, "extraction": None}
     )
     assert rendered["harness"] == "-"
     assert rendered["turns"] == "0"
+    assert rendered["extraction"] == "-"
     assert "None" not in set(rendered.values())
+
+
+def test_session_fields_renders_the_unrecorded_outcome_qualifier():
+    """#3520: an UNKNOWN extraction outcome is not rendered as `stored`.
+
+    A commit-created / budget-hold / demo-seeded / longmem-ingest session
+    carries `capture_ok = NULL`, so the server reports `stored` with
+    `outcome_known: false`. Printing the bare status word would tell the CLI's
+    user the session was not processed when nothing recorded whether it was.
+    """
+    rendered = _session_fields({
+        "extraction": {"status": "stored", "extractor": None,
+                       "outcome_known": False}})
+    assert rendered["extraction"] == "stored (outcome not recorded)"
+    assert rendered["extraction"] != "stored"
+    # A KNOWN not-processed status (a store-only capture) keeps the plain word —
+    # the qualifier is only spoken when the server spoke it.
+    known = _session_fields({
+        "extraction": {"status": "stored", "extractor": "none",
+                       "outcome_known": True}})
+    assert known["extraction"] == "stored"
 
 
 def test_api_row_dict_serves_exactly_the_shared_projection():

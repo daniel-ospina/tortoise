@@ -770,6 +770,19 @@ surfaces:
   # this arm a hosted_api-only change to the guard probe could ship without the
   # pin that says a rebuilt graph must read as provisioned.
   - test_rebuild_team_meta_marker_5353.py
+  # #3520: the per-session EXTRACTION status (`{status, extractor,
+  # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
+  # agreement on the 2xx path, and the appended-at-the-END column positions.
+  # DUAL-REGISTERED with `core` because the two files it pins select DIFFERENT
+  # arms and a named-surface match REPLACES the `core` fallback: the handlers
+  # live in `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERNS match), so
+  # an api-only PR runs this file only if it is registered HERE; the vocabulary
+  # and the derivation live in `tortoise/session_projection.py`, which matches
+  # no named pattern and so falls through to `core`. This entry alone would
+  # leave the declaration unguarded on a session_projection-only change; the
+  # `core` entry alone would never run on the handler change that can reorder
+  # the positional columns. (The #2938/#3154 dual-registration convention.)
+  - test_session_capture_status.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -866,6 +879,7 @@ surfaces:
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
+  - test_5089_operator_status_parity.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_7767_restore_rollback.py
@@ -2268,6 +2282,12 @@ surfaces:
   # to the instrument. Hermetic: pure arithmetic + a module-attribute swap, no
   # graph / embedder / network.
   - test_fusion_formula_ab.py
+  # #3520: the `core` half of the dual registration documented at the `api`
+  # entry — `tortoise/session_projection.py` (the extraction vocabulary and
+  # `session_extraction_status`, the ONE derivation every read surface calls)
+  # matches no SOURCE_PATTERNS entry, so a declaration-only change selects
+  # `core` via the `tortoise/` fallback.
+  - test_session_capture_status.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
@@ -3266,6 +3286,7 @@ durations:
   test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
   test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
+  test_session_capture_status.py: 2.0  # #3520: same #3400 flat default — a file that never ran cannot appear in a junit artifact, so this is NOT a measurement. Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2

@@ -83,11 +83,12 @@ def test_operator_dedup_exact_hit_with_event_input(s1919):
 
 def test_operator_dedup_event_input_partial_absorb_path(s1919):
     """P2-9 companion: the partial-absorb collection also sees Event targets —
-    a NULL-status operator whose written set is a proper subset matches with
-    the Event id in `written` (never silently dropped from the key). The draft
-    operator itself carries an Event input, so pre-fix (Point-only partial
-    collection) the Event is invisible → written={pa} only (silent drop from
-    the absorb key). Post-fix the full set surfaces in `written`."""
+    a not-yet-promoted (draft) operator whose written set is a proper subset
+    matches with the Event id in `written` (never silently dropped from the
+    key). The draft operator itself carries an Event input, so pre-fix
+    (Point-only partial collection) the Event is invisible → written={pa} only
+    (silent drop from the absorb key). Post-fix the full set surfaces in
+    `written`."""
     events, sdk = s1919  # noqa: RUF059
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
