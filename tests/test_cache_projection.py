@@ -270,7 +270,7 @@ def test_key_properties_are_the_interface_e_contract_read_from_the_ddl():
         "Source": "url",
         "Session": "id",
     }
-    assert cp.KEY_PROPERTY == expected
+    assert expected == cp.KEY_PROPERTY
     sql = (MIGRATIONS / "20261012000001_record_event_stream.sql").read_text()
     assert "key_property" in sql, "the DDL moved — re-read the parser"
 

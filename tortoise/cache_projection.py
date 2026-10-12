@@ -627,7 +627,7 @@ def _rows(cur: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
     if isinstance(fetched[0], Mapping):
         return fetched
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in fetched]
+    return [dict(zip(cols, r, strict=True)) for r in fetched]
 
 
 # ════════════════════════════════════════════════════════════════════════════
