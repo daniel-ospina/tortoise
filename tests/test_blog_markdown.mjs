@@ -103,16 +103,23 @@ console.log("bounded span content stays linear on adversarial input");
   // heading and extractFaq() on EVERY FAQ answer. Unbounded link/image
   // quantifiers re-scanned to end-of-string at each `[` → O(n²) (pre-fix,
   // 20000 `[`: heading ≈6.8s, FAQ answer ≈6.4s — a CPU DoS at BODY_MAX=100KB).
-  // Post-fix on this machine: heading ≈460ms, FAQ answer ≈80ms (medians).
+  //
+  // Bounds are wall-clock, and this harness runs inside `welcome-e2e` on a
+  // shared, self-hosted runner (the fleet host), so they are deliberately wide
+  // (#8294 review): the previous 1500ms bound was measured at 1146ms under
+  // ordinary fleet load — a flake generator. At 40 000 `[` the fixed path
+  // measures ≈0.4s (heading) / ≈0.1s (FAQ) and the pre-fix quadratic path
+  // ≈27s, so a 4s bound keeps an order of magnitude of margin in each
+  // direction while still failing loud on the pre-fix code.
   const t1 = Date.now();
-  renderMarkdown("## " + "[".repeat(20000));
+  renderMarkdown("## " + "[".repeat(40000));
   const headMs = Date.now() - t1;
-  assert(headMs < 1500, `a '['-heavy heading stays linear (${headMs}ms; pre-fix ≈6.8s)`);
+  assert(headMs < 4000, `a '['-heavy heading stays linear (${headMs}ms; pre-fix ≈27s)`);
 
   const t2 = Date.now();
-  extractFaq("## FAQ\n\n### Q?\n\n" + "[".repeat(20000));
+  extractFaq("## FAQ\n\n### Q?\n\n" + "[".repeat(40000));
   const faqMs = Date.now() - t2;
-  assert(faqMs < 1500, `a '['-heavy FAQ answer stays linear (${faqMs}ms; pre-fix ≈6.4s)`);
+  assert(faqMs < 4000, `a '['-heavy FAQ answer stays linear (${faqMs}ms; pre-fix ≈27s)`);
 
   // Duplicate headings must allocate anchors in O(1) amortised per heading.
   // The scanned-from-`-1` form was O(N²): 8000 `## A` (48KB — well under
@@ -267,6 +274,31 @@ console.log("TOC labels match the rendered heading text (#8294 — no second str
     tocLabel(renderMarkdown("[[toc]]\n\n## **Bold** and `code`")).join(" → "),
     "bold-and-code → Bold and code",
     "markup inline() DOES implement is still stripped from the label",
+  );
+  // A heading is not a list item: inline() renders a leading `3.` / `-` as
+  // literal text, so the label and slug must keep it (a hand-rolled stripper
+  // deleted it, which is #8294 review finding 2).
+  assertEq(
+    tocLabel(renderMarkdown("[[toc]]\n\n## 3. Hybrid retrieval")).join(" → "),
+    "3-hybrid-retrieval → 3. Hybrid retrieval",
+    "a numbered heading keeps its number in the label and slug",
+  );
+  assertEq(
+    tocLabel(renderMarkdown("[[toc]]\n\n## - A dash heading")).join(" → "),
+    "a-dash-heading → - A dash heading",
+    "a leading dash is literal heading text, not a list marker to strip",
+  );
+  // The editor backslash-escapes ASCII punctuation; inline() treats `\*` / `` \` ``
+  // as literal, so the label must not strip them (the same review's adjacent find).
+  assertEq(
+    tocLabel(renderMarkdown("[[toc]]\n\n## Does \\*fair use\\* apply?")).join(" → "),
+    "does-fair-use-apply → Does *fair use* apply?",
+    "an escaped asterisk pair stays literal in the label",
+  );
+  assertEq(
+    tocLabel(renderMarkdown("[[toc]]\n\n## Use \\`code\\` fence")).join(" → "),
+    "use-code-fence → Use `code` fence",
+    "an escaped code span stays literal in the label",
   );
 }
 
@@ -479,8 +511,42 @@ console.log("FAQ answer text equals the rendered answer text (#8292 — fails if
     ["a known callout drops its chrome label", "> [!NOTE] It is fast."],
     ["a `[[toc]]` marker contributes no answer text", "[[toc]]\n\nA."],
     ["a fence contributes its visible code", "```\nsecret();\n```"],
+    // An h4 inside an answer is re-rendered from its WHOLE line, so a heading
+    // whose text starts with a block marker is not reclassified (review finding).
+    ["an h4 whose text starts with a list marker", "Intro.\n\n#### - item\n\nMore."],
+    ["an h4 whose text starts with an ordered marker", "Intro.\n\n#### 2026. Plan\n\nAfter."],
+    ["an h4 whose text starts with a quote marker", "Intro.\n\n#### > quote\n\nAfter."],
+    ["an h4 whose text is a thematic break", "Intro.\n\n#### ---\n\nAfter."],
   ]) {
     assertEq(faqAnswer(answerMd), visible(answerMd), `answer text equals the rendered text: ${name}`);
+  }
+}
+
+console.log("FAQ questions equal the rendered heading text (#8294 — one classifier)");
+{
+  // The question half of the same invariant: `Question.name` must be the text
+  // the reader sees in the <h3>. The answer half is asserted above; this pins
+  // the label path too, on the constructs a second stripper got wrong.
+  const questionOf = (q) => extractFaq(`## FAQ\n\n### ${q}\n\nA.`)[0].question;
+  const renderedHeading = (q) => {
+    const m = /<h3[^>]*>([\s\S]*?)<\/h3>/.exec(renderMarkdown(`### ${q}`));
+    return m
+      ? m[1]
+          .replace(/<[^>]*>/g, "")
+          .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+          .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+      : "";
+  };
+  for (const [name, q] of [
+    ["a numbered question keeps its number", "1. Is it fast?"],
+    ["a leading dash is literal", "- A dash question"],
+    ["an escaped asterisk pair stays literal", "Does \\*fair use\\* apply?"],
+    ["an escaped code span stays literal", "Use \\`code\\` fence"],
+    ["an underscored identifier survives", "Is snake_case_naming ok?"],
+    ["a strikethrough is literal text", "Is ~~old~~ gone?"],
+    ["inline markup is stripped as the renderer renders it", "**Bold** question"],
+  ]) {
+    assertEq(questionOf(q), renderedHeading(q), `FAQ question equals the rendered heading: ${name}`);
   }
 }
 

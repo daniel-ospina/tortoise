@@ -222,31 +222,20 @@ function renderCalloutBody(lines: string[]): string {
 
 const HEADING_SLUG_MAX = 80;
 
-/** Markdown → plain text (for slugs and TOC labels). Input is RAW markdown, so
- *  this strips markdown — it must never be handed escaped HTML. */
+/**
+ * Markdown → plain text (for slugs, TOC labels and FAQ questions).
+ *
+ * Derived from the RENDERER, not a second hand-rolled stripper: `inline()` is
+ * the sole authority on what a heading shows, so running it and stripping the
+ * allowlisted tags yields exactly the text the reader sees. A second stripper
+ * drifted on every construct `inline()` treats as literal — underscores
+ * (`snake_case` → `snakecase`), tildes (`~~old~~` → `old`), and backslash-
+ * escaped delimiters (`\*fair use\*` → `fair use`) — and it deleted a heading's
+ * leading list marker (`## 3. Hybrid retrieval` → `Hybrid retrieval`), which the
+ * heading body keeps. One classifier, so the label/id/question cannot diverge.
+ */
 function plainText(md: string): string {
-  return unescapeMd(md)
-    // Bounded quantifiers + an escape-aware text class, the same shape inline()
-    // uses. The unbounded forms re-scanned to end-of-string at every `[`, so on
-    // many unclosed `[` the match at each position was O(n) → O(n²) overall
-    // (measured ~6.5s at 20K `[`), a CPU blowup on this renderer's two new
-    // unbounded paths: slugifyHeading() (every heading) and extractFaq() (every
-    // FAQ answer). Bounded, each position has exactly one parse and the run is
-    // linear; ordinary links are unaffected.
-    .replace(/!\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\)/g, "$1") // image → alt text
-    .replace(/\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\)/g, "$1") // link → link text
-    .replace(/^\s*[-*+]\s+/gm, "") // list markers
-    .replace(/^\s*\d+\.\s+/gm, "")
-    .replace(/`([^`]*)`/g, "$1")
-    // Mirror inline() exactly: it implements ONLY `**…**` and `*…*`. Stripping
-    // `_`/`__`/`~~` here removed characters the reader still sees (`snake_case`
-    // → `snakecase`, `~~old~~` → `old`), so the slug/TOC label diverged from the
-    // rendered heading. Underscores/tildes are literal text to inline(), so they
-    // must survive this pass too.
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/\*(.*?)\*/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
+  return htmlToText(inline(md));
 }
 
 /**
@@ -551,8 +540,12 @@ export function extractFaq(markdown: string): FaqEntry[] {
         question = plainText(h[2]);
       } else if (inFaq && question) {
         // An h4 inside an answer is part of that answer — its text is visible
-        // to the reader, so the schema must carry it too.
-        answer.push(h[2]);
+        // to the reader, so the schema must carry it too. Push the WHOLE line
+        // (`#### …`), not just its text: the answer is re-rendered by
+        // markdownToText(), and a bare text line whose first characters look
+        // like a block marker (`- item`, `1. Plan`, `> quote`, `---`) would be
+        // reclassified — so the schema text would differ from the visible <h4>.
+        answer.push(line);
       }
       i++;
       continue;
@@ -583,37 +576,60 @@ export function faqPageJsonLd(entries: FaqEntry[]): unknown | null {
   };
 }
 
+/** `BlogPosting` for an article. */
+function blogPostingJsonLd(post: BlogPost, url: string): unknown {
+  const description = post.meta_description ?? (post.excerpt ?? post.title);
+  return {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: post.title,
+    description,
+    url,
+    image: post.cover_image_url ?? undefined,
+    author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
+    datePublished: post.published_at,
+    dateModified: post.updated_at,
+  };
+}
+
+/** `BreadcrumbList` for an article. */
+function breadcrumbJsonLd(post: BlogPost, url: string): unknown {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Blog", item: `${SITE_URL}/blog` },
+      { "@type": "ListItem", position: 2, name: post.title, item: url },
+    ],
+  };
+}
+
+/** `FAQPage` for an article that has an FAQ section, or `null` when it has none. */
+function faqPageJsonLdFor(post: BlogPost): unknown | null {
+  return faqPageJsonLd(extractFaq(post.body));
+}
+
 /**
- * The JSON-LD array for an article: `BlogPosting` + `BreadcrumbList`, with a
- * `FAQPage` appended only when the article actually has an FAQ section. Pure, so
- * the wiring is testable without a Cloudflare runtime, and the single seam a
- * future schema type (e.g. `VideoObject`) lands on.
+ * The schema types an article composes, in output order. Adding a type (e.g.
+ * #7751's `VideoObject`) is a local change to THIS list plus one small builder
+ * function — not an edit to a fixed JSON literal a contributor has to find in
+ * the page (#8292 indicator 2).
+ */
+const ARTICLE_SCHEMA_BUILDERS: ReadonlyArray<(post: BlogPost, url: string) => unknown> = [
+  blogPostingJsonLd,
+  breadcrumbJsonLd,
+  faqPageJsonLdFor,
+];
+
+/**
+ * The JSON-LD array for an article, composed from `ARTICLE_SCHEMA_BUILDERS`.
+ * Pure, so the wiring is testable without a Cloudflare runtime; a builder that
+ * returns `null` (currently only the FAQ node) is omitted.
  */
 export function articleJsonLd(post: BlogPost, url: string): unknown[] {
-  const description = post.meta_description ?? (post.excerpt ?? post.title);
-  const faqSchema = faqPageJsonLd(extractFaq(post.body));
-  return [
-    {
-      "@context": "https://schema.org",
-      "@type": "BlogPosting",
-      headline: post.title,
-      description,
-      url,
-      image: post.cover_image_url ?? undefined,
-      author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
-      datePublished: post.published_at,
-      dateModified: post.updated_at,
-    },
-    {
-      "@context": "https://schema.org",
-      "@type": "BreadcrumbList",
-      itemListElement: [
-        { "@type": "ListItem", position: 1, name: "Blog", item: `${SITE_URL}/blog` },
-        { "@type": "ListItem", position: 2, name: post.title, item: url },
-      ],
-    },
-    ...(faqSchema ? [faqSchema] : []),
-  ];
+  return ARTICLE_SCHEMA_BUILDERS
+    .map((build) => build(post, url))
+    .filter((node) => node !== null && node !== undefined);
 }
 
 // ── HTML shell ─────────────────────────────────────────────────────────────
