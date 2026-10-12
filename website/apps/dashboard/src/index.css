@@ -1036,6 +1036,13 @@ input::placeholder, textarea::placeholder {
 }
 .integration-tile.coming-soon .integration-badge { color: #facc15; border-color: rgba(196, 167, 60, 0.5); }
 .integration-panel { margin-top: 4px; }
+/* #3513 (review P1): `hidden={openTile !== …}` on a `.toggle-row` panel is
+   INERT without this — `.toggle-row` sets `display: flex` at author origin,
+   which outranks the UA sheet's `[hidden] { display: none }`. Without an
+   explicit author hide rule all four detail panels stay visible and the
+   "one panel at a time" contract never takes effect. (0,2,0) beats
+   `.toggle-row`'s (0,1,0). */
+.integration-panel[hidden] { display: none; }
 .integration-disclosure { margin: 8px 0 0; }
 .integration-modal-backdrop {
   position: fixed;

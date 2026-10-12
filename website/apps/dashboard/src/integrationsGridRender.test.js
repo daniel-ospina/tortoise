@@ -19,6 +19,7 @@ import { DATA_SOURCES_ORDER } from './integrationsGrid.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(here, 'main.jsx'), 'utf8')
+const indexCss = readFileSync(join(here, 'index.css'), 'utf8')
 
 // The live wizard's step-3 branch (the Data-sources screen) up to the next
 // top-level branch. Anchored on the exact guard so a renumber fails loud.
@@ -44,8 +45,11 @@ test('#3513: the Data-sources step is index 3 and done is index 4', () => {
 
 test('#3513: the step renders the grid through the ONE shared component', () => {
   const branch = dataSourcesBranch()
-  assert.match(branch, /<MemorySources \{\.\.\.memorySourcesProps\} order=\{DATA_SOURCES_ORDER\} surface="wizard" \/>/,
-    'the wizard mount must pass the explicit order and its own surface')
+  assert.match(branch, /<MemorySources \{\.\.\.memorySourcesProps\} order=\{DATA_SOURCES_ORDER\} \/>/,
+    'the wizard mount must pass the explicit order')
+  // review P2: no `surface` prop — the component never read it, so both mounts
+  // render byte-identical output and the prop only LOOKED load-bearing.
+  assert.doesNotMatch(branch, /surface=/, 'the wizard mount must not pass a dead surface prop')
 })
 
 test('#3513: Continue AND Skip both reach done (index 4); Back lands on connect', () => {
@@ -127,8 +131,26 @@ test('#3513: the bound is enforced and the expansion resets per open', () => {
 test('#3513: the grid order is a prop, never the array literal', () => {
   // the shared prop bundle carries the explicit order and BOTH mounts spread it
   assert.match(src, /order: DATA_SOURCES_ORDER,/, 'the prop bundle declares the order explicitly')
-  assert.match(src, /<MemorySources \{\.\.\.memorySourcesProps\} surface="settings" \/>/,
+  assert.match(src, /<MemorySources \{\.\.\.memorySourcesProps\} \/>/,
     'Settings spreads the same bundle (same order)')
+  // review P2: the `surface` prop was dead, so neither mount carries it
+  assert.doesNotMatch(src, /<MemorySources[^>]*surface=/,
+    'the dead surface prop must not be re-added to any mount')
   // the order itself is the pinned ship order, declared once in the module
   assert.deepEqual([...DATA_SOURCES_ORDER], ['agent_sessions', 'github_issues', 'github_documents'])
+})
+
+test('#3513: a collapsed integration panel is ACTUALLY hidden (the [hidden] attribute must win over .toggle-row)', () => {
+  // review P1: the four detail panels hide via `hidden={openTile !== ...}`, but
+  // `.toggle-row` sets `display: flex` at author origin — which outranks the UA
+  // `[hidden] { display: none }` — so the attribute is INERT without an explicit
+  // author hide rule. This pins that rule (and its declaration) in the real
+  // stylesheet; without it every panel renders on both mounts at all times.
+  const css = indexCss.replace(/\/\*[\s\S]*?\*\//g, ' ')
+  const rule = css.match(/\.integration-panel\[hidden\]\s*\{([^}]*)\}/)
+  assert.ok(rule, 'an explicit .integration-panel[hidden] rule must exist in index.css')
+  assert.match(rule[1], /display\s*:\s*none/, 'the rule must set display:none')
+  // non-vacuity: the conflicting author rule the UA sheet cannot beat is real
+  assert.match(css, /\.toggle-row\s*\{[^}]*display\s*:\s*flex/,
+    'the conflicting .toggle-row display:flex rule must exist')
 })

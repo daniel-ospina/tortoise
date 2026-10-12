@@ -523,8 +523,12 @@ def test_data_sources_grid_renders_in_order_and_continue_reaches_done(page: Page
     _walk_to_connect(page)
     page.get_by_role("button", name="Skip for now").click()
     expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
-    # the sr-only step count reads "of 5" (the literal regression this pins)
-    expect(page.locator("span.sr-only[role='status']")).to_contain_text("of 5", timeout=5_000)
+    # the sr-only step count reads "of 5" (the literal regression this pins).
+    # #3513 review P1: the wizard renders TWO span.sr-only[role='status'] nodes
+    # (the welcome-head status and the step announcement), so an unscoped
+    # locator hits Playwright strict mode before any text comparison — scope to
+    # the wizard card's span, which is the one that carries the announcement.
+    expect(page.locator(".wizard span.sr-only[role='status']")).to_contain_text("of 5", timeout=5_000)
     # RENDER ORDER is asserted on the DOM, not inferred from the array literal:
     # sessions → issues → docs, then the coming-soon group.
     keys = page.locator(".integration-tile").evaluate_all(
@@ -654,6 +658,8 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # direct test of the fix.
     # #3232: Claude Code is a two-block leaf now — its advance reads "Done …".
     page.get_by_role("button", name="Done — Continue to dashboard").click()
+    # #3513: the connect advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #3428 (lane B3, review cycle 1 P1-3): scope the exit evidence to the
     # VISIBLE final screen. review cycle 6 (item 2): "No connection observed
     # yet" is also text inside the sr-only step announcement (clipped, not
@@ -695,6 +701,8 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
+    # #3513: the connect skip lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #2912 (PR-gate UX): skipped → paused, and the heading says so (cycle 6
     # item 2: the observation phrasing, both forks).
     expect(page.locator(".welcome-title")).to_have_text(
@@ -1046,6 +1054,8 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     # it lands on the honest not-connected done step and the exit is still
     # reachable (the user is never trapped).
     expect(page.locator(".harness-families")).to_have_count(0, timeout=10_000)
+    # #3513: the keyless advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #3428 (review cycle 1 P1-3): assert the VISIBLE final screen, not the
     # unscoped body — the step label also lives in the sr-only step
     # announcement, so a body-wide assertion cannot falsify a `.done`-body
@@ -1375,12 +1385,27 @@ def _connected_projection(*, receipt: str | None = None, probe: str | None = Non
     return proj
 
 
-def _advance_to_done(page: Page) -> None:
-    """Land on step 3 from the connect step's skip escape (the done step's
-    body is gated on the SERVER projection, so how we advanced does not
-    matter — this keeps the capture-tense tests focused on the projection)."""
-    page.get_by_role("button", name="Skip for now").click()
+def _skip_data_sources_to_done(page: Page) -> None:
+    """#3513: leave the Data-sources step (index 3) for done (index 4).
+
+    The connect step's skip/advance now lands on the Data-sources step, so any
+    journey that used to reach `div.done` one hop after connect must also take
+    the grid step's own Skip. `exact=True` targets the grid's "Skip" and never
+    the connect step's "Skip for now".
+    """
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+    page.get_by_role("button", name="Skip", exact=True).click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+
+
+def _advance_to_done(page: Page) -> None:
+    """Land on the done step from the connect step's skip escape (the done
+    step's body is gated on the SERVER projection, so how we advanced does not
+    matter — this keeps the capture-tense tests focused on the projection).
+    #3513: the connect skip lands on the Data-sources step (index 3), so take
+    the grid step's own skip to reach done (index 4)."""
+    page.get_by_role("button", name="Skip for now").click()
+    _skip_data_sources_to_done(page)
 
 
 def test_connected_screen_states_capture_in_present_tense_on_an_observed_receipt(page: Page) -> None:
@@ -1467,7 +1492,8 @@ def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> No
     page.get_by_role("button", name=re.compile("Claude Web")).click()
     page.get_by_role(
         "button", name=re.compile(r"I've connected it — Continue")).click()
-    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # #3513: the keyless advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)

@@ -74,17 +74,28 @@ test('#3513: expanded shows every coming-soon tile and offers no Show more', () 
   assert.equal(overBound, false, 'a fully-expanded group needs no control')
 })
 
-test('#3513: the bound is a real cut — a 7-tile group hides exactly one and says so', () => {
-  // The live inventory has three coming-soon tiles, so the bound is not
-  // exercised by it. Assert the mechanism itself: with seven tiles the seventh
-  // is behind the control and the label names the count.
-  const seven = Array.from({ length: 7 }, (_, i) => ({ key: `x${i}` }))
-  assert.equal(seven.length, COMING_SOON_VISIBLE_LIMIT + 1)
-  const shown = seven.slice(0, COMING_SOON_VISIBLE_LIMIT)
-  assert.equal(shown.length, 6)
-  assert.equal(seven.length - shown.length, 1)
-  assert.equal(comingSoonShowMoreLabel({ expanded: false, hidden: 1 }), 'Show 1 more')
+test('#3513: the bound is a real cut — visibleComingSoon slices an over-limit group', () => {
+  // The live inventory has three coming-soon tiles, so `overBound` is false and
+  // the cut branch never runs on the live data. Assert the mechanism ITSELF by
+  // calling visibleComingSoon with an over-limit `limit` (review P2: the old
+  // test built a local `seven` array and sliced it by hand — it never called
+  // visibleComingSoon, so a mutation that ignored `limit` for the slice stayed
+  // green and the "Show more" mechanism was unit-uncovered).
+  const all = comingSoonTiles()
+  const limit = 1
+  assert.ok(all.length > limit, 'fixture premise: the live group exceeds the probe limit')
+  const cut = visibleComingSoon({ expanded: false, limit })
+  assert.equal(cut.shown.length, limit, 'the collapsed group IS cut to `limit`')
+  assert.equal(cut.hidden, all.length - limit, 'the remainder is reported as hidden')
+  assert.equal(cut.overBound, true, 'an over-limit group needs the Show more control')
+  // the label names the count the control would reveal
+  assert.equal(comingSoonShowMoreLabel({ expanded: false, hidden: cut.hidden }), `Show ${cut.hidden} more`)
   assert.equal(comingSoonShowMoreLabel({ expanded: true, hidden: 0 }), 'Show fewer')
+  // and a group UNDER the bound is not cut — overBound stays false
+  const whole = visibleComingSoon({ expanded: false, limit: all.length + 1 })
+  assert.equal(whole.shown.length, all.length, 'an under-bound group shows every tile')
+  assert.equal(whole.hidden, 0)
+  assert.equal(whole.overBound, false, 'an under-bound group needs no control')
 })
 
 test('#3513: a shipped tile reports on/off from its own source flag', () => {

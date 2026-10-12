@@ -573,7 +573,7 @@ function SettingsTab(props) {
             (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
         <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
         <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph. Session recording is permission for this Organization: it is on unless you switch it off, but each machine's Claude Code, Codex or Cursor hooks still opt in separately (<code>{CAPTURE_OPT_IN_LINE}</code>) before they file anything — on a Pi machine, installing the extension is the opt-in. Turning this on grants the permission; it is not the switch.</p>
-        <MemorySources {...memorySourcesProps} surface="settings" />
+        <MemorySources {...memorySourcesProps} />
       </section>
 
       {/* ── Home 4: Captured sessions (DE2E-11 home). W6 consumer seam:
@@ -1730,12 +1730,16 @@ function claimIntentInFlight() {
   // with no observed edge. The guard that a graph-down `'unavailable'` string
   // never reads as connected lives in the helper.
   const serverHarnessConnected = harnessConnectionObserved(onboarding)
-  // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
-  // escapes — the keyless/owner nav, the cap-remedy nav, and the main
-  // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
-  // it now means exactly "the user skipped the connect step" — no session-local
-  // assertion can suppress it any more. (review cycle 1 P2-7: the count was
-  // stated as two, which made the invariant unauditable.)
+  // `wizardPaused` is set ONLY by a live Skip escape — the connect step's THREE
+  // "Skip for now" navs (the keyless/owner nav, the cap-remedy nav, and the
+  // main per-harness nav) PLUS the Data-sources step's own Skip
+  // (`setWizardPaused(true)` has exactly FOUR call sites, #3513) — so it means
+  // "the user skipped PAST an optional setup step". `effectivelyPaused` below
+  // combines it with the server observation, so a skipped-but-connected user
+  // still reads as connected (connect → Back → Skip must not read as paused)
+  // and no session-local assertion can suppress it any more. (review cycle 1
+  // P2-7: the count was stated as two, which made the invariant unauditable;
+  // #3513 added the fourth call site and this line had been left stating three.)
   const effectivelyPaused = wizardPaused && !serverHarnessConnected
   // #3428 (lane B3, option (a)): the success screen's capture sentence is
   // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
@@ -3470,7 +3474,7 @@ function claimIntentInFlight() {
   // #1997 (W1): LEGACY #1643 step labels — ARCHIVED-not-deleted (A0 rollback
   // path, epic §8; the DE2E-1 archived-not-deleted assertion greps this +
   // the LEGACY_WIZARD_ARCHIVED marker below). The LIVE wizard renders
-  // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
+  // WIZARD_STEPS (wizardFlow.js) — 5 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
   // is the A0 gate's rollback surface (partial revert restores it); it is
@@ -4080,9 +4084,9 @@ function claimIntentInFlight() {
   // the defaults from the session when the seed step is first entered
   // (ONCE — a deliberate clear + Back/Next must not re-populate).
   // #1997 (W1): the seed step is ARCHIVED — this effect must not fire on the
-  // live connect step (wizardStep 3 is now connect-consent, not seed); gate
-  // it on LEGACY_WIZARD_ARCHIVED so the A0 rollback path stays clean
-  // (review P2).
+  // live data-sources step (#3513 renumbered it to index 3; it was
+  // connect-consent before); gate it on LEGACY_WIZARD_ARCHIVED so the A0
+  // rollback path stays clean (review P2).
   const seedPrefilledRef = React.useRef(false)
   React.useEffect(() => {
     if (!LEGACY_WIZARD_ARCHIVED) return
@@ -5457,9 +5461,12 @@ function claimIntentInFlight() {
       if (forkId === 'unsure') {
         // no fork consumed — refresh so the projection carries fork_unsure_at
         // (the card's deferred hint + the Setup-guide fork row need it), then
-        // advance like a self pick (there is no catalog to show).
+        // advance straight to the DONE step (index 4, #3513 renumbered it from
+        // 3) — a deferral sets up nothing, so it skips the connect step AND the
+        // new Data-sources step (there is no catalog to show and no pick to
+        // make).
         refreshOnboarding().catch(() => {})
-        setWizardStep(3)
+        setWizardStep(4)
         return
       }
       setWizardForkChosen(forkId)
@@ -8025,8 +8032,7 @@ function claimIntentInFlight() {
   // mounts (the wizard's Data-sources step and Settings → Memory sources), so
   // the two cannot drift into two partially-installed states. The `order` prop
   // is explicit (the pinned ship order) — the component must not rely on the
-  // inventory array literal's incidental order — and each mount adds its own
-  // `surface` ('wizard' | 'settings').
+  // inventory array literal's incidental order.
   const memorySourcesProps = {
     state: onboarding,
     loading: onboardingLoading,
@@ -8224,9 +8230,9 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
-                    → fork card → connect-consent → done (orientation removed per
-                    epic #2534).
+                {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — org-create/join
+                    → fork card → connect-consent → data-sources (#3513) → done
+                    (orientation removed per epic #2534).
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
@@ -8795,7 +8801,7 @@ function claimIntentInFlight() {
                         Choose what Tortoise should remember. Everything here is optional and can be
                         changed any time from Settings → Memory sources.
                       </p>
-                      <MemorySources {...memorySourcesProps} order={DATA_SOURCES_ORDER} surface="wizard" />
+                      <MemorySources {...memorySourcesProps} order={DATA_SOURCES_ORDER} />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                         <div className="wizard-nav-actions">
@@ -11147,14 +11153,15 @@ function MemorySources(props) {
     onToggleCaptureExtract = null,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
-    // #3513: the grid's explicit render order (the wizard passes
-    // DATA_SOURCES_ORDER) and the surface discriminator ('wizard' | 'settings').
-    // BOTH mounts pass them: the wizard renders status + the disclosure; the
-    // Settings mount is the same grid, so an existing user sees ONE
+    // #3513: the grid's explicit render order (both mounts pass
+    // DATA_SOURCES_ORDER) — the wizard renders status + the disclosure, and the
+    // Settings mount renders the SAME grid, so an existing user sees ONE
     // presentation of the source list. The order is a prop, never the array
     // literal's incidental order (a render-order assertion depends on that).
+    // (review P2: a `surface` prop used to sit here and was never read by this
+    // component — both mounts render byte-identical output — so it was dropped
+    // rather than left looking load-bearing.)
     order = DATA_SOURCES_ORDER,
-    surface = 'settings',
   } = props
 
   // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job

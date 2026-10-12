@@ -57,14 +57,14 @@ test('DE2E-2/#3513: MemorySources is the SINGLE source-list presentation — Set
   const archivedIdx = src.indexOf(ARCHIVED_MARK)
   assert.ok(tabDef > -1 && archivedIdx > -1, 'component + archived anchors')
   // #3513: the unchanged invariant is "no source list on the Overview". The
-  // CHANGE is that the live render sites are now TWO surfaces of ONE
-  // component — Settings and the wizard's Data-sources step — each passing its
-  // own explicit `surface` prop, so the grid (not a competing toggle list) is
-  // the single presentation at both. The archived block stays dead.
-  assert.equal((src.match(/<MemorySources[^>]*surface="settings"/g) || []).length, 1,
-    'exactly one Settings mount, marked surface="settings"')
-  assert.equal((src.match(/<MemorySources[^>]*surface="wizard"/g) || []).length, 1,
-    'exactly one wizard mount, marked surface="wizard"')
+  // CHANGE is that the live render sites are now TWO mounts of ONE component —
+  // Settings and the wizard's Data-sources step — both spreading the same
+  // `memorySourcesProps` bundle (one order, one output), so the grid (not a
+  // competing toggle list) is the single presentation at both. The archived
+  // block stays dead. (review P2: the `surface` prop these assertions used to
+  // pin was never read by the component — it was dropped, so it is not pinned.)
+  assert.equal((src.match(/<MemorySources \{\.\.\.memorySourcesProps\}/g) || []).length, 2,
+    'exactly two live mounts, both spreading the shared prop bundle')
   for (const pos of sites) {
     // never inside the populated-Overview branch (between overview and settings)
     assert.ok(!(pos > ovStart && pos < setStart), 'MemorySources leaked onto the Overview')
@@ -87,7 +87,7 @@ test('DE2E-2/6: SettingsTab has all FOUR homes (P3: Setup guide, GitHub connect,
   assert.ok(tabText.includes('id="settings-memory-heading"'), 'Memory sources home')
   assert.ok(tabText.includes('id="settings-capture-heading"'), 'Captured sessions home (DE2E-11)')
   assert.ok(tabText.includes('SetupGuideCard state={state} loading={loading}'), 'Setup guide renders the graph-held state')
-  assert.ok(tabText.includes('<MemorySources {...memorySourcesProps} surface="settings" />'), 'Memory sources home renders the grid')
+  assert.ok(tabText.includes('<MemorySources {...memorySourcesProps} />'), 'Memory sources home renders the grid')
 })
 
 test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never workspace', () => {

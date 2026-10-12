@@ -822,7 +822,8 @@ test('#3428: the done screen is gated on the SERVER-observed connection, not a c
 })
 
 test('#3428/#2937: the done step names a harness ONLY when the connect step offered the picker', () => {
-  // review cycle 3 (P1-A): the 'unsure' fork answer advances to step 3 without
+  // review cycle 3 (P1-A): the 'unsure' fork answer advances to the done step
+  // (index 4 since #3513) without
   // ever rendering step 2's chooser, and the capped owner/admin re-entry
   // replaces the chooser with the mint-cap remedy — yet `wizardHarness` keeps
   // its untouched 'claude' default on BOTH. Naming Claude there would be the
@@ -839,11 +840,12 @@ test('#3428/#2937: the done step names a harness ONLY when the connect step offe
   assert.match(src, /const doneCaptureClaim = harnessPickEstablished \? harnessCaptureClaim : 'none'/,
     'the capture sentence is silenced (never asserted) without a pick')
   // the path this gate exists for: 'unsure' never establishes a fork — it
-  // advances straight to step 3, which is why step 2's chooser never renders.
+  // advances straight to the DONE step (index 4 since #3513), which is why
+  // step 2's chooser never renders.
   const forkFn = src.slice(src.indexOf('async function handleWizardFork('),
                            src.indexOf('setWizardForkChosen(forkId)'))
-  assert.match(forkFn, /if \(forkId === 'unsure'\)[\s\S]{0,400}?setWizardStep\(3\)/,
-    "the 'unsure' answer reaches step 3 without setting a fork")
+  assert.match(forkFn, /if \(forkId === 'unsure'\)[\s\S]{0,400}?setWizardStep\(4\)/,
+    "the 'unsure' answer reaches the done step without setting a fork")
   // review cycle 4 (item 2): the negative below used to run over `forkFn`, whose
   // slice ENDS at the first `setWizardForkChosen(forkId)` — so the negated token
   // could not be inside it by construction and the assertion could never fail.
