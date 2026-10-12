@@ -61,6 +61,30 @@ if ! acq; then
 fi
 trap 'rm -f "$LOCKF"' EXIT INT TERM
 
+# A worker whose log has not grown in this many minutes is hung. `pi -p` has no internal
+# timeout and a runaway child it spawns (a reviewer's `find /` ran for 8 hours on 2026-10-12)
+# keeps the pane alive, so the concurrency caps — which count SESSIONS — silently halve.
+STALE_MIN="${STALE_MIN:-40}"
+
+# ── stale-worker reaper ───────────────────────────────────────────────────────
+# Kill a worker that has gone silent. It only ever touches tmux sessions, so it can never reach
+# the operator's own shell or any process outside the harness. The PR is re-dispatched by the
+# normal sweep on the next cycle (the claim_live() check then sees a dead owner and frees it).
+reap_stale_workers() {
+  local s f age pid
+  for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^(merge|lane|fix)-'); do
+    f="$O/logs/$s.log"
+    [ -f "$f" ] || continue
+    age=$(( $(date +%s) - $(stat -f '%m' "$f" 2>/dev/null || echo "$(date +%s)") ))
+    [ "$age" -gt $((STALE_MIN * 60)) ] || continue
+    pid="$(tmux list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null | head -1)"
+    echo "[reap-worker] $s silent ${age}s -> killing session (pane_pid=${pid:-?})" >> "$LOG"
+    tmux kill-session -t "$s" 2>/dev/null
+    # tmux HUPs the pane's process group; a child that ignored it (e.g. a stuck find) is killed here.
+    if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null; fi
+  done
+}
+
 heartbeat() { date +%s > "$O/heartbeat"; }
 load1() { sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}'; }
 # Exact session-name test. `tmux has-session -t <name>` prefix-matches, so a guard for PR #82
@@ -83,6 +107,7 @@ review_slots() { # <open_prs>
 
 while true; do
   heartbeat
+  reap_stale_workers
   L="$(load1)"
   echo "=== $(date) load=$L lanes=$(tmux ls 2>/dev/null | grep -c '^lane-') backlog=$(wc -l < "$O/candidates.txt" | tr -d ' ') ===" >> "$LOG"
 

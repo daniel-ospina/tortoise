@@ -374,6 +374,49 @@ if need "$TMP/claimlive.sh" "claim_live() is extracted from the shipped orch-loo
   ck "shipped claim_live(): the stale claim file is removed" $rc
 fi
 
+# ── 15) a hung worker cannot hold a concurrency slot forever ────────────────────
+# `pi -p` has no internal timeout. A hung reviewer occupied a merge slot for 9 hours on
+# 2026-10-12 while the caps (which count SESSIONS) reported the slot as busy.
+grep -q '^  reap_stale_workers$' "$LOOP" && rc=0 || rc=1
+ck "the reaper runs every cycle" $rc
+sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP" > "$TMP/reapw.sh"
+if need "$TMP/reapw.sh" "reap_stale_workers() is extracted from the shipped loop"; then
+  mkdir -p "$TMP/RW/logs"
+  : > "$TMP/RW/logs/merge-999.log"; touch -t 202601010000 "$TMP/RW/logs/merge-999.log"
+  : > "$TMP/RW/fresh.log"
+  KILLED=0
+  tmux() { case "${1:-}" in ls) printf 'merge-999\n' ;; list-panes) echo 4242 ;; kill-session) KILLED=1 ;; esac; }
+  kill() { :; }
+  LOG="$TMP/RW/rw.log"; O="$TMP/RW"; STALE_MIN=1
+  # shellcheck disable=SC1090
+  . "$TMP/reapw.sh"
+  reap_stale_workers
+  [ "$KILLED" = "1" ] && rc=0 || rc=1
+  ck "shipped reaper kills a session whose log has gone stale" $rc
+  grep -q 'reap-worker' "$LOG" && rc=0 || rc=1
+  ck "the reaper logs what it killed" $rc
+  unset -f tmux kill
+fi
+# the agent invocation is wall-clock bounded, portably (macOS has no timeout/gtimeout)
+sed -n '/^run_agent() {/,/^}/p' "$MERGE" > "$TMP/runagent.sh"
+if need "$TMP/runagent.sh" "run_agent() is extracted from the shipped merge-one.sh"; then
+  # NOTE: the heredoc must EXPAND $TMP (unquoted) while leaving the runtime substitutions for the
+  # script itself. A quoted heredoc left the source path literal, so run_agent never got defined and
+  # the check passed on "command not found" — the exact vacuity this file exists to prevent.
+  cat > "$TMP/ra.sh" <<SH
+pi() { sleep 60; }
+. "$TMP/runagent.sh"
+start=\$(date +%s); run_agent 2 "$TMP/ra.log" /dev/null; rc=\$?; end=\$(date +%s)
+echo "\$((end-start)) \$rc"
+SH
+  ra="$(bash "$TMP/ra.sh" 2>/dev/null | tail -1)"
+  set -- $ra
+  # must have actually run (a real abort, non-zero rc), and been cut off well before the 60s sleep
+  ran=0; grep -q 'wall_limit=' "$TMP/ra.log" 2>/dev/null && ran=1
+  if [ "$ran" = "1" ] && [ "${1:-0}" -ge 1 ] && [ "${1:-99}" -lt 30 ] && [ "${2:-0}" -ne 0 ]; then rc=0; else rc=1; fi
+  ck "shipped run_agent() kills a hung agent at the wall limit (elapsed=${1:-?}s rc=${2:-?} ran=$ran)" $rc
+fi
+
 echo
 echo "==> $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
