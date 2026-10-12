@@ -2639,6 +2639,12 @@ surfaces:
   # contract under test when only the client moves. Dual-registered with `api`
   # and `core` (see the `api` arm).
   - test_data_source_capture.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration, asserted across the surfaces that must agree (the JS grid ↔
+  # the demand record's keys ↔ the connector manifest). Text-only (parses the
+  # dashboard module), so it needs no docker, no node, no network — and it must
+  # run on a `website/apps/dashboard/src/` diff, which selects THIS surface.
+  - test_integrations_grid_inventory.py
   - test_onboarding_auto_complete.py
   # #3517: the capture disclosure's single source of truth + the non-LLM
   # renderer + the false-promise grep (lane-agnostic: no DB, no network — one

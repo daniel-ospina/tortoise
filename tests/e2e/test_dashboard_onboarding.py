@@ -450,7 +450,15 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # second part.
     expect(page.get_by_role("button", name="Done — Continue to dashboard")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
-    # STEP 3: done — the wizard REPORTS what the server observed; NO
+    # #3513: the connect step's Skip now lands on the DATA-SOURCES step (index
+    # 3) — the integrations grid — not on done. It is the single source-list
+    # presentation in the product.
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Choose your memory sources", timeout=10_000)
+    # Skip does NOT block on an incomplete connection and advances to done.
+    page.get_by_role("button", name="Skip", exact=True).click()
+    # STEP 4: done — the wizard REPORTS what the server observed; NO
     # `harness-connected` write and NO onboarding_complete PATCH (the node's
     # gate owns completion; accept-and-drop).
     # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
@@ -503,6 +511,70 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # mount mint is deleted; connect-step durable sourcing is #2211-owned and
     # rides POST /v1/team/keys)
     assert cap.get("session_key_posts", 0) == 0, f"zero-mint violated: {cap.get('session_key_posts')} session-key POSTs"
+
+
+def test_data_sources_grid_renders_in_order_and_continue_reaches_done(page: Page) -> None:
+    """#3513: the Data-sources step renders the integrations grid as the single
+    source-list presentation — shipped tiles first in the pinned order, the
+    Coming-soon group LOWER in the same grid at FULL contrast with a badge and
+    never disabled — and Continue reaches `done` at index 4."""
+    _seed_cookie(page, "u-onb")
+    _wire(page, key_rows=[DURABLE_ROW])
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Skip for now").click()
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+    # the sr-only step count reads "of 5" (the literal regression this pins)
+    expect(page.locator("span.sr-only[role='status']")).to_contain_text("of 5", timeout=5_000)
+    # RENDER ORDER is asserted on the DOM, not inferred from the array literal:
+    # sessions → issues → docs, then the coming-soon group.
+    keys = page.locator(".integration-tile").evaluate_all(
+        "els => els.map(e => e.dataset.integrationKey)")
+    assert keys[:3] == ["agent_sessions", "github_issues", "github_documents"], keys
+    assert {"slack", "linear", "supabase_org"}.issubset(set(keys[3:])), keys
+    # a coming-soon tile: badge, full contrast, still clickable (never disabled)
+    coming = page.locator(".integration-tile.coming-soon").first
+    expect(coming.locator(".integration-badge")).to_have_text("Coming soon")
+    assert coming.is_disabled() is False, "a coming-soon tile must stay clickable (the click is the signal)"
+    assert coming.evaluate("el => getComputedStyle(el).opacity") == "1", \
+        "a coming-soon tile must be FULL contrast — never opacity-muted into reading as disabled"
+    # Continue does not block on an incomplete connection and reaches done.
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # the incomplete-setup variant names what did not finish (GitHub unconnected)
+    expect(page.locator("div.done")).to_contain_text("GitHub was not connected", timeout=10_000)
+
+
+def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> None:
+    """#3513: the Coming-soon dialog's pinned contract — role=dialog,
+    aria-modal, aria-labelledby on the "Not available yet" heading, initial
+    focus into the dialog, Escape closes and returns focus to the invoking
+    tile — and the tile is keyboard reachable (Enter activates). Skip reaches
+    `done` at index 4 too."""
+    _seed_cookie(page, "u-onb")
+    _wire(page, key_rows=[DURABLE_ROW])
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Skip for now").click()
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+
+    dialog = page.locator("[role='dialog']")
+    coming = page.locator(".integration-tile.coming-soon").first
+    # keyboard reachability: the tile is a real tab stop and Enter activates it
+    coming.focus()
+    page.keyboard.press("Enter")
+    expect(dialog).to_be_visible(timeout=5_000)
+    assert dialog.get_attribute("aria-modal") == "true"
+    assert dialog.get_attribute("aria-labelledby") == "integration-modal-title"
+    expect(page.locator("#integration-modal-title")).to_have_text("Not available yet")
+    # initial focus moved INTO the dialog (the Close button autofocuses)
+    assert page.evaluate("() => document.activeElement && document.activeElement.textContent.trim()") == "Close"
+    # Escape closes and returns focus to the invoking tile
+    page.keyboard.press("Escape")
+    expect(dialog).to_have_count(0)
+    assert page.evaluate("() => document.activeElement && document.activeElement.dataset.integrationKey") is not None, \
+        "closing must return focus to the tile that opened the dialog, never <body>"
+    # Skip reaches done
+    page.get_by_role("button", name="Skip", exact=True).click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
 
 
 def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None:

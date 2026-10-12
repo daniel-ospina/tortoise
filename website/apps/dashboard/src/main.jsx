@@ -54,9 +54,18 @@ import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, res
 import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerCardProps, keyTabAffordance, graphMissingCta,
   REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN, REENTRY_KEYED_LEAD_IN,
   GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
-// #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
+// #1997 (W1): the human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub, wizardStepAnnouncement } from './wizardFlow.js'
+// #3513 (epic #1714 R1): the integration tile inventory + the grid's pure
+// presentation rules (order, the coming-soon bound, state-bearing aria-labels,
+// the monogram fallback). node --test unit-tested (integrationsGrid.test.js).
+import {
+  COMING_SOON_DIALOG_BODY, COMING_SOON_DIALOG_FOOTNOTE, COMING_SOON_DIALOG_TITLE,
+  DATA_SOURCES_ORDER, INTEGRATION_STATE,
+  comingSoonShowMoreLabel, orderedTiles, tileActionLabel, tileAriaLabel, tileByKey, tileMark,
+  tileStatus, visibleComingSoon,
+} from './integrationsGrid.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
@@ -564,7 +573,7 @@ function SettingsTab(props) {
             (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
         <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
         <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph. Session recording is permission for this Organization: it is on unless you switch it off, but each machine's Claude Code, Codex or Cursor hooks still opt in separately (<code>{CAPTURE_OPT_IN_LINE}</code>) before they file anything — on a Pi machine, installing the extension is the opt-in. Turning this on grants the permission; it is not the switch.</p>
-        <MemorySources {...memorySourcesProps} />
+        <MemorySources {...memorySourcesProps} surface="settings" />
       </section>
 
       {/* ── Home 4: Captured sessions (DE2E-11 home). W6 consumer seam:
@@ -1747,7 +1756,7 @@ function claimIntentInFlight() {
   // step (a re-opener may have connected in a prior session) so the paused
   // gate reads fresh server truth.
   React.useEffect(() => {
-    if (welcomeMode && authed && wizardStep === 3 && !onboardingRefreshedAtDoneRef.current) {
+    if (welcomeMode && authed && wizardStep === 4 && !onboardingRefreshedAtDoneRef.current) {
       onboardingRefreshedAtDoneRef.current = true
       refreshOnboarding().catch(() => {})
     }
@@ -1782,7 +1791,7 @@ function claimIntentInFlight() {
   const wizardConnectPollInFlightRef = React.useRef(false)
   const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
   React.useEffect(() => {
-    if (!(welcomeMode && authed) || wizardStep !== 3 || serverHarnessConnected) return
+    if (!(welcomeMode && authed) || wizardStep !== 4 || serverHarnessConnected) return
     // review cycle 4 (item 9): the failure/stall state was NEVER reset, so it
     // out-lived the effect that produced it. Reachable false state: a user sees
     // ≥3 failed checks, presses Back, re-enters step 3, and the connection
@@ -1905,7 +1914,7 @@ function claimIntentInFlight() {
   // Clear it where the step is LEFT, so re-entry starts from the not-stalled
   // state and the frame cannot render a withdrawn promise.
   React.useEffect(() => {
-    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+    if (wizardStep !== 4) setWizardConnectPollStalled(false)
   }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
@@ -1950,8 +1959,13 @@ function claimIntentInFlight() {
     // the user sits on step 3 re-runs the announcement with the SAME arm the
     // <h1> just rendered. It used to be body-only (a later-declared const in a
     // deps array is the #2426 TDZ white-screen), which let the two disagree.
-    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
-    setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
+    // #3513: the count AND the label are one derivation (`wizardStepAnnouncement`
+    // composes `wizardStageLabel` with the count from WIZARD_STEPS). Before
+    // this the count was a bare "of 4" literal, so inserting a step made
+    // screen readers announce four steps while sighted users saw five. The
+    // label still comes from the SAME derivation the visible <h1> uses, so the
+    // two cannot drift (the #2361/#2912 rule this effect already depended on).
+    setWizardStepAnnounce(wizardStepAnnouncement(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork }))
     if (!wizardFocusInit.current) {
       wizardFocusInit.current = true
       // #3728 review (P2): seed the last-announced step HERE. The init run
@@ -8007,6 +8021,42 @@ function claimIntentInFlight() {
         ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
         : wizardPasteRow
 
+  // #3513: the MemorySources prop bundle is built ONCE and spread at both
+  // mounts (the wizard's Data-sources step and Settings → Memory sources), so
+  // the two cannot drift into two partially-installed states. The `order` prop
+  // is explicit (the pinned ship order) — the component must not rely on the
+  // inventory array literal's incidental order — and each mount adds its own
+  // `surface` ('wizard' | 'settings').
+  const memorySourcesProps = {
+    state: onboarding,
+    loading: onboardingLoading,
+    wizardHarness: null,  // Settings never knows the user's harness — no spurious "current" highlight
+    github: wizardGithub,
+    issuesWantOn,
+    docsWantOn,
+    indexJob,
+    docsJob,
+    memoryBusy,
+    memoryErrors,
+    onToggleIssues: toggleIssues,
+    onToggleDocs: toggleDocs,
+    onToggleSessions: toggleSessionRecording,
+    onToggleCaptureExtract: toggleCaptureExtract,
+    onConnectGithub: wizardConnectGithub,
+    onIndexDocs: indexDocs,
+    onReindexGithub: reindexGithub,
+    reposList,
+    reposLoaded,
+    reposLoadFailed,
+    branchLists,
+    docsScope,
+    issuesScope,
+    onDocsScopeChange: handleDocsScopeChange,
+    onIssuesScopeChange: handleIssuesScopeChange,
+    onLoadBranches: loadBranches,
+    order: DATA_SOURCES_ORDER,
+  }
+
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
     // W1 wizard, never the key. There is NO mount provisioning (#1566's
@@ -8731,7 +8781,32 @@ function claimIntentInFlight() {
                     </div>
                   )))}
 
+                  {/* #3513 (epic #1714 R1): the Data-sources step. The grid is
+                      the SAME MemorySources component Settings mounts — one
+                      presentation of the source list in the product, no
+                      competing toggle list. Continue does NOT block on an
+                      incomplete connection (blocking an opt-in wizard is worse
+                      than a partial state); BOTH Continue and Skip advance to
+                      `done` (index 4), and the done step names what did not
+                      finish. */}
                   {wizardStep === 3 && (
+                    <div className="data-sources">
+                      <p className="dim" style={{ lineHeight: 1.6 }}>
+                        Choose what Tortoise should remember. Everything here is optional and can be
+                        changed any time from Settings → Memory sources.
+                      </p>
+                      <MemorySources {...memorySourcesProps} order={DATA_SOURCES_ORDER} surface="wizard" />
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip</button>
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(4)}>Continue →</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 4 && (
                     <div className="done">
                       {isBuildFork ? (
                         // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
@@ -8892,8 +8967,24 @@ function claimIntentInFlight() {
                             : ''}
                         </p>
                       )}
+                      {/* #3513: the incomplete-setup variant. Continue and Skip
+                          both reach `done` WITHOUT blocking, so this step must
+                          name what did not finish instead of silently passing.
+                          The affordance goes back to the grid (index 3), where
+                          the unfinished tile carries its own honest state. */}
+                      {!githubConnected && (
+                        <p className="dim" style={{ lineHeight: 1.6 }}>
+                          GitHub was not connected, so issue and document indexing will start once the
+                          connection completes.{' '}
+                          <button type="button" className="small" onClick={() => setWizardStep(3)}>Back to sources</button>
+                        </p>
+                      )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                        {/* #3513: Back from `done` lands on the Data-sources step
+                            (index 3) — the step before it — never on connect.
+                            The renumbered guard is regression-tested: it must not
+                            re-fire the advance. */}
+                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
                         {/* #3428 (lane B3): the only real control is deliberately
@@ -9962,34 +10053,7 @@ function claimIntentInFlight() {
             onDeleteSession={deleteCapturedSession}
             deletingSessionId={sessionDeletingId}
             sessionsActionError={sessionsActionError}
-            memorySourcesProps={{
-              state: onboarding,
-              loading: onboardingLoading,
-              wizardHarness: null,  // Settings never knows the user's harness — no spurious "current" highlight
-              github: wizardGithub,
-              issuesWantOn,
-              docsWantOn,
-              indexJob,
-              docsJob,
-              memoryBusy,
-              memoryErrors,
-              onToggleIssues: toggleIssues,
-              onToggleDocs: toggleDocs,
-              onToggleSessions: toggleSessionRecording,
-              onToggleCaptureExtract: toggleCaptureExtract,
-              onConnectGithub: wizardConnectGithub,
-              onIndexDocs: indexDocs,
-              onReindexGithub: reindexGithub,
-              reposList,
-              reposLoaded,
-              reposLoadFailed,
-              branchLists,
-              docsScope,
-              issuesScope,
-              onDocsScopeChange: handleDocsScopeChange,
-              onIssuesScopeChange: handleIssuesScopeChange,
-              onLoadBranches: loadBranches,
-            }}
+            memorySourcesProps={memorySourcesProps}
           />
         )}
 
@@ -11083,6 +11147,14 @@ function MemorySources(props) {
     onToggleCaptureExtract = null,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
+    // #3513: the grid's explicit render order (the wizard passes
+    // DATA_SOURCES_ORDER) and the surface discriminator ('wizard' | 'settings').
+    // BOTH mounts pass them: the wizard renders status + the disclosure; the
+    // Settings mount is the same grid, so an existing user sees ONE
+    // presentation of the source list. The order is a prop, never the array
+    // literal's incidental order (a render-order assertion depends on that).
+    order = DATA_SOURCES_ORDER,
+    surface = 'settings',
   } = props
 
   // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job
@@ -11093,6 +11165,32 @@ function MemorySources(props) {
     const t = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(t)
   }, [])
+
+  // #3513: the grid's own state. Hooks are declared BEFORE the early returns
+  // (rules of hooks — the loading/state guards return early below).
+  //
+  // `openTile` is the one expanded tile's SOURCE id; the recording tile is
+  // expanded by default at both mounts (the pinned sibling-panel contract), so
+  // the Sessions control is reachable without a click. A shipped tile opens ONE
+  // panel at a time; a coming-soon tile opens the demand dialog instead (its
+  // activation is the demand signal, #3514) and no panel.
+  const [openTile, setOpenTile] = React.useState('sessions')
+  const [comingSoonKey, setComingSoonKey] = React.useState(null)
+  const [comingSoonExpanded, setComingSoonExpanded] = React.useState(false)
+  // #2392: restore focus to the tile that opened the dialog (dialogFocus.js),
+  // and close it on Escape. The expanded coming-soon state resets on close
+  // (per-open, never persisted).
+  const comingSoonRestoreRef = React.useRef(null)
+  const closeComingSoon = () => {
+    setComingSoonKey(null)
+    setComingSoonExpanded(false)
+    requestAnimationFrame(() => restoreFocus(comingSoonRestoreRef))
+  }
+  const openComingSoon = (key, trigger) => {
+    rememberFocusedTrigger(comingSoonRestoreRef, undefined)
+    if (trigger) rememberRestoreTarget(comingSoonRestoreRef, trigger)
+    setComingSoonKey(key)
+  }
 
   if (loading) {
     return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
@@ -11129,10 +11227,89 @@ function MemorySources(props) {
   // Never inside the `role="alert"` failure sentence (see captureStatus.js).
   const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
+  // #3513: the grid's data. The shipped group is ordered by the explicit
+  // `order` prop; the coming-soon group is bounded (COMING_SOON_VISIBLE_LIMIT)
+  // with the remainder behind "Show more". The four state inputs are the SAME
+  // values the switches below render, so a tile's state and its panel cannot
+  // disagree.
+  const tileStatusInputs = { sessionsOn, issuesOn, docsOn, githubConnected }
+  const shippedGridTiles = orderedTiles(order).filter((t) => t.state === INTEGRATION_STATE.SHIPPED)
+  const comingSoon = visibleComingSoon({ expanded: comingSoonExpanded })
+  const gridTiles = [...shippedGridTiles, ...comingSoon.shown]
+  const comingSoonTile = comingSoonKey ? tileByKey(comingSoonKey) : null
+
   return (
     <div className="memory-sources">
+      {/* #3513 (epic #1714 R1): the integration TILE GRID is the source list —
+          the single presentation in the product (this same component mounts in
+          the wizard's Data-sources step AND in Settings). Built on the two
+          primitives that already existed: `.plans-grid` (the grid skeleton)
+          and `.harness-surface` (the button-tile interaction). Every tile is a
+          real <button> in the tab order — not a roving-tabindex composite —
+          because these are independent actions, not a data grid. */}
+      <ul className="integrations-grid" aria-label="Memory sources">
+        {gridTiles.map((t) => {
+          const isComingSoon = t.state === INTEGRATION_STATE.COMING_SOON
+          const mark = tileMark(t)
+          const open = !isComingSoon && openTile === t.source
+          return (
+            <li key={t.key}>
+              <button
+                type="button"
+                className={'integration-tile'
+                  + (isComingSoon ? ' coming-soon' : '')
+                  + (open ? ' active' : '')}
+                data-integration-key={t.key}
+                data-state={tileStatus(t, tileStatusInputs)}
+                aria-label={tileAriaLabel(t, tileStatusInputs)}
+                aria-expanded={isComingSoon ? undefined : open}
+                aria-controls={isComingSoon ? undefined : `integration-panel-${t.source}`}
+                onClick={(e) => (isComingSoon ? openComingSoon(t.key, e.currentTarget) : setOpenTile(t.source))}
+              >
+                {/* the fixed-size logo slot: a monogram today (no logo assets
+                    exist in the repo), never a broken <img>. */}
+                <span className="integration-mark" aria-hidden="true">{mark.kind === 'logo' ? '?' : mark.text}</span>
+                <span className="integration-tile-body">
+                  <span className="integration-name">{t.name}</span>
+                  <span className="integration-desc">{t.description}</span>
+                  {/* the state badge: "Coming soon" on an unbuilt tile, the
+                      state-derived action label on a shipped one. NEVER an
+                      opacity-muted or disabled tile — a faded tile reads as
+                      disabled and would suppress the click that IS the signal. */}
+                  <span className="integration-badge">
+                    {isComingSoon ? 'Coming soon' : tileActionLabel(t, tileStatusInputs)}
+                  </span>
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+      {/* The bound must not hide the demand signal: tiles revealed here are the
+          same buttons as the first paint, so their click is identical. The
+          control renders ONLY when it reveals something — an inert control is
+          worse than an absent one. */}
+      {comingSoon.overBound && (
+        <button
+          type="button"
+          className="ghost small"
+          aria-expanded={comingSoonExpanded}
+          onClick={() => setComingSoonExpanded((v) => !v)}
+        >
+          {comingSoonShowMoreLabel({ expanded: comingSoonExpanded, hidden: comingSoon.hidden })}
+        </button>
+      )}
+      {/* GAP-7: the disclosure is product transparency, not a consent gate — it
+          states what is recorded and where to view/delete it. The delete path
+          EXISTS: Settings → Captured sessions (SettingsTab home 4). Always
+          visible, on both surfaces, so neither mount can drop the promise. */}
+      <p className="dim small integration-disclosure">
+        Captured sessions are filed to your Organization's graph. View or delete them any time in
+        Settings → Captured sessions.
+      </p>
+
       {/* ── Issues toggle ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-issues" hidden={openTile !== 'issues'}>
         <button
           type="button"
           className="switch"
@@ -11219,7 +11396,7 @@ function MemorySources(props) {
       </div>
 
       {/* ── Docs toggle ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-docs" hidden={openTile !== 'docs'}>
         <button
           type="button"
           className="switch"
@@ -11348,7 +11525,7 @@ function MemorySources(props) {
       </div>
 
       {/* ── Sessions toggle (off-switch; default ON per ToS — per-harness status) ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-sessions" hidden={openTile !== 'sessions'}>
         <button
           type="button"
           className="switch"
@@ -11436,7 +11613,7 @@ function MemorySources(props) {
           the turns, skip extraction. Rendered only where a handler exists —
           the archived wizard passes none, so an inert switch is not shown. ── */}
       {onToggleCaptureExtract && (
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" hidden={openTile !== 'sessions'}>
         <button
           type="button"
           className="switch"
@@ -11465,6 +11642,37 @@ function MemorySources(props) {
       </div>
       )}
       {/* ── End extraction toggle (#4258) ── */}
+
+      {/* #3513: the coming-soon dialog SHELL + a11y contract. The modal contract
+          is pinned by the issue: role=dialog, aria-modal, aria-labelledby on the
+          "Not available yet" heading, initial focus INTO the dialog, Escape
+          closes (returning focus to the invoking tile via dialogFocus.js), and
+          the expansion resets per open. The post-action states are #3514's —
+          this shell carries no posting primary. */}
+      {comingSoonTile && (
+        <div
+          className="integration-modal-backdrop"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) closeComingSoon() }}
+        >
+          <div
+            className="integration-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="integration-modal-title"
+            aria-describedby="integration-modal-body"
+            onKeyDown={(e) => { if (e.key === 'Escape') closeComingSoon() }}
+          >
+            <h3 id="integration-modal-title">{COMING_SOON_DIALOG_TITLE}</h3>
+            <p id="integration-modal-body">
+              <strong>{comingSoonTile.name}.</strong> {COMING_SOON_DIALOG_BODY}
+            </p>
+            <p className="dim small">{COMING_SOON_DIALOG_FOOTNOTE}</p>
+            <div className="wizard-actions">
+              <button type="button" className="btn-primary" autoFocus onClick={closeComingSoon}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
