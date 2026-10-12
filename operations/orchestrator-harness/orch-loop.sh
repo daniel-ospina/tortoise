@@ -235,6 +235,27 @@ print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pe
                 && echo "#$PR re-record" >>"$LOG"
             fi
           fi
+        elif echo "$V" | grep -qE 'docs|test-isolation|license-surface|legal-e2e|pricing-artifact'; then
+          # A required check OTHER than the review gate or python CI is red — docs lint, a committed
+          # conflict marker, legal-e2e, test isolation. Nothing re-recorded or reran those, so such a
+          # PR sat red forever with no worker at all (observed: #8278 had conflict markers committed,
+          # #8193 a new MD018 finding; both had zero workers for hours). Route them to the fixer,
+          # which now also receives the failing CI log, capped like every other fix loop.
+          NFC2="$(cat "$O/state/fixcount-$PR" 2>/dev/null || echo 0)"
+          case "$NFC2" in ''|*[!0-9]*) NFC2=0 ;; esac
+          if [ "$NFC2" -ge "${MAX_FIX_TRIES:-3}" ]; then
+            [ -f "$O/state/parked-$PR" ] || { echo "${HEAD_N:-}" > "$O/state/parked-$PR"; echo "#$PR PARKED (CI still red after $NFC2 fixes: $V)" >>"$LOG"; }
+          elif claim_live "$PR" || sess "fix-$PR" || sess "merge-$PR"; then
+            : # a worker is already on it
+          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ]; then
+            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+            if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
+              echo $((NFC2 + 1)) > "$O/state/fixcount-$PR"
+              echo "#$PR CI-red ($V) -> fixer attempt $((NFC2 + 1))" >>"$LOG"
+            else
+              echo "#$PR CI-red, fixer spawn FAILED" >>"$LOG"
+            fi
+          fi
         fi
         if echo "$V" | grep -q python-ci-gate; then
           RID="$(gh pr checks "$PR" --repo "$OR" --json name,link --jq '.[]|select(.name=="python-ci-gate")|.link' 2>/dev/null | sed -nE 's#.*/runs/([0-9]+).*#\1#p')"
