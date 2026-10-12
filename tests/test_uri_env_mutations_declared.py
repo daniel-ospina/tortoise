@@ -187,6 +187,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # OWN graph, so the operator-scope assertions cannot see a neighbour's
     # residue. No monkeypatch site is declared, because this file has none.
     "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #6151: the annotation band's graph read. Module-level live probe
+    # (os.environ set + save/restore at import; DELIBERATE_URI — the probe IS
+    # what asserts the docker lane, because the mechanism's whole claim is the
+    # weight the READER derives from the dimensions stored on the node, which a
+    # pure function test cannot observe: it is handed the value directly) plus a
+    # per-test fresh-URI fixture whose `monkeypatch.setenv` auto-restores at
+    # teardown, so no lane leaks into a later docker-lane test.
+    "test_6151_annotation_band.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                      r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).

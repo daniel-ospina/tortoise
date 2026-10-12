@@ -96,7 +96,7 @@ class TestRegistryEquivalence:
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
-        assert "tortoise_events_poll" in names, "Missing #432 events_poll tool"
+        assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
@@ -151,8 +151,8 @@ class TestRegistryEquivalence:
 class TestCurationGroups:
     """Epic #888 no-regret: GROUP_BY_NAME coherence fixes (#888 item 3).
 
-    retract_point and events_poll previously fell through to the implicit
-    "memory" default via GROUP_BY_NAME.get(t.name, "memory") — events_poll is
+    retract_point and poll_events previously fell through to the implicit
+    "memory" default via GROUP_BY_NAME.get(t.name, "memory") — poll_events is
     a CDC/subscription tool that belongs in "sessions", and retract_point
     belongs explicitly with the lifecycle tools in "memory" (#432).
     """
@@ -162,7 +162,7 @@ class TestCurationGroups:
         entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
         assert entry.group == "memory", f"got {entry.group}"
 
-    def test_events_poll_in_sessions_group(self):
+    def test_poll_events_in_sessions_group(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
         assert entry.group == "sessions", f"got {entry.group}"

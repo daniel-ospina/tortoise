@@ -844,6 +844,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 # the real lane, so hermetic/equivalence tests keep driving
                 # the arm in a degraded environment.
                 arm.require_observed_hybrid = True
+                # #4520: also probe the STORE before setup/ingest. The embedder
+                # availability preflight cannot see that the engine silently
+                # discards a small-Δ vector overwrite — a store whose dense leg
+                # is stale must refuse the arm, not publish a number built on
+                # vectors that no longer describe their content.
+                arm.require_store_integrity = True
             arm.setup_scenarios(scenarios)
         except HybridRetrievalUnavailable as e:
             run_retrieval_degraded = True

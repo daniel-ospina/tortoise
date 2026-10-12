@@ -46,7 +46,7 @@ evolve a table that already exists.
 | `handle` | TEXT PRIMARY KEY | The opaque value in `__Host-session`. 32 random bytes, hex (`randomHandle`). |
 | `user_id` | TEXT NOT NULL | Supabase user id. Indexed (`idx_sessions_user`) — F15 "sign out everywhere" is a per-user scan. |
 | `refresh_token` | TEXT NOT NULL | Rotating single-use GoTrue refresh token. **Server-only.** |
-| `revoked` | INTEGER NOT NULL DEFAULT 0 | Immediate revocation. Nothing deletes the row; revocation is a flag, so the CAS stays observable. |
+| `revoked` | INTEGER NOT NULL DEFAULT 0 | Immediate revocation. Revocation is a **flag on a live row**, so the CAS in `revokeSession` stays observable for the session's whole declared life; the row itself is deleted only once its own `expires_at` has passed (§5a) — never on the flag. |
 | `created_at`, `expires_at` | INTEGER NOT NULL | `expires_at` is the SESSION's own TTL (`SESSION_MAX_AGE_S` = 400 days), not the access token's. Enforced on every read path, including the W6 proxy (`getAccessTokenForSession`). |
 | `access_token`, `access_token_expires_at` | TEXT / INTEGER | Cache for the W6 token-handler proxy. Refreshing per proxied request would stampede GoTrue's rotating single-use tokens. |
 | `token_rejected_at` | INTEGER | Cooldown stamp (`invalidateCachedToken`), so a persistent upstream 401 cannot become unbounded refresh traffic. |
@@ -61,7 +61,9 @@ signing the user out. The distinction the amendment preserves: the cached `acces
 Pre-auth flows are a second table in the same database: `auth_flows` (`flow_id`, `verifier`,
 `kind`, `client_id`, `redirect_uri`, `state`, `next`, timestamps) — the PKCE verifier lives
 server-side and the `__Host-authflow` cookie is *bound* to a live row, which is what makes
-"cookie exists" insufficient. `email_flow_pending` is the third.
+"cookie exists" insufficient. `email_flow_pending` is the third: the verified email link held
+for the consent step, whose `refresh_token` is a live credential. Both pre-auth tables carry an
+`expires_at` index, and both are swept once it passes (§5a).
 
 ## 2. Migration path — this project has no `wrangler.toml`, deliberately
 
@@ -76,10 +78,12 @@ adopted; Gate 1).
 Four legs, all live:
 
 1. **Runtime bootstrap (idempotent, deliberate).** `ensureSchema` / `ensureSchemaTokenColumns`
-   (sessions + token columns + `idx_sessions_user`), `ensureFlowTable` (`/auth/start`),
-   `ensurePendingTable` (`/auth/confirm`), `ensureLinkFlowTable` (`/auth/link`),
-   `ensureAuthFlowIndexes`. Only `CREATE … IF NOT EXISTS` and `ALTER TABLE ADD COLUMN` — never a
-   destructive change. A fresh local database is self-establishing instead of mysteriously broken.
+   (sessions + token columns + `idx_sessions_user` + `idx_sessions_expires`), `ensureFlowTable`
+   (`/auth/start`; it also calls `ensurePendingTable`, because this route sweeps that table's
+   expired rows — §5a), `ensurePendingTable` (`/auth/confirm`), `ensureLinkFlowTable`
+   (`/auth/link`), `ensureAuthFlowIndexes`. Only `CREATE … IF NOT EXISTS` and
+   `ALTER TABLE ADD COLUMN` — never a destructive change. A fresh local database is
+   self-establishing instead of mysteriously broken.
 2. **Explicit apply, for a real migration.** `wrangler d1 execute SESSIONS --file website/migrations/0001_auth_sessions.sql`
    (`--local` for dev). Production's tables were created by leg 1, so the migration file and the
    runtime bootstrap must agree — that is why leg 1 creates `idx_auth_flows_expires` too, which a
@@ -176,8 +180,51 @@ touches the store follows it:
 - A session past `expires_at` is a **dead** session (401), not a refreshable one: the TTL is
   enforced on the data path too, or the proxy keeps serving authenticated data with a 200 while
   `/api/session` answers 401 for the same cookie.
-- Housekeeping never escalates: `sweepExpiredFlows` and `invalidateCachedToken` absorb their own
-  failures (logged / best-effort). A collection problem must not become a 503 on sign-in.
+- Housekeeping never escalates: `sweepExpiredFlows`, `sweepExpiredSessions`,
+  `sweepExpiredPending` and `invalidateCachedToken` absorb their own failures (logged /
+  best-effort). A collection problem must not become a 503 on sign-in.
+
+---
+
+## 5a. Retention — every row is deleted after its OWN life, and that is a decision (#8032)
+
+`auth_flows` could be swept on `expires_at < now` unconditionally because `expires_at` there
+encodes the row's *entire usable life*. Neither of the other two tables is like that, so "port
+the `sweepExpiredFlows` call" is not the whole fix — the PREDICATE is the fix:
+
+| Table | Predicate | Kept for | Why that predicate |
+|---|---|---|---|
+| `auth_flows` (#3647) | `expires_at < now` | the flow's declared life | `/auth/callback` refuses an expired row and `/auth/start` never reads one, so no live flow can be collected. |
+| `email_flow_pending` (#8032) | `expires_at < now` | the pending record's declared life | its only reader — `/auth/confirm` POST — refuses a row past `expires_at`, and nothing else reads the table. **The severity angle differs:** the row's payload is the flow's `refresh_token`, so an expired row was retaining a usable credential — `RECOVERY_MAX_AGE_S` bounds replay of the RECORD, not the token it carries. |
+| `sessions` (#8032) | `expires_at < now - SESSION_SWEEP_GRACE_S` | the session's declared life **plus a grace** | a reader deliberately looks at a row *after* its TTL: `/api/session` and `/api/profile` answer `session_expired` (a distinct 401 from `not_signed_in`) and revoke the row. The grace is what keeps that reachable, and it is the window upstream applies too (GoTrue deletes a session's row only after its expiry). |
+
+**The policy, stated once.** A `sessions` row is deleted after its own `expires_at` plus the
+grace held in `SESSION_SWEEP_GRACE_S`. **Revocation is never the trigger**, because revocation
+is not the end of the row's usefulness: keeping the row to the session's own declared life
+leaves the CAS observable for the whole live window and leaves abuse forensics able to see all
+of it, while still bounding our copy of a credential. The grace follows upstream's own
+behaviour — Supabase Auth deletes a session's row only *after* its expiry, so a mass deletion
+cannot happen by accident and a bad setting can be undone (read 2026-10-12). The window itself
+is registered in `docs/retention-and-deletion.md` and is never restated here. That entry is the
+store's own garbage collection: it is not one of the deletion *promise*'s windows, and it
+changes no customer-facing wording.
+
+**Where the sweeps run, and why there.** None of the three adds a route or a schedule.
+`sweepExpiredFlows` and `sweepExpiredPending` run on `/auth/start` — the one auth path a
+schedule already drives (the #3628 probe, every 5 minutes), so collection is unconditional and
+stops only when the auth store stops being used at all. `sweepExpiredSessions` runs inside
+`createSession`, the single waist every session-minting route passes through (`/auth/callback`,
+`/auth/confirm`, `/auth/password`, `/auth/api-key`, `/auth/signup`): coupling it there gives a
+sixth route collection for free and leaves no five call sites to drift apart. Each sweep is
+capped by `FLOW_SWEEP_LIMIT` per call and drains the next slice on the next call, so a backlog
+is bounded work per request rather than one request draining years of rows.
+
+The cost argument for each sweep is its index — `idx_sessions_expires`,
+`idx_email_flow_pending_expires`, `idx_auth_flows_expires` — so each is created **where its
+table is created**: a database established by the runtime bootstraps alone never receives the
+migration's copy, and `config/required-bindings.yml` records that production's tables are
+created exactly that way. Without it the `sessions` sweep would be a full scan of the largest
+table in this store, on the sign-in path.
 
 ## 6. Capacity, and the documented scale-out path
 
@@ -200,6 +247,11 @@ contract (`HttpOnly`, opaque) does not change, so this can be introduced without
 session design. Until then, treat the ~1k qps figure as a **design bound, not a measurement**:
 this store has never been load-tested.
 
+Since #8032 the table has a ceiling as well as a floor: `sweepExpiredSessions` removes each row
+once its own life ends (§5a), so the store is bounded by the sessions minted within
+`SESSION_MAX_AGE_S` plus the grace instead of growing monotonically with every sign-in — which is
+what "the largest table in the store" would otherwise have meant.
+
 ---
 
 ## Integration Docs
@@ -214,6 +266,7 @@ this store has never been load-tested.
 | **Bindings declared** | `config/required-bindings.yml`: `SESSIONS` / `d1_databases` / `required` for `premise-labs` **and** `tortoise-dashboard`, envs `production` + `preview`. Plus `SUPABASE_URL`, `SUPABASE_ANON_KEY` (`production`) for the token exchange the store's refresh leg performs. |
 | **Gate** | `tools/check_pages_bindings.py --manifest config/required-bindings.yml --project <name>`, run **before** deploy in `.github/workflows/deploy-pages.yml`; exit 2 = "could not determine" = fail closed. |
 | **Tables** | `sessions`, `auth_flows`, `email_flow_pending` (all created by the runtime bootstraps; `website/migrations/0001_auth_sessions.sql` mirrors them). |
+| **Row lifecycle** | every row of all three tables is deleted once its own `expires_at` has passed (§5a) — by `sweepExpiredSessions`, `sweepExpiredFlows` and `sweepExpiredPending`, on `/auth/start` and inside `createSession`. No cron, no scheduled worker, no route of its own. |
 | **Verified by execution** | Gate 1b: read-after-write, `casRevokeChanges: 1`, `casIdempotent: true`, `bulkRevokeChanges: 1`. Evidence: `docs/engineering/auth-spike/GATE1-RESULT.md`. |
 | **Vendor docs read at** | `developers.cloudflare.com/d1/best-practices/read-replication/`, `developers.cloudflare.com/d1/platform/limits/` (2026-10-10). |
 
@@ -223,5 +276,7 @@ this store has never been load-tested.
   is off* is a dashboard setting nothing in-repo reads back (§3(a)).
 - **The ~1k qps bound has never been load-tested** against this store.
 - **#5355** — the concurrent-rotation CAS re-read has no test.
-- **#8032** — `sessions` and `email_flow_pending` have no expiry sweep (the rest of the #3647 class).
+- **#8032** — `sessions` and `email_flow_pending` had no expiry sweep (the rest of the #3647
+  class). **CLOSED by §5a**, which also records why the `sessions` side needed a retention
+  decision rather than a mechanical port.
 - **#3529** — 4 of the 7 declared threat classes have no test.

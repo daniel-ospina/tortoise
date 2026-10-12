@@ -388,6 +388,110 @@ def test_targeted_delete_is_still_allowed():
     assert len(guarded._g.queries) == 1
 
 
+# ── #3037/#8223: the property-map exemption is anchored to a pattern element ─
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n",                              # the plain wipe
+    "MATCH (n) DETACH DELETE n // {",                         # brace in a // comment
+    "MATCH (n) DETACH DELETE n /* { */",                      # brace in a /* */ comment
+    "CALL { MATCH (n) DETACH DELETE n }",                     # CALL subquery delimiter
+    "MATCH (n) DETACH DELETE n WHERE id(n) = '{'",            # brace in a string
+    "MATCH (n) DETACH DELETE n WHERE {",                      # stray trailing brace
+    "MATCH (m) WITH {a:1} AS x DETACH DELETE m",              # top-level map literal
+    "CALL { MATCH (n:Point {id:1}) RETURN n } MATCH (m) "
+    "DETACH DELETE m",                                        # map inside a CALL block
+    # #8223: an EXPRESSION map literal is not a pattern property map — the
+    # bracket before the brace is a function call / list / grouping, not a
+    # node/relationship pattern, so it must not exempt the wipe.
+    "UNWIND [{a:1}] AS x MATCH (n) DETACH DELETE n",
+    "MATCH (n) WITH n, properties({a:1}) AS p DETACH DELETE n",
+    "MATCH (n) WITH n, [{a:1}] AS xs DETACH DELETE n",
+    "MATCH (n) DETACH DELETE n RETURN keys({a:1})",
+    "MATCH (n) WHERE ({a:1}).a = 1 DETACH DELETE n",
+    "MATCH (n) WHERE size(keys({x:1})) > 0 DETACH DELETE n",
+    "MATCH (n) DETACH DELETE n RETURN coalesce({a:1},{b:2})",
+    "MATCH (n) DETACH DELETE n RETURN [x IN [{a:1}] | x]",
+    # A map PROJECTION (`n {.a}`) is an expression, not a pattern property map.
+    "MATCH (n) DETACH DELETE n RETURN [x {.a}]",
+])
+def test_non_property_map_brace_does_not_exempt_a_wipe(statement):
+    """#3037/#8223: a `{` that is not a pattern property map must not make a
+    whole-graph wipe look targeted. Before the fix, every brace-bearing
+    statement here returned False ("targeted") because the classifier was a
+    bare ``"{" in cypher`` test (the expression-map cases survived the first
+    #3037 pass because its regex accepted ANY ``(``/``[`` before the brace), so
+    on the raw-query lane — where L2 is the only layer — the wipe reached a
+    production server graph unguarded. The first parameter (the plain wipe with
+    no brace) is the non-discriminating control: it returned True pre-fix and
+    must keep returning True."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n WHERE x = 'foo({",            # unterminated '
+    "MATCH (n) DETACH DELETE n WHERE x = \"foo({",          # unterminated "
+    "MATCH (n) DETACH DELETE n WHERE x = 'foo(n {a:1})",     # pattern-looking map inside a stray string
+    "MATCH (n) DETACH DELETE n /* (x { ",                      # unterminated /* block
+])
+def test_unterminated_literal_or_comment_fails_closed(statement):
+    """#3037: masking removes only TERMINATED literals/comments, so a malformed
+    statement keeps its stray quote and a `{` after it would still read as a
+    pattern property map. An unreadable statement is not evidence of targeting:
+    the classifier must fail closed (bulk) rather than exempt the wipe. All four
+    returned False pre-fix (the stray bracket looked like a pattern)."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n RETURN [x {.a}]",            # projection in a list
+    "MATCH (n) WITH [x {.a}] AS xs DETACH DELETE n",         # projection in a WITH list
+])
+def test_map_projection_brace_is_not_a_property_map(statement):
+    """A map projection (`n {.a}`) is an expression, so its brace is not a
+    pattern property map. The list form matched the first-pass regex
+    (``[x {``) and so returned False pre-fix."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+    "MATCH (n:Meta {key:$key}) DETACH DELETE n",
+    "MATCH (n:Point) WHERE n.id = $id DETACH DELETE n",
+    "MATCH (a)-[r:IMPL {idx:0}]->(b) DETACH DELETE r",
+])
+def test_pattern_property_map_still_exempts_a_targeted_delete(statement):
+    """Indicator (3): the existing targeted-delete behaviour is unchanged."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DETACH DELETE n // {",
+    "CALL { MATCH (n) DETACH DELETE n }",
+    "UNWIND [{a:1}] AS x MATCH (n) DETACH DELETE n",
+    "MATCH (n) DETACH DELETE n RETURN keys({a:1})",
+])
+def test_spoofed_wipe_is_refused_by_the_guard(statement):
+    """The issue's named forms AND the #8223 expression-map forms, end-to-end
+    through BOTH L2 call sites on a non-test SERVER graph: the classifier
+    verdict must reach ``_assert_test_graph``, not merely the unit classifier."""
+    proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.query(statement)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query(statement)
+    assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
+
+
 # ── (b) the legitimate disposable paths still work ────────────────────────
 
 

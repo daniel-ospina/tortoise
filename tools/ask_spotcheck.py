@@ -443,13 +443,20 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
         # full-path MERGE whose edge is missing makes FalkorDB create the
         # whole path from scratch, duplicating the Point node.
+        from tortoise.vector_write import (  # #4520: the ONE vector write seam
+            clear_then_set_prefix,
+        )
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             # #4194: capture the node's PRE-write content_hash before the SET
             # reassigns it, so the vector preserve/clear decision is made
             # against the real prior (the product's own turn write does this).
             "WITH t, t.content_hash AS prior_ch "
-            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            # #4520: the shared clear-then-set seam — this hand-copied turn
+            # write is the pre-fix `_TURN_WRITE_CYPHER` shape, which the
+            # embedded engine silently discards on a re-seeded turn.
+            + clear_then_set_prefix("t", "$emb")
+            + "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "

@@ -11,6 +11,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   isManagedKey, durableConnectKey, usableDurableRows,
+  // #4370 (A6): the reveal predicate's module-scope home — this file is the
+  // pure module's own suite, so the guard it now shares with `durableConnectKey`
+  // (and with every writer in main.jsx) is pinned here.
+  revealablePlaintext, revealableMintPlaintext,
 } from './sessionKey.js'
 
 // #2166 + #2426: isManagedKey — what the API Keys page actually shows
@@ -291,4 +295,66 @@ test('connect: no apiKey + rows with only disabled/revoked/bootstrap → none (r
   ]
   const r = durableConnectKey('', '', rows)
   assert.equal(r.source, 'none')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// #4370 (A6): the reveal predicate lives HERE — at module scope, beside
+// `durableConnectKey` — so the pure module shares ONE guard with every writer
+// in main.jsx instead of assuming a string. These arms pin the predicate's
+// contract and the two reads in this module that depend on it.
+test('#4370: revealablePlaintext accepts only a non-blank STRING, verbatim', () => {
+  // A truthy non-string is the class: a bare `!plaintext` (or a `typeof
+  // value === 'string'` with no blankness test) accepts every one of these and
+  // latches a reveal the user cannot render or copy.
+  for (const bad of [42, 0, {}, [], true, Symbol('x'), () => {}, NaN, null, undefined]) {
+    assert.equal(revealablePlaintext(bad), '', `${String(bad)} is not a revealable plaintext`)
+  }
+  // `trim()` alone is not a blankness test: the FORMAT + DEFAULT-IGNORABLE sets
+  // and BRAILLE PATTERN BLANK (U+2800) are visually blank but survive `.trim()`.
+  for (const blank of ['', '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad',
+    '\u061c', '\u180e', '\u115f', '\u1160', '\uffa0', '\ufe0f', '\u200b\u2800 ']) {
+    assert.equal(revealablePlaintext(blank), '', `${JSON.stringify(blank)} must not be revealable`)
+  }
+  // A real key passes VERBATIM — the decision uses the stripped copy, the
+  // return value is always the secret (never a mutated one).
+  for (const key of ['tt_live_key', 'tk_durable', '  tt_padded  ', 'tt_ok\u200b']) {
+    assert.equal(revealablePlaintext(key), key, `${JSON.stringify(key)} must pass verbatim`)
+  }
+})
+
+test('#4370: revealableMintPlaintext composes the two legs individually', () => {
+  assert.equal(revealableMintPlaintext({ key: 'tt_a', api_key: 'tt_b' }), 'tt_a')
+  for (const primary of [{}, [], '   ', 42, '\u2800']) {
+    assert.equal(revealableMintPlaintext({ key: primary, api_key: 'tt_b' }), 'tt_b',
+      `an unrevealable primary (${JSON.stringify(primary)}) must not shadow the fallback`)
+  }
+  for (const missing of [null, undefined, {}, { key: '' }, { key: 42 }]) {
+    assert.equal(revealableMintPlaintext(missing), '', `${JSON.stringify(missing)} carries no plaintext`)
+  }
+})
+
+test('#4370: durableConnectKey never runs startsWith on a non-string, and never embeds a blank', () => {
+  // This function is exported and its `welcome.startsWith(...)` was unguarded:
+  // a truthy non-string welcomeKey threw `TypeError: …startsWith is not a
+  // function` (reproduced here pre-fix). A BLANK string was worse than a crash
+  // in one way — it WON as `source: 'welcome'` and was embedded into the connect
+  // snippet as whitespace.
+  const rows = [row('tt_welcome_ab')]
+  for (const bad of [42, {}, [], true, NaN]) {
+    assert.doesNotThrow(() => durableConnectKey(bad, '', rows),
+      `${String(bad)} must not reach startsWith`)
+    const r = durableConnectKey(bad, '', rows)
+    assert.equal(r.key, '', `${String(bad)} must never be embedded as an API key`)
+    assert.notEqual(r.source, 'welcome')
+  }
+  for (const blank of ['   ', '\n\t', '\u200b', '\u2800']) {
+    const r = durableConnectKey(blank, '', rows)
+    assert.equal(r.key, '', `${JSON.stringify(blank)} must not be embedded`)
+    assert.notEqual(r.source, 'welcome',
+      'a blank welcome plaintext must fall through to the rows resolution, not win as a held key')
+  }
+  // Positive control: a real held plaintext still wins (the pre-load path must
+  // keep working — the provisioned row lands in the same loadAll response).
+  assert.equal(durableConnectKey('tt_welcome_ab', '', rows).source, 'welcome')
+  assert.equal(durableConnectKey('tt_welcome_ab', '', null).key, 'tt_welcome_ab')
 })

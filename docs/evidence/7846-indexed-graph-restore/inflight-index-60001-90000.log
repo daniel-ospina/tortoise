@@ -1,0 +1,1 @@
+{"port": 16414, "n": 90000, "build_s": 40.7, "status_at_dump": "[Indexing] 0/90000: UNDER CONSTRUCTION", "dump_mb": 43.2, "status_after_dump": "[Indexing] 0/90000: UNDER CONSTRUCTION", "restore_s": 9.69, "restore_error": null, "ping_after": true, "nodes_after": 90000, "status_after_restore": "OPERATIONAL", "knn_after": 3, "VERDICT": "NO_WEDGE"}

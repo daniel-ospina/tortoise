@@ -169,7 +169,10 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
-from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
+    redact_error,
+    redact_for_publication,
+)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
@@ -6647,8 +6650,10 @@ class CreatePointRequest(BaseModel):
     # and never make it EP-able through this surface. Forwarded to
     # ``create_point``'s ``credibility=`` and consumed into the
     # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
-    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
-    # with a logged warning (the existing point keeps its own baseline).
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` applies it
+    # to the existing point IF that point carries no baseline yet, and keeps
+    # the baseline it already has otherwise (with a logged warning) — never a
+    # silent drop either way (#7980).
     credibility: str | int | float | None = None
 
     @field_validator("kind")
@@ -8483,7 +8488,7 @@ async def events_poll(
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
         result = await asyncio.to_thread(
-            sdk.events_poll, after=after, types=type_list or None, limit=limit)
+            sdk.poll_events, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -8725,11 +8730,33 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
     not be reached is never served as a clean empty result. Unset/``0`` leaves
     this response byte-identical.
+
+    #7952 (§17.2): the COMPLETENESS MARKER rides its OWN field, ``residency``
+    (``hot`` / ``not-hot``), and is NOT a fifth status term — a residency
+    verdict is a directive about WHERE TO LOOK, not a status of the read. When
+    ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
+    PARTIAL, a read that falls outside the known-hot set returns
+    ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
+    from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
-    status_out: dict | None = {} if _read_status_enabled() else None
+    # The sink is the READ PATH's carrier for both fields; each field is
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
+    _status_on = _read_status_enabled()
+    _residency_on = _residency_enabled()
+    status_out: dict | None = {} if (_status_on or _residency_on) else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -8758,9 +8785,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         out.append(props)
     response = {"results": out, "count": len(out)}
     if status_out is not None:
-        # The SDK sets this on every return path; a missing term is a bug, not
-        # a reason to emit null under a vocabulary of exactly four terms.
-        response["status"] = status_out["status"]
+        # The SDK sets `status` on every return path; a missing term is a bug,
+        # not a reason to emit null under a vocabulary of exactly four terms.
+        # #7952: `residency` is present only when the known-hot set could be
+        # READ and a verdict was reached, so an unassessable read (a store that
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
+        if _residency_on and "residency" in status_out:
+            response["residency"] = status_out["residency"]
     return response
 
 
@@ -9320,7 +9358,7 @@ async def upload_pack_manifest(
         MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
-        validate_manifest,
+        validate_manifest_for_tenant,
     )
     # #2029: reject oversized request bodies BEFORE buffering/parsing them —
     # the 64KB check below alone only fires after request.json() has buffered
@@ -9351,11 +9389,14 @@ async def upload_pack_manifest(
                             detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
-    result = validate_manifest(manifest_yaml)
+    # #2781: the pre-check seeds the tenant's own installed manifests, exactly
+    # as the install below does — a pre-check that could not see them would
+    # refuse the very manifests it exists to admit.
+    sdk = _make_sdk(namespace=org_id)
+    result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
                             detail={"errors": result.errors or ["invalid manifest"]})
-    sdk = _make_sdk(namespace=org_id)
     try:
         record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
     except ValueError as e:
@@ -10460,12 +10501,14 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
-    # recovery lanes' EXPIRY exclusion diverges (the Supabase
-    # recover_team_key RPC still counts expired-but-unrevoked rows while
-    # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
-    # can revoke a LIVE key as collateral for expired rows that no longer
-    # occupy a slot); the RPC never 402s.
+    # recovery lanes' EXPIRY exclusion USED to diverge (the Supabase
+    # recover_team_key RPC counted expired-but-unrevoked rows while its
+    # registry twin excluded them, so the RPC's over-cap branch could
+    # revoke a LIVE key as collateral for rows that no longer occupy a
+    # slot) — closed as of #4550: 20261012000006_recover_team_key_expiry
+    # puts the RPC's count on public.api_key_slot_count (the ONE SQL
+    # declaration of this predicate) and gives its revoke-target scan the
+    # same expiry arm. No cap lane omits the expiry axis any more.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         KeyCapRefusal,
@@ -14511,17 +14554,64 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
     # non-episodic quota/budget discriminator). ──
+    #
+    # #4704 — THESE THREE ARE APPLIED EXACTLY ONCE PER LOGICAL PAYLOAD, and
+    # the guard is the :CommitRecord, inside THIS statement (never a
+    # read-then-write). They are the ONLY non-idempotent writes in the phase
+    # (every later step is MERGE-keyed), and the phase is RE-RUN BY DESIGN: a
+    # failure at a later step surfaces as the fail-closed 500 whose contract
+    # is "retry with the same client_commit_id", and L1 does not replay a
+    # `partial` record — so the retry re-enters HERE. Unguarded, that applied
+    # `commit_count +1` and `value_nodes_created + net_new` a second time for
+    # one payload, and `value_nodes_created` is the budget numerator
+    # `adjudicate_budget` reads as `prior_created`: the session's remaining
+    # budget was understated for every LATER commit, so a payload the true
+    # spend would have written is HELD at the >25 band instead, and once that
+    # inflated numerator crosses 50 the client's re-submission of it 402s.
+    #
+    # `r.value_nodes_declared` IS the stamp: NULL ⇒ this payload has not
+    # declared its value-node contribution on the Session yet; an int ⇒ it
+    # has, and that int is what it declared. The stamp and the arithmetic are
+    # one statement, so they cannot half-apply (a crash leaves both or
+    # neither). `write_ops_billed` is the SAME shape for the billing half
+    # (PL4: "billed exactly once"); this is that contract for the counter
+    # half. The numerator itself stays on the Session (§4.1 division of
+    # labour) — the record only remembers what IT declared, which is what
+    # stops a retry from declaring again (`plan_commit` reads the stamp back
+    # to adjudicate the retry against the payload's TOTAL, not the remainder).
+    #
+    # `collect(r)` collapses the record match to ONE row: a plain join would
+    # evaluate the guard once PER row and apply the counters once per duplicate
+    # record. With NO record at all (the direct callers of this helper — the
+    # supersession/binding/span tests) `recs` is `[null]`, `pending` is true (a
+    # null property IS NULL) and the counters apply exactly as before: nothing
+    # is stamped, because exactly-once needs a logical-payload identity and a
+    # caller with no record has none. `IS NULL` — not truthiness — is the test,
+    # so a merge-only payload's `0` is a real declaration and still guards
+    # `commit_count`/`draft_count`. The FOREACH is a LATER clause than the SET,
+    # so `pending` reads the pre-statement stamp.
     drafts = sum(1 for pr in reconcile.points
                  if pr.action in ("new", "supersede")
                  and pr.point.status == "draft")
     proj.g.query(
+        "OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "WITH collect(r) AS recs "
+        "WITH recs, all(x IN recs WHERE x.value_nodes_declared IS NULL) "
+        "     AS pending "
         "MERGE (s:Session {id:$sid}) "
         "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
-        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
-        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
-        "    s.updated_at=$now",
-        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + "
+        "        (CASE WHEN pending THEN $created ELSE 0 END), "
+        "    s.draft_count = coalesce(s.draft_count, 0) + "
+        "        (CASE WHEN pending THEN $drafts ELSE 0 END), "
+        "    s.commit_count = coalesce(s.commit_count, 0) + "
+        "        (CASE WHEN pending THEN 1 ELSE 0 END), "
+        "    s.updated_at=$now "
+        "FOREACH (x IN [y IN recs WHERE y IS NOT NULL AND "
+        "               y.value_nodes_declared IS NULL] | "
+        "         SET x.value_nodes_declared = $created)",
+        params={"cid": payload.client_commit_id, "sid": session_id,
+                "now": now, "created": reconcile.net_new,
                 "drafts": drafts},
     )
 
@@ -14815,19 +14905,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # INVERTED window still 422s — that is a correctable payload
             # error (the client fixes the window and retries), not a wedge,
             # and the two are deliberately not conflated.
+            from .live import LIFECYCLE_FANOUT_QUERY as _FANOUT_QUERY
+            from .live import classify_lifecycle_fanout as _classify_fanout
             from .live import is_terminal_status as _is_terminal_status
 
             def _terminal_state(point_id: str) -> tuple | None:
                 """The terminal state of ``point_id``, or ``None``.
 
-                The query is deliberately the SAME STATEMENT
-                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
-                same three projected columns in the same order, same
-                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                The query is the SHARED ``live.LIFECYCLE_FANOUT_QUERY`` — the
+                same statement ``sdk._assert_lifecycle_guard`` runs — and the
+                verdict is the same ``live.classify_lifecycle_fanout`` scan,
+                so the two cannot disagree (#7822). A differently-shaped or
                 first-row-only probe could select a DIFFERENT node than the
                 write's own guard: point ids are not unique and row order is
                 server-dependent, and that divergence would either resurrect
-                this bug or silently drop a legitimate supersede.
+                this bug or silently drop a legitimate supersede. Since #7822
+                the guard refuses when ANY node carrying the id is terminal,
+                so this pre-check must report terminal on the same condition —
+                otherwise the mixed duplicate id would 500-wedge again, which
+                is exactly what #3366 exists to prevent.
 
                 ``None`` means "not terminal, or not a statement point": an
                 ``is_operator`` prior is corruption, not a benign replay, so
@@ -14836,13 +14932,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 missing-point path is unchanged.
                 """
                 rows = sdk._get_proj().g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "RETURN n.is_operator, n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": point_id}).result_set
-                if not rows or bool(rows[0][0]):
-                    return None
-                return (rows[0][1], bool(rows[0][2]))
+                    _FANOUT_QUERY, params={"id": point_id}).result_set
+                kind, status, outdated = _classify_fanout(rows)
+                if kind == "terminal":
+                    return (status, outdated)
+                return None
 
             # #3366: the pre-check's mechanism is documented ONCE, on
             # ``_terminal_state`` above — including the LOCKSTEP requirement
@@ -16898,6 +16992,51 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     }
 
 
+async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
+    """#2810: THE one entitlement chokepoint — raise the structured 402 unless
+    *user_id* may own one more free org.
+
+    Every lane that can result in a NEW owned free org calls this and nothing
+    else: ``POST /v1/organizations`` (both control-plane lanes),
+    ``POST /v1/onboarding/team``, and the two anon-claim lanes (``/v1/claim``,
+    ``/v1/claim/email``). Before #2810 each create lane re-implemented the same
+    read-then-raise pair, so a new lane could silently omit it — and ``/v1/claim``
+    did: it binds an anon org to the caller as its OWNER, so one person could
+    mint N anon orgs (``/v1/agent/signup``) and claim each in turn, ending up
+    with N free orgs while the create lanes only blocked the NEXT create.
+
+    The predicate stays ``_owned_free_org_ids`` (ownership-scoped, not the
+    #1877 membership-scoped twin the invite-JOIN gates read — see that
+    helper). Callers that run the check and the write as read-then-write must
+    hold ``_org_create_lock(user_id)`` across BOTH (see the claim lanes, #1954
+    parity for the create lanes).
+
+    ``pool`` mirrors ``_owned_free_org_ids``: the org-create lane passes
+    ``"org"`` so its gate read does not queue behind authentication work;
+    every other caller keeps the default.
+
+    The invite-JOIN gates are deliberately NOT routed here (#2810 Q3): they read
+    the membership-scoped ``_count_active_free_memberships``, and an org OWNER
+    is always also an ACTIVE member of that org, so an owner already fails the
+    free-tier JOIN gate. Routing them here would change the settled invite
+    semantics #2789 pinned out of scope, and would refuse nothing extra.
+
+    KNOWN, DELIBERATELY-UNFIXED hole (recorded, not carried silently): after
+    ``customer.subscription.deleted`` the org drops to
+    ``tier='free', subscription_status='canceled'``, which this predicate counts
+    as free again — so *create A → buy B → cancel B* still ends with two free
+    orgs. The remedy changes the settled counting rule (docs/scoping/
+    2026-09-10-2789-one-free-org.md §2) and is a PRODUCT DECISION, so it is
+    pinned by
+    ``tests/test_one_free_org_entitlement.py::TestCancellationLifecycleKnownHole``
+    rather than improvised here."""
+    free_org_ids = await _owned_free_org_ids(user_id, pool=pool)
+    if free_org_ids:
+        raise HTTPException(
+            status_code=402,
+            detail=_one_free_org_detail(free_org_ids[0]))
+
+
 @app.post("/v1/organizations")
 async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create an org (zero-orgs state). Tier defaults Free; org
@@ -17116,11 +17255,8 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
     # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
     # dashboard renders the three-option dialog from `code`.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"], pool="org")
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the check is the ONE shared chokepoint — never an inline copy.
+    await _assert_free_org_allowance(user["user_id"], pool="org")
 
     org_id = str(_uuid.uuid4().hex[:26])
     # stored name == data-plane namespace (org_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.org_create keeps org_{name} — registry lane tracked in #2023)
@@ -17255,11 +17391,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"])
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the shared chokepoint (see also the claim lanes).
+    await _assert_free_org_allowance(user["user_id"])
 
     try:
         # #1921: mint_key=False — the registry twin of the Supabase lane's
@@ -19145,10 +19278,41 @@ async def invite_info(token: str):
     def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
         reg = sdk._get_registry()
+        # #4588: the expiry predicate is part of the QUERY, not only the
+        # caller's post-check, because THIS route is unauthenticated and the
+        # per-row cost is a full PBKDF2 (100k iterations, `hash_api_key`).
+        # Without the prune, every expired-but-not-yet-swept ``Invitation``
+        # node was materialised and hashed for ANY attacker-supplied token —
+        # an amplification the caller drives at will. The bound is now the
+        # number of LIVE invites. Nothing but accept, revoke, the admin
+        # ``expire_invite`` and the clock sweep writes a terminal ``status``
+        # (#1890), so an invite that expires by the clock alone sat at
+        # 'pending' — scanned on every request — until a sweep ran.
+        #
+        # Stored form: both writers (``invite_to_org`` above and
+        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
+        # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
+        # STRING — so the comparison is the same lexicographic ISO compare the
+        # sibling registry predicates use (the #1890 dup-check below,
+        # ``list_pending_invites_for_me``, ``_get_current_org``'s API-key
+        # lanes). Legacy nodes have no ``expires_at`` prop → NULL → the
+        # ``IS NULL`` arm keeps them (Never-expires), never silently dropped.
+        #
+        # No indexed ``lookup_hash`` equality is available on this lane: the
+        # registry stores only ``token_hash`` in the salted ``salt:hash``
+        # PBKDF2 form, so the per-row verify is unavoidable and the expiry
+        # prune is the ceiling. A ``LIMIT``/cap was considered and REJECTED —
+        # it would silently stop resolving valid invites past the cap, turning
+        # an amplification into a correctness failure on the accept path.
+        # The caller's post-match expiry check below stays as the authority
+        # (defence in depth): the predicate only prunes, it never decides.
+        now_iso = datetime.now(UTC).isoformat()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
             "RETURN i.id, i.org_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
+            params={"now": now_iso},
         ).result_set
         for iid, tid, role, ie, exp, th in rows:  # noqa: B007
             if _verify(token, th):
@@ -21462,6 +21626,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     if pc_err is not None:
         raise ValueError(pc_err)
     packs = pc.get("packs", [])
+    # #2781: a restore installs a SET of packs, so a manifest may reference a
+    # sibling that appears later in this same pack_config. Seed every sibling
+    # with a yaml as an available pack, so the validator resolves against the
+    # set the restore will leave behind rather than against install order.
+    # (Before #2781 the validator's temp registry held one manifest and no
+    # cross-pack reference could validate at all.)
+    sibling_yamls = {
+        p.get("namespace"): p.get("yaml") for p in packs
+        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
+        and isinstance(p.get("yaml"), str) and p.get("yaml")
+    }
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
@@ -21474,13 +21649,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # residue. The ok-ness check is deliberately NOT duplicated:
             # upsert_tenant_manifest re-validates unconditionally before any
             # graph write with the identical message + zero residue.
-            result = validate_manifest(yaml_text)
+            result = validate_manifest(yaml_text, installed_manifests=sibling_yamls)
             if result.ok and result.namespace != ns:
                 raise ValueError(
                     f"pack_config pack namespace {ns!r} does not match "
                     f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
-            upsert_tenant_manifest(sdk, yaml_text)
+            # #2781: pass the restore's sibling set so a cross-referencing
+            # pack_config validates as the SET it will become, not in install
+            # order (the sibling may appear later in this same list).
+            upsert_tenant_manifest(
+                sdk, yaml_text, extra_manifests=sibling_yamls)
         else:
             # Starter-pack activation record (idempotent MERGE).
             reg = _get_registry()
@@ -23651,23 +23830,36 @@ async def claim_org(request: Request):
         raise HTTPException(status_code=409,
                             detail="Team has already been claimed")
 
-    # 6. claim_membership service-role RPC (same key, same org, memories
-    #    intact).
+    # 5b. #2810: the ownership entitlement chokepoint. Claiming binds the caller
+    #     to the org's owner row, so it is a create-org-equivalent event for the
+    #     "one free organization per person" rule — without this gate one person
+    #     could mint N anon orgs (/v1/agent/signup) and claim each in turn, and
+    #     the create lanes' cap would only block the NEXT create. Ordering
+    #     mirrors the create lanes (409 → 402): an already-claimed org is still
+    #     a 409 for a capped user. The gate read and the claim_membership write
+    #     are read-then-write (#1954), so the same per-user lock the create
+    #     lanes hold is held across BOTH — without it two concurrent claims of
+    #     two different anon orgs could each read "owns nothing" and both
+    #     commit two free orgs.
     from tortoise.auth import lookup_hash as _lookup_hash
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500. (str(e) not e.message — ClaimError has no .message,
-        # #1765 latent-bug fix.)
-        raise _control_plane_unavailable() from None
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        # 6. claim_membership service-role RPC (same key, same org, memories
+        #    intact).
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500. (str(e) not e.message — ClaimError has no .message,
+            # #1765 latent-bug fix.)
+            raise _control_plane_unavailable() from None
 
     # 7. audit org_claim — provider/email/user_id in detail (0002 has no
     #    provider/email columns; 20260813000004 added detail JSONB).
@@ -23770,22 +23962,35 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if not user_id:
         raise HTTPException(status_code=502, detail="Account created but no user id returned — try again")
 
-    # 3. claim_membership RPC links the new user to the org's owner row
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        # The RPC's already_claimed guard may fire if a concurrent OAuth
-        # claim won first — surface as a plain conflict.
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500.
-        raise _control_plane_unavailable() from None
+    # 3. #2810: the ownership entitlement chokepoint, then claim_membership
+    #    links the new user to the org's owner row.
+    #
+    #    This lane is invariant-preserving BY CONSTRUCTION — it always mints a
+    #    BRAND-NEW auth user (an existing email is a 409 at the admin-create
+    #    step above), and a brand-new user owns nothing. The gate is applied
+    #    anyway because that safety rests on an EXTERNAL API's behaviour: if
+    #    admin-create ever returns an EXISTING user (i.e. became idempotent on
+    #    email), this lane would silently reopen the multi-free-org hole with no
+    #    other surface noticing. The gate can only fire on exactly that drift —
+    #    when it does, the returned user already existed, so no orphan account
+    #    is created by the refusal.
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            # The RPC's already_claimed guard may fire if a concurrent OAuth
+            # claim won first — surface as a plain conflict.
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500.
+            raise _control_plane_unavailable() from None
 
     # audit
     await _async_audit(request, org_id, "team_claim", resource_type="team",
@@ -27398,12 +27603,8 @@ async def create_onboarding_org(body: dict,
         # collaborator on someone else's free org can still create their own).
         # STRUCTURED detail (#2789) so the wizard lane renders the same
         # three-option dialog from `code`.
-        _free_org_ids = await _owned_free_org_ids(owner_user_id)
-        if _free_org_ids:
-            raise HTTPException(
-                status_code=402,
-                detail=_one_free_org_detail(_free_org_ids[0]),
-            )
+        # #2810: the shared chokepoint (never an inline copy).
+        await _assert_free_org_allowance(owner_user_id)
         return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
@@ -33002,9 +33203,15 @@ async def backups_drill(request: Request):
             org_id=org_id, backup_key=backup_key,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
 
 
 @app.post("/v1/internal/backups/drill-scheduled")
@@ -33050,20 +33257,46 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: an exception MESSAGE is app-controlled text and this
+                # detail is published verbatim into a PUBLIC issue body
+                # (``alert_store._body``). ``error_type`` is the bounded half
+                # the other operator incidents already carry
+                # (``operator_alert.alert_abuse_fault``); the message goes
+                # through the publication scrubber before it joins it.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        # #3293 review: the response body is echoed verbatim into a PUBLIC
+        # Actions log by the drill drivers (``registry-drill*.sh``), so the
+        # raw exception is a publication sink too — scrub it here, not only in
+        # the incident detail above. Internal-key auth gates WHO may call, not
+        # where the caller writes the response.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: see the ValueError path above — same public sink, same
+                # scrub. This is the path a STORAGE error takes, i.e. the one
+                # most likely to echo a signed URL or endpoint in its message.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        # #3293 review: see the ValueError path above — same public-Actions-log
+        # sink, same boundary scrub.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).

@@ -121,6 +121,7 @@ build whose read set excludes it refuses on a retired file until it is deleted.
 | `:PackManifest` | `namespace` |
 | `:Meta{key:'calibration_milestone'}` | `key` |
 | `:Meta{key:'config_reset'}` | `key` |
+| `:Meta{key:'residency'}` | `key` |
 <!-- config-registry:end -->
 
 The `config_reset` entry is the **third state**: a sticky marker distinguishing
@@ -128,6 +129,11 @@ The `config_reset` entry is the **third state**: a sticky marker distinguishing
 a never-configured graph looks like, so absence can never encode it. It is
 **not** a "tombstone" — that is a controlled term in `docs/ONTOLOGY.md` for a
 retracted `Point`.
+
+The `residency` entry (#7952) is the completeness marker's declared known-hot
+set: graph-only operator metadata. Without it, a whole-graph rebuild would
+silently revert a declared-`partial` store to the `complete` default, under
+which the §17.2 marker cannot fire.
 
 <!-- config-registry:not-preserved -->
 - `:EpMeta` — a monotonic epoch that must be re-baselined with the Points;
@@ -241,7 +247,7 @@ loudly afterwards rather than coerced into a value the node does not hold.
 from the surviving log either — the rebuild replays points, not `:GraphEvent`
 rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
 `last_seq + 1`. That is the truthful floor once the stream is truncated, and it
-makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
+makes `poll_events` answer 410 instead of returning `[]` forever to a subscriber
 parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
 would only relabel the same truncation. The pre-wipe purge floor is therefore
 LOST, which is why the backup/restore sibling
@@ -346,7 +352,7 @@ MATCH (p:PackInstall) RETURN 'PackInstall' AS cls, p.namespace AS ident
 UNION ALL
 MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
-MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
+MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset', 'residency']
 RETURN 'Meta' AS cls, x.key AS ident
 UNION ALL
 MATCH (b:Batch) RETURN 'Batch' AS cls, b.id AS ident

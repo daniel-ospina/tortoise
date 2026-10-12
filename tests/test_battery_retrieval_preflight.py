@@ -557,6 +557,53 @@ class TestArmObservedVectorRefusal:
         assert summary["run"]["retrieval_degraded"] is True
         assert "vector" in summary["run"]["retrieval_legs"]
 
+    def test_real_runner_arms_the_store_integrity_flag(self, tmp_path,
+                                                       monkeypatch):
+        """#4520 — the real lane MUST arm the store-integrity probe.
+
+        ``A4TortoiseArm.setup_scenarios`` consults
+        ``self.require_store_integrity`` before the first seed; only the real
+        runner branch sets it. The arm's own test asserts the probe does not
+        falsely refuse an embedded store, which is green whether or not the
+        probe is reached — so the WIRING needs this pin.
+
+        Mutation: deleting ``arm.require_store_integrity = True`` at
+        ``battery/runner/run.py:852`` leaves the attribute unset on the arm,
+        ``armed["store"]`` is ``None``, and the assertion fails. Without that
+        line a real a4 lane would ingest into a store that silently discards
+        a small-Δ vector overwrite and still publish the number.
+        """
+        from battery.arms import a4_tortoise as a4
+        from battery.runner import run as run_mod
+
+        cfg = _cfg_dir(tmp_path)
+        monkeypatch.setattr(run_mod, "require_hybrid_retrieval", lambda: None)
+        armed: dict = {}
+
+        class _FakeSDK:
+            pass
+
+        def _setup(self, scenarios, **kw):
+            armed["observed_hybrid"] = self.require_observed_hybrid
+            armed["store"] = getattr(self, "require_store_integrity", None)
+            for sc in scenarios:
+                self._sdk_by_id[sc.id] = _FakeSDK()
+
+        def _no_read(self, ctx):
+            raise ArmUnavailable("no read in this wiring test")
+
+        monkeypatch.setattr(a4.A4TortoiseArm, "setup_scenarios", _setup)
+        monkeypatch.setattr(a4.A4TortoiseArm, "retrieve", _no_read)
+        out = tmp_path / "out"
+        run_mod.run_battery(
+            run_mod.RunConfig(config_dir=cfg, arms=["a4"], executor="real",
+                              out_dir=out), stdout=lambda _: None)
+        assert armed["observed_hybrid"] is True
+        assert armed["store"] is True, (
+            "the real runner must arm the store-integrity probe (#4520) — a "
+            "store that silently discards a small-Δ overwrite must refuse "
+            "the arm, not publish a number built on stale vectors")
+
     def test_zero_observed_legs_fails_closed(self, tmp_path, monkeypatch):
         """#3005 P2 — a real hybrid arm that observed NO legs cannot attest
         hybrid: ``retrieval_legs: []`` + ``retrieval_degraded: false`` would
