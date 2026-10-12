@@ -15,7 +15,6 @@ ontology:
   - database
   - software
   - infrastructure
-  - deployment
   - indicator
   - theme
   - pullRequest
@@ -31,7 +30,9 @@ ontology:
     issue:
     - pm:issue
   pointKinds:
-  - requirement
+  # `requirement` is NOT a point kind (#7848 owner ruling): it is an Object kind,
+  # declared ONCE by product-strategy. A claim about a requirement is a separate
+  # Point, linked to it — the Object carries the lifecycle/satisfaction state.
   - technicalDebt
   - risk
   documentKinds:
@@ -89,7 +90,6 @@ ontology:
       nearMisses:
       - issue
       - incident
-      - requirement
     incident:
       description: A production problem — service deviates from its SLO/standard (problem
         family)
@@ -99,11 +99,6 @@ ontology:
       - friction
       - bug
       - deployment
-    requirement:
-      description: A stated need a feature must satisfy (≡ product-strategy:requirement)
-      nearMisses:
-      - bug
-      - risk
     risk:
       description: A claim that a problem may occur — the potential form of the problem
         family
@@ -111,7 +106,6 @@ ontology:
       - threat
       - hazard
       nearMisses:
-      - requirement
       - bug
       - standard
     indicator:
@@ -166,7 +160,10 @@ ontology:
     mechanism: IMPL
     semantics: addresses
     fromKind: dev:code
-    toKind: dev:deployment
+    # `deployment` is core's EVENT kind (#7848): a deployment HAPPENS at a
+    # moment. The pack does not re-declare it; the relation names it through
+    # the `core:` spelling the resolver accepts.
+    toKind: core:deployment
   - predicate: dependsOn
     mechanism: IMPL
     semantics: addresses

@@ -1,5 +1,6 @@
 // keyRotateEmptyRevealExec.test.js — #4342 (the #4330 defect class on the
-// ROTATE surface), extended by #4355 (the single-call rotate primitive).
+// ROTATE surface), extended by #4355 (the single-call rotate primitive) and
+// #4429 (the destructive response is never discarded).
 //
 // WHY THIS FILE EXISTS. `regenerateKey` mints the replacement, revokes the OLD
 // key, and then latches the reveal with
@@ -22,6 +23,14 @@
 // re-pinned against the new call. What is new: the response's
 // `replaced_revoked` / `warning` partial-state disclosure, and the single
 // pinned URL/body shape.
+//
+// #4429 supersedes the STORAGE shape of the outcome, not the guard. Because the
+// rotate is destructive server-side, its response is the only delivery of the
+// replacement's plaintext, so the outcome is now kept PER TEAM and latched
+// BEFORE the stale-team guard: a team switch landing on the RTT must not destroy
+// the secret along with the old key (`rotateOutcomeFor` is the one reader that
+// scopes a retained outcome to the team that owns it). The `copyRotatedKey`
+// cases below cover the matching clear semantics.
 //
 // WHY EXECUTION, NOT A TEXT SCAN. The exit claim is a BEHAVIOUR — "a
 // plaintext-less rotate never latches the reveal, and no falsy value reaches
@@ -130,13 +139,24 @@ function build(deps, decls) {
 // drives the 402 branch).
 function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays } = {}) {
   const calls = {
-    rotatedKey: [], rotateNotice: [], error: [], capNotice: [], loadAll: 0,
+    rotateOutcomes: [], error: [], capNotice: [], loadAll: 0,
     api: [], order: [], welcomeKeys: [], wizardKeys: [],
+    // The pre-#4429 store (`setRotatedKey`) is kept as a LEGACY PROBE: these two
+    // deps are unused by the current implementation on purpose, so the #4429
+    // regression tests can also be run against the pre-fix `main.jsx` and fail
+    // for the SUBSTANTIVE reason (the outcome was dropped across the switch)
+    // rather than for a missing identifier. The tests assert they stay unused.
+    legacyRotatedKey: [], legacyRotateNotice: [],
   }
   const rows = [
     { id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
       created_at: '2026-08-01T00:00:00.000Z' },
   ]
+  // #4429: the rotate outcome is ONE per-team record map. The stub models the
+  // real state (applying the functional updater, not just pushing it), so the
+  // merge semantics — a latch for another team must not wipe a retained
+  // outcome — are exercised rather than assumed.
+  let outcomesState = {}
   const deps = {
     calls,
     busy: false,
@@ -179,8 +199,12 @@ function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays 
     setCapNotice: (v) => calls.capNotice.push(v),
     setError: (v) => calls.error.push(v),
     setBusy: () => {},
-    setRotatedKey: (v) => calls.rotatedKey.push(v),
-    setRotateNotice: (v) => calls.rotateNotice.push(v),
+    setRotatedKey: (v) => calls.legacyRotatedKey.push(v),
+    setRotateNotice: (v) => calls.legacyRotateNotice.push(v),
+    setRotateOutcomes: (v) => {
+      outcomesState = typeof v === 'function' ? v(outcomesState) : v
+      calls.rotateOutcomes.push(outcomesState)
+    },
     setWelcomeKey: (v) => calls.welcomeKeys.push(v),
     setWizardDurableKey: (v) => calls.wizardKeys.push(v),
   }
@@ -194,8 +218,8 @@ test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old ke
     response: { id: 'k-new', key_prefix: 'tt_rot_new', replaced_revoked: true },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey, [],
-    'a plaintext-less mint must never latch `rotatedKey` (the empty `.key-value` box)')
+  assert.deepEqual(calls.rotateOutcomes, [],
+    'a plaintext-less mint must never latch an outcome (the empty `.key-value` box)')
   assert.deepEqual(calls.order, ['rotate'],
     'the single rotate call revokes the old key server-side — the message must say so')
   assert.equal(calls.loadAll, 1,
@@ -206,13 +230,14 @@ test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old ke
     'and that the OLD key is already revoked (the rotate-specific remedy)')
   assert.match(msg, /create a new key/, 'and name the remedy')
   // Never an empty string latched, and never a non-string in the error slot.
-  assert.ok(!calls.rotatedKey.some((v) => !v || !v.plaintext))
+  assert.ok(!calls.rotateOutcomes.some((m) => Object.values(m).some((v) => !v.plaintext)),
+    'no latched outcome may carry a falsy plaintext')
 })
 
 test('#4342: a mint returning nothing at all is refused the same way', async () => {
   const { calls, regenerateKey } = rotateEnv({ response: undefined })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey, [], 'a missing response must not latch a reveal')
+  assert.deepEqual(calls.rotateOutcomes, [], 'a missing response must not latch a reveal')
   assert.match(calls.error.filter(Boolean).at(-1) || '', /cannot be shown/)
 })
 
@@ -223,7 +248,7 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
   for (const value of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
     const { calls, regenerateKey } = rotateEnv({ response: { key: value } })
     await regenerateKey('k-old')
-    assert.deepEqual(calls.rotatedKey, [],
+    assert.deepEqual(calls.rotateOutcomes, [],
       `a mint carrying ${JSON.stringify(value)} must not latch the reveal`)
     const msg = calls.error.filter(Boolean).at(-1) || ''
     assert.match(msg, /cannot be shown/,
@@ -242,7 +267,7 @@ test('#4342: a failing refresh cannot overwrite the already-revoked message', as
     loadAll: (c) => { c.error.push('Failed to fetch') },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  assert.deepEqual(calls.rotateOutcomes, [], 'still no reveal')
   const msg = calls.error.filter(Boolean).at(-1) || ''
   assert.match(msg, /has already been revoked/,
     'the rotate truth must survive a refresh failure, not be replaced by the network error')
@@ -251,16 +276,14 @@ test('#4342: a failing refresh cannot overwrite the already-revoked message', as
 
 test('#4342: a successful rotate still latches the plaintext and its expiry echo', async () => {
   // Positive control: the guard must not swallow the working path (#2426 must
-  // keep riding `rotatedKey`).
+  // keep riding the outcome).
   const { calls, regenerateKey } = rotateEnv({
     response: { key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00', replaced_revoked: true },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey,
-    [{ plaintext: 'tt_ok', expiresAt: '2026-10-20T00:00:00+00:00' }])
+  assert.deepEqual(calls.rotateOutcomes,
+    [{ 'org-A': { plaintext: 'tt_ok', expiresAt: '2026-10-20T00:00:00+00:00', warning: '' } }])
   assert.deepEqual(calls.error, [''], 'the open-time clear is the only error write')
-  assert.deepEqual(calls.rotateNotice, [''],
-    'a clean rotate clears any previous partial-state notice')
   assert.equal(calls.loadAll, 1)
 })
 
@@ -275,7 +298,7 @@ test('#4342/#4359: a team switch during the rotate refusal refresh suppresses th
     loadAll: async () => { orgIdRef.current = 'org-B' },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  assert.deepEqual(calls.rotateOutcomes, [], 'still no reveal')
   assert.deepEqual(calls.error.filter(Boolean), [],
     'a refusal whose team changed mid-refresh must not be surfaced under the new team')
 })
@@ -330,10 +353,9 @@ test('#4355: replaced_revoked:false surfaces the partial-state notice AND the li
     response: { key: 'tt_ok', replaced_revoked: false, warning },
   })
   await regenerateKey('k-old')
-  assert.deepEqual(calls.rotatedKey, [{ plaintext: 'tt_ok', expiresAt: null }],
-    'the live replacement is still revealed — the alternative is losing a live secret')
-  assert.deepEqual(calls.rotateNotice, [warning],
-    'the partial state is disclosed, verbatim from the server')
+  assert.deepEqual(calls.rotateOutcomes,
+    [{ 'org-A': { plaintext: 'tt_ok', expiresAt: null, warning } }],
+    'the live replacement is still revealed — the alternative is losing a live secret — and the warning rides the same record')
   assert.deepEqual(calls.error, [''], 'it is NOT an error — the call succeeded')
 })
 
@@ -358,7 +380,7 @@ test('#4355: a lost non-402 rotate response re-reads state and discloses a COMPL
   await regenerateKey('k-old')
   assert.equal(calls.loadAll, 1,
     'the true state must be re-read BEFORE the message is chosen')
-  assert.deepEqual(calls.rotatedKey, [],
+  assert.deepEqual(calls.rotateOutcomes, [],
     'a lost response can never latch a reveal — it carried no plaintext')
   const msg = calls.error.filter(Boolean).at(-1) || ''
   assert.match(msg, /may have completed/,
@@ -419,7 +441,7 @@ test('#4355: a team switch during the ambiguous-failure refresh suppresses the d
   assert.equal(calls.loadAll, 1, 'the state is still re-read')
   assert.deepEqual(calls.error.filter(Boolean), [],
     'a disclosure whose team changed mid-refresh must not be surfaced')
-  assert.deepEqual(calls.rotatedKey, [])
+  assert.deepEqual(calls.rotateOutcomes, [])
 })
 
 test('#4355: a rotate 402 is the OVER-cap case and uses the over-cap copy', async () => {
@@ -450,8 +472,105 @@ test('#4355: rotating a row whose prefix we hold clears the held plaintext (row 
     'an unrelated held plaintext is untouched')
 })
 
+// ── #4429: the destructive response is never discarded ─────────────────────
+//
+// `POST /v1/team/keys/{id}/rotate` mints the replacement AND revokes the
+// displaced row in ONE server operation (#4355), so its response is the ONLY
+// delivery of the replacement's plaintext (hash-only server-side, "shown
+// once"). A team switch across that RTT used to hit the stale-response guard
+// and drop the plaintext: the old key was revoked, its applications stopped
+// working, and the replacement was unrecoverable — the user lost a working
+// credential and got nothing. The outcome is now latched BEFORE the guard,
+// tagged with the team that owns it, and the derive block's
+// `rotateOutcomeFor` is the ONE reader that scopes it.
+
+test('#4429: a team switch during the rotate RTT retains the replacement', async () => {
+  const orgIdRef = { current: 'org-A' }
+  const response = {
+    key: 'tt_rot_kept', expires_at: '2026-10-20T00:00:00+00:00', replaced_revoked: true,
+  }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    // The switch lands DURING the RTT: by the time the response is in hand the
+    // displaced row is already revoked server-side.
+    apiImpl: async () => { orgIdRef.current = 'org-B'; return response },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotateOutcomes.at(-1), {
+    'org-A': { plaintext: 'tt_rot_kept', expiresAt: '2026-10-20T00:00:00+00:00', warning: '' },
+  }, '#4429: the replacement must SURVIVE the switch — it is the only copy of a live secret')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'and the outcome must not be re-surfaced in the shared error slot on the new team')
+  assert.equal(calls.loadAll, 0,
+    '#4429: a stale response must not refresh the NEW team\u2019s key list')
+  assert.deepEqual(calls.welcomeKeys, [],
+    '#4429: nor may its row-truth prefix clear write into the new team\u2019s held plaintexts')
+  assert.deepEqual(calls.legacyRotatedKey, [],
+    '#4429: the single-slot `setRotatedKey` store must be gone — the outcome is per team now')
+})
+
+test('#4429: a partial-state warning is retained with its team, not dropped by the switch', async () => {
+  const orgIdRef = { current: 'org-A' }
+  const warning = 'The replacement was created, but the previous key could not be revoked and the rollback failed — both are currently active.'
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    apiImpl: async () => {
+      orgIdRef.current = 'org-B'
+      return { key: 'tt_ok', replaced_revoked: false, warning }
+    },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotateOutcomes.at(-1),
+    { 'org-A': { plaintext: 'tt_ok', expiresAt: null, warning } },
+    '#4429: BOTH keys are live — the user must still be told, so the warning rides the retained outcome')
+})
+
+test('#4429: the latch is a MERGE — one team\u2019s rotate cannot wipe another team\u2019s outcome', async () => {
+  // A retained outcome is the only copy of a live credential, so a later
+  // rotate on a DIFFERENT team must not destroy it (the shape this would have
+  // taken with a single slot: rotate A mid-switch, switch, rotate B → A\u2019s
+  // secret gone).
+  const { deps, calls, regenerateKey } = rotateEnv({
+    response: { key: 'tt_ok', replaced_revoked: true },
+  })
+  const heldForC = { plaintext: 'tt_held_c', expiresAt: null, warning: '' }
+  deps.setRotateOutcomes({ 'org-C': heldForC })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotateOutcomes.at(-1), {
+    'org-C': heldForC,
+    'org-A': { plaintext: 'tt_ok', expiresAt: null, warning: '' },
+  }, 'the latch must merge into the per-team map, never replace it')
+})
+
+test('#4429: the two outcome readers never surface another team\u2019s record', () => {
+  // The scoping rule EXECUTED, over the real declarations: `rotateOutcomeFor`
+  // resolves the active team\u2019s record, and the reveal/notice derivations
+  // (main.jsx\u2019s, reproduced verbatim) read only through it.
+  const rec = { plaintext: 'tt_rot_kept', expiresAt: '2026-10-20T00:00:00+00:00', warning: 'both keys are live' }
+  const outcomes = { 'org-A': rec }
+  // #4370 (A6): `revealablePlaintext` is imported at module scope now, so only
+  // `rotateOutcomeFor` is extracted from `main.jsx`.
+  const { rotateOutcomeFor } = build({}, ['function rotateOutcomeFor'])
+  const revealOf = (orgId) => {
+    const o = rotateOutcomeFor(outcomes, orgId)
+    return (o && revealablePlaintext(o.plaintext)) || ''
+  }
+  const noticeOf = (orgId) => {
+    const o = rotateOutcomeFor(outcomes, orgId)
+    return (o && o.warning) || ''
+  }
+  assert.equal(revealOf('org-A'), 'tt_rot_kept', 'the owning team still sees its replacement')
+  assert.equal(noticeOf('org-A'), 'both keys are live')
+  assert.equal(revealOf('org-B'), '', 'team B must NEVER render team A\u2019s retained plaintext')
+  assert.equal(noticeOf('org-B'), '')
+  assert.equal(revealOf(null), '', 'no team selected → nothing to render')
+  assert.equal(revealOf(undefined), '')
+  assert.equal(rotateOutcomeFor(null, 'org-A'), null, 'no outcomes map → no record')
+  assert.equal(rotateOutcomeFor(outcomes, 'org-Z'), null, 'an unrelated team has no record')
+})
+
 // ── copyRotatedKey ──────────────────────────────────────────────────────────
-function copyEnv(rotatedKey, clipboard = {}) {
+function copyEnv(outcome, clipboard = {}) {
   const written = []
   const cleared = []
   // The fallback branch SELECTS the key element for a manual copy. Stubbing
@@ -459,8 +578,13 @@ function copyEnv(rotatedKey, clipboard = {}) {
   // manual-copy remedy could be deleted with the suite still green.
   const selected = { selectNodeContents: [], addRange: [], removeAllRanges: 0 }
   const fakeEl = { nodeType: 1, __keyValue: true }
+  // #4429: the copy writes through the per-team map, so the stub models the
+  // real state and records the map after the update (the merge/clear semantics
+  // are the thing under test, not the call shape).
+  let outcomesState = outcome ? { 'org-A': outcome } : {}
   const deps = {
-    rotatedKey,
+    rotateOutcome: outcome,
+    currentOrgId: 'org-A',
     revealablePlaintext,
     navigator: {
       clipboard: {
@@ -477,7 +601,10 @@ function copyEnv(rotatedKey, clipboard = {}) {
         addRange: (r) => { selected.addRange.push(r) },
       }),
     },
-    setRotatedKey: (v) => cleared.push(v),
+    setRotateOutcomes: (v) => {
+      outcomesState = typeof v === 'function' ? v(outcomesState) : v
+      cleared.push(outcomesState)
+    },
   }
   return { written, cleared, selected, fakeEl, copyRotatedKey: build(deps, ['async function copyRotatedKey']).copyRotatedKey }
 }
@@ -498,7 +625,20 @@ test('#4342: the rotate copy NEVER hands a non-string/empty value to the clipboa
   const { written, cleared, copyRotatedKey } = copyEnv({ plaintext: 'tt_rot_new_x' })
   await copyRotatedKey()
   assert.deepEqual(written, ['tt_rot_new_x'], 'a real key is copied verbatim')
-  assert.deepEqual(cleared, [null], 'the reveal clears only after the write resolves')
+  assert.deepEqual(cleared, [{ 'org-A': { plaintext: '', expiresAt: null } }],
+    'the reveal clears only after the write resolves')
+})
+
+test('#4429: the rotate copy clears the ACTIVE team\u2019s plaintext only, and keeps its warning', async () => {
+  // A retained outcome is not this button\u2019s to destroy, and the
+  // partial-state warning is not a secret — clearing it would erase the user\u2019s
+  // only notice that a key is still live.
+  const { written, cleared, copyRotatedKey } = copyEnv(
+    { plaintext: 'tt_rot_new_x', expiresAt: '2026-10-20T00:00:00+00:00', warning: 'both keys are live' })
+  await copyRotatedKey()
+  assert.deepEqual(written, ['tt_rot_new_x'])
+  assert.deepEqual(cleared, [{ 'org-A': { plaintext: '', expiresAt: null, warning: 'both keys are live' } }],
+    'the plaintext is dropped, the warning outlives the copy')
 })
 
 test('#4342: a refused clipboard keeps the rotate replacement visible and SELECTS it', async () => {
@@ -517,12 +657,17 @@ test('#4342: a refused clipboard keeps the rotate replacement visible and SELECT
 })
 
 // ── static backstops for the parts execution cannot reach (JSX) ─────────────
-test('#4342: the rotate reveal is gated on a derived non-empty string, and the raw state never hits the clipboard', () => {
+test('#4342/#4429: the rotate reveal is gated on a derived non-empty string, and the raw state never hits the clipboard', () => {
   // ONE derivation gates the reveal, mirroring `newKeyReveal` — so a falsy
-  // `rotatedKey.plaintext` can never render the empty `.key-value` box.
+  // `rotateOutcome.plaintext` can never render the empty `.key-value` box.
+  // #4429: the derivation reads the ACTIVE team\u2019s record (the scoping rule
+  // executed in the test above), so a retained outcome cannot render here.
   assert.match(mainJsxCode,
-    /const rotatedKeyReveal = \(rotatedKey && revealablePlaintext\(rotatedKey\.plaintext\)\) \|\| ''/,
-    'the reveal key must be derived once from a non-empty, non-blank string')
+    /const rotatedKeyReveal = \(rotateOutcome && revealablePlaintext\(rotateOutcome\.plaintext\)\) \|\| ''/,
+    'the reveal key must be derived once from the active team\u2019s non-empty, non-blank string')
+  assert.match(mainJsxCode,
+    /const rotateNoticeText = \(rotateOutcome && rotateOutcome\.warning\) \|\| ''/,
+    'the partial-state notice must render from the same team-scoped record (#4429)')
   // #4370 (A6): the predicate moved to module scope in the pure module, so the
   // body pin follows it there (it is no longer declared in main.jsx).
   assert.match(sessionKeyJs,
@@ -533,10 +678,14 @@ test('#4342: the rotate reveal is gated on a derived non-empty string, and the r
     'main.jsx must import the shared predicate from its module-scope home')
   assert.match(mainJsxCode, /\{rotatedKeyReveal && \(/,
     'the JSX must gate on the derived string, not the truthy object')
+  assert.match(mainJsxCode, /\{rotateNoticeText && \(/,
+    'the notice must gate on the derived team-scoped string')
   assert.equal((mainJsxCode.match(/\{rotatedKey && \(/g) || []).length, 0,
     'the raw-object gate must be gone — `{rotatedKey && …}` is truthy with an empty plaintext')
   assert.equal((mainJsxCode.match(/writeText\(rotatedKey\.plaintext\)/g) || []).length, 0,
     'the raw state must never be handed to the clipboard')
+  assert.equal((mainJsxCode.match(/\{rotateNotice && \(/g) || []).length, 0,
+    'the raw outcome object must not gate the notice either')
   assert.match(mainJsxCode, /onClick=\{copyRotatedKey\}/,
     'the reveal Copy must call the guarded `copyRotatedKey`')
 })

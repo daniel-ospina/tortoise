@@ -91,8 +91,11 @@ class TestKindIndexBuild:
         # kindDef ride through with the derived section
         assert spec["pm:cardCreated"]["section"] == "events"
         assert spec["dev:apiSpec"]["section"] == "objects"
-        # point-only kinds are absent (never classifiable)
-        assert "dev:requirement" not in spec
+        # point-only kinds are absent (never classifiable) — pin a kind that
+        # still exists on the point axis (`dev:requirement` is no longer a
+        # declared point kind: #7848 made `requirement` an Object kind declared
+        # by product-strategy, so asserting its absence would be vacuous)
+        assert "dev:risk" not in spec
         assert "product-strategy:jobToBeDone" not in spec
 
     def test_points_section_contains_only_statement(self, spec):
@@ -117,7 +120,11 @@ class TestKindIndexBuild:
         Synthesized entries are name-only; an existing kindDefs entry is
         never clobbered."""
         assert spec["dev:apiSpec"]["section"] == "objects"
-        assert spec["dev:deployment"]["section"] == "objects"
+        # #7848: `deployment` is core's EVENT kind; dev no longer re-declares it
+        # as an objectKind, so NO `dev:deployment` entry is synthesized — this
+        # REDs if the deformation returns. Core sections it as an event.
+        assert "dev:deployment" not in spec
+        assert spec["core:deployment"]["section"] == "events"
         assert spec["dev:api"] is not None
         assert spec["marketing:keyword"]["section"] == "objects"
         assert spec["marketing:contentCalendar"]["section"] == "objects"
@@ -134,8 +141,9 @@ class TestKindIndexBuild:
             assert spec[f"pm:{ek}"]["section"] == "events", ek
             assert spec[f"pm:{ek}"]["description"] == "", ek
             assert spec[f"pm:{ek}"]["synonyms"] == [], ek
-        # multi-declared kind: marketing:contentBrief is in pointKinds AND
-        # documentKinds → objects (document first; FIX A skips point-only)
+        # `marketing:contentBrief` is a documentKind (its genre axis) — #7848
+        # removed the second, pointKind declaration. Document kinds section as
+        # objects; FIX A skips point-only kinds regardless.
         assert spec["marketing:contentBrief"]["section"] == "objects"
         # a kindDefs entry is never clobbered by the synthesis
         assert spec["dev:issue"]["description"]

@@ -1055,7 +1055,13 @@ test('#4370 (D6): the plaintext-writer set is closed, and every member reads the
   // (`''` / null / false / undefined). A new seam changes this count and fails
   // here, so it must be classified by function below instead of landing
   // silently. Comment-stripped source, so a commented-out seam cannot satisfy it.
-  const NON_CLEAR_STORE = /\bset(?:RevealKey|NewKey|RotatedKey|WizardDurableKey|WelcomeKey)\((?!\s*(?:''|""|null|false|undefined)\s*\))/g
+  // #4429: the rotate writer stores into the per-team map via a functional
+  // updater (`setRotateOutcomes((prev) => ({ … plaintext … }))`), not the
+  // single-slot `setRotatedKey({…})` this ratchet originally saw. The
+  // block-bodied clear in `copyRotatedKey` (`(prev) => {`) and the `{}` reset
+  // in `switchTeam` are NOT stores, so the alternation matches only the
+  // object-literal store.
+  const NON_CLEAR_STORE = /\bset(?:RevealKey|NewKey|RotatedKey|WizardDurableKey|WelcomeKey)\((?!\s*(?:''|""|null|false|undefined)\s*\))|setRotateOutcomes\(\(prev\) => \(\{/g
   const stores = mainJsxCode.match(NON_CLEAR_STORE) || []
   assert.equal(stores.length, 9,
     `the plaintext-writer set changed (${stores.length} non-clear stores). Classify the new/removed writer here and in this test's table:\n${stores.join('\n')}`)
@@ -1068,7 +1074,7 @@ test('#4370 (D6): the plaintext-writer set is closed, and every member reads the
     ['async function wizardMintDurableKey', /setWizardDurableKey\(plaintext\)/, /const plaintext = revealableMintPlaintext\(mk\)/],
     ['async function copyNewKey', /setWizardDurableKey\(plaintext\)/, /const plaintext = revealablePlaintext\(newKey\)/],
     ['function dismissKeyModal', /if \(plaintext\) setWizardDurableKey\(plaintext\)/, /const plaintext = revealablePlaintext\(newKey\)/],
-    ['async function regenerateKey', /setRotatedKey\(\{ plaintext: plaintext,/, /const plaintext = revealableMintPlaintext\(mk\)/],
+    ['async function regenerateKey', /setRotateOutcomes\(\(prev\) => \(\{/, /const plaintext = revealableMintPlaintext\(mk\)/],
     ['async function createGraph', /setRevealKey\(\{/, /const plaintext = revealablePlaintext\(b\.key_plaintext\)/],
     ['async function mintGraphKey', /setRevealKey\(\{ plaintext, title:/, /const plaintext = revealableMintPlaintext\(resp\)/],
     ['async function handleWizardCreateOrg', /setWelcomeKey\(revealablePlaintext\(provisioned\.api_key\)\)/, null],
