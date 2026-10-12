@@ -591,6 +591,78 @@ console.log("JSON-LD cannot break out of its script element");
   assert(tag.startsWith('<script type="application/ld+json">'), "the tag is a JSON-LD script");
 }
 
+// ── House style: the shapes the already-published articles use ────────────
+// Recognised so an existing article gains real links and a styled answer box
+// with NO body edit — the CMS has no revision history and no read path
+// (tortoise#8002), so rewriting a body to introduce the markers would be an
+// unrecoverable write performed blind.
+console.log("house-style table of contents");
+{
+  const md = [
+    "**Table of contents**",
+    "",
+    "1. First section",
+    "2. Second section",
+    "",
+    "## First section",
+    "",
+    "## Second section",
+  ].join("\n");
+  const html = renderMarkdown(md);
+  assertEq((html.match(/<ol>/g) ?? []).length, 1, "the hand-written list is replaced, not duplicated");
+  assert(html.includes('<nav class="toc"'), "a linked TOC is generated from the house-style marker");
+  assert(html.includes('<a href="#first-section">First section</a>'), "the generated entries link to the heading anchors");
+  assert(!html.includes("Table of contents</p>"), "the marker paragraph itself is not emitted");
+
+  // The guard: a marker with no list under it stays ordinary prose, so a
+  // sentence that happens to read "Table of contents" is not eaten.
+  const bare = renderMarkdown("**Table of contents**\n\nJust prose after it.");
+  assert(!bare.includes('<nav class="toc"'), "a marker with no list generates no TOC");
+  assert(bare.includes("Table of contents"), "...and the paragraph is left alone");
+
+  assert(
+    !renderMarkdown("See the Table of contents for details.").includes('<nav class="toc"'),
+    "the phrase inside a sentence does not trigger a TOC",
+  );
+}
+
+console.log("house-style answer box");
+{
+  assertEq(
+    renderMarkdown("> **Quick answer:** Agent memory retains information."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>Agent memory retains information.</p></aside>",
+    "`> **Quick answer:** …` renders as the answer box, with the label not duplicated",
+  );
+  assert(
+    renderMarkdown("> \\*\\*Quick answer:\\*\\* Short.").includes("callout-answer"),
+    "the editor's backslash-escaped spelling is recognised too",
+  );
+  assert(
+    renderMarkdown("> Quick answer: no bold.").includes("callout-answer"),
+    "the bold is optional — the label is the marker",
+  );
+  assert(
+    !renderMarkdown("> **Quick answer:** x").includes("Quick answer:</p>"),
+    "the stripped marker text does not survive into the body",
+  );
+  // The marker must be the START of the blockquote, not anywhere inside it.
+  assertEq(
+    renderMarkdown("> Some context first.\n> **Quick answer:** x"),
+    "<blockquote>Some context first. <strong>Quick answer:</strong> x</blockquote>",
+    "a marker mid-quote is left as an ordinary blockquote",
+  );
+  assertEq(
+    renderMarkdown("> Just a quote."),
+    "<blockquote>Just a quote.</blockquote>",
+    "a plain blockquote is still untouched",
+  );
+  assert(
+    renderMarkdown("> [!ANSWER] Explicit marker.").includes('class="callout callout-answer"'),
+    "the explicit [!ANSWER] marker still works (no regression)",
+  );
+}
+
 console.log("");
 if (failures > 0) {
   console.error(`${failures} blog markdown assertion(s) failed`);

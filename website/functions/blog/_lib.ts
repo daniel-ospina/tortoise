@@ -298,12 +298,31 @@ const MD_ALERTS: Record<string, { slug: string; label: string }> = {
 // list can never drift from the headings it points at.
 const MD_TOC_RE = /^\\?\[\\?\[\s*toc\s*\\?\]\\?\]$/i;
 
+// ── House style (#8293 follow-up) ──────────────────────────────────────────
+// The articles already published — and the flagship draft — write their table of
+// contents as a `**Table of contents**` paragraph followed by a numbered list,
+// and their answer box as a `> **Quick answer:** …` blockquote. Recognising those
+// two shapes means an existing article gains real links and a styled answer box
+// with NO body edit.
+//
+// That matters because the CMS has no revision history and no read path
+// (`tortoise#8002`): rewriting a body to introduce the `[[toc]]` / `[!ANSWER]`
+// markers would be an unrecoverable write performed blind. Recognising the shape
+// is also strictly better than a body edit — a hand-written list can DRIFT from
+// the headings it names, whereas the generated one cannot.
+const MD_HOUSE_TOC_RE = /^table of contents$/i;
+// TipTap escapes `*` as `\*`, so both spellings are accepted.
+const MD_HOUSE_ANSWER_RE = /^\s*(?:\\?\*\\?\*|__)?\s*quick answer\s*:?\s*(?:\\?\*\\?\*|__)?\s*/i;
+
 export function renderMarkdown(markdown: string): string {
   const paragraphBuf: string[] = []; // per-render buffer (no cross-render leakage)
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
   const tocEntries: { level: number; id: string; text: string }[] = [];
   let tocIndex = -1;
+  // Set when a house-style TOC marker is followed by its list; the generated nav
+  // replaces that list, and the flag is consumed by the next list branch.
+  let skipListAfterToc = false;
   let i = 0;
 
   // Duplicate headings get `-1`, `-2`, … allocated against the ids ALREADY
@@ -329,6 +348,23 @@ export function renderMarkdown(markdown: string): string {
       out.push("");
       i++;
       continue;
+    }
+
+    // House-style table of contents: the marker paragraph, dropped, and the
+    // numbered list beneath it, replaced by the generated nav. Only fires when a
+    // list actually FOLLOWS — a stray sentence reading "Table of contents" stays
+    // an ordinary paragraph.
+    if (MD_HOUSE_TOC_RE.test(plainText(line).trim())) {
+      let lookahead = i + 1;
+      while (lookahead < lines.length && lines[lookahead].trim() === "") lookahead++;
+      if (lookahead < lines.length && /^(\d+\.|[-*])\s+/.test(lines[lookahead])) {
+        flushPara(paragraphBuf);
+        tocIndex = out.length;
+        out.push("");
+        skipListAfterToc = true;
+        i++;
+        continue;
+      }
     }
 
     // Fenced code block
@@ -369,10 +405,30 @@ export function renderMarkdown(markdown: string): string {
         buf.push(lines[i].replace(/^>\s?/, ""));
         i++;
       }
-      const alert = MD_ALERT_RE.exec(buf[0] ?? "");
-      const kind = alert ? MD_ALERTS[alert[1].toUpperCase()] : undefined;
+      const firstLine = buf[0] ?? "";
+      const alert = MD_ALERT_RE.exec(firstLine);
+      // House style: `> **Quick answer:** …` — the answer box the published
+      // articles already use, recognised without a body edit (see
+      // MD_HOUSE_ANSWER_RE). The label is dropped from the body because the
+      // callout renders its own.
+      const houseAnswer = alert ? null : MD_HOUSE_ANSWER_RE.exec(firstLine);
+      const kind = alert
+        ? MD_ALERTS[alert[1].toUpperCase()]
+        : houseAnswer
+          ? MD_ALERTS.ANSWER
+          : undefined;
       if (kind && alert) {
         const bodyLines = [alert[2], ...buf.slice(1)].map((s) => s.trim()).filter(Boolean);
+        out.push(
+          `<aside class="callout callout-${kind.slug}">` +
+            `<p class="callout-label">${escapeHtml(kind.label)}</p>` +
+            renderCalloutBody(bodyLines) +
+            `</aside>`,
+        );
+      } else if (kind && houseAnswer) {
+        const bodyLines = [firstLine.slice(houseAnswer[0].length), ...buf.slice(1)]
+          .map((s) => s.trim())
+          .filter(Boolean);
         out.push(
           `<aside class="callout callout-${kind.slug}">` +
             `<p class="callout-label">${escapeHtml(kind.label)}</p>` +
@@ -393,6 +449,10 @@ export function renderMarkdown(markdown: string): string {
         items.push(lines[i].replace(/^[-*]\s+/, ""));
         i++;
       }
+      if (skipListAfterToc) {
+        skipListAfterToc = false; // the generated nav replaces this list
+        continue;
+      }
       out.push(`<ul>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ul>`);
       continue;
     }
@@ -404,6 +464,10 @@ export function renderMarkdown(markdown: string): string {
       while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
         items.push(lines[i].replace(/^\d+\.\s+/, ""));
         i++;
+      }
+      if (skipListAfterToc) {
+        skipListAfterToc = false; // the generated nav replaces this list
+        continue;
       }
       out.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
       continue;
