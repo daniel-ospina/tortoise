@@ -1609,6 +1609,36 @@ def test_the_8171_advisory_field_is_recorded_on_both_create_doors():
         )
 
 
+def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
+    """A `merge=union` duplicate silently drops a whole side (#5373, PR #8221 review).
+
+    `config/surface-manifest.yml` is on `merge=union` (`.gitattributes`), so merging main
+    emitted TWO top-level `response_fields:` keys. YAML keeps only the LAST, so main's
+    recorded `direction_basis` rows (#7852 W1) vanished from the effective block AND from
+    the rendered list — every drift check stayed green, because manifest and doc agreed on
+    the truncated set. `registry_integrity` catches the duplicate key itself
+    (`test_the_real_registries_are_clean`); this pins the CONTENT the duplicate destroys, so
+    a resolution that drops the wrong side cannot pass. Fails on the pre-fix head, where the
+    effective block is the branch's half and carries no `direction_basis` row.
+    """
+    recorded = {(rf["response"], rf["field"]) for rf in _manifest()["response_fields"]}
+    # main's half — landed by #7852 W1, present only in main's copy of the block.
+    assert ("sdk:create_operator", "direction_basis") in recorded
+    assert ("tortoise_create_operator", "direction_basis") in recorded
+    # the branch's half — must not be dropped in the other direction.
+    assert ("tortoise_create_entity", "advisories") in recorded
+    assert ("tortoise_create_document", "advisories") in recorded
+    # the collapsed view the render/check tools see must carry both sides into the doc.
+    rendered = RENDERED.read_text(encoding="utf-8")
+    for response, field in (
+        ("sdk:create_operator", "direction_basis"),
+        ("tortoise_create_operator", "direction_basis"),
+    ):
+        assert f"| `{response}` | `{field}` |" in rendered, (
+            f"the union-merge survivor lost {response}/{field} from the rendered list"
+        )
+
+
 # --- ROUND-2 REVIEW FINDINGS: fail-open content paths, closed with mutations ---------
 # Four fresh-context reviewers ran on this change. Their P1s were both real: (1) a
 # DUPLICATE row name silently dropped content from the drift comparison AND from the D2
