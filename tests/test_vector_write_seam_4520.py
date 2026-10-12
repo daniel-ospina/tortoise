@@ -316,6 +316,11 @@ def test_every_known_vector_writer_uses_the_seam():
         # ids on a re-seed, so it is an overwrite the first migration missed.
         "benchmarks/synthetic_corpus.py": ("clear_then_set_prefix",),
         "tools/ask_spotcheck.py": ("clear_then_set_prefix",),
+        # #4520 review P2-2: a runbook diagnostic that set `p.embedding`
+        # directly. Latent (it seeds `embed=False` first, so the write is a
+        # first write, not an overwrite), but it was an undeclared writer
+        # outside this net — routed through the seam so the net is complete.
+        "docs/runbook/w6c_gold_rank_diagnostic.py": ("clear_then_set_prefix",),
     }
     for rel, markers in writers.items():
         source = (root / rel).read_text()
