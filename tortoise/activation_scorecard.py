@@ -59,6 +59,18 @@ recorded observation of the read side, and mislabelling it as activation is
 precisely the error this lane exists to fix — hence no ``activated`` key, no
 activation rate, anywhere in the payload.
 
+STAGE 4's GATE AND ITS COUNT HAVE DIFFERENT SCOPES — #4039. The gate is the org
+DEFAULT graph's ``first_memory_at``; the count is the org-wide analytics stream
+(``analytics_events`` carries no ``graph_id``). A multi-graph org that produced
+memory only outside the default graph therefore has no gate, and for such an org
+``no_memory_produced_in_lifetime`` would be a claim about the ORG derived from a
+GRAPH-scoped absence — false, and exactly the state inversion this module
+exists to prevent. When that org's windowed retrieval count is EXACT AND
+POSITIVE, the stage refuses instead: ``unavailable`` /
+``no_memory_in_default_graph_org_scope_unknown``. The ambiguity is surfaced, not
+asserted away; the rows where the count cannot be established (withheld) are
+disclosed in ``LIMITATIONS``.
+
 Stage 5 is where that stops being true. Since #3675 the ``mcp_tool_call``
 props carry ``result_count`` — the number of items the call returned — so a
 retrieval that returned content is distinguishable from one that returned
@@ -67,7 +79,6 @@ is NOT is a value judgement: a returned item is a CANDIDATE. Nothing recorded
 says the candidate was relevant, read, or used, so stage 5 is an UPPER BOUND on
 "answered from memory" and is never reported as one. ``value_confirmed`` (stage
 6) therefore stays a refusal — see its constant for exactly which gap remains.
-
 ZERO vs NO-SIGNAL
 -----------------
 Every stage carries ``state`` in ``{measured, unavailable, not_measurable}``
@@ -166,12 +177,34 @@ RETRIEVAL_TOOL_ALLOWLIST_WIDE: frozenset[str] = RETRIEVAL_TOOL_ALLOWLIST | froze
 # The analytics event the hosted MCP dispatch point emits per client tool call.
 MCP_TELEMETRY_EVENT = "mcp_tool_call"
 
+# The analytics read's PAGE SIZE, handed to ``SupabaseControlPlane.query_all``.
 # PostgREST caps an unpaginated read at the project's max-rows (1000 by
-# default). ``SupabaseControlPlane.query`` exposes no offset/Range, so a full
-# page means the count is only a LOWER BOUND — a lower bound is not a count,
-# and is reported as ``unavailable``, never as a measured value.
+# default), so this is also the hint that makes the common case one request.
+# It is a HINT, not an assumption: a deployment capped LOWER now costs more
+# pages rather than silently under-counting, because the walk ends on an EMPTY
+# page, never on a page that is merely short (#4038 — the pre-fix read took a
+# full page for a lower bound and refused; see the limitations).
 RECALL_PAGE_CAP = 1000
 
+# The MOST pages the stage-4 walk will read before it refuses to certify the
+# count (#4038). A bound is required — its length IS the read's latency and
+# memory, and the read sits on a per-org path with a 30s cohort timeout — but
+# exceeding it must stay a refusal (`analytics_page_cap_truncated`), never a
+# partial count published as measured. 100 pages is 100x the size at which the
+# pre-fix read gave up entirely: an org sustaining >100k `mcp_tool_call` rows in
+# one window still reads `unavailable`, honestly, and the fix for that tail is
+# a server-side aggregate, not a longer walk this surface holds in memory.
+RECALL_MAX_PAGES = 100
+
+# #4039: the stage-4 reason for the GRAPH-scope ambiguity. A SEPARATE reason (not
+# a reworded ``no_memory_produced_in_lifetime``) because the two are different
+# facts: that one says the org has nothing to recall FROM, this one says the org
+# cannot be reached by this gate — its memory may live outside the default graph,
+# which this read never opens. Consumers switch on ``state``, so the qualifying
+# belongs in BOTH the state (`unavailable`, not `not_measurable`) and the reason:
+# a scope-qualified reason under a `not_measurable` state would keep the
+# mis-scoped classification while fixing only the sentence beside it.
+GRAPH_SCOPE_UNKNOWN_REASON = "no_memory_in_default_graph_org_scope_unknown"
 # Default window = the beta's own <= 24h criterion (product-success-eval.md §5).
 DEFAULT_WINDOW = timedelta(hours=24)
 # A window this wide is a typo or an attempt to scan the whole history; the
@@ -397,9 +430,10 @@ def _stage(value: Any, unit: str | None, reason: str | None = None,
     reason means unavailable" — is right for the RECOVERABLE failures (store
     unreachable, write path unconfigured, page cap, bad data): retry or repair
     fixes them, so the metric exists and merely could not be read just now.
-    An org that has never produced memory has nothing to recall FROM, and no
-    retry changes that — so that case is ``not_measurable`` and must say so
-    explicitly rather than inheriting ``unavailable``.
+    An org that has never produced memory — and has no contradicting org-wide
+    retrieval count (see :data:`GRAPH_SCOPE_UNKNOWN_REASON`) — has nothing to
+    recall FROM, and no retry changes that, so that case is ``not_measurable``
+    and must say so explicitly rather than inheriting ``unavailable``.
     """
     if value is None:
         return {"state": state or (STATE_UNAVAILABLE if reason
@@ -592,6 +626,7 @@ def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | 
         "result_count_prop": RESULT_COUNT_PROP,
         "recall_rows_fetched": None,
         "recall_page_cap": RECALL_PAGE_CAP,
+        "recall_page_limit": RECALL_MAX_PAGES,
         "recall_truncated": False,
         "unparseable_analytic_rows": None,
         "unclassifiable_analytic_rows": None,
@@ -619,8 +654,10 @@ def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | 
     # `recall_attempted_any` on the no-memory path, which is otherwise an
     # UNVERIFIED whole-history count presented as a windowed one. It sits above
     # the `first_memory_at is None` and `truncated` branches so those paths
-    # carry the same doubt; the STAGE precedence is left unchanged (an org with
-    # no memory stays `not_measurable`, it does not become `unavailable`).
+    # carry the same doubt; the STAGE precedence is otherwise unchanged (an org
+    # with no memory AND a withheld/`0` org-wide count stays `not_measurable`;
+    # the one #4039 exception below — an exact, POSITIVE org-wide count — is
+    # what becomes `unavailable`).
     window_failed = False
     if window is not None:
         out_of_range = 0
@@ -678,6 +715,21 @@ def _recall_attempted_stage(rows: Iterable[dict] | None, first_memory_at: str | 
         # would report nothing-to-measure for an org that has memory.
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
+        # `recall_attempted_any` is the count over the ORG-WIDE windowed stream
+        # and it is emitted ONLY when exact (above), so a POSITIVE value here is
+        # a positive, verified observation that this org made retrieval calls in
+        # the window while the DEFAULT graph shows no memory ever produced —
+        # #4039. The absence is graph-scoped, the calls are org-wide, so the
+        # org-scope claim `no_memory_produced_in_lifetime` is not established:
+        # the org's memory may live in a graph this read does not open. Refuse
+        # the state (the metric exists and this gate cannot reach it) rather
+        # than assert it. The SAME pinned retrieval allowlist is the trigger, so
+        # the evidence and the count are one definition. `None` (withheld) or
+        # `0` (exact zero) leaves no org-wide activity to contradict the gate,
+        # so a single-graph org with no memory stays `not_measurable` as before.
+        if detail["recall_attempted_any"]:
+            return _stage(None, "calls", GRAPH_SCOPE_UNKNOWN_REASON,
+                          state=STATE_UNAVAILABLE), detail
         # No memory has ever been produced, so no retrieval can have been
         # "from memory". Report the raw count for visibility, but the stage is
         # unmeasurable rather than zero.
@@ -1061,16 +1113,23 @@ LIMITATIONS: tuple[str, ...] = (
     "GUARANTEE, not a limitation: it is asserted by a test, because the two "
     "legs are separate queries and could drift.",
     "Self-hosted orgs are not covered: the analytics store is hosted-lane only.",
-    "The analytics read assumes the store's page limit is RECALL_PAGE_CAP. A "
-    "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "
-    "a short page that looks complete, so recall_attempted would read measured "
-    "while under-counting. The cap cannot be probed from here.",
-    "A BUSY org that HAS produced memory (>= RECALL_PAGE_CAP MCP tool calls "
-    "in the window) reads `unavailable` (`analytics_page_cap_truncated`), not "
-    "a count: the analytics leg is a single unpaginated read, so a full page "
-    "is a lower bound. (An org with no lifetime memory reads "
-    "`not_measurable` instead — the no-memory check deliberately precedes the "
-    "page-cap check.) Paging the leg to completion is #4038.",
+    "The analytics read is keyset-paged to COMPLETION on `id` (#4038): it walks "
+    "pages until the store returns an EMPTY one, so a page that is merely SHORT "
+    "— a deployment whose PostgREST db-max-rows (or a proxy cap) sits below "
+    "`recall_page_cap`, which used to look complete and under-count — costs "
+    "more requests instead of a smaller number. Completion is REFUSED, and the "
+    "stage reads `unavailable` (`analytics_page_cap_truncated`), when the walk "
+    "cannot certify it: it exceeds `recall_page_limit` pages, a page is not "
+    "strictly ascending on `id` (the server ignored `order`), a page carries no "
+    "usable `id` to carry the cursor, or the store will not advance past the "
+    "cursor. A lower bound is never published as a count.",
+    "A BUSY org no longer reads `unavailable` for being busy: the pre-#4038 read "
+    "stopped at `recall_page_cap` (1000) rows and called a full page a lower "
+    "bound, which landed `unavailable` on exactly the most-used orgs. The "
+    "binding bound is now `recall_page_cap * recall_page_limit` rows in ONE "
+    "window; past it the stage still refuses rather than under-reporting. (An "
+    "org with no lifetime memory reads `not_measurable` instead — the "
+    "no-memory check deliberately precedes the page-cap check.)",
     "Stage 4 is GATED on `first_memory_at` from the org DEFAULT graph while it "
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "
@@ -1078,7 +1137,28 @@ LIMITATIONS: tuple[str, ...] = (
     "are counted in `detail.recall_attempted_any` when that count is exact "
     "(a windowed, untruncated, fully-placeable read; otherwise it is None and "
     "the exclusion counters name why). The state is graph-scoped, "
-    "the count is org-wide. Surfacing the ambiguity is #4039.",
+    "the count is org-wide. #4039: a windowed retrieval CALL is counted by its "
+    "`tool_name` alone — `status` and `result_count` are not read — so the "
+    "count is calls, not answers: a call that FAILED (`status` `exec_error`) or "
+    "returned nothing (`result_count` 0) is counted exactly like one that "
+    "returned items. When that exact count is POSITIVE the stage no longer "
+    "makes the org-scope claim — it reports `unavailable` "
+    f"(`{GRAPH_SCOPE_UNKNOWN_REASON}`). The refusal is therefore deliberately "
+    "CONSERVATIVE: this read cannot tell an org whose memory lives in another "
+    "graph from a single-graph org whose only windowed recall activity failed "
+    "or returned nothing, so such a single-graph org reads `unavailable` "
+    "rather than `not_measurable`. RESIDUAL, not fixed: "
+    "a multi-graph org whose count is withheld (a truncated page, an "
+    "unplaceable or unclassifiable row, an out-of-window row) or is an exact "
+    "`0` (no retrieval call in the window) still reads "
+    "`no_memory_produced_in_lifetime`, because no org-wide call count "
+    "contradicts "
+    "the graph-scoped absence — this read cannot enumerate the org's other "
+    "graphs, so that case is indistinguishable from a single-graph org with no "
+    "memory. Making the gate itself org-scoped is the fix that would remove the "
+    "residual; it is a new read (an org's graph list, then a lifetime memory "
+    "scan per graph) rather than an instrumentation-definition choice — "
+    "tracked in #8149.",
     "`detail.first_memory_at` is the earliest memory-bearing SESSION's capture "
     "time (`min(s.created_at)`), NOT the creation time of the first extracted "
     "memory Point. Extraction runs after the session is written, so this "
@@ -1193,7 +1273,11 @@ COHORT_LIMITATIONS: tuple[str, ...] = (
     "stages read once per org). A failure of the SHARED `recall_attempted` "
     "store is a server-level condition, reported once in `notes` rather than "
     "attributed to every org; that stage's per-org verdict still appears in "
-    "its `orgs_unavailable`.",
+    "its `orgs_unavailable`. EXCEPTION: "
+    f"`{GRAPH_SCOPE_UNKNOWN_REASON}` is a per-ORG condition reported instead "
+    "with org attribution, because the graph-scope ambiguity it names belongs "
+    "to each org rather than to the store (see the org-scoped surface's "
+    "`limitations`).",
     # #3676 review: a well-formed name that names NO org is not detected. The
     # endpoint does no registry lookup (the entry above), so a typo reads as an
     # empty graph and is reported as a MEASURED 0 with no `org_errors` entry —
@@ -1371,6 +1455,17 @@ def org_failure_reason(payload: dict | None) -> str | None:
     return None
 
 
+#: Stage-4 reasons that are a property of ONE ORG, not of the shared analytics
+#: store. `shared_stage_notes` hoists a shared-stage reason ONCE so it is not
+#: repeated per org, and the sentence it writes says the condition is
+#: "server-level ... rather than a per-org read failure" — a claim about the
+#: STORE. For these reasons that sentence would be FALSE, and a false claim
+#: introduced by the fix for a false claim is not a fix (#4039): the graph-scope
+#: ambiguity is per-org by definition. They get their own attributed sentence;
+#: the affected orgs stay named in `stages.recall_attempted.orgs_unavailable`.
+ORG_SCOPED_STAGE_4_REASONS = frozenset({GRAPH_SCOPE_UNKNOWN_REASON})
+
+
 def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
     """ONE cohort-level note per distinct reason the SHARED stage is unmeasured.
 
@@ -1379,6 +1474,9 @@ def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
     be dropped either — that would leave the operator with `unavailable` and no
     cause anywhere in the payload. Hoisting it here keeps it visible exactly
     once, and the count says how much of the cohort it covers.
+
+    The HOISTED SENTENCE is about the store, so it is only written for reasons
+    that actually are store-level — `ORG_SCOPED_STAGE_4_REASONS` get their own.
     """
     counts: dict[str, int] = {}
     for payload in payloads:
@@ -1388,12 +1486,21 @@ def shared_stage_notes(payloads: Sequence[dict | None]) -> list[str]:
         if cell.get("state") == STATE_UNAVAILABLE:
             reason = str(cell.get("reason") or "unavailable")
             counts[reason] = counts.get(reason, 0) + 1
-    return [
-        f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} — this "
-        f"stage reads ONE shared analytics store, so it is a server-level "
-        f"condition rather than a per-org read failure"
-        for reason, n in sorted(counts.items())
-    ]
+    notes: list[str] = []
+    for reason, n in sorted(counts.items()):
+        if reason in ORG_SCOPED_STAGE_4_REASONS:
+            notes.append(
+                f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} "
+                f"— this reason is a property of EACH named org (its memory may "
+                f"live outside the org default graph, which this read does not "
+                f"open), not of the shared analytics store; the orgs are named "
+                f"in stages.{COHORT_SHARED_STAGE}.orgs_unavailable")
+            continue
+        notes.append(
+            f"{COHORT_SHARED_STAGE} is unavailable for {n} org(s): {reason} — "
+            f"this stage reads ONE shared analytics store, so it is a "
+            f"server-level condition rather than a per-org read failure")
+    return notes
 
 
 def assemble_cohort(*, orgs: Sequence[str], payloads: Sequence[dict | None],

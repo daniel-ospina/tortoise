@@ -43,7 +43,7 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # The frozen count for THIS phase. A literal on purpose (see the module docstring): asserting
 # `len(live) == len(live)` would be satisfied by any surface at all. When a later phase of
 # #4282 lands the 40-method target, this number is expected to change — in the same PR that
-# re-cuts the approved baseline, so the change is a reviewed decision and not a silent drift.
+# re-cuts the frozen baseline, so the change is a reviewed decision and not a silent drift.
 DECLARED_COUNT = 150
 
 
@@ -88,7 +88,7 @@ def test_the_declaration_describes_the_live_class_exactly():
     )
     assert len(live) == DECLARED_COUNT, (
         f"the public `TortoiseSDK` surface is {len(live)} methods, not the {DECLARED_COUNT} "
-        "this phase declared. A surface change is a reviewed decision: re-cut the approved "
+        "this phase declared. A surface change is a reviewed decision: re-cut the frozen "
         "baseline (config/surface-manifest.yml) and update DECLARED_COUNT in the same PR."
     )
 
@@ -116,20 +116,20 @@ def test_the_declaration_matches_runtime_reflection():
     )
 
 
-def test_the_declaration_matches_the_approved_baseline():
+def test_the_declaration_matches_the_frozen_baseline():
     """Identity and approval are two artifacts; if they disagree, one of them is wrong.
 
-    `config/surface-manifest.yml` is the owner-approved set (#3863) and stays the merge gate.
+    `config/surface-manifest.yml` is the frozen baseline (#3863) and stays the merge gate.
     This declaration is not a second approval gate — it must simply agree with the first, so
     a re-cut of one without the other is caught here rather than in production.
     """
     import tools.sdk_surface as sdk_surface
 
-    approved = sdk_surface.approved_from_manifest()
-    assert _declared() == approved, (
+    frozen_baseline = sdk_surface.frozen_from_manifest()
+    assert _declared() == frozen_baseline, (
         "config/sdk-surface.json and config/surface-manifest.yml's `sdk:` rows disagree: "
-        f"declared-not-approved={sorted(_declared() - approved)}, "
-        f"approved-not-declared={sorted(approved - _declared())}"
+        f"declared-not-in-baseline={sorted(_declared() - frozen_baseline)}, "
+        f"in-baseline-not-declared={sorted(frozen_baseline - _declared())}"
     )
 
 
@@ -141,8 +141,8 @@ def test_the_declaration_matches_the_approved_baseline():
 # differ, which is what pins each comparison individually.
 
 
-def test_a_declaration_disagreeing_only_with_the_APPROVED_baseline_reds(tmp_path):
-    """Isolates the approved-baseline comparison: the code views are untouched."""
+def test_a_declaration_disagreeing_only_with_the_FROZEN_baseline_reds(tmp_path):
+    """Isolates the frozen-baseline comparison: the code views are untouched."""
     import yaml
 
     import tools.sdk_surface as sdk_surface
@@ -155,14 +155,14 @@ def test_a_declaration_disagreeing_only_with_the_APPROVED_baseline_reds(tmp_path
             row["method"] = None
             break
     else:  # pragma: no cover - the fixture row must exist
-        raise AssertionError(f"no `sdk:` row for {target} in the approved baseline")
+        raise AssertionError(f"no `sdk:` row for {target} in the frozen baseline")
     modified = tmp_path / "baseline.yml"
     modified.write_text(yaml.safe_dump(doc, sort_keys=False, width=110), encoding="utf-8")
 
     result = _run("--check", "--manifest", str(modified))
 
     assert result.returncode == 1, (
-        "a declaration that disagrees only with the approved baseline did not red — the "
+        "a declaration that disagrees only with the frozen baseline did not red — the "
         "baseline comparison is disarmed"
     )
     assert target in result.stdout
@@ -174,7 +174,7 @@ def test_a_declaration_disagreeing_only_with_REFLECTION_reds(monkeypatch):
 
     real_reflected = sdk_surface.reflected_from_runtime()
     # A public method attached to the class OUTSIDE the class body: reachable to `dir()`,
-    # invisible to the AST walk, and absent from the approved baseline. This is the exact
+    # invisible to the AST walk, and absent from the frozen baseline. This is the exact
     # divergence class the reconciliation exists for.
     phantom = "a_method_attached_outside_the_class_body"
     monkeypatch.setattr(
@@ -185,7 +185,7 @@ def test_a_declaration_disagreeing_only_with_REFLECTION_reds(monkeypatch):
         _declared(),
         sdk_surface.declared_from_ast(),
         sdk_surface.reflected_from_runtime(),
-        sdk_surface.approved_from_manifest(),
+        sdk_surface.frozen_from_manifest(),
     )
 
     assert problems, (
@@ -198,7 +198,7 @@ def test_a_declaration_disagreeing_only_with_REFLECTION_reds(monkeypatch):
 
 
 # The AST comparison is isolated by `test_a_vanished_public_method_is_a_failure` above: it
-# repoints `_sdk_targets` at a mutated copy of `sdk.py` while reflection and the approved
+# repoints `_sdk_targets` at a mutated copy of `sdk.py` while reflection and the frozen
 # baseline keep the real set, so a finding there can only come from the AST comparison.
 
 
@@ -284,7 +284,7 @@ def test_a_vanished_public_method_is_a_failure(tmp_path, monkeypatch):
         _declared(),
         live_after,
         sdk_surface.reflected_from_runtime(),
-        sdk_surface.approved_from_manifest(),
+        sdk_surface.frozen_from_manifest(),
     )
     assert problems, "a method that vanished from the class body did not red the check"
     assert any(target in p for p in problems), (
@@ -486,7 +486,7 @@ def test_the_rendered_doc_does_not_claim_agreement_when_the_views_disagree():
     )
 
     assert "do NOT all agree" in disagreed, (
-        "the rendered doc claimed agreement while the approved baseline disagreed"
+        "the rendered doc claimed agreement while the frozen baseline disagreed"
     )
     assert "— all agree" not in disagreed
 
@@ -529,7 +529,7 @@ def test_check_refuses_when_its_evidence_is_missing(tmp_path):
 def test_check_refuses_when_the_baseline_is_missing(tmp_path):
     """The baseline is evidence too, and a missing one must REFUSE.
 
-    Found by mutation (M10): a version of `approved_from_manifest` that returned an empty set
+    Found by mutation (M10): a version of `frozen_from_manifest` that returned an empty set
     instead of raising still exited 1 — but with a *wrong* finding ("the declaration names 150
     methods the baseline does not have"), so the fail-open was masked by an accidental red.
     The exit code alone cannot tell the two apart; the message is what does.
@@ -537,7 +537,7 @@ def test_check_refuses_when_the_baseline_is_missing(tmp_path):
     result = _run("--check", "--manifest", str(tmp_path / "nope.yml"))
     assert result.returncode == 1
     assert "REFUSED" in result.stdout + result.stderr, (
-        "a missing approved baseline produced findings rather than a refusal — the gate failed "
+        "a missing frozen baseline produced findings rather than a refusal — the gate failed "
         "open and was only accidentally red"
     )
     assert "does not exist" in result.stdout + result.stderr
@@ -553,7 +553,7 @@ def test_check_refuses_on_a_malformed_declaration(tmp_path):
 
 
 def test_check_refuses_on_a_malformed_baseline(tmp_path):
-    """Same fail-closed rule for the approved baseline."""
+    """Same fail-closed rule for the frozen baseline."""
     bad = tmp_path / "bad.yml"
     bad.write_text("rows: not-a-list\n", encoding="utf-8")
     result = _run("--check", "--manifest", str(bad))
@@ -656,7 +656,7 @@ def test_check_refuses_when_the_doc_is_unreadable(tmp_path):
     )
 
 
-@pytest.mark.parametrize("label", ["AST", "reflection", "approved"])
+@pytest.mark.parametrize("label", ["AST", "reflection", "frozen"])
 def test_the_clean_run_reports_all_three_views(label: str):
     """The gate states what it reconciled, so a silently dropped comparison is visible.
 

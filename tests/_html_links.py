@@ -17,6 +17,18 @@ unconditional suite cannot import it to compare. Two copies of a rule whose whol
 purpose is that the two layers agree is the silent-drift class this guard exists
 to close.
 
+The parser below is also the ONE place this repo asks "what does a browser
+actually put in the document tree?", so the duplicate-`id` guard reads it too
+(``extract_element_ids``, #4118). It used to keep an `HTMLParser` subclass of its
+own, which inherited the stdlib tokenizer's divergences from a browser in BOTH
+directions — it missed `<svg><style><div id="dup"></div></style></svg>` (raw text
+to the stdlib, markup to a browser: a SILENT miss) and counted `<template>`
+content a browser keeps inert. Every fix to that copy was "declare the limit and
+gate it" rather than "model what a browser does", and that does not converge:
+the divergence set is not enumerable from the outside (three were found, one per
+review cycle). Routing the ids through this seam removes the class instead of
+containing it — the same argument as the paragraph above, one level down.
+
 This module is pure (stdlib only, no network/browser/DB/env), so it is importable
 from either suite without touching the E2E harness gates, which stay at module
 scope in the E2E file.
@@ -42,9 +54,17 @@ _SCRIPT_IN_SCRIPT = re.compile(r"<script[\s/>]", re.IGNORECASE)
 
 
 class _AnchorHrefParser(HTMLParser):
-    """Collect the ``href`` of every ``<a>`` a browser would render as a link.
+    """The rendered-link set AND the document tree's element ids.
 
-    The contract is "the rendered-link set", because the guard's whole purpose is
+    Two answers from one parse, because they are one question asked twice: which
+    anchors ``hrefs`` a browser renders, and which element ``ids`` it puts in the
+    document tree (#4118) — see the "Ids" bullet below for how the second differs
+    from the first. A second parser is a second answer, and the two diverge: that
+    is exactly what the id guard's own `HTMLParser` subclass did, missing
+    `<svg><style><div id="dup"></div></style></svg>` where a browser has two
+    elements with that id.
+
+    The link contract is "the rendered-link set", because the guard's whole purpose is
     to answer "can a visitor reach the blog from this page?" — so an anchor that
     no browser exposes is not a way in, and an anchor a browser *does* expose must
     not be missed. Both directions are enforced explicitly rather than left to
@@ -66,6 +86,20 @@ class _AnchorHrefParser(HTMLParser):
       the first of a duplicate pair. An ``href`` with no value, or an empty one,
       counts as no link: this extractor's own policy, not the tokenizer's — an
       empty ``href`` merely self-links.
+    * **Ids** — the ``ids``: the ``id`` of every element a browser exposes, which
+      is a DIFFERENT question from "is this element's content rendered": a
+      ``<style id="x">`` holds no markup and IS an element, so its own id counts
+      while an ``<div id="x">`` written inside it does not. Suppression here is
+      about an element's CONTENT, so an element's own id is recorded BEFORE
+      ``_open`` starts its suppressed region — and an element whose content is
+      inert (``<template>``) is in the tree, so it counts too. Everything the
+      suppression rules get right for links then comes free: a raw-text tag
+      inside ``<svg>``/``<math>`` does not suppress (its children are markup, so
+      their ids count), foreign content is otherwise traversed as ordinary
+      elements, and the abrupt-close comment rule in ``parse_comment`` keeps a
+      later element visible. Only the FIRST ``id`` on a tag counts and an empty
+      one counts as no id — both browser rules, since a browser keeps the first
+      of a duplicate pair and ``getElementById("")`` matches nothing.
     * **Foreign content** — ``<template>`` is only the HTML inert element outside
       ``<svg>``/``<math>``; inside them it is an ordinary foreign element whose
       children do render, so suppression is skipped there. That context ENDS at a
@@ -142,6 +176,9 @@ class _AnchorHrefParser(HTMLParser):
         # still covers the case where the attribute is absent).
         self.scripting = True
         self.hrefs: list[str] = []
+        # `(id, line)` of every element a browser would put in the document tree,
+        # in document order — see the class docstring's "Ids" bullet (#4118).
+        self.ids: list[tuple[str, int]] = []
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -190,6 +227,37 @@ class _AnchorHrefParser(HTMLParser):
         # The stdlib's write is accepted and ignored — the derived value above is the
         # authority. `flag` is unused by design.
         del flag
+
+    def _record_id(self, attrs: list[tuple[str, str | None]]) -> None:
+        """Record an element's OWN id, when that element is in the tree.
+
+        Suppression in this class is about an element's CONTENT, so this is
+        called before ``_open`` pushes the region — `<style id="x">` and
+        `<template id="x">` are both real elements to ``getElementById``. A
+        start tag inside such a region is not markup the browser parses, either
+        because the tokenizer is in raw-text mode or because the content is
+        inert, so the guard reads the stack as it stood for the enclosing
+        element and skips those.
+
+        A wedged parse records nothing further, for the reason ``_collect``
+        stops: the model is known wrong past that point. What makes that safe is
+        the page-level ratchet — `_all_website_pages()` is checked for the
+        seam's declared limits in `tests/test_website_docs_consistency.py`, so a
+        covered page that wedges fails loudly instead of silently reporting
+        fewer ids.
+        """
+        if self._suppress or self.wedged_reason:
+            return
+        for name, value in attrs:
+            if name == "id":
+                # FIRST id wins and an empty one is no id: the stdlib hands over
+                # both attributes of a duplicate pair while a browser keeps the
+                # first, so `id="" id="x"` leaves the element with no id; and
+                # `getElementById("")` matches nothing, so two `id=""` elements
+                # are not a collision any script can observe.
+                if value:
+                    self.ids.append((value, self.getpos()[0]))
+                return
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
@@ -268,6 +336,9 @@ class _AnchorHrefParser(HTMLParser):
             # E2E layer asks `blog_entry_hrefs` and never looks at `wedged_reason`
             # (review finding, #3962, Chromium-verified).
             self.hrefs.clear()
+            # The same clear for the ids: this is one document tree, and the
+            # honored `<frameset>` replaced all of it.
+            self.ids.clear()
             return True
         return False
 
@@ -288,6 +359,9 @@ class _AnchorHrefParser(HTMLParser):
         super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # Before `_open`, because this tag's own id counts even where its CONTENT
+        # does not (see `_record_id`).
+        self._record_id(attrs)
         if not self._open(tag, attrs):
             self._collect(tag, attrs)
 
@@ -300,6 +374,12 @@ class _AnchorHrefParser(HTMLParser):
         # ignored for a non-void element, so `<template/>`/`<script/>` genuinely
         # open and swallow what follows — deleting the `/` is what a browser does.
         if tag in self._FOREIGN:
+            # A self-closing foreign root is an empty element, so its own id is
+            # recorded here; the non-foreign path below delegates to
+            # `handle_starttag`, which records it there. Recording on BOTH paths
+            # would count a single element twice — `<svg id="d"/>` is ONE
+            # element, and two ids on it is a duplicate a browser does not have.
+            self._record_id(attrs)
             self._collect(tag, attrs)
             return
         self.handle_starttag(tag, attrs)
@@ -485,3 +565,23 @@ def extract_anchor_hrefs(html: str) -> list[str]:
     parser.feed(html)
     parser.close()
     return parser.hrefs
+
+
+def extract_element_ids(html: str) -> list[tuple[str, int]]:
+    """``(id, line)`` for every element ``html`` puts in the document tree (#4118).
+
+    The duplicate-`id` guard's input, and the second answer this module's
+    render-fidelity seam gives (see ``_AnchorHrefParser``). Before #4118 that
+    guard parsed with its own `HTMLParser` subclass, which diverged from a
+    browser in both directions: it MISSED markup inside a raw-text element nested
+    in foreign content (silent — the direction a duplicate-id guard must not
+    have), and it counted `<template>` content a browser keeps inert. One parser
+    removes the divergence class instead of declaring each instance of it.
+
+    Empty ids are omitted (``getElementById("")`` matches nothing) and a repeated
+    ``id`` attribute keeps the first, as a browser does.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    return parser.ids

@@ -39,6 +39,7 @@ from .security import entity_label, validate_entity_type
 # `draft`); `_status_vocab_for` below is the ONE dispatcher between the two
 # families, so neither leg re-states the mapping.
 from .commit_ops import OBJECT_TERMINAL_STATUSES
+from .commit_ops import SUBJECT_TERMINAL_STATUSES  # #1423: the Subject family
 # #3359: the capture-level graph-op meter is a ContextVar, and ContextVars do
 # not cross into the ThreadPoolExecutor this module runs its retrieval legs on
 # — without binding the legs to the caller's metering context, a capture's
@@ -85,6 +86,17 @@ def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
       OBJECT vocabulary — superseded / deprecated / archived / retracted)
       and NO flag conjunct: no Object writer sets ``outdated``, so the Point
       flag would hide an Object nobody can mark.
+    * ``Subject`` -> #1423: ``commit_ops.SUBJECT_TERMINAL_STATUSES`` (the
+      terminal members of ONTOLOGY §4.2's Subject vocabulary — superseded /
+      deprecated / archived) and no flag conjunct. Before #1423 a Subject
+      fell through to the OBJECT set by ACCIDENT of the fallback below while
+      every leg's ``label in ("Point", "Object")`` gate skipped it entirely,
+      so a superseded team/role/person stayed search-visible.
+
+    The non-Point, non-Subject branch stays a fallback for a future family and
+    returns the Object vocabulary — a family added without its own arm is
+    therefore filtered with the WRONG vocabulary, which is why the two
+    families above are named explicitly rather than inherited.
 
     #2598: ``draft`` is deliberately in NEITHER set. A draft is CURRENT, not
     dead (``live.CURRENT_POINT_STATUS_VALUES``), so every retrieval leg — and
@@ -98,10 +110,22 @@ def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
     """
     if label == "Point":
         return TERMINAL_EXCLUDED_STATUSES, True
+    if label == "Subject":
+        return SUBJECT_TERMINAL_STATUSES, False
     # #3301: the OBJECT family's canonical set, imported at MODULE level —
     # commit_ops imports only ``.live`` and never ``search_engine``, so this
     # edge is acyclic (a module-level import, not a defensive lazy one).
     return OBJECT_TERMINAL_STATUSES, False
+
+
+#: #1423: the canonical labels whose retrieval legs apply a terminal-status
+#: exclusion. ONE declaration, read by all four legs AND the scope probe — the
+#: per-site `("Point", "Object")` literal this replaces is the #2901 class
+#: (a hand-written subset at a call site silently omits a family), and it was
+#: exactly how `:Subject` stayed unfiltered while `_status_vocab_for` already
+#: answered correctly for it. A family added to `_status_vocab_for` must be
+#: added HERE too, or its terminal nodes stay search-visible.
+_STATUS_FILTERED_LABELS: tuple[str, ...] = ("Point", "Object", "Subject")
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -1133,10 +1157,12 @@ def run_fts_query(
     # as quota.py's `documents` meter (documentKind IS NOT NULL) and
     # sdk.list_sources() (documentKind IS NULL). All three legs mean one
     # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
-    if label in ("Point", "Object"):
+    if label in _STATUS_FILTERED_LABELS:
         # #3301: the OBJECT family shares this leg's exclusion — before it,
         # a retracted/superseded/deprecated/archived Object was SEARCH-VISIBLE
-        # while recall_state hid it. The family rule (vocabulary + whether the
+        # while recall_state hid it. #1423 adds the SUBJECT family (same
+        # doctrine: a superseded team/role/person is a dead entity, so it is
+        # not current state). The family rule (vocabulary + whether the
         # Point ``outdated`` flag applies) lives in ``_status_vocab_for``.
         _vocab, _flag = _status_vocab_for(label)
         status_filter = ("" if excluded_statuses == ()
@@ -1390,7 +1416,7 @@ def run_vector_query(
             # read — the #4199 class via the status axis). ``_status_vocab_for``
             # is the ONE family→vocabulary dispatcher; calling it here (never
             # re-stating the mapping) is what keeps probe and leg from drifting.
-            if label in ("Point", "Object") and excluded_statuses != ():
+            if label in _STATUS_FILTERED_LABELS and excluded_statuses != ():
                 _vocab, _flag = _status_vocab_for(label)
                 _scope_where.append(_exclude_status_clause(
                     "n", excluded_statuses or _vocab,
@@ -1437,7 +1463,7 @@ def run_vector_query(
         # (documentKind NULL); the predicate lands post-YIELD, ahead of the
         # outer LIMIT, so a document query never fuses a non-document Source
         # (and vice versa). Same axis on all three legs.
-        if label in ("Point", "Object"):
+        if label in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label)
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
@@ -1610,7 +1636,7 @@ def run_vector_query(
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
         # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
         # and structural legs (documentKind IS NOT NULL ⟺ document).
-        if label in ("Point", "Object"):
+        if label in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label)
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or _vocab, include_outdated_flag=_flag)}")
@@ -1814,7 +1840,7 @@ def run_structural_query(
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
         # scan). include_terminal opts out for audit/history queries.
-        if excluded_statuses != () and label_str in ("Point", "Object"):
+        if excluded_statuses != () and label_str in _STATUS_FILTERED_LABELS:
             _vocab, _flag = _status_vocab_for(label_str)
             conditions.append(_exclude_status_clause(
                 "n", excluded_statuses or _vocab,
@@ -3119,7 +3145,10 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # that EXCLUDES on it (``_terminal_excluded``) and the reader that
             # must MARK it (the ask lane's D8 gate / ``to_dict``) now read the
             # same fact.
-            "  coalesce(n.outdated, false)",
+            "  coalesce(n.outdated, false), "
+            # #1423: the Subject's own lifecycle status, appended AFTER #2294's
+            # index-18 flag so neither addition shifts the other's mapping.
+            "  s.status, es.status",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -3160,12 +3189,25 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                         st["superseded_by"].get("created_at")):
                     st["superseded_by"] = cand
             # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
+            # #1423: the Subject's own `status` rides the decoration so a
+            # consumer can see that the subject has since been superseded
+            # WITHOUT the point's provenance disappearing — the ONTOLOGY
+            # §4.2/§12 doctrine is `superseded, never deleted`, and a point
+            # about a reorganized team remains a true record of that turn.
+            # Additive: the key is present on every row ("" when unset), so
+            # existing consumers reading id/name/kind are unaffected.
             s_id, s_name, s_kind = row[12], row[13], row[14]
             es_id, es_name, es_kind = row[15], row[16], row[17]
+            s_status = row[19] if len(row) > 19 else ""
+            es_status = row[20] if len(row) > 20 else ""
             if st["subject"] is None and s_id:
-                st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
+                st["subject"] = {"id": s_id, "name": s_name or "",
+                                 "kind": s_kind or "",
+                                 "status": s_status or ""}
             elif st["subject"] is None and es_id:
-                st["subject"] = {"id": es_id, "name": es_name or "", "kind": es_kind or ""}
+                st["subject"] = {"id": es_id, "name": es_name or "",
+                                 "kind": es_kind or "",
+                                 "status": es_status or ""}
     except Exception:
         logger.warning("Epistemic-state fetch failed", exc_info=True)
 

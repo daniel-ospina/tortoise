@@ -24,14 +24,15 @@ lost measurement.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+from typing import ClassVar
 
 import pytest
 from fastmcp.tools import FunctionTool
 
 from tortoise import hosted_api as ha
 from tortoise import mcp_server as ms
-
 
 # ── The prop is registered, and the filter keeps it ───────────────────────
 
@@ -145,7 +146,9 @@ def test_a_result_object_without_structured_content_is_not_counted():
     free text — the one thing that must never reach the props)."""
     class _Bare:
         structured_content = None
-        content = ["some retrieved prose that must not be counted or emitted"]
+        content: ClassVar[list[str]] = [
+            "some retrieved prose that must not be counted or emitted"
+        ]
 
     assert ms._mcp_result_count(_Bare()) is None
 
@@ -167,10 +170,9 @@ def _probe(name: str, fn) -> None:
 
 
 def _drop(name: str) -> None:
-    try:
+    # Cleanup must never mask the assertion — hence the blanket suppression.
+    with contextlib.suppress(Exception):
         ms.mcp.local_provider.remove_tool(name)
-    except Exception:  # noqa: BLE001 — cleanup must never mask the assertion
-        pass
 
 
 @pytest.mark.asyncio

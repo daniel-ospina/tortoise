@@ -18,10 +18,15 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shlex
+import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from tortoise import hook_install
 from tortoise.capture_install import install_capture
@@ -29,7 +34,9 @@ from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
-VERSION_MARKER = "# tortoise-hook-version: 3"
+SESSION_START_HOOK = (REPO_ROOT / "tortoise" / "cursor-hooks"
+                      / "session-start.sh")
+VERSION_MARKER = "# tortoise-hook-version: 4"
 
 #: The machine's REAL home, resolved from the password database — NOT from
 #: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
@@ -154,15 +161,24 @@ def _wait_for_done(log: Path, timeout: float = 12) -> None:
 
 
 def test_hook_artifact_carries_the_version_marker():
-    """The install contract is one marker, column-0, one per file.
+    """The install contract is one marker, column-0, one per file, and ONE
+    generation for the whole Cursor seam.
 
-    Mutation: delete ``# tortoise-hook-version: 3`` from the shipped hook — the
-    install then has no generation to compare and this REDs."""
-    text = HOOK.read_text(encoding="utf-8")
-    assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
-    assert read_hook_version(HOOK) == 3
-    assert count_canonical_markers(HOOK) == 1, (
-        "exactly one column-0 marker (an in-body mention is not a declaration)")
+    Mutation: delete ``# tortoise-hook-version: 4`` from the shipped hook — the
+    install then has no generation to compare and this REDs; give the two
+    script files different numbers — ``contract_version`` collapses to ``None``
+    and the generation pin REDs."""
+    for path in (HOOK, SESSION_START_HOOK):
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), (
+            path, text[:120])
+        assert read_hook_version(path) == 4, path
+        assert count_canonical_markers(path) == 1, (
+            "exactly one column-0 marker (an in-body mention is not a "
+            f"declaration): {path}")
+    assert hook_install.contract_version(
+        hook_install.get_layout("cursor")) == 4, (
+        "Cursor grades its seam as ONE generation — both scripts must agree")
 
 
 def test_no_cursor_test_can_reach_the_real_cursor_store(tmp_path, monkeypatch):
@@ -721,3 +737,444 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
         "a raw tab in the JSON text is a control character and makes the file "
         "unparseable — it must be escaped or stripped. Assert on the RAW file: "
         "json.loads would decode a correct \\t back to a tab and hide this")
+
+
+# ── #2122: the sessionStart INJECTION half ───────────────────────────────
+# Cursor's ONE documented push seam. `beforeSubmitPrompt` (its per-turn event)
+# can observe/block a prompt but its output contract is `{continue,
+# user_message}` — no injection — so this half carries the cold-context digest
+# and the per-turn reflex is deliberately NOT registered for Cursor.
+#
+# `_installed_session_start` runs the SHIPPED script from an INSTALLED path
+# (`~/.cursor/hooks/…`), where `$(dirname $0)/../..` is `$HOME` — not this
+# repo's checkout.  Running the repo copy would let the hook's LAST-RESORT
+# module fallback find `tortoise/` and this checkout's `.venv`, which is a real
+# Tortoise install: the tests would then pass or fail on the machine's state
+# instead of on the hook's behaviour (the #8106 lesson, one layer up).
+
+
+def _installed_session_start(home: Path) -> Path:
+    dst = home / ".cursor" / "hooks" / "tortoise-session-start.sh"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(SESSION_START_HOOK.read_bytes())
+    dst.chmod(0o755)
+    return dst
+
+
+def _python3_shim(bindir: Path) -> Path:
+    """A WORKING ``python3`` for the hook to find on its controlled PATH.
+
+    The encoder path resolves ``command -v python3``, and letting that fall to
+    the HOST's ``/usr/bin/python3`` made these tests depend on a usable system
+    interpreter (a stock macOS ``/usr/bin/python3`` without Xcode CLT exits
+    non-zero).  Plant a shim that execs THIS test process's interpreter so the
+    suite is hermetic.  A caller that needs a FAILING interpreter writes its
+    own ``bindir/python3`` first and this leaves it alone."""
+    shim = bindir / "python3"
+    if shim.exists():
+        return shim
+    bindir.mkdir(parents=True, exist_ok=True)
+    shim.write_text("#!/usr/bin/env bash\n"
+                    f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    return shim
+
+
+def _run_session_start(stdin_json: str = "", *, home: Path, bindir: Path,
+                       hook: Path | None = None,
+                       extra_env: dict[str, str] | None = None,
+                       python3: bool = True):
+    if python3:
+        _python3_shim(bindir)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        # No checkout to fall back to — the hermetic default.
+        "TORTOISE_SRC_DIR": str(home / "no-checkout"),
+        "TORTOISE_IMPORT_RECEIPT_DIR": str(home / "state" / "import-receipts"),
+    }
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["/bin/bash", str(hook or _installed_session_start(home))],
+        input=stdin_json,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+
+def _fake_reflex(bindir: Path, *, digest: str | None, rc: int = 0,
+                 log: Path | None = None) -> None:
+    """A `tortoise` whose `context` subcommand answers ``digest``.
+
+    ``digest=None`` models a binary that RUNS but prints nothing (the
+    empty-graph answer: rc 0, no output); ``rc=1`` models a shim that exists
+    but cannot answer at all (the #8106 broken-shim class).
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    payload = bindir.parent / "digest.txt"
+    payload.write_text(digest or "", encoding="utf-8")
+    script = bindir / "tortoise"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        + (f'printf "%s\\n" "$@" >> {log}\n' if log else "")
+        + '[ "$1" = "context" ] || exit 1\n'
+        + (f"exit {rc}\n" if rc else
+           f'cat "{payload}"\n'
+           "exit 0\n"),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def _breadcrumb(home: Path) -> Path:
+    return (home / "state" / "capture-errors" / "cursor-install.json")
+
+
+def test_session_start_emits_cursors_additional_context_contract(tmp_path):
+    """The sessionStart output contract is Cursor's NATIVE one —
+    `{"additional_context": <digest>}` (snake_case) — and nothing else.
+
+    Mutation: emit Claude Code's `hookSpecificOutput.additionalContext` (or
+    Python-repr the block) — Cursor's sessionStart schema reads
+    `additional_context`, so the digest never lands and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _fake_reflex(bindir, digest="# Tortoise memory\n- **CI deploys** → point/pt_1\n")
+
+    r = _run_session_start(json.dumps({
+        "session_id": "s-1", "is_background_agent": False,
+        "composer_mode": "agent"}), home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    # The reflex's output is captured through command substitution, so ONE
+    # trailing newline is stripped (as in every other shipped hook).
+    assert out == {"additional_context":
+                   "# Tortoise memory\n- **CI deploys** → point/pt_1"}, out
+    assert "hookSpecificOutput" not in r.stdout, (
+        "a native sessionStart entry is parsed against Cursor's schema — the "
+        "Claude-shaped field is not what Cursor reads here")
+
+
+def test_session_start_json_round_trips_quotes_backslashes_and_newlines(tmp_path):
+    """The digest is passed through the ENVIRONMENT and escaped by a JSON
+    encoder, so a digest carrying quotes / backslashes / newlines / a
+    multi-byte arrow still parses and round-trips EXACTLY.
+
+    Mutation: interpolate the block into the JSON string by hand — the first
+    `"` in the digest ends the string and `json.loads` REDs (or the value is
+    silently truncated)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    digest = '# Memory\n- **a "quoted" point** → point/pt_1\n- C:\\path\\x\n'
+    _fake_reflex(bindir, digest=digest)
+
+    r = _run_session_start("{}", home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == digest.rstrip("\n")
+
+
+def test_session_start_falls_through_a_broken_path_shim_to_the_checkout_venv(
+        tmp_path):
+    """#8106's defect class, closed for THIS seam: a `tortoise` shim that
+    exists on PATH but cannot answer (rc≠0 — a stale homebrew/pipx leftover)
+    must NOT be a silent dead end. The hook tries the next candidate and
+    injects from the checkout's venv.
+
+    Mutation: treat the first resolved binary as final (the shape
+    `volunteer-turn.sh` still has today, #8106) — the digest is empty and this
+    REDs while the broken shim is still on PATH. The order is asserted too: the
+    shim must be TRIED first (PATH stays the first candidate)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    log = tmp_path / "tried.log"
+    _fake_reflex(bindir, digest=None, rc=1, log=log)
+
+    checkout = tmp_path / "checkout"
+    (checkout / "tortoise").mkdir(parents=True)
+    venv_bin = checkout / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    console = venv_bin / "tortoise"
+    console.write_text("#!/usr/bin/env bash\n"
+                       "printf '%s\\n' 'from the checkout venv'\n"
+                       "exit 0\n", encoding="utf-8")
+    console.chmod(0o755)
+
+    r = _run_session_start("{}", home=home, bindir=bindir,
+                           extra_env={"TORTOISE_SRC_DIR": str(checkout)})
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == \
+        "from the checkout venv", r.stdout
+    assert log.exists() and "context" in log.read_text(encoding="utf-8"), (
+        "the PATH candidate must be tried FIRST — PATH installs are supported "
+        "and this hook only falls through when that candidate REFUSES")
+
+
+def test_session_start_resolves_the_owning_venv_wheel_candidate(tmp_path):
+    """#2385: a WHEEL install puts this hook in ``site-packages/tortoise/
+    cursor-hooks/``, so there is no ``.venv`` beneath the module dir.  The hook
+    walks UP to the ``pyvenv.cfg`` marker and runs ``<venv>/bin/tortoise`` —
+    the owning-venv candidate — instead of giving up.
+
+    Mutation: drop the ``pyvenv.cfg`` walk (the owning-venv candidate) —
+    nothing on PATH answers, ``<module>/.venv`` does not exist, so no candidate
+    answers and the digest never lands → RED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()  # deliberately no `tortoise` here: PATH must not answer
+
+    module = tmp_path / "site-packages"
+    (module / "tortoise").mkdir(parents=True)  # accepted as a module dir
+    (module / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+    console = module / "bin" / "tortoise"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/usr/bin/env bash\n"
+                       "printf '%s\\n' 'from the owning venv'\n"
+                       "exit 0\n", encoding="utf-8")
+    console.chmod(0o755)
+
+    r = _run_session_start("{}", home=home, bindir=bindir,
+                           extra_env={"TORTOISE_SRC_DIR": str(module)})
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == \
+        "from the owning venv", r.stdout
+
+
+def test_session_start_falls_back_to_the_module_under_the_interpreter(tmp_path):
+    """The LAST candidate: no console script anywhere, but a checkout on
+    ``$TORTOISE_SRC_DIR`` and an interpreter.  The hook runs
+    ``python3 -c '…from tortoise.__main__ import main…'`` with the module dir
+    passed via ARGV (never ``-m``, never string-interpolated).
+
+    Mutation: drop the module fallback — no other candidate can answer, so
+    stdout is empty and the digest never lands → RED."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+
+    module = tmp_path / "checkout"
+    pkg = module / "tortoise"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__main__.py").write_text(
+        "def main(argv):\n"
+        "    print('from the module fallback')\n"
+        "    return 0\n", encoding="utf-8")
+
+    r = _run_session_start("{}", home=home, bindir=bindir,
+                           extra_env={"TORTOISE_SRC_DIR": str(module)})
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["additional_context"] == \
+        "from the module fallback", r.stdout
+
+
+def test_session_start_is_inert_with_evidence_when_no_reflex_resolves(tmp_path):
+    """No reflex at all → exit 0 with EMPTY stdout (content fail-open) AND the
+    local `install-inert` breadcrumb, so `session verify` reports INERT rather
+    than reading absent output as health (#4314).
+
+    Mutation: drop `_record_breadcrumb` — the session starts fine and NOTHING
+    anywhere records that the seam did not fire; the breadcrumb assertion
+    REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+
+    r = _run_session_start("{}", home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    record = json.loads(_breadcrumb(home).read_text(encoding="utf-8"))
+    assert record["harness"] == "cursor", record
+    assert record["kind"] == "install-inert", record
+    assert "sessionStart" in record["detail"], record
+
+
+def test_session_start_records_evidence_when_the_json_encoder_fails(tmp_path):
+    """#4314: an encoder that EXISTS but cannot run must not be silent.  A
+    digest is present but `python3` dies (stock macOS `/usr/bin/python3`
+    without Xcode CLT is the real case) — the hook emits nothing, so it must
+    record the SAME `install-inert` breadcrumb the missing-`PY3` branch does,
+    rather than reporting silence as health.
+
+    Mutation: restore ``|| true`` on the encoder — stdout is empty, NO
+    breadcrumb is written anywhere, and the breadcrumb assertion REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _fake_reflex(bindir, digest="# Tortoise memory\n- point/pt_1\n")
+    # A python3 that runs but cannot encode anything (the stub-interpreter
+    # class).  Written BEFORE `_run_session_start`, whose helper leaves an
+    # existing `bindir/python3` alone.
+    shim = bindir / "python3"
+    shim.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    shim.chmod(0o755)
+
+    r = _run_session_start("{}", home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    record = json.loads(_breadcrumb(home).read_text(encoding="utf-8"))
+    assert record["harness"] == "cursor", record
+    assert record["kind"] == "install-inert", record
+    assert "python3" in record["detail"], record
+
+
+def test_session_start_records_evidence_when_no_interpreter_can_encode(tmp_path):
+    """#4314: a digest with NO ``python3`` to encode it must still leave
+    EVIDENCE.  The hook emits nothing (a malformed document would be worse)
+    but records the install-inert breadcrumb, so `session verify` reads INERT
+    rather than silence-as-health.
+
+    Mutation: drop the missing-``PY3`` breadcrumb — stdout is empty and NOTHING
+    anywhere records that the seam did not fire → the breadcrumb assertion
+    REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # A CONTROLLED PATH with no interpreter but with the shell utilities the
+    # hook itself needs (`tr` gates the empty-digest check before the encoder
+    # is ever reached; `dirname` resolves the last-resort module candidate).
+    for tool in ("bash", "cat", "date", "dirname", "mkdir", "tr"):
+        real = shutil.which(tool)
+        if real is None:
+            pytest.skip(f"{tool!r} unavailable on this host")
+        (bindir / tool).symlink_to(real)
+    _fake_reflex(bindir, digest="# Tortoise memory\n- point/pt_1\n")
+
+    r = _run_session_start("{}", home=home, bindir=bindir, python3=False,
+                           extra_env={"PATH": str(bindir)})
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    record = json.loads(_breadcrumb(home).read_text(encoding="utf-8"))
+    assert record["harness"] == "cursor", record
+    assert record["kind"] == "install-inert", record
+    assert "no python3" in record["detail"], record
+
+
+def test_session_start_says_nothing_when_the_reflex_has_nothing(tmp_path):
+    """The reflex RAN (rc 0) and had nothing to inject → emit NOTHING and
+    record NO breadcrumb. An empty answer is not an inert install: injecting an
+    empty `additional_context` would make Cursor carry an empty context block.
+
+    Mutation: emit the hook output unconditionally — the empty-object assertion
+    REDs; write a breadcrumb on the empty answer — the second assertion
+    REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _fake_reflex(bindir, digest=None, rc=0)
+
+    r = _run_session_start("{}", home=home, bindir=bindir)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+    assert not _breadcrumb(home).exists(), (
+        "an empty digest is a successful answer, not an inert install")
+
+
+def test_install_registers_both_cursor_halves_flat_and_absolute(tmp_path):
+    """`install_capture("cursor")` installs BOTH shipped scripts and merges
+    BOTH registrations, each a FLAT script object with an ABSOLUTE command —
+    and never a per-turn registration (Cursor's per-turn event cannot inject,
+    so claiming it would be claiming an unshipped seam).
+
+    Mutation: install only `layout.scripts[0]` (the pre-#2122 one-script body)
+    — the sessionStart script/entry are missing and this REDs; register a
+    nested matcher group — Cursor rejects the WHOLE hooks.json (#3819) and the
+    flat-shape assertion REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+
+    assert install_capture("cursor", home=home).ok
+    doc = json.loads((home / ".cursor" / "hooks.json").read_text())
+
+    assert doc["version"] == 1, doc
+    assert set(doc["hooks"]) == {"sessionStart", "sessionEnd"}, doc["hooks"]
+    for event, name in (("sessionStart", "tortoise-session-start.sh"),
+                        ("sessionEnd", "tortoise-session-end.sh")):
+        installed = home / ".cursor" / "hooks" / name
+        assert installed.is_file(), installed
+        assert installed.stat().st_mode & stat.S_IXUSR, installed
+        entry = doc["hooks"][event][0]
+        assert "hooks" not in entry and "matcher" not in entry, entry
+        assert entry["command"] == str(installed), entry
+    assert "volunteer-turn.sh" not in json.dumps(doc), (
+        "Cursor's per-turn beforeSubmitPrompt event has no injection field — "
+        "registering the per-turn reflex here would be an unshipped claim")
+    assert "beforeSubmitPrompt" not in doc["hooks"], doc["hooks"]
+
+
+def test_install_preserves_a_foreign_session_start_entry(tmp_path):
+    """Merge, never overwrite: a user's own `sessionStart` hook survives, and a
+    second install adds nothing.
+
+    Mutation: assign `hooks[event] = [ours]` instead of merging — the foreign
+    command disappears and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / ".cursor" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({
+        "version": 1,
+        "hooks": {"sessionStart": [{"command": "/bin/other-hook.sh"}]},
+    }))
+
+    assert install_capture("cursor", home=home).ok
+    assert install_capture("cursor", home=home).ok  # idempotent
+
+    doc = json.loads(target.read_text())
+    commands = [e["command"] for e in doc["hooks"]["sessionStart"]]
+    assert commands.count("/bin/other-hook.sh") == 1, commands
+    assert len(commands) == 2, commands
+
+
+def test_upgrade_from_a_generation_3_install_adds_the_injection_half(tmp_path):
+    """An install frozen at generation 3 (session-end only — every Cursor
+    install before #2122) is DRIFT, and `upgrade` repairs it: the missing
+    sessionStart script + registration land, the stale script is re-written.
+
+    Mutation: skip the generation bump (leave the shipped marker at 3) — the
+    missing script and `sessionStart` entry are still repaired by `upgrade`,
+    so the injection half lands and the final `detect_install(...) == []`
+    stays green; what the mutation removes is the STALE generation on the
+    frozen session-end copy, so the `{"stale-script", …} <= kinds` assertion
+    REDs (the same marker test #4314 leaves behind)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    assert install_capture("cursor", home=home).ok
+    root = home / ".cursor"
+
+    # Model the pre-#2122 install: no injection half, generation 3.
+    (root / "hooks" / "tortoise-session-start.sh").unlink()
+    doc = json.loads((root / "hooks.json").read_text())
+    del doc["hooks"]["sessionStart"]
+    (root / "hooks.json").write_text(json.dumps(doc))
+    stale = root / "hooks" / "tortoise-session-end.sh"
+    stale.write_text(stale.read_text(encoding="utf-8").replace(
+        "# tortoise-hook-version: 4", "# tortoise-hook-version: 3"))
+
+    kinds = {f.kind for f in hook_install.detect_install(root, "cursor")}
+    assert {"stale-script", "missing-script", "missing-hook-entry"} <= kinds, kinds
+
+    result = hook_install.upgrade_install(root, "cursor")
+    assert result.ok, result.refused
+    assert hook_install.detect_install(root, "cursor") == []
+    assert (root / "hooks" / "tortoise-session-start.sh").is_file()
+    assert json.loads((root / "hooks.json").read_text())[
+        "hooks"]["sessionStart"]

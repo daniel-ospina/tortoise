@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -952,6 +952,28 @@ REAL_PAYLOAD = json.dumps(
                 "latest_submitted_at": "2026-09-20T20:09:39.089Z",
                 "latest_conversation_message": "WRAPPER-POSITIVE-4292 :: reply with the single word WRAPOK",
             },
+        ],
+    }
+)
+
+
+#: The ORCHESTRATOR's own workspace, as `cmux list-workspaces --json` renders it.
+#: Used to exercise the `workspace:NN` refuse path, where the orchestrator is
+#: addressed by its positional ref (`workspace:1`) and the raw argument carries no
+#: recognisable id or name — only the RESOLVED entry does (#8177).
+ORCHESTRATOR_PAYLOAD = json.dumps(
+    {
+        "window_ref": "window:1",
+        "workspaces": [
+            {
+                "ref": "workspace:1",
+                "id": cd.ORCHESTRATOR_WORKSPACE_ID,
+                "index": 0,
+                "custom_title": "ORCHESTRATOR (never dispatch here)",
+                "latest_submitted_message": None,
+                "latest_submitted_at": None,
+                "latest_conversation_message": None,
+            }
         ],
     }
 )
@@ -2490,6 +2512,122 @@ class TestCliExitCodes(unittest.TestCase):
             "--timeout", "0",
         )
         self.assertEqual(rc, 0)
+
+
+class TestOrchestratorRefusal(unittest.TestCase):
+    """#8177: the orchestrator's OWN workspace is not a dispatch target.
+
+    Measured 2026-10-11: a work order sent to `C2C97E96` — the workspace NAMED
+    `Packs + Extractor` but running the ORCHESTRATOR — landed in the orchestrator's
+    own pane and had to be forwarded by hand. The warning lived in a TSV COMMENT,
+    which the standard `grep -v '^#'` read strips, so the refusal is enforced in
+    code on every subcommand. These tests assert on the RECORDED cmux calls, not
+    only the exit code: a refusal that still writes or sends is not a refusal.
+    """
+
+    ORCHESTRATOR = "C2C97E96-0CBC-4DFE-BC91-FEF44F09B5BD"
+
+    def _main(self, fake, *args: str) -> int:
+        with mock.patch.object(cd, "Cmux", lambda *a, **k: fake):
+            return cd.main(list(args))
+
+    def test_the_orchestrator_id_lives_in_one_named_constant(self):
+        # A second inline copy is a second chance for the two to disagree.
+        self.assertEqual(cd.ORCHESTRATOR_WORKSPACE_ID, self.ORCHESTRATOR)
+
+    def test_send_refuses_the_orchestrator_id_and_writes_nothing(self):
+        fake = FakeCmux()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = self._main(
+                fake, "send", "--workspace", self.ORCHESTRATOR, "--text", PROBE
+            )
+        self.assertNotEqual(rc, 0, "the orchestrator id must NOT exit 0")
+        # FAIL-CLOSED: no send, no workspace read, no screen read — the guard fired
+        # BEFORE any cmux call.
+        self.assertEqual(fake.sent_log, [])
+        self.assertEqual(fake.list_calls, 0)
+        self.assertEqual(fake.read_calls, 0)
+        self.assertIn(self.ORCHESTRATOR, err.getvalue())
+
+    def test_the_refusal_names_the_workspace_and_says_why(self):
+        fake = FakeCmux()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = self._main(
+                fake, "send", "--workspace", self.ORCHESTRATOR, "--text", PROBE
+            )
+        message = err.getvalue()
+        self.assertNotEqual(rc, 0)
+        self.assertIn(self.ORCHESTRATOR, message)
+        self.assertIn("ORCHESTRATOR", message)
+        self.assertIn("a workspace NAME is not a session", message)
+
+    def test_the_refusal_is_case_insensitive_on_the_id(self):
+        for target in (self.ORCHESTRATOR.lower(), self.ORCHESTRATOR.upper()):
+            with self.subTest(target=target):
+                fake = FakeCmux()
+                with redirect_stderr(io.StringIO()):
+                    rc = self._main(fake, "state", "--workspace", target)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(fake.list_calls, 0)
+
+    def test_a_workspace_NAME_is_refused_too(self):
+        # A cmux workspace NAME is not a session: this is the exact string a human
+        # reads off `cmux list-workspaces` and pastes into `--workspace`.
+        for name in ("Packs + Extractor", "packs + extractor"):
+            with self.subTest(name=name):
+                fake = FakeCmux()
+                with redirect_stderr(io.StringIO()):
+                    rc = self._main(fake, "send", "--workspace", name, "--text", PROBE)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(fake.sent_log, [])
+                self.assertEqual(fake.list_calls, 0)
+
+    def test_every_subcommand_refuses_before_any_cmux_call(self):
+        # `send` / `wait-ready` / `verify` / `state` all pass through main()'s
+        # single guard, so all four refuse with ZERO cmux invocations.
+        commands = (
+            ("send", "--workspace", self.ORCHESTRATOR, "--text", PROBE),
+            ("wait-ready", "--workspace", self.ORCHESTRATOR),
+            ("verify", "--workspace", self.ORCHESTRATOR, "--text", PROBE),
+            ("state", "--workspace", self.ORCHESTRATOR),
+        )
+        for argv in commands:
+            with self.subTest(command=argv[0]):
+                fake = FakeCmux()
+                with redirect_stderr(io.StringIO()):
+                    rc = self._main(fake, *argv)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(fake.sent_log, [])
+                self.assertEqual(fake.list_calls, 0)
+                self.assertEqual(fake.read_calls, 0)
+
+    def test_the_ref_form_of_the_orchestrator_is_refused_after_resolution(self):
+        # `workspace:1` is POSITIONAL: only cmux can say which workspace it now
+        # addresses, so the raw argument carries no recognisable id or name. The
+        # resolved-entry check closes it on the read every path already performs —
+        # before any send or screen read.
+        fake = RecordingCmux(payload=ORCHESTRATOR_PAYLOAD)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = self._main(fake, "state", "--workspace", "workspace:1")
+        self.assertNotEqual(rc, 0)
+        calls = [argv[0] for argv in fake.argv]
+        self.assertIn("list-workspaces", calls)
+        self.assertNotIn("send", calls)
+        self.assertNotIn("read-screen", calls)
+        self.assertIn("ORCHESTRATOR", err.getvalue())
+
+    def test_a_normal_lane_workspace_is_not_refused(self):
+        # ANTI-OVER-REFUSAL: the guard must leave a real lane id/ref untouched.
+        fake = FakeCmux()
+        rc = self._main(
+            fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+            "--ready-timeout", "0", "--consume-timeout", "0",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.submitted, [PROBE])
 
 
 # --------------------------------------------------------------------------- #

@@ -713,22 +713,33 @@ class TestSupabaseLane:
 
     # ── #1872: recover_team_key's cap revoke is LRU, not oldest-created ────
 
-    def _seed_two_keys(self, org_id: str, first: dict, second: dict):
-        """Replace the org's api_keys rows with exactly two LIVE
-        non-bootstrap rows so the fake's cap-revoke victim is deterministic."""
+    def _seed_key_rows(self, org_id: str, specs) -> None:
+        """Replace the org's api_keys rows with exactly ``specs`` so the
+        fake's cap-revoke victim is deterministic.
+
+        ``expires_at`` is first-class (#4550): an EXPIRED-but-unrevoked
+        durable row is a real state the cap predicate has to exclude, and a
+        seeder that could only write live rows could not express it.
+        """
         rows = [k for k in self.fake.tables.get("api_keys", [])
                 if k.get("org_id") != org_id]
-        for spec in (first, second):
+        for spec in specs:
             rows.append({
                 "id": spec["id"], "org_id": org_id,
                 "lookup_hash": "lh-" + spec["id"],
                 "key_prefix": spec["id"][:10],
-                "created_via": "recovery", "created_by": "st_seed",
+                "created_via": spec.get("created_via", "recovery"),
+                "created_by": "st_seed",
                 "created_at": spec["created_at"],
                 "last_used_at": spec.get("last_used_at"),
-                "expires_at": None, "revoked_at": None,
+                "expires_at": spec.get("expires_at"), "revoked_at": None,
             })
         self.fake.tables["api_keys"] = rows
+
+    def _seed_two_keys(self, org_id: str, first: dict, second: dict):
+        """Replace the org's api_keys rows with exactly two LIVE
+        non-bootstrap rows so the fake's cap-revoke victim is deterministic."""
+        self._seed_key_rows(org_id, (first, second))
 
     def _by_id(self) -> dict:
         return {k["id"]: k for k in self.fake.tables.get("api_keys", [])}
@@ -786,6 +797,85 @@ class TestSupabaseLane:
                         headers={"Authorization": f"Bearer {r.json()['key']}"})
         assert r2.status_code == 200, (
             "the minted key must not be the rotation victim: " + r2.text)
+
+    # ── #4550: the cap predicate excludes EXPIRED rows on this lane too ────
+    # The recovery RPC's count and its victim scan used to be expiry-BLIND,
+    # while every Python twin (quota._count_resource, the registry
+    # sdk.signup_token_recover, hosted_api.session_key both lanes) and the
+    # sibling SQL helper public.api_key_slot_count exclude expired rows. At
+    # cap that made an expired-but-unrevoked row push the org "over cap" and
+    # the never-used-first victim scan then revoked a LIVE credential as
+    # collateral while the expired rows survived.
+
+    def test_expired_rows_never_doom_a_live_key_as_cap_collateral(self, client):
+        """#4550: expired-but-unrevoked durables do NOT count and are NOT the
+        revoke axis, so the LIVE key survives the recovery mint.
+
+        The live key is seeded NEVER-USED, which is exactly the harm: under
+        the expiry-blind predicate it sorted first as the LRU victim.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+
+        data = _mint(client)
+        org_id, token = data["org_id"], data["signup_token"]
+        now = datetime.now(UTC)
+        created = (now - timedelta(days=10)).isoformat()
+        expired = (now - timedelta(days=2)).isoformat()
+        used = (now - timedelta(minutes=5)).isoformat()
+        self._seed_key_rows(org_id, [
+            # the LIVE credential — never used, so it sorts FIRST under the
+            # LRU order the RPC's victim scan applies.
+            {"id": "exp4550-live", "created_at": created},
+            # two EXPIRED-but-unrevoked durables, both recently USED (so the
+            # old scan preferred the never-used live key over them).
+            {"id": "exp4550-exp1", "created_at": created,
+             "last_used_at": used, "expires_at": expired},
+            {"id": "exp4550-exp2", "created_at": created,
+             "last_used_at": used, "expires_at": expired},
+        ])
+        # Predicate parity: the ONE shared count already excludes the expired
+        # rows (this is the number the RPC's cap check must agree with).
+        assert _count_resource(org_id, "api_keys") == 1
+
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        rows = self._by_id()
+        assert rows["exp4550-live"]["revoked_at"] is None, (
+            "#4550: expired-but-unrevoked rows must not doom a LIVE key as "
+            "cap collateral")
+        assert rows["exp4550-exp1"]["revoked_at"] is None
+        assert rows["exp4550-exp2"]["revoked_at"] is None
+        # 1 live + the row this call minted: the mint landed and the org sits
+        # AT cap, i.e. no revoke was owed at all.
+        assert _count_resource(org_id, "api_keys") == 2
+        r2 = client.get("/v1/team",
+                        headers={"Authorization": f"Bearer {r.json()['key']}"})
+        assert r2.status_code == 200, r2.text
+
+    def test_expiry_filter_does_not_disable_the_cap_revoke(self, client):
+        """#4550 non-regression: when every counted row is genuinely LIVE the
+        org is over cap after the mint and the LRU rotation still fires — the
+        expiry filter must narrow the predicate, not disable the cap."""
+        from tortoise.quota import _count_resource
+
+        data = _mint(client)
+        org_id, token = data["org_id"], data["signup_token"]
+        self._seed_key_rows(org_id, [
+            {"id": "cap4550-never", "created_at": "2026-08-01T00:00:00Z"},
+            {"id": "cap4550-used", "created_at": "2026-08-02T00:00:00Z",
+             "last_used_at": "2026-08-06T00:00:00Z"},
+        ])
+        assert _count_resource(org_id, "api_keys") == 2  # at cap
+        r = client.post("/v1/agent/signup", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        rows = self._by_id()
+        assert rows["cap4550-never"]["revoked_at"] is not None, (
+            "a genuinely over-cap org still rotates its LRU live slot")
+        assert rows["cap4550-used"]["revoked_at"] is None
+        assert _count_resource(org_id, "api_keys") == 2, (
+            "the cap still holds after the LRU rotation")
 
     # ── Review P0/P1: transport-shape + error-mapping regressions ──────────
     # PostgREST return=minimal does NOT echo volatile SECURITY DEFINER RPC

@@ -189,7 +189,9 @@ def local_state_dir(leaf: str) -> Path:
       and its reader ``session_verify._local_import_receipt`` — a copy whose
       EMPTY-override behaviour differs (the writer takes ``""`` as a value,
       the reader as unset);
-    * the five sibling shell hooks, which do not drop a trailing ``/.``.
+    * the six sibling shell hooks — five of which, unlike this resolver, do not
+      drop a trailing ``/.`` (``cursor-hooks/session-start.sh``, added by
+      #2122, does).
 
     ``TORTOISE_IMPORT_RECEIPT_DIR`` names the RECEIPT dir, so the base is its
     ``.parent``.  An override that is UNSET **or EMPTY** falls back to
@@ -681,7 +683,7 @@ def _claude_layout() -> HarnessLayout:
 
 
 def _cursor_layout() -> HarnessLayout:
-    """The Cursor capture seam as a layout (#3819) — NOT a fork of the logic.
+    """The Cursor seam as a layout (#3819, extended by #2122).
 
     Cursor reads hook registrations from ``~/.cursor/hooks.json`` (verified
     against the installed bundle: ``CursorHooksService`` resolves
@@ -694,6 +696,37 @@ def _cursor_layout() -> HarnessLayout:
     command runs from the hook cwd, not the install dir), and there is no
     matcher key.  ``sessionEnd`` is an IDE-only event: Cursor's docs state
     cloud agents have no editor-lifetime session boundary.
+
+    TWO scripts, because Cursor's seam has two jobs (#2122):
+
+    * ``sessionEnd`` — the capture half (#3819): file the session.
+    * ``sessionStart`` — the injection half (#2122): Cursor's ONE push seam.
+      ``sessionStart`` is the only Cursor event whose output contract carries
+      ``additional_context`` (the cold-context digest). Its per-turn event,
+      ``beforeSubmitPrompt``, can observe/block a prompt but cannot inject
+      (verified against Cursor's hook reference 2026-10-11), so the shared
+      per-turn reflex is deliberately NOT registered here — claiming it would
+      be claiming an unshipped seam.
+
+    This second script is the SEVENTH copy of the HOME-scoped local-state
+    derivation whose claude twin is ``claude-hooks/session-start.sh`` — that
+    copy's comment no longer restates the count, so a count note cannot itself
+    red an already-installed host as "local edit" (see ``detect_install``'s
+    byte comparison).  TWO of the seven drop a trailing ``/.`` — the claude
+    helper and this one — so a ``TORTOISE_IMPORT_RECEIPT_DIR`` ending in
+    ``/.`` still splits them from the five copies that do not; that residual
+    is the #4373 duplication, tracked in #5503.
+
+    ``timeout`` is declared for NEITHER script.  Cursor's hook reference DOES
+    document the unit — ``timeout number ... Execution timeout in seconds`` —
+    but the kill semantics for a fire-and-forget ``sessionStart`` are not
+    documented, and Cursor's own default applies when the key is absent.  The
+    verified-current install (what Cursor 3.20.21 reads today) carries no
+    ``timeout`` key, so omitting it inherits that platform default rather than
+    pinning a budget we would have to defend; ``None`` is the
+    non-speculative choice, and the spec field stays available for the day a
+    budget must be pinned (``sessionEnd`` is IDE-only and joined by Cursor's
+    shutdown, so neither half needs one today).
     """
     return HarnessLayout(
         harness="cursor",
@@ -709,6 +742,11 @@ def _cursor_layout() -> HarnessLayout:
                 "tortoise-session-end.sh", "sessionEnd", None,
                 "hooks/tortoise-session-end.sh",
                 source_subdir="cursor-hooks", source_name="session-end.sh",
+            ),
+            HookScriptSpec(
+                "tortoise-session-start.sh", "sessionStart", None,
+                "hooks/tortoise-session-start.sh",
+                source_subdir="cursor-hooks", source_name="session-start.sh",
             ),
         ),
     )

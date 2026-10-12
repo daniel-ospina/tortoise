@@ -1,0 +1,15 @@
+/tmp/tm7846/evict_cost.py:156: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+  v["redis_version"] = client().info("server").get("redis_version")
+/tmp/tm7846/evict_cost.py:157: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+  mods = client().execute_command("MODULE LIST")
+{"start": {"label": "graph-60001 eviction cost: index vs no index @30k", "port": 16414, "n": 30000, "redis_version": "8.10.2", "graph_module": 60001}}
+{"build_s": 17.9}
+/tmp/tm7846/evict_cost.py:39: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+  return client(decode=False).execute_command("GRAPH.QUERY", GRAPH, sql)
+/tmp/tm7846/evict_cost.py:128: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+  r = client(decode=False)
+/tmp/tm7846/evict_cost.py:71: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+  c = client().info("cpu")
+{"arm_A": {"arm": "no-index", "indexed": false, "dump_mb": 14.42, "restore_s": 0.17, "restore_error": null, "cpu_s": 0.2, "bystander": {"samples": 66, "failed_pings": 0, "first_fail_s": null, "last_fail_s": null, "p50_ms": 1.0, "max_ms": 53.3}, "nodes_after": 30000, "index_after": "NO_INDEX", "knn_after": 0}}
+{"index_status": "OPERATIONAL", "knn_before": 3, "index_ready_s": 4.3}
+{"arm_B": {"arm": "with-index", "indexed": true, "dump_mb": 14.37, "restore_s": 2.62, "restore_error": null, "cpu_s": 2.6, "bystander": {"samples": 68, "failed_pings": 0, "first_fail_s": null, "last_fail_s": null, "p50_ms": 1.0, "max_ms": 2497.7}, "nodes_after": 30000, "index_after": "OPERATIONAL", "knn_after": 3}}

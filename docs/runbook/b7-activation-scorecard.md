@@ -54,8 +54,36 @@ The two non-measured states are **not** interchangeable:
 
 | State | Means | Examples |
 | --- | --- | --- |
-| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated`, `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection) |
+| `unavailable` | the metric exists but could not be read *now* — a retry or a repair fixes it | `analytics_store_unreachable`, `analytics_write_path_unconfigured`, `analytics_page_cap_truncated` (the walk could not be certified COMPLETE — see below), `window_predicate_not_applied`, `unparseable_created_at`, `first_memory_at_missing`, `unparseable_analytic_rows`, `unclassifiable_analytic_rows`, `result_count_not_recorded` (a window predating #3675's deploy), `result_count_unreadable` (a retrieval whose result carried no item collection), `no_memory_in_default_graph_org_scope_unknown` |
 | `not_measurable` | there is nothing to measure, and no retry changes that | `no_memory_produced_in_lifetime` (nothing to recall from); `value_confirmed` (the surviving gap is whether a returned item was *used*, which no surface records) |
+
+**Stage 4's gate and its count have different scopes (#4039).** The gate is the
+org **default graph**'s `first_memory_at`; the count is the org-wide analytics
+stream (`analytics_events` carries no `graph_id`). For a multi-graph org that
+produced memory only outside the default graph, the graph-scoped absence is not
+a fact about the org, so `no_memory_produced_in_lifetime` would be a false claim
+about it. The count is of retrieval **calls**, not answers: a row is counted by
+its `tool_name` alone (`status` and `result_count` are not read), so a call that
+failed (`status` `exec_error`) or returned nothing (`result_count` 0) counts
+exactly like one that returned items. When that count is **exact and positive**
+the stage reports `unavailable` /
+`no_memory_in_default_graph_org_scope_unknown` instead. The refusal is
+deliberately **conservative**: this read cannot tell an org whose memory lives
+in another graph from a single-graph org whose only windowed recall activity
+failed or returned nothing, so such a single-graph org reads `unavailable`
+rather than `not_measurable`. The same org with an exact `0` (or a withheld
+count: a truncated page, an unplaceable or unclassifiable row) still reads
+`no_memory_produced_in_lifetime`: no org-wide call count contradicts the
+gate, and
+this read cannot enumerate the org's other graphs, so that case is
+indistinguishable from a single-graph org with no memory. Making the gate itself
+org-scoped (an org's graph list, then a lifetime memory scan per graph) would
+remove that residual; it is a new read rather than a disclosure choice — tracked
+in #8149.
+
+In the cohort roll-up this reason is attributed **per org** rather than hoisted
+as a store-level note: it is the org that is ambiguous, not the analytics store.
+The affected orgs are named in `stages.recall_attempted.orgs_unavailable`.
 
 The window guard **fails closed**: a row that is out of window, or that cannot
 be placed on the timeline at all (unparseable, naive, an unexpected type),
@@ -272,8 +300,17 @@ straddles it. This is in the payload's `limitations` too.
 Carried in the payload's `limitations` list — read it before citing a number.
 `recall_attempted` cannot distinguish an answered query from an empty one on its
 own (that is what `recall_returned` adds) and neither can be attributed to a
-session or a graph; the analytics read is capped at 1000 rows (a truncated page
-reports `unavailable`, never a partial count); `recall_returned` is an upper
+session or a graph; its gate is graph-scoped while its count is org-wide, which
+is refused as `no_memory_in_default_graph_org_scope_unknown` when the exact
+org-wide count contradicts the gate (see above); `recall_returned` is an upper
 bound — a returned candidate is not a used one; `value_confirmed` is not
-measurable; and `memory_produced` is extraction-succeeded, not
-memory-that-helped.
+measurable; and `memory_produced` is
+extraction-succeeded, not memory-that-helped.
+
+The analytics read is **keyset-paged to completion** on `id` (#4038), up to
+`recall_page_cap × recall_page_limit` rows (1000 × 100) per window. A walk that
+cannot be certified COMPLETE reports `unavailable` — `analytics_page_cap_truncated`
+when the bound was reached, the store ignored `order`, or it would not advance
+past the cursor, and `analytics_store_unreachable` when it failed mid-walk —
+never a partial count. Both `recall_attempted` and `recall_returned` inherit that
+ladder, so neither can be a lower bound published as exact.

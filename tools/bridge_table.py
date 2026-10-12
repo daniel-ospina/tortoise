@@ -186,10 +186,27 @@ DESTINATION = {
     "tortoise_file_decision": "write_question",
     "tortoise_file_human_approval": "record_decision",
     "tortoise_approve_merge": "approve_merge",
-    # ── Journal — filed post-beta, listed nowhere ────────────────────
-    "tortoise_checkpoint": "REMOVED",
-    "tortoise_diary_write": "REMOVED",
-    "tortoise_diary_read": "REMOVED",
+    # ── Journal — RECONCILED to the owner-approved canonical menu ────
+    # Two owner-approved docs disagreed for the whole life of this table: the
+    # canonical MCP menu ABSORBS all three (row 10 absorbs `diary_write`, row 13
+    # absorbs `checkpoint`, and "Removed entirely" dissolves `diary_read` into
+    # `list_knowledge(kind="diary")`), while `beta-sdk-surface.md` filed the same
+    # three under "Named but not solved" (post-beta, unlisted, #4667) — and this map
+    # followed beta, so it read all three as `REMOVED`.
+    #
+    # The owner ruled which governs (#4282, 2026-10-09): "it maps all three
+    # journaling tools to REMOVED, while the approved menu absorbs … The approval
+    # wins; the table is the defect." Each name therefore retires INTO the
+    # replacement that already exists for it, and the sibling SDK rename table
+    # (`tools/sdk_rename_table.py`) carries the same reconciliation so the two
+    # artifacts cannot contradict each other.
+    #
+    # OVERRIDES: the beta doc's `#4667` post-beta/unlisted reading of the journal —
+    # the canonical menu's absorptions govern, so each journal name retires into the
+    # replacement that already exists for it.
+    "tortoise_diary_write": "create_entity",              # canonical row 10
+    "tortoise_checkpoint": "mine_knowledge_from_session",  # canonical row 13 (`capture_knowledge`, renamed by beta)
+    "tortoise_diary_read": "list_knowledge",               # canonical "Removed entirely": `list_knowledge(kind="diary")`
     # ── Onboarding and packs ────────────────────────────────────────
     "tortoise_onboarding_state": "REMOVED",
     "tortoise_onboarding_seed": "REMOVED",
@@ -249,6 +266,70 @@ DISCRIMINATORS = {
 }
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
+
+# ─────────────────────────────────────────────────────────────────────
+# THE RETIREMENT REASONS — the reconciliation PROOF (#4282).
+#
+# `REMOVED` is a destination with NO target, and before this map it was a bare
+# catch-all: a name could be retired by typing `REMOVED` and nothing recorded WHY.
+# The owner's prerequisite for the migration (2026-10-09) is that every served name
+# "resolves to a target that exists in the approved list, or to an explicit, reasoned
+# retirement" — so a retirement carries its reason here, and `_validate` requires
+# this map's key set to be EXACTLY the set of tools mapped to `REMOVED`. A new
+# retirement therefore cannot appear without a recorded reason, and a resolved one
+# cannot leave a stale reason behind (both directions fail the build).
+#
+# The other two non-target destinations are namespaced and self-describing:
+# `tenancy:` is account tenancy (SDK/REST, off the agent surface) and `sdk:` is a
+# builder-only SDK method — neither is a retirement, and neither owes a reason here.
+# ─────────────────────────────────────────────────────────────────────
+REMOVALS: dict[str, str] = {
+    "tortoise_analyze": (
+        "canonical-mcp-tools.md §Removed entirely — spends LLM tokens at read "
+        "time; read-time LLM is not offered (write-time LLM cost is ours)"
+    ),
+    "tortoise_backfill_v25": (
+        "canonical-mcp-tools.md §Removed entirely — a one-shot migration to "
+        "ONTOLOGY v2.5; pre-beta there are no legacy v2.5 graphs to migrate, so "
+        "the tool has no caller"
+    ),
+    "tortoise_onboarding_state": (
+        "settled 2026-09-22 (canonical §run_onboarding) — `run_onboarding` dropped "
+        "for `check_connection`; this tenant-visible READ is rehomed to the tenancy "
+        "block (SDK/REST, GET /v1/onboarding/state), so no capability is deleted"
+    ),
+    "tortoise_onboarding_github_status": (
+        "settled 2026-09-22 (canonical §run_onboarding) — `run_onboarding` dropped "
+        "for `check_connection`; this tenant-visible READ is rehomed to the tenancy "
+        "block (SDK/REST, GET /v1/onboarding/github/status)"
+    ),
+    "tortoise_onboarding_seed": (
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target; a setup "
+        "member, not a tenant-visible read, so it retires with no destination"
+    ),
+    "tortoise_onboarding_demo_create": (
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
+    ),
+    "tortoise_onboarding_github_connect": (
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
+    ),
+    "tortoise_onboarding_github_index": (
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
+    ),
+    "tortoise_onboarding_session_recording": (
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
+    ),
+    "tortoise_packs_list": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
+        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
+        "installation on its agent API"
+    ),
+    "tortoise_pack_install": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
+        "tenant-visible WRITE is preserved there rather than folded into an "
+        "operator-only tool"
+    ),
+}
 
 # Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md`, GENERATED
 # ON DEMAND — not committed, #5373; render with `uv run python tools/sdk_rename_table.py`;
@@ -624,6 +705,21 @@ def _validate(rows: list[dict]) -> list[str]:
         # the registry, never on the target not having been built yet.
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dest[len(ns):]):
             errs.append(f"NAMESPACED destination is not a method name for {name}: {dest!r}")
+
+    # The reconciliation PROOF (#4282): a retirement must carry an explicit reason, and
+    # the reason set must be EXACTLY the retired set — so a new `REMOVED` cannot appear
+    # without a recorded reason, and a resolved one cannot leave a stale reason behind.
+    retired = {n for n, d in DESTINATION.items() if d == "REMOVED"}
+    for name in sorted(retired - set(REMOVALS)):
+        errs.append(
+            f"UNREASONED retirement (no REMOVALS entry): {name} — a retirement is a "
+            "surface decision, so it must name the doc that authorises it"
+        )
+    for name in sorted(set(REMOVALS) - retired):
+        errs.append(
+            f"STALE retirement reason (no longer mapped to REMOVED): {name} — "
+            "remove its REMOVALS entry, or restore its destination"
+        )
 
     # A disclosure that has rotted is worse than none: it would name a row that no longer
     # exists, or a "documented reading" that is not a destination at all.

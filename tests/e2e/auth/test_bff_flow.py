@@ -36,9 +36,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
-from bff_test_helpers import d1_sqlite_files, require_toolchain
+from bff_test_helpers import d1_sqlite_files, dashboard_persist_args, require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # The BFF moved to the DASHBOARD Pages project (issue #4054). A Pages project's
@@ -141,6 +142,19 @@ def stack():
             wrangler, "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
+            # PIN the D1 state root (`test_bff_start_provider.py` already does).
+            # Wrangler resolves it by walking UP from the cwd, so a checkout
+            # nested under a directory holding a `.env`/`package.json` does not
+            # write to `<dashboard>/.wrangler/state` at all: this module's
+            # D1-reading tests then found nothing to patch (`d1_sqlite_files`
+            # globs the pinned path) and failed with a message naming neither
+            # wrangler nor the path. Worse for THIS suite, the unpinned root is
+            # machine-global, so two checkouts running it at once share one
+            # `sessions`/`auth_flows` database whose schema `CREATE TABLE IF NOT
+            # EXISTS` will not repair. In CI the walk stops at the checkout, so
+            # this is a no-op there — it exists so the suite reads the database
+            # it asserts on, wherever it is run from.
+            *dashboard_persist_args(),
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             "-b", f"AUTH_CALLBACK_URL={APP}/auth/callback",
@@ -380,6 +394,507 @@ def test_callback_with_forged_flow_cookie_is_rejected(stack):
     )
     assert status == 302, f"forged flow must be answered with the interstitial, got {status}"
     assert "interstitial=1" in headers.get("Location", ""), headers.get("Location")
+
+
+# ---------------------------------------------------------------------------
+# Contract: a DENIED / failed provider round-trip reaches the #1224 banner
+# ---------------------------------------------------------------------------
+# Under the BFF the provider's outcome comes back to `/auth/callback` — and
+# GoTrue carries a FAILURE there as `error` / `error_code` / `error_description`
+# on the QUERY (`internal/api/external.go` → `redirectErrors`; it mirrors the
+# same params into the FRAGMENT too, which a browser never sends to a server).
+# The callback read only `code`, so the error was discarded and the visitor was
+# sent into a NEW `/auth/start` hop — i.e. straight back to the provider with no
+# explanation, while the page's banner code was unreachable on the BFF path.
+#
+# These tests drive the REAL redirect chain (the mock's `/authorize` answers with
+# GoTrue's exact query+fragment shape), so the channel the server can read is the
+# channel that is exercised.
+@contextlib.contextmanager
+def _provider_denied(error_code: str):
+    """Make the mock's authorize hop answer with a provider error, then reset.
+
+    `error_code=""` reproduces GoTrue's `OAuthError` shape (a visitor denying
+    consent: `error` + `error_description`, NO `error_code`); any other value is
+    emitted as `error_code`, which is the `HTTPError` shape (`bad_oauth_state`
+    is the #1224 state-expiry case).
+    """
+    def _set(mode):
+        req = urllib.request.Request(
+            f"{MOCK_URL}/__mock/fault",
+            data=json.dumps({"providerDenied": mode}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+
+    _set(error_code)
+    try:
+        yield
+    finally:
+        # Reset even on a failing assertion, or the deny mode leaks into every
+        # later test in the module (the mock is module-scoped).
+        with contextlib.suppress(Exception):
+            _set(None)
+
+
+def _drive_to_the_denial(j: Jar) -> str:
+    """start -> authorize and return the denial URL the browser would follow."""
+    status, _, headers = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302, f"/auth/start failed: {status}"
+    assert j.cookie("__Host-authflow"), "a denial is only realistic with a live flow"
+    status, _, headers = j.get(headers["Location"], follow=False)
+    assert status == 302, f"the authorize hop failed: {status}"
+    return headers["Location"]
+
+
+@pytest.mark.parametrize("error_code", ["", "bad_oauth_state"])
+def test_denied_provider_round_trip_reaches_the_banner(stack, error_code):
+    """A denial must surface, and must NOT be answered by restarting OAuth.
+
+    Both GoTrue shapes are covered because the page's own predicate is
+    `error || error_code` — a forwarding rule keyed on `error_code` alone would
+    drop the visitor-denied case, and one keyed on `error` alone would drop
+    nothing here but is not what the page reads.
+    """
+    j = Jar()
+    with _provider_denied(error_code):
+        denial = _drive_to_the_denial(j)
+        assert "error=access_denied" in denial, denial
+        assert "access_denied" in denial.split("#", 1)[0], (
+            "the mock must put the error in the QUERY — a denial carried only in "
+            f"the fragment is invisible to every server: {denial}"
+        )
+
+        # The browser sends the query and drops the fragment; urllib does the
+        # same, so this IS the request /auth/callback actually receives.
+        status, _, headers = j.get(denial, follow=False)
+
+    assert status == 302, f"/auth/callback must redirect, got {status}"
+    loc = headers.get("Location", "")
+    target = urlparse(loc)
+    q = parse_qs(target.query)
+    assert target.path == "/auth", (
+        f"the provider's error must be forwarded to the page that RENDERS the "
+        f"#1224 banner, got {loc!r}"
+    )
+    assert q.get("error") == ["access_denied"], loc
+    assert q.get("error_description") == ["User denied the request"], loc
+    if error_code:
+        assert q.get("error_code") == [error_code], loc
+
+    # The defect: /auth/start mints a fresh flow and bounces the visitor
+    # straight back to the provider — an unexplained denial loop.
+    assert "/auth/start" not in loc, (
+        f"a denial must NOT restart OAuth, got {loc!r} — this is the loop the "
+        "banner exists to break"
+    )
+    # Single-use: the flow is spent, and its cookie must not outlive it.
+    cleared = headers.get("Set-Cookie", "")
+    assert "__Host-authflow=" in cleared and "Max-Age=0" in cleared, (
+        f"the spent flow cookie must be cleared, got {cleared!r}"
+    )
+    assert "__Host-session=" not in cleared, "a denied round-trip must not mint a session"
+
+    # And the hop actually resolves to the document that renders it — the query
+    # must survive `functions/auth/index.ts`'s `/signup` rewrite, or the banner
+    # is still unreachable with a correct-looking redirect.
+    landed, body, _ = j.get(f"{APP}{loc}")
+    assert landed == 200, f"the banner page must serve, got {landed}"
+    assert 'id="error"' in body and "oauthErrorParams" in body, (
+        "the landing document is not the `/auth` page that renders the #1224 banner"
+    )
+
+
+def test_a_callback_with_no_provider_outcome_still_restarts_the_flow(stack):
+    """PAIRED CONTROL: the bare case is not the error case.
+
+    A hit with no `code` and no error is an abandoned/aborted flow, and
+    restarting is the correct answer. If forwarding were unconditional, this
+    would land on `/auth?` with no banner and no way forward.
+    """
+    j = Jar()
+    status, _, headers = j.get(f"{APP}/auth/callback", follow=False)
+    assert status == 302, f"got {status}"
+    assert headers.get("Location", "") == "/auth/start?kind=signin", headers.get("Location")
+
+
+def test_a_denied_round_trip_forwards_a_bounded_description(stack):
+    """A hostile / oversized description must not become an unsendable header.
+
+    The forwarded values are attacker-forgeable on a crafted link, and they are
+    written into a `Location` header — so an unbounded `error_description` turns
+    a denial into a redirect the runtime cannot send. 300 is the bound the
+    consent surface already uses (#3496 `boundedText`).
+    """
+    hostile = "A" * 2000 + "\r\nX-Injected: 1\x00tail"
+    j = Jar()
+    # No flow needed: the `!code` branch decides before the class-8 binding, and
+    # an over-long description is exactly the crafted-URL case.
+    status, _, headers = j.get(
+        f"{APP}/auth/callback?error=access_denied&error_code=bad_oauth_state"
+        f"&error_description={quote(hostile, safe='')}",
+        follow=False,
+    )
+
+    assert status == 302, f"a hostile description must not 500 the callback, got {status}"
+    loc = headers.get("Location", "")
+    assert not any(ch in loc for ch in "\r\n\x00"), f"raw control chars in Location: {loc!r}"
+    forwarded = parse_qs(urlparse(loc).query).get("error_description", [""])[0]
+    assert len(forwarded) <= 300, f"unbounded forwarding: {len(forwarded)} chars"
+    assert forwarded.startswith("A" * 100), forwarded[:200]
+
+
+def test_a_denied_round_trip_forwards_error_code_without_error(stack):
+    """The page's predicate is `error || error_code` — either signal is enough.
+
+    GoTrue's HTTPError shape sets both, but the PAGE also arms its banner on
+    `error_code` alone; a forwarding rule that required `error` would drop it.
+    """
+    j = Jar()
+    status, _, headers = j.get(f"{APP}/auth/callback?error_code=bad_oauth_state", follow=False)
+
+    assert status == 302, f"got {status}"
+    loc = headers.get("Location", "")
+    assert parse_qs(urlparse(loc).query).get("error_code") == ["bad_oauth_state"], loc
+    assert "/auth/start" not in loc, loc
+
+
+# ---------------------------------------------------------------------------
+# #1871: the LINK flow's return path
+#
+# `/auth/link` records the user the flow was started for (`auth_flows.user_id`,
+# taken from the SERVER session row). The OAuth return must NOT complete as a
+# different account — and a link flow's failure must land the (still signed in)
+# user back on the page they started from, never on the sign-in card.
+#
+# Evidence for why the account guard is a BACKSTOP rather than the reported
+# path: GoTrue refuses the cross-account case itself —
+# `internal/api/identity.go::linkIdentityToUser` returns 422
+# `identity_already_exists` ("Identity is already linked to another user") before
+# any token is issued, and `redirectErrors` (internal/api/external.go) puts that
+# on `redirect_to` as query+fragment params. Both halves are asserted here: the
+# rejection LANDING (the reproduction on the current BFF) and the guard.
+# ---------------------------------------------------------------------------
+def _patch_flow(flow_id: str, *, kind: str, user_id: str | None, next_path: str) -> None:
+    """Write the columns the LINK route would have written, on a real row.
+
+    The row and its `__Host-authflow` cookie come from `/auth/start` itself, so
+    the DDL and the cookie attributes under test are the application's rather
+    than a copy that can drift; `/auth/link` is not reachable from this suite
+    (its mock lives in `test_link_flow.py`), so the three columns that make a
+    flow a LINK flow — the binding, the kind, and `next` — are patched in here.
+
+    The `user_id` column is created FIRST, exactly as `/auth/link`'s
+    `ensureLinkFlowTable` does: it is added lazily by that route, so a database
+    that has only ever served sign-ins does not have it.
+    """
+    import sqlite3
+
+    patched = 0
+    for db in d1_sqlite_files(DASHBOARD_DIR):
+        try:
+            con = sqlite3.connect(db)
+            try:
+                con.execute("ALTER TABLE auth_flows ADD COLUMN user_id TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            cur = con.execute(
+                "UPDATE auth_flows SET kind = ?1, user_id = ?2, next = ?3 WHERE flow_id = ?4",
+                (kind, user_id, next_path, flow_id),
+            )
+            patched += cur.rowcount
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+    assert patched == 1, (
+        f"expected to patch exactly one auth_flows row for {flow_id!r}, patched {patched} "
+        "— the test would otherwise assert against a flow that is not a link flow"
+    )
+
+
+def _drop_binding_column() -> bool:
+    """Remove the lazily-added binding column, as a start-only database has it.
+
+    Returns True when the column is ABSENT afterwards (already absent counts —
+    that IS the state under test); False only when it is still there, which is
+    SQLite before 3.35 (no `DROP COLUMN`) or a failed drop. A False return makes
+    the caller FAIL rather than quietly assert less than it claims: a missing
+    column is the condition that made a plain `SELECT … user_id …` break every
+    OAuth return, and that is the case this test exists to pin.
+    """
+    import sqlite3
+
+    for db in d1_sqlite_files(DASHBOARD_DIR):
+        try:
+            con = sqlite3.connect(db)
+            try:
+                con.execute("ALTER TABLE auth_flows DROP COLUMN user_id")
+                con.commit()
+            except sqlite3.OperationalError:
+                # Already absent, or this SQLite cannot drop columns.
+                con.rollback()
+            still_there = any(
+                r[1] == "user_id" for r in con.execute("PRAGMA table_info(auth_flows)")
+            )
+            con.close()
+            return bool(not still_there)
+        except Exception:
+            continue
+    return True
+
+
+def _mint_link_flow(j: Jar, *, user_id: str | None, next_path: str, with_code: bool):
+    """Start a real flow, make it a LINK flow, and (optionally) take the
+    authorize hop so a PKCE code exists for the callback.
+
+    Returns `(flow_id, callback_url | None)`.
+    """
+    status, _, headers = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302, f"/auth/start failed: {status}"
+    callback_url = None
+    if with_code:
+        status, _, headers = j.get(headers["Location"], follow=False)
+        assert status == 302, f"the authorize hop failed: {status}"
+        callback_url = headers["Location"]
+        assert "code=" in callback_url, callback_url
+    flow_id = j.cookie("__Host-authflow")
+    assert flow_id, "no flow cookie was minted"
+    _patch_flow(flow_id, kind="link", user_id=user_id, next_path=next_path)
+    return flow_id, callback_url
+
+
+def _flow_exists(flow_id: str) -> bool:
+    import sqlite3
+
+    for db in d1_sqlite_files(DASHBOARD_DIR):
+        try:
+            con = sqlite3.connect(db)
+            row = con.execute(
+                "SELECT 1 FROM auth_flows WHERE flow_id = ?1", (flow_id,)
+            ).fetchone()
+            con.close()
+            if row:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def test_a_link_return_for_another_account_never_replaces_the_session(stack):
+    """THE #1871 GUARD. A link return that resolves to a different account must
+    not mint a session — the browser keeps the account it already had.
+
+    The session is established FIRST (a real full sign-in), so "unchanged" is
+    asserted against a real handle rather than against absence.
+    """
+    j = Jar()
+    status, _, _ = j.get(f"{APP}/auth/start")
+    assert status == 200, "the sign-in chain should complete"
+    handle_before = j.cookie("__Host-session")
+    assert handle_before, f"need a session first; hops={j.hops}"
+
+    flow_id, callback_url = _mint_link_flow(
+        j, user_id="user-someone-else", next_path="/?link_flow=ref.abc", with_code=True
+    )
+    assert callback_url
+
+    status, loc, set_cookie = _jar_call(j, urllib.request.Request(callback_url))
+
+    assert status == 302, f"the callback must redirect, got {status}"
+    target = urlparse(loc)
+    q = parse_qs(target.query)
+    assert q.get("link_mismatch") == ["1"], (
+        f"a cross-account link return must be marked for the app, got {loc!r}"
+    )
+    assert target.path == "/", f"must land on the flow's own `next`, got {loc!r}"
+    assert q.get("link_flow") == ["ref.abc"], (
+        f"the intent ref must survive so the app knows which link failed, got {loc!r}"
+    )
+    assert "__Host-session=" not in set_cookie, (
+        f"SECURITY: a link return for ANOTHER account minted a session: {set_cookie!r}"
+    )
+    assert j.cookie("__Host-session") == handle_before, "the existing session was replaced"
+    assert "__Host-authflow=" in set_cookie and "Max-Age=0" in set_cookie, (
+        f"the spent flow cookie must be cleared: {set_cookie!r}"
+    )
+    # Single-use, and the refusal consumed it (no replay of the same code).
+    assert not _flow_exists(flow_id), f"flow {flow_id!r} survived the refusal"
+
+    # The user is still signed in, as the SAME account, on the data path.
+    s, body, _ = j.get(f"{APP}/api/session")
+    assert s == 200, f"the original session must still work, got {s} {body}"
+    assert json.loads(body)["user"]["id"] == "user-123", body
+
+
+def test_a_link_return_for_the_same_account_still_mints_the_session(stack):
+    """PAIRED CONTROL: the guard must not break the working same-account link.
+
+    Same flow shape as the refusal case, with the recorded uid equal to the
+    exchanged subject. If the guard were keyed on `kind` alone (or on the mere
+    presence of `user_id`), this would fail.
+    """
+    j = Jar()
+    flow_id, callback_url = _mint_link_flow(
+        j, user_id="user-123", next_path="/?link_flow=ref.abc", with_code=True
+    )
+    assert callback_url
+
+    status, loc, set_cookie = _jar_call(j, urllib.request.Request(callback_url))
+
+    assert status == 302, f"got {status}"
+    assert "link_mismatch" not in loc, f"a same-account link was refused: {loc!r}"
+    assert parse_qs(urlparse(loc).query).get("link_flow") == ["ref.abc"], loc
+    assert "__Host-session=" in set_cookie, (
+        f"a same-account link MUST mint the session, got {set_cookie!r}"
+    )
+    assert not _flow_exists(flow_id), "the flow must be single-use"
+
+    s, body, _ = j.get(f"{APP}/api/session")
+    assert s == 200 and json.loads(body)["user"]["id"] == "user-123", body
+
+
+def test_a_link_row_without_a_recorded_user_fails_closed(stack):
+    """A `link`-kind row with NO binding must refuse, never wave the flow through.
+
+    Two ways to reach that state, and the test drives both:
+      * `user_id` is NULL on a row whose table HAS the column; and
+      * the column itself is absent, because it is added lazily by `/auth/link`
+        and a database that has only ever served sign-ins has no such column.
+        `/auth/start` stores `kind` from the query string unvalidated, so
+        `?kind=link` mints exactly this row — the case that made a plain
+        `SELECT … user_id …` fail EVERY OAuth return with a 503.
+    """
+    j = Jar()
+    status, _, headers = j.get(f"{APP}/auth/start?kind=link", follow=False)
+    assert status == 302, f"/auth/start failed: {status}"
+    flow_id = j.cookie("__Host-authflow")
+    assert flow_id
+    assert _drop_binding_column(), (
+        "the binding column is still present — the missing-column fallback is NOT "
+        "exercised by this run (SQLite < 3.35 cannot DROP COLUMN)"
+    )
+
+    status, _, headers = j.get(headers["Location"], follow=False)
+    assert status == 302, f"the authorize hop failed: {status}"
+    callback_url = headers["Location"]
+
+    status, loc, set_cookie = _jar_call(j, urllib.request.Request(callback_url))
+
+    assert status == 302, (
+        f"a missing binding column must not 503 the callback (that is every "
+        f"OAuth return on a start-only database), got {status}"
+    )
+    assert parse_qs(urlparse(loc).query).get("link_mismatch") == ["1"], loc
+    assert "__Host-session=" not in set_cookie, (
+        f"an unverifiable link flow minted a session: {set_cookie!r}"
+    )
+
+
+def test_a_link_row_with_a_null_binding_fails_closed(stack):
+    """The same property on a table that DOES have the column: NULL is not a match."""
+    j = Jar()
+    _flow_id, callback_url = _mint_link_flow(
+        j, user_id=None, next_path="/?link_flow=ref.null", with_code=True
+    )
+    assert callback_url
+
+    status, loc, set_cookie = _jar_call(j, urllib.request.Request(callback_url))
+
+    assert status == 302, f"got {status}"
+    assert parse_qs(urlparse(loc).query).get("link_mismatch") == ["1"], loc
+    assert "__Host-session=" not in set_cookie, (
+        f"an unverifiable link flow minted a session: {set_cookie!r}"
+    )
+
+
+def test_a_failed_link_round_trip_lands_on_the_profile_not_the_signin_card(stack):
+    """The REPRODUCTION's landing. GoTrue answers `identity_already_exists` as an
+    error on `redirect_to` (no code), so no session is minted — but the visitor
+    is a SIGNED-IN user mid-task on their profile, and `/auth` would answer that
+    with "Sign-in failed" and no way back. A link flow's failure returns to the
+    page the flow started from, carrying the provider's error code.
+    """
+    j = Jar()
+    _mint_link_flow(
+        j, user_id="user-123", next_path="/?link_flow=ref.abc", with_code=False
+    )
+
+    # The query GoTrue's `redirectErrors` composes onto `redirect_to`.
+    status, loc, set_cookie = _jar_call(
+        j,
+        urllib.request.Request(
+            f"{APP}/auth/callback?error=access_denied"
+            "&error_code=identity_already_exists"
+            "&error_description=Identity+is+already+linked+to+another+user"
+        ),
+    )
+
+    assert status == 302, f"got {status}"
+    target = urlparse(loc)
+    q = parse_qs(target.query)
+    assert target.path == "/", (
+        f"a failed LINK must return to the app page it started from, got {loc!r}"
+    )
+    assert q.get("link_failed") == ["identity_already_exists"], loc
+    assert q.get("link_flow") == ["ref.abc"], loc
+    assert "__Host-session=" not in set_cookie, "a provider error must not mint a session"
+    # The flow cookie is spent. The ROW is deliberately left to the producer's
+    # expiry sweep (#3647) — that is the contract every provider-error branch on
+    # this route already has, and no code was exchanged here, so there is no
+    # single-use binding to consume.
+    assert "__Host-authflow=" in set_cookie and "Max-Age=0" in set_cookie, (
+        f"the spent flow cookie must be cleared: {set_cookie!r}"
+    )
+
+
+def test_a_link_failure_code_is_bounded_and_allowlisted(stack):
+    """The code is written into a `Location` header and arrives on a URL a
+    visitor can compose. Only GoTrue's own `error_code` vocabulary survives;
+    anything else collapses to `other` (the app maps the known ones to copy).
+    """
+    j = Jar()
+    _mint_link_flow(j, user_id="user-123", next_path="/?link_flow=ref.abc", with_code=False)
+
+    hostile = "<script>alert(1)</script>" + "A" * 200
+    status, loc, _ = _jar_call(
+        j,
+        urllib.request.Request(
+            f"{APP}/auth/callback?error=access_denied"
+            f"&error_code={quote(hostile, safe='')}"
+        ),
+    )
+    assert status == 302, f"a hostile code must not 500 the callback, got {status}"
+    assert not any(ch in loc for ch in "\r\n\x00"), f"raw control chars in Location: {loc!r}"
+    code = parse_qs(urlparse(loc).query).get("link_failed", [""])[0]
+    assert code == "other", f"a non-GoTrue code must collapse to `other`, got {code!r}"
+
+
+def test_a_signin_failure_still_reaches_the_banner(stack):
+    """PAIRED CONTROL for the reroute: only LINK flows go back to the app. A
+    sign-in flow's provider error must keep reaching the #1224 banner.
+
+    `test_denied_provider_round_trip_reaches_the_banner` covers the same property
+    end-to-end through `/auth/start`; this pins it for the shape where a flow row
+    exists and the error arrives on the callback query.
+    """
+    j = Jar()
+    status, _, _headers = j.get(f"{APP}/auth/start", follow=False)
+    assert status == 302
+    assert j.cookie("__Host-authflow"), "a sign-in flow must be live for this control"
+
+    status, loc, _ = _jar_call(
+        j,
+        urllib.request.Request(
+            f"{APP}/auth/callback?error=access_denied&error_code=bad_oauth_state"
+        ),
+    )
+    assert status == 302, f"got {status}"
+    assert urlparse(loc).path == "/auth", f"a sign-in failure belongs on /auth, got {loc!r}"
+    assert "link_failed" not in loc, loc
 
 
 def test_email_confirmation_completes_through_the_interstitial(stack):

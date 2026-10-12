@@ -1307,21 +1307,34 @@ class TestHostedCommitSeam:
 
 class TestEntitySupersessionGuard:
     def test_subject_kind_successor_is_reported_accurately(self, sdk):
-        """(1) Fails if a subject-kind successor produces the generic
-        "dangling successor" message (misdiagnosing a correctly-typed node as
-        missing) or is silently dropped. (2) Fixture: a supersession record
-        whose successor IS a :Subject — reachable.
+        """(1) Fails if the subject-kind successor path regresses: the record
+        must APPLY (ref `status` -> `superseded`, `supersededBy` -> the
+        successor) rather than fall through to the Object lane's
+        dangling-successor warning or to the ref-side "not a :Subject"
+        refusal. (2) Fixture: BOTH endpoints ARE :Subject — the ref
+        `old thing` is created as a Subject, so ref resolution reaches the
+        subject lane and the applied outcome is reachable. The former
+        assertion (a `":Subject" in m` substring match) also passed on the
+        unrelated ref-not-found refusal, so it pinned nothing.
         """
         from tortoise.commit_ops import apply_supersessions
+        sdk.create_entity("subject", "old thing", subjectKind="core:team")
         sdk.create_entity("subject", "the team", subjectKind="core:team")
         msgs: list[str] = []
-        apply_supersessions(
+        skips: list[dict] = []
+        applied = apply_supersessions(
             sdk._get_proj(), sdk,
             [{"superseded": "old thing", "supersedes_by": "the team",
               "evidence": "test"}],
-            session_id="s-sup-1370",
+            session_id="s-sup-1370", skipped=skips,
             warn=lambda m, *a, **k: msgs.append(m % a if a else m))
-        assert any(":Subject" in m for m in msgs), msgs
+        assert applied == 1, (applied, msgs, skips)
+        assert skips == [], skips
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Subject {name:'old thing'}) "
+            "RETURN s.status, s.supersededBy").result_set
+        assert len(rows) == 1, rows
+        assert tuple(rows[0]) == ("superseded", "the team"), rows
         assert not any("dangling successor" in m for m in msgs), msgs
 
 

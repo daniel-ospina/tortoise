@@ -697,6 +697,37 @@ def test_hosted_shape_fired_goldens(sdk, monkeypatch):
     assert res2["evidence"] == GOLD_FIRED_COMPARE_HOSTED, res2["evidence"]
 
 
+def test_relative_date_lookup_fires_on_the_named_day(sdk, monkeypatch):
+    """#2655 end-to-end: a calendar-anchored question resolves its DAY from
+    ``question_date`` and the fired block is the day's own rows.
+
+    Base graph: session B (2026-09-01) carries pB-couch-sold (when),
+    pB-sofa-delivered (createdAt) and the evB-sofa Event (startedAt).
+    ``question_date`` 2026-09-07 (a Monday) makes "last Tuesday" = 2026-09-01,
+    so all THREE rows of that day are admitted — no subject is resolved.
+    """
+    ag.build_base_graph(sdk)
+    q = "Who did I meet with during the lunch last Tuesday?"
+    aa = run_ask_assembled(sdk, q, question_date="2026-09-07")
+    assert aa.fired is True, aa
+    assert aa.shape == "relative-date-lookup", aa.shape
+    assert aa.subjects == [], "the day is the scope — there is no subject"
+    assert "DATE (last tuesday): 2026-09-01" in aa.evidence, aa.evidence
+    # the day's rows (one per kind: point/when, point/createdAt, event)
+    assert "sold the old couch and ordered a new sofa instead" \
+        in aa.evidence, aa.evidence
+    assert "the new sofa was delivered on the first of september" \
+        in aa.evidence, aa.evidence
+    assert "sold the old couch and ordered a sofa" in aa.evidence, aa.evidence
+    ids = {h.get("id") for h in aa.post_cap_lines}
+    assert {"pB-couch-sold", "pB-sofa-delivered"} <= ids, ids
+    # the as-of discipline: session A's 2026-08-10 rows are NOT in a day
+    # lookup for 2026-09-01
+    assert "bought the grey couch from ikea for 800 dollars" \
+        not in aa.evidence, aa.evidence
+    assert aa.retrieval_degraded is False
+
+
 def test_positive_fts_paraphrase_fires(sdk, monkeypatch):
     """Docker positive: 'the couch I bought in March' resolves via name-token
     FTS (source=fts) AND the fired path assembles the state-header block."""

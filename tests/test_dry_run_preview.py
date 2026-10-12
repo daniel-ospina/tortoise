@@ -496,6 +496,43 @@ class TestBlastRadius:
         assert preview["successor_nodes"] == 2, preview
         assert preview["edges_created_at_new"] == 2, preview
 
+    def test_supersede_preview_self_edge_guard_covers_every_successor_node(
+            self, sdk):
+        """#7822: the 2b no-self-edge guard mirrors the writer over EVERY node
+        carrying the successor id.
+
+        With a duplicated successor id the writer's MERGE binds every one of
+        them, so an old edge ending at a LATER successor is DELETE-ONLY — a
+        transfer would mint the phantom ``(new)-[:aboutPoint]->(new)`` there.
+        The old point carries an edge to BOTH successor nodes, so exactly one
+        was unprotected whichever row the server returned first: the preview
+        must report BOTH as dropped and transfer neither.
+        """
+        proj = sdk._get_proj()
+        old = _seed_point(sdk, "old")
+        proj.g.query(
+            "CREATE (n:Point {id:'newdup7822', content:'x', "
+            "pointKind:'statement'})")
+        proj.g.query(
+            "CREATE (n:Point {id:'newdup7822', content:'y', "
+            "pointKind:'statement'})")
+        proj.g.query(
+            "MATCH (o:Point {id:$o}), (t:Point {id:$t}) "
+            "CREATE (o)-[:aboutPoint]->(t)",
+            params={"o": old, "t": "newdup7822"})
+        from tortoise.mcp_server import _preview_supersede
+        preview = _preview_supersede(sdk, old, "newdup7822")
+        drops = [d for d in preview["edges_dropped"]
+                 if "successor" in (d.get("reason") or "")]
+        assert len(drops) == 2, preview
+        assert preview["edges_created_at_new"] == 0, preview
+        # Parity: the writer's own end-state agrees with the preview — no
+        # self-edge on any successor node, no transferred aboutPoint edge.
+        sdk.supersede(old, "newdup7822")
+        assert proj.g.query(
+            "MATCH (a:Point {id:'newdup7822'})-[:aboutPoint]->"
+            "(b:Point {id:'newdup7822'}) RETURN count(*)").result_set[0][0] == 0
+
     def test_supersede_preview_excludes_a_pre_existing_successor_edge(self, sdk):
         """`new` already carrying the destination edge means the writer's MERGE
         is a no-op — the preview must not claim a net-new edge."""

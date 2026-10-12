@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-10
+updated: 2026-10-11
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -88,6 +88,21 @@ doc_status: live
 > needs the inversion guards the Point window needed (#3980/#4021/#5358/#5360);
 > `Subject`/`Object` windows remain ❌ (§4.2/§4.3).
 >
+> **Changelog v3.23 (2026-10-11 — issue #1423 — Subject status is projection-owned, and supersession reaches the Subject family):**
+> §4.2's `status` cell recorded a **capability gap** ("projection-owned status is planned, NOT yet
+> implemented on Subject", #2295) and the Subject family had no supersession path at all:
+> `commit_ops.apply_supersessions` refused a record whose successor was a `:Subject` (the #1370
+> warn-and-skip), so a replaced team/role/person stayed `live` and search-visible forever. Both are
+> now built. `_upsert_subject` **seeds** `status` ON CREATE and `status` ∈ `_SUBJECT_HANDLED`, so the
+> Object's #1350/#2194 clobber guard applies to Subjects too; the supersession write goes through the
+> generic entity surface (`EntityMutated op="supersede"`, journaled with `status`/`supersededBy`/
+> `supersededAt`), which the ONE `SET n += $state` arm replays in all four engines; and
+> `commit_ops.SUBJECT_TERMINAL_STATUSES` excludes terminal Subjects from the four retrieval legs by
+> default. §4.2's `status` row moves ⚠️ → ✅ and gains `supersededBy`/`supersededAt`. **No model
+> change** — the Subject lifecycle vocabulary and the `superseded, never deleted` doctrine are
+> unchanged; this is the declaration catching up to the build. (The Subject `validFrom`/`validTo`
+> WINDOW is a separate row and stays ❌ — #1423 does not touch it.)
+>
 > **Changelog v3.22 (2026-10-10 — issue #7902 — the operator-endpoint WRITE path admits the four epistemic labels):**
 > The owner ruling #7813 makes confidence propagate across :Point/:Subject/:Object/:Event. (#7853's
 > read-widening branch is unmerged; on `main` the EP reads and the WRITE path are still Point/Event.)
@@ -133,6 +148,15 @@ doc_status: live
 >   **Object** (born live already); the born-live rule is the legacy-Point-leg
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
+>
+> **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
+> §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
+> recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
+> against it, warning with the valid alternatives when a value is out of vocabulary, retired or
+> missing (warn-not-block, W2). A relation declaration may carry **`nearMisses`**, mirroring
+> `kindDefs`, resolved across loaded packs. The both-ways names state their direction
+> (`mutuallySupportive`, `mutuallyExclusive`); the one-way names keep theirs (`addresses`, `supports`,
+> `refutes`).
 >
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
@@ -994,7 +1018,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `foaf:name` / `schema:name` | ⚠️ | Human-readable name |
 | `subjectKind` | string | ✅ | `dcterms:type` | ✅ | organization, team, role, legalPerson, naturalPerson, other |
-| `status` | string | — | `pav:status` | ⚠️ | Lifecycle: draft, live, superseded, deprecated, archived — **projection-owned status is planned, NOT yet implemented on Subject**; SDK-created subjects currently carry `status: "live"` via the extra-props path (`_persist_extra_props` — `status` ∉ `_SUBJECT_HANDLED`, #2295): `_upsert_subject` itself writes only `id`/`subjectKind`/`createdAt`/`embedding` |
+| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, superseded, deprecated, archived. **Projection-owned since #1423** — the Subject twin of the Object status cache (§11: the journal is the reconstruction source, the property is a cache). `_upsert_subject` SEEDS it ON CREATE (`status=coalesce($st,'live')`) and `status` ∈ `_SUBJECT_HANDLED`, so `_persist_extra_props` never rewrites it on MATCH — the #1350/#2194 clobber guard ported to Subject (before #1423 `status` rode the extras lane, which applies ON MATCH, so a **re-mention of a superseded team/role/person reset it to `live` live-side while replay kept the supersession** — the #2193 live≠replay class, pinned by `tests/test_subject_supersession_1423.py`). Supersession folds through the generic entity surface: `commit_ops.apply_supersessions` writes `status`/`supersededBy`/`supersededAt` and journals `EntityMutated op="supersede"`, which the ONE `SET n += $state` arm replays in all four engines. **Write side (review P1)**: `create_entity`/`update_entity` validate a Subject `status` against `commit_ops.SUBJECT_STATUS_VALUES` (this §4.2 lifecycle) and raise for anything else, so an undeclared value (e.g. `dead`) can neither be stored nor leak. Read side: `commit_ops.SUBJECT_TERMINAL_STATUSES` (superseded / deprecated / archived / retracted — `retracted` is not among the §4.2 declared verbs and the write guard REFUSES it, but the read set is the NET for a state a legacy/pre-fix SDK or a raw producer may already have stored, on the Object family's own precedent (#2977), where a read vocabulary kept `retracted` with no in-tree writer) excludes terminal Subjects from the four retrieval legs by default |
+| `supersededBy` / `supersededAt` | string / ISO8601 | — | — | ✅ | #1423: successor NAME (stored verbatim) and the fold instant, written together with `status='superseded'` by the subject supersession lane. Carried in the journaled `EntityMutated` `state` map, so a wipe+rebuild restores the ORIGINAL instant rather than a rebuild-time one — the #2164-P4 drift class the Object twin still exhibits (`_fold_object_superseded` falls back to `now` on the live path while replay reads the journaled `ts`). Absent on non-superseded Subjects |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the Subject held in the world (declared §4.7, #3642; not yet written by `_upsert_subject`) |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Subject stopped being current (declared §4.7, #3642) |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2295) |
@@ -1406,7 +1431,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 | Status | Kind | Write path | Transitions to | Notes |
 |--------|------|------------|----------------|-------|
 | `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point`, the capture/extraction writers | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
-| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
+| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source, and writes the operator node's own `status='live'` — `'draft'` when the source is not promoted, #5089), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
 | `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
@@ -1531,21 +1556,46 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Layer | Where | What |
 |-------|-------|------|
 | **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
-| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
-### Semantic Types
+### The semantics vocabulary (Layer 2)
 
-| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
-|------|-----------|------------|-------------------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
-| supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Both ways for a mutual restatement; one way for a directed attack | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
+**Core is canonical, and a pack aligns to it.** The vocabulary is closed: a declaration outside it
+is a typo, not a new meaning, and validation warns, naming the valid alternatives. The value is chosen
+by the **co-variance test** — *does the relationship make the two ends' confidence move together?* —
+and the answer is the direction the relation records.
 
-> **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
+| Semantics | Mechanism | Direction | Meaning |
+|-----------|-----------|-----------|---------|
+| `addresses` | IMPL | `->` | Aimed at / applies to — scope. A one-way link carries weak confidence: a pull request existing that addresses a bug is weak evidence the bug is real. |
+| `supports` | IMPL | `->` | Positive evidence, one way |
+| `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
+| `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
+| `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
+| `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
+| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** `produces` is the encouraged Layer-3 predicate for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
+| `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
+| `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
+| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning |
+
+**Same semantics + different predicates is correct.** `fixes`, `implements` and `deploysTo` all
+carry `addresses`; the **predicate** (Layer 3) keeps them distinct. Semantics is a **meaning**
+vocabulary, not a shape flag — `addresses` and `supports` are different meanings that share a
+direction and are not merged into one word.
+
+> **Direction is recorded on the write — four values: `->`, `<-`, `<->`, `-`.** It comes from the
+> connection's semantics and the recorded value is authoritative. `-` means the connection exists and
+> **no confidence transfers along it**, so direction and confidence-transfer are one axis.
+> *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state*
+> note in the changelog.)*
+
+A relation declaration may also carry **`nearMisses`** — the sibling predicates or semantics it is
+confused with, mirroring `kindDefs`. Each target resolves to a declared predicate or a semantics
+value.
 
 ### Pack Relation Declarations
 
@@ -1556,6 +1606,7 @@ relations:
     semantics: hasPart
     fromKind: dev:epic
     toKind: dev:issue
+    nearMisses: [related]
 ```
 
 ---

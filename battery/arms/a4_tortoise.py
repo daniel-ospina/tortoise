@@ -149,6 +149,7 @@ class A4TortoiseArm:
 
         ev_dir = Path(db_file).parent / "events"
         self._filed_content = {}
+        self._store_integrity_checked = False
         for sc in scenarios:
             ns = scenario_namespace(sc.id)
             sdk = TortoiseSDK(
@@ -157,6 +158,20 @@ class A4TortoiseArm:
                 event_log_path=str(ev_dir / f"{ns}.jsonl"),
             )
             self._sdk_by_id[sc.id] = sdk
+            # #4520: the real lane must not ingest into a store that silently
+            # discards a small-Δ vector overwrite — probe BEFORE the first seed
+            # (one probe per setup, on the first handle). Flag-gated exactly
+            # like `require_observed_hybrid` (the real runner sets it), so
+            # hermetic/equivalence tests keep driving the arm on the embedded
+            # store. Raises VectorOverwriteDiscarded -> the runner's existing
+            # `except HybridRetrievalUnavailable` records an arm skip.
+            if (getattr(self, "require_store_integrity", False)
+                    and not self._store_integrity_checked):
+                from battery.runner.retrieval_preflight import (
+                    require_vector_overwrite_integrity,
+                )
+                require_vector_overwrite_integrity(sdk._get_proj().g)
+                self._store_integrity_checked = True
             if seed_lane:
                 from battery.runner.setup import seed_scenario_via_ingest
                 seed_scenario_via_ingest(sdk, sc, seed_mode=True)
