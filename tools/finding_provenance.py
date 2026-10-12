@@ -99,6 +99,26 @@ The trailing ``(DIRTY)`` is added by ``--emit`` when the worktree has
 uncommitted changes, so the reader can see that HEAD does not describe the
 files that were read.
 
+⛔ WHAT THE LINE IS, AND WHAT GREEN DOES **NOT** MEAN. The line is a CLAIM by
+the author about WHICH TREE the finding was read against. The gate validates
+that claim's ANCESTRY — that the named tree contains the current base — and
+nothing else. It cannot observe whether the finding was actually re-read, so::
+
+    green  means  "this body names a tree that contains the current base"
+    green  does NOT mean  "someone re-measured this finding against it"
+
+Running ``--emit`` and pasting its output therefore CLEARS THIS GATE WITHOUT
+DISCHARGING THE REASON FOR IT. A stamp appended to a body nobody re-read is
+indistinguishable, afterwards, from an earned one — and is worse than a red:
+the red is a question, the green looks like an answer. (Observed for real on
+#6140, 2026-10-12: a stamp was appended after a work-in-flight check, the gate
+went green, and the stamp had to be reverted by hand once it was clear that no
+measurement of the finding had happened.)
+
+So: re-read the finding against the tree you are naming BEFORE you paste the
+line. If you did not re-read it, leave the red — or state the gap in the body —
+rather than clearing it.
+
 Exit codes
 ----------
     0  CURRENT / ok                     (--checkout: current)
@@ -326,7 +346,12 @@ def _validate(root: Path, body: str, base_ref: str, fix: str | None,
             "it was measured against — run `uv run python tools/finding_provenance.py "
             "--emit` and paste its output into the finding body (format: "
             "`Measured at: <ref>@<40-hex-sha> on <YYYY-MM-DD>`). Unknown "
-            "provenance is not a pass (#4290).",
+            "provenance is not a pass (#4290). "
+            "⚠️ But `--emit` reports the tree you are STANDING IN, not the tree "
+            "the finding was read against — so pasting its output clears this "
+            "gate WITHOUT re-measuring, and this gate only ever checks the "
+            "named tree's ancestry. Re-read the finding against that tree "
+            "first; if you did not, leave this red.",
         )
     if len(provs) > 1:
         # Ambiguity is not a pass either: an appended second line must not
