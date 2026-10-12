@@ -8,7 +8,7 @@ deliberately left #7951 OPEN, because doors to the fold remained reachable
 `indexer/github_indexer.py` · `mining.py` · `sdk.py`) at line numbers that had
 already moved twice (`sdk.py` shifted +77 in #7884 alone). This suite is the
 **executable form of that enumeration**: it re-derives every `.apply(` call
-site from the tree and refuses an **unclassified** one.
+site in the scan roots and refuses an **unclassified** one.
 
 WHY AN INVENTORY TEST, AND NOT ONLY BEHAVIOURAL PINS. §17.1's defect was not one
 bad writer; it was that a *new* unjournaled writer could appear **silently** —
@@ -19,9 +19,9 @@ EXACTLY THREE node kinds — (1) a `.apply(...)` attribute call, (2) a `.apply`
 used as a value (`fn = proj.apply`, an attribute not consumed as a call's func),
 and (3) a **compile-time constant `"apply"` passed as a call argument, a
 keyword argument, or a subscript slice** (a placeholder-free f-string is the
-same constant) — and asserts the `(file, enclosing function)` pairs and
-per-function call counts equal `_DOORS`, with any non-call mention classified or
-RED. A receiver heuristic was tried and ABANDONED (round 3 of review): walrus,
+same constant, and so is a single-element `*`-unpacked list/tuple) — and
+asserts the `(file, enclosing function)` pairs and per-function call counts
+equal `_DOORS`, with any non-call mention classified or RED. A receiver heuristic was tried and ABANDONED (round 3 of review): walrus,
 rebind and attribute-target spellings escaped it, so the scan takes no receiver
 filter at all.
 
@@ -203,7 +203,17 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
 
 def _is_apply_literal(node: ast.AST) -> bool:
     """True for a compile-time constant `apply`: a plain string, or a
-    placeholder-free f-string, which the compiler folds to `LOAD_CONST`."""
+    placeholder-free f-string, which the compiler folds to `LOAD_CONST` — and
+    the same constant delivered through a single-element list/tuple, with or
+    without a `*` unpack (`getattr(proj, *["apply"])`, `getattr(proj,
+    *("apply",))`). The value handed to the helper is still the compile-time
+    constant, so the spelling is the same door, not an escape. A MULTI-element
+    unpack is NOT a single constant and stays out (it is not one `"apply"`
+    argument); so does an empty one."""
+    if isinstance(node, ast.Starred):
+        node = node.value
+    if isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) == 1:
+        return _is_apply_literal(node.elts[0])
     if isinstance(node, ast.Constant):
         return node.value == "apply"
     if isinstance(node, ast.JoinedStr):
@@ -221,9 +231,11 @@ class _Scan(ast.NodeVisitor):
     — an attribute not consumed as a call's func), and a compile-time constant
     `"apply"` used as a positional/keyword call argument, a subscript slice, or
     a placeholder-free f-string (`f"apply"`, which the compiler folds to a
-    constant). That covers `getattr`, `builtins.getattr`, `__getattribute__`,
-    `operator.methodcaller`, `functools.partial`, `attrgetter`, `__dict__[…]`,
-    and a custom helper that is CALLED with the literal.
+    constant). A single-element `*`-unpacked list/tuple counts as the same
+    constant (`getattr(proj, *["apply"])`). That covers `getattr`,
+    `builtins.getattr`, `__getattribute__`, `operator.methodcaller`,
+    `functools.partial`, `attrgetter`, `__dict__[…]`, and a custom helper that
+    is CALLED with the literal.
 
     What it does NOT see, by design (this is a drift guard, not a completeness
     claim — see the module docstring): a `"apply"` literal in any other
@@ -402,6 +414,55 @@ def test_every_apply_call_site_is_classified():
                 f"unknown door class {cls!r} — use one of {sorted(known_classes)} "
                 "or `exempt:<reason>`"
             )
+
+
+# ── the indirect spellings the kind-3 matcher must keep covering ─────────
+
+def _apply_mentions(source: str) -> list[str]:
+    """Run the inventory's OWN scanner over `source` and return the mention
+    descriptions it surfaces (call sites + suspicious), so a matcher change is
+    exercised end-to-end rather than at `_is_apply_literal` alone."""
+    scan = _Scan("probe.py")
+    scan.visit(ast.parse(source))
+    return [desc for _rel, _qual, _line, desc in (*scan.sites, *scan.suspicious)]
+
+
+def test_apply_literal_matcher_covers_starred_and_collection_spellings():
+    """Kind 3 covers a compile-time constant `"apply"` handed to a call —
+    INCLUDING the same constant delivered through a single-element list/tuple,
+    `*`-unpacked or not (`getattr(proj, *["apply"])(ev)`). The value reaching
+    the helper is the same compile-time constant, so it is the same door; the
+    scanner must not be silent about it.
+
+    FAILS IF `_is_apply_literal` stops unwrapping `ast.Starred` / a one-element
+    `List`/`Tuple`: that re-opens the spelling the class claims to cover (the
+    guard/doc gap this test pins). MUTATION: with both unwrap branches removed,
+    the `*["apply"]` / `*("apply",)` / `__dict__[*["apply"]]` spellings produce
+    no mention and this test goes RED."""
+    indirect = (
+        'getattr(proj, "apply")(ev)',
+        'getattr(proj, *["apply"])(ev)',
+        'getattr(proj, *("apply",))(ev)',
+        'proj.__dict__["apply"](ev)',
+        'proj.__dict__[*["apply"]](ev)',
+    )
+    for spelling in indirect:
+        mentions = _apply_mentions(spelling)
+        assert any("indirect door" in m or "named-attribute access" in m
+                   for m in mentions), (
+            f"{spelling!r} produced no apply mention — `_is_apply_literal` no "
+            f"longer covers its spelling (the guard/doc gap re-opened); "
+            f"mentions={mentions!r}"
+        )
+    # The boundary that keeps the unwrap from over-reaching: an unpack of TWO
+    # elements passes two arguments, not the single constant `"apply"`, and an
+    # empty one passes none — neither is this door, and neither may be flagged
+    # (a matcher widened to any list would red this half).
+    for not_a_door in ('f(*["apply", "other"])', 'f(*[])'):
+        assert not _apply_mentions(not_a_door), (
+            f"{not_a_door!r} was flagged although it hands the helper no single "
+            "`apply` constant — the matcher over-reached"
+        )
 
 
 # ── the CLOSED door: `_doc_write` is journal-first ────────────────────────
