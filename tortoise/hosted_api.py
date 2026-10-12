@@ -16989,6 +16989,51 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     }
 
 
+async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
+    """#2810: THE one entitlement chokepoint — raise the structured 402 unless
+    *user_id* may own one more free org.
+
+    Every lane that can result in a NEW owned free org calls this and nothing
+    else: ``POST /v1/organizations`` (both control-plane lanes),
+    ``POST /v1/onboarding/team``, and the two anon-claim lanes (``/v1/claim``,
+    ``/v1/claim/email``). Before #2810 each create lane re-implemented the same
+    read-then-raise pair, so a new lane could silently omit it — and ``/v1/claim``
+    did: it binds an anon org to the caller as its OWNER, so one person could
+    mint N anon orgs (``/v1/agent/signup``) and claim each in turn, ending up
+    with N free orgs while the create lanes only blocked the NEXT create.
+
+    The predicate stays ``_owned_free_org_ids`` (ownership-scoped, not the
+    #1877 membership-scoped twin the invite-JOIN gates read — see that
+    helper). Callers that run the check and the write as read-then-write must
+    hold ``_org_create_lock(user_id)`` across BOTH (see the claim lanes, #1954
+    parity for the create lanes).
+
+    ``pool`` mirrors ``_owned_free_org_ids``: the org-create lane passes
+    ``"org"`` so its gate read does not queue behind authentication work;
+    every other caller keeps the default.
+
+    The invite-JOIN gates are deliberately NOT routed here (#2810 Q3): they read
+    the membership-scoped ``_count_active_free_memberships``, and an org OWNER
+    is always also an ACTIVE member of that org, so an owner already fails the
+    free-tier JOIN gate. Routing them here would change the settled invite
+    semantics #2789 pinned out of scope, and would refuse nothing extra.
+
+    KNOWN, DELIBERATELY-UNFIXED hole (recorded, not carried silently): after
+    ``customer.subscription.deleted`` the org drops to
+    ``tier='free', subscription_status='canceled'``, which this predicate counts
+    as free again — so *create A → buy B → cancel B* still ends with two free
+    orgs. The remedy changes the settled counting rule (docs/scoping/
+    2026-09-10-2789-one-free-org.md §2) and is a PRODUCT DECISION, so it is
+    pinned by
+    ``tests/test_one_free_org_entitlement.py::TestCancellationLifecycleKnownHole``
+    rather than improvised here."""
+    free_org_ids = await _owned_free_org_ids(user_id, pool=pool)
+    if free_org_ids:
+        raise HTTPException(
+            status_code=402,
+            detail=_one_free_org_detail(free_org_ids[0]))
+
+
 @app.post("/v1/organizations")
 async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create an org (zero-orgs state). Tier defaults Free; org
@@ -17207,11 +17252,8 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # still passes. Order pinned: 429 → 409 → 402 (a free-capped user creating
     # a duplicate name gets 409, not 402). STRUCTURED detail (#2789): the
     # dashboard renders the three-option dialog from `code`.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"], pool="org")
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the check is the ONE shared chokepoint — never an inline copy.
+    await _assert_free_org_allowance(user["user_id"], pool="org")
 
     org_id = str(_uuid.uuid4().hex[:26])
     # stored name == data-plane namespace (org_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.org_create keeps org_{name} — registry lane tracked in #2023)
@@ -17346,11 +17388,8 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
-    _free_org_ids = await _owned_free_org_ids(user["user_id"])
-    if _free_org_ids:
-        raise HTTPException(
-            status_code=402,
-            detail=_one_free_org_detail(_free_org_ids[0]))
+    # #2810: the shared chokepoint (see also the claim lanes).
+    await _assert_free_org_allowance(user["user_id"])
 
     try:
         # #1921: mint_key=False — the registry twin of the Supabase lane's
@@ -23773,23 +23812,36 @@ async def claim_org(request: Request):
         raise HTTPException(status_code=409,
                             detail="Team has already been claimed")
 
-    # 6. claim_membership service-role RPC (same key, same org, memories
-    #    intact).
+    # 5b. #2810: the ownership entitlement chokepoint. Claiming binds the caller
+    #     to the org's owner row, so it is a create-org-equivalent event for the
+    #     "one free organization per person" rule — without this gate one person
+    #     could mint N anon orgs (/v1/agent/signup) and claim each in turn, and
+    #     the create lanes' cap would only block the NEXT create. Ordering
+    #     mirrors the create lanes (409 → 402): an already-claimed org is still
+    #     a 409 for a capped user. The gate read and the claim_membership write
+    #     are read-then-write (#1954), so the same per-user lock the create
+    #     lanes hold is held across BOTH — without it two concurrent claims of
+    #     two different anon orgs could each read "owns nothing" and both
+    #     commit two free orgs.
     from tortoise.auth import lookup_hash as _lookup_hash
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500. (str(e) not e.message — ClaimError has no .message,
-        # #1765 latent-bug fix.)
-        raise _control_plane_unavailable() from None
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        # 6. claim_membership service-role RPC (same key, same org, memories
+        #    intact).
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500. (str(e) not e.message — ClaimError has no .message,
+            # #1765 latent-bug fix.)
+            raise _control_plane_unavailable() from None
 
     # 7. audit org_claim — provider/email/user_id in detail (0002 has no
     #    provider/email columns; 20260813000004 added detail JSONB).
@@ -23892,22 +23944,35 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if not user_id:
         raise HTTPException(status_code=502, detail="Account created but no user id returned — try again")
 
-    # 3. claim_membership RPC links the new user to the org's owner row
-    try:
-        await _cp_offload(
-            lambda: claim_membership(
-                cp, lookup_hash=_lookup_hash(api_key),
-                user_id=user_id, email=email),
-            op="claim_membership")
-    except ClaimError as e:
-        # The RPC's already_claimed guard may fire if a concurrent OAuth
-        # claim won first — surface as a plain conflict.
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except RuntimeError:
-        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
-        # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500.
-        raise _control_plane_unavailable() from None
+    # 3. #2810: the ownership entitlement chokepoint, then claim_membership
+    #    links the new user to the org's owner row.
+    #
+    #    This lane is invariant-preserving BY CONSTRUCTION — it always mints a
+    #    BRAND-NEW auth user (an existing email is a 409 at the admin-create
+    #    step above), and a brand-new user owns nothing. The gate is applied
+    #    anyway because that safety rests on an EXTERNAL API's behaviour: if
+    #    admin-create ever returns an EXISTING user (i.e. became idempotent on
+    #    email), this lane would silently reopen the multi-free-org hole with no
+    #    other surface noticing. The gate can only fire on exactly that drift —
+    #    when it does, the returned user already existed, so no orphan account
+    #    is created by the refusal.
+    async with _org_create_lock(user_id):
+        await _assert_free_org_allowance(user_id)
+        try:
+            await _cp_offload(
+                lambda: claim_membership(
+                    cp, lookup_hash=_lookup_hash(api_key),
+                    user_id=user_id, email=email),
+                op="claim_membership")
+        except ClaimError as e:
+            # The RPC's already_claimed guard may fire if a concurrent OAuth
+            # claim won first — surface as a plain conflict.
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        except RuntimeError:
+            # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+            # plane outage) must degrade to 503 control_plane_unavailable,
+            # never a raw 500.
+            raise _control_plane_unavailable() from None
 
     # audit
     await _async_audit(request, org_id, "team_claim", resource_type="team",
@@ -27520,12 +27585,8 @@ async def create_onboarding_org(body: dict,
         # collaborator on someone else's free org can still create their own).
         # STRUCTURED detail (#2789) so the wizard lane renders the same
         # three-option dialog from `code`.
-        _free_org_ids = await _owned_free_org_ids(owner_user_id)
-        if _free_org_ids:
-            raise HTTPException(
-                status_code=402,
-                detail=_one_free_org_detail(_free_org_ids[0]),
-            )
+        # #2810: the shared chokepoint (never an inline copy).
+        await _assert_free_org_allowance(owner_user_id)
         return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
