@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import (  # noqa: I001
+    _cmd_install_hooks,
     _harness_mcp_config,
     _harness_stdio_config,
     _onboard_ready_lines,
@@ -556,9 +557,17 @@ class TestPrintHarnessInstructions:
         assert "tortoise-context" not in out, (
             "`tortoise-context` has never existed — the Pi seam is the capture "
             "extension declared in hook_install.ARTIFACT_CONTRACTS")
-        assert "auto-inject" not in out, (
-            "Pi has no per-turn injection seam (#2119, still open) — the "
-            "Pi install promise is capture only")
+        # The gap is Tortoise's wiring of Pi's injection seam, NOT a ceiling in
+        # Pi: Pi's extension API exposes `before_agent_start`, which injects a
+        # message (our own `skill-enforcer`/`loop-enforcer`/`cmux-session`
+        # extensions use it). So do NOT assert "auto-inject" is absent in the
+        # abstract — that would red the build for copy that is TRUE once #2119
+        # lands. Pin the honest disclosure about the SHIPPED extension instead.
+        assert "does not inject context per turn" in out, (
+            "the Pi block must disclose that the SHIPPED extension is capture "
+            "only (Tortoise's per-turn injection is #2119, still open)")
+        assert "#2119" in out, (
+            "the disclosure must point at the issue that wires the seam")
         assert (REPO_ROOT / "tortoise" / "pi-hooks" / PI_EXTENSION_NAME).is_file(), (
             "the advertised extension must be a real file the installer copies")
 
@@ -582,6 +591,10 @@ class TestPrintHarnessInstructions:
         surfaces["onboard completion banner"] = "\n".join(_onboard_ready_lines())
         surfaces["`tortoise install --list` catalogue"] = self._capture_call(
             _install_read_hook_impl, SimpleNamespace(list=True, harness=None))
+        # #3502 P2/P3: the `--uninstall` message names the install path too —
+        # it was the lone retyped literal in the class this guard closes.
+        surfaces["`tortoise install pi --uninstall` message"] = self._capture_call(
+            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
 
         advertised: set[str] = set()
         for label, text in surfaces.items():
@@ -597,6 +610,29 @@ class TestPrintHarnessInstructions:
         assert PI_EXTENSION_NAME in advertised, (
             "the Pi surfaces must name the extension the installer writes; a "
             "guard that also passes when the claim is deleted pins nothing")
+
+    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch):
+        """#3502: `tortoise install pi --uninstall` must name the file the
+        installer writes, DERIVED — never a retyped literal.
+
+        The surface above can only prove the literal is *currently* correct
+        (the literal and the contract agree today). Moving the contract is the
+        drift this pins: with the name patched to something else, a derived
+        message follows it and a hardcoded one does not.
+
+        MUTATION: restore `tortoise-capture.ts` as a literal in
+        `_cmd_install_hooks` → the mutated name never appears → RED.
+        """
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "tortoise.capture_install.PI_EXTENSION_NAME", "tortoise-renamed.ts")
+        out = self._capture_call(
+            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+        assert "tortoise-renamed.ts" in out, (
+            "the --uninstall message retyped the extension name instead of "
+            "deriving it from the install contract:\n" + out)
+        assert "tortoise-capture.ts" not in out, out
 
     @staticmethod
     def _real_extension_names() -> set[str]:

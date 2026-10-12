@@ -2960,10 +2960,15 @@ def _cmd_install_hooks(args) -> int:
     # that `else` branch): `tortoise install pi --uninstall` would otherwise
     # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
     if uninstall and harness == "pi":
+        # Derived from the install contract, never retyped (#3502). The
+        # `cursor` and `openclaw` sibling branches below already interpolate
+        # their layout; a literal here names a file the installer no longer
+        # writes the moment the contract's `install_name` moves — the exact
+        # hardcoded-copy drift class #3502 exists to close.
         print("pi has no shell-hook read seam — nothing for --uninstall to "
               "remove. The pi capture extension (~/.pi/agent/extensions/"
-              "tortoise-capture.ts) is left in place; delete that file to "
-              "uninstall it.")
+              f"{_pi_capture_extension_name()}) is left in place; delete that "
+              "file to uninstall it.")
         return 0
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
@@ -3110,9 +3115,13 @@ def _pi_capture_extension_name() -> str:
 
     This module used to hardcode ``tortoise-context`` — an extension that has
     never existed anywhere in this repo or in agent-infra — and promise a
-    per-turn context injection Pi has no seam for (#2119, still open). Nothing
-    failed when the prose drifted from the artifact because nothing coupled
-    the two; deriving it here is that coupling.
+    per-turn context injection the SHIPPED extension does not do. Pi's
+    extension API does have that seam (``before_agent_start`` can inject a
+    message, and our own extensions use it); what is missing is Tortoise's
+    wiring of it (#2119, still open). Saying otherwise is a false claim about
+    the harness, not honest copy. Nothing failed when the prose drifted from
+    the artifact because nothing coupled the two; deriving it here is that
+    coupling.
     """
     from tortoise.capture_install import PI_EXTENSION_NAME
 
@@ -8325,15 +8334,25 @@ def _print_harness_instructions(harness: str) -> None:
         # #3502: the name is DERIVED from the install contract
         # (``_pi_capture_extension_name``), never written as prose. This block
         # used to advertise a `tortoise-context` extension that has never
-        # existed and a per-turn auto-injection Pi has no seam for — the
-        # install path's one product promise, made falsely to the harness we
-        # ourselves run on. It also told the user to `/reload` to activate it,
-        # contradicting both the install report and the dashboard's Pi setup.
+        # existed and promise a per-turn auto-injection the SHIPPED extension
+        # does not do — the install path's one product promise, made falsely to
+        # the harness we ourselves run on. It also told the user to `/reload` to
+        # activate it, contradicting both the install report and the dashboard's
+        # Pi setup.
+        #
+        # The replacement says what the extension DOES, and scopes the gap to
+        # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
+        # injection seam (``before_agent_start`` injects a message, and our own
+        # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
+        # "Pi cannot inject" would be a false impossibility claim of the same
+        # class as the promise it replaces. What is missing is Tortoise's use of
+        # that seam (#2119, still open).
         _pi_ext = _pi_capture_extension_name()
         print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
         print(f"  {_PI_RESTART_GUIDANCE}")
-        print("  Pi has no per-turn context injection — call tortoise_help() or the")
-        print("  Tortoise MCP tools when you want graph context.")
+        print("  It files your sessions; it does not inject context per turn yet")
+        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
+        print("  want graph context.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":
