@@ -429,5 +429,19 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
         sdk.update_point(mit_id, mitigation_strength="oops")
         got = compute_operator_weight(proj, op["id"])
         assert 0.1 <= got <= 10.0, f"malformed mitigation strength gave {got}"
+
+        # 4. A NON-FINITE strength reached through the STRING "nan": the store
+        #    refuses a real non-finite number outright (UnrepresentableNumberError,
+        #    even on a raw Cypher parameter — so that route is unreachable), but a
+        #    string is persisted unvalidated and converts to NaN. It matters
+        #    because `max([nan, 0.25])` is `nan`, so ONE such row would return NaN
+        #    as the weight of the whole operator.
+        sdk.update_point(mit_id, mitigation_strength="nan")
+        got = compute_operator_weight(proj, op["id"])
+        assert got == got, (
+            f"a non-finite mitigation strength made the weight NaN ({got}) — one "
+            "such row poisons every read of this operator"
+        )
+        assert 0.1 <= got <= 10.0, f"non-finite mitigation strength gave {got}"
     finally:
         sdk.close()

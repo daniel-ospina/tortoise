@@ -34,7 +34,7 @@ skills/how-to-use-tortoise, tortoise/onboarding, graph-scripts/decide.py,
 commit_ops, audit) references THIS docstring for the band + formula.
 """
 
-import math  # noqa: F401, I001
+import math  # noqa: I001
 
 
 # ── Mitigation strength band (#2315) ──────────────────────────────────
@@ -86,12 +86,20 @@ NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier
 #    source. ... importantly the default should be neutral and only with a
 #    purposeful agent/user intention should we end up not in the default."
 #
-# * THE DEFAULT IS EXACTLY NEUTRAL, BY CONSTRUCTION. `ANNOTATION_TERM_NEUTRAL`
-#   is the coalesce value for ALL FOUR dimensions, so an operator carrying no
-#   rating scores `2.0 ** (2*0.5 - 1)` — exactly 1.0, and exactly-representable
-#   because the exponent is exactly 0.
-#   This is the property the archive existed to protect, and it is worth stating
-#   why the same 0.5 default is safe here when it was ruinous there. The 91%
+# * THE DEFAULT IS EXACTLY NEUTRAL, AND IT RESTS ON THE VALUE `0.5`, NOT ON THE
+#   SHAPE OF THE FORMULA. `ANNOTATION_TERM_NEUTRAL` is the coalesce value for ALL
+#   FOUR dimensions (the query builds its default from this constant — see
+#   `compute_operator_weight`), so an operator carrying no rating scores
+#   `2.0 ** (2*0.5 - 1)` — exactly 1.0, and exactly-representable because the
+#   exponent is exactly 0.
+#   The neutrality is a property of that number and not of the arithmetic: 0.5 is
+#   the UNIQUE fixed point of `x -> 1 - x`, which is what makes the symmetric
+#   band centred. Changing the constant does NOT keep the default neutral — it
+#   moves it off centre — so the value is pinned by
+#   `test_an_unrated_operator_is_EXACTLY_neutral` for that reason.
+#
+#   That uniqueness is also why the same 0.5 default is safe here when it was
+#   ruinous there. The 91%
 #   attenuation (1fa2fa7ce) came from the OLD formula `(1-b*0.5)*p*c*d` reading
 #   `0.5` defaults as `(1-0.5*0.5)*0.5*0.5*0.5 = 0.0938`. The bug was never that
 #   a formula existed: it was that "unrated" and "rated as middling" collapsed to
@@ -204,21 +212,23 @@ def _annotation_term(value, *, inverted: bool) -> float:
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:
     """Compute EP factor weight w in [0.1, 10.0] from graph structure."""
     g = proj.g
-    # The coalesce default is built FROM the constant, never typed as a literal:
-    # a literal here is a drift surface (it silently becomes a different default
-    # the moment ANNOTATION_TERM_NEUTRAL moves, and the test stubs that stood in
-    # for this query had hardcoded the old identity row exactly that way). An
-    # unrated operator and one rated at the midpoint must both score exactly 1.0,
-    # which is what the owner's ruling requires of the default.
-    _n = ANNOTATION_TERM_NEUTRAL
+    # The coalesce default is BOUND, not interpolated, and derived FROM the
+    # constant rather than typed twice. Both halves matter: a literal here is a
+    # drift surface (the test stubs that stood in for this query had hardcoded the
+    # old identity row exactly that way), and `f"...{_n}..."` would render
+    # whatever the constant happens to be into Cypher — `Fraction(1, 2)` becomes
+    # `1/2`, which Cypher evaluates as integer division 0, and a string is injected
+    # verbatim. A bound parameter accepts any value and cannot rewrite the query.
+    # An unrated operator and one rated at the midpoint must both score exactly
+    # 1.0, which is what the owner's ruling requires of the default.
     rows = g.query(
         "MATCH (o:Point {id:$id}) "
         "RETURN o.op_type, "
-        f"coalesce(o.annotator_bias, {_n}) AS bias, "
-        f"coalesce(o.annotator_precision, {_n}) AS precision, "
-        f"coalesce(o.annotator_consistency, {_n}) AS consistency, "
-        f"coalesce(o.annotator_directness, {_n}) AS directness",
-        params={"id": op_id},
+        "coalesce(o.annotator_bias, $n) AS bias, "
+        "coalesce(o.annotator_precision, $n) AS precision, "
+        "coalesce(o.annotator_consistency, $n) AS consistency, "
+        "coalesce(o.annotator_directness, $n) AS directness",
+        params={"id": op_id, "n": ANNOTATION_TERM_NEUTRAL},
     ).result_set
     if not rows:
         return 1.0
@@ -291,11 +301,17 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
         present = []
         for r in mit_rows:
             try:
-                present.append(float(r[0]))
+                v = float(r[0])
             # Same contract as `_annotation_term`: a bare `except Exception`,
             # because the conversion can raise anything and the run must survive.
             except Exception:
                 continue
+            # A non-finite strength is filtered for the same reason a NaN
+            # DIMENSION degrades to neutral: `max([nan, 0.25])` is `nan`, so one
+            # non-finite row would poison `w` and return nan to the whole run.
+            # `math.isfinite` also rejects the infinities `float()` accepts.
+            if math.isfinite(v):
+                present.append(v)
         # Legacy mitigation with NO strength property → the documented
         # mid-band default (see module docstring).
         w *= mitigation_dampening_factor(max(present) if present else None)

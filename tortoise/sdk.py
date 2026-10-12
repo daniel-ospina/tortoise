@@ -10886,16 +10886,16 @@ class TortoiseSDK:
         """Annotate an operator Point with structured epistemic dimensions.
 
         These dimensions are not inert: they modulate the operator's EP weight in a
-        symmetric bounded band, so a well-rated connection counts for up to TWICE
-        an unrated one and the worst-rated for half (#6151). Leaving them unset is
-        exactly neutral (factor 1.0) and is the default — set them only to express a
+        symmetric bounded band, so a well-rated connection counts for MORE than an
+        unrated one and the worst-rated for less. Leaving them unset is exactly
+        neutral (factor 1.0) and is the default — set them only to express a
         deliberate judgement about the connection's quality.
 
         Args:
             id: Operator Point ID (must have is_operator=true).
             bias: 0-1, how much hidden stake/additional interest beyond stated position.
-                INVERTED: higher bias means LESS weight (up to half at 1.0), because a
-                one-sided source should count for less than a disinterested one.
+                INVERTED: higher bias means LESS weight, because a one-sided source
+                should count for less than a disinterested one.
             precision: 0-1, how narrow/well-defined the relevance claim is (higher = more weight).
             consistency: 0-1, how stable this relevance is across contexts (higher = more weight).
             directness: 0-1, how directly the source bears on the target (higher = more weight).
@@ -10905,6 +10905,12 @@ class TortoiseSDK:
         dimension justifies. Do not use these to disagree with a connection — that is
         NAND's job; use them to grade how much the connection contributes. A rating
         does not require a source.
+
+        HOW FAR IT MOVES depends on the operator's base weight: the rating doubles
+        or halves it, but the final weight is clamped to ``[0.1, 10.0]``, and a NAND
+        starts at 8.0 — so the best rating on a NAND reaches the clamp (10.0, a
+        1.25x gain) rather than the full 2x. On an IMPL, whose base is 1.0, the band
+        applies in full.
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """
@@ -20673,12 +20679,18 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}, {}
+        # The ranking default is the weight mechanism's own neutral constant, not a
+        # literal: a literal here would silently disagree with the weight the same
+        # dimension produces if that constant ever moves (#6151). Imported locally
+        # because `weights` is a leaf module this file otherwise does not need.
+        from tortoise.weights import ANNOTATION_TERM_NEUTRAL
+
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
             "WHERE n.id IN $ids "
             "RETURN n.id, op.id, op.label, op.op_type, "
-            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
-            params={"ids": point_ids},
+            "  coalesce(op.annotator_precision, op.precision, $n), type(r)",
+            params={"ids": point_ids, "n": ANNOTATION_TERM_NEUTRAL},
         ).result_set
         args: dict[str, list[dict]] = {}
         nands: dict[str, list[dict]] = {}
