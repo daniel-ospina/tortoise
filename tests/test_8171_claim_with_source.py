@@ -290,3 +290,79 @@ def test_a_list_of_real_refs_still_fans_out(tmp_path):
 
     assert [_edge_count(proj, node_id, r) for r in refs] == [1, 1], (
         "a claim read from several sources carries one edge per source")
+
+
+# ── the DOMAIN restriction (review P1) ─────────────────────────────────
+
+def test_entity_domains_other_than_document_get_no_extracted_from_edge(
+        tmp_path):
+    """`extractedFrom` is Point -> Source. Do not invent a wider domain.
+
+    ONTOLOGY §3.3 declares the predicate's domain, and §4.6 is explicit that
+    "derived Events and Objects reach their source through their own links
+    rather than `extractedFrom`" — their declared predicate is `references`
+    (written by `link_source_to_entity`). Wiring subject/object/event through
+    `_link_source` did two bad things at once: it landed an edge domain the
+    ontology does not declare, AND the edge was live-only, because no
+    `_upsert_subject`/`_upsert_object`/`_upsert_event` replays it — so
+    `rebuild_all` deleted it and `derived = replay(journal)` failed.
+
+    MUTATION THAT MUST RED: re-add "subject"/"object"/"event" to
+    `_ENTITY_SOURCE_LABELS`. Each becomes 1 instead of 0.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+    for t, extra in (("subject", {}), ("object", {}),
+                     ("event", {"eventKind": "note"})):
+        res = sdk.create_entity(type=t, name=f"Dom {t}",
+                                extractedFrom=f"corpus://dom/{t}", **extra)
+        node_id = res["node"].get("id") or res["node"].get("eventId")
+        assert _any_edge_count(proj, f"corpus://dom/{t}") == 0, (
+            f"create_entity(type={t!r}) wrote an `extractedFrom` edge — an "
+            f"edge domain ONTOLOGY §3.3 does not declare for :{t.title()}, "
+            f"and one no replay handler restores")
+        assert _source_count(proj, f"corpus://dom/{t}") == 0
+        assert node_id, f"the {t} itself must still be created"
+
+
+def test_create_document_refuses_a_bad_ref_instead_of_swallowing_it(
+        tmp_path):
+    """The sibling document door must not silently drop what it cannot honour.
+
+    `create_document` routes the ref to the same `_link_source`, so without
+    this guard the choke point's container gate turned a bad ref into a silent
+    no-op: the caller got a success, no provenance, and no advisory — while
+    `create_entity(type='document')` raised. Two doors onto one node kind
+    disagreeing about what a legal ref is, is the defect.
+
+    MUTATION THAT MUST RED: remove the `_validate_extracted_from` call from
+    `create_document` — no `ValueError` is raised for any of the three inputs.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+    before = _scalar(proj, "MATCH (n) RETURN count(n)")
+
+    for bad in (123, {"url": "corpus://forged"}, ["corpus://ok", 5]):
+        with pytest.raises(ValueError):
+            sdk.create_document("Bad ref doc", "note", extractedFrom=bad)
+
+    assert _scalar(proj, "MATCH (n) RETURN count(n)") == before, (
+        "the refusal must precede the write — a rejected ref must leave no "
+        "node behind for the caller to lose track of")
+
+
+def test_the_advisory_does_not_fire_on_a_write_that_carries_a_session_id(
+        tmp_path):
+    """A supplied `session_id` IS provenance — do not advise it as a gap.
+
+    `create_point` infers `session:<id>` from a usable `session_id` (#3263), so
+    a writer that supplied one is not unsourced. Advising it would be a FALSE
+    POSITIVE telling the writer to declare the very ref the sibling door
+    derives for free — and a false-positive advisory is how an advisory stops
+    being read.
+    """
+    sdk = _sdk(tmp_path)
+    res = sdk.create_entity(type="document", name="Session ctx doc",
+                            documentKind="note", session_id="sess-8171")
+    assert not (res.get("advisories") or []), (
+        "a write carrying a usable session_id already has a derivable source")

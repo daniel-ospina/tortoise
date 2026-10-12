@@ -23609,45 +23609,11 @@ class TortoiseSDK:
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        # #8171 (review P1): `extractedFrom` must be SHAPE-CHECKED BEFORE any
-        # write, exactly as `create_point` does since #3263. This door now hands
-        # the ref to `projection._link_source`, whose fan-out does
-        # `list(source_ref)` for a non-str — so an unchecked ref fails in three
-        # MEASURED ways, all worse than a refusal:
-        #   - a non-str scalar (123) raises TypeError AFTER the node is
-        #     CREATEd, leaving an orphan the caller gets no handle to (and, on
-        #     the event door, an already-journaled EventRecorded);
-        #   - a DICT minted one fabricated `:Source` node PER KEY, i.e. an
-        #     invented provenance — "an invented source is worse than none"
-        #     (design contract #3);
-        #   - a list with a non-str member silently DROPPED that member.
-        # Refusing pre-write keeps the write atomic and matches the claim
-        # door's contract, so the two doors cannot disagree about what is a
-        # legal source ref.
-        _ef_pre = props.get("extractedFrom")
-        if _ef_pre is not None:
-            if isinstance(_ef_pre, str):
-                if not _ef_pre.strip():
-                    props.pop("extractedFrom", None)
-            elif isinstance(_ef_pre, (list, tuple)):
-                _clean = [r for r in _ef_pre
-                          if isinstance(r, str) and r.strip()]
-                if len(_clean) != len(_ef_pre):
-                    raise ValueError(
-                        "create_entity: extractedFrom must be a non-empty "
-                        "string or a list of non-empty strings "
-                        f"(got {_ef_pre!r})")
-                if _clean:
-                    props["extractedFrom"] = _clean
-                else:
-                    props.pop("extractedFrom", None)
-            else:
-                raise ValueError(
-                    "create_entity: extractedFrom must be a non-empty string "
-                    f"or a list of non-empty strings (got {_ef_pre!r}); a "
-                    "non-string scalar would mint a corrupt Source, and "
-                    "raising after the write would leave an un-journaled "
-                    "orphan (#3263/#8171)")
+        # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
+        # — the one home is `_validate_extracted_from`, shared with
+        # `create_document` so the two doors cannot disagree. See its docstring
+        # for the three measured failure modes it closes.
+        _validate_extracted_from(props, door="create_entity")
         # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
         # never be reachable through the props passthrough — the MCP boundary
         # denylist catches top-level keys, this catches the nested-props
@@ -23744,15 +23710,28 @@ class TortoiseSDK:
         # also wired the Source via `projection._link_source` (#394), and that
         # half was LOST in the move — `create_entity` minted NO `:Source` node
         # and NO `extractedFrom` edge, so a caller that had declared a source
-        # got a claim the auditor reads as a provenance gap
+        # got a subject the auditor reads as a provenance gap
         # (`audit.missing_sourceKind`). Measured, `type='document'`:
         #     create_entity    sourceKind/edge: none
         #     create_document  :Source node + extractedFrom edge
         # `_link_source` is "declared inline, created if absent": it MERGEs the
         # Source stub on the ref and is idempotent, so a re-declared ref
-        # converges instead of duplicating. The LABEL is the created node's
-        # own — a document IS a `:Source` (D10), and `_link_source` keys a
-        # Source by `url` and every other label by `id`.
+        # converges instead of duplicating.
+        #
+        # ⛔ DOCUMENT ONLY, and that restriction is the point (review P1).
+        # `extractedFrom` has a DECLARED domain of Point -> Source
+        # (ONTOLOGY §3.3), and §4.6 says of these very classes: "Derived Events
+        # and Objects reach their source through their own links rather than
+        # `extractedFrom`". Their declared provenance predicate is
+        # `references` (Source -> Event/Object/Source), written by
+        # `link_source_to_entity`. Routing subject/object/event through
+        # `_link_source` therefore invented an edge domain the ontology does
+        # not declare — AND wired it live-only, because no `_upsert_subject` /
+        # `_upsert_object` / `_upsert_event` replays it, so `rebuild_all`
+        # silently deleted the edges and `derived = replay(journal)` failed.
+        # The document leg is the capability the consolidation actually lost
+        # (#394/D10), and a document IS a `:Source` — which is also why
+        # `_link_source` keys it by `url` and every other label by `id`.
         _prov_ref = props.get("extractedFrom")
         _prov_label = self._ENTITY_SOURCE_LABELS.get(t)
         if _prov_ref and _prov_label:
@@ -23781,9 +23760,7 @@ class TortoiseSDK:
     # what was stored. A caller ignoring it loses nothing; a caller reading it
     # learns the one cheap fix (declare `extractedFrom`, e.g. a
     # `session:<id>` ref for what the writer itself asserts).
-    _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {
-        "subject": "Subject", "object": "Object",
-        "event": "Event", "document": "Source"}
+    _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
 
     def _provenance_advisory(self, node: dict, props: dict) -> dict:
         """Advisory when a write lands with no source and no provenance.
@@ -23793,6 +23770,13 @@ class TortoiseSDK:
         blocks — see the block comment above.
         """
         if props.get("extractedFrom") or props.get("sourceKind"):
+            return {}
+        # #3263 parity (review P2): `create_point` INFERS `session:<id>` from
+        # the write context, so a writer that supplied a usable `session_id` is
+        # NOT unsourced — advising it would be a FALSE POSITIVE telling the
+        # writer to declare the very ref the sibling door derives for free.
+        _sid = props.get("session_id")
+        if isinstance(_sid, str) and _sid.strip():
             return {}
         # A document that STATED its kind has declared what it is (D10: a
         # document is a `:Source`, so `sourceKind` is its provenance
@@ -26257,6 +26241,14 @@ class TortoiseSDK:
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #8171 (review P2): this door routes `extractedFrom` to the SAME
+        # `_link_source` as `create_entity`, so it needs the SAME pre-write
+        # shape check. Without it the choke point's container gate turns a bad
+        # ref into a SILENT no-op — the caller gets a 200, no provenance, and
+        # no advisory — where the sibling document door (`create_entity`) and
+        # this door's own pre-fix behaviour both failed loudly. A ref this door
+        # cannot honour must not be accepted in silence.
+        _validate_extracted_from(props, door="create_document")
 
         did = self.ulid()
         result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
@@ -28146,3 +28138,49 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
                       json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
+
+
+def _validate_extracted_from(props: dict, *, door: str) -> None:
+    """#8171: shape-check ``extractedFrom`` BEFORE any graph write.
+
+    The contract is `create_point`'s #3263 one, and it lives here so the doors
+    that route a ref to `projection._link_source` cannot disagree about what a
+    legal source ref is. Three input classes matter, and all three were
+    MEASURED to fail badly when unchecked, because `_link_source` fans out with
+    `list(source_ref)`:
+
+      - a non-str scalar (`123`) raised TypeError AFTER the node was CREATEd,
+        leaving an ORPHAN the caller gets no handle to;
+      - a DICT had its KEYS minted as `:Source` nodes, one per key — an
+        INVENTED provenance, which is worse than none (design contract #3);
+      - a list with a non-str member silently DROPPED that member.
+
+    Raising HERE, before the write, is what keeps the refusal atomic: a raise
+    after the CREATE still reports an error, but the node is already in the
+    graph and the caller cannot even name it. Empty and whitespace-only refs
+    are dropped rather than refused — they mean "no provenance", not "bad
+    provenance" (the bundle contract allows an empty list for the same reason).
+    """
+    ref = props.get("extractedFrom")
+    if ref is None:
+        return
+    if isinstance(ref, str):
+        if not ref.strip():
+            props.pop("extractedFrom", None)
+        return
+    if isinstance(ref, (list, tuple)):
+        clean = [r for r in ref if isinstance(r, str) and r.strip()]
+        if len(clean) != len(ref):
+            raise ValueError(
+                f"{door}: extractedFrom must be a non-empty string or a list "
+                f"of non-empty strings (got {ref!r})")
+        if clean:
+            props["extractedFrom"] = clean
+        else:
+            props.pop("extractedFrom", None)
+        return
+    raise ValueError(
+        f"{door}: extractedFrom must be a non-empty string or a list of "
+        f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
+        "corrupt Source, and raising after the write would leave an "
+        "un-journaled orphan (#3263/#8171)")
