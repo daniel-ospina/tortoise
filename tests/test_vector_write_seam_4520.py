@@ -301,6 +301,13 @@ def test_every_known_vector_writer_uses_the_seam():
     Scope is the ENUMERATED set below, not "every writer in the repo": the net
     cannot prove anything about an unenumerated file, and `update_point` /
     `update_entity` are a KNOWN, tracked gap (see `tortoise/vector_write.py`).
+
+    This net is FILE-granular — it only asserts the module imports a seam name,
+    so it cannot see a SECOND, un-seamed write inside a module it already
+    passes. `graph-scripts/backfill_embeddings.py` has exactly that: its
+    `_repair_legacy_event_embeddings` is a Δ = 0 self-recast deliberately out
+    of scope. That blind spot is covered by
+    `test_vector_write_scope_claim_is_not_absolute` below.
     """
     root = Path(__file__).resolve().parent.parent
     writers = {
@@ -309,6 +316,12 @@ def test_every_known_vector_writer_uses_the_seam():
         "tortoise/session_indexer.py": ("clear_then_set_prefix",),
         "tortoise/sdk.py": ("clear_then_set_prefix", "clear_embedding"),
         "tortoise/hosted_backup.py": ("clear_then_set_prefix",),
+        # `_backfill_graph` (the OVERWRITE writer) is seamed in this module.
+        # The same module ALSO holds `_repair_legacy_event_embeddings`, a
+        # Δ = 0 self-recast that is deliberately OUT of scope (the SET reads
+        # the property a clear would remove) — see `tortoise/vector_write.py`.
+        # Because this net is file-granular, that second write is invisible to
+        # it; `test_vector_write_scope_claim_is_not_absolute` pins the scope.
         "graph-scripts/backfill_embeddings.py": ("clear_then_set_prefix",),
         "battery/runner/setup.py": ("clear_then_set_prefix",),
         "battery/runner/retrieval_preflight.py": ("clear_then_set_prefix",),
@@ -352,3 +365,34 @@ def _seam_import_names(source: str) -> set[str]:
             for alias in node.names:
                 names.add(alias.asname or alias.name)
     return names
+
+
+def test_vector_write_scope_claim_is_not_absolute():
+    """The seam's scope claim must NOT cover every writer (#4520 P2-2).
+
+    ``graph-scripts/backfill_embeddings.py`` contains a SECOND write the
+    file-granular inventory above cannot see: ``_repair_legacy_event_embeddings``
+    issues ``SET n.embedding = vecf32(n.embedding)`` — a Δ = 0 SELF-RECAST
+    (source == target), deliberately OUT of the seam's scope. It must not be
+    routed through the guard: the SET reads the same property the clear just
+    REMOVED, so ``clear_then_set_prefix`` would destroy the value.
+
+    The module docstring is where that scope is stated, so an absolute "Every
+    vector writer KNOWN TO #4520" claim would silently read as covering that
+    un-seamed write. This pins the narrowed claim: it fails if the claim goes
+    absolute again, or if the out-of-scope self-recast stops being named.
+    """
+    root = Path(__file__).resolve().parent.parent
+    source = (root / "tortoise/vector_write.py").read_text()
+    assert "Every vector writer KNOWN TO #4520" not in source, (
+        "the seam's scope claim went absolute again — it would read as "
+        "covering `_repair_legacy_event_embeddings`, a Δ = 0 self-recast in "
+        "graph-scripts/backfill_embeddings.py that is deliberately out of "
+        "scope (#4520 P2-2)")
+    assert "_repair_legacy_event_embeddings" in source, (
+        "the out-of-scope Δ = 0 self-recast is no longer named in the seam's "
+        "scope statement, so the file-granular inventory's blind spot is "
+        "undocumented (#4520 P2-2)")
+    assert "self-recast" in source.lower(), (
+        "the Δ = 0 self-recast category is no longer distinguished from the "
+        "overwrite writers the seam covers (#4520 P2-2)")

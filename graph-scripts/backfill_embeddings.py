@@ -414,6 +414,12 @@ def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     Vectorf32 but was List") — one legacy node poisons Event vector search.
     vecf32() on an already-vecf32 node errors, so each node is rewritten in a
     try/except and failures are counted (expected on fully-migrated DBs).
+
+    This is a Δ = 0 SELF-RECAST and is deliberately OUT of #4520's vector-write
+    seam: the ``SET`` reads the same property a clear guard would remove, so
+    routing it through ``clear_then_set_prefix`` would destroy the value. It
+    replaces no stored vector, so it cannot hit the small-Δ dropped-overwrite
+    defect the seam exists for. See ``tortoise/vector_write.py``.
     """
     rows = g.query(
         "MATCH (n:Event) WHERE n.embedding IS NOT NULL "

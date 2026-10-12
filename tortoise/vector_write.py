@@ -33,11 +33,27 @@ This module is the single place that expresses the invariant, so a new writer
 cannot silently re-inherit the defect — which has already landed three separate
 times (#4457 ``_upsert_point_props``, #4524 the Subject/Object/Document/Event
 seams, #4521 ``_revise_point``) because each writer re-spelled the clause
-locally. **Every vector writer KNOWN TO #4520 goes through one of the helpers
-below** — the issue's own sites plus the further writers this change found
-(``graph-scripts/backfill_embeddings.py``, ``tortoise/hosted_backup.py``'s
-restore, the snapshot derived-restore path in ``projection/__init__.py``,
-``battery/runner/setup.py``, ``tools/ask_spotcheck.py``).
+locally. **Every #4520 writer that OVERWRITES an existing vector goes through
+one of the helpers below** — the issue's own sites plus the further overwrite
+writers this change found (``graph-scripts/backfill_embeddings.py``'s
+``_backfill_graph``, ``tortoise/hosted_backup.py``'s restore, the snapshot
+derived-restore path in ``projection/__init__.py``,
+``battery/runner/setup.py``, ``tools/ask_spotcheck.py``). The claim is narrowed
+to OVERWRITES on purpose — the defect is a small-Δ overwrite being silently
+dropped, and two kinds of write are not overwrites, so they are deliberately
+OUT of this seam's scope and must NOT be routed into it:
+
+* **Δ = 0 self-recast** — ``SET x.embedding = vecf32(x.embedding)`` reads and
+  rewrites the SAME property, so no value is replaced and none can be dropped.
+  Routing it through :func:`clear_then_set_prefix` would **destroy the
+  vector**: the guard REMOVES the property and the ``SET`` then reads the
+  property the clear just removed. ``graph-scripts/backfill_embeddings.py``
+  holds one, ``_repair_legacy_event_embeddings`` (the pre-#244 plain-``List``
+  → ``VectorF32`` repair), named as out of scope at its definition.
+* **NULL wipe** — a write whose incoming vector is NULL sets the property to
+  NULL rather than replacing its value; the seam's guarantee (that a new vector
+  LANDS) does not govern it. Writers that ALSO overwrite still route their
+  non-null branch through these helpers.
 
 ⚠️ **A KNOWN REMAINING GAP (reported on #4520, NOT closed here):**
 ``TortoiseSDK.update_point`` and the ``update_entity`` Point branch write props
