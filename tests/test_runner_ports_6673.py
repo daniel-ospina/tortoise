@@ -575,7 +575,9 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
                    ping: str = "PONG", health_timeout: str = "1",
                    fake_run: str = "ok", fake_port: str = "",
                    fake_image_rc: str = "0", fake_pull_rc: str = "0",
-                   fake_pull_only_last: str = ""
+                   fake_pull_only_last: str = "",
+                   image: str = "falkordb/falkordb-server:v4.20.6",
+                   repo_owner: str = ""
                    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -595,7 +597,8 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
         "GITHUB_RUN_ID": run_id,
         "GITHUB_JOB": "test",
         "GITHUB_RUN_ATTEMPT": "1",
-        "FALKORDB_IMAGE": "falkordb/falkordb-server:v4.20.6",
+        "FALKORDB_IMAGE": image,
+        "GITHUB_REPOSITORY_OWNER": repo_owner,
         "FALKORDB_LEGACY": legacy,
         "FALKORDB_URI_GRAPH": uri_graph,
         "FAKE_PING": ping,
@@ -642,8 +645,7 @@ def test_resolver_tries_mirror_then_ghcr_then_docker_hub_last(tmp_path):
     pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
     assert len(pulls) == 3, pulls
     assert pulls[0] == "pull mirror.gcr.io/falkordb/falkordb-server:v4.20.6", pulls
-    assert pulls[1].startswith("pull ghcr.io/"), pulls
-    assert pulls[1].endswith("/falkordb-server:v4.20.6"), pulls
+    assert pulls[1] == "pull ghcr.io/daniel-ospina/falkordb-server:v4.20.6", pulls
     assert pulls[2] == "pull falkordb/falkordb-server:v4.20.6", pulls
     assert "pulled falkordb/falkordb-server:v4.20.6" in proc.stderr
     assert "TORTOISE_TEST_DOCKER_PORT=32768" in genv.read_text().splitlines()
@@ -669,6 +671,34 @@ def test_resolver_fails_closed_and_attributably_when_every_tier_is_dark(tmp_path
     assert "mirror.gcr.io/falkordb/falkordb-server:v4.20.6" in proc.stdout
     invoked = calls.read_text()
     assert not [ln for ln in invoked.splitlines() if ln.startswith("run ")], invoked
+
+
+def test_slashless_reference_still_resolves_through_every_tier(tmp_path):
+    """Docker's own rule treats a first path component as a registry host only
+    when a `/` separates it, so `redis:7` is Docker Hub `redis`, tag `7`.
+    Without the slash test the reference is misread as already-qualified and the
+    mirror tiers are skipped — which is what mutating that guard produces."""
+    proc, _genv, calls = _run_provision(
+        tmp_path, image="redis:7", fake_image_rc="1", fake_pull_only_last="1",
+    )
+    assert proc.returncode == 0, proc.stderr
+    pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
+    assert len(pulls) == 3, pulls
+    assert pulls[0] == "pull mirror.gcr.io/redis:7", pulls
+    assert pulls[1] == "pull ghcr.io/daniel-ospina/redis:7", pulls
+    assert pulls[2] == "pull redis:7", pulls
+
+
+def test_ghcr_candidate_derives_a_lowercased_owner(tmp_path):
+    """The mirror pushes under `github.repository_owner` and this resolver derives
+    its own path: if the two diverge the durable GHCR home silently never serves.
+    GHCR also rejects an uppercase path, so the derivation must lowercase."""
+    proc, _genv, calls = _run_provision(
+        tmp_path, repo_owner="Some-Org", fake_image_rc="1", fake_pull_only_last="1",
+    )
+    assert proc.returncode == 0, proc.stderr
+    pulls = [ln for ln in calls.read_text().splitlines() if ln.startswith("pull ")]
+    assert pulls[1] == "pull ghcr.io/some-org/falkordb-server:v4.20.6", pulls
 
 
 def test_provision_omits_the_legacy_port_and_uri_when_not_asked(tmp_path):
