@@ -2316,6 +2316,20 @@ surfaces:
   - test_weights_mitigation.py
   - test_3815_mitigation_moves_weight.py
   - test_6151_annotation_band.py
+  # #7846: a graph-key `DUMP`/`RESTORE` of a VECTOR-INDEXED graph. The issue
+  # (P0) reports the restore permanently wedging the whole instance; measured
+  # 2026-10-12 it does not reproduce on any pullable image, but the two in-repo
+  # acceptance criteria do — the restore must be BOUNDED (the instance still
+  # answers `PING`) and the vector index must NOT be silently dropped
+  # (docs/evidence/7846-indexed-graph-restore/). The file pins no product
+  # module: it asserts an ENGINE contract the eviction/backup design depends on
+  # (`STORAGE-ARCHITECTURE.md` §2.1 — the graph is the only eviction unit), so
+  # it belongs to the `core` fallback rather than to a surface that would only
+  # select it when some unrelated source file changed. It runs on the docker
+  # lane only (the vector index needs the engine's vector-index API); URI-less
+  # runs skip visibly with the URI-gate reason, so the tier-2 embedded leg
+  # excludes it and the `core` always-on set carries it on the docker lane.
+  - test_indexed_graph_key_restore_7846.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
