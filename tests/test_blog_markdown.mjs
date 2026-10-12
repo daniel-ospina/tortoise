@@ -113,6 +113,25 @@ console.log("bounded span content stays linear on adversarial input");
   extractFaq("## FAQ\n\n### Q?\n\n" + "[".repeat(20000));
   const faqMs = Date.now() - t2;
   assert(faqMs < 1500, `a '['-heavy FAQ answer stays linear (${faqMs}ms; pre-fix ≈6.4s)`);
+
+  // Duplicate headings must allocate anchors in O(1) amortised per heading.
+  // The scanned-from-`-1` form was O(N²): 8000 `## A` (48KB — well under
+  // BODY_MAX=100KB) took 23.9s standalone, and 16000 (96KB) 131s. Post-fix on
+  // this machine the same 8000 renders in ≈0.3–0.6s (16000 ≈0.9s), so the bound
+  // sits well above the measured time and far below the pre-fix blowup.
+  const dupMd = Array.from({ length: 8000 }, () => "## A").join("\n\n");
+  const t3 = Date.now();
+  const dupHtml = renderMarkdown(dupMd);
+  const dupMs = Date.now() - t3;
+  assert(
+    dupMs < 5000,
+    `8000 duplicate headings stay linear (${dupMs}ms; pre-fix ≈23.2s, post-fix ≈0.3–0.6s)`,
+  );
+  const dupIds = [...dupHtml.matchAll(/id="([^"]*)"/g)].map((mm) => mm[1]);
+  assertEq(dupIds.length, 8000, "every duplicate heading still emits an anchor id");
+  assertEq(new Set(dupIds).size, 8000, "every one of the 8000 anchor ids is distinct");
+  assertEq(dupIds[0], "a", "the first duplicate heading keeps the bare base id");
+  assertEq(dupIds[7999], "a-7999", "the last duplicate heading resumes the suffix cursor");
 }
 
 console.log("code spans are exempt from unescaping (CommonMark)");
