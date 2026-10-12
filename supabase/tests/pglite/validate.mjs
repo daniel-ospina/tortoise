@@ -379,6 +379,12 @@ const suites = [
   // is not named here never runs, and "the suite exists" is then mistaken for
   // "the suite passes". Add the entry in the same commit as the file.
   '20261012000001_record_schema.sql',  // #7968
+  // #4550 — `recover_team_key`'s cap count AND revoke-target scan exclude
+  // EXPIRED-but-unrevoked rows, driven against the REAL function. NOTE: this
+  // list is EXPLICIT, not a glob — a suite file that is not named here never
+  // runs, and "the suite exists" is then mistaken for "the suite passes".
+  // Add the entry in the same commit as the file.
+  '20261012000006_recover_team_key_expiry.sql',  // #4550
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
