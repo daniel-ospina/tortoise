@@ -26,8 +26,8 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-from tests.fake_control_plane import FakeControlPlane  # noqa: E402
-from tortoise.supabase_control import purge_org_control_plane  # noqa: E402
+from tests.fake_control_plane import FakeControlPlane
+from tortoise.supabase_control import purge_org_control_plane
 
 
 def test_routes_the_org_delete_through_the_rpc():
