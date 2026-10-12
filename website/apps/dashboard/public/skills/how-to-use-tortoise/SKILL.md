@@ -421,7 +421,7 @@ direction** — the model's chain step that used to have no way to run (#7852 W1
 | **mutuallySupportive** | IMPL | bidirectional (A↔B) | Each reinforces the other |
 | **mutuallyExclusive** | NAND | bidirectional (A↔B) | "A and B can't both be true" — "Feature competesWith Competitor" |
 | **hasPart** | IMPL | bidirectional (parts↔whole) | Composition — "Epic hasPart Issue", "Product hasPart Feature" |
-| **related** / **transacts** | — | no direction (`-`) | Neutral association — **no confidence transfers** |
+| **related** / **transacts** | — | `-` in the model; the runtime records the caller/default direction | Neutral association. The model says no confidence transfers — but the runtime stores no `-` value yet, so the write path falls through and records `bidirectional` (unless you pass `direction=`). The four-value **storage** migration is the open half of #7852; for a genuinely transfer-free association use the plain (operator-less) `related` edge. |
 
 **`semantics` is resolved by the write path, and the basis it used is recorded** on the operator as
 `direction_basis` (`explicit` = the caller stated a non-default direction, `semantics` = the declared
