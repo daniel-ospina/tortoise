@@ -144,6 +144,13 @@ def _target():
     Read from ``TORTOISE_DB_URI``. Deliberately NOT mutated: this file needs the
     URI the lane was given, and `tests/test_uri_env_mutations_declared.py`
     requires any test that writes that variable to declare it.
+
+    A URI with no explicit port falls back through the #6673 seam
+    (``_live_utils.docker_port()``, i.e. ``$TORTOISE_TEST_DOCKER_PORT``) — NOT a
+    ``6379`` literal. That is the split-brain guard in
+    ``tests/test_runner_ports_6673.py``: a file that reads the seam must not
+    also dial the historical fixed port, or the probe passes while the client
+    connects to nothing.
     """
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     parsed = urlparse(uri)
@@ -155,7 +162,7 @@ def _target():
     username, password = parse_uri_userinfo(uri)
     return (
         parsed.hostname,
-        parsed.port or 6379,
+        parsed.port or _live_utils.docker_port(),
         username,
         password,
         parsed.scheme == "rediss",
