@@ -286,6 +286,16 @@ surfaces:
   # the writer in tortoise/metering.py, so a change to EITHER must run it — a
   # registration in only one surface would leave the other silently unguarded.
   - test_embed_metering.py
+  # #4489: retrieval-work measurement. Dual-registered with `core` (and the
+  # source `tortoise/retrieval_metering.py` is named in `api`'s SOURCE_PATTERNS
+  # so a module-only diff selects this arm). The writer/reader live in
+  # tortoise/metering.py + tortoise/supabase_control.py and the /v1/team render
+  # in tortoise/hosted_api.py — all `api` patterns — so `api` is the surface
+  # that must run it when any of those moves; `core` covers the search_engine
+  # leg hooks and the migration-text contract. Without this line
+  # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
+  # be classified — the scope-v5 drift trap).
+  - test_retrieval_metering.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -565,6 +575,12 @@ surfaces:
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
+  # #5109: the CLI's no-literal-key gate pins `tortoise/__main__.py`, an EXACT
+  # `api` SOURCE_PATTERNS match — so like test_init_apikey_validation.py above
+  # it must be registered under `api`, not only `core` (the #2938 silent-drop
+  # class: a `__main__.py`-only change that selected `api` alone would skip a
+  # core-only registration). Dual-registered with `core`.
+  - test_secret_not_printed_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -728,6 +744,17 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #2120: the OpenClaw two-way seam — `tortoise/openclaw-plugin/` (the native
+  # plugin: manifest, entry, spool writer), the installer in
+  # tortoise/capture_install.py, the version contract in tortoise/hook_install.py,
+  # and `tortoise sessions import --harness openclaw` through
+  # tortoise/session_import/parsers.py. None of those match a named
+  # SOURCE_PATTERNS entry (the plugin directory and the two modules classify
+  # `core` via the `tortoise/` fallback). Dual-registered with `core` because
+  # the same tests drive `tortoise install openclaw` (tortoise/__main__.py) and
+  # the harness vocabulary in tortoise/hosted_api.py, both `api`-classified —
+  # without this leg a CLI-only or vocabulary-only change would run no guard.
+  - test_openclaw_seam.py
   # #3809: `tortoise session verify` — the one-command install verification
   # that drives the REAL installed hook and the real `tortoise` CLI. Its
   # sources are tortoise/session_verify.py (an ENGINE path matching no
@@ -798,6 +825,25 @@ surfaces:
   # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
   # run the pin that says export-skip is not a durability statement.
   - test_rebuild_event_meta_watermark_4653.py
+  # #5353: the :TeamMeta first-org marker across the same wipe+replay. The
+  # `team_meta` sidecar section lives in tortoise/projection/ (core fallback),
+  # but the class IS the `#2789` guard implemented in `tortoise/hosted_api.py`
+  # (`_eager_provision_org_graph`, an exact `api` SOURCE_PATTERN) — so without
+  # this arm a hosted_api-only change to the guard probe could ship without the
+  # pin that says a rebuilt graph must read as provisioned.
+  - test_rebuild_team_meta_marker_5353.py
+  # #2081 (epic #2080 W4 phase 2): the outbound webhook delivery layer —
+  # subscription registry, dispatcher, retry/backoff, receipts, HMAC signing,
+  # the SSRF-gated registration REST routes (POST/GET/DELETE
+  # /v1/context/subscriptions + /deliveries) and the dream-cycle dispatch hook
+  # in `_dream_worker`. `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN
+  # match, so this arm runs the routes' auth/422 assertions on a hosted change.
+  # DUAL-REGISTERED with `core` (below): the module that carries the delivery
+  # semantics is `tortoise/webhook_delivery.py` (plus the
+  # `security.validate_webhook_url` guard), and NEITHER matches a named surface
+  # — they fall through to `core` — so without that arm a webhook_delivery-only
+  # change would run no guard at all.
+  - test_webhook_delivery.py
   # #3520: the per-session EXTRACTION status (`{status, extractor,
   # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
   # agreement on the 2xx path, and the appended-at-the-END column positions.
@@ -1013,6 +1059,13 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #7953 (§17.3): the RESIDENCY ROUTER — a cache miss is not an insufficiency.
+  # It pins tortoise/residency_router.py (no SOURCE_PATTERN) and the per-key
+  # coordinate on the shipped read path in tortoise/sdk.py, so a sdk.py change
+  # that stops reporting the coordinate still runs this guard. No hosted route
+  # emits it yet (`#7970` is the consumer), so `core` alone is correct.
+  - test_residency_router.py
+  - test_secret_not_printed_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
@@ -1261,6 +1314,7 @@ surfaces:
   - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
+  - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   - test_embedder_provision.py
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
@@ -1507,6 +1561,7 @@ surfaces:
   - test_3817_tags_rebuild_durability.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
+  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a plain List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg); the caller-supplied branch stays verbatim (PR #3018) — embedded_only + carve_out
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -1632,6 +1687,11 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #2120: the OpenClaw seam. This is the CORE arm (the plugin artifact, the
+  # installer, the version contract and the parser are all `tortoise/`-fallback
+  # paths); see the api arm for the CLI + hosted-vocabulary half of the same
+  # dual registration.
+  - test_openclaw_seam.py
   # #3809: `tortoise session verify` — the one-command install verification
   # that drives the REAL installed hook and the real `tortoise` CLI. Its
   # sources are tortoise/session_verify.py (an ENGINE path matching no
@@ -2037,6 +2097,10 @@ surfaces:
   # watermark re-derivation, both in tortoise/projection/ (core fallback) over
   # tortoise/event_store.py's allocator.
   - test_rebuild_event_meta_watermark_4653.py
+  # #5353: the same wipe+replay drives the `team_meta` sidecar section and the
+  # post-restore marker verification, both in tortoise/projection/ (core
+  # fallback), over the `#2789` guard's probe in tortoise/hosted_api.py.
+  - test_rebuild_team_meta_marker_5353.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -2149,6 +2213,7 @@ surfaces:
   - test_capture_redaction_sinks_5445.py  # #5445/#5446/#5472: the #4911 capture control's role sink, summary depth-guard and helper contract holes (guards tortoise/security.py + sdk.py helpers; `core` is security.py's surface and `sdk` is a SHARED_MODULE so it runs on the full matrix)
   - test_secret_rule_precision_5470.py  # #5470/#5471: span precision in `tortoise/security.py`'s `_SECRET_SHAPES` — the generic `sk-` rule must consume a long token whole (ordering fix, not a narrowed body), and the bare `Bearer` rule must fire on credentials while leaving hyphen/underscore-joined prose byte-identical
   - test_capture_secret_redaction_4911.py  # #4911: the capture write path redacts credential-shaped spans before persistence (guards tortoise/security.py's scrubber + sdk._capture_turn_texts; `core` is security.py's surface and `sdk` is a SHARED_MODULE so this runs on the full matrix — DUAL-REGISTERED under `api` for a hosted_api.py-only PR, see the entry there)
+  - test_connection_url_redaction_5326.py  # #5326: the password-bearing connection URL (`postgres://user:pw@host`) — the `connection_url` rule in tortoise/security.py: the closed scheme allow-list anchor, the URL-grammar confirmation, each removed #4911 revision answered (no-password class, no dotted-host gate, no greedy span), and the documented residuals. NOT dual-registered under `api`: it asserts nothing about hosted_api.py, and its end-to-end capture half is the DUAL-REGISTERED #4911 file
   - test_security.py
   - test_semantic_extractor.py
   - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
@@ -2373,6 +2438,12 @@ surfaces:
   # to the instrument. Hermetic: pure arithmetic + a module-attribute swap, no
   # graph / embedder / network.
   - test_fusion_formula_ab.py
+  # #2081: the delivery engine's own file (`tortoise/webhook_delivery.py`) and
+  # the SSRF guard (`tortoise/security.py`) match no named SOURCE_PATTERN, so a
+  # change to either selects `core` — this is the registration that keeps the
+  # engine's contract tests on that diff. Dual-registered under `api` (above)
+  # for `tortoise/hosted_api.py`, which is an exact `api` match.
+  - test_webhook_delivery.py
   # #3520: the `core` half of the dual registration documented at the `api`
   # entry — `tortoise/session_projection.py` (the extraction vocabulary and
   # `session_extraction_status`, the ONE derivation every read surface calls)
@@ -2748,6 +2819,14 @@ surfaces:
   # born-live default for goal-kind Points (a target-only draft goal is
   # EP-inert while `converged=True` is still reported).
   - test_7856_goal_state.py
+  # #7852 W1: the Layer-2 `semantics` write path — `create_operator` resolves the
+  # direction from the relation's declared meaning and records the basis it used
+  # as `direction_basis` (absent/`None` is NOT a declaration — review ISSUE 3).
+  # `sdk` owns it: the change is `tortoise/sdk.py` (a SHARED_MODULE, so an
+  # sdk.py diff selects the full matrix) plus the `tortoise_create_operator`
+  # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
+  # and replays the journal), so it is ALSO registered in `carve_out` below.
+  - test_semantics_write_path_7852.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -3227,6 +3306,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
+# fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
+# replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
+# Also in the `sdk` surface above, which is where the diff selects it.
+- test_semantics_write_path_7852.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level
@@ -3239,6 +3323,13 @@ carve_out:
 # hook, a permanently green and permanently unexecuted gate on main (the #4047
 # shape).
 - test_4521_revise_point_embedding.py
+# #4520 residual: the module is module-level `embedded_only` — the plain-list
+# embedding write and its clear-then-set fix are embedded-engine specific, so
+# without this registration a full URI-set selection would collect it and SKIP
+# every case via the marker hook, a permanently green and permanently
+# unexecuted gate on main (the same #4047 shape as the #4521/#4524 entries
+# above).
+- test_update_point_derived_embedding_4520.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
@@ -3324,6 +3415,7 @@ uri_requiring:
 - test_onboarding_w4_settings.py
 - test_onboarding_w6_capture_disclosure.py
 push_extra: []
+durations_captured_at: "2026-10-12T04:54:57Z"
 durations:
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
@@ -3444,7 +3536,7 @@ durations:
 # RETAINED row (test_selfhost_health_probe_executor.py), and any row marked
 # `# unmeasured` (a file no source leg collected, whose value is carried forward
 # and is not a measurement).
-  test_fly_secret_drift.py: 8.5
+  test_fly_secret_drift.py: 2.1
   # #4071: four hermetic asserts (no DB, no network). The duration-coverage
   # floor counts it as a fast file, so it needs an entry like every other fast
   # file; its own testcase call time is sub-second (the file's wall time is
@@ -3478,14 +3570,14 @@ durations:
   # `# unmeasured` convention stated above. Refresh from the first post-merge main run that includes it.
   test_onboarding_state_cas.py: 120.0  # unmeasured
   test_onboarding_state_split_init.py: 55.8  # unmeasured
-  test_onboarding_state_split_checkpoint.py: 123.5  # unmeasured
+  test_onboarding_state_split_checkpoint.py: 11.3
   test_onboarding_state_split_patch.py: 91.6  # unmeasured
   test_onboarding_state_split_projection.py: 39.8  # unmeasured
   test_onboarding_truth_surface.py: 4.0
-  eval/write_path/test_write_path_benchmark.py: 101.8
-  test_tortoise_client.py: 11.9
-  eval/retrieval/test_run.py: 179.8
-  test_4314_inert_hooks.py: 23.9
+  eval/write_path/test_write_path_benchmark.py: 235.5
+  test_tortoise_client.py: 1.7
+  eval/retrieval/test_run.py: 196.4
+  test_4314_inert_hooks.py: 20.1
   test_platform_seams.py: 74.5
   # #2125: NEW file — no CI junit measurement exists yet, so it carries the local
   # embedded-lane reading for this turn under the `# unmeasured` convention above
@@ -3495,12 +3587,12 @@ durations:
   # how this row was found (#4348 trap).
   test_framework_middleware.py: 37.0  # unmeasured
   test_2952_degraded_read.py: 0.4
-  test_quota.py: 17.0
+  test_quota.py: 9.5
   test_no_legacy_token_path.py: 0.5
   test_dump_edge_asymmetry_3895.py: 0.8
   test_divergence_conformance.py: 4.8
-  test_from_uri_userinfo.py: 2.7
-  test_export_cli.py: 13.5
+  test_from_uri_userinfo.py: 3.1
+  test_export_cli.py: 13.2
   # #2961: newly-declared fast file. Originally placed at its value-ordered slot
   # (the map was value-ordered then); main's #3400 refresh re-wrote the block, so
   # the slot is kept adjacent to the nearest 13.x neighbour rather than at the
@@ -3517,15 +3609,15 @@ durations:
   # file it introduces. Supersede from the first post-merge main run that
   # includes it (#4817/#4729).
   test_graph_delete_guard.py: 13.1
-  test_github_indexer.py: 50.2
+  test_github_indexer.py: 61.7
   test_doctor.py: 7.1
   test_onboarding_w6_capture_disclosure.py: 111.3
   test_onboarding_w4_settings.py: 59.4
   test_finding_provenance.py: 1.7
   test_onboarding_false_completion_repair.py: 3.6
   test_onboarding_telemetry_w11.py: 0.8
-  test_graph_diagnostics.py: 24.3
-  eval/write_path/test_write_path_runner.py: 70.0
+  test_graph_diagnostics.py: 15.6
+  eval/write_path/test_write_path_runner.py: 90.4
   test_unjournaled_mutation_class.py: 100.0  # unmeasured — #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
   test_3311_multilabel_status_vocab.py: 15.3  # unmeasured — #3311: locally re-measured 2026-10-10 on this host (load ~80-84, 10 CPUs), 14 tests as the file collects now. HOW: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_3311_multilabel_status_vocab.py -q --durations=0` — live FalkorDB on the shared docker lane, reached through the projection's TEST_MODE redirect (under pytest an explicit db_path is rewritten onto TORTOISE_DB_URI; the `env` fixture's tmp_path .db is only the redirect key). Verified this turn: the per-path graph `test_ml3311_<hash12>` is on the shared container WHILE the file runs (polled `redis-cli GRAPH.LIST` mid-run) — and do NOT use the container's `total_commands_processed` delta as evidence for this, the container is shared with other lanes and that number is not reproducible. WHAT THE NUMBER IS: pytest's own session total, "14 passed in 15.31s". It is NOT what this map's own refresher computes: `tools/ci_timing.py --refresh-durations` reads the TEXTUAL `--durations=` block out of the CI log (python-ci.yml runs `--durations=15`, so only those printed lines are summed, per `parse_log`) and never reads junit — so a CI reading is a LOWER bound on this figure (measured while correcting this note: 11.57 s parsed vs 12.14 s session, and 9.92 s vs 10.41 s). Session totals across runs were 13.6 / 15.3 / 17.1 s and the enclosing process wall was 17.2-20.7 s including uv startup; 15.3 s is committed at the map's one-decimal precision. THE 188.0 THIS ROW USED TO CARRY IS CORRECTED, not merely updated: it was a two-run local reading, and it is not reproducible here — 188.0 s is 12x the measured cost, and the same measurement at the pre-fix projection (9dd52f717, which collected 11 tests) was still only 17.5 s wall, so the drop is not the #3311 projection fix. The old note's "10 tests" was wrong even for that state (11 collected before the three rebuild tests, 14 now). Kept in this map rather than left to the sweep because `--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time. Refresh from the first post-merge run that includes it, via `tools/ci_timing.py --refresh-durations`.
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
@@ -3533,75 +3625,75 @@ durations:
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
   test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
-  test_battery_setup.py: 67.9
-  test_graph_write_loop_responsiveness.py: 19.6
-  test_read_routes_loop_responsiveness.py: 6.5
+  test_battery_setup.py: 64.3
+  test_graph_write_loop_responsiveness.py: 8.9
+  test_read_routes_loop_responsiveness.py: 2.2
   test_cli_serve.py: 5.5
   test_redirect_seam.py: 3.3
   eval/retrieval/test_gate_1349.py: 25.7
-  eval/why_suite/test_why_suite_benchmark.py: 34.5
+  eval/why_suite/test_why_suite_benchmark.py: 35.2
   test_commit_schema.py: 3.3
-  test_onboarding_seed_endpoint.py: 63.8
+  test_onboarding_seed_endpoint.py: 12.9
   test_battery_r1_seed.py: 27.5
   test_onboarding_w6_member_authz.py: 3.0
-  test_selfhost.py: 6.2
+  test_selfhost.py: 4.3
   test_epic903_warmstart.py: 32.0
   test_epic903_modes.py: 15.1
   test_import_endpoint.py: 19.7
-  test_client_surface.py: 15.4
-  test_ingest_v2_consolidation.py: 22.1
+  test_client_surface.py: 16.5
+  test_ingest_v2_consolidation.py: 15.5
   test_metering.py: 6.8
-  eval/harness/test_harness_benchmark.py: 34.4
-  test_epic903_scheduler.py: 21.4
+  eval/harness/test_harness_benchmark.py: 11.2
+  test_epic903_scheduler.py: 13.9
   test_hosted_volunteer_context.py: 14.4
-  test_tripwire.py: 9.8
-  test_battery_corpus.py: 20.4
+  test_tripwire.py: 3.8
+  test_battery_corpus.py: 12.9
   test_commit_endpoint.py: 21.4
   test_invites_http.py: 13.6
   test_relationships_bounded.py: 17.6
   test_extractor_v2.py: 17.2
   test_prior_bound_4509.py: 22.0
-  test_fly_machines_guard.py: 13.1
+  test_fly_machines_guard.py: 4.6
   test_fly_machine_env.py: 28.2
   test_ask_sdk.py: 3.9
   test_battery_seed_ingest.py: 3.9
   test_delivery_tenancy.py: 9.7
-  test_ep_selector.py: 16.8
+  test_ep_selector.py: 16.3
   test_longmem_reader_prompting.py: 11.2
   test_pages_bindings.py: 7.3
   test_abuse_integration.py: 14.5
-  test_github_index_lifecycle.py: 13.8
-  test_main_guards.py: 7.6
+  test_github_index_lifecycle.py: 7.9
+  test_main_guards.py: 9.2
   test_epic903_fixtures.py: 16.1
-  test_index_docs_api.py: 9.1
-  longmem_eval/test_vector_arm.py: 12.6
+  test_index_docs_api.py: 2.2
+  longmem_eval/test_vector_arm.py: 4.4
   test_dr_endpoints.py: 19.5
-  test_retrieval.py: 8.5
-  test_consolidation_4way.py: 10.8
+  test_retrieval.py: 26.1
+  test_consolidation_4way.py: 9.9
   test_invite_fusion_http.py: 12.2
   test_signup_token_revoke.py: 8.3
   test_w4_why_enrichment.py: 12.8
-  test_capture_loop_responsiveness.py: 20.6
+  test_capture_loop_responsiveness.py: 8.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
   # workers on threading.Event gates and drive a reachable cold-start through
   # the real probe. The weight is a measured estimate — re-measure from the
   # first post-merge junit artifact rather than trusting it.
-  test_selfhost_health_probe_executor.py: 28.1
+  test_selfhost_health_probe_executor.py: 9.3
   test_writer_inventory.py: 44.0
-  test_decide.py: 9.9
+  test_decide.py: 7.5
   test_onboarding_endpoints.py: 9.1
   test_data_source_capture.py: 22.0  # #3514: locally measured on this host (40 tests, DB-free: the analytics sink is the local JSONL or a stubbed HTTP client, Telegram is a stub; 16.9s session total in one run, 22.0s including the hung-transport row's waits). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Deliberately NOT in `slow_files`: its rows put threads, not processes, on a released barrier, and the dual-registration note above (`classify_test_file` takes the FIRST match) is exactly the trap that list's header warns about. Refresh from CI junit once this file has run on main.
-  test_battery_executor_v2.py: 5.7
+  test_battery_executor_v2.py: 2.2
   test_body_cap_sweep.py: 3.6
-  test_agent_signup_idempotency.py: 6.8
-  test_ep_local_395.py: 10.4
+  test_agent_signup_idempotency.py: 2.6
+  test_ep_local_395.py: 9.4
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
-  test_pack_manifest_store_extraction.py: 10.1
+  test_pack_manifest_store_extraction.py: 4.5
   test_battery_provenance.py: 3.2
-  test_assembly_pure.py: 7.5
+  test_assembly_pure.py: 2.1
   test_ep_terminal_ghost.py: 5.9
-  test_uri_env_mutations_declared.py: 8.4
+  test_uri_env_mutations_declared.py: 7.7
   eval/retrieval/test_oracle.py: 5.7
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 5.7
@@ -3625,10 +3717,13 @@ durations:
   # above. It is carried (rather than left to the flat 2.0s default) for LPT
   # packing accuracy: the durations map has 720 entries, median 1.5s
   # (fast-pool subset 663, median 1.3s), so 66.7s is ~44x the median. Refresh
-  # from the first post-merge main junit run that includes it — the BARE marker
-  # form is deliberate, because the refresh writer (`tools/ci_timing.py`,
-  # `re.fullmatch(r"[ \t]*#\s*unmeasured", tail)`) can only clear a bare marker.
-  test_destructive_wipe_guard.py: 66.7  # unmeasured
+  # from the first post-merge main junit run that includes it — the marker must
+  # LEAD the tail: the refresh writer (`tools/ci_timing.py`, `re.match(
+  # r"[ \t]*#\s*unmeasured\b", tail)`) clears any tail whose first token is
+  # `# unmeasured`, and preserves every other comment verbatim — so a long-form
+  # unmeasured claim that does NOT lead with the marker survives the refresh and
+  # goes stale once the value is measured (#8254 review, P3).
+  test_destructive_wipe_guard.py: 12.9
   # #3718 (DATA-plane residual): 9 cases (4 parametrized lane cases + the
   # /v1/sessions delete freeze case + the demo-seed serialization case + the
   # commit-serialization case + the _lifespan control-plane case + the
@@ -3641,32 +3736,32 @@ durations:
   # embedded-redislite startup). FIRST ESTIMATE; re-measure
   # from the first post-merge junit artifact (see #3653/#3685 for the flake
   # that inflates the tail).
-  test_dataplane_lane_loop_responsiveness.py: 90.0
-  test_extractor_reliability.py: 5.5
-  test_acl_graph_users.py: 9.8
-  test_battery_exposure_liveness.py: 5.9
+  test_dataplane_lane_loop_responsiveness.py: 13.2
+  test_extractor_reliability.py: 4.7
+  test_acl_graph_users.py: 11.6
+  test_battery_exposure_liveness.py: 3.8
   test_attribution_machine_model.py: 6.5
-  test_battery_real_deadline.py: 5.0
-  test_epic903_lifecycle.py: 4.2
+  test_battery_real_deadline.py: 3.0
+  test_epic903_lifecycle.py: 4.3
   test_pointsuperseded_rebuild.py: 8.7
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
-  test_value_extractor.py: 6.5
+  test_value_extractor.py: 4.1
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   test_pack_state.py: 5.1
   test_skip_guard.py: 16.0
-  test_admin_return_to.py: 1.2
+  test_admin_return_to.py: 2.7
   test_admin_origin_redirect.py: 3.1
-  test_longmem_usage_e2e.py: 4.4
+  test_longmem_usage_e2e.py: 3.2
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
   test_oauth_mcp.py: 16.1
-  test_oauth_consent_pkce.py: 8.0  # unmeasured — added by #3496, so no leg of the four documented source runs could collect it; refresh from CI junit.
+  test_oauth_consent_pkce.py: 3.4
   test_mcp_server.py: 4.4
   test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
-  test_ci_selection.py: 18.8
+  test_ci_selection.py: 45.8
   # #6144: measured floor over 3 runs on the dev box (19.0 / 21.2 / 23.4s); the
   # spread is fleet I/O contention, not the guard (user+sys ~4s). The YAML parses
   # are memoized on (path, mtime, size) so the 2.2k-line python-ci.yml is read
@@ -3688,7 +3783,7 @@ durations:
   test_battery_corpus_v11.py: 3.3
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 5.8
-  test_collision_preflight.py: 13.1
+  test_collision_preflight.py: 5.5
   test_who_is_on.py: 6.0  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
@@ -3697,16 +3792,16 @@ durations:
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8
   test_integration_search.py: 2.8
-  test_kind_classifier.py: 6.0
-  test_longmem_preflight.py: 5.0
+  test_kind_classifier.py: 2.1
+  test_longmem_preflight.py: 0.8
   test_battery_ep_outcome.py: 5.4
   test_battery_write_channel.py: 3.3
   test_ep_draft_filter.py: 3.1
-  test_integrity_gate_docker.py: 4.2
+  test_integrity_gate_docker.py: 0.8
   test_pack_manifest_store.py: 3.3
   test_tortoise_search.py: 2.4
   test_2199_decide_calibration.py: 2.5
-  test_battery_determinism.py: 2.7
+  test_battery_determinism.py: 0.9
   test_oauth_token_fault.py: 4.9
   test_pointinvalidated_rebuild.py: 3.2
   test_invite_fusion_docker.py: 2.3
@@ -3714,7 +3809,7 @@ durations:
   test_email_notify.py: 4.3
   test_mining.py: 2.9
   test_wipe_server.py: 5.1
-  test_boot_regressions.py: 4.2
+  test_boot_regressions.py: 2.2
   test_de2e1_entity_extraction.py: 2.1
   # #3019: measured 2026-10-05 LOCALLY under the embedded carve-out config
   # (`TORTOISE_TEST_CARVE_OUT=1`) — 7.10s for the file (a second run 8.31s; one
@@ -3726,8 +3821,8 @@ durations:
   # pool size or percentage is restated here on purpose — see the same rule on
   # the `#3400` rows above.
   test_determinism_tie_order_3019.py: 7.1
-  test_epic903_staleness.py: 2.6
-  test_epic903_observability.py: 3.1
+  test_epic903_staleness.py: 1.7
+  test_epic903_observability.py: 1.6
   test_lme_m6_evidence.py: 2.4
   test_supersede_edges.py: 2.7
   test_directional_impl_fix.py: 2.2
@@ -3736,7 +3831,7 @@ durations:
   test_ask_spotcheck_judge.py: 2.0
   test_assembly_sdk.py: 3.6
   test_epic903_retention.py: 2.1
-  test_eval_retrieval_budget.py: 2.1
+  test_eval_retrieval_budget.py: 2.0
   test_export_delete.py: 3.2
   test_review_connections.py: 3.7
   test_battery_report_writers.py: 2.2
@@ -3774,7 +3869,7 @@ durations:
   # two a load-varied run happens to slow down.
   test_mcp_rename_table.py: 3.0
   test_sdk_rename_table.py: 6.1
-  test_sdk_surface.py: 32.6
+  test_sdk_surface.py: 2.0
   test_connector_source_version_5214.py: 20.0  # #5214: 13 tests; embedded lane (like test_connector_sources.py). Local wall time ~135s of which ~110s is the ONE-OFF embedding-model load on a cold cache (this machine cannot fetch it — the hermetic egress guard blocks HF), so ~20s is the steady-state figure; locally measured, not a junit sweep
   test_connector_sources.py: 1.7
   test_e2e9_point_in_time.py: 2.6
@@ -3785,7 +3880,7 @@ durations:
   test_volunteer_pipeline.py: 2.6
   eval/retrieval/test_1348.py: 1.4
   test_about_event_untangle.py: 1.5
-  test_auth_flip.py: 3.2
+  test_auth_flip.py: 0.8
   test_battery_config.py: 1.2
   test_calibration.py: 2.0
   test_eval_ingest_cache.py: 1.5
@@ -3798,7 +3893,7 @@ durations:
   test_verdict_contract.py: 0.0  # unmeasured — new in #5049; the sweeper fills this from the run's junit
   test_5365_fail_open_visible.py: 21.2  # unmeasured — local single run (5 tests); refresh from CI junit
   bench/test_degradation_chain.py: 1.3
-  longmem_eval/test_measure_temporal.py: 2.2
+  longmem_eval/test_measure_temporal.py: 4.7
   test_assembly_fixtures.py: 2.2
   test_epic903_hosted.py: 2.2
   test_operator_dedup_parity.py: 1.4
@@ -3810,7 +3905,7 @@ durations:
   test_battery_probe_measured.py: 1.5
   test_coverage_loop.py: 1.3
   test_ep_quadrature.py: 0.9
-  test_event_store.py: 1.7
+  test_event_store.py: 8.6
   test_health_ready_nonblocking.py: 3.1
   test_hosted_auth.py: 1.8
   test_ingest_event_endpoint.py: 1.7
@@ -3858,7 +3953,7 @@ durations:
   test_postmerge_dedup.py: 0.9
   test_session_index_health.py: 1.1
   test_suspension_parity.py: 2.5
-  test_2206_confidence_surfaces.py: 1.1
+  test_2206_confidence_surfaces.py: 6.2
   test_ask_regression_llm.py: 0.5
   test_entity_key_expansion.py: 0.8
   test_ep_dirty_persist.py: 1.2
@@ -3888,12 +3983,12 @@ durations:
   test_session_capture_e2e.py: 0.7
   test_stop_writes.py: 0.5
   test_subscriptions.py: 0.8
-  test_1162_add_operator_local_svbp.py: 0.6
+  test_1162_add_operator_local_svbp.py: 3.7
   test_analyze.py: 0.2
   test_battery_arms.py: 0.6
   test_battery_lane_matrix.py: 0.7
   test_battery_parity_executors.py: 0.4
-  test_ci_timing.py: 0.5
+  test_ci_timing.py: 4.9
   test_commit_supersession_parity.py: 0.7
   test_email_signup.py: 1.1
   test_embeddings_filters.py: 0.5
@@ -3904,7 +3999,7 @@ durations:
   test_issue94_annotate_ep_batch.py: 0.7
   test_longmem_reader_aggregation.py: 0.5
   test_lookup_hash.py: 0.4
-  test_markers.py: 19.9
+  test_markers.py: 21.5
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
@@ -3951,7 +4046,7 @@ durations:
   test_remove_context_migration.py: 0.4
   test_search_engine_nameerror.py: 0.7
   test_signup_form_safety.py: 1.6
-  test_tool_registry.py: 10.3
+  test_tool_registry.py: 3.8
   test_user_identity_authority.py: 2.3
   test_ci_expected_manifests.py: 0.6
   test_ci_guard_invocation.py: 0.6
@@ -4126,7 +4221,7 @@ durations:
   test_sdk_adapter_cap.py: 0.1
   test_sentry.py: 0.1
   test_session_attribution.py: 0.3
-  test_session_import_codex.py: 0.2
+  test_session_import_codex.py: 5.0
   test_capture_spool.py: 1.9
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker
@@ -4162,10 +4257,10 @@ durations:
   test_session_reinjection.py: 3.0
   test_session_reinjection_rules.py: 0.9
   test_backups_v1_alias.py: 0.1
-  eval/write_path/test_write_path_operator_lane.py: 7.0
+  eval/write_path/test_write_path_operator_lane.py: 9.3
   longmem_eval/test_temporal_admission_trace.py: 0.1
-  test_2884_ep_state_journaled.py: 4.7
-  test_3276_has_ep_measured.py: 0.9
+  test_2884_ep_state_journaled.py: 4.5
+  test_3276_has_ep_measured.py: 4.6
   test_4220_blog_residue_cleanup.py: 0.1
   test_activation_scorecard.py: 1.6
   test_analytics_fallback_alert.py: 1.9
@@ -4184,18 +4279,18 @@ durations:
   test_client_cli_probe.py: 0.1
   test_client_status_vocabulary.py: 0.2
   test_cmux_dispatch.py: 0.3
-  test_codex_capture_hook.py: 7.4
+  test_codex_capture_hook.py: 4.2
   test_cohort_cost_cap.py: 5.5
-  test_cursor_capture_hook.py: 8.7
+  test_cursor_capture_hook.py: 4.1
   test_cursor_mcp_exit_evidence.py: 1.1
   test_d3_session_identity.py: 1.4
   test_dashboard_unknown_address.py: 0.1
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
   test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
-  test_embedder_provision.py: 12.0  # unmeasured — #7359: the file gained two subprocess-hang tests (a blocked main thread signalled, and a watchdog dump) at locally measured 8-16s; refresh from CI junit.
+  test_embedder_provision.py: 6.1
   test_entity_delete_rebuild.py: 1.9
-  test_env_truthy.py: 10.6
+  test_env_truthy.py: 14.7
   test_health_client_effect.py: 3.5
   test_hook_upgrade.py: 9.4
   test_issue_4010_sessions_unlimited.py: 2.1
@@ -4204,7 +4299,11 @@ durations:
   test_metering_window_admission.py: 1.0
   test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
-  test_pi_capture_hooks.py: 10.3
+  test_pi_capture_hooks.py: 10.5
+  # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
+  # artifact + installer + parser, one node --test subprocess, and one real
+  # `tortoise install openclaw` CLI run into a temp HOME.
+  test_openclaw_seam.py: 7.0
   test_product_rerank.py: 0.1
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.2
@@ -4216,12 +4315,13 @@ durations:
   test_source_version_window_3644.py: 22.0  # #3644: 19 tests, embedded carve-out lane; locally measured (8-27s across clean runs; fleet-contention sensitive — redislite start failures under load, not assertions)
   test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
-  test_retention_promise.py: 2.7
+  test_retention_promise.py: 3.8
   test_retired_tools.py: 0.2
+  test_retrieval_metering.py: 90.0  # unmeasured — #4489: 34 tests on the embedded registry lane, locally measured 87.5s (TestTeamRoute's FastAPI client runs three requests through the real app; refresh from CI junit).
   test_session_bridge_fragment_retention.py: 0.3
-  test_session_verify.py: 97.4
+  test_session_verify.py: 92.1
   test_ship_test_onboarding.py: 1.4
-  test_surface_manifest.py: 105.0
+  test_surface_manifest.py: 125.0
   test_surface_resolution.py: 0.9
   test_telemetry_registration.py: 1.6
   test_temporal_leg_2976.py: 0.4
@@ -4231,9 +4331,9 @@ durations:
   test_time_aware_eval_2520.py: 0.0   # unmeasured — arrived via main #5297; no source leg measured it
   test_time_aware_run_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
   test_time_aware_sdk_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
-  test_tmpdir_hygiene_4096.py: 8.4
+  test_tmpdir_hygiene_4096.py: 9.2
   test_turn_embedding_write_path_4194.py: 1.4
-  test_website_docs_consistency.py: 3.2
+  test_website_docs_consistency.py: 6.6
   test_install_reaper_schedule.py: 7.8  # unmeasured
   test_contact_form.py: 2.0  # unmeasured
   test_contact_rate_limit_behaviour.py: 2.0  # unmeasured
@@ -4254,7 +4354,7 @@ durations:
   test_rotate_key.py: 3.6  # unmeasured
   test_verbatim_span.py: 0.5  # unmeasured
   test_ops_safety.py: 16.8  # unmeasured
-  test_org_graph_open_tripwire.py: 13.8  # unmeasured
+  test_org_graph_open_tripwire.py: 4.7
   test_backup_e2e.py: 13.1  # unmeasured
   test_embedded_lifecycle_fast_close.py: 9.1  # unmeasured
   # #5011: 64 tests, docker lane — one full fold+graph-diff per assertion, nine of
@@ -4274,22 +4374,22 @@ durations:
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.0  # unmeasured
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
-  bench/test_smoke_embedded.py: 30.7  # unmeasured
+  bench/test_smoke_embedded.py: 38.3
   test_about_edges.py: 8.3  # unmeasured
   test_backfill_sources.py: 1.0  # unmeasured
   test_billing.py: 15.6  # unmeasured
   test_cli_context.py: 9.3  # unmeasured
-  test_config.py: 4.1  # unmeasured
+  test_config.py: 4.0
   test_control_plane.py: 5.1  # unmeasured
   test_cross_tenant_read_isolation.py: 2.6  # unmeasured
   test_dream.py: 3.5  # unmeasured
-  test_embedded_concurrency.py: 125.6  # unmeasured
+  test_embedded_concurrency.py: 111.5
   test_embedded_durability_claim.py: 0.5  # unmeasured
-  test_embedded_lifecycle.py: 87.7  # unmeasured
+  test_embedded_lifecycle.py: 91.1
   test_enumeration_surfaces.py: 1.2  # unmeasured
   test_ep_sources.py: 5.3  # unmeasured
   test_eval_extraction_health.py: 0.1  # unmeasured
-  test_eval_ingest_retry.py: 16.1  # unmeasured
+  test_eval_ingest_retry.py: 12.2
   test_eval_resume_retry_failed.py: 4.2  # unmeasured
   test_event_provenance.py: 2.3  # unmeasured
   test_flip_gate.py: 6.7  # unmeasured
@@ -4297,7 +4397,7 @@ durations:
   test_fork_slot_wedge_3845.py: 2.1  # unmeasured
   test_graph_integrity_gate.py: 9.2  # unmeasured
   test_graphcopy_boolean_index_3154.py: 0.6  # unmeasured
-  test_guard.py: 30.4  # unmeasured
+  test_guard.py: 16.5
   test_hard_reject.py: 0.7  # unmeasured
   test_hosted_api.py: 114.6  # unmeasured
   test_hosted_backup.py: 14.4  # unmeasured
@@ -4308,18 +4408,18 @@ durations:
   test_ingest_bundle.py: 8.7  # unmeasured
   test_ingest_mode.py: 4.4  # unmeasured
   test_ingest_validation.py: 1.4  # unmeasured
-  test_longmem_runner.py: 173.3  # unmeasured
+  test_longmem_runner.py: 49.7
   test_mcp_http.py: 16.5  # unmeasured
   test_mcp_route_challenge.py: 0.8  # unmeasured
-  test_migrate_db.py: 34.1  # unmeasured
-  test_pack_shipping_wheel.py: 33.7  # unmeasured
+  test_migrate_db.py: 5.6
+  test_pack_shipping_wheel.py: 23.4
   test_per_session_census.py: 2.0  # unmeasured
   test_pre_migration_safety.py: 2.3  # unmeasured
   test_precision_leak_4028.py: 3.1  # unmeasured
   test_projection.py: 8.9  # unmeasured
   test_projection_embedded_socket_timeout.py: 1.9  # unmeasured
   test_projection_lifecycle.py: 8.9  # unmeasured
-  test_reaper.py: 195.9  # unmeasured
+  test_reaper.py: 96.1
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
   test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
@@ -4327,7 +4427,7 @@ durations:
   test_sdk.py: 7.9  # unmeasured
   test_sdk_group3.py: 2.7  # unmeasured
   test_search_engine_gaps.py: 3.0  # unmeasured
-  test_source_inheritance_own.py: 45.7  # unmeasured
+  test_source_inheritance_own.py: 34.3
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
@@ -4336,7 +4436,7 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
-  test_docs_lint_baseline.py: 2.0  # unmeasured (#7435: registered under core)
+  test_docs_lint_baseline.py: 2.5
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
   # #6137: register the fast pool's unmeasured files. Registering them is
   # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
@@ -4352,7 +4452,7 @@ durations:
   # reports the whole file unmeasured.
   eval/write_path/test_write_path_prescreen.py: 0.2
   eval/write_path/test_write_path_semantic_judge.py: 0.2
-  test_2500_terminal_ep_backfill.py: 1.7
+  test_2500_terminal_ep_backfill.py: 3.9
   test_3026_oauth_boundaries.py: 0.7
   test_3660_session_upload_identity.py: 0.1
   test_3844_annotation_injection.py: 0.1
@@ -4363,7 +4463,7 @@ durations:
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
-  test_4921_construct_lock.py: 60.0  # #4921: a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). Locally measured this turn: 20 tests, wall time dominated by the 2 forced-interleave tests (two real embedded servers per arm) — 29s on an idle-ish box, ~85s on a loaded one, so the flat #3400 default is set mid-range (60.0) and the true weight is deliberately NOT claimed: it moves with box load more than with the code. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). Refresh from the first post-merge run that includes it.
+  test_4921_construct_lock.py: 114.1  # #4921: MEASURED from the 2026-10-12T04:54:57Z main run (3 tests; 114.13s summed across legs, 60.06s in the slowest single leg) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
@@ -4376,6 +4476,7 @@ durations:
   test_capture_graph_ops.py: 0.8
   test_capture_redaction_sinks_5445.py: 0.1
   test_capture_secret_redaction_4911.py: 9.7
+  test_connection_url_redaction_5326.py: 2.7  # #5326: 23 tests (21 at the first cut; #5326 review added 2 that pin the authority-boundary leak). Local wall is fuzz- and box-dependent (~2.7-8 s), so the numeric value stays the pre-merge estimate; a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). The file is CPU-light (one 6,000-case in-process fuzz, no DB), so unlike the #4921 entry above it does NOT move much with box load. Refresh the value from the first post-merge run that includes it.
   test_capture_validfrom_3945.py: 0.5
   test_ci_last_failed.py: 1.9
   test_ci_manifest.py: 7.2
@@ -4390,14 +4491,14 @@ durations:
   test_extractor_embed_coerce_5060.py: 0.6
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
-  test_heavy_import_guard.py: 9.2
+  test_heavy_import_guard.py: 6.1
   test_hook_run_observation.py: 5.4
   test_hook_stderr_5919.py: 0.3
   test_hosted_aboutobject_journal_4240.py: 4.4
   test_id_predicate_barrier_6976.py: 0.1
   test_invalidate_inverted_window_5358.py: 0.8
   test_merge_throughput.py: 5.8
-  test_mergify_config_guard.py: 7.1
+  test_mergify_config_guard.py: 3.9
   test_notify_offloop_4456.py: 1.7
   test_pack_extraction_slots_v31.py: 0.2
   test_pr_lead_time.py: 0.2
@@ -4421,12 +4522,14 @@ durations:
   test_subject_binding_1370.py: 7.1
   test_subject_layer_read_surfaces_4889.py: 0.9
   test_surface_guard_pin_4606.py: 0.9
-  test_uri_requiring_selection.py: 52.7
+  test_uri_requiring_selection.py: 48.2
   test_uri_username_consumed_3081.py: 0.5
   test_validity_window_contract_5374.py: 0.8
   test_value_gate_4899.py: 0.9
   test_vet_gate_5005.py: 0.5
   test_vocab_gating_by_graph.py: 5.1
+  test_bounded_raw_clients_3065.py: 3.0
+  test_entity_identity.py: 7.8
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-

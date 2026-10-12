@@ -139,6 +139,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # monkeypatch auto-restores at teardown, so no lane leaks into a later
     # docker-lane test (the test_metering_period_window.py precedent).
     "test_embed_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #4489: the registry-lane ledger fixture forces the EMBEDDED lane (the
+    # delenv IS the point — the fixture pins TORTOISE_DB_PATH so the writer and
+    # reader address the same store; a URI redirect would split them). The
+    # fixture-param monkeypatch auto-restores at teardown (no lane leak).
+    "test_retrieval_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #3825: the metering-WINDOW tests force the EMBEDDED registry lane (the
     # delenv IS the point — the fixture puts a real billing anchor on an org's

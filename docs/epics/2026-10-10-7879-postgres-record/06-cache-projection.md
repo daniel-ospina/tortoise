@@ -53,7 +53,7 @@ it the derived cache's fold **over history**, and there are two consequences:
 | **A — `rebuild_all`'s source becomes `public.journal_event`; replay the same events through `apply()`** (the smallest diff; the test-design's machinery line describes it) | **Rejected.** It is a **second reading of history** — the record's own `journal_event` rows re-entered through the same fold — so the record's *state* tables become redundant for the cache and a bug in the state projection is invisible in the cache. Worse, it **fails S3's contract structurally**: `apply()` writes the recomputed `content_hash`/`confidence`/embedding, which have no PRIMARY claim. The contract would then have to be scoped away — i.e. the clause that makes this unit's verification non-vacuous would be the one dropped. |
 | **B — a hand-written second declaration of the property set** | **Rejected**, same reason `#7969` rejected its alternative A: the second declaration is the one that goes stale. The property↔column pairing is read from the placement table (`#7955`), which `#7968`'s schema is already pinned to. |
 | **C — project the record's **state**, output confined to the record's PRIMARY field set, one way; the declaration is derived from what was materialized** ✅ | **Chosen.** Nodes are `MERGE`d by the label's canonical key (`#7955` Interface E) and `SET` from the record's own columns; relations are `MERGE`d with `(label, key)` endpoints resolved from `node_identity`'s contract. Nothing on the path reads the cache. |
-| **D — reuse `projection/entities.py`'s `_upsert_point_props`** | **Rejected.** It is event-shaped and open-set (`SET n += $props` over a journal payload), so it would carry the derived fields and the journal-only ones straight through — including the five graph-only classes `rebuild_all` currently rescues from the cache (`#548`/`#990`/`#2814`/`#4641`/`#4653`), which §0.4 addresses head-on. |
+| **D — reuse `projection/entities.py`'s `_upsert_point_props`** | **Rejected.** It is event-shaped and open-set (`SET n += $props` over a journal payload), so it would carry the derived fields and the journal-only ones straight through — including the six graph-only classes `rebuild_all` currently rescues from the cache (`#548`/`#990`/`#2814`/`#4641`/`#4653`/`#5353`), which §0.4 addresses head-on. |
 
 ### 0.3 Chosen approach
 
@@ -104,17 +104,17 @@ of journal events.
 
 ### 0.5 What is deliberately NOT carried — and it is a report, not a silent skip
 
-`rebuild_all` **reads the cache before wiping it** to preserve five graph-only
+`rebuild_all` **reads the cache before wiping it** to preserve six graph-only
 classes that no journal record carries (`_SNAPSHOT_SECTIONS`): `#548` synthetic
-Points, `#990` `:Batch` markers, `#2814` config, `#4641` onboarding state, and
-`#4653` `:GraphEventMeta`. The issue's own words forbid exactly that on this
+Points, `#990` `:Batch` markers, `#2814` config, `#4641` onboarding state,
+`#4653` `:GraphEventMeta`, and `#5353` `:TeamMeta`. The issue's own words forbid exactly that on this
 path — *"the cache is a destination, never an input. Nothing in this path may
 read the cache to decide what to project"* — and the placement ruling says what
 they are: *"a field with no PRIMARY claim in the record that exists only here is
 a defect, not a shortcut."*
 
 So **this projection does not carry them.** The consequence is named, not
-hidden and not silent: a record-sourced rebuild **drops** them, and the five
+hidden and not silent: a record-sourced rebuild **drops** them, and the six
 classes are listed here (and in the module docstring). It is deliberately **not
 counted at runtime** — a count would need the same pre-wipe cache read this
 path forbids, and `rebuild_from_record`'s report describes the RECORD's coverage
@@ -162,7 +162,7 @@ to have none.
   step of that path and does not route live writes.
 * **The read path** (`#7970`, deferred by §2.0) and the **residency router**
   (`#7953`).
-* **The five graph-only classes** (§0.5) — dropped (and named), not carried.
+* **The six graph-only classes** (§0.5) — dropped (and named), not carried.
 * **Normalising the ~9,700 legacy ids** (`#7955` §1.4, W1b).
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**

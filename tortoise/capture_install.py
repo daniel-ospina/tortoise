@@ -187,6 +187,22 @@ from tortoise import hook_install
 #: ``__main__._cmd_install_hooks`` for ``volunteer-turn.sh``.
 PACKAGE_DIR = Path(__file__).resolve().parent
 
+# ── OpenClaw (#2120) — a plugin DIRECTORY, not a single artifact ─────────
+#: The plugin directory name (= the manifest ``id``) and the entry file
+#: ``package.json#openclaw.extensions`` declares.  BOTH are DERIVED from
+#: ``hook_install``'s artifact contract: the version detector must inspect
+#: exactly the file the installer writes, so writer and reader read ONE
+#: declaration (#4680).
+OPENCLAW_PLUGIN_DIRNAME = hook_install.OPENCLAW_PLUGIN_DIRNAME
+OPENCLAW_ENTRY_NAME = hook_install.OPENCLAW_ENTRY_NAME
+
+#: The plugin's own test suite.  Shipped in the repo, never installed: it is a
+#: development gate, not part of the seam.
+OPENCLAW_TEST_NAME = "index.test.mjs"
+
+#: OpenClaw's config document, beside the state directory.
+OPENCLAW_CONFIG_NAME = "openclaw.json"
+
 #: The in-repo artifact each harness's capture seam installs.  Mirrors
 #: ``HARNESS_CAPTURE_SEAM`` in ``website/apps/dashboard/src/harnesses.js`` and
 #: the dashboard's ``harnesses.test.js`` pins the two together.
@@ -195,6 +211,11 @@ CAPTURE_SEAM: dict[str, str] = {
     "codex": "tortoise/codex-hooks/session-end.sh",
     "cursor": "tortoise/cursor-hooks/session-end.sh",
     "pi": "tortoise/pi-hooks/tortoise-capture.ts",
+    # #2120: OpenClaw has NO shell-hook surface, so this seam is the plugin
+    # ENTRY file — the artifact the version contract grades, and the file a
+    # `tortoise install --harness openclaw` puts under
+    # ``~/.openclaw/extensions/tortoise/``.
+    "openclaw": f"tortoise/openclaw-plugin/{OPENCLAW_ENTRY_NAME}",
 }
 
 #: The per-hook budget #3754 established and #3801 identified as the
@@ -1353,6 +1374,211 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
 
+def openclaw_home(home: Path) -> Path:
+    """Resolve OpenClaw's plugin directory: ``~/.openclaw/extensions/tortoise``.
+
+    OpenClaw has NO ``HarnessLayout`` (its seam is an in-process plugin, not a
+    scripted hook), so the directory is part of the artifact contract in
+    ``hook_install`` — ``ARTIFACT_CONTRACTS["openclaw"].root_relpath`` — which
+    this delegates to, so the contract, the installer, ``session verify`` and
+    ``doctor`` all read ONE declaration of where the seam lives (#4680).
+
+    The returned path IS the plugin directory (OpenClaw's shared
+    ``extensions`` parent holds every plugin, so the seam's own root is the
+    one carrying our entry file); the OpenClaw state directory — where
+    ``openclaw.json`` lives — is its parent's parent.
+
+    ``OPENCLAW_STATE_DIR`` relocates the whole state tree, so the contract's
+    ``root_env`` resolves through it — an install that ignored the override
+    would write where OpenClaw never looks and report success (#2120).
+    """
+    root = hook_install.artifact_root("openclaw", Path(home))
+    if root is None:  # pragma: no cover - "openclaw" is a registered contract
+        raise RuntimeError(
+            "'openclaw' is missing from hook_install.ARTIFACT_CONTRACTS")
+    return root
+
+
+def _merge_openclaw_plugin(data: dict) -> list[str]:
+    """Merge ``plugins.entries.tortoise.enabled = true`` into ``openclaw.json``.
+
+    Merge, never overwrite: every unrelated key, every other plugin entry and
+    any existing config block survive untouched, and a second call is a no-op.
+    Returns the extra actions the merge performed (the ``plugins.allow``
+    repair), so the caller reports them instead of silently widening access.
+
+    Two security-relevant branches, both keyed on OpenClaw's own rules
+    (``docs/plugins/manage-plugins.md``):
+
+    * A ``plugins.deny`` entry for ``tortoise`` is AUTHORITATIVE — the product
+      refuses to load the plugin however we write ``enabled``.  Writing the
+      entry anyway would install a plugin that can never run and report
+      success, so this RAISES: the caller refuses and says what to remove.
+    * An existing RESTRICTIVE ``plugins.allow`` list is widened with
+      ``tortoise``, mirroring what the Gateway itself does when a plugin is
+      enabled through the CLI.  A missing ``tortoise`` there is the other
+      silent-inert path — discovered, configured, and never loaded.
+
+    Raises :class:`ValueError` for a shape that cannot be merged safely.
+    """
+    actions: list[str] = []
+    plugins = data.get("plugins")
+    if plugins is None:
+        plugins = {}
+        data["plugins"] = plugins
+    if not isinstance(plugins, dict):
+        raise ValueError('"plugins" is not a JSON object')
+    deny = plugins.get("deny")
+    if isinstance(deny, list) and OPENCLAW_PLUGIN_DIRNAME in deny:
+        raise ValueError(
+            f'a plugins.deny entry for "{OPENCLAW_PLUGIN_DIRNAME}" is '
+            "authoritative — remove it from plugins.deny first, then re-run")
+    entries = plugins.get("entries")
+    if entries is None:
+        entries = {}
+        plugins["entries"] = entries
+    if not isinstance(entries, dict):
+        raise ValueError('"plugins.entries" is not a JSON object')
+    entry = entries.get(OPENCLAW_PLUGIN_DIRNAME)
+    if entry is None:
+        entry = {}
+        entries[OPENCLAW_PLUGIN_DIRNAME] = entry
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f'"plugins.entries.{OPENCLAW_PLUGIN_DIRNAME}" is not a JSON object')
+    entry["enabled"] = True
+    allow = plugins.get("allow")
+    if isinstance(allow, list) and allow and OPENCLAW_PLUGIN_DIRNAME not in allow:
+        allow.append(OPENCLAW_PLUGIN_DIRNAME)
+        actions.append(
+            f"added {OPENCLAW_PLUGIN_DIRNAME!r} to the restrictive "
+            "plugins.allow list (without it the plugin is discovered and "
+            "never loaded)")
+    return actions
+
+
+def _openclaw_plugin_payloads(src_dir: Path) -> dict[str, bytes]:
+    """Every shipped plugin file, minus the seam's own test suite.
+
+    DERIVED from the package directory rather than re-listed here: a file
+    added to the plugin but forgotten in a hard-coded tuple would be silently
+    missing from every install, which is the drift class the Pi seam's
+    ``LEGACY_PI_DIRNAME`` comment records.  ``tests/test_openclaw_seam.py``
+    pins the shipped set so an unintended new file is noticed.
+    """
+    payloads: dict[str, bytes] = {}
+    for path in sorted(src_dir.iterdir()):
+        if not path.is_file() or path.name == OPENCLAW_TEST_NAME:
+            continue
+        payloads[path.name] = path.read_bytes()
+    return payloads
+
+
+def _install_openclaw(home: Path, *, dry_run: bool) -> InstallResult:
+    """Install/upgrade the OpenClaw plugin seam (#2120).
+
+    Two halves, both inside ONE already-guarded call site:
+
+    * the plugin DIRECTORY, copied to ``~/.openclaw/extensions/tortoise/`` —
+      OpenClaw's documented global discovery path, which needs no managed
+      install record and therefore no ``openclaw`` CLI on the machine; and
+    * the ``plugins.entries.tortoise.enabled`` enablement in
+      ``~/.openclaw/openclaw.json`` — discovered is not loaded.
+    """
+    harness = "openclaw"
+    plugin_dir = openclaw_home(home)
+    # ``~/.openclaw/extensions/tortoise`` ⇒ state dir is its parent's parent.
+    state = plugin_dir.parents[1]
+    settings_path = state / OPENCLAW_CONFIG_NAME
+    src_dir = PACKAGE_DIR / "openclaw-plugin"
+    if not src_dir.is_dir():
+        return InstallResult(harness, error=(
+            f"shipped capture plugin not found at {src_dir} — this install is "
+            "incomplete (broken package?). Reinstall tortoise."))
+    payloads = _openclaw_plugin_payloads(src_dir)
+    if OPENCLAW_ENTRY_NAME not in payloads:
+        return InstallResult(harness, error=(
+            f"shipped capture plugin at {src_dir} has no "
+            f"{OPENCLAW_ENTRY_NAME} — this install is incomplete (broken "
+            "package?). Reinstall tortoise."))
+
+    entry_dst = plugin_dir / OPENCLAW_ENTRY_NAME
+    for target in (entry_dst, settings_path):
+        escape = _symlink_escape(state, target, label="OpenClaw state dir")
+        if escape:
+            return InstallResult(harness, error=f"Refusing: {escape}")
+    non_regular = _refuse_non_regular(entry_dst)
+    if non_regular:
+        return InstallResult(harness, error=non_regular)
+    # Ownership guard on the CONTRACT file, mirroring `_install_pi`: a
+    # differing, foreign entry at this path is never silently replaced.
+    foreign = _foreign_install_refusal(entry_dst, payloads[OPENCLAW_ENTRY_NAME])
+    if foreign:
+        return InstallResult(harness, error=foreign)
+    if plugin_dir.exists() and not plugin_dir.is_dir():
+        return InstallResult(harness, error=(
+            f"Refusing: {plugin_dir} exists but is not a directory — move it "
+            "aside and re-run"))
+
+    data, refusal = _load_settings(settings_path)
+    if refusal:
+        return InstallResult(harness, error=f"Refusing: {refusal}")
+    if data is None:  # unreachable (a refusal is set whenever data is None)
+        return InstallResult(harness, error=(
+            f"Refusing: {settings_path} could not be read — refusing to touch "
+            "it. Merge manually."))
+    before = json.dumps(data, sort_keys=True)
+    try:
+        merge_actions = _merge_openclaw_plugin(data)
+    except ValueError as e:
+        return InstallResult(harness, error=(
+            f"Refusing: {settings_path} has {e}. Merge manually."))
+
+    unwritable = _preflight_probe([plugin_dir, settings_path.parent])
+    if not unwritable and not dry_run:
+        unwritable = _preflight_writable([plugin_dir, settings_path.parent])
+    if unwritable:
+        return InstallResult(harness, error=f"Refusing: {unwritable}")
+
+    actions: list[str] = []
+    changed = False
+    for name, payload in payloads.items():
+        dst = plugin_dir / name
+        if _is_regular_unchanged(dst, payload):
+            continue
+        if dst.exists() and dst.is_file() and not dst.is_symlink():
+            # A differing copy that passed the guard is a stale or locally
+            # edited Tortoise file — preserve it before the shipped bytes
+            # replace it (mirrors `_install_pi`).
+            backup = _backup_path(dst)
+            if dry_run:
+                actions.append(f"[dry-run] would back up {dst} → {backup}")
+            else:
+                _atomic_bytes(backup, dst.read_bytes(), 0o600)
+                actions.append(f"backed up {dst} → {backup}")
+        if dry_run:
+            actions.append(f"[dry-run] would install {dst}")
+        else:
+            _atomic_bytes(dst, payload, 0o644)
+            actions.append(f"installed {dst}")
+        changed = True
+
+    if before != json.dumps(data, sort_keys=True):
+        if dry_run:
+            actions.append(f"[dry-run] would enable the tortoise plugin in "
+                           f"{settings_path}")
+        else:
+            _atomic_bytes(settings_path,
+                          (json.dumps(data, indent=2) + "\n").encode("utf-8"),
+                          0o644 if not settings_path.exists()
+                          else settings_path.stat().st_mode & 0o777)
+            actions.append(f"enabled the tortoise plugin in {settings_path}")
+        changed = True
+    actions.extend(merge_actions)
+
+    return InstallResult(harness, changed=changed, actions=tuple(actions))
+
+
 def _install_failed(harness: str, e: Exception) -> InstallResult:
     """The populated failure result for ANY failure inside the install.
 
@@ -1428,6 +1654,18 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
+    elif harness == "openclaw":
+        # #2120: a plugin DIRECTORY plus its enablement in openclaw.json — not
+        # a script + registration file, so it has its own installer rather than
+        # `_install_home_scoped`'s layout contract.
+        try:
+            result = _install_openclaw(
+                Path(home) if home is not None else Path.home(),
+                dry_run=dry_run)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
     else:
         try:
             result = _install_pi(
@@ -1485,6 +1723,9 @@ __all__ = [
     "CURSOR_SCRIPT_NAME",
     "CURSOR_SESSION_START_EVENT",
     "CURSOR_SESSION_START_SCRIPT_NAME",
+    "OPENCLAW_CONFIG_NAME",
+    "OPENCLAW_ENTRY_NAME",
+    "OPENCLAW_PLUGIN_DIRNAME",
     "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",
@@ -1493,5 +1734,6 @@ __all__ = [
     "merge_capture_hooks",
     "merge_codex_capture_hooks",
     "merge_cursor_capture_hooks",
+    "openclaw_home",
     "pi_home",
 ]

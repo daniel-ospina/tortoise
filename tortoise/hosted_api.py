@@ -134,6 +134,9 @@ from tortoise.projection import (
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
+from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
+    RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
+)
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
     _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
@@ -2733,9 +2736,59 @@ def _embed_metered(fn):
     return _sync_wrapper
 
 
+async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None) -> None:
+    """#2081: push this tenant graph's pending events to its subscribers.
+
+    Called at the END of ``_dream_worker`` (the dream cycle is the delivery
+    cadence — the phase-2 target is "push latency ≤ one dream-cycle cadence") and
+    ONLY there. Nothing on the write path ever awaits this: a capture must stay
+    2xx regardless of a subscriber's endpoint.
+
+    Best-effort by construction. ``dispatch_pending`` itself never raises; this
+    wrapper additionally catches the SDK/edge failures around it (an
+    unreachable graph, a build failure) and logs — a delivery problem must
+    never surface as a dream failure, and it must never abort the worker (the
+    roots are already drained; a raise here would be read as a dream bug).
+
+    KNOWN LIMITATION (follow-up filed, not fixed here): the pass runs when a
+    dream runs, so a subscription whose retry backoff elapses while the tenant
+    is IDLE waits for that tenant's next dream. The backoff/attempt state is
+    durable and correct (`next_attempt_at` gates the next pass), so the gap is
+    the TRIGGER, not the bookkeeping — a scheduled sweep across tenants is the
+    fix.
+    """
+    import logging
+
+    from tortoise import webhook_delivery as _webhook_delivery
+    from tortoise.security import redact_error
+
+    if not _webhook_delivery.dispatch_enabled():
+        return
+    _log = logging.getLogger("tortoise.api")
+
+    def _run() -> dict:
+        sdk = (_make_sdk(graph_name=graph_namespace) if graph_namespace is not None
+               else _make_sdk(namespace=org_id))
+        try:
+            return _webhook_delivery.dispatch_pending(sdk._get_proj())
+        finally:
+            sdk.close()
+
+    try:
+        summary = await asyncio.to_thread(_run)
+    except Exception as e:
+        _log.warning("webhook dispatch failed for tenant %s: %s",
+                     org_id, redact_error(e))
+        return
+    if summary.get("delivered") or summary.get("failed"):
+        _log.info("webhook dispatch tenant=%s graph=%s %s",
+                  org_id, graph_namespace or org_id, summary)
+
+
 @_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
+
     C5: key carries the graph (org_id, or org_id::<graph_namespace> for a
     custom graph) — the drain opens the DIRTY graph, never the default."""
     if key is None:
@@ -2779,6 +2832,12 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 sdk.dream(dirty_only=True, mode="local")
 
         await _run_dream_on_pool(_drain, _open_sdk)
+        # #2081: push the events this tenant's subscribers are behind on. Runs
+        # AFTER the dream pass — so a push can only ever carry post-dream
+        # state — and OUTSIDE the pool item (a slow subscriber endpoint must
+        # never hold the dream pool). Best-effort: never raises, never retries
+        # the dream, and a delivery failure becomes a receipt + a backoff.
+        await _dispatch_webhooks(org_id, gns)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -3632,6 +3691,15 @@ class InFlightMiddleware:
             workload_exit()
 
 
+# #4489: the RETRIEVAL boundary, at the same seat as the compute/egress/embed
+# wrappers — INSIDE ``InFlightMiddleware`` and ``WaitBoundMiddleware`` (both
+# registered after this line, and ``add_middleware`` inserts at index 0), so a
+# request the transport bound refuses is not credited with retrieval work.
+# Unlike the embed boundary it arms EVERY method, because a read is a GET.
+# ``test_retrieval_metering.py::TestMiddleware::
+# test_the_middleware_is_actually_installed_on_the_app`` is the guard that
+# this line is the only thing making the hosted read lane measurable.
+app.add_middleware(_RetrievalMeteringMiddleware)
 app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
 
@@ -6785,6 +6853,20 @@ class OrgInfoResponse(BaseModel):
     #: Sticky: TRUE once two different encoder identities were seen in the
     #: window. A figure that silently averaged two models would be unusable.
     embed_identity_mixed: bool = False
+    # #4489: per-org RETRIEVAL workload for the current period. WORKLOAD, not a
+    # price — nothing here can bill, cap or throttle (the issue's explicit
+    # out-of-scope list). Additive + defaulted, so every existing consumer is
+    # unaffected; a fresh org reads zeros (the ledger row is created by
+    # whichever lane writes first). The per-leg counters are the recorded
+    # vocabulary (fts / vector / structural); ``retrieval_leg_runs`` may exceed
+    # their sum, because a leg outside the vocabulary advances the total only.
+    retrieval_queries: int = 0
+    retrieval_leg_runs: int = 0
+    retrieval_leg_degraded: int = 0
+    retrieval_wall_ms: float = 0.0
+    retrieval_leg_fts: int = 0
+    retrieval_leg_vector: int = 0
+    retrieval_leg_structural: int = 0
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -6927,12 +7009,14 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -8918,25 +9002,31 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
             max_nodes = None
 
     # Metering: write-op usage for the current billing period (#681), ask usage
-    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
-    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
-    # straight on the event loop. #4488 added the third, which is the clearest
-    # possible reason to move the GROUP off the loop rather than add another
-    # blocking hop to a route that is also under a 10s transport bound
-    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
-    # from the same moment, and the route does strictly less blocking work than
-    # before this PR rather than more. Found in review.
+    # (#1987 Task 6), embedding-encode workload (#4488) and retrieval workload
+    # (#4489). All four are SYNCHRONOUS ledger/control-plane reads, and each was
+    # previously run straight on the event loop. #4488 added the third and #4489
+    # the fourth, which is the clearest possible reason to move the GROUP off
+    # the loop rather than add another blocking hop to a route that is also
+    # under a 10s transport bound (`mcp_auth.py`). ONE offloaded hop for all
+    # four — the figures then come from the same moment, and the route does
+    # strictly less blocking work than before this PR rather than more.
     #
-    # All three degrade internally to a zero view (never raising), so the
+    # All four degrade internally to a zero view (never raising), so the
     # best-effort contract is unchanged by where they run.
-    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
+    from tortoise.metering import (
+        get_ask_usage,
+        get_current_usage,
+        get_embedding_usage,
+        get_retrieval_usage,
+    )
 
     def _read_usage():
         oid = org["org_id"]
         return (get_current_usage(oid), get_ask_usage(oid),
-                get_embedding_usage(oid))
+                get_embedding_usage(oid), get_retrieval_usage(oid))
 
-    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
+    usage, ask_usage, embed_usage, retrieval_usage = await asyncio.to_thread(
+        _read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],
@@ -8988,6 +9078,19 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         embed_revision=embed_usage.get("embed_revision"),
         embed_identity_mixed=bool(
             embed_usage.get("embed_identity_mixed", False)),
+        # #4489: retrieval workload for the current period, read from the SAME
+        # ledger row as the write-ops figure — that is what makes #4489
+        # indicator 3 (a read-heavy org vs a write-heavy one) one response away.
+        # The read degrades to the zero view on failure (never 500).
+        retrieval_queries=retrieval_usage.get("retrieval_queries", 0),
+        retrieval_leg_runs=retrieval_usage.get("retrieval_leg_runs", 0),
+        retrieval_leg_degraded=retrieval_usage.get(
+            "retrieval_leg_degraded", 0),
+        retrieval_wall_ms=retrieval_usage.get("retrieval_wall_ms", 0.0),
+        retrieval_leg_fts=retrieval_usage.get("retrieval_leg_fts", 0),
+        retrieval_leg_vector=retrieval_usage.get("retrieval_leg_vector", 0),
+        retrieval_leg_structural=retrieval_usage.get(
+            "retrieval_leg_structural", 0),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_org predicate (Supabase mode only; registry = False).
         anon=_org_is_anon(org["org_id"]),
@@ -11941,6 +12044,11 @@ async def toggle_api_key_enabled(
 # must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    # #2120: the OpenClaw seam. Without this member a
+    # `tortoise sessions import --harness openclaw` POST is refused 422 and
+    # OpenClaw sessions can never carry a capture receipt — the ingestion half
+    # of the two-way seam would be unreachable however correctly it parsed.
+    "openclaw",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -12127,6 +12235,18 @@ class VolunteerContextRequest(BaseModel):
     min_confidence: float = Field(0.7, ge=0.0, le=1.0)
     max_pointers: int = Field(3, ge=1, le=5)
     why: bool = True
+
+
+class ContextSubscriptionRequest(BaseModel):
+    """#2081: register a webhook target for the graph-event push stream.
+
+    ``url`` is validated by ``security.validate_webhook_url`` in the handler
+    (SSRF gate) — deliberately NOT here, so the refusal is the SAME readable
+    ``ValueError`` text whether it is reached through REST or in-process.
+    """
+    url: str = Field(..., max_length=2048)
+    types: list[str] | None = Field(None, max_length=32)
+    description: str | None = Field(None, max_length=500)
 
 
 # ── Session extraction (LLM-default — issue #822) ──────────────────────────
@@ -25115,6 +25235,132 @@ def _volunteer_slo_enforced() -> bool:
     return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
 
 
+@app.post("/v1/context/subscriptions", status_code=201)
+async def create_context_subscription(
+    body: ContextSubscriptionRequest,
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081 (epic #2080 W4 phase 2): subscribe to pushed graph events.
+
+    The PUSH half of the delivery path. Events are the durable ``:GraphEvent``
+    rows written by every graph mutation (the same stream ``GET /v1/events``
+    serves by pull); a subscription hands them to ``url`` as they are produced,
+    drained at the end of the tenant's dream cycle (``_dream_worker`` →
+    ``webhook_delivery.dispatch_pending``). The subscription lives in the
+    CALLER'S graph namespace — the key's graph IS the partition, exactly as for
+    events, so a graph-bound key subscribes to that graph's events only.
+
+    Contract:
+      * auth fail-CLOSED (401/403 as everywhere on /v1): a subscription can
+        never be created cross-tenant; ``graphs:write`` scope required.
+      * 422 for a rejected target — non-http(s) scheme, credentials in the url,
+        a loopback/private/link-local/metadata host (SSRF gate,
+        ``security.validate_webhook_url``), an unknown event type (the same
+        registry ``events_poll`` validates against), or the per-graph cap.
+      * 503 when ``TORTOISE_ENCRYPTION_KEY`` is unset — the signing secret is a
+        long-lived credential and is never stored in the clear (``crypto``
+        fails loudly rather than downgrade).
+      * 201 with the record INCLUDING ``secret`` — the ONE time the signing
+        secret is returned. Every read path reports ``secret_set`` instead.
+
+    Delivery is at-least-once, ordered per subscription, and idempotent on the
+    consumer's side: dedupe on ``event_id`` (or the stable ``X-Tortoise-Delivery``
+    header ``<sub_id>:<seq>``). Verify each request with
+    ``webhook_delivery.verify_signature`` against the ``X-Tortoise-Signature``
+    header.
+    """
+    _require_scope(org, "graphs:write", "context subscription create")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+
+    def _create() -> dict:
+        return _webhook_delivery.create_subscription(
+            sdk._get_proj(), url=body.url, types=body.types,
+            description=body.description or "",
+            created_by=org.get("user_id") or org.get("key_id"),
+        )
+
+    try:
+        return await asyncio.to_thread(_create)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except RuntimeError as e:
+        # TORTOISE_ENCRYPTION_KEY unset/malformed (crypto fail-loud contract).
+        raise HTTPException(
+            status_code=503,
+            detail="webhook secrets are unavailable on this deployment "
+                   "(server-side encryption key not configured)",
+        ) from e
+
+
+@app.get("/v1/context/subscriptions")
+async def list_context_subscriptions(
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: this graph's webhook subscriptions (never the signing secrets)."""
+    _require_scope(org, "graphs:read", "context subscription list")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+    subs = await asyncio.to_thread(
+        lambda: _webhook_delivery.list_subscriptions(sdk._get_proj()))
+    return {"subscriptions": subs}
+
+
+@app.delete("/v1/context/subscriptions/{sub_id}")
+async def delete_context_subscription(
+    sub_id: str,
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: delete a subscription and its receipts (404 when unknown).
+
+    Deletion is the RE-ENABLE path for an auto-disabled subscription (a target
+    that failed ``TORTOISE_WEBHOOK_MAX_ATTEMPTS`` times is disabled rather than
+    retried forever) — recreate it to resume delivery from the tail.
+    """
+    _require_scope(org, "graphs:write", "context subscription delete")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+    deleted = await asyncio.to_thread(
+        lambda: _webhook_delivery.delete_subscription(sdk._get_proj(), sub_id))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="unknown subscription")
+    return {"deleted": True, "sub_id": sub_id}
+
+
+@app.get("/v1/context/subscriptions/{sub_id}/deliveries")
+async def list_context_deliveries(
+    sub_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    org: dict = Depends(get_current_org_gated),  # noqa: B008
+):
+    """#2081: delivery receipts for a subscription, newest first.
+
+    One receipt per ATTEMPT — ``delivered`` / ``retrying`` / ``exhausted``
+    (the last means the attempt ceiling was reached and the subscription was
+    disabled) — so a subscriber can prove what was pushed and diagnose a
+    failing endpoint without reading server logs.
+    """
+    _require_scope(org, "graphs:read", "context subscription deliveries")
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    sdk = await _data_sdk_offloaded(org)
+
+    def _read() -> dict:
+        proj = sdk._get_proj()
+        if _webhook_delivery.get_subscription(proj, sub_id) is None:
+            return {"missing": True}
+        return {"missing": False,
+                "deliveries": _webhook_delivery.read_receipts(proj, sub_id, limit)}
+
+    result = await asyncio.to_thread(_read)
+    if result["missing"]:
+        raise HTTPException(status_code=404, detail="unknown subscription")
+    return {"deliveries": result["deliveries"]}
+
+
 @app.post("/v1/context")
 async def volunteer_context(
     body: VolunteerContextRequest,
@@ -25299,12 +25545,14 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
@@ -26452,12 +26700,20 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_receipt_codex: str | None = None
     session_capture_receipt_cursor: str | None = None
     session_capture_receipt_pi: str | None = None
+    # #2120: the OpenClaw seam. A harness added to _SESSION_HARNESS_VALUES mints
+    # a receipt/last-error member of _CAPTURE_SERVER_OWNED_KEYS, so the field
+    # must exist here too: without it the key is server-owned but carries no
+    # PATCH field, and its 403 refusal cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes — it caught exactly this omission when openclaw was added).
+    session_capture_receipt_openclaw: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
     session_capture_last_error_codex: str | None = None
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
+    session_capture_last_error_openclaw: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so

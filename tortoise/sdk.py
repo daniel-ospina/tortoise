@@ -55,6 +55,7 @@ from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
+    EMBEDDING_PROPERTY,
     clear_embedding,
     clear_then_set_prefix,
     set_embedding_clause,
@@ -91,6 +92,12 @@ from .session_projection import session_extraction_status
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
+# #4489: the read funnel's retrieval meter. ``metered_query`` wraps
+# ``tortoise_fts_query`` so ONE product read notes ONE query and its wall time
+# without any caller cooperation; it is a no-op (one ``ContextVar.get()``) when
+# no tally is armed. Imported at module level because it is stdlib-only at
+# import (its ``metering`` dependency is deferred), so no cycle is introduced.
+from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 from .projection.entities import (  # #3998: the declared :Source surface
@@ -8937,6 +8944,43 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
+        # ── #4520 residual: the DERIVED vector goes through the shared seam ──
+        # `update_point(content=…)` re-encodes the embedding (#4208) and the
+        # merge below would store it as a plain Cypher `List` — no `vecf32`,
+        # no clear. `typeof` then flips `Vectorf32` → `List` on ONE content
+        # edit, and `search_engine`'s per-row dense leg
+        # (`vec.euclideanDistance(n.embedding, …)`) raises
+        # "Type mismatch: expected Null or VectorF32 but was List" for the
+        # WHOLE `MATCH` — so one edited Point degrades the entire Point dense
+        # leg to FTS-only recall. That is the #4521 class on the LIVE path
+        # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
+        # derived vector is SERVER-owned, so it is cast and CLEARED first,
+        # exactly like `_revise_point`: `vecf32()` alone is not enough,
+        # because a small-Δ `vecf32` overwrite is silently DISCARDED on the
+        # embedded engine (#4520's own, previously-fixed defect).
+        # `preserve_on_null=False` keeps this branch's wipe-on-None semantics
+        # (the embedder was unavailable, or the content became empty —
+        # #19/#4208): a vector for different text is worse than none.
+        #
+        # ⛔ The CALLER-supplied vector is deliberately NOT routed here. It is
+        # stored VERBATIM by a recorded decision (PR #3018's TYPE CHANGE
+        # GUARD — a float64 list must not be silently narrowed through
+        # `vecf32`), and the `embedding_verbatim` marker above describes that
+        # form. Routing it through `set_embedding_clause` would narrow the
+        # caller's value, reversing that decision rather than fixing a defect;
+        # its remaining gap belongs to the #5046/#5048 reopen, not this change.
+        _embed_clear = ""
+        _embed_set = ""
+        _props_param = props
+        _embed_params: dict = {}
+        if _derived_embedding:
+            _props_param = {
+                k: v for k, v in props.items() if k != EMBEDDING_PROPERTY}
+            _embed_clear = clear_then_set_prefix("n")
+            _embed_set = ", " + set_embedding_clause(
+                "n", preserve_on_null=False)
+            _embed_params[EMBEDDING_PROPERTY] = props.get(EMBEDDING_PROPERTY)
+
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -8953,18 +8997,23 @@ class TortoiseSDK:
                 res = proj.g.query(
                     "MATCH (n:Point:Object {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now, "
-                    "n.version = coalesce(n.version, 0) + 1, n += $props "
+                    + _embed_clear
+                    + "SET n.status = 'live', n.updatedAt = $now, "
+                    "n.version = coalesce(n.version, 0) + 1, n += $props"
+                    + _embed_set + " "
                     "RETURN n",
-                    params={"id": id, "props": props, "now": now},
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
             else:
                 proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) "
-                    "SET n += $props, n.version = coalesce(n.version, 0) + 1, n.updatedAt = $now",
-                    params={"id": id, "props": props, "now": now},
+                    "MATCH (n:Point:Object {id:$id}) " + _embed_clear
+                    + "SET n += $props, n.version = coalesce(n.version, 0) + 1, "
+                    "n.updatedAt = $now" + _embed_set,
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
         else:
             if 'status' in props:
@@ -8975,17 +9024,31 @@ class TortoiseSDK:
                 res = proj.g.query(
                     "MATCH (n:Point {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now, n += $props "
+                    + _embed_clear
+                    + "SET n.status = 'live', n.updatedAt = $now, n += $props"
+                    + _embed_set + " "
                     "RETURN n",
-                    params={"id": id, "props": props, "now": now},
+                    params={"id": id, "props": _props_param, "now": now,
+                            **_embed_params},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
             else:
-                for key, val in props.items():
+                for key, val in _props_param.items():
                     proj.g.query(
                         "MATCH (n:Point {id:$id}) SET n += $props",
                         params={"id": id, "props": {key: val}},
+                    )
+                if _derived_embedding:
+                    # The clear and the set are ONE atomic query, so a crash
+                    # between them cannot leave the node vectorless. This arm
+                    # is already per-key (not one statement), so the added
+                    # embedding write introduces no new non-atomicity.
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) " + _embed_clear
+                        + "SET " + set_embedding_clause(
+                            "n", preserve_on_null=False),
+                        params={"id": id, **_embed_params},
                     )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
@@ -10773,7 +10836,8 @@ class TortoiseSDK:
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
                         direction: str = "bidirectional",
-                        promote_source: bool = True) -> dict:
+                        promote_source: bool = True,
+                        semantics: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
@@ -10782,12 +10846,23 @@ class TortoiseSDK:
             a mitigation is a SEPARATE Point that attacks the operator bridge
             it damps, so it can express neither an op_type nor a bridge. It is
             created by ``mitigate_operator`` AFTER the operator exists.
-          - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
+          - label: Layer-3 predicate — the domain verb ("fixes", "bearsOn", …).
+          - semantics: Layer-2 meaning — the closed vocabulary in
+            ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
+            ``refutes``, ``mutuallyExclusive``, ``hasPart``, ``related`` …).
+            When supplied it RESOLVES the direction (the model's chain step 2):
+            a one-way meaning records ``unidirectional``, a mutual one
+            ``bidirectional``. The basis actually used is recorded on the node
+            as ``direction_basis`` (``explicit`` / ``semantics`` / ``default``).
+            An unknown word warns (warn-not-block, never refuses).
           - direction: "bidirectional" (default) or "unidirectional" — explicit
             flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
             Default bidirectional (mutual) for all op types; pass
-            "unidirectional" for a directed attack (no back-pressure).
-          - Operator carries the label and direction; IMPL/NAND edges carry confidence via EP.
+            "unidirectional" for a directed attack (no back-pressure). A
+            NON-default explicit value outranks ``semantics``; the signature
+            default does not (it is the default, not a declaration).
+          - Operator carries the label, direction and direction_basis; IMPL/NAND
+            edges carry confidence via EP.
           - promote_source: default True fills in a source point's NEVER-SET
             status (``status IS NULL``) to live when its first edge is
             created. An EXPLICIT or prior ``draft`` is NOT retro-promoted
@@ -10856,6 +10931,91 @@ class TortoiseSDK:
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
+        # ── direction: the precedence chain (#7852 W1, the owner-approved `w1
+        # yes approved` 2026-10-09) ────────────────────────────────────────
+        # The three-layer model records a direction DERIVED FROM the relation's
+        # meaning (ONTOLOGY §8): the caller states the Layer-2 `semantics`, this
+        # write path resolves the direction, and `direction_basis` records which
+        # step fired. Order: (1) an explicit `direction=` → 'explicit'; (2) the
+        # declared `semantics` → 'semantics'; (3) endpoint kinds → 'kind-pair' (a
+        # SEPARATE scoped change, not implemented here); (4) the per-op_type
+        # default → 'default'.
+        #
+        # The signature default is the literal "bidirectional" (#807/#753/#86,
+        # kept by the #7813 ruling) and `None` is the CYCLE-25 "absent" input —
+        # canonicalized per op_type below, and the value the ingest path passes
+        # whenever a connection omits `direction` (`conn.get("direction")`).
+        # NEITHER is a declaration: treating `None` as explicit would record a
+        # FALSE provenance and silently disable the semantics step below. A
+        # declared semantics therefore outranks both, and never overrides a
+        # direction the caller actually differentiated.
+        direction_basis = "explicit" if direction not in (None, "bidirectional") else "default"
+        if semantics is not None:
+            from tortoise.enforcement import emit_violation
+            from tortoise.pack_registry import (
+                SEMANTICS_TRANSITION,
+                SEMANTICS_VALUES,
+            )
+            # A retired word (e.g. `opposes`) is recognised and warned with its
+            # canonical replacement (#7852 W2's pack-transition contract) — the
+            # write proceeds, the retired word is not silently accepted.
+            if semantics in SEMANTICS_TRANSITION:
+                canonical = SEMANTICS_TRANSITION[semantics]
+                warnings.append({
+                    "code": "undeclared_relation",
+                    "message": (
+                        f"semantics '{semantics}' is retired — uses of it "
+                        f"resolve to '{canonical}' (warn-not-block, #7852)"
+                    ),
+                    "semantics": semantics,
+                })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (retired -> {canonical})")
+                semantics = canonical
+            if semantics not in SEMANTICS_VALUES:
+                warnings.append({
+                    "code": "undeclared_relation",
+                    "message": (
+                        f"semantics '{semantics}' is not in the closed Layer-2 "
+                        f"vocabulary; valid values: "
+                        f"{', '.join(sorted(SEMANTICS_VALUES))} "
+                        f"(warn-not-block, #7852)"
+                    ),
+                    "semantics": semantics,
+                })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (out of vocabulary)")
+            else:
+                derived = self._direction_from_semantics(semantics)
+                if derived is None:
+                    # `-` (e.g. `related`, `transacts`) means the connection
+                    # exists and NO confidence transfers. The shipped runtime
+                    # encodes only bidirectional/unidirectional (§8 Transition
+                    # state — the four-value migration is the separate change
+                    # named on #7852), so no direction can be derived. Say what
+                    # actually happens: the caller-supplied/signature default is
+                    # what gets recorded (naming the "op_type default" here
+                    # would be false for NAND, whose canonical default is
+                    # unidirectional but whose signature default is
+                    # bidirectional).
+                    warnings.append({
+                        "code": "undeclared_relation",
+                        "message": (
+                            f"semantics '{semantics}' carries no transferable "
+                            f"direction ('-') — no direction is derived from "
+                            f"it, so the caller-supplied/write-path default is "
+                            f"recorded (#7852)"
+                        ),
+                        "semantics": semantics,
+                    })
+                elif direction in (None, "bidirectional"):
+                    # Chain step 2 — basis `semantics`: the direction was resolved
+                    # from the Layer-2 meaning the caller declared, which is the
+                    # input actually read here. (Named for the layer that produced
+                    # it, not the Layer-3 `label` predicate, which is a different
+                    # input and does not touch direction.)
+                    direction = derived
+                    direction_basis = "semantics"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
@@ -10914,7 +11074,13 @@ class TortoiseSDK:
         # coalesce) is overridden by the explicit status." So the door, not the
         # replay, was the omission.
         extra_props = []
-        params = {"id": pid, "op": op_type, "direction": direction}
+        params = {"id": pid, "op": op_type, "direction": direction,
+                  "dbasis": direction_basis}
+        # #7852 W1: the basis the chain used is recorded on the node, beside the
+        # direction it produced — so "why is this direction what it is" is a
+        # property of the write, not a re-derivation. Replay parity is carried by
+        # the explicit clause in `projection/entities.py`.
+        extra_props.append("direction_basis:$dbasis")
         if label:
             extra_props.append("label:$label")
             params["label"] = label
@@ -12043,6 +12209,37 @@ class TortoiseSDK:
                 and not conn.get("reify"):
             return "direct"
         return "operator"
+
+    @staticmethod
+    def _direction_from_semantics(semantics: str) -> str | None:
+        """The runtime direction a Layer-2 semantics value records (#7852 W1).
+
+        ``None`` when the value records no transferable direction — `-`
+        (`related`, `transacts`) or an unrecognised word. The vocabulary and
+        the per-value direction are the registry's single source of truth
+        (``pack_registry.SEMANTICS_DIRECTIONS``), so this cannot drift from the
+        validation that admits the word in the first place.
+        """
+        from tortoise.pack_registry import SEMANTICS_DIRECTIONS
+        model_direction = SEMANTICS_DIRECTIONS.get(semantics)
+        if model_direction is None:
+            return None
+        return TortoiseSDK._SEMANTICS_RUNTIME_DIRECTION.get(model_direction)
+
+    # The model's four-value direction (ONTOLOGY §8: `->` / `<-` / `<->` / `-`)
+    # mapped onto the runtime's two-value vocabulary, which is what the
+    # `direction` property stores today (the four-value migration is the
+    # separate scoped change named on #7852). `<-` is deliberately ABSENT: the
+    # runtime's `unidirectional` means source→target only (ep.py writes the
+    # target message and withholds the source back-message), so mapping
+    # target→source onto it would record the OPPOSITE direction. No ruled
+    # semantics value produces `<-`, and an unmapped value safely returns None
+    # (falls through with a warning) instead. `-` maps to nothing too — no
+    # confidence transfers.
+    _SEMANTICS_RUNTIME_DIRECTION: ClassVar[dict[str, str]] = {
+        "->": "unidirectional",
+        "<->": "bidirectional",
+    }
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str | None:
@@ -18708,6 +18905,7 @@ class TortoiseSDK:
 
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
+    @_metered_query
     def tortoise_fts_query(
         self,
         query: str | None = None,
@@ -18732,6 +18930,13 @@ class TortoiseSDK:
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
+        # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
+        # asked about, as ``label:key`` (``cache_projection.declared_key``).
+        # The read path passes it to the marker so a partial declaration can
+        # tell "outside the known-hot set" from "inside it and genuinely
+        # absent"; a SET read names no node and passes nothing, keeping
+        # today's set-level polarity. Default None = byte-identical.
+        _residency_key: str | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -18827,6 +19032,16 @@ class TortoiseSDK:
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
             passed by production callers.
+        _residency_key (#7953, §17.3): PRIVATE — the residency coordinate this
+            read named, as ``label:key`` (build it with
+            ``cache_projection.declared_key``, the SAME function the cache
+            projection declares hot keys with). It is handed to the
+            completeness marker (#7952) so a PARTIAL declaration can separate
+            "outside the known-hot set" (a residency miss → fetch the record)
+            from "inside it and genuinely absent" (a real in-store finding).
+            A SET read names no node and leaves this None, which is the
+            set-level polarity the marker already had — so default None is
+            byte-identical behavior.
         leg_trace (R3 #1542 D4): PRIVATE trace contract — when provided,
             appends per-leg entries (vector/fts/structural/fallback — the
             R2 #1541 shared shape {"leg", "ran", "degraded", "reason",
@@ -19021,11 +19236,11 @@ class TortoiseSDK:
                 if _residency is not None:
                     # §17.3: a `not-hot` read may not be reported as `empty` —
                     # a partial store cannot establish "nothing matched". The
-                    # truth store was NOT consulted on this path (no residency
-                    # router exists yet — #7953), so a zero-hit read of a
-                    # declared-partial store is `degraded`, never `empty`.
+                    # truth store was NOT consulted on this path (the residency
+                    # router is not wired here yet — #7970), so a zero-hit read
+                    # of a declared-partial store is `degraded`, never `empty`.
                     marker = _mark_residency(
-                        _residency, hits=len(rows))
+                        _residency, hits=len(rows), key=_residency_key)
                     status = _apply_residency(
                         status, marker, record_consulted=False)
                     read_status_out[_RESIDENCY_FIELD] = marker

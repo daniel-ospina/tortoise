@@ -718,6 +718,181 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert ci_timing.validate_refreshed_manifest(text) == []
 
 
+# A long-form `# unmeasured` tail is what authors actually write (see the #7359
+# and #3496 rows the #8254 review named). The marker is a LEADING TOKEN; only a
+# comment that merely mentions the word later is preserved.
+LONG_FORM_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - test_alpha.py
+    - test_beta.py
+    - test_gamma.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_alpha.py: 99.0  # unmeasured — #3496: added after the sampled run; refresh from CI junit.
+  test_beta.py: 42.0  # a note that only mentions unmeasured rows further on
+  test_gamma.py: 7.0  # unmeasuredly worded, not the marker
+"""
+
+
+def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) -> None:
+    """#8254 review P3: the marker is a LEADING TOKEN, not the whole tail.
+
+    A measured row whose preserved tail still leads with `# unmeasured` asserts
+    the opposite of its fresh value. The old rule used `re.fullmatch`, so it
+    cleared only a BARE marker and wrote the long-form provenance through — the
+    three rows this review found stale. Non-vacuity: the first assertion below
+    fails on the pre-fix code, because the tail is preserved.
+    """
+    path = _bridge_manifest(tmp_path, LONG_FORM_UNMEASURED_MANIFEST)
+    text, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        _bridge_weights(test_alpha=12.34, test_beta=4.5, test_gamma=1.0),
+        "T",
+    )
+    # the measured row's stale marker is GONE — line is exactly `key: value`
+    assert "  test_alpha.py: 12.3\n" in text
+    assert "# unmeasured —" not in text
+    # a comment that only MENTIONS the marker later is preserved verbatim ...
+    assert ("  test_beta.py: 4.5  # a note that only mentions unmeasured rows "
+            "further on") in text
+    # ... and so is a word that merely starts with the marker's letters (\b)
+    assert "  test_gamma.py: 1.0  # unmeasuredly worded, not the marker" in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+# A `durations:` key carrying a directory. The rendered artifact's `files` map is
+# BASENAME-keyed (`parse_log`), so this row is measured when `test_run.py` is —
+# the class the pre-fix guard's full-key comparison silently skipped (#8254
+# review, P2).
+SUBDIR_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - eval/retrieval/test_run.py
+    - test_alpha.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  eval/retrieval/test_run.py: 99.0  # unmeasured — no source leg collected it
+  test_alpha.py: 4.5
+"""
+
+
+# Two rows, ONE basename, and the artifact measured that basename: which row the
+# measurement belongs to cannot be recovered, so it is refused, never guessed.
+COLLIDING_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - test_twin.py
+    - eval/test_twin.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_twin.py: 3.0
+  eval/test_twin.py: 9.0  # unmeasured — a namesake, not the measured file
+"""
+
+
+def test_committed_map_marks_no_measured_row_unmeasured() -> None:
+    """The committed-data half of the #8254 P3 fix.
+
+    A row whose BASENAME the rendered artifact (``docs/ci-timing.json``) lists IS
+    a measurement, so its tail must not lead with `# unmeasured`. The comparison
+    is on the basename because the artifact is basename-keyed while a
+    `durations:` key is a tests-relative path — the pre-fix full-key comparison
+    skipped all 9 subdir rows at this head. Of the four rows the first review
+    named, THREE carry a leading `# unmeasured` token and fail here; the fourth
+    carried a long note that only mentioned the word and was normalised
+    separately. Skips while the artifact is still the #1483 stub, because then
+    nothing has been rendered to contradict.
+    """
+    artifact = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    measured = set(artifact.get("files", {}))
+    if not measured:
+        pytest.skip("docs/ci-timing.json is still the #1483 stub — nothing rendered")
+    manifest_text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stale = ci_timing.unmeasured_rows_measured_by_artifact(manifest_text, measured)
+    assert not stale, (
+        f"{len(stale)} durations row(s) still claim `# unmeasured` while the "
+        f"rendered artifact shows their basename measured: {stale[:5]}"
+    )
+
+
+def test_unmeasured_guard_covers_a_subdir_row() -> None:
+    """#8254 review P2: the artifact is BASENAME-keyed, a key is a PATH.
+
+    The pre-fix guard compared the FULL key (`if key not in measured: continue`),
+    so `eval/retrieval/test_run.py` was skipped outright — the very class it was
+    added for. Non-vacuity: the first assertion is the pre-fix rule and shows it
+    misses the row; the second asserts the shipped rule catches it.
+    """
+    measured = {"test_run.py"}  # `parse_log` keys `files` by basename
+    assert "eval/retrieval/test_run.py" not in measured  # the pre-fix blind spot
+    assert ci_timing.unmeasured_rows_measured_by_artifact(
+        SUBDIR_UNMEASURED_MANIFEST, measured
+    ) == ["eval/retrieval/test_run.py"]
+
+
+def test_unmeasured_guard_refuses_an_ambiguous_measured_basename() -> None:
+    """#8254 review P2: two rows, one measured basename — REFUSED, not guessed.
+
+    Either twin could be the measured file, so a stale marker on the other
+    cannot be judged. Non-vacuity: the pre-fix full-key comparison never reached
+    this state, so it silently skipped both rows.
+    """
+    with pytest.raises(ci_timing.DurationsBridgeError, match="share that basename"):
+        ci_timing.unmeasured_rows_measured_by_artifact(
+            COLLIDING_UNMEASURED_MANIFEST, {"test_twin.py"}
+        )
+
+
+def _render_minimal_md(steps: dict, files: dict, history: list) -> str:
+    counts = {key: 0 for key in ci_timing.COUNT_KEYS}
+    return ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        steps, files, counts, False, "4242", history, [],
+    )
+
+
+def test_render_md_emits_one_emphasis_style() -> None:
+    """#8254 review P1: MD049 (`consistent`) keys on a document's FIRST emphasis.
+
+    The renderer mixed `*candidate flake*` with `_No candidate flakes…_`; the
+    #1483 stub's earlier underscore placeholders masked it, and the first REAL
+    render failed the required `docs` check (669:1 and :80). Every branch that
+    emits emphasis now emits asterisk. Non-vacuity: on the pre-fix renderer the
+    `*No candidate flakes` and the fallback assertions below fail.
+    """
+    row = {"sample_time": "2026-01-01T00:00:00Z", "run_id": "1",
+           "conclusion": "success", "counts": {k: 0 for k in ci_timing.COUNT_KEYS}}
+    rendered = _render_minimal_md(
+        {"j": [{"name": "s", "duration_ms": 1000}]},
+        {"test_x.py": {"tests": 1, "total_ms": 1000, "max_ms": 1000}},
+        [row],
+    )
+    # the no-flakes placeholder matches the `*candidate flake*` blockquote above it
+    assert "*No candidate flakes" in rendered
+    assert "_No candidate flakes" not in rendered
+    # every degenerate fallback is asterisk too, so whichever branch renders
+    # first, the document's first emphasis is asterisk
+    empty = _render_minimal_md({}, {}, [])
+    for placeholder in ("*no job data*", "*no per-file data (logs unavailable)*",
+                        "*no history yet*"):
+        assert placeholder in empty
+    assert not re.search(r"(?<![*\w])_[^_\n]+_(?!\w)", empty), (
+        "an underscore emphasis remains in the render — one stray underscore "
+        "flips MD049's expected style for the whole document"
+    )
+
+
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
     path = _bridge_manifest(tmp_path)
     weights = _bridge_weights(test_alpha=12.34, test_gamma=4.5)

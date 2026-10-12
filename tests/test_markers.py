@@ -145,6 +145,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical registry namespace IS that coupling. A test_* rename would seed
     # a different graph than the writer resolves.
     "test_embed_metering.py": {"registry": "prod-coupled"},
+    # #4489: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the registry-lane writer and reader address the dbs the SDK uses.
+    "test_retrieval_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
@@ -686,6 +689,31 @@ def test_no_redirect_stems_registry_exact():
         # the addition is the pin working as designed, so the stem is DECLARED
         # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
+        # #4520 residual: the module-level `embedded_only` plain-list embedding
+        # guard asserts the EMBEDDED engine's stored type (`Vectorf32` -> `List`
+        # on a bare `+=` embedding write) and the clear-then-set seam that fixes
+        # it, so it reads `typeof()` back off a real embedded store. Under a URI
+        # the hook SKIPS the whole module (it never runs); a redirected
+        # construction would run against the server lane, which lands the same
+        # plain-list write, so the assertion would certify nothing. The third leg
+        # of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS already carried the stem — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4521/#4921 shape).
+        "test_update_point_derived_embedding_4520",
+        # #7852 W1: the Layer-2 `semantics` write-path guard builds
+        # `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay to
+        # prove `derived = replay(journal)` for `direction_basis`. The module
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would discard the path and connect the construction to the
+        # server, so the embedded replay this file exists to prove would never
+        # happen. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than
+        # exempted (the #4921/#4521 shape, minus their module-level marker).
+        "test_semantics_write_path_7852",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

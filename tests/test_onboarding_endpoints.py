@@ -765,12 +765,19 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     "session_capture_receipt_codex": ("session_capture_receipt_codex", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_cursor": ("session_capture_receipt_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_pi": ("session_capture_receipt_pi", "2026-08-25T00:00:00Z"),
+    # #2120: OpenClaw joins the harness vocabulary, so its two derived
+    # server-owned keys need their PATCH field here — the coverage guard in
+    # test_capture_verification_keys_not_client_writable is what reds when a
+    # harness is added without them (no PATCH field ⇒ the 403 refusal for that
+    # key can never be asserted, and the key would be silently untested).
+    "session_capture_receipt_openclaw": ("session_capture_receipt_openclaw", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude": ("session_capture_last_error_claude", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-desktop": ("session_capture_last_error_claude_desktop", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-web": ("session_capture_last_error_claude_web", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_codex": ("session_capture_last_error_codex", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_cursor": ("session_capture_last_error_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_pi": ("session_capture_last_error_pi", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_openclaw": ("session_capture_last_error_openclaw", "2026-08-25T00:00:00Z"),
     "install_probe_claude": ("install_probe_claude", "2026-08-25T00:00:00Z"),
     "install_probe_pi": ("install_probe_pi", "2026-08-25T00:00:00Z"),
     # #1893: persisted source-scope keys (short repo names / {repo, branch}).
@@ -1283,12 +1290,19 @@ def test_cross_surface_harness_vocab_contract():
 
     # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
     assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
-    # both server surfaces stay exactly the pinned 6-harness vocabulary.
+    # The analytics vocabulary is the DASHBOARD copy-attribution beacon's set —
+    # it must stay exactly the wizard's leaf population (asserted below), so it
+    # is unchanged.  The SessionRequest vocabulary is a SUPERSET: #2120 added
+    # OpenClaw, whose seam ships no live dashboard copy row (the plugin installs
+    # sessions through `tortoise sessions import`, and the archived-reference
+    # HARNESS_INSTALL entry is not rendered), so there is no copy to attribute
+    # and no leaf to add.
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
     assert frozenset({
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+        "openclaw",
     }) == _SESSION_HARNESS_VALUES
 
     # 2. the WIZARD contract (#2936). The client declares only the EXCEPTIONS

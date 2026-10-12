@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.23"
+title: "Tortoise — Canonical Ontology v3.24"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-11
+updated: 2026-10-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.23
+# Tortoise — Canonical Ontology v3.24
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -149,6 +149,21 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.24 (2026-10-12 — issue #7852 W1 — the Layer-2 `semantics` reaches the write path):**
+> `create_operator` (SDK) and `tortoise_create_operator` (MCP) accept an additive, defaulted
+> `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
+> one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
+> used is recorded on the operator as `direction_basis` — `explicit` (the caller stated a non-default
+> direction), `semantics` (the declared Layer-2 meaning resolved it — the token names the LAYER that
+> produced the value, never the Layer-3 `label` predicate, which is a different input), or `default`
+> (nothing declared). The endpoint-kind step is a
+> separate scoped change. An out-of-vocabulary word warns and the write proceeds — never refuses —
+> and a retired word resolves to its canonical replacement. This is the chain step that had no way
+> to run, so the direction no longer always falls through to the per-op_type default. The four-value
+> **storage** vocabulary is unchanged (see *Transition state*): the model's `-` maps to no runtime
+> value, and `<-` is deliberately left unmapped rather than recorded as the opposite (`unidirectional`
+> is source→target only).
+>
 > **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
 > §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
 > recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
@@ -170,7 +185,10 @@ doc_status: live
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
 > EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
-> accepted names** — the model tables state the target.
+> accepted names** — the model tables state the target. **The write path now reads the semantics**:
+> `create_operator` / `tortoise_create_operator` accept `semantics` and resolve the recorded direction
+> from it (recording the basis in `direction_basis`), mapping the model's direction onto the two values
+> the runtime stores (#7852 W1). The four-value **storage** migration remains open.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -740,7 +758,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code does not read the semantics — `create_direct_edge` and the ingest path key off `op_type`, while `create_operator` still takes its `bidirectional` default (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` now accept `semantics` and resolve the direction from it, recording the basis as `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path still key off `op_type` (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -1535,9 +1553,12 @@ and carry confidence as an edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
-  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
-  default (#7813). See the *Transition state* note.)*
+  recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
+  accept `semantics` and resolve the direction from it, recording the basis on the operator as
+  `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The remaining gap is the
+  four-value **storage** vocabulary: the runtime still records only `bidirectional` /
+  `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1722,8 +1743,9 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
-code does not read the semantics — it resolves by `op_type`, or takes `create_operator`'s default
-(#7813). See the *Transition state* note.)*
+code reads the semantics on the operator write path — `create_operator` / `tortoise_create_operator`
+resolve it and record `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path
+still resolve by `op_type` (#7813). See the *Transition state* note.)*
 
 ---
 
