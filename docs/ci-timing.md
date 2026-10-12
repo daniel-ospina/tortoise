@@ -666,7 +666,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 > sample and is absent from the next sample's failed list is a *candidate flake*.
 > Per-test rerun-based flake rate becomes exact once the retry protocol lands (#1477).
 
-_No candidate flakes in the sampled window yet (needs ≥ 2 consecutive samples)._
+*No candidate flakes in the sampled window yet (needs ≥ 2 consecutive samples).*
 
 ## History (bounded to last 52 samples)
 

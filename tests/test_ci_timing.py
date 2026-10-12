@@ -764,33 +764,132 @@ def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) ->
     assert ci_timing.validate_refreshed_manifest(text) == []
 
 
+# A `durations:` key carrying a directory. The rendered artifact's `files` map is
+# BASENAME-keyed (`parse_log`), so this row is measured when `test_run.py` is —
+# the class the pre-fix guard's full-key comparison silently skipped (#8254
+# review, P2).
+SUBDIR_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - eval/retrieval/test_run.py
+    - test_alpha.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  eval/retrieval/test_run.py: 99.0  # unmeasured — no source leg collected it
+  test_alpha.py: 4.5
+"""
+
+
+# Two rows, ONE basename, and the artifact measured that basename: which row the
+# measurement belongs to cannot be recovered, so it is refused, never guessed.
+COLLIDING_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - test_twin.py
+    - eval/test_twin.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_twin.py: 3.0
+  eval/test_twin.py: 9.0  # unmeasured — a namesake, not the measured file
+"""
+
+
 def test_committed_map_marks_no_measured_row_unmeasured() -> None:
     """The committed-data half of the #8254 P3 fix.
 
-    A row present in the rendered artifact (``docs/ci-timing.json``) IS a
-    measurement, so its tail must not lead with `# unmeasured`. The four rows
-    the review named fail this; the renderer rule that clears them on the next
-    refresh is pinned by the test above. Skips while the artifact is still the
-    #1483 stub, because then nothing has been rendered to contradict.
+    A row whose BASENAME the rendered artifact (``docs/ci-timing.json``) lists IS
+    a measurement, so its tail must not lead with `# unmeasured`. The comparison
+    is on the basename because the artifact is basename-keyed while a
+    `durations:` key is a tests-relative path — the pre-fix full-key comparison
+    skipped all 9 subdir rows at this head. Of the four rows the first review
+    named, THREE carry a leading `# unmeasured` token and fail here; the fourth
+    carried a long note that only mentioned the word and was normalised
+    separately. Skips while the artifact is still the #1483 stub, because then
+    nothing has been rendered to contradict.
     """
     artifact = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
     measured = set(artifact.get("files", {}))
     if not measured:
         pytest.skip("docs/ci-timing.json is still the #1483 stub — nothing rendered")
-    lines = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text().split("\n")
-    _, entries = ci_timing._locate_durations_block(lines)
-    assert entries, "no durations rows located in the committed manifest"
-    stale = []
-    for key, index in entries.items():
-        if key not in measured:
-            continue
-        match = ci_timing._DURATION_LINE_RE.match(lines[index])
-        assert match is not None  # the locator used the same regex
-        if re.match(r"[ \t]*#\s*unmeasured\b", match.group("tail")):
-            stale.append(key)
+    manifest_text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stale = ci_timing.unmeasured_rows_measured_by_artifact(manifest_text, measured)
     assert not stale, (
         f"{len(stale)} durations row(s) still claim `# unmeasured` while the "
-        f"rendered artifact shows them measured: {stale[:5]}"
+        f"rendered artifact shows their basename measured: {stale[:5]}"
+    )
+
+
+def test_unmeasured_guard_covers_a_subdir_row() -> None:
+    """#8254 review P2: the artifact is BASENAME-keyed, a key is a PATH.
+
+    The pre-fix guard compared the FULL key (`if key not in measured: continue`),
+    so `eval/retrieval/test_run.py` was skipped outright — the very class it was
+    added for. Non-vacuity: the first assertion is the pre-fix rule and shows it
+    misses the row; the second asserts the shipped rule catches it.
+    """
+    measured = {"test_run.py"}  # `parse_log` keys `files` by basename
+    assert "eval/retrieval/test_run.py" not in measured  # the pre-fix blind spot
+    assert ci_timing.unmeasured_rows_measured_by_artifact(
+        SUBDIR_UNMEASURED_MANIFEST, measured
+    ) == ["eval/retrieval/test_run.py"]
+
+
+def test_unmeasured_guard_refuses_an_ambiguous_measured_basename() -> None:
+    """#8254 review P2: two rows, one measured basename — REFUSED, not guessed.
+
+    Either twin could be the measured file, so a stale marker on the other
+    cannot be judged. Non-vacuity: the pre-fix full-key comparison never reached
+    this state, so it silently skipped both rows.
+    """
+    with pytest.raises(ci_timing.DurationsBridgeError, match="share that basename"):
+        ci_timing.unmeasured_rows_measured_by_artifact(
+            COLLIDING_UNMEASURED_MANIFEST, {"test_twin.py"}
+        )
+
+
+def _render_minimal_md(steps: dict, files: dict, history: list) -> str:
+    counts = {key: 0 for key in ci_timing.COUNT_KEYS}
+    return ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        steps, files, counts, False, "4242", history, [],
+    )
+
+
+def test_render_md_emits_one_emphasis_style() -> None:
+    """#8254 review P1: MD049 (`consistent`) keys on a document's FIRST emphasis.
+
+    The renderer mixed `*candidate flake*` with `_No candidate flakes…_`; the
+    #1483 stub's earlier underscore placeholders masked it, and the first REAL
+    render failed the required `docs` check (669:1 and :80). Every branch that
+    emits emphasis now emits asterisk. Non-vacuity: on the pre-fix renderer the
+    `*No candidate flakes` and the fallback assertions below fail.
+    """
+    row = {"sample_time": "2026-01-01T00:00:00Z", "run_id": "1",
+           "conclusion": "success", "counts": {k: 0 for k in ci_timing.COUNT_KEYS}}
+    rendered = _render_minimal_md(
+        {"j": [{"name": "s", "duration_ms": 1000}]},
+        {"test_x.py": {"tests": 1, "total_ms": 1000, "max_ms": 1000}},
+        [row],
+    )
+    # the no-flakes placeholder matches the `*candidate flake*` blockquote above it
+    assert "*No candidate flakes" in rendered
+    assert "_No candidate flakes" not in rendered
+    # every degenerate fallback is asterisk too, so whichever branch renders
+    # first, the document's first emphasis is asterisk
+    empty = _render_minimal_md({}, {}, [])
+    for placeholder in ("*no job data*", "*no per-file data (logs unavailable)*",
+                        "*no history yet*"):
+        assert placeholder in empty
+    assert not re.search(r"(?<![*\w])_[^_\n]+_(?!\w)", empty), (
+        "an underscore emphasis remains in the render — one stray underscore "
+        "flips MD049's expected style for the whole document"
     )
 
 
