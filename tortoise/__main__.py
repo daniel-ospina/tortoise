@@ -1268,16 +1268,18 @@ def _cmd_recover(args) -> int:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
         # #5109 NOTE: DELIBERATE show-once — the key was recovered but could
         # not be persisted, so it exists nowhere else; no resolution expression
-        # can replace the value. Echoed to STDERR only, never stdout (the
-        # verbatim-captured channel).
+        # can replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
     # #5109: the key was just PERSISTED to config_path (0600) above, so a
     # resolution expression resolves it — print the resolution, never the
-    # value (stdout is the verbatim-captured channel; see the module note on
-    # #5109). (`recover` mints a NEW key per invocation, but that is not what
-    # makes the resolution valid; the persistence is.)
+    # value (stdout is the machine-read channel; the harness captures stderr in
+    # the same tool result, so this is a routing choice, not containment; see
+    # the module note on #5109). (`recover` mints a NEW key per invocation, but
+    # that is not what makes the resolution valid; the persistence is.)
     print(f"   API key: {_key_resolution_expr(config_path)}")
     print(f"   Config saved to {config_path} (0600 — key stays on disk)")
     print(f"   Recovery token kept: {token[:14]}…")
@@ -1775,8 +1777,9 @@ def _cmd_signup(args) -> int:
               file=sys.stderr)
         # #5109 NOTE: DELIBERATE show-once — the key was minted but could NOT
         # be persisted, so it exists nowhere else; no resolution expression can
-        # replace the value. Echoed to STDERR only, never stdout (the
-        # verbatim-captured channel).
+        # replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
         orphan_token = config.get("signup_token")
         if orphan_token:
@@ -2094,9 +2097,9 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 
 # #5109 — never interpolate the credential into printed output.
 #
-# This CLI is run BY AN AGENT in this fleet, so its stdout is a tool result — and
-# a tool result is persisted VERBATIM into the session transcript, the task-session
-# log and audit.jsonl. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
+# This CLI is run BY AN AGENT in this fleet, so what it prints is a tool result —
+# and a tool result is persisted VERBATIM into the session transcript and the
+# task-session log. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
 # credential DISCLOSURE, not a convenience: every captured copy of that output keeps
 # the key. It is one channel into those stores, not the only one — harness-side
 # capture of the same bytes is the other.

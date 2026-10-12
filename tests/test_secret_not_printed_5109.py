@@ -10,11 +10,11 @@ instructions emit is the resolution expression, not the value.
 WHY THIS GATE EXISTS (the mechanism, measured 2026-10-11)
 =========================================================
 ``tortoise init`` prints per-harness MCP config. In this fleet that command is
-run *by an agent*, so its stdout is a tool result — and a tool result is
-persisted **verbatim** into the session transcript, the task-session log and
-``audit.jsonl``. A literal printed here is therefore one channel by which a live
-key reaches those stores (harness-side capture of the same bytes is another);
-every captured copy keeps the credential.
+run *by an agent*, so what it prints is a tool result — and a tool result is
+persisted **verbatim** into the session transcript and the task-session log. A
+literal printed here is therefore one channel by which a live key reaches those
+stores (harness-side capture of the same bytes is another); every captured copy
+keeps the credential.
 
 The functions below already *claim* the correct behaviour in their own prose —
 "env expansion … no literal key on disk" — while emitting the literal value on
@@ -197,7 +197,8 @@ def test_signup_orphan_echo_is_stderr_only_never_stdout(
 ) -> None:
     """#5109 P2: on `_cmd_signup`'s orphan path (key minted, save failed) the
     key genuinely exists nowhere else, so the echo is DELIBERATE — but it must
-    stay on STDERR. stdout is the verbatim-captured channel; a regression that
+    stay on STDERR, off the payload stream (the harness captures stderr in the
+    same tool result, so this is routing, not containment). A regression that
     moves (or duplicates) this echo onto stdout reds this gate."""
     import contextlib
     import io
@@ -230,7 +231,7 @@ def test_signup_orphan_echo_is_stderr_only_never_stdout(
         "the orphan path must still echo the key — it exists nowhere else"
     )
     assert orphan_key not in out.getvalue(), (
-        "the orphan key echo must never reach stdout (verbatim-captured, #5109)"
+        "the orphan key echo must never reach stdout (the parsed payload, #5109)"
     )
 
 
@@ -274,7 +275,7 @@ def test_recover_prints_the_resolution_never_the_live_key(
     stdout = out.getvalue()
     assert sentinel not in stdout, (
         "`recover` persisted the key and echoed the LIVE value to stdout — "
-        "the verbatim-captured channel #5109 exists to close"
+        "the machine-read channel #5109 exists to close"
     )
     assert not KEY_SHAPE.findall(stdout), "no tt_<hex> literal on stdout"
     assert "python3 -c" in stdout and str(
