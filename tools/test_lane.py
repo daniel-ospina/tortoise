@@ -53,9 +53,10 @@ derived inside ``start()``/``stop()`` from the worktree the command runs in.
 There is no ``--name``, no ``--slug``, and no function argument that selects a
 container: any override, however spelled, would be a way for one lane to delete
 or silently adopt another lane's isolated DB, because a peer's slug is a
-computable ``sha1(path)[:10]``. ``repo_root()`` scrubs
-``GIT_DIR``/``GIT_WORK_TREE`` for the same reason — an inherited git env var
-would otherwise retarget the CLI at a peer worktree with no flag involved.
+computable ``sha1(path)[:10]``. Every git call scrubs the whole ``GIT_*``
+prefix (``_git_env``) for the same reason — ``GIT_DIR``, ``GIT_WORK_TREE`` or
+``GIT_COMMON_DIR`` inherited from a git-hook or wrapper context would otherwise
+retarget the CLI at a peer worktree with no flag involved.
 
 Also fail-closed by design:
 * the container is bound to ``127.0.0.1`` only;
@@ -71,8 +72,8 @@ Also fail-closed by design:
   ``-a`` adds nothing measured — neither a stopped nor a created container
   reports or reserves its published port (Docker 29.4.0) — and is kept only as a
   cheap hedge;
-* ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike ``GIT_DIR``/
-  ``GIT_WORK_TREE``): a remote daemon is addressed as-is, so the printed
+* ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike every ``GIT_*``):
+  a remote daemon is addressed as-is, so the printed
   ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
   a warning is printed when ``DOCKER_HOST`` is set;
 * a FAILED ``docker ps -a`` scan ABORTS port selection instead of reporting
@@ -163,25 +164,32 @@ GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 def _git_env() -> dict[str, str]:
     """The environment every git call in this module must run under.
 
-    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED rather than inherited: with
-    ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts) git answers about
-    the OTHER tree, so the tool would compute a peer lane's container name — or
-    read a peer clone's worktree list — and act on it with no flag involved.
+    The WHOLE ``GIT_*`` prefix is SCRUBBED rather than inherited: ``GIT_DIR``,
+    ``GIT_WORK_TREE`` and ``GIT_COMMON_DIR`` each redirect which repository git
+    addresses, so with one set (git-hook contexts, wrapper scripts) git answers
+    about the OTHER tree — the tool would compute a peer lane's container name,
+    or read a peer clone's worktree list, and act on it with no flag involved.
     Both git call sites (`repo_root`, `_worktree_slugs`) go through this ONE
     helper so the scrub cannot be applied to one and forgotten on the other
     (#8180 review: the new `_worktree_slugs` call had skipped it, and the
     ownership answer a delete is authorized from was being read from the wrong
-    repository).
+    repository; scrubbing only ``GIT_DIR``/``GIT_WORK_TREE`` then left the same
+    hole one variable over — ``GIT_COMMON_DIR`` retargets the read on its own).
+
+    Scrubbing the prefix rather than an enumerated list matches the in-repo
+    precedent (`tools/mergify_config_guard.py::_git_env`) and is deliberate:
+    the cost is fail-CLOSED (the read fails, `_worktree_slugs` returns ``None``,
+    and ``None`` authorizes no removal), never a silent retarget.
     """
     return {k: v for k, v in os.environ.items()
-            if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+            if not k.startswith("GIT_")}
 
 
 def repo_root() -> Path:
     """The git worktree this invocation belongs to.
 
-    ``GIT_DIR``/``GIT_WORK_TREE`` are SCRUBBED (via `_git_env`) rather than
-    inherited: with ``GIT_WORK_TREE`` set (git-hook contexts, wrapper scripts)
+    Every ``GIT_*`` is SCRUBBED (via `_git_env`) rather than inherited: with
+    one set (git-hook contexts, wrapper scripts)
     `rev-parse` reports the OTHER tree, so the tool would compute a peer lane's
     container name and act on it with no flag involved.
 

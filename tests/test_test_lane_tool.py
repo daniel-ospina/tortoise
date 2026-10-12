@@ -447,21 +447,31 @@ def test_repo_root_ignores_an_inherited_git_work_tree(tmp_path, monkeypatch):
     assert tl.lane_name() == tl.container_name(tl.slug_for(ROOT))
 
 
-def test_worktree_slugs_reads_this_repo_not_an_inherited_git_env(tmp_path, monkeypatch):
+@pytest.mark.parametrize("retarget", ["work_tree", "common_dir"])
+def test_worktree_slugs_reads_this_repo_not_an_inherited_git_env(
+        tmp_path, monkeypatch, retarget):
     """`_worktree_slugs` is the ownership record a delete is AUTHORIZED from, and
     it shells out to `git worktree list` — the same hazard `repo_root()` scrubs
-    `GIT_DIR`/`GIT_WORK_TREE` for. Unscrubbed, an inherited git env var makes
-    the reaper read a PEER clone's worktrees, so every real `fdb-lane-*`
-    container resolves to `owner is None` (silent no-op) and a foreign record
-    can authorize a removal this worktree never established (#8180 review).
+    the ambient `GIT_*` for. Unscrubbed, an inherited git env var makes the
+    reaper read a PEER clone's worktrees, so every real `fdb-lane-*` container
+    resolves to `owner is None` (silent no-op) and a foreign record can
+    authorize a removal this worktree never established (#8180 review).
+
+    Both redirections are pinned: `GIT_WORK_TREE`/`GIT_DIR` together, and
+    `GIT_COMMON_DIR` ALONE — the hole an enumerated two-variable scrub left
+    open one variable over (measured: `GIT_COMMON_DIR` retargets the read on its
+    own, with no `GIT_DIR` set).
 
     The decoy is a REAL repository (a non-existent path makes git fail and
     `_worktree_slugs` return None, which would let the unscrubbed code pass).
     """
-    decoy = tmp_path / "decoy-worktree"
+    decoy = tmp_path / f"decoy-{retarget}"
     subprocess.run(["git", "init", "-q", str(decoy)], check=True)
-    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
-    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    if retarget == "common_dir":
+        monkeypatch.setenv("GIT_COMMON_DIR", str(decoy / ".git"))
+    else:
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
     slugs = tl._worktree_slugs()
     assert slugs is not None
     assert tl.slug_for(ROOT) in slugs, (
