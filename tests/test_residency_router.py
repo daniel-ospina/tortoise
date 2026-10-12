@@ -29,6 +29,12 @@ RED (the reverts and their verbatim pytest output are recorded in the PR body):
 * **Coerce a container marker** — drop the `marker not in RESIDENCY_VERDICTS`
   guard in ``route_residency`` →
   ``test_a_presence_container_at_the_seam_is_refused_not_coerced`` RED.
+* **Report an unassessed marker as resident** — restore the single final
+  branch (``reason=REASON_RESIDENT`` for ``marker=None``) →
+  ``test_an_unassessed_marker_is_reasoned_unassessed_not_resident`` RED.
+* **Carry an unvalidated marker on the type** — drop the marker check in
+  ``ResidencyRoute.__post_init__`` →
+  ``test_the_decision_itself_refuses_an_unvalidated_marker`` RED.
 
 Runs on the embedded lane (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).
@@ -56,6 +62,7 @@ from tortoise.residency_router import (
     REASON_INSUFFICIENCY,
     REASON_RESIDENCY_MISS,
     REASON_RESIDENT,
+    REASON_UNASSESSED,
     ROUTE_ESCALATE_TIER,
     ROUTE_FETCH_RECORD,
     ROUTE_SERVE,
@@ -87,7 +94,7 @@ class TestVocabulary:
         assert RESIDENCY_NOT_HOT not in ROUTES
         assert RESIDENCY_FIELD not in ROUTES
 
-    def test_the_routes_are_exactly_three_and_named_as_the_rule_states(self):
+    def test_the_router_has_exactly_three_routes(self):
         assert ROUTES == ("serve", "fetch-record", "escalate-tier")
         assert ROUTE_SERVE == "serve"
         assert ROUTE_FETCH_RECORD == "fetch-record"
@@ -178,6 +185,43 @@ class TestRouteResidency:
         """With the marker off, behaviour is §12.4's — the byte-identical default."""
         r = route_residency(marker=None, sufficient=False)
         assert r.route == ROUTE_ESCALATE_TIER
+
+    def test_an_unassessed_marker_is_reasoned_unassessed_not_resident(self):
+        """NOT ASSESSED carries its OWN reason — never a ``resident`` claim.
+
+        ``reason`` names WHICH EVENT FIRED. A marker that never ran is not a
+        positive residency verdict, so a consumer keyed on ``reason`` must not
+        read one — ``.marker is None`` preserves the distinction, and the
+        reason must state it too. The ROUTE stays ``serve``.
+
+        Non-vacuity: restoring the single final branch (``reason=
+        REASON_RESIDENT`` for ``marker=None``) reddens this test.
+        """
+        r = route_residency(marker=None, sufficient=True)
+        assert r.route == ROUTE_SERVE
+        assert r.reason == REASON_UNASSESSED
+        assert r.reason != REASON_RESIDENT
+        assert r.marker is None
+
+    def test_the_decision_itself_refuses_an_unvalidated_marker(self):
+        """The TYPE enforces the marker rule, not only the factory.
+
+        ``ResidencyRoute`` is in ``__all__``, so a decision constructed
+        directly must not be able to carry a verdict the module refuses. The
+        two canonical verdicts and the NOT-ASSESSED sentinel stay legal.
+
+        Non-vacuity: dropping the marker check in ``__post_init__`` lets
+        ``marker="cold"`` (and a container) construct successfully, and this
+        test goes RED.
+        """
+        for bad in ("cold", [], {}, ()):
+            with pytest.raises(ValueError):
+                ResidencyRoute(
+                    route=ROUTE_SERVE, reason=REASON_RESIDENT, marker=bad)
+        for good in (RESIDENCY_HOT, RESIDENCY_NOT_HOT, None):
+            assert ResidencyRoute(
+                route=ROUTE_SERVE, reason=REASON_RESIDENT,
+                marker=good).marker == good
 
     def test_an_unknown_verdict_is_refused_not_guessed(self):
         """A typo'd verdict must fail loud — a wrong route is a wrong answer."""

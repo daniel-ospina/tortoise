@@ -252,6 +252,142 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
   assertEq(incomplete.body.error, "generation_incomplete", "the incompleteness error is named");
 }
 
+// ── #8320: the guarantee must hold for the call the PIPELINE makes ──────────
+// The block above always sends `tags`, which is why this bug shipped: the
+// pipeline sends title + body only, and the model GENERATES the tags. Reading
+// the primary keyword from the request tags therefore yielded null for every
+// real call, the repair had nothing to enforce, and `keyword_ok` returned TRUE
+// while checking nothing.
+console.log("");
+console.log("generate-seo with NO request tags — the keyword check must not be vacuous (#8320)");
+{
+  const { onRequestPost } = await import("../website/functions/blog/api/generate-seo.ts");
+
+  // The model is the only source of tags on this path.
+  const driveNoTags = async (opts = {}) => {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes("/rest/v1/blog_agent_keys")) {
+        return Response.json([{ agent_name: "pipeline", active: true }]);
+      }
+      if (u.includes("openrouter.ai")) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                slug: "a-slug",
+                excerpt: "A concrete excerpt that earns the click.",
+                // The model picks from the canonical vocabulary, as it did live.
+                tags: opts.generatedTags ?? ["agent-memory"],
+                meta_title: opts.metaTitle ?? "Agent Memory 2026: Recall vs Learning | Tortoise",
+                meta_description: opts.metaDescription ??
+                  "Agent memory systems measure recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
+              }),
+            },
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        });
+      }
+      return Response.json({});
+    };
+    const request = new Request("https://tortoise.premiselabs.co/blog/api/generate-seo", {
+      method: "POST",
+      headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+      // NO `tags` — the shape the CMS ingest actually sends.
+      body: JSON.stringify({ title: "A title", body: "Sentence. ".repeat(40) }),
+    });
+    const res = await onRequestPost({
+      request,
+      env: {
+        SUPABASE_URL: "https://db.test",
+        SUPABASE_SERVICE_ROLE_KEY: "svc",
+        OPENROUTER_API_KEY: "or",
+      },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  const noTags = await driveNoTags();
+  assertEq(noTags.status, 200, "a tagless request still succeeds");
+  assertEq(
+    noTags.body.primary_keyword !== null,
+    true,
+    `primary_keyword is derived from the model's tags, not left null (got ${JSON.stringify(noTags.body.primary_keyword)})`,
+  );
+  assertEq(
+    typeof noTags.body.keyword_ok,
+    "boolean",
+    `keyword_ok is a real verdict, not a vacuous pass (got ${JSON.stringify(noTags.body.keyword_ok)})`,
+  );
+  assertEq(noTags.body.keyword_ok, true, "the keyword genuinely landed, so the verdict is true");
+
+  // The verdict must be EARNED on this path, not vacuous. When the model's own
+  // text omits the keyword, the repair puts it there — so `true` here means the
+  // repair ran and the keyword really is present in both fields.
+  const repairedCase = await driveNoTags({
+    metaTitle: "A title with no keyword in it at all",
+    metaDescription: "Also nothing relevant here whatsoever, just filler prose.",
+  });
+  assertEq(
+    repairedCase.body.primary_keyword !== null,
+    true,
+    "the keyword is still resolved when the model's text omits it",
+  );
+  assertEq(
+    repairedCase.body.keyword_ok,
+    true,
+    "the verdict passes because the repair placed the keyword, not vacuously",
+  );
+  const kw = repairedCase.body.primary_keyword;
+  assertEq(
+    repairedCase.body.meta_title.toLowerCase().includes(kw.toLowerCase()),
+    true,
+    `the keyword is genuinely IN the repaired title (got ${JSON.stringify(repairedCase.body.meta_title)})`,
+  );
+  assertEq(
+    repairedCase.body.meta_description.toLowerCase().includes(kw.toLowerCase()),
+    true,
+    "the keyword is genuinely IN the repaired description",
+  );
+
+  // No tag maps to the vocabulary at all → nothing was verified. That is
+  // `null` (unknown), never `true` (success).
+  const unmapped = await driveNoTags({ generatedTags: ["a-tag-not-in-the-vocabulary"] });
+  assertEq(unmapped.body.primary_keyword, null, "an unmapped tag yields no primary keyword");
+  assertEq(
+    unmapped.body.keyword_ok,
+    null,
+    "with no primary keyword the verdict is null (unverified), NOT true (success)",
+  );
+}
+
+// ── #8320 part 2: metaTitle must never end in a bare separator ─────────────
+console.log("");
+console.log("metaTitle never returns a value ending in a dangling separator (#8320)");
+{
+  const { metaTitle } = constraints;
+  for (const raw of [
+    "Long-term Memory for AI Agents: Recall vs Learning | Tortoise",
+    "A reasonably long title that will be truncated somewhere in the middle | Tortoise",
+    "Something long enough to truncate and ending in a colon: Tortoise",
+    "Something long enough to truncate and ending in a comma, Tortoise",
+  ]) {
+    const out = metaTitle(raw);
+    assertEq(
+      /[\s,.;:!?|—-]$/.test(out),
+      false,
+      `no dangling separator: ${JSON.stringify(out)}`,
+    );
+    assertEq(out.length <= 60, true, `stays within 60 chars: ${JSON.stringify(out)}`);
+  }
+  // And the live case that produced the defect, byte for byte.
+  assertEq(
+    metaTitle("Long-term Memory for AI Agents: Recall vs Learning | Tortoise"),
+    "Long-term Memory for AI Agents: Recall vs Learning",
+    "the exact live response no longer ends in a bare pipe",
+  );
+}
+
 console.log("");
 if (failures > 0) {
   console.error(`${failures} blog SEO meta assertion(s) failed`);

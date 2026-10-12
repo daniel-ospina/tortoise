@@ -165,6 +165,12 @@ _MINIMAL_RECORDS: dict[str, dict] = {
                          "valid_to": "2026-10-12T00:00:25Z",
                          "expired_at": "2026-10-12T00:00:25Z"},
     "ConfidenceChanged": {"id": "p1", "confidence": 0.4},
+    # #5380: the edge-message write-back. IDENTITY is the flat composite
+    # (an edge has no node id of its own), the same shape
+    # `DirectEdgeCreated` uses.
+    "EdgeMessageChanged": {"id": "p1->p2:IMPL", "op": "set",
+                          "src": "p1", "tgt": "p2", "rel": "IMPL",
+                          "msg_alpha": 0.5, "msg_beta": 0.5},
     "ObjectRegistered": {"id": "o1", "name": "n1", "objectKind": "document"},
     "ObjectSuperseded": {"id": "o1", "name": "n1", "supersedes_by": "o2"},
     "SubjectAdded": {"id": "s1", "name": "sub1", "subjectKind": "other"},

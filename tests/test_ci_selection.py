@@ -3050,12 +3050,14 @@ def test_pmv_job_carries_uri_manifest_guard():
 
 def test_live_required_job_runs_only_declared_live_tests():
     """cycle-8 P2-12: test-concurrency-falkor runs EXACTLY the declared
-    live-test pair — tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor
+    live-test set — as of #5379 that is THREE tests:
+    tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor,
+    tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor
     and tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes.
-    A third live test added to the job without extending this pin reds (the
+    A further live test added to the job without extending this pin reds (the
     audit's executable form — the old audit named two test files but grepped
     only test_embedded_concurrency, so a new live test in test_event_store
-    was invisible)."""
+    was invisible; #5379 added the third through this pin)."""
     wf = _load_python_ci()
     job = wf["jobs"]["test-concurrency-falkor"]
     steps = job["steps"]
@@ -3064,6 +3066,7 @@ def test_live_required_job_runs_only_declared_live_tests():
     nodeids = _re.findall(r"tests/[A-Za-z0-9_/.]+\.py::[A-Za-z0-9_]+", run["run"])
     declared = {
         "tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor",
+        "tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor",
         "tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes",
     }
     assert set(nodeids) == declared, (
@@ -3072,9 +3075,10 @@ def test_live_required_job_runs_only_declared_live_tests():
         "test-prefixed job URI, epic #1647 cycle-8 P2-12)"
     )
     # The job-level URI stays the NON-test-prefixed path — inert because
-    # both live tests pass explicit test-prefixed graph names and never
+    # all three live tests pass explicit test-prefixed graph names and never
     # bulk-wipe the URI default (verified test_embedded_concurrency
-    # L111-153 + test_event_store L165-185). If a future test adds a
+    # L111-153 + test_event_store L165-185 and the #5379 ceiling test's
+    # `test_seq_ceiling_tortoise`). If a future test adds a
     # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
     # path.
     assert "TORTOISE_DB_URI" not in job.get("env", {}), \
@@ -3082,6 +3086,15 @@ def test_live_required_job_runs_only_declared_live_tests():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise"
+    # The skip-fail guard must name EVERY declared live test, or a new test
+    # can skip while the regex stays green (the exact gap #5379 fixed).
+    guard_lines = [ln for ln in run["run"].splitlines() if "SKIPPED" in ln]
+    assert guard_lines, "the job must carry a skip-fail guard"
+    guard_text = "\n".join(guard_lines)
+    for nodeid in declared:
+        assert nodeid.split("::", 1)[1] in guard_text, (
+            f"the skip-fail guard must name {nodeid} — a live test missing from "
+            f"the regex can SKIP while the job stays green (vacuity)")
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():

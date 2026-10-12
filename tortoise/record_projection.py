@@ -165,6 +165,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "PointsMerged",
     "OperatorAnnotated",
     "ConfidenceChanged",
+    "EdgeMessageChanged",
     "EntityMutated",
     "ObjectRegistered",
     "ObjectSuperseded",
@@ -448,6 +449,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "refuses the name, so the record's correct mutation is none. The "
             "`outdated=true` terminal leg rides PointInvalidated's flag, and "
             "`_graph_id`/`_nid`/`reason` are replay bookkeeping (DERIVED)."
+        ),
+    ),
+    "EdgeMessageChanged": Mutation(
+        NoRecordEffect(
+            "EP carve-out, the EDGE half of `ConfidenceChanged`'s (STORAGE-"
+            "ARCHITECTURE §2.0/§17.5): `msg_alpha`/`msg_beta`/`back_msg_*` are "
+            "EP runtime message parameters, recomputed by the next "
+            "propagation from the structure and never stored as authority — "
+            "`public.relation` has no such column and no props tail entry for "
+            "them, so the record's correct mutation is none. The record is "
+            "GRAPH-REPLAY state only: it makes a FalkorDB rebuild faithful "
+            "(#5380, the edge half of #2884), and `derived = replay(journal)` "
+            "holds without the RECORD becoming their owner."
         ),
     ),
     "PointsMerged": Mutation(

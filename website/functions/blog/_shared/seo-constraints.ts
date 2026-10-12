@@ -45,8 +45,8 @@ function truncateAtWord(s: string, max: number): string {
   const lastSpace = cut.lastIndexOf(" ");
   // Always cut at the last word boundary when one exists (the old heuristic
   // kept the hard cut when the last space fell in the first half — mid-word).
-  if (lastSpace > 0) return cut.slice(0, lastSpace).replace(/[\s,.;:!?—-]+$/, "").trim();
-  return cut.replace(/[\s,.;:!?—-]+$/, "").trim();
+  if (lastSpace > 0) return cut.slice(0, lastSpace).replace(/[\s,.;:!?|—-]+$/, "").trim();
+  return cut.replace(/[\s,.;:!?|—-]+$/, "").trim();
 }
 
 export const constraints: Constraints = {
@@ -69,7 +69,14 @@ export const constraints: Constraints = {
     const withSuffix = `${t}${BRAND_SUFFIX}`;
     if (withSuffix.length <= META_TITLE_MAX) return withSuffix;
     // No room for the suffix — keep the truncated base (SSR appends nothing).
-    return t;
+    //
+    // A model title that already ends in a separator reaches here intact: it
+    // emitted its OWN " | Tortoise" which did not fit, so the truncation cut
+    // inside the suffix and left the "|" behind. `truncateAtWord` strips a
+    // trailing separator, but strip again here because this branch is reached
+    // with the caller's raw text on the `meta_title` path too, and a title
+    // ending in a bare "|" is user-visible in the SERP and the <title> tag.
+    return t.replace(/[\s,.;:!?|—-]+$/, "").trim();
   },
 
   metaDescription(raw: string): string {

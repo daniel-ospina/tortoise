@@ -66,6 +66,25 @@ surfaces:
   # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #7951 (remaining doors) / review P1: the write-door INVENTORY is
+  # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
+  # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the
+  # inventory scans (`ep`, `onboarding`, `sdk`, `eval` — each registered
+  # there). It scans ALL of `tortoise/**` minus `tortoise/projection/`, plus
+  # `graph-scripts/setup.py`, so the change that can re-open a door is a
+  # change to ANY file under `tortoise/` — not only the connectors/indexer
+  # that happen to select `core` today. `tortoise/__main__.py` carries two
+  # classified doors (`_cmd_reconcile`, `_cmd_verify`) plus the dedicated
+  # `test_verify_health_check_remains_a_self_deleting_scratch_write` pin; it
+  # is an EXACT `api` SOURCE_PATTERN that REPLACES `core`, and
+  # `tortoise/hosted_api.py` is the same shape for a future door. Without this
+  # arm a `__main__.py`-only change runs neither the map nor its pin and goes
+  # SILENTLY GREEN — the #1349/#2938/#4367 silent-drop class (observed before
+  # this arm: `--changed-files tortoise/__main__.py` → surfaces=['api'],
+  # `test_7951_write_doors.py` absent; `--surface-audit` flagged it as an
+  # addition candidate). `--integrity` also requires every test file to be
+  # classified, which the `core` entry satisfies.
+  - test_7951_write_doors.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
   # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
@@ -956,6 +975,28 @@ surfaces:
   # without this entry the delete-resurrection guard would not run on the
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
+  # #7951 (remaining doors): the write-door INVENTORY — every projection
+  # `.apply()` call site must be classified (chokepoint / closed / replay /
+  # documented exemption), and `_doc_write` must journal before it folds.
+  # The inventory's scan roots are ALL of `tortoise/**` minus
+  # `tortoise/projection/`, plus `graph-scripts/setup.py` — NOT merely
+  # `tortoise/connectors/*.py` and `tortoise/indexer/github_indexer.py`. Those
+  # two (with `mining.py`, `backup.py`, `consistency.py`, `api.py`,
+  # `pipeline_cli.py`) match no named surface and fall through to `core`, so
+  # this `core` arm runs the inventory on a change to any of them. But an
+  # exact SOURCE_PATTERN match REPLACES the `core` fallback in `select()`, so
+  # `core` alone leaves the inventory unrun on a change to a scanned file
+  # that selects another surface: `tortoise/__main__.py` and
+  # `tortoise/hosted_api.py` (`api`), `analyze.py`/`dream.py`/`ranking.py`
+  # (`ep`), `ask_lane.py`/`crypto.py`/`ids.py`/`models.py`/`reader.py`/
+  # `retrieval.py`/`schemas.py`/`transport.py` (`sdk`), `capture_disclosure.py`
+  # and `onboarding/*.py` (`onboarding`), `cross_lens.py`/`embeddings.py`
+  # (`eval`). Hence the DUAL-REGISTRATION on those five surfaces (see the `api`
+  # entry) — the #1349/#2938 silent-drop class. (A `tortoise/sdk.py` change
+  # selects the FULL matrix — `ci_selection.py --changed-files tortoise/sdk.py`
+  # → `"full": true` — so it needs no entry here.) `--integrity` also
+  # requires every test file to be classified, which this entry satisfies.
+  - test_7951_write_doors.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
@@ -2446,6 +2487,13 @@ surfaces:
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
   ep:
+  # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
+  # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
+  # `tortoise/**`, and `tortoise/analyze.py` / `dream.py` / `ranking.py` select
+  # `ep`, REPLACING the `core` fallback — so without this arm an `ep`-only
+  # change could add an unclassified `.apply` door silently (the
+  # #1349/#2938 silent-drop class; full rationale in the `api` entry).
+  - test_7951_write_doors.py
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
   # change. Dual-registered under `core` (above) for its
@@ -2560,6 +2608,13 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
+  # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
+  # `tortoise/**`, and `tortoise/capture_disclosure.py` + `tortoise/onboarding/*.py`
+  # select `onboarding`, REPLACING the `core` fallback — so without this arm an
+  # `onboarding`-only change could add an unclassified `.apply` door silently
+  # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
+  - test_7951_write_doors.py
   # #1652: the served skill set's own guard. `website/apps/dashboard/public/
   # skills/` is a SOURCE_PATTERN for THIS surface (tools/ci_selection.py), and
   # the surface's existing tests pin the onboarding document + the installer's
@@ -2736,6 +2791,14 @@ surfaces:
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
+  # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
+  # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
+  # `tortoise/**`, and `tortoise/ask_lane.py` / `crypto.py` / `ids.py` /
+  # `models.py` / `reader.py` / `retrieval.py` / `schemas.py` / `transport.py`
+  # select `sdk`, REPLACING the `core` fallback — so without this arm an
+  # `sdk`-only change could add an unclassified `.apply` door silently (the
+  # #1349/#2938 silent-drop class; full rationale in the `api` entry).
+  - test_7951_write_doors.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
   # #7209: `create_point` must never report success for a write that did not
@@ -2891,6 +2954,13 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
+  # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
+  # `tortoise/**`, and `tortoise/cross_lens.py` / `embeddings.py` select `eval`,
+  # REPLACING the `core` fallback — so without this arm an `eval`-only change
+  # could add an unclassified `.apply` door silently (the #1349/#2938
+  # silent-drop class; full rationale in the `api` entry).
+  - test_7951_write_doors.py
   # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
   # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
   # hosted lifespan now calls), and that module is an EXACT
