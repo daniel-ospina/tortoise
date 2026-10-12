@@ -591,6 +591,244 @@ console.log("JSON-LD cannot break out of its script element");
   assert(tag.startsWith('<script type="application/ld+json">'), "the tag is a JSON-LD script");
 }
 
+// ── House style: the shapes the already-published articles use ────────────
+// Recognised so an existing article gains real links and a styled answer box
+// with NO body edit — the CMS has no revision history and no read path
+// (tortoise#8002), so rewriting a body to introduce the markers would be an
+// unrecoverable write performed blind.
+console.log("house-style table of contents");
+{
+  const md = [
+    "**Table of contents**",
+    "",
+    "1. First section",
+    "2. Second section",
+    "",
+    "## First section",
+    "",
+    "## Second section",
+  ].join("\n");
+  const html = renderMarkdown(md);
+  assertEq((html.match(/<ol>/g) ?? []).length, 1, "the hand-written list is replaced, not duplicated");
+  assert(html.includes('<nav class="toc"'), "a linked TOC is generated from the house-style marker");
+  assert(html.includes('<a href="#first-section">First section</a>'), "the generated entries link to the heading anchors");
+  // Assert the shape the marker ACTUALLY renders pre-fix. `"Table of contents
+  // </p>"` was inert: the paragraph renders `<p><strong>Table of contents
+  // </strong></p>`, so `</strong>` sits between the text and `</p>` and the
+  // substring never matched — the old assertion passed on the broken renderer.
+  assert(
+    !html.includes("<strong>Table of contents</strong>"),
+    "the marker paragraph itself is not emitted",
+  );
+
+  // The guard: a marker with no list under it stays ordinary prose, so a
+  // sentence that happens to read "Table of contents" is not eaten.
+  const bare = renderMarkdown("**Table of contents**\n\nJust prose after it.");
+  assert(!bare.includes('<nav class="toc"'), "a marker with no list generates no TOC");
+  assert(bare.includes("Table of contents"), "...and the paragraph is left alone");
+
+  // This input MUST carry a list: without one the list lookahead rejects it and
+  // the `^…$` anchor is never exercised at all.
+  assert(
+    !renderMarkdown("See the Table of contents for details.\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "the phrase inside a sentence does not trigger a TOC",
+  );
+
+  // TipTap writes the bold as `\*\*…\*\*`; matching on the raw source (rather
+  // than on plainText, where the asterisks stay literal) recognises it.
+  assert(
+    renderMarkdown("\\*\\*Table of contents\\*\\*\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "the editor's backslash-escaped marker spelling is recognised too",
+  );
+
+  // Authored markup that merely RENDERS as "Table of contents" is not a marker.
+  assert(
+    !renderMarkdown("[Table of contents](#x)\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "a link whose text is 'Table of contents' is not a marker",
+  );
+  assert(
+    !renderMarkdown("![Table of contents](cover.png)\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "an image whose alt is 'Table of contents' is not a marker",
+  );
+  // Markdown does not break a paragraph at a newline, so a wrapped sentence's
+  // tail line is not its own paragraph — and must not be eaten.
+  const wrapped = renderMarkdown(
+    "This guide explains the whole model.\nTable of contents\n\n1. Setup\n\n## Setup",
+  );
+  assert(!wrapped.includes('<nav class="toc"'), "a wrapped paragraph's tail line is not a marker");
+  assert(wrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  // The BOLDED tail spelling reaches the regex (the unbolded one is rejected for
+  // an unrelated reason), so the `^…$` anchor alone does not stop it: it must
+  // not START a block either. Pre-fix this split the paragraph in two and ate the
+  // list beneath it, because the tail was tested without checking `paragraphBuf`.
+  const boldWrapped = renderMarkdown(
+    "Every section below is listed in the\n**Table of contents**\n\n1. Setup\n\n## Setup",
+  );
+  assert(!boldWrapped.includes('<nav class="toc"'), "a wrapped paragraph's bolded tail line is not a marker");
+  assert(boldWrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  assert(
+    boldWrapped.includes("<p>Every section below is listed in the\n<strong>Table of contents</strong></p>"),
+    "...and the wrapped paragraph stays one paragraph",
+  );
+
+  // No H2 ⇒ the generated nav would be empty, so the author's label AND list
+  // must survive rather than be deleted in exchange for nothing.
+  const noH2 = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n### Alpha\n\n### Beta",
+  );
+  assert(!noH2.includes('<nav class="toc"'), "a marker with no H2 generates no TOC");
+  assert(
+    noH2.includes("<strong>Table of contents</strong>") &&
+      noH2.includes("<ol><li>Alpha</li><li>Beta</li></ol>"),
+    "with no H2 the author's label and list are preserved",
+  );
+
+  // A loose (blank-separated) hand-written list is ONE list; the generated nav
+  // must replace all of it, not just the first contiguous run.
+  const loose = renderMarkdown(
+    "**Table of contents**\n\n1. First\n\n2. Second\n\n## First\n\n## Second",
+  );
+  assertEq((loose.match(/<ol>/g) ?? []).length, 1, "a loose hand-written list is fully replaced (no stray tail)");
+  assert(!loose.includes("<li>Second</li>"), "no leftover list item survives the marker");
+
+  // Indented nested items belong to the list too.
+  const nested = renderMarkdown("**Table of contents**\n\n- First\n  - Nested\n- Third\n\n## H");
+  assert(!nested.includes("Nested"), "indented nested TOC items are consumed with the list");
+  assert(!nested.includes("<p>  -"), "no raw list marker leaks into a paragraph");
+
+  // A top-level item of a DIFFERENT marker type under the marker is a SEPARATE
+  // list — the renderer's ordered branch ends at `-` just as its bullet branch
+  // ends at `1.` — so the nav must not swallow it. Pre-fix `consumeTocList`
+  // crossed the blank line by item shape alone and deleted the authored list.
+  const mixed = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n- Real bullet one\n- Real bullet two\n\n## Alpha",
+  );
+  assert(mixed.includes('<nav class="toc"'), "the marker still generates its nav above a mixed list pair");
+  assert(
+    mixed.includes("<ul><li>Real bullet one</li><li>Real bullet two</li></ul>"),
+    "a bulleted list after the TOC's ordered list is not consumed",
+  );
+  const mixedReverse = renderMarkdown(
+    "**Table of contents**\n\n- Alpha\n- Beta\n\n1. Real item one\n2. Real item two\n\n## Alpha",
+  );
+  assert(
+    mixedReverse.includes("<ol><li>Real item one</li><li>Real item two</li></ol>"),
+    "an ordered list after the TOC's bullet list is not consumed",
+  );
+
+  // Two markers must both be filled, not have the first overwritten by the second.
+  const twoMarkers = renderMarkdown(
+    "**Table of contents**\n\n1. A\n\n## A\n\n**Table of contents**\n\n1. B\n\n## B",
+  );
+  assertEq((twoMarkers.match(/<nav class="toc"/g) ?? []).length, 2, "two markers each render a nav");
+}
+
+console.log("house-style answer box");
+{
+  assertEq(
+    renderMarkdown("> **Quick answer:** Agent memory retains information."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>Agent memory retains information.</p></aside>",
+    "`> **Quick answer:** …` renders as the answer box, with the label not duplicated",
+  );
+  assert(
+    renderMarkdown("> \\*\\*Quick answer:\\*\\* Short.").includes("callout-answer"),
+    "the editor's backslash-escaped spelling is recognised too",
+  );
+  assert(
+    renderMarkdown("> Quick answer: no bold.").includes("callout-answer"),
+    "the bold is optional — the label is the marker",
+  );
+  // Exact render, not `!includes("Quick answer:</p>")`: that substring never
+  // matched even when the marker DID survive (the emitted label is
+  // `<p class="callout-label">Quick answer</p>`, no colon), so the old assertion
+  // passed on the pre-fix renderer too and proved nothing.
+  assertEq(
+    renderMarkdown("> **Quick answer:** x"),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p><p>x</p></aside>',
+    "the stripped marker text does not survive into the body",
+  );
+  // The colon bounds the label. A word that merely STARTS with "answer" is
+  // prose: the pre-fix regex matched the prefix and sliced it off the body.
+  assertEq(
+    renderMarkdown("> Quick answers are hard."),
+    "<blockquote>Quick answers are hard.</blockquote>",
+    "the word 'answers' is not amputated and stays prose",
+  );
+  for (const prose of [
+    "> Quick answering takes practice.",
+    "> Quick answerable claims need care.",
+    "> Quick answer is hard.",
+    "> **Quick answers** are hard.",
+  ]) {
+    const rendered = renderMarkdown(prose);
+    assert(
+      rendered.startsWith("<blockquote>") && !rendered.includes("callout-answer"),
+      `prose beginning with "Quick answer" is not the answer box: ${prose}`,
+    );
+  }
+  // A body-leading bold/underscore run must not be consumed as the label's
+  // closing delimiter — the delimiter is bound to the opening one.
+  assertEq(
+    renderMarkdown("> Quick answer: **Bold** start of the body."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start of the body.</p></aside>",
+    "a body-leading bold delimiter is not consumed as the label's closing bold",
+  );
+  assert(
+    renderMarkdown("> Quick answer: __init__ runs first.").includes("<p>__init__ runs first.</p>"),
+    "a body-leading underscore run survives the colon-only spelling",
+  );
+  assert(
+    renderMarkdown("> **Quick answer:** **Bold** start.").includes("<p><strong>Bold</strong> start.</p>"),
+    "the bolded spelling still leaves a body-leading bold intact",
+  );
+  // The closing delimiter glyph is consumed in EXACTLY ONE position, or the
+  // second copy reaches past the colon and eats a BODY-leading `**` / `__`:
+  // the pre-fix regex published `> **Quick answer**: **Bold** start.` as
+  // `Bold** start.` (first word amputated, literal delimiter leaked). These
+  // colon-outside-the-bold spellings are the regression cases for that.
+  assertEq(
+    renderMarkdown("> **Quick answer**: **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "the colon-outside-bold spelling does not eat the body's leading bold",
+  );
+  assertEq(
+    renderMarkdown("> **Quick answer** : **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "a space before the colon does not widen the consumed span",
+  );
+  assertEq(
+    renderMarkdown("> __Quick answer__: __init__ runs first."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>__init__ runs first.</p></aside>",
+    "the underscore spelling does not eat the body's leading underscore run",
+  );
+  assertEq(
+    renderMarkdown("> \\*\\*Quick answer\\*\\*: \\*\\*Bold\\*\\* start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>**Bold** start.</p></aside>",
+    "the escaped spelling does not amputate the body's first word",
+  );
+  // The marker must be the START of the blockquote, not anywhere inside it.
+  assertEq(
+    renderMarkdown("> Some context first.\n> **Quick answer:** x"),
+    "<blockquote>Some context first. <strong>Quick answer:</strong> x</blockquote>",
+    "a marker mid-quote is left as an ordinary blockquote",
+  );
+  assertEq(
+    renderMarkdown("> Just a quote."),
+    "<blockquote>Just a quote.</blockquote>",
+    "a plain blockquote is still untouched",
+  );
+  assert(
+    renderMarkdown("> [!ANSWER] Explicit marker.").includes('class="callout callout-answer"'),
+    "the explicit [!ANSWER] marker still works (no regression)",
+  );
+}
+
 console.log("");
 if (failures > 0) {
   console.error(`${failures} blog markdown assertion(s) failed`);
