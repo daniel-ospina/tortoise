@@ -26,6 +26,12 @@ WHY EVERY ROW IS HERE.
   validation is proven in both directions
   (``test_every_inventory_key_is_accepted``).
 * R4's "Notify me" creates NO state (``test_notify_me_label_creates_no_extra_state``).
+* The READ half runs OFF the event loop (``test_demand_read_runs_off_the_event_loop``)
+  — the #3514 review P2. ``_demand_store_rows`` is a sync ``httpx.Client.get``
+  with a 5 s timeout plus an unbounded local file read, called from four
+  ``async def`` handlers on a SINGLE-uvicorn-worker app, so an inline call
+  stalled every tenant (re-measured: a 1.00 s read ⇒ a 1.00 s loop gap, 0.05 s
+  free). ``_demand_store_rows_off_loop`` routes it through ``_cp_offload``.
 
 DB-FREE BY CONSTRUCTION. The analytics sink is either the local JSONL (Supabase
 env removed) or a stubbed HTTP client; Telegram is a stub; the marker set is
@@ -33,6 +39,7 @@ reset per test. No network, no store, no docker lane.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -40,6 +47,7 @@ import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -650,3 +658,116 @@ def test_cross_org_count_dedupes_per_org_not_per_click(tmp_path, monkeypatch):
     row = body["demand"][0]
     assert row["click_count"] == 4
     assert row["org_count"] == 2, "org_count must dedupe per team"
+
+
+# ── The read half runs OFF the event loop (#3514 review P2) ────────────
+
+def test_demand_read_runs_off_the_event_loop(monkeypatch):
+    """The demand read must not stall the loop (measured, not inferred).
+
+    ``_demand_store_rows`` is a synchronous ``httpx.Client.get`` (5 s timeout)
+    plus an unbounded local JSONL read, and the app runs ONE uvicorn worker, so
+    an inline call freezes EVERY concurrent request for its duration — the same
+    class as #3498/#3718/#4015, and the only analytics HTTP call in
+    ``hosted_api`` that still ran inline.
+
+    The falsifier is loop LIVENESS while the store is parked: the stub sets
+    ``entered`` when its read starts, and the test releases the park only from
+    the event loop. On the unfixed code the loop is blocked, so the park can
+    only ever time out (``released_in_time is False``); with the read offloaded
+    the release runs while the store is still parked. A future refactor that
+    puts the read back on the loop fails here regardless of mechanism. (The
+    ``max`` tick-gap check is the same invariant read a second way.)
+    """
+    monkeypatch.setenv("SUPABASE_URL", "https://demand-store.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc-3514")
+
+    entered = threading.Event()
+    release = threading.Event()
+    state: dict = {}
+
+    class _ParkedStore:
+        def get(self, *a, **kw):
+            entered.set()
+            state["released_in_time"] = release.wait(1.0)
+
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return [{"org_id": TEAM["org_id"],
+                             "properties": {"integration_key": KEY_A},
+                             "created_at": "2026-01-01T00:00:00+00:00"}]
+
+            return _Resp()
+
+    monkeypatch.setattr(hosted_api, "_analytics_http_client",
+                        lambda url, key: _ParkedStore())
+    app.dependency_overrides[hosted_api.get_current_org_session_ungated] = (
+        lambda: TEAM)
+    try:
+        async def _run():
+            gaps: list[float] = []
+            last = time.perf_counter()
+            stop = {"done": False}
+
+            async def _ticker():
+                nonlocal last
+                while not stop["done"]:
+                    await asyncio.sleep(0.05)
+                    now = time.perf_counter()
+                    gaps.append(now - last)
+                    last = now
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                tick = asyncio.create_task(_ticker())
+                await asyncio.sleep(0.15)  # the ticker must be mid-sleep
+                gaps.clear()
+                read = asyncio.create_task(
+                    ac.get("/v1/data-sources/demand"))
+                deadline = time.perf_counter() + 5.0
+                while (not entered.is_set() and not read.done()
+                       and time.perf_counter() < deadline):
+                    await asyncio.sleep(0.02)
+                assert entered.is_set(), (
+                    "the store read never started — this run proves nothing")
+                release.set()
+                resp = await read
+                stop["done"] = True
+                await tick
+            return gaps, resp
+
+        gaps, resp = asyncio.run(_run())
+    finally:
+        app.dependency_overrides.pop(
+            hosted_api.get_current_org_session_ungated, None)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["demand"][0]["integration_key"] == KEY_A
+    assert state.get("released_in_time") is True, (
+        "the loop could not release the parked store read until its own park "
+        "timed out — the demand read ran ON the event loop (#3514 review P2)")
+    assert max(gaps) < 0.5, (
+        f"the loop stalled for {max(gaps):.2f}s while the store read was parked "
+        "(#3514 review P2)")
+
+
+def test_demand_read_offload_refusal_is_unavailable_not_a_crash(monkeypatch):
+    """#4456's ``OFFLOAD_REFUSED`` is not a ``(rows, source)`` tuple.
+
+    ``_cp_offload(..., best_effort=True)`` returns the sentinel — NOT ``None`` —
+    when the pool genuinely refused the submission, so a wrapper that guarded
+    only ``is not None`` would hand the aggregator a non-iterable and answer a
+    500 exactly when the pool is saturated. The established unavailable
+    polarity must hold, and the honest not-zero follows from it.
+    """
+    async def _refused(*_a, **_kw):
+        return hosted_api.OFFLOAD_REFUSED
+
+    monkeypatch.setattr(hosted_api, "_cp_offload", _refused)
+    assert asyncio.run(
+        hosted_api._demand_store_rows_off_loop(None)) == (None, "unavailable")
+    assert hosted_api._demand_click_count(None, KEY_A) is None, (
+        "an unreadable store must never render as the click count 0")

@@ -35718,6 +35718,38 @@ def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
     return rows, "local_jsonl"
 
 
+async def _demand_store_rows_off_loop(
+        org_id: str | None) -> tuple[list[dict] | None, str]:
+    """#3514 review P2: the demand READ half, off the event loop.
+
+    ``_demand_store_rows`` is a synchronous ``httpx.Client.get`` (a 5 s timeout)
+    plus an unbounded local JSONL read, and ``hosted_api`` runs a SINGLE uvicorn
+    worker — so calling it inline from an ``async def`` handler stalled EVERY
+    concurrent request, not just the one clicking (re-measured on this tree: a
+    1.00 s read produced a 1.00 s loop gap, 0.05 s when the loop is free). It
+    was the only analytics HTTP call in this module not offloaded; the write
+    path already goes through ``_cp_offload``.
+
+    ``best_effort=True`` because the read must not ADD a failure mode: the
+    helper itself never raises (it returns ``(None, "unavailable")``), so only
+    an OFFLOAD failure remains — a missed wait bound or a saturated telemetry
+    pool — and that degrades to the SAME established polarity, which both read
+    routes already map to a 503. The seam never manufactures the fail-closed
+    ``control_plane_unavailable`` body (whose copy is sign-in specific and would
+    mislead a demand reader).
+
+    ``OFFLOAD_REFUSED`` (#4456) is a distinct non-``None`` sentinel for a
+    submission the pool genuinely refused, so it is NOT unpacked as a result
+    tuple: anything that is not a ``(rows, source)`` tuple is unavailable.
+    """
+    result = await _cp_offload(
+        lambda: _demand_store_rows(org_id),
+        op="data_source_demand_read", best_effort=True)
+    if isinstance(result, tuple):
+        return result
+    return None, "unavailable"
+
+
 def _demand_aggregate(rows: list[dict]) -> tuple[list[dict], bool]:
     """Per-integration demand: distinct orgs × clicks, deduped per (key, team).
 
@@ -35846,7 +35878,7 @@ async def record_data_source_demand(
     idem_key = f"{org_key}:{integration_key}:{idem}" if idem else ""
     if idem_key and not _demand.DEMAND_MARKERS.claim(
             _demand.MARK_RECORD, idem_key, _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
-        rows, source = _demand_store_rows(org_id)
+        rows, source = await _demand_store_rows_off_loop(org_id)
         return {"ok": True, "integration_key": integration_key,
                 "replayed": True, "org_key": org_key,
                 "click_count": _demand_click_count(rows, integration_key),
@@ -35873,7 +35905,7 @@ async def record_data_source_demand(
                             org_key=org_key),
         org_key=org_key, integration_key=integration_key)
 
-    rows, source = _demand_store_rows(org_id)
+    rows, source = await _demand_store_rows_off_loop(org_id)
     return {"ok": True, "integration_key": integration_key,
             "replayed": False, "org_key": org_key,
             "click_count": _demand_click_count(rows, integration_key),
@@ -35903,7 +35935,7 @@ async def read_data_source_demand(
     records" holds by construction rather than by a client-supplied argument.
     """
     _reject_graph_bound_org_surface(org, "data-source demand")
-    rows, source = _demand_store_rows(org["org_id"])
+    rows, source = await _demand_store_rows_off_loop(org["org_id"])
     if rows is None:
         # Unreadable is a 503, never an empty list: "no demand" and "the store
         # could not be read" must not render the same way.
@@ -35928,7 +35960,7 @@ async def operator_data_source_demand(request: Request):
     ``_check_internal`` and not on the tenant surface.
     """
     _check_internal(request)
-    rows, source = _demand_store_rows(None)
+    rows, source = await _demand_store_rows_off_loop(None)
     if rows is None:
         raise HTTPException(
             status_code=503,
