@@ -4557,6 +4557,29 @@ def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
     return graph_installed_namespaces(sdk)
 
 
+def _read_stored_number(value, default):
+    """Coerce a STORED numeric property for display/sorting; never raise (#6151).
+
+    ``annotator_*`` and ``mitigation_strength`` are writable through the generic
+    entity surface, which does not validate, so a stored string or an int past
+    float range reaches the readers. ``weights.compute_operator_weight`` degrades
+    such a value to a harmless default rather than aborting the run, and the state
+    readers must hold the SAME contract: they read the same two properties, and
+    `recall_state` is an agent-facing path, so one malformed row would otherwise
+    make every state query touching that operator raise while the weight read on
+    the identical input succeeded.
+
+    ``default`` is the caller's own "nothing usable here" value, because the two
+    sites disagree on it on purpose: a rating falls back to the neutral term (the
+    value an unrated operator yields), while a mitigation strength falls back to
+    ``None`` (the value an absent strength yields).
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -10917,12 +10940,36 @@ class TortoiseSDK:
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
 
+        These dimensions are not inert: they modulate the operator's EP weight in a
+        symmetric bounded band, so a well-rated connection counts for MORE than an
+        unrated one and the worst-rated for less. Leaving them unset is exactly
+        neutral (factor 1.0) and is the default — set them only to express a
+        deliberate judgement about the connection's quality.
+
         Args:
             id: Operator Point ID (must have is_operator=true).
             bias: 0-1, how much hidden stake/additional interest beyond stated position.
-            precision: 0-1, how narrow/well-defined the relevance claim is.
-            consistency: 0-1, how stable this relevance is across contexts.
-            directness: 0-1, how directly the source bears on the target.
+                INVERTED: higher bias means LESS weight, because a one-sided source
+                should count for less than a disinterested one.
+            precision: 0-1, how narrow/well-defined the relevance claim is (higher = more weight).
+            consistency: 0-1, how stable this relevance is across contexts (higher = more weight).
+            directness: 0-1, how directly the source bears on the target (higher = more weight).
+
+        The four are averaged (never multiplied), so rating one well cannot penalise
+        the others, and a partial rating moves the weight only as far as that
+        dimension justifies. Do not use these to disagree with a connection — that is
+        NAND's job; use them to grade how much the connection contributes. A rating
+        does not require a source.
+
+        HOW FAR IT MOVES depends on the operator's base weight, because the rating
+        multiplies the base and the result is then clamped to ``[0.1, 10.0]``. A
+        NAND starts at 8.0 and DOUBLES when it targets another operator, so a
+        best-rated operator-targeting NAND is clamped both before and after the
+        rating and gains NOTHING; even a top-level NAND gains only 1.25x
+        (8.0 -> 16.0 -> clamped to 10.0). On an ordinary IMPL the base is 1.0
+        (2.0 when operator-targeting), and the band applies in full there. So the
+        band is exact near the low end of the range and compresses as the base
+        approaches the ceiling — a rating on a contradiction is rarely worth much.
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """
@@ -20749,18 +20796,26 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}, {}
+        # The ranking default is the weight mechanism's own neutral constant, not a
+        # literal: a literal here would silently disagree with the weight the same
+        # dimension produces if that constant ever moves (#6151). Imported locally
+        # because `weights` is a leaf module this file otherwise does not need.
+        from tortoise.weights import ANNOTATION_TERM_NEUTRAL
+
         rows = self._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND|hasPart]-(n:Point) "
             "WHERE n.id IN $ids "
             "RETURN n.id, op.id, op.label, op.op_type, "
-            "  coalesce(op.annotator_precision, op.precision, 0.5), type(r)",
-            params={"ids": point_ids},
+            "  coalesce(op.annotator_precision, op.precision, $n), type(r)",
+            params={"ids": point_ids, "n": ANNOTATION_TERM_NEUTRAL},
         ).result_set
         args: dict[str, list[dict]] = {}
         nands: dict[str, list[dict]] = {}
         for nid, op_id, label, op_type, precision, rel in rows:
             op = {"id": op_id, "label": label or "", "op_type": op_type or "",
-                  "precision": round(float(precision), 4), "mechanism": rel}
+                  "precision": round(
+                      _read_stored_number(precision, ANNOTATION_TERM_NEUTRAL), 4),
+                  "mechanism": rel}
             if rel == "NAND":
                 nands.setdefault(nid, []).append(op)
             else:
@@ -20794,7 +20849,8 @@ class TortoiseSDK:
         for op_id, mid, content, strength in rows:
             out.setdefault(op_id, []).append(
                 {"id": mid, "content": content or "",
-                 "strength": float(strength) if strength is not None else None})
+                 "strength": None if strength is None
+                 else _read_stored_number(strength, None)})
         # Attach under the owning result point (via its surfaced operator).
         # Dedup: an operator can appear in BOTH arguments and nands for the
         # same target (mixed IMPL+NAND edges) — mitigations must not double.
