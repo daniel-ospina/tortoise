@@ -41,6 +41,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
     SHAPE_POINT_BELIEF_MISS,
@@ -9551,7 +9555,9 @@ class FalkorProjection(
             if gap:
                 clauses.append("n += $props")
                 params["props"] = gap
+            restore_guard = ""
             if restore_embedding:
+                restore_guard = clear_then_set_prefix("n", "$emb")
                 if sp.get("embedding_verbatim"):
                     # #5004 round-7: a CALLER-owned vector must keep its RAW
                     # form. `vecf32()` is the ONE form it must not take (it
@@ -9567,11 +9573,12 @@ class FalkorProjection(
                     # `vecf32()` cast exactly like `_upsert_point_props`: the
                     # HNSW index rejects a bare list, and a bare-list write
                     # would leave the restored vector unsearchable.
-                    clauses.append("n.embedding = vecf32($emb)")
+                    clauses.append(set_embedding_clause("n", "$emb"))
                 params["emb"] = list(emb)
             try:
                 self.g.query(
-                    "MATCH (n:Point {id:$pid}) SET " + ", ".join(clauses),
+                    "MATCH (n:Point {id:$pid}) " + restore_guard
+                    + "SET " + ", ".join(clauses),
                     params=params,
                 )
             except Exception as e:
@@ -12212,9 +12219,10 @@ class FalkorProjection(
         params: dict = {"id": pid}
         set_clauses: list[str] = []
         wrote_embedding = False
-        # #4457/#4520: the `REMOVE n.embedding` prefix, spliced ahead of the SET
-        # list in the SAME atomic query when (and only when) a real vector is
-        # being written below. See the embedding block for why.
+        # #4457/#4520: the shared clear-then-set prefix (`tortoise/vector_write.py`),
+        # spliced ahead of the SET list in the SAME atomic query when (and only
+        # when) a real vector is being written below. See the embedding block
+        # for why.
         embed_clear = ""
         wrote_content_hash = False
 
@@ -12288,11 +12296,9 @@ class FalkorProjection(
                 # wipe-on-None branch is unaffected and a fresh node simply has
                 # nothing to remove. Same workaround as `_upsert_point_props`
                 # (#4457) and the Subject/Object/Document/Event seams (#4524).
-                if params["embedding"] is not None:
-                    embed_clear = "REMOVE n.embedding "
+                embed_clear = clear_then_set_prefix("n")
                 set_clauses.append(
-                    "n.embedding = CASE WHEN $embedding IS NULL THEN NULL "
-                    "ELSE vecf32($embedding) END")
+                    set_embedding_clause("n", preserve_on_null=False))
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live

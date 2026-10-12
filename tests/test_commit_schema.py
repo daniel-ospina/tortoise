@@ -1085,6 +1085,93 @@ class TestBudgetDE2E7:
         assert plan.budget.held_point_ids == [p.id for p in payload.points]
 
 
+class TestFailedWriteRetry4704:
+    """#4704 — a payload whose counters are ALREADY DECLARED on the Session
+    (``:CommitRecord.value_nodes_declared``) is adjudicated against the
+    declared TOTAL, not against the retry's remainder.
+
+    Reachability, stated so the numbers below are not mistaken for arbitrary:
+    a first adjudication that is WRITTEN always satisfied ``prior + net_new
+    <= 25`` (the hard band HOLDS above that), so re-counting the remainder
+    cannot on its own cross the 50 ceiling inside that window. What it
+    corrupts is the cumulative the retry reports and — at the soft band — the
+    WARN verdict: the retry warned where the clean attempt had not, because
+    it added a remainder on top of a prior that already contained the whole
+    payload. The PERSISTED inflation (`value_nodes_created` re-applied, so
+    every LATER commit adjudicated against an inflated ``prior_created`` —
+    the issue's headline) is the write-side half, pinned end-to-end in
+    ``tests/test_commit_endpoint.py``.
+    """
+
+    @staticmethod
+    def _nine_points() -> list[dict]:
+        # ids 2..10 — distinct from any prior state ids
+        return [_point(i) for i in range(2, 11)]
+
+    def test_clean_attempt_and_retry_agree_on_the_declared_total(self):
+        payload = _payload_with(self._nine_points())
+        # clean attempt: prior 6 + 9 = 15 → written (<= 25 hard band), no WARN
+        clean = plan_commit(payload, GraphState(value_nodes_created=6),
+                            record=None)
+        assert clean.reconcile.net_new == 9
+        assert clean.budget.outcome == "ok"
+        assert clean.budget.cumulative_after == 15
+        assert clean.budget.warn is False
+
+        # that attempt declared its counters and THEN failed partway: 3 points
+        # are on the graph (they reconcile to zero to the retry) and the
+        # Session already holds prior + 9.
+        landed = {p.id: p.content for p in payload.points[:3]}
+        retry = plan_commit(
+            payload, GraphState(value_nodes_created=15, points=landed),
+            record=CommitRecordState(
+                client_commit_id="cid", session_id="s1", status="partial",
+                value_nodes_declared=9))
+        # reconcile sees the REMAINDER (6), not the payload...
+        assert retry.reconcile.net_new == 6
+        # ...and the adjudication must still report the clean attempt's numbers
+        assert retry.budget.outcome == "ok"
+        assert retry.budget.cumulative_after == 15
+        assert retry.budget.warn is False
+
+    def test_declared_retry_does_not_weaken_the_ceiling(self):
+        # a genuinely over-ceiling session must still 402 on the retry: the
+        # declaration is subtracted and added back, so it launders nothing
+        payload = _payload_with(self._nine_points())
+        retry = plan_commit(
+            payload, GraphState(value_nodes_created=55),
+            record=CommitRecordState(
+                client_commit_id="cid", session_id="s1", status="partial",
+                value_nodes_declared=9))
+        assert retry.budget.outcome == "fail"
+        assert "ceiling" in (retry.budget.reason or "")
+
+    def test_declared_retry_is_not_re_held(self):
+        # PL3: a re-submission is a DEFERRAL, never a re-adjudication against
+        # the hard-25 band — the declared retry's cumulative (30) is in that
+        # band and must still be written
+        payload = _payload_with(self._nine_points())
+        retry = plan_commit(
+            payload, GraphState(value_nodes_created=30),
+            record=CommitRecordState(
+                client_commit_id="cid", session_id="s1", status="partial",
+                value_nodes_declared=9))
+        assert retry.budget.outcome == "ok"
+        assert retry.budget.cumulative_after == 30
+
+    def test_undeclared_held_record_keeps_the_remainder_path(self):
+        # a HELD record never declared anything (the held path writes no
+        # counters — §4.1), so its re-submission must count the payload it is
+        # about to write, exactly as before
+        payload = _payload_with(self._nine_points())
+        plan = plan_commit(
+            payload, GraphState(value_nodes_created=20),
+            record=CommitRecordState(
+                client_commit_id="cid", session_id="s1", status="held"))
+        assert plan.budget.cumulative_after == 29
+        assert plan.budget.outcome == "ok"
+
+
 class TestL1Replay:
     def test_fully_written_is_duplicate(self):
         record = CommitRecordState(
@@ -1172,6 +1259,24 @@ class TestCommitRecordStore:
         from tortoise.commit_idempotency import CommitRecordStore
         store = CommitRecordStore(store_sdk)
         assert store.update("nope", status="fully_written") is None
+
+    def test_value_nodes_declared_roundtrips(self, store_sdk):
+        """#4704: the declaration is the retry's exactly-once key, so the
+        store must surface it — NULL until the write phase stamps it (the
+        stamp lands with the counters, in the writer's own statement)."""
+        from tortoise.commit_idempotency import CommitRecordStore
+        store = CommitRecordStore(store_sdk)
+        record, created = store.acquire("cid-5", session_id="s1",
+                                        status="partial")
+        assert created is True
+        assert record.value_nodes_declared is None
+        assert store.get("cid-5").value_nodes_declared is None
+        store_sdk._get_proj().g.query(
+            "MATCH (r:CommitRecord {client_commit_id:'cid-5'}) "
+            "SET r.value_nodes_declared = 7")
+        assert store.get("cid-5").value_nodes_declared == 7
+        assert store.update(
+            "cid-5", status="fully_written").value_nodes_declared == 7
 
     def test_invalid_status_fails_fast(self, store_sdk):
         from tortoise.commit_idempotency import CommitRecordStore

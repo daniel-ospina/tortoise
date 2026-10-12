@@ -32,6 +32,11 @@ from tortoise.projection.nonfolded import (
     record_non_folded,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
+from tortoise.vector_write import (
+    clear_embedding,
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1482,15 +1487,15 @@ class _EntityHandlers:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
-        # #4457: clear the property FIRST, in the same atomic query, so the
+        # #4457/#4520: the shared clear-then-set seam (`tortoise/vector_write.py`)
+        # clears the property FIRST, in the same atomic query, so the
         # conditional `vecf32` write below actually lands on the embedded
-        # engine (the overwrite there can be silently discarded — see the
-        # docstring). Only emitted when a new embedding is being written, so
-        # the CASE's preserve-the-existing-value branch is unaffected, and
-        # `MERGE`-created nodes simply have nothing to remove.
-        embed_clear = "REMOVE n.embedding " if embedding is not None else ""
+        # engine (the overwrite there can be silently discarded). The Cypher
+        # guard fires only when a real vector is written, so the CASE's
+        # preserve-the-existing-value branch is unaffected and a `MERGE`-created
+        # node simply has nothing to remove.
         self.g.query(
-            "MERGE (n:Point {id:$id}) " + embed_clear
+            "MERGE (n:Point {id:$id}) " + clear_then_set_prefix("n")
             + "SET " + ", ".join(set_clauses),
             params=params,
         )
@@ -2841,11 +2846,8 @@ class _EntityHandlers:
         # written, so the ``ELSE s.embedding`` preserve branch is untouched and
         # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
         # the MERGE uses (not ``id``), or this misses its own node.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (s:Subject {name:$name}) REMOVE s.embedding",
-                params={"name": name},
-            )
+        clear_embedding(self.g, "(s:Subject {name:$name})", "s", {"name": name}, embedding)
+        _set_emb = set_embedding_clause("s")
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
@@ -2858,7 +2860,7 @@ class _EntityHandlers:
             # With status projection-owned, this clause SEEDS a fresh/
             # re-created Subject and ON MATCH never touches it.
             "            s.status=coalesce($st, 'live'), "
-            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
+            "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
@@ -2872,7 +2874,7 @@ class _EntityHandlers:
             # stubs — a createdAt-CARRYING EventAPI-first node keeps its own
             # value under existing-wins (accepted divergence, #2295 plan).
             "            s.createdAt=coalesce(s.createdAt, $ca), "
-            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END",
+            "            " + _set_emb,
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
@@ -2927,21 +2929,18 @@ class _EntityHandlers:
         # discard a ``vecf32`` overwrite, and this embedding sits inside
         # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
         # only when a new vector is being written; key ``name``, the MERGE key.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (o:Object {name:$name}) REMOVE o.embedding",
-                params={"name": name},
-            )
+        clear_embedding(self.g, "(o:Object {name:$name})", "o", {"name": name}, embedding)
+        _set_emb = set_embedding_clause("o")
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.status=coalesce($st, 'live'), "
-            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
+            "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
-            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
+            "            " + _set_emb,
             params={"id": oid, "name": name,
                     "ok": ok,
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
@@ -3185,9 +3184,8 @@ class _EntityHandlers:
         # written, so the ``ELSE s.embedding`` preserve branch is untouched.
         # #5026/D10: the node is the document ``:Source`` (retired ``:Document``),
         # so the REMOVE and the SET list both bind ``s``.
-        embed_clear = "REMOVE s.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (s:Source {url:$id}) " + embed_clear +
+            "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
@@ -3239,7 +3237,7 @@ class _EntityHandlers:
             "    s.sourcePath=coalesce($sp, s.sourcePath), "
             "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
             "    s._searchText=coalesce($st, s._searchText, s.title), "
-            "    s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END, "
+            "    " + set_embedding_clause("s") + ", "
             "    s.updatedAt=$now "
             # D10 B6 (fourth door, review round 3): the retired fields must be
             # SCRUBBED on promotion, not merely refused on write. A PRE-RULING
@@ -3403,15 +3401,11 @@ class _EntityHandlers:
         # property in a separate query first. Emitted ONLY when a new embedding
         # is being written, leaving the ``ELSE e.embedding`` preserve branch
         # untouched.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (e:Event {eventId: $eid}) REMOVE e.embedding",
-                params={"eid": eid},
-            )
+        clear_embedding(self.g, "(e:Event {eventId: $eid})", "e", {"eid": eid}, embedding)
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
-            "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
-            "ON MATCH SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+            "ON CREATE SET e += $props, " + set_embedding_clause("e", preserve_on_null=False) + " "
+            "ON MATCH SET e += $props, " + set_embedding_clause("e"),
             params={"eid": eid, "props": props, "embedding": embedding},
         )
         # ── Auto-create structural edges (#122) ──
