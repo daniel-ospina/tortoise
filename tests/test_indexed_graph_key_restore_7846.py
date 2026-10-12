@@ -80,6 +80,18 @@ where the ``graph`` module is missing the skip carries the availability-
 regression reason instead, so the skip guard reds a probe regression rather than
 silently greening (the #1436 class).
 
+⚠️ **Where this actually executes in CI, so no reader mistakes a skip for a
+pass.** A *tier-2* PR runs its whole fast band URI-less (``python-ci.yml``: the
+``changes`` job's ``full`` is false, the leg sets ``CARVE_OUT=1`` and leaves
+``TORTOISE_DB_URI`` empty), so this file skips there by design and the skip guard
+exempts it — the same coverage class as ``test_acl_graph_users.py`` and
+``test_hnsw_vector_index.py``. It **runs** on every ``full`` selection: pushes to
+``main``, the nightly, and any PR whose diff the selector cannot place (shared
+module / unknown path), where the fast band gets the docker URI and this file's
+shard exercises it. An in-PR execution therefore has to be confirmed from the
+selection (``python tools/ci_selection.py --changed-files - --event pull_request``),
+not assumed from a green PR.
+
 ⚠️ This file performs a REAL ``DUMP``/``DEL``/``RESTORE`` against the live
 instance, so every graph it touches is named from a uuid: it can never delete or
 restore another test's graph. The graphs are dropped in teardown.
