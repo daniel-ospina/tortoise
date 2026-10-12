@@ -352,25 +352,40 @@ function hasPublishedH2(lines: string[]): boolean {
 /**
  * Advance past the author's hand-written table-of-contents list, from its first
  * item, to the first line that is not part of it. Loose (blank-separated) items
- * and indented nested items are consumed — stopping at the first contiguous run
- * would leave the tail behind as a stray list — and blank lines between items
- * are crossed with no upper bound. It does NOT follow a wrapped item's
- * continuation line: the renderer continues no list that way, so the region ends
- * there exactly as every other list branch would end it. Returns the index of
- * the first line after the region.
+ * of the SAME marker type and indented nested items are consumed — stopping at
+ * the first contiguous run would leave the tail behind as a stray list — and
+ * blank lines between same-type items are crossed with no upper bound. It does
+ * NOT follow a wrapped item's continuation line: the renderer continues no list
+ * that way, so the region ends there exactly as every other list branch would
+ * end it.
+ *
+ * Membership is bounded by the FIRST item's marker type: a top-level item of
+ * the other type begins a SEPARATE list (so does the renderer — its ordered
+ * branch stops at `-`, its bullet branch stops at `1.`), and consuming it with
+ * the TOC would silently delete authored content the marker never claimed.
+ * Returns the index of the first line after the region.
  */
 function consumeTocList(lines: string[], start: number): number {
-  const isItem = (s: string): boolean => /^\s*(?:\d+\.|[-*])\s+/.test(s);
+  const kind = (s: string): "ordered" | "bullet" | null =>
+    /^\s*\d+\.\s+/.test(s) ? "ordered" : /^\s*[-*]\s+/.test(s) ? "bullet" : null;
+  const indent = (s: string): number => /^\s*/.exec(s)?.[0].length ?? 0;
+  const firstKind = kind(lines[start]);
+  const firstIndent = indent(lines[start]);
+  // Same marker type (top level or nested), or a nested item of the other type.
+  const belongs = (s: string): boolean => {
+    const k = kind(s);
+    return k !== null && (k === firstKind || indent(s) > firstIndent);
+  };
   let i = start;
   while (i < lines.length) {
-    if (isItem(lines[i])) {
+    if (belongs(lines[i])) {
       i++;
       continue;
     }
     if (lines[i].trim() === "") {
       let k = i;
       while (k < lines.length && lines[k].trim() === "") k++;
-      if (k < lines.length && isItem(lines[k])) {
+      if (k < lines.length && belongs(lines[k])) {
         i = k;
         continue;
       }
@@ -427,8 +442,11 @@ export function renderMarkdown(markdown: string): string {
     // numbered list beneath it, replaced by the generated nav. Only fires when a
     // list actually FOLLOWS and there is an H2 to build the nav from — a stray
     // sentence reading "Table of contents" (or a body with no H2) stays ordinary
-    // content.
-    if (hasH2 && MD_HOUSE_TOC_RE.test(line.trim())) {
+    // content. It must also START a block: markdown does not break a paragraph at
+    // a newline, so a bolded TAIL line of a wrapped paragraph is a continuation,
+    // not its own paragraph — intercepting it split the paragraph and ate the
+    // list beneath it.
+    if (hasH2 && paragraphBuf.length === 0 && MD_HOUSE_TOC_RE.test(line.trim())) {
       let lookahead = i + 1;
       while (lookahead < lines.length && lines[lookahead].trim() === "") lookahead++;
       if (lookahead < lines.length && /^(\d+\.|[-*])\s+/.test(lines[lookahead])) {

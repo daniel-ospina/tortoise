@@ -657,6 +657,19 @@ console.log("house-style table of contents");
   );
   assert(!wrapped.includes('<nav class="toc"'), "a wrapped paragraph's tail line is not a marker");
   assert(wrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  // The BOLDED tail spelling reaches the regex (the unbolded one is rejected for
+  // an unrelated reason), so the `^…$` anchor alone does not stop it: it must
+  // not START a block either. Pre-fix this split the paragraph in two and ate the
+  // list beneath it, because the tail was tested without checking `paragraphBuf`.
+  const boldWrapped = renderMarkdown(
+    "Every section below is listed in the\n**Table of contents**\n\n1. Setup\n\n## Setup",
+  );
+  assert(!boldWrapped.includes('<nav class="toc"'), "a wrapped paragraph's bolded tail line is not a marker");
+  assert(boldWrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  assert(
+    boldWrapped.includes("<p>Every section below is listed in the\n<strong>Table of contents</strong></p>"),
+    "...and the wrapped paragraph stays one paragraph",
+  );
 
   // No H2 ⇒ the generated nav would be empty, so the author's label AND list
   // must survive rather than be deleted in exchange for nothing.
@@ -682,6 +695,26 @@ console.log("house-style table of contents");
   const nested = renderMarkdown("**Table of contents**\n\n- First\n  - Nested\n- Third\n\n## H");
   assert(!nested.includes("Nested"), "indented nested TOC items are consumed with the list");
   assert(!nested.includes("<p>  -"), "no raw list marker leaks into a paragraph");
+
+  // A top-level item of a DIFFERENT marker type under the marker is a SEPARATE
+  // list — the renderer's ordered branch ends at `-` just as its bullet branch
+  // ends at `1.` — so the nav must not swallow it. Pre-fix `consumeTocList`
+  // crossed the blank line by item shape alone and deleted the authored list.
+  const mixed = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n- Real bullet one\n- Real bullet two\n\n## Alpha",
+  );
+  assert(mixed.includes('<nav class="toc"'), "the marker still generates its nav above a mixed list pair");
+  assert(
+    mixed.includes("<ul><li>Real bullet one</li><li>Real bullet two</li></ul>"),
+    "a bulleted list after the TOC's ordered list is not consumed",
+  );
+  const mixedReverse = renderMarkdown(
+    "**Table of contents**\n\n- Alpha\n- Beta\n\n1. Real item one\n2. Real item two\n\n## Alpha",
+  );
+  assert(
+    mixedReverse.includes("<ol><li>Real item one</li><li>Real item two</li></ol>"),
+    "an ordered list after the TOC's bullet list is not consumed",
+  );
 
   // Two markers must both be filled, not have the first overwritten by the second.
   const twoMarkers = renderMarkdown(
