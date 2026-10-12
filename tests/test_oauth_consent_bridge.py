@@ -29,6 +29,7 @@ each one asserts it found its subject.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -85,13 +86,29 @@ def test_rfc8414_authorization_endpoint_stays_same_origin() -> None:
     # The base is the REQUEST's origin, not a literal: that is what keeps it correct on previews
     # and on a self-hosted deployment, and it is the reason a `Host`-header change moves the
     # advertised origin with it.
-    base_src = _lines(HOSTED)
-    base_line = next(i for i, line in enumerate(base_src)
-                     if line.startswith("def _oauth_base(request: Request)"))
-    body = "\n".join(base_src[base_line:base_line + 6])
+    # Assert on the RETURNED EXPRESSION, not a fixed window of source lines.
+    # A window lands inside the function's docstring — which literally reads
+    # "Origin for RFC 8707 resource URIs (request.base_url in tests resolves..."
+    # — so `return "https://api.premiselabs.co"` still satisfied a substring
+    # check and the guard PASSED on the very regression it names (#8219 review).
+    # `ast` reads behaviour; prose cannot satisfy it.
+    _tree = ast.parse(HOSTED.read_text())
+    _fn = next((n for n in ast.walk(_tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "_oauth_base"), None)
+    assert _fn is not None, (
+        "_oauth_base is gone from hosted_api.py — the RFC 8414 origin derivation the spec's §5 "
+        "VERIFIED section rests on no longer exists"
+    )
+    _returns = [n for n in ast.walk(_fn) if isinstance(n, ast.Return)]
+    assert _returns, (
+        "_oauth_base has no return — it no longer derives an origin at all, so the metadata's "
+        "authorization_endpoint source changed and the RFC 8414 claim must be re-measured"
+    )
+    body = ast.unparse(_returns[-1].value)
     assert "request.base_url" in body, (
-        "_oauth_base no longer derives the origin from request.base_url — the metadata's origin "
-        "source changed, so the RFC 8414 stability claim in the spec must be re-measured"
+        "_oauth_base no longer derives the origin from request.base_url (returned "
+        f"{body!r}) — the metadata's origin source changed, so the RFC 8414 stability claim "
+        "in the spec must be re-measured"
     )
 
     # Served from BOTH well-known routes (the MCP SDK tries the path-based form first), and the
@@ -198,7 +215,7 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
     table = section[1].split("## 4.", 1)[0]
     assert "| Entry | Why |" in table, "the required-entries table is gone from §3"
 
-    assert "api.premiselabs.co" in record, (
+    assert "api.premiselabs.co" in table, (
         "the consent page's sign-in fallback origin (https://api.premiselabs.co/oauth/authorize) "
         "is absent from the redirect-allowlist record. Add the entry, or record that the bridge "
         "removed the dependency — do not leave the origin unaddressed (#3524 task 5)."
