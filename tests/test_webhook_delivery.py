@@ -123,6 +123,9 @@ def test_secret_is_encrypted_at_rest(sdk_factory):
 
 @pytest.mark.parametrize("url", [
     "http://localhost/cb",
+    "http://localhost./cb",              # trailing dot: an FQDN spelling of loopback
+    "http://LOCALHOST.:8080/cb",         # ... and case-insensitive with a port
+    "http://127.1/cb",                   # short form: numeric, but ipaddress rejects it
     "http://127.0.0.1/cb",
     "http://[::1]/cb",
     "https://169.254.169.254/latest/meta-data/",

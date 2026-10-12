@@ -1053,7 +1053,11 @@ def validate_webhook_url(url: str) -> str:
     if parts.username or parts.password:
         raise ValueError("webhook url must not carry credentials (user:pass@)")
     try:
-        host = (parts.hostname or "").strip().lower()
+        # `.rstrip(".")`: a trailing dot is an FQDN spelling of the SAME name
+        # (``localhost.`` resolves to loopback exactly as ``localhost`` does), so
+        # it must be normalised BEFORE the name blocklist — otherwise every
+        # check below is comparing against a string the resolver never sees.
+        host = (parts.hostname or "").strip().lower().rstrip(".")
         port = parts.port
     except ValueError as e:  # non-numeric / out-of-range port
         raise ValueError(f"webhook url has an invalid port: {e}") from e
@@ -1076,6 +1080,16 @@ def validate_webhook_url(url: str) -> str:
     try:
         addr = ipaddress.ip_address(literal)
     except ValueError:
+        # A NUMERIC host that is not a valid IP literal (``127.1``,
+        # ``0177.0.0.1``, ``1.2.3.4.5``) is not a DNS name — it is a
+        # non-canonical address, and the resolver still sends it into loopback
+        # or private space. `ipaddress` rejecting it must not launder it into
+        # the DNS residual: that is how ``http://127.1/`` reached 127.0.0.1
+        # with every check above passing.
+        if literal and all(c in "0123456789." for c in literal):
+            raise ValueError(
+                f"webhook url host {host!r} is a numeric address that is not a "
+                f"valid IP literal — a webhook target must be a public address") from None
         addr = None  # a DNS name — the residual above applies
     if addr is not None and not addr.is_global:
         raise ValueError(
