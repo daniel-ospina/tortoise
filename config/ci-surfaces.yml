@@ -267,6 +267,16 @@ surfaces:
   # the writer in tortoise/metering.py, so a change to EITHER must run it — a
   # registration in only one surface would leave the other silently unguarded.
   - test_embed_metering.py
+  # #4489: retrieval-work measurement. Dual-registered with `core` (and the
+  # source `tortoise/retrieval_metering.py` is named in `api`'s SOURCE_PATTERNS
+  # so a module-only diff selects this arm). The writer/reader live in
+  # tortoise/metering.py + tortoise/supabase_control.py and the /v1/team render
+  # in tortoise/hosted_api.py — all `api` patterns — so `api` is the surface
+  # that must run it when any of those moves; `core` covers the search_engine
+  # leg hooks and the migration-text contract. Without this line
+  # `test_integrity_covers_all_test_files` fails (every tests/**/test_*.py must
+  # be classified — the scope-v5 drift trap).
+  - test_retrieval_metering.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -546,6 +556,12 @@ surfaces:
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
+  # #5109: the CLI's no-literal-key gate pins `tortoise/__main__.py`, an EXACT
+  # `api` SOURCE_PATTERNS match — so like test_init_apikey_validation.py above
+  # it must be registered under `api`, not only `core` (the #2938 silent-drop
+  # class: a `__main__.py`-only change that selected `api` alone would skip a
+  # core-only registration). Dual-registered with `core`.
+  - test_secret_not_printed_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -991,6 +1007,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_secret_not_printed_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
@@ -1239,6 +1256,7 @@ surfaces:
   - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
+  - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   - test_embedder_provision.py
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
@@ -2715,6 +2733,14 @@ surfaces:
   # born-live default for goal-kind Points (a target-only draft goal is
   # EP-inert while `converged=True` is still reported).
   - test_7856_goal_state.py
+  # #7852 W1: the Layer-2 `semantics` write path — `create_operator` resolves the
+  # direction from the relation's declared meaning and records the basis it used
+  # as `direction_basis` (absent/`None` is NOT a declaration — review ISSUE 3).
+  # `sdk` owns it: the change is `tortoise/sdk.py` (a SHARED_MODULE, so an
+  # sdk.py diff selects the full matrix) plus the `tortoise_create_operator`
+  # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
+  # and replays the journal), so it is ALSO registered in `carve_out` below.
+  - test_semantics_write_path_7852.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -3187,6 +3213,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
+# fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
+# replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
+# Also in the `sdk` surface above, which is where the diff selects it.
+- test_semantics_write_path_7852.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level
@@ -4178,6 +4209,7 @@ durations:
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
+  test_retrieval_metering.py: 90.0  # unmeasured — #4489: 34 tests on the embedded registry lane, locally measured 87.5s (TestTeamRoute's FastAPI client runs three requests through the real app; refresh from CI junit).
   test_session_bridge_fragment_retention.py: 0.3
   test_session_verify.py: 97.4
   test_ship_test_onboarding.py: 1.4

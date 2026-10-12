@@ -649,6 +649,14 @@ SOURCE_PATTERNS = {
             # here (in addition to sdk): its only direct unit test is
             # test_metering.py::test_selfhost_transport_exemption.
             "tortoise/metering.py", "tortoise/selfhost.py",
+            # #4489: the retrieval meter. Its writer/reader live in metering.py
+            # (already above) but the module itself is the read-funnel wrapper
+            # and the per-leg hooks' caller, and its guard
+            # (tests/test_retrieval_metering.py) is registered in `api`. Without
+            # this entry a retrieval_metering.py-only diff matched no pattern,
+            # fell through to `core`, and skipped the guard that pins it — the
+            # #7076 self-guard class the test below refuses.
+            "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
             # `extractor.py`, `m0.py` and `__main__.py` all write through.

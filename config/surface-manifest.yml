@@ -21,141 +21,167 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 4d11a7b40f8c1dbb5d099acc4b54e09324af5452
+cut_at_commit: 165d820dc
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
+response_fields:
+- response: tortoise_analyze
+  field: why
+  emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)
+  unchanged_when_off: yes — the response is byte-identical when the flag is off
+- response: tortoise_search
+  field: status
+  emitted_when: the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or
+    0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py
+    is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)
+  unchanged_when_off: yes — results and count stay byte-identical and the key is absent
+- response: tortoise_search
+  field: residency
+  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_RESIDENCY is truthy (1/true/yes/on; unset or
+    0 means off) AND the consulted scope''s known-hot set could be read (a store that is DOWN leaves the key absent
+    but emits status degraded — even when TORTOISE_READ_STATUS is off — so the impairment is still carried) — one
+    of hot|not-hot. Its OWN field, never a fifth term of the recorded status vocabulary (tortoise/status_vocabulary.py
+    forbids one; tortoise/residency.py is the marker''s ONE home, #7952 §17.2). `not-hot` means the read falls outside
+    the KNOWN-HOT SET because the cache is partial by design — the same answer a real absence gives, which is why
+    it is a marker and not an empty result; under it `status` is never `empty` (§17.3; the truth fetch is #7953,
+    not built)'
+  unchanged_when_off: yes — results, count and status stay byte-identical and the key is absent
+- response: tortoise_search
+  field: outdated
+  emitted_when: the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises
+    WITHOUT stamping status) — present only when true
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay
+    byte-identical
+- response: tortoise_search
+  field: provenance.currency
+  emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point
+    — the §4.6 AGGREGATE over the Point''s `extractedFrom` links: current (every link current, at least one link),
+    stale (ANY link behind), unknown (no link, or a pair with an absent operand). Never one link''s verdict, and
+    never a stored field (tortoise/search_engine.py::aggregate_currency is its ONE home)'
+  unchanged_when_off: yes — the whole `provenance` block is absent when the flag is off, so the row is byte-identical
+- response: tortoise_search
+  field: provenance.fyi
+  emitted_when: 'the same flag AND a `stale` verdict with at least one behind link — {reason: source-version-drift,
+    sources: [{source, recorded, current, currency}]}, the OUT-OF-DATE FACT DISCLOSED CARRYING ITS SOURCE (owner
+    ruling 2026-09-26: withheld as the answer, disclosed as a sourced FYI). Omitted for current/unknown, so its
+    absence means `no drift` rather than `drift we failed to name`'
+  unchanged_when_off: yes — nested in the same flag-gated `provenance` block; absent when the flag is off
+- response: tortoise_session_capture
+  field: capture_redactions
+  emitted_when: always — the count of credential-shaped spans redacted from this capture's stored turn text (0 when
+    nothing matched)
+  unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
+- response: sdk:provenance
+  field: raw
+  emitted_when: 'the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash,
+    raw_state, raw_state_at, available, permanent, retryable, label, message'
+  unchanged_when_off: n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response
+    is byte-identical
+- response: sdk:get_provenance_chain
+  field: raw
+  emitted_when: always, on every returned item — the same index entry (the chain is the Source link, which exists
+    whether or not the raw does)
+  unchanged_when_off: n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as
+    the terminal entity/labels (both keys always emitted), so the chain is never dropped
+- response: sdk:restore_point_at
+  field: malformed
+  emitted_when: only in the honest-absence branch, and only when a chain window is inverted (validTo before validFrom,
+    so it covers no instant)
+  unchanged_when_off: yes — no flag; the found and ambiguous replies are byte-identical, and this key is ABSENT
+    rather than false when no window is inverted (#5361)
+- response: sdk:restore_point_at
+  field: malformed_ids
+  emitted_when: the same condition as malformed, and always alongside it — the ids of the chain entries carrying
+    an inverted window
+  unchanged_when_off: yes — absent when no window is inverted (#5361)
+- response: sdk:restore_point_at
+  field: nearest.malformed
+  emitted_when: ALWAYS in the honest-absence branch, on every call that reports a nearest entry; true iff that entry
+    is the inverted one
+  unchanged_when_off: NO — deliberately not gated. nearest gains this key (true or false) whenever it is present,
+    so the absence-branch reply gains one key on every call; the found and ambiguous replies are untouched (#5361)
+- response: sdk:capture_session
+  field: graph_ops
+  emitted_when: always on the SDK path — the capture's measured graph-operation count as {total, by_phase}, added
+    by the counts_capture_ops decorator (#3561)
+  unchanged_when_off: n/a — not gated by a flag; an additive key on the returned dict, absent from the MCP tortoise_session_capture
+    response, which calls the underlying impl directly
+- response: sdk:traverse
+  field: idx
+  emitted_when: always, on every returned point — the matched edge's idx (0 names the operator's SOURCE, >= 1 a
+    TARGET; null on an edge written without the property), so an operator and its reverse read distinctly (#6101)
+  unchanged_when_off: n/a — not flag-gated; the key is present (null where the edge carries no idx) on every returned
+    point, and every pre-existing key keeps its value
+- response: tortoise_traverse
+  field: idx
+  emitted_when: always, on every hop in nodes[] — the traversed edge's idx, same value sdk:traverse returns (#6101)
+  unchanged_when_off: n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries
+    no idx), and node/relationship/depth are unchanged
+- response: tortoise_entity_profile
+  field: _idx
+  emitted_when: 'always, on every connected node — the traversed edge''s idx (underscore-prefixed like the sibling
+    _relationship key, #6101)'
+  unchanged_when_off: n/a — not flag-gated; additive key on each connected node, present (null where the edge carries
+    no idx), and the categorised lists are unchanged
+- response: tortoise_get_session
+  field: extraction
+  emitted_when: always on the durable :Session arm — the server-resolved extraction status object {status, extractor,
+    outcome_known}. status is one of the three declared members (stored | stored-and-processed | stored-extraction-failed),
+    from tortoise/session_projection.py::SESSION_EXTRACTION_STATES, derived in ONE place (session_extraction_status);
+    extractor names the lane that ran (v2/m2, or none/disabled for a store-only capture — extraction never attempted
+    — or null when the record predates the property); outcome_known is the qualifier BESIDE the set (capture_ok
+    IS NOT NULL) that carries stored-with-an-UNRECORDED-outcome, so it is never read as not-processed (#3520)
+  unchanged_when_off: n/a — not flag-gated; an additive key APPENDED at the END of the projection, so every pre-existing
+    key keeps its value, the turn/point lists and `source` are untouched, and a consumer reading the projection
+    positionally does not shift
+- response: tortoise_recall
+  field: recall_ranking.draft
+  emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive
+    rule), so every live hit is byte-identical. It is the machine-readable badge: the status vocabulary is not something
+    a consumer should have to know to see that a row is staged. tortoise_recall mode=state and mode=custom (both
+    serve recall_state); mode=gaps has its own ranker'
+  unchanged_when_off: yes — not flag-gated; the key is ABSENT on every non-draft row
+- response: tortoise_recall
+  field: recall_ranking.confidence
+  emitted_when: 'the same rows as recall_ranking.draft, and only when EP has NOT measured the claim (no persisted
+    posterior, and no non-baseline legacy ep_alpha — the #3276 measured predicate): confidence becomes null. A draft
+    that DOES carry a persisted posterior (demoted after a real EP run) keeps its measured number, because there
+    the number is real and only the staging is the news. Rationale: a draft is EP-inert (live._live_only excludes
+    it at every factor-extraction call site), so no belief is computed for it, and the neutral 0.5 it used to report
+    could outrank a measured live claim below 0.5 (#2598 repro). The min_confidence floor refuses an uncomputed
+    draft for any POSITIVE floor; the default 0.0 floor keeps it, so drafts stay recallable and the ranker places
+    them after every live row'
+  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. This is
+    a value change on an existing key, scoped to rows whose rendered number was never measured. Live rows: identical
+    number, identical key set, identical order. Uncalibrated LIVE rows keep the documented #898 neutral 0.5 (a recorded
+    decision this change does not reopen)'
+- response: tortoise_recall
+  field: recall_ranking.confidence_source
+  emitted_when: the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead
+    of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured"
+    without knowing the status vocabulary
+  unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
+    every live row keeps its "posterior"/"neutral" verdict
+- response: sdk:create_operator
+  field: direction_basis
+  emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded
+    direction came from: explicit (the caller stated a non-default direction), semantics (the declared Layer-2
+    meaning resolved it) or default (nothing was declared, so the caller-supplied/write-path default was
+    recorded — the signature default is bidirectional for EVERY op_type; only an explicit direction=None
+    canonicalizes per op_type)'
+  unchanged_when_off: n/a — not flag-gated; an additive key on the returned operator properties, and every
+    pre-existing key keeps its value
+- response: tortoise_create_operator
+  field: direction_basis
+  emitted_when: 'always on the hosted path — the same basis, on the operator the tool returns (#7852 W1,
+    owner-approved "w1 yes approved" 2026-10-09)'
+  unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing
+    key keeps its value
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
-# Response FIELDS are outside the frozen surface — the freeze is on tools and
-# endpoints — but each one is recorded here so this manifest stays the single
-# source of truth for what we tell agents we return. A field that is off by
-# default and leaves the response unchanged when off does not gate; an
-# unrecorded one has no approval behind it and the carve-out does not cover it.
-response_fields:
-- response: tortoise_analyze
-  field: why
-  emitted_when: 'TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)'
-  unchanged_when_off: 'yes — the response is byte-identical when the flag is off'
-- response: tortoise_search
-  field: status
-  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
-  unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
-- response: tortoise_search
-  field: residency
-  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_RESIDENCY is truthy (1/true/yes/on; unset or 0 means off) AND the consulted scope''s known-hot set could be read (a store that is DOWN leaves the key absent but emits status degraded — even when TORTOISE_READ_STATUS is off — so the impairment is still carried) — one of hot|not-hot. Its OWN field, never a fifth term of the recorded status vocabulary (tortoise/status_vocabulary.py forbids one; tortoise/residency.py is the marker''s ONE home, #7952 §17.2). `not-hot` means the read falls outside the KNOWN-HOT SET because the cache is partial by design — the same answer a real absence gives, which is why it is a marker and not an empty result; under it `status` is never `empty` (§17.3; the truth fetch is #7953, not built)'
-  unchanged_when_off: 'yes — results, count and status stay byte-identical and the key is absent'
-# #2294: the OTHER half of the terminal vocabulary. ``status`` alone cannot
-# express ``invalidate_point``'s terminal state — that writer sets
-# ``outdated=true`` and leaves ``status`` untouched (``supersede_point`` is the
-# one that stamps ``status='superseded'``), so a status-only reader served an
-# invalidated claim as CURRENT. Emitted only when true, so every live hit stays
-# byte-identical; the flag rides the search-result wire so every consumer can
-# apply the shared ``live.is_terminal_status`` (#2901) instead of re-declaring
-# a status subset at a call site.
-- response: tortoise_search
-  field: outdated
-  emitted_when: 'the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises WITHOUT stamping status) — present only when true'
-  unchanged_when_off: 'n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay byte-identical'
-# #5581 (the #5038 read-path half): the Point-level §4.6 currency verdict and
-# the sourced disclosure that rides with a `stale` verdict. INSIDE the existing
-# flag-gated `provenance` block, so the addition needs the block's flag rather
-# than a new one. Recorded here for the same reason as every other response
-# field — an unrecorded addition has no approval behind it and the carve-out
-# does not cover it. The placement was ALREADY RULED (Policy B, #5038: the
-# check is a read on the EXISTING read surfaces — no new MCP tool, no new SDK
-# method, no stored `status` field), so #4282's tool/method rule is not engaged;
-# see docs/plans/2026-09-25-5038-source-version-anchor.md §8 O3.
-- response: tortoise_search
-  field: provenance.currency
-  emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point — the §4.6 AGGREGATE over the Point''s `extractedFrom` links: current (every link current, at least one link), stale (ANY link behind), unknown (no link, or a pair with an absent operand). Never one link''s verdict, and never a stored field (tortoise/search_engine.py::aggregate_currency is its ONE home)'
-  unchanged_when_off: 'yes — the whole `provenance` block is absent when the flag is off, so the row is byte-identical'
-- response: tortoise_search
-  field: provenance.fyi
-  emitted_when: 'the same flag AND a `stale` verdict with at least one behind link — {reason: source-version-drift, sources: [{source, recorded, current, currency}]}, the OUT-OF-DATE FACT DISCLOSED CARRYING ITS SOURCE (owner ruling 2026-09-26: withheld as the answer, disclosed as a sourced FYI). Omitted for current/unknown, so its absence means `no drift` rather than `drift we failed to name`'
-  unchanged_when_off: 'yes — nested in the same flag-gated `provenance` block; absent when the flag is off'
-- response: tortoise_session_capture
-  field: capture_redactions
-  emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
-  unchanged_when_off: 'n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)'
-# #3998 (D30): the ABSENT-RAW state, added in the SDK layer (`tortoise/sdk.py`)
-# — NOT inside a tool function, so the D2 carve-out holds (a tool-body edit is
-# what reds the gate as "a changed implementation"). Recorded here because
-# every response-field addition is, and because the entry is the only record
-# of what we now tell agents we return. NOT flag-gated: the keys are ABSENT
-# (not null) in the sourceless case, so those responses stay byte-identical.
-- response: sdk:provenance
-  field: raw
-  emitted_when: 'the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash, raw_state, raw_state_at, available, permanent, retryable, label, message'
-  unchanged_when_off: 'n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response is byte-identical'
-- response: sdk:get_provenance_chain
-  field: raw
-  emitted_when: 'always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does)'
-  unchanged_when_off: 'n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as the terminal entity/labels (both keys always emitted), so the chain is never dropped'
-- response: sdk:restore_point_at
-  field: malformed
-  emitted_when: 'only in the honest-absence branch, and only when a chain window is inverted (validTo before validFrom, so it covers no instant)'
-  unchanged_when_off: 'yes — no flag; the found and ambiguous replies are byte-identical, and this key is ABSENT rather than false when no window is inverted (#5361)'
-- response: sdk:restore_point_at
-  field: malformed_ids
-  emitted_when: 'the same condition as malformed, and always alongside it — the ids of the chain entries carrying an inverted window'
-  unchanged_when_off: 'yes — absent when no window is inverted (#5361)'
-- response: sdk:restore_point_at
-  field: nearest.malformed
-  emitted_when: 'ALWAYS in the honest-absence branch, on every call that reports a nearest entry; true iff that entry is the inverted one'
-  unchanged_when_off: 'NO — deliberately not gated. nearest gains this key (true or false) whenever it is present, so the absence-branch reply gains one key on every call; the found and ambiguous replies are untouched (#5361)'
-- response: sdk:capture_session
-  field: graph_ops
-  emitted_when: 'always on the SDK path — the capture''s measured graph-operation count as {total, by_phase}, added by the counts_capture_ops decorator (#3561)'
-  unchanged_when_off: 'n/a — not gated by a flag; an additive key on the returned dict, absent from the MCP tortoise_session_capture response, which calls the underlying impl directly'
-- response: sdk:traverse
-  field: idx
-  emitted_when: 'always, on every returned point — the matched edge''s idx (0 names the operator''s SOURCE, >= 1 a TARGET; null on an edge written without the property), so an operator and its reverse read distinctly (#6101)'
-  unchanged_when_off: 'n/a — not flag-gated; the key is present (null where the edge carries no idx) on every returned point, and every pre-existing key keeps its value'
-- response: tortoise_traverse
-  field: idx
-  emitted_when: 'always, on every hop in nodes[] — the traversed edge''s idx, same value sdk:traverse returns (#6101)'
-  unchanged_when_off: 'n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries no idx), and node/relationship/depth are unchanged'
-- response: tortoise_entity_profile
-  field: _idx
-  emitted_when: 'always, on every connected node — the traversed edge''s idx (underscore-prefixed like the sibling _relationship key, #6101)'
-  unchanged_when_off: 'n/a — not flag-gated; additive key on each connected node, present (null where the edge carries no idx), and the categorised lists are unchanged'
-# #3520: the per-session EXTRACTION status. Recorded on the SDK/tool side because
-# the shared projection is ONE declaration (tortoise/session_projection.py): the
-# key rides `TortoiseSDK.get_session` (and therefore `tortoise_get_session`) as
-# well as the hosted `GET /v1/sessions` + `GET /v1/sessions/{id}` it mirrors, and
-# NO method or tool is added — the freeze is on tools and endpoints, and this is an
-# additive key on an existing read. Announced for the same reason every other
-# response-field addition is: it is what we now tell agents we return.
-- response: tortoise_get_session
-  field: extraction
-  emitted_when: 'always on the durable :Session arm — the server-resolved extraction status object {status, extractor, outcome_known}. status is one of the three declared members (stored | stored-and-processed | stored-extraction-failed), from tortoise/session_projection.py::SESSION_EXTRACTION_STATES, derived in ONE place (session_extraction_status); extractor names the lane that ran (v2/m2, or none/disabled for a store-only capture — extraction never attempted — or null when the record predates the property); outcome_known is the qualifier BESIDE the set (capture_ok IS NOT NULL) that carries stored-with-an-UNRECORDED-outcome, so it is never read as not-processed (#3520)'
-  unchanged_when_off: 'n/a — not flag-gated; an additive key APPENDED at the END of the projection, so every pre-existing key keeps its value, the turn/point lists and `source` are untouched, and a consumer reading the projection positionally does not shift'
-# #2598 (the draft-honesty half; the ingest-default half needs a registry +
-# baseline re-cut, so it is NOT here): a DRAFT row's belief rendering on the
-# state recall. Two entries because the change is two things — an ADDITIVE key
-# and a VALUE change on an existing one — and neither is flag-gated, so both
-# are recorded rather than left to the #4282 carve-out. The tool/method rule is
-# not engaged: no tool is added or removed, and no SDK method is; the read is on
-# the EXISTING recall surface (the #5038 Policy B precedent recorded above in this
-# this block). The value change is strictly scoped — only a row whose status is
-# `draft` AND whose belief EP has not measured, i.e. exactly the rows that used
-# to render a fabricated 0.5. Every live row keeps its number, its key set and
-# its order.
-- response: tortoise_recall
-  field: recall_ranking.draft
-  emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive rule), so every live hit is byte-identical. It is the machine-readable badge: the status vocabulary is not something a consumer should have to know to see that a row is staged. tortoise_recall mode=state and mode=custom (both serve recall_state); mode=gaps has its own ranker'
-  unchanged_when_off: 'yes — not flag-gated; the key is ABSENT on every non-draft row'
-- response: tortoise_recall
-  field: recall_ranking.confidence
-  emitted_when: 'the same rows as recall_ranking.draft, and only when EP has NOT measured the claim (no persisted posterior, and no non-baseline legacy ep_alpha — the #3276 measured predicate): confidence becomes null. A draft that DOES carry a persisted posterior (demoted after a real EP run) keeps its measured number, because there the number is real and only the staging is the news. Rationale: a draft is EP-inert (live._live_only excludes it at every factor-extraction call site), so no belief is computed for it, and the neutral 0.5 it used to report could outrank a measured live claim below 0.5 (#2598 repro). The min_confidence floor refuses an uncomputed draft for any POSITIVE floor; the default 0.0 floor keeps it, so drafts stay recallable and the ranker places them after every live row'
-  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. This is a value change on an existing key, scoped to rows whose rendered number was never measured. Live rows: identical number, identical key set, identical order. Uncalibrated LIVE rows keep the documented #898 neutral 0.5 (a recorded decision this change does not reopen)'
-- response: tortoise_recall
-  field: recall_ranking.confidence_source
-  emitted_when: 'the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured" without knowing the status vocabulary'
-  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence; every live row keeps its "posterior"/"neutral" verdict'
 counts:
   tools: 82
   sdk_public_methods: 150
@@ -255,17 +281,6 @@ retired:
   sdk_method: taxonomy
   http_policy: true
   approval: null
-# Every tool row records BOTH halves of that tool's served identity (#4192):
-#   `served_from`       — the CODE OBJECT behind the name (the implementation)
-#   `served_attributes` — the parts of the function that live OUTSIDE its code object and are
-#                         still caller-visible: parameter defaults, keyword-only defaults and
-#                         annotations, all of which the MCP `tools/list` inputSchema publishes.
-# They are two cells, not one, because the guard that measures `served_from` in CI is pinned
-# to the BASE ref (#5132/#4606): folding the attributes into it re-stamps all 82 rows, and the
-# pinned guard then reds on every one of them — a required check no PR can satisfy. A separate
-# cell leaves `served_from` byte-identical; the attributes are enforced by
-# `tools/surface_manifest.py check` at PR time and by the guard on the tree itself. See
-# `_served_attributes` in tools/surface_manifest.py.
 rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:7dc2585e3d3af508
@@ -337,10 +352,10 @@ rows:
     list/expand split — search returns bounded state entries; use this to read a neighbor''s full text on demand).'
   dependency: declares TortoiseSDK.expand_relationships (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -362,10 +377,10 @@ rows:
   job: 'Get EP confidence for a claim: {mean, variance, alpha, beta}.'
   dependency: declares TortoiseSDK.get_confidence (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -430,10 +445,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_recall`: the #3926
-  # typed-error guard refactor moved its fingerprint 32a22d4162be59b6 -> d625dc916f15d980.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
@@ -485,10 +497,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_suggest_entry_points`: the #3926
-  # typed-error guard refactor moved its fingerprint 4fc2d2c7d48e54e5 -> 564fb24731914250.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
@@ -543,15 +552,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 (#3926 typed-error guard), PR #3949 (#3784 fail-closed decision
-  # observation) and PR #7651 (#3916: the observation accepts BOTH
-  # decide-protocol pointKinds) each changed the implementation served as
-  # `tortoise_create_point`; the merged implementation carries all three, at
-  # 068bffeb250a7729. No tool was added, removed or renamed. #7651 IS a
-  # behaviour change — the observation now fires on `option` as well as
-  # `decision` — so its own approval is appended rather than assumed; the earlier
-  # two approved the narrower `decision`-only observation, not this one.
-  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina, #7651 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -569,10 +570,10 @@ rows:
   job: Audit graph calibration state. Returns per-point guidance.
   dependency: declares TortoiseSDK.calibrate_summary (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -642,8 +643,8 @@ rows:
   cluster: update
   canonical: true
   job: Update a Point OR entity by id. Points get point-lifecycle semantics (draft→live promote via status — an
-    already-live point is an idempotent no-op, version increment for Point:Object, status validation); entities get a
-    plain property update.
+    already-live point is an idempotent no-op, version increment for Point:Object, status validation); entities
+    get a plain property update.
   dependency: declares TortoiseSDK.update (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -672,7 +673,7 @@ rows:
   job: Update properties on a Point. Safe — modifies one Point only.
   dependency: declares TortoiseSDK.update_point (resolves)
   lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_update` in the same group already does this job (its own description names what it consolidates),
@@ -707,10 +708,7 @@ rows:
   recommended_family: memory
   proposed: true
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_delete`: the #3926
-  # typed-error guard refactor moved its fingerprint bc9ed3ffe618b1f1 -> 92890c80d0ad8e5e.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
@@ -758,10 +756,10 @@ rows:
     transition + one edge and changes nothing.
   dependency: declares TortoiseSDK.invalidate_point (resolves)
   lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -894,10 +892,10 @@ rows:
     by newest stamp, capped at limit, default 20).
   dependency: declares TortoiseSDK.list_batches (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -920,10 +918,10 @@ rows:
     failure rate, region_attempts, warm-start savings). Embedded call-triggered evaluator.'
   dependency: declares TortoiseSDK.dream_health_check (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1031,10 +1029,10 @@ rows:
     canonical fetch-by-id tool.
   dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: graph
   proposed: true
   exemption: false
@@ -1168,10 +1166,10 @@ rows:
     via operator_action when mitigation is needed. Returns {edge, created, nudges}.'
   dependency: declares TortoiseSDK.create_edge (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1179,8 +1177,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_operator
-  served_from: tortoise/mcp_server.py:607a8fcf59c53553
-  served_attributes: 91d227eba1a642ab
+  served_from: tortoise/mcp_server.py:2730ec9b51fca554
+  served_attributes: 9c8df3f7f40e3d00
   family: graph
   family_rank: 2
   served: http
@@ -1190,7 +1188,9 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create an operator connecting Points. op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.'
+  job: 'Create an operator connecting Points. op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.
+    semantics: the Layer-2 meaning (addresses, supports, refutes, mutuallyExclusive, hasPart, related, …) — it resolves
+    the direction.'
   dependency: declares TortoiseSDK.create_operator (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -1226,14 +1226,14 @@ rows:
     item is REJECTED (INGEST_CONTRACT row 9 — case variants, nested props={...}, and terminal statuses included)
     — use promotion_policy=''auto'' or promote after ingest via update_point(status=''live''). promotion_policy=''auto''
     preserves the #131 promote-on-wire lifecycle (null-status sources only — an explicit draft is never retro-promoted,
-    #1088; terminal sources are never resurrected; deduped connections never retro-promote). Idempotent-ish: points dedup by content hash
-    + kind, sources by url, operators by input set.'
+    #1088; terminal sources are never resurrected; deduped connections never retro-promote). Idempotent-ish: points
+    dedup by content hash + kind, sources by url, operators by input set.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1519,10 +1519,10 @@ rows:
     ''what supports claim X?'''
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1660,10 +1660,10 @@ rows:
     is reported separately, gate keys stay the gate-kind breakdown, gate_total is the gate subtotal.'
   dependency: declares TortoiseSDK.summarize_structure (resolves)
   lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1712,7 +1712,7 @@ rows:
   job: Get a single agent session Event by session_id.
   dependency: declares TortoiseSDK.get_session (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: merge
   basis: decided
   reason: '`tortoise_get_entity` in the same group already does this job (its own description names what it consolidates),
@@ -1779,13 +1779,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
-  # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
-  # A line shift is not a fingerprint change since #4170, so no line-only row exists.
-  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
-  # #5736 — 20fc9c5db96c8fd3 -> 5aac73bc86e8a8a1 (implementation-only, #4898:
-  # the failure path resolves the per-harness last-error key via the stored harness).
-  approval: '#5736 @daniel-ospina, #3780 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_set_recording
@@ -1857,10 +1851,10 @@ rows:
   job: List installed pack namespaces.
   dependency: declares TortoiseSDK.list_namespaces (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2015,10 +2009,10 @@ rows:
     CLI).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2300,11 +2294,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
-  # observation) both changed the implementation served as `tortoise_file_decision`.
-  # The merged implementation carries BOTH, at 1a8c8a757eb40d30; no tool was added,
-  # removed or renamed, so both recorded approvals stand.
-  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval
@@ -3848,7 +3838,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_delete.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -5740,7 +5730,7 @@ rows:
   job: Public SDK method TortoiseSDK.update_point.
   dependency: 'reached by 1 registered tool(s): tortoise_update_point'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null

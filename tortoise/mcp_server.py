@@ -2206,17 +2206,26 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              direction: str = "bidirectional") -> dict:
+                              direction: str = "bidirectional",
+                              semantics: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+    semantics: Layer-2 meaning — the closed vocabulary ('addresses',
+      'supports', 'refutes', 'mutuallyExclusive', 'hasPart', 'related', …).
+      Supplying it RESOLVES the direction: a one-way meaning records
+      'unidirectional' (addresses / supports / refutes), a mutual one
+      'bidirectional' (hasPart / mutuallyExclusive / mutuallySupportive).
+      The basis used is recorded on the operator as 'direction_basis'. An
+      unknown word warns and the write proceeds (warn-not-block). This is the
+      write half of the three-layer relation model (#7852, owner-approved).
     direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
       direction. Default is mutual (both directions); pass 'unidirectional'
       for a directed attack (attacker's truth penalizes the target, no
-      back-pressure).
+      back-pressure). An explicitly different value outranks `semantics`.
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
@@ -2228,7 +2237,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
     return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
-                 direction=direction)
+                 direction=direction, semantics=semantics)
 
 
 def tortoise_annotate_operator(id: str, bias: float, precision: float,
