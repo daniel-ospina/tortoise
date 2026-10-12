@@ -133,20 +133,24 @@ for bin in gh pi uv tmux; do
   esac
 done
 ok "daemon PATH: $DAEMON_PATH"
-# ⛔ PROBE BY EXECUTION — printing the PATH proves nothing, and every failure mode above is silent
-# at runtime. If a tool cannot RUN under the PATH about to be baked in, that is an INSTALL error.
-# This probe catches a shim whose real binary is NOT on the PATH; it is BLIND to trap (3) — TCC
-# refuses the read only when LAUNCHD does it, not when this interactive install shell does.
-for bin in tmux uv pi; do
-  # uv is OPTIONAL (warned about above, not required): probe only a tool this install shell can
-  # already run, so the probe checks RESOLUTION and never invents a new hard dependency. A tool the
-  # shell can run but the daemon PATH cannot is still a hard install error.
+# ⛔ PROBE BY EXECUTION — resolving a name is NOT running it. Every failure mode above is silent
+# at runtime, and a shim/wrapper directory that does NOT match the exclusion patterns (e.g. cmux's
+# `cmux-cli-shims`, a real one on this box) can be baked in while resolving the tool to a wrapper
+# that exits 127 — so EVERY tool is EXECUTED under the PATH about to be baked in, not merely
+# looked up. uv is optional (warned above), so a tool this install shell cannot run at all is
+# skipped: the probe checks RESOLUTION and never invents a new hard dependency.
+# This probe catches a shim/wrapper whose real binary is not usable on the daemon PATH; it is still
+# BLIND to trap (3) — TCC refuses the read only when LAUNCHD does it, not when an interactive
+# install shell does.
+for bin in tmux uv pi gh; do
   command -v "$bin" >/dev/null 2>&1 || continue
   PATH="$DAEMON_PATH" command -v "$bin" >/dev/null 2>&1 \
     || die "daemon PATH cannot resolve $bin (the install shell can): $DAEMON_PATH"
+  # tmux takes -V; the rest take --version. Either way it must actually EXECUTE.
+  _vflag="--version"; [ "$bin" = "tmux" ] && _vflag="-V"
+  PATH="$DAEMON_PATH" "$bin" "$_vflag" >/dev/null 2>&1 \
+    || die "daemon PATH resolves a $bin that does not RUN: $DAEMON_PATH"
 done
-PATH="$DAEMON_PATH" gh --version >/dev/null 2>&1 \
-  || die "daemon PATH resolves a gh that does not RUN (a shim needs its real binary findable): $DAEMON_PATH"
 
 # ── the merge authority ──────────────────────────────────────────────────────────
 # The harness can review and record, but it cannot MERGE without the gate key.

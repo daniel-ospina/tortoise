@@ -161,6 +161,10 @@ fi
 SB="$TMP/sb"; mkdir -p "$SB/Library/LaunchAgents" "$SB/.config" "$SB/.pi/agent/scripts"
 ln -s "$HOME/.config/gh" "$SB/.config/gh" 2>/dev/null || true
 [ -f "$HOME/.pi/agent/scripts/record-review.sh" ] && ln -s "$HOME/.pi/agent/scripts/record-review.sh" "$SB/.pi/agent/scripts/record-review.sh"
+# install.sh prefers the version-independent pi-node symlink under $HOME, and the daemon probe now
+# EXECUTES pi — so a sandbox HOME must expose a runnable pi, exactly as a real install's HOME does.
+mkdir -p "$SB/.local/share/pi-node/current/bin"
+printf '#!/bin/bash\nexit 0\n' > "$SB/.local/share/pi-node/current/bin/pi"; chmod +x "$SB/.local/share/pi-node/current/bin/pi"
 HOSTILE="$TMP/x&y"
 HOME="$SB" O="$HOSTILE" REPO="$HERE/../.." OR="acme/widget" bash "$INST" >"$TMP/inst.out" 2>&1
 PL="$SB/Library/LaunchAgents/com.eldato.orchestrator-loop.plist"
@@ -196,6 +200,8 @@ grep -q 'check-ignore -q .worktrees/' "$INST" && rc=0 || rc=1
 ck "install.sh's gitignore guard uses the directory form .worktrees/" $rc
 SB2="$TMP/sb2"; mkdir -p "$SB2/Library/LaunchAgents" "$SB2/.config" "$SB2/.pi/agent/scripts"
 ln -s "$HOME/.config/gh" "$SB2/.config/gh" 2>/dev/null || true
+mkdir -p "$SB2/.local/share/pi-node/current/bin"
+printf '#!/bin/bash\nexit 0\n' > "$SB2/.local/share/pi-node/current/bin/pi"; chmod +x "$SB2/.local/share/pi-node/current/bin/pi"
 HOME="$SB2" O="$TMP/fresh-o" REPO="$FR/repo" OR="acme/widget" bash "$INST" > "$TMP/inst-fresh.out" 2>&1
 PL2="$SB2/Library/LaunchAgents/com.eldato.orchestrator-loop.plist"
 [ -f "$PL2" ] && rc=0 || { rc=1; echo "      fresh checkout: $(tail -2 "$TMP/inst-fresh.out")"; }
@@ -437,6 +443,7 @@ fi
 # turned a 25-open-PR queue into `open=0 -> OWN`, dropping the BROAD drain, the reviewer headroom
 # and the merge-priority gate at once. Drive the SHIPPED function (extracted, not re-implemented)
 # with a stubbed gh, and pin the failure path, the sticky fallback and the success write.
+unset -f gh pi uv tmux 2>/dev/null || true   # an exported function would shadow the gh stub below
 sed -n '/^open_pr_count() {/,/^}/p' "$LOOP" > "$TMP/opencount.sh"
 if need "$TMP/opencount.sh" "open_pr_count() is extracted from the shipped orch-loop.sh"; then
   OC="$TMP/opencount"; mkdir -p "$OC/state"
@@ -484,6 +491,19 @@ SH
   ck "a successful open-PR count returns the count" $rc
   [ "$(cat "$OC/state/last-open-n" 2>/dev/null)" = "25" ] && rc=0 || rc=1
   ck "a successful open-PR count is persisted to last-open-n" $rc
+  # (c2) a GENUINE 0 (drained queue) must still be returned as 0 and persisted: the `-gt 0` guard
+  # lives ONLY in the failure branch. Coercing a real 0 to 11 would make BROAD permanent and the
+  # queue would never be treated as drained.
+  cat > "$OC/gh" <<'SH'
+#!/bin/bash
+printf '0\n'
+SH
+  chmod +x "$OC/gh"; rm -f "$OC/state/last-open-n"; : > "$LOG"
+  n="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" bash "$OC/drive.sh" )"
+  [ "$n" = "0" ] && rc=0 || { rc=1; echo "      success-0 produced '$n'"; }
+  ck "a genuine 0 (drained queue) is still returned as 0" $rc
+  [ "$(cat "$OC/state/last-open-n" 2>/dev/null)" = "0" ] && rc=0 || rc=1
+  ck "a genuine 0 is persisted to last-open-n" $rc
 fi
 # The sweep listing must be captured and rc-checked too: piped straight into `while read` with
 # 2>/dev/null, a failed listing is ZERO iterations and no output — a sweep that silently does
@@ -505,6 +525,7 @@ ck "the sweep loop is fed the captured listing, not gh directly" $rc
 # re-implemented): put a shim FIRST on the driving PATH, render DAEMON_PATH, and assert no shim/
 # ~/.pi directory survives while the real binary's directory is kept. A pre-fix add_dir fixture
 # proves the scenario is real and that dropping the exclusion would fail this check.
+unset -f gh pi uv tmux 2>/dev/null || true   # an exported function would shadow the stubs below
 awk '/^add_dir\(\) \{/{f=1} f{ if (/^ok "daemon PATH:/) exit; print }' "$INST" > "$TMP/daemonpath.sh"
 if need "$TMP/daemonpath.sh" "the daemon-PATH block is extracted from the shipped install.sh"; then
   DP="$TMP/dp"; mkdir -p "$DP/home/.pi/agent/shims" "$DP/realbin"
@@ -550,6 +571,28 @@ SH
   ck "a symlink TO the shim dir cannot enter the daemon PATH" $rc
   case ":$out2:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      symlinked-shim daemon PATH: $out2";; esac
   ck "a symlinked shim dir does not suppress the real binary's directory" $rc
+fi
+
+# ── 18) the install-time probe EXECUTES every tool, not just resolves it ────────
+# Resolving a name is not running it: a shim/wrapper directory that does NOT match the exclusion
+# patterns (cmux's `cmux-cli-shims` is a real one on this box) resolves the tool to a wrapper that
+# exits 127, and a resolution-only probe reports install success while every lane spawn then fails.
+# Drive the SHIPPED probe block with a fixture whose `pi` resolves but cannot run.
+awk '/^for bin in tmux uv pi gh; do$/{f=1} f{print} f&&/^done$/{exit}' "$INST" > "$TMP/probe.sh"
+if need "$TMP/probe.sh" "the install-time probe is extracted from the shipped install.sh"; then
+  PB="$TMP/probe"; mkdir -p "$PB/bin"
+  for b in tmux uv gh; do printf '#!/bin/bash\nexit 0\n' > "$PB/bin/$b"; chmod +x "$PB/bin/$b"; done
+  { echo 'set -u'; echo 'die() { echo "DIED: $*" >&2; exit 9; }'; cat "$TMP/probe.sh"; } > "$PB/drive.sh"
+  bash -n "$PB/drive.sh" && rc=0 || rc=1
+  ck "the probe driver parses" $rc
+  printf '#!/bin/bash\nexit 127\n' > "$PB/bin/pi"; chmod +x "$PB/bin/pi"
+  PATH="$PB/bin:/usr/bin:/bin" DAEMON_PATH="$PB/bin" bash "$PB/drive.sh" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "9" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 9 — a resolved-but-non-running pi must fail install)"; }
+  ck "the probe fails install when a resolved tool cannot RUN (exit 127)" $rc
+  printf '#!/bin/bash\nexit 0\n' > "$PB/bin/pi"; chmod +x "$PB/bin/pi"
+  PATH="$PB/bin:/usr/bin:/bin" DAEMON_PATH="$PB/bin" bash "$PB/drive.sh" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "0" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 0 when every resolved tool runs)"; }
+  ck "the probe passes when every resolved tool runs" $rc
 fi
 
 echo
