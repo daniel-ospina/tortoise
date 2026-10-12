@@ -145,6 +145,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical registry namespace IS that coupling. A test_* rename would seed
     # a different graph than the writer resolves.
     "test_embed_metering.py": {"registry": "prod-coupled"},
+    # #4489: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the registry-lane writer and reader address the dbs the SDK uses.
+    "test_retrieval_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},

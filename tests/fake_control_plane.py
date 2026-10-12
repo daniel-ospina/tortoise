@@ -690,7 +690,7 @@ class FakeControlPlane:
         if fn == "metering_increment_retrieval":
             # #4489: the retrieval lane's additive upsert on the SAME
             # ``(org_id, period_start)`` row (migration
-            # 20261012000001_metering_retrieval_columns). ADDITIVE here and
+            # 20261013000001_metering_retrieval_columns). ADDITIVE here and
             # NOTHING more — the sibling gauge arm below exists precisely
             # because a test that cannot tell a gauge from an increment cannot
             # catch a double-count.

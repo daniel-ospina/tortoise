@@ -242,7 +242,7 @@ surfaces:
   - test_notify_offloop_4456.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
-  - test_metering_window_admission.py  # #3981: the seven swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  - test_metering_window_admission.py  # #3981: the eight swallow sites report the dropped increment (caller-level; the coverage is the proof)
   # #4779 (leg 2 of #3981): the durable representation of a dropped increment,
   # asserted against the frozen migration + the fake control plane. `api` is the
   # surface that owns every source it pins — tortoise/metering.py,
@@ -267,8 +267,10 @@ surfaces:
   # the writer in tortoise/metering.py, so a change to EITHER must run it — a
   # registration in only one surface would leave the other silently unguarded.
   - test_embed_metering.py
-  # #4489: retrieval measurement. Dual-registered with `core` — the leg hooks live
-  # in tortoise/search_engine.py and the funnel note in tortoise/sdk.py (both
+  # #4489: retrieval measurement. Dual-registered with `core` (and the source
+  # `tortoise/retrieval_metering.py` is named in `api`'s SOURCE_PATTERNS so a
+  # module-only diff selects this arm). The leg hooks live in
+  # tortoise/search_engine.py and the funnel note in tortoise/sdk.py (both
   # `core`-selecting), while the writer is tortoise/metering.py and the render +
   # middleware are tortoise/hosted_api.py (both `api`). A registration in only one
   # surface would leave the other silently unguarded.
@@ -4174,6 +4176,7 @@ durations:
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
+  test_retrieval_metering.py: 90.0  # unmeasured — #4489: 34 tests on the embedded registry lane, locally measured 87.5s (TestTeamRoute's FastAPI client runs three requests through the real app; refresh from CI junit).
   test_session_bridge_fragment_retention.py: 0.3
   test_session_verify.py: 97.4
   test_ship_test_onboarding.py: 1.4
