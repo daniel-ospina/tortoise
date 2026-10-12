@@ -23692,7 +23692,7 @@ class TortoiseSDK:
                 f"subject, object, event, document")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
-        # generic passthrough (see `_ALLOWED_PROPS`) and is stored on the node.
+        # generic passthrough and is stored on the node.
         # Storing it is NOT the capability: `create_document` (which
         # `type='document'` absorbed in the epic #888 / #4282 consolidation)
         # also wired the Source via `projection._link_source` (#394), and that
@@ -23816,11 +23816,13 @@ class TortoiseSDK:
             "extractedFrom='session:<session_id>' explicitly.)"
             if isinstance(_sid, str) and _sid.strip() else ""
         )
-        # NOTE: no analogous hint for `sourceKind`. MEASURED: it is already
-        # stripped from `props` by the time this runs (the doors DISCARD it —
-        # it is in `_SOURCE_HANDLED` and no SET clause writes it), so there is
-        # nothing here to detect. The caller is told up front instead, in the
-        # door's own docstring: "`sourceKind` is not stored on these nodes".
+        # NOTE: no analogous hint for `sourceKind`. It IS still present in
+        # `props` here, but it is not materializable — the WRITE's passthrough
+        # discards it (`_SOURCE_HANDLED`, `projection/entities.py:914`) and no
+        # SET clause writes it (`_upsert_document`/`_upsert_source`) — so it
+        # cannot buy silence. There is deliberately no branch keyed on it; the
+        # caller is told in the door's docstring that `sourceKind` is not
+        # stored on these nodes.
         # No `sourceKind` branch (review P1 in round 7). An earlier revision
         # treated a declared `sourceKind` as provenance on a document and
         # returned `{}` — on the D10 reasoning that a document IS a `:Source`.
