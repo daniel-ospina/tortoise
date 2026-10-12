@@ -77,7 +77,7 @@ private accessor, not a new public method). The REST additions are declared in t
 
 ## 4. Verification (exact commands + results on this branch)
 
-```
+```bash
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_webhook_delivery.py -q -p no:cacheprovider
   → 36 passed
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_security.py tests/test_rest_surface_inventory.py tests/test_ci_manifest.py -q
