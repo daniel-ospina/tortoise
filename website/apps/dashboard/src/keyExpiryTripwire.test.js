@@ -149,8 +149,19 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   // rotate RTT dropped the only notice that the rotate destroyed a key.
   assert.ok(rotBody.lastIndexOf('setRotateOutcomes((prev) =>') < rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return'),
     'the refusal latch must precede the team-identity guard too (#8249)')
-  assert.match(rotBody, /refusal: `The server did not return the replacement key/,
-    '#8249: the plaintext-less branch latches the refusal on the per-team record, not in the error slot')
+  assert.match(rotBody, /refusal: revealRefusalFor\('replacement key\\u2019s value'\)/,
+    '#8249: the plaintext-less branch latches the refusal on the per-team record, not in the error slot'
+    + ' — and routes the prefix through the shared revealRefusalFor contract (#4370) instead of hardcoding it')
+  // #8249 (review P1): the refusal record is also the reveal's home, so the
+  // latch must MERGE the prior reveal (plaintext + expiry) and partial-state
+  // warning forward — a plaintext-less response delivers no secret and must
+  // not overwrite a live unread one minted by an earlier rotate on the team.
+  assert.match(rotBody, /plaintext: prior\.plaintext \|\| ''/,
+    'the plaintext-less latch must carry a prior same-team reveal forward, never blank it')
+  assert.match(rotBody, /expiresAt: prior\.expiresAt \|\| null/,
+    'the prior reveal expiry rides with the carried-forward plaintext')
+  assert.match(rotBody, /warning: \(mk && mk\.warning\) \? String\(mk\.warning\) : \(prior\.warning \|\| ''\)/,
+    'a prior partial-state warning survives a warning-less plaintext-less response too')
   assert.doesNotMatch(rotBody, /setError\(`The server did not return the replacement key/,
     '#8249: the refusal must not ride the un-keyed, transient `error` slot — that is what a switch dropped'
     + ' (the catch branch\u2019s ambiguous-failure disclosure is a separate, deliberately-scoped case)')
