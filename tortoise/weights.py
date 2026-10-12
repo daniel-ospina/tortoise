@@ -77,21 +77,95 @@ def mitigation_dampening_factor(strength: float | None) -> float:
 NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier (0.5-3.0): for NAND, any dyn >= 1.25 lands on the 10.0 clamp, so dynamic mode can only down-modulate NAND within [4.0, 10.0] (latent — no caller uses use_dynamic today)
 
 
+# ── Annotation dimensions (#6151 owner ruling, 2026-10-11 — option B) ─────────
+# An operator's four rating dimensions modulate its weight in a SYMMETRIC,
+# BOUNDED band. The ruling, verbatim:
+#
+#   "a well rated piece of evidence should count more than an unrated one, this
+#    allows a user to grade entities in confidence even if they haven't got a
+#    source. ... importantly the default should be neutral and only with a
+#    purposeful agent/user intention should we end up not in the default."
+#
+# * THE DEFAULT IS EXACTLY NEUTRAL, BY CONSTRUCTION. `ANNOTATION_TERM_NEUTRAL`
+#   is the coalesce value for ALL FOUR dimensions, so an operator carrying no
+#   rating scores `2.0 ** (2*0.5 - 1)` — exactly 1.0, and exactly-representable
+#   because the exponent is exactly 0.
+#   This is the property the archive existed to protect, and it is worth stating
+#   why the same 0.5 default is safe here when it was ruinous there. The 91%
+#   attenuation (1fa2fa7ce) came from the OLD formula `(1-b*0.5)*p*c*d` reading
+#   `0.5` defaults as `(1-0.5*0.5)*0.5*0.5*0.5 = 0.0938`. The bug was never that
+#   a formula existed: it was that "unrated" and "rated as middling" collapsed to
+#   the same value through a formula with NO NEUTRAL POINT, so a default silently
+#   applied a 91% penalty to every operator in the graph. Here those two states
+#   are STILL the same value, and that value IS the neutral point — which is what
+#   makes the default safe by construction rather than by vigilance.
+# * A PARTIAL rating means "only this dimension moved": an unset dimension
+#   contributes its neutral term, so one dimension alone moves the factor only as
+#   far as that dimension justifies. A rating is a deliberate act ("only with a
+#   purposeful agent/user intention"), never a by-product of writing other props.
+# * THE COMBINATION IS AN AVERAGE, not the archived product. The archived form
+#   multiplied three dimensions, so three ratings of 0.9 gave `0.9**3 = 0.729` —
+#   a 27% PENALTY for being rated well, with no neutral point short of a perfect
+#   1.0 on all four. Measured on the live graph before this change: the single
+#   annotated operator carries `bias 0.1` and `0.9` on the other three (the best
+#   reading available) and the archived formula still took 30.7% of its weight.
+# * BOUNDED AND SYMMETRIC: worst 0.5, middling 1.0, best 2.0 — for every decision
+#   to halve an operator there is a mirror decision to double one.
+# * Applied BEFORE the final [0.1, 10.0] clamp, so on a NAND (`NAND_BASE_WEIGHT`
+#   = 8.0) the TOP of the band is partly absorbed — `8.0 * 2.0 = 16.0` clamps to
+#   10.0. Strengthening is fully effective on IMPL (base 1.0) and only partly on
+#   NAND. That is the clamp's existing rule (a contradiction is at most so
+#   forceful) and is deliberately NOT changed here: raising it is a separate
+#   question about `NAND_BASE_WEIGHT`, measured on its own.
+ANNOTATION_TERM_NEUTRAL = 0.5  # neutral value of EACH of the four terms
+ANNOTATION_FACTOR_MAX = 2.0  # best rating doubles the weight
+ANNOTATION_FACTOR_MIN = 0.5  # worst rating halves it (== 1 / ANNOTATION_FACTOR_MAX)
+
+
+def annotation_factor(
+    bias: float, precision: float, consistency: float, directness: float
+) -> float:
+    """Combine the four rating dimensions into a bounded multiplier (#6151).
+
+    Each dimension contributes a term in [0, 1] whose neutral value is
+    ``ANNOTATION_TERM_NEUTRAL``; ``bias`` enters INVERTED, so a less one-sided
+    origin reads better. The terms are AVERAGED — deliberately not multiplied —
+    and the average is mapped onto [MIN, MAX] symmetrically in log space:
+
+        q      = mean(1 - bias, precision, consistency, directness)
+        factor = ANNOTATION_FACTOR_MAX ** (2q - 1)
+
+    ``q = 0.5`` is therefore EXACTLY 1.0, the best reading is 2.0, the worst is
+    0.5, and equal steps in ``q`` are equal RATIOS in the factor rather than
+    equal differences — which is what makes improvement and decline symmetric.
+    Strictly increasing in ``precision``, ``consistency`` and ``directness``, and
+    strictly DECREASING in ``bias`` (which enters inverted as ``1 - bias``);
+    equivalently, strictly increasing in every quality term.
+    """
+    terms = (1.0 - bias, precision, consistency, directness)
+    q = sum(terms) / len(terms)
+    return ANNOTATION_FACTOR_MAX ** (2.0 * q - 1.0)
+
+
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:
     """Compute EP factor weight w in [0.1, 10.0] from graph structure."""
     g = proj.g
     rows = g.query(
         "MATCH (o:Point {id:$id}) "
         "RETURN o.op_type, "
-        "coalesce(o.annotator_bias, 0.0) AS bias, "
-        "coalesce(o.annotator_precision, 1.0) AS precision, "
-        "coalesce(o.annotator_consistency, 1.0) AS consistency, "
-        "coalesce(o.annotator_directness, 1.0) AS directness",
+        # The coalesce value is the NEUTRAL term, not an identity for a formula
+        # with no neutral point (see ANNOTATION_TERM_NEUTRAL): "never rated" and
+        # "rated at the midpoint" both score exactly 1.0, which is what the
+        # owner's ruling requires of the default.
+        "coalesce(o.annotator_bias, 0.5) AS bias, "
+        "coalesce(o.annotator_precision, 0.5) AS precision, "
+        "coalesce(o.annotator_consistency, 0.5) AS consistency, "
+        "coalesce(o.annotator_directness, 0.5) AS directness",
         params={"id": op_id},
     ).result_set
     if not rows:
         return 1.0
-    op_type, bias, precision, consistency, directness = rows[0]  # noqa: RUF059
+    op_type, bias, precision, consistency, directness = rows[0]
     w = 1.0
 
     # NAND base weight (#855): see NAND_BASE_WEIGHT above.
@@ -115,10 +189,10 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     # Context tag multipliers removed (#49 Phase 2 — n.context is deprecated).
     # Re-key to pointKind-based weighting when needed.
 
-    # Annotation dimensions (ARCHIVED — no active effect)
-    # Restore to (1.0 - bias * 0.5) * precision * consistency * directness when reactivated.
-    annotation_factor = 1.0
-    w *= annotation_factor
+    # Annotation dimensions (#6151 — declaration and rationale above). Reactivated
+    # by the owner's 2026-10-11 ruling; the archived line this replaces was
+    # `annotation_factor = 1.0` with a "restore when reactivated" comment.
+    w *= annotation_factor(bias, precision, consistency, directness)
 
     # Dynamic: post-convergence message strength (aggregated over ALL
     # relationships of each type — previously only the first row was read,
