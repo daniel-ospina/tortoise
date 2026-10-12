@@ -155,6 +155,17 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
           "pi-hooks/tortoise-capture.ts",
+          # #2120: the OpenClaw seam is a plugin DIRECTORY — `tortoise install
+          # openclaw` copies every file out of the PACKAGE (the entry, the
+          # manifest that makes OpenClaw load it, and package.json), so a wheel
+          # missing any of them produces an install OpenClaw refuses. `*.mjs`
+          # would also ship `index.test.mjs`; the three files are named
+          # explicitly (pinned by tests/test_openclaw_seam.py against the
+          # directory, so a NEW shipped file cannot be silently dropped).
+          "openclaw-plugin/index.mjs",
+          "openclaw-plugin/openclaw.plugin.json",
+          "openclaw-plugin/package.json",
+          "openclaw-plugin/README.md",
           # #3517: the capture disclosure's SINGLE SOURCE OF TRUTH ships in the
           # wheel beside `config/routing.yaml`. `tortoise session disclosure`
           # renders from it and the dashboard imports the same file — a wheel

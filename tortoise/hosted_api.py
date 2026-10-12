@@ -7009,12 +7009,14 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -12042,6 +12044,11 @@ async def toggle_api_key_enabled(
 # must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    # #2120: the OpenClaw seam. Without this member a
+    # `tortoise sessions import --harness openclaw` POST is refused 422 and
+    # OpenClaw sessions can never carry a capture receipt — the ingestion half
+    # of the two-way seam would be unreachable however correctly it parsed.
+    "openclaw",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -25538,12 +25545,14 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
@@ -26691,12 +26700,20 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_receipt_codex: str | None = None
     session_capture_receipt_cursor: str | None = None
     session_capture_receipt_pi: str | None = None
+    # #2120: the OpenClaw seam. A harness added to _SESSION_HARNESS_VALUES mints
+    # a receipt/last-error member of _CAPTURE_SERVER_OWNED_KEYS, so the field
+    # must exist here too: without it the key is server-owned but carries no
+    # PATCH field, and its 403 refusal cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes — it caught exactly this omission when openclaw was added).
+    session_capture_receipt_openclaw: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
     session_capture_last_error_codex: str | None = None
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
+    session_capture_last_error_openclaw: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
