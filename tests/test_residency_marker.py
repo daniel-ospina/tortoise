@@ -68,9 +68,11 @@ class _FakeGraph:
         self.rows = rows
         self.raises = raises
         self.queries: list[tuple[str, dict]] = []
+        self.timeouts: list = []
 
     def query(self, cypher, params=None, timeout=None):
         self.queries.append((cypher, params or {}))
+        self.timeouts.append(timeout)
 
         class _R:
             result_set = self.rows if self.raises is None else []
@@ -238,6 +240,17 @@ class TestReadDeclaration:
         g = _FakeGraph(rows=[])
         read_declaration(g, timeout_ms=250)
         assert g.queries and g.queries[0][1] == {"key": DECLARATION_META_KEY}
+        # the bound is the property this test NAMES: a wedged store must not
+        # stall the annotated read, so the timeout is forwarded — not just the
+        # params. (Without this assertion, deleting `timeout=int(timeout_ms)`
+        # from `read_declaration` left the whole suite green.)
+        assert g.timeouts == [250]
+
+    def test_the_default_read_path_also_passes_a_bound(self):
+        g = _FakeGraph(rows=[])
+        read_declaration(g)
+        assert g.timeouts == [500]
+        assert all(isinstance(t, int) and t > 0 for t in g.timeouts)
 
 
 class TestCombineResidency:
@@ -380,6 +393,35 @@ class TestReadPathEndToEnd:
         finally:
             sdk.close()
 
+    def test_a_re_declaration_replaces_the_known_hot_set(self, sdk_factory):
+        """A re-declaration REPLACES the set — it does not merge into it.
+
+        `SET n += $props` is additive: a later keyless declaration that omitted
+        the enumeration kept the previous `hot_keys`, so `read_declaration`
+        reported coverage the current declaration no longer claimed and a
+        covered-key miss surfaced as an absence (§17.2).
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            declare_residency(g, ResidencyDeclaration(
+                coverage=COVERAGE_PARTIAL, hot_keys=frozenset({"p1", "p2"})))
+            assert read_declaration(g).hot_keys == frozenset({"p1", "p2"})
+            # shrink to an unenumerated partial: the old keys must be GONE
+            declare_residency(g, ResidencyDeclaration(coverage=COVERAGE_PARTIAL))
+            assert read_declaration(g).hot_keys is None
+            # a later enumeration must not resurrect the dropped ones either
+            declare_residency(g, ResidencyDeclaration(
+                coverage=COVERAGE_PARTIAL, hot_keys=frozenset({"p3"})))
+            assert read_declaration(g).hot_keys == frozenset({"p3"})
+            # and a COMPLETE re-declaration must drop the enumeration too
+            declare_residency(g, ResidencyDeclaration(coverage=COVERAGE_COMPLETE))
+            read = read_declaration(g)
+            assert read.coverage == COVERAGE_COMPLETE
+            assert read.hot_keys is None
+        finally:
+            sdk.close()
+
     def test_recall_state_carries_the_composite_marker(
             self, sdk_factory, monkeypatch):
         """The composite read coalesces its legs' markers — one directive."""
@@ -451,6 +493,58 @@ class TestHostedSearchRoute:
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
         assert body["status"] == "empty"
         assert RESIDENCY_FIELD not in body
+
+    def test_a_down_store_still_names_the_impairment_with_only_residency_on(
+            self, monkeypatch):
+        """§17.2: a residency-only deployment must not serve a bare empty.
+
+        On the outage path the known-hot set cannot be read, so `residency` is
+        absent (never a guessed `not-hot`). But the response must still name
+        the impairment term: `{"results": [], "count": 0}` alone is
+        byte-identical to a genuine empty result, which is exactly what the
+        marker exists to prevent.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _DownSDK:
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+                if read_status_out is not None:
+                    # the store is down: the SDK sets `degraded` and the
+                    # declaration is never read, so no residency key.
+                    read_status_out["status"] = "degraded"
+                return []
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(hosted_api, "_data_sdk", lambda org: _DownSDK())
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        self._flags(monkeypatch, status=False, residency=True)
+        body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        assert body["status"] == "degraded"
+        assert RESIDENCY_FIELD not in body
+
+    def test_the_down_store_impairment_is_absent_when_both_flags_are_off(
+            self, monkeypatch):
+        """Off means off: the outage response is byte-identical to before."""
+        import tortoise.hosted_api as hosted_api
+
+        class _DownSDK:
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+                if read_status_out is not None:
+                    read_status_out["status"] = "degraded"
+                return []
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(hosted_api, "_data_sdk", lambda org: _DownSDK())
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        self._flags(monkeypatch, status=False, residency=False)
+        body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        assert body == {"results": [], "count": 0}
 
     def test_both_fields_ride_when_both_flags_are_on(self, monkeypatch):
         hosted_api = self._patch_route(monkeypatch)

@@ -118,6 +118,13 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
     divergence, not an absence to be skipped — that is the entire point (an
     unpresent key on one side is exactly what a second writer produces).
 
+    A per-key value that is NOT a property mapping is compared WHOLE (the same
+    comparison :func:`divergent_key_count` uses) rather than coerced to ``{}``:
+    the coercion made two differing values — or a ``None``-valued property
+    against an absent one — compare equal and report agreement, an impossible
+    comparison reported as success (the #1382 class :func:`reconcile` refuses
+    at the top level). ``field_mismatches`` counts such a value as ONE field.
+
     ``sample_limit`` bounds only the reported key sample; the counts are exact.
     """
     if sample_limit < 0:
@@ -145,14 +152,22 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
     for key in truth_keys & cache_keys:
         truth_props = truth[key]
         cache_props = cache[key]
-        truth_flat = truth_props if isinstance(truth_props, Mapping) else {}
-        cache_flat = cache_props if isinstance(cache_props, Mapping) else {}
-        mismatched = False
-        for prop in set(truth_flat) | set(cache_flat):
-            if _canonical(truth_flat.get(prop)) != _canonical(cache_flat.get(prop)):
-                field_mismatches += 1
-                mismatched = True
-        if mismatched:
+        if isinstance(truth_props, Mapping) and isinstance(cache_props, Mapping):
+            # Field-by-field, and PRESENCE-AWARE: a property present with
+            # value ``None`` on one side and absent on the other is a
+            # divergence (`set(keys)` differs), not `None == None`.
+            for prop in set(truth_props) | set(cache_props):
+                if (prop not in truth_props or prop not in cache_props
+                        or _canonical(truth_props[prop])
+                        != _canonical(cache_props[prop])):
+                    field_mismatches += 1
+        elif not _equal_view(truth_props, cache_props):
+            # An uncomparable per-key value cannot be counted field by field;
+            # the whole value is one mismatch.
+            field_mismatches += 1
+        # Divergence is decided by the SAME comparison the focused count uses,
+        # so `reconcile_views` and `divergent_key_count` cannot drift apart.
+        if not _equal_view(truth_props, cache_props):
             value_divergent += 1
             _sample(key)
 

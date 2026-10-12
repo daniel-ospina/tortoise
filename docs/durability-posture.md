@@ -121,6 +121,7 @@ build whose read set excludes it refuses on a retired file until it is deleted.
 | `:PackManifest` | `namespace` |
 | `:Meta{key:'calibration_milestone'}` | `key` |
 | `:Meta{key:'config_reset'}` | `key` |
+| `:Meta{key:'residency'}` | `key` |
 <!-- config-registry:end -->
 
 The `config_reset` entry is the **third state**: a sticky marker distinguishing
@@ -128,6 +129,11 @@ The `config_reset` entry is the **third state**: a sticky marker distinguishing
 a never-configured graph looks like, so absence can never encode it. It is
 **not** a "tombstone" — that is a controlled term in `docs/ONTOLOGY.md` for a
 retracted `Point`.
+
+The `residency` entry (#7952) is the completeness marker's declared known-hot
+set: graph-only operator metadata. Without it, a whole-graph rebuild would
+silently revert a declared-`partial` store to the `complete` default, under
+which the §17.2 marker cannot fire.
 
 <!-- config-registry:not-preserved -->
 - `:EpMeta` — a monotonic epoch that must be re-baselined with the Points;
@@ -318,7 +324,7 @@ MATCH (p:PackInstall) RETURN 'PackInstall' AS cls, p.namespace AS ident
 UNION ALL
 MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
-MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
+MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset', 'residency']
 RETURN 'Meta' AS cls, x.key AS ident
 UNION ALL
 MATCH (b:Batch) RETURN 'Batch' AS cls, b.id AS ident

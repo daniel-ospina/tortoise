@@ -258,8 +258,14 @@ def declare_residency(g, declaration: ResidencyDeclaration) -> None:
     they should keep using this writer so the format has ONE declaration.
     """
     props: dict[str, object] = {"coverage": declaration.coverage}
-    if declaration.hot_keys:
-        props["hot_keys"] = sorted(declaration.hot_keys)
+    # ALWAYS write the enumeration. ``SET n += $props`` is an ADDITIVE merge, so
+    # omitting ``hot_keys`` for an unenumerated declaration would leave the
+    # PREVIOUS enumeration on the node: a stale known-hot set the reader would
+    # then report as coverage this declaration no longer claims (§17.2 — the
+    # "empty is not a finding" defect the marker exists to prevent). ``[]``
+    # reads back as ``None`` ("claims NO key") via ``_parse_hot_keys``, so the
+    # write is a full REPLACE, not a merge.
+    props["hot_keys"] = sorted(declaration.hot_keys or [])
     g.query(
         "MERGE (n:Meta {key:$key}) SET n += $props",
         params={"key": DECLARATION_META_KEY, "props": props},

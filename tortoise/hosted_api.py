@@ -8737,16 +8737,23 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
     PARTIAL, a read that falls outside the known-hot set returns
     ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
-    partial store cannot establish "nothing matched". Unset/``0`` leaves this
-    response byte-identical.
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
     from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
     # The sink is the READ PATH's carrier for both fields; each field is
-    # emitted only under its own flag, so enabling one never turns the other on
-    # (`status` stays gated on TORTOISE_READ_STATUS exactly as before).
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
     _status_on = _read_status_enabled()
     _residency_on = _residency_enabled()
     status_out: dict | None = {} if (_status_on or _residency_on) else None
@@ -8780,12 +8787,16 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     if status_out is not None:
         # The SDK sets `status` on every return path; a missing term is a bug,
         # not a reason to emit null under a vocabulary of exactly four terms.
-        if _status_on:
-            response["status"] = status_out["status"]
         # #7952: `residency` is present only when the known-hot set could be
         # READ and a verdict was reached, so an unassessable read (a store that
-        # is DOWN) leaves the field absent and lets `status` carry the
-        # impairment — never a guessed `not-hot` for an unreachable cache.
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
         if _residency_on and "residency" in status_out:
             response["residency"] = status_out["residency"]
     return response

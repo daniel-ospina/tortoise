@@ -82,6 +82,33 @@ class TestCounts:
         assert report.field_mismatches == 1
         assert report.divergent == 1
 
+    def test_a_none_valued_property_and_an_absent_one_diverge(self):
+        """`None` present must not equal absent — the `set(keys)` comparison."""
+        truth = {"p1": {"a": None}}
+        cache = {"p1": {}}
+        report = reconcile_views(truth, cache)
+        assert report.field_mismatches == 1
+        assert report.divergent == 1
+        # the sampled and full paths must not drift apart
+        assert report.divergent == divergent_key_count(["p1"], truth, cache)
+
+    def test_a_shared_key_with_uncomparable_values_is_not_agreement(self):
+        """A non-Mapping per-key value is compared WHOLE, never as `{} == {}`.
+
+        Coercing both sides to `{}` made two differing values compare equal and
+        report zero divergence — a check that cannot read its evidence must not
+        report success (#1382). The two values here differ by construction.
+        """
+        report = reconcile_views({"p1": "alpha"}, {"p1": "beta"})
+        assert report.field_mismatches == 1
+        assert report.divergent == 1
+        assert report.divergent_keys == ("p1",)
+
+    def test_uncomparable_values_agree_when_they_are_equal(self):
+        report = reconcile_views({"p1": [1, 2]}, {"p1": [1, 2]})
+        assert report.field_mismatches == 0
+        assert report.divergent == 0
+
     def test_key_order_does_not_matter(self):
         report = reconcile_views(
             {"p1": {"a": 1, "b": 2}}, {"p1": {"b": 2, "a": 1}})
@@ -166,6 +193,11 @@ class TestFailClosed:
         with pytest.raises(ReconciliationUnavailable):
             reconcile(lambda: ["p1"], lambda: {})
 
+    def test_an_uncomparable_per_key_value_is_not_reported_as_agreement(self):
+        """The public seam must not answer `0 divergent` for a bad reader."""
+        report = reconcile(lambda: {"p1": "alpha"}, lambda: {"p1": "beta"})
+        assert report.divergent == 1
+
     def test_a_readable_pair_reconciles(self):
         report = reconcile(lambda: {"p1": {"x": 1}}, lambda: {"p1": {"x": 1}})
         assert report.divergent == 0
@@ -188,3 +220,15 @@ class TestFocusedCount:
         keys = ["p1", "p2", "p3"]
         assert (divergent_key_count(keys, truth, cache)
                 == reconcile_views(truth, cache).divergent)
+
+    def test_it_agrees_on_an_uncomparable_value_and_a_none_vs_absent(self):
+        """The two paths cannot drift — the focused count is not a second rule."""
+        scalar_truth = {"p1": "alpha"}
+        scalar_cache = {"p1": "beta"}
+        assert (divergent_key_count(["p1"], scalar_truth, scalar_cache)
+                == reconcile_views(scalar_truth, scalar_cache).divergent)
+
+        none_truth = {"p1": {"a": None}}
+        absent_cache = {"p1": {}}
+        assert (divergent_key_count(["p1"], none_truth, absent_cache)
+                == reconcile_views(none_truth, absent_cache).divergent)
