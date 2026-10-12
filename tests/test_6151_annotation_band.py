@@ -459,3 +459,45 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
         )
     finally:
         sdk.close()
+
+
+@pytest.mark.skipif(not _LIVE_OK, reason="Live FalkorDB (Docker) not available")
+def test_recall_state_survives_the_same_malformed_values(monkeypatch):
+    """The STATE reader must hold the weight reader's contract, on the same props.
+
+    `compute_operator_weight` is not the only reader of `annotator_*` and
+    `mitigation_strength`: `recall_state` reads both, and it is an agent-facing
+    path. Guarding the weight read alone leaves one malformed row aborting every
+    state query that touches the operator — while the weight read on the identical
+    input returns 1.0. Both readers must degrade, not raise.
+    """
+    from tortoise.sdk import TortoiseSDK as SDK
+
+    monkeypatch.setenv("TORTOISE_DB_URI", _LIVE_URI)
+    sdk = SDK(db_path=None, namespace=f"test_ann6151_state_{uuid.uuid4().hex[:8]}")
+    try:
+        src = sdk.create_point("decision", "a source claim", status="live", dedup=False)
+        tgt = sdk.create_point("decision", "a target claim", status="live", dedup=False)
+        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        mit = sdk.mitigate_operator(op["id"], "some reason", strength=0.25)
+        mit_id = mit.get("id") or mit.get("mitigation_id")
+
+        # Baseline: the state view works before anything is corrupted.
+        sdk.recall_state("source claim")
+
+        sdk.update_point(op["id"], annotator_precision="oops")
+        sdk.recall_state("source claim")  # must not raise
+
+        sdk.update_point(mit_id, mitigation_strength="oops")
+        state = sdk.recall_state("source claim")  # must not raise
+        assert state is not None
+
+        # And the degraded values really are present, so the reader did not
+        # simply drop the operator or the mitigation to dodge the parse.
+        blob = repr(state)
+        assert op["id"] in blob, (
+            "the operator vanished from the state view instead of degrading — a "
+            "malformed property must not silently hide the connection"
+        )
+    finally:
+        sdk.close()

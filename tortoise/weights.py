@@ -122,13 +122,13 @@ NAND_BASE_WEIGHT = 8.0  # applied BEFORE the dynamic post-convergence multiplier
 #   = 8.0) the TOP of the band is partly absorbed — `8.0 * 2.0 = 16.0` clamps to
 #   10.0. Strengthening is fully effective on IMPL (base 1.0) and only partly on
 #   NAND. Note the operator-targeting doubling (an operator whose target is
-#   itself an operator has its base doubled, so 16.0 and 20.0 respectively) means
-#   a NAND that CONTRADICTS AN OPERATOR has no headroom left at all: neutral is
-#   already clamped to 10.0, so a best rating gains nothing there. The band is
-#   exact near the bottom of the range and compresses as the base approaches the
-#   ceiling. That is the clamp's existing rule (a contradiction is at most so
-#   forceful) and is deliberately NOT changed here: raising it is a separate
-#   question about `NAND_BASE_WEIGHT`, measured on its own.
+#   itself an operator has its base doubled, so 16.0 for NAND and 2.0 for IMPL)
+#   means a NAND that CONTRADICTS AN OPERATOR has no headroom left at all:
+#   neutral is already clamped to 10.0, so a best rating gains nothing there. The
+#   band is exact near the bottom of the range and compresses as the base
+#   approaches the ceiling. That is the clamp's existing rule (a contradiction is
+#   at most so forceful) and is deliberately NOT changed here: raising it is a
+#   separate question about `NAND_BASE_WEIGHT`, measured on its own.
 ANNOTATION_TERM_NEUTRAL = 0.5  # neutral value of EACH of the four terms
 ANNOTATION_FACTOR_MAX = 2.0  # best rating doubles the weight
 ANNOTATION_FACTOR_MIN = 0.5  # worst rating halves it (== 1 / ANNOTATION_FACTOR_MAX)
